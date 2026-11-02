@@ -783,19 +783,20 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     }
 
     /// Prune all nodes up to but not including the given leaf location and update the pinned nodes.
+    /// Returns whether any node blob was removed.
     ///
     /// This implementation ensures that no failure can leave the structure in an unrecoverable
     /// state, requiring it sync the structure to write any potential unsynced updates.
     ///
     /// Returns [Error::LocationOverflow] if `loc` exceeds [Family::MAX_LEAVES].
     /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
-    pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>> {
+    pub async fn prune(mut self, loc: Location<F>) -> Result<(Self, bool), Error<F>> {
         let pos = Position::try_from(loc)?;
         if loc > self.mem.leaves() {
             return Err(Error::LeafOutOfBounds(loc));
         }
         if pos <= self.pruned_to_pos {
-            return Ok(self);
+            return Ok((self, false));
         }
 
         // Flush items cached in the mem to disk to ensure the current state is recoverable.
@@ -806,11 +807,12 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let pinned_nodes;
         (self, pinned_nodes) = self.update_metadata(pos).await?;
 
-        (self.journal, _) = self.journal.prune(*pos).await?;
+        let pruned;
+        (self.journal, pruned) = self.journal.prune(*pos).await?;
         Arc::make_mut(&mut self.mem).add_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
-        Ok(self)
+        Ok((self, pruned))
     }
 
     /// Compute the root of the structure using `inactive_peaks` and the bagging carried by `hasher`.
@@ -827,7 +829,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     pub async fn prune_all(mut self) -> Result<Self, Error<F>> {
         let leaves = self.mem.leaves();
         if leaves != 0 {
-            self = self.prune(leaves).await?;
+            (self, _) = self.prune(leaves).await?;
         }
         Ok(self)
     }
@@ -1198,7 +1200,7 @@ mod tests {
             }
             let batch = batch.merkleize(merkle.mem(), &hasher);
             merkle = merkle.apply_batch(&batch).unwrap();
-            let merkle = merkle.prune(Location::new(60)).await.unwrap();
+            let (merkle, _) = merkle.prune(Location::new(60)).await.unwrap();
             let root = merkle.root(&hasher, 0).unwrap();
             let leaves = merkle.leaves();
 
@@ -1255,7 +1257,7 @@ mod tests {
         }
         let batch = batch.merkleize(merkle.mem(), &hasher);
         merkle = merkle.apply_batch(&batch).unwrap();
-        let merkle = merkle.prune(Location::new(60)).await.unwrap();
+        let (merkle, _) = merkle.prune(Location::new(60)).await.unwrap();
         drop(merkle);
 
         // Cut the destroy after its metadata is gone.
@@ -1325,7 +1327,7 @@ mod tests {
         assert!(bounds.is_empty());
         mmr = mmr.prune_all().await.unwrap();
         assert_eq!(bounds.start, 0);
-        mmr = mmr.prune(Location::<F>::new(0)).await.unwrap();
+        (mmr, _) = mmr.prune(Location::<F>::new(0)).await.unwrap();
         mmr = mmr.sync().await.unwrap();
         drop(mmr);
 
@@ -1599,7 +1601,7 @@ mod tests {
         }
         let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
-        let mmr = mmr.prune(Location::<F>::new(8)).await.unwrap();
+        let (mmr, _) = mmr.prune(Location::<F>::new(8)).await.unwrap();
         let leaves_before = mmr.leaves();
         drop(mmr);
         assert!(matches!(
@@ -1777,7 +1779,7 @@ mod tests {
         let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         mmr = mmr.sync().await.unwrap();
-        mmr = mmr.prune(Location::<F>::new(50)).await.unwrap();
+        (mmr, _) = mmr.prune(Location::<F>::new(50)).await.unwrap();
         let mut batch = mmr.new_batch();
         for i in LEAF_COUNT..LEAF_COUNT + 10 {
             batch = batch.add(&hasher, &test_digest(i));
@@ -2186,7 +2188,7 @@ mod tests {
         // roots and accept new elements.
         for i in 0usize..300 {
             let prune_loc = Location::<F>::new(std::cmp::min(i as u64 * 10, *pruned_mmr.leaves()));
-            pruned_mmr = pruned_mmr.prune(prune_loc).await.unwrap();
+            (pruned_mmr, _) = pruned_mmr.prune(prune_loc).await.unwrap();
             assert_eq!(prune_loc, pruned_mmr.bounds().start);
 
             let digest = test_digest(LEAF_COUNT + i);
@@ -2264,7 +2266,7 @@ mod tests {
         assert_eq!(bounds.start, Location::<F>::try_from(size).unwrap());
 
         // Make sure pruning to older location is a no-op.
-        pruned_mmr = pruned_mmr
+        (pruned_mmr, _) = pruned_mmr
             .prune(Location::<F>::try_from(size).unwrap() - 1)
             .await
             .unwrap();
@@ -2341,7 +2343,7 @@ mod tests {
                 mmr.simulate_pruning_failure(prune_loc).await.unwrap();
                 continue;
             }
-            mmr = mmr.prune(prune_loc).await.unwrap();
+            (mmr, _) = mmr.prune(prune_loc).await.unwrap();
 
             // add new elements, simulating a partial write after each.
             for j in 0..10 {
@@ -2494,7 +2496,7 @@ mod tests {
 
         // Prune to leaf 16 (position 30)
         let prune_loc = Location::<F>::new(16);
-        let mmr = mmr.prune(prune_loc).await.unwrap();
+        let (mmr, _) = mmr.prune(prune_loc).await.unwrap();
 
         // Create reference structure for verification to get correct size
         let mut ref_mmr = Merkle::<F, _, Digest, Sequential>::init(
@@ -2910,7 +2912,7 @@ mod tests {
         let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
         let mmr = mmr.sync().await.unwrap();
-        let mmr = mmr.prune(Location::<F>::new(6)).await.unwrap();
+        let (mmr, _) = mmr.prune(Location::<F>::new(6)).await.unwrap();
 
         let original_size = mmr.size();
         let original_leaves = mmr.leaves();
@@ -3282,7 +3284,7 @@ mod tests {
                 // keeps the rest in the journal, so the recovering init_sync must read both. With 8
                 // leaves every pin stays in the journal.
                 if boundary_leaves == 11 {
-                    merkle = merkle.prune(Location::new(10)).await.unwrap();
+                    (merkle, _) = merkle.prune(Location::new(10)).await.unwrap();
                     let pins: Vec<_> = F::nodes_to_pin(boundary).collect();
                     assert!(pins.iter().any(|pos| {
                         merkle.metadata.get(&U64::new(NODE_PREFIX, **pos)).is_some()
@@ -3294,9 +3296,14 @@ mod tests {
                     assert!(merkle.metadata.keys().next().is_none());
                 }
 
-                // Pruning to 10 falls inside blob 0 and removes no blob, so both cases still
-                // store every node, in blobs 0 through 2.
-                assert_eq!(merkle.journal.bounds(), 0..*end_pos);
+                // Pruning to 10 falls inside blob 0 and removes no blob, so both cases still store
+                // every node, in blobs 0 through 2. The pruned journal reads from `pruned_to_pos`.
+                let start = if boundary_leaves == 11 {
+                    *merkle.pruned_to_pos
+                } else {
+                    0
+                };
+                assert_eq!(merkle.journal.bounds(), start..*end_pos);
                 assert_eq!(node_blob_names(&context, &cfg).await, vec![0, 1, 2]);
                 drop(merkle);
 
@@ -3598,13 +3605,14 @@ mod tests {
         let boundary = Location::<F>::new(11);
 
         // Pruning to 10 stores the pins of 10 in metadata. Pick one that is also a pin of the sync
-        // boundary at 11.
+        // boundary at 11. The journal still stores its digest but reads it as pruned until a
+        // reopen.
         let merkle = seed_recovery_tree::<F>(&context, cfg.clone(), 22).await;
-        let mut merkle = merkle.prune(Location::new(10)).await.unwrap();
+        let (mut merkle, _) = merkle.prune(Location::new(10)).await.unwrap();
         let pos = F::nodes_to_pin(boundary)
             .find(|pos| merkle.metadata.get(&U64::new(NODE_PREFIX, **pos)).is_some())
             .unwrap();
-        assert!(merkle.journal.read(*pos).await.is_ok());
+        assert!(merkle.journal.read(*pos).await.is_err());
 
         // A present metadata pin remains authoritative even when the journal has its digest.
         merkle.metadata.put(U64::new(NODE_PREFIX, *pos), Vec::new());
@@ -3876,7 +3884,7 @@ mod tests {
         let restart = Location::<F>::new(7);
         let pinned_nodes = merkle.pinned_nodes_at(restart).await.unwrap();
         let merkle = merkle.sync().await.unwrap();
-        let merkle = merkle.prune(Location::new(30)).await.unwrap();
+        let (merkle, _) = merkle.prune(Location::new(30)).await.unwrap();
         let merkle = merkle.sync().await.unwrap();
         assert!(merkle.bounds().start > restart);
         drop(merkle);
@@ -4096,7 +4104,7 @@ mod tests {
             let target_root = merkle.root(&hasher, 0).unwrap();
             let pinned_nodes = merkle.pinned_nodes_at(restart).await.unwrap();
             let merkle = merkle.sync().await.unwrap();
-            let merkle = merkle.prune(Location::new(30)).await.unwrap();
+            let (merkle, _) = merkle.prune(Location::new(30)).await.unwrap();
             let merkle = merkle.sync().await.unwrap();
             assert!(merkle.bounds().start > end);
             let newest = (*merkle.size() - 1) / cfg.items_per_blob.get();
@@ -4181,7 +4189,7 @@ mod tests {
         let root = merkle.root(&hasher, 0).unwrap();
         let mut pinned_nodes = merkle.pinned_nodes_at(restart).await.unwrap();
         let merkle = merkle.sync().await.unwrap();
-        let merkle = merkle.prune(Location::new(30)).await.unwrap();
+        let (merkle, _) = merkle.prune(Location::new(30)).await.unwrap();
         let merkle = merkle.sync().await.unwrap();
         let bounds = merkle.bounds();
         assert!(bounds.start > end);
@@ -4496,7 +4504,7 @@ mod tests {
             merkle = merkle.apply_batch(&batch).unwrap();
             let pinned_nodes = merkle.pinned_nodes_at(restart).await.unwrap();
             let merkle = drive_pending_syncs(&pending, merkle.sync()).await.unwrap();
-            let mut merkle = drive_pending_syncs(&pending, merkle.prune(Location::new(30)))
+            let (mut merkle, _) = drive_pending_syncs(&pending, merkle.prune(Location::new(30)))
                 .await
                 .unwrap();
 
@@ -4805,7 +4813,7 @@ mod tests {
             let batch = batch.merkleize(merkle.mem(), &hasher);
             merkle = merkle.apply_batch(&batch).unwrap();
             let merkle = merkle.sync().await.unwrap();
-            let merkle = merkle.prune(Location::new(30)).await.unwrap();
+            let (merkle, _) = merkle.prune(Location::new(30)).await.unwrap();
             let merkle = merkle.sync().await.unwrap();
             drop(merkle);
 
@@ -4973,7 +4981,7 @@ mod tests {
         let batch = batch.merkleize(merkle.mem(), &hasher);
         merkle = merkle.apply_batch(&batch).unwrap();
         let merkle = merkle.sync().await.unwrap();
-        let merkle = merkle.prune(Location::new(12)).await.unwrap();
+        let (merkle, _) = merkle.prune(Location::new(12)).await.unwrap();
         let merkle = merkle.sync().await.unwrap();
         drop(merkle);
 
@@ -5046,7 +5054,7 @@ mod tests {
 
         // Prune to position 30 (this stores pinned nodes and updates metadata)
         let prune_loc = Location::<F>::new(16);
-        let mmr = mmr.prune(prune_loc).await.unwrap();
+        let (mmr, _) = mmr.prune(prune_loc).await.unwrap();
         let expected_root = mmr.root(&hasher, 0).unwrap();
         let expected_size = mmr.size();
         drop(mmr);
@@ -5173,7 +5181,7 @@ mod tests {
         mmr = mmr.apply_batch(&batch).unwrap();
 
         let prune_loc = Location::<F>::new(16);
-        let mmr = mmr.prune(prune_loc).await.unwrap();
+        let (mmr, _) = mmr.prune(prune_loc).await.unwrap();
 
         let historical_leaves = mmr.leaves();
         let mut pruned_loc = None;
@@ -5331,7 +5339,7 @@ mod tests {
         mmr = mmr.apply_batch(&batch).unwrap();
 
         let prune_loc = Location::<F>::new(10);
-        let mmr = mmr.prune(prune_loc).await.unwrap();
+        let (mmr, _) = mmr.prune(prune_loc).await.unwrap();
 
         let requested = Location::<F>::new(20);
         let range = prune_loc..requested;
@@ -5427,7 +5435,7 @@ mod tests {
         mmr = mmr.apply_batch(&batch).unwrap();
         let end = mmr.leaves();
         let keep_loc = end - 1;
-        mmr = mmr.prune(keep_loc).await.unwrap();
+        (mmr, _) = mmr.prune(keep_loc).await.unwrap();
         let ok_result = mmr
             .historical_range_proof(&hasher, end, keep_loc..end, 0)
             .await;
@@ -5608,7 +5616,7 @@ mod tests {
         let mut failures = Vec::new();
         for prune_leaf in 1..*end {
             let prune_loc = Location::<F>::new(prune_leaf);
-            mmr = mmr.prune(prune_loc).await.unwrap();
+            (mmr, _) = mmr.prune(prune_loc).await.unwrap();
             for loc_u64 in 0..*end {
                 let loc = Location::<F>::new(loc_u64);
                 let range_includes_pruned_leaf = loc < prune_loc;

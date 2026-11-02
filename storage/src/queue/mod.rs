@@ -3,8 +3,8 @@
 //! [Queue] provides a persistent message queue with at-least-once delivery semantics.
 //! Items are durably stored in a journal and will survive crashes. [Queue::init] returns the
 //! queue, which writes items, and its [Reader], which delivers committed items. The reader must
-//! explicitly acknowledge each item after processing. On restart, all non-pruned items are
-//! re-delivered (acknowledged or not).
+//! explicitly acknowledge each item after processing. On restart, every item the journal still
+//! holds is re-delivered, acknowledged or not.
 //!
 //! # Ownership
 //!

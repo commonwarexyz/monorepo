@@ -673,10 +673,13 @@ pub(crate) mod test {
 
             db.sync().await.unwrap();
 
-            // Confirm state is preserved after reopen.
+            // Confirm state is preserved after reopen. The log reopens at the start of the section
+            // holding the pruning boundary.
             let db = open_db(context.child("open").with_attribute("index", 5)).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.bounds(), bounds);
+            let per_section = create_test_config(0).journal_config.items_per_section.get();
+            let start = Location::new(*bounds.start - *bounds.start % per_section);
+            assert_eq!(db.bounds(), start..bounds.end);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor);
             assert_eq!(db.snapshot.items(), snapshot_items);
 

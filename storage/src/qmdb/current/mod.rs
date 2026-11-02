@@ -3767,7 +3767,12 @@ pub mod tests {
             let db = db.prune(prune_loc).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert_eq!(pruned_bits, CHUNK_BITS);
-            let retained_start = db.bounds().start;
+            assert_eq!(db.bounds().start, prune_loc);
+            let per_section = variable_config::<OneCap>(partition)
+                .journal_config
+                .items_per_section
+                .get();
+            let retained_start = Location::new(*prune_loc - *prune_loc % per_section);
             assert!(retained_start < prune_loc);
 
             // Pick a commit the log retains in full whose floor the bitmap has pruned.
@@ -3832,13 +3837,17 @@ pub mod tests {
 
             // Prune as the glue adapter does, to the oldest retained generation's sync boundary.
             // That boundary is a whole chunk above zero, so the prune moves both the log and the
-            // bitmap, and the bitmap lands on the requested boundary rather than the log's
-            // section boundary.
+            // bitmap to it.
             let prune_loc = history[1].sync_boundary;
             assert!(prune_loc >= Location::new(CHUNK_BITS));
             let db = db.prune(prune_loc).await.unwrap();
             assert_eq!(db.pruned_bits(), *prune_loc);
-            let retained_start = db.bounds().start;
+            assert_eq!(db.bounds().start, prune_loc);
+            let per_section = variable_config::<OneCap>(partition)
+                .journal_config
+                .items_per_section
+                .get();
+            let retained_start = Location::new(*prune_loc - *prune_loc % per_section);
             assert!(retained_start > Location::new(0));
             assert!(history[0].size <= retained_start);
             let db = db.sync().await.unwrap();
@@ -5862,15 +5871,16 @@ pub mod tests {
                     db.assert_exact().await;
                     db.assert_proves(&model, &evicted).await;
 
-                    // The pruned state survives reopen.
+                    // The pruned state survives reopen, and the log reopens at the start of the
+                    // blob holding the pruning boundary.
                     let bounds = db.bounds();
                     drop(db);
-                    let db: $db =
-                        <$db>::init(ctx.child("reopen"), fixed_config::<OneCap>(partition), None)
-                            .await
-                            .unwrap();
+                    let cfg = fixed_config::<OneCap>(partition);
+                    let per_blob = cfg.journal_config.items_per_blob.get();
+                    let db: $db = <$db>::init(ctx.child("reopen"), cfg, None).await.unwrap();
                     assert_eq!(db.root(), root);
-                    assert_eq!(db.bounds(), bounds);
+                    let start = Location::new(*bounds.start - *bounds.start % per_blob);
+                    assert_eq!(db.bounds(), start..bounds.end);
                     assert_eq!(db.inactivity_floor_loc(), stopped);
                     assert_eq!(db.pruned_bits(), *boundary);
                     assert_eq!(db.live().await, live);

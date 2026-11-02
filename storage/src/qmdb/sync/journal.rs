@@ -414,9 +414,9 @@ mod tests {
                         .await
                         .unwrap();
 
-                // The end is capped at the range end. Pruning to the range start removes only
-                // whole blobs below it, so the start is 5, the first position of blob 1.
-                assert_eq!(journal.bounds(), 5..20);
+                // The end is capped at the range end and the journal reads from the range start,
+                // although only whole blobs below it are removed.
+                assert_eq!(journal.bounds(), 7..20);
                 for value in 7..20u8 {
                     assert_eq!(
                         journal.read(value.into()).await.unwrap(),
@@ -516,9 +516,9 @@ mod tests {
                         .await
                         .unwrap();
 
-                // The end is capped at the range end. Pruning to the range start removes only
-                // whole sections below it, so the start is 5, the first position of section 1.
-                assert_eq!(journal.bounds(), 5..20);
+                // The end is capped at the range end and the journal reads from the range start,
+                // although only whole sections below it are removed.
+                assert_eq!(journal.bounds(), 7..20);
                 for value in 7..20u64 {
                     assert_eq!(journal.read(value).await.unwrap(), value);
                 }
@@ -744,11 +744,10 @@ mod tests {
                 .await
                 .unwrap();
 
-                // Pruning to 7 removes only whole blobs below it, so both copies start at 5. The
-                // torn copy ends before 30 after repair truncates its torn tail. Every retained
-                // item from the range start reads back intact.
+                // Both copies read from 7. The torn copy ends before 30 after repair truncates
+                // its torn tail. Every retained item from the range start reads back intact.
                 let bounds = journal.bounds();
-                assert_eq!(bounds.start, 5);
+                assert_eq!(bounds.start, 7);
                 if torn {
                     assert!(bounds.end < 30);
                 } else {
@@ -918,11 +917,10 @@ mod tests {
                 .await
                 .unwrap();
 
-                // Pruning to 7 removes only whole sections below it, so both copies start at 5.
-                // The torn copy ends before 30 after repair truncates its torn tail. Every
-                // retained item from the range start reads back intact.
+                // Both copies read from 7. The torn copy ends before 30 after repair truncates
+                // its torn tail. Every retained item from the range start reads back intact.
                 let bounds = journal.bounds();
-                assert_eq!(bounds.start, 5);
+                assert_eq!(bounds.start, 7);
                 if torn {
                     assert!(bounds.end < 30);
                 } else {

@@ -16,9 +16,10 @@ use std::sync::Arc;
 pub(crate) struct Metrics<E: Clock> {
     /// Logical operation end.
     size: Gauge,
-    /// Oldest retained operation location.
+    /// Oldest readable operation location.
     pruning_boundary: Gauge,
-    /// Retained operation count.
+    /// Operations from the log's retained start to its end, including pruned operations that
+    /// storage still holds.
     retained: Gauge,
     /// Application-declared pruning floor location.
     inactivity_floor: Gauge,
@@ -56,16 +57,20 @@ pub(crate) struct Metrics<E: Clock> {
     prune_duration: Timed,
     /// Clock used by the duration timers.
     clock: Arc<E>,
+    /// Oldest location the operation log's storage holds. It changes only when the log opens or
+    /// prunes.
+    retained_start: u64,
 }
 
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
-    /// Register the full metric set under `context`, retaining it as the timers' clock.
-    pub(crate) fn new(context: E) -> Self {
+    /// Register the full metric set under `context` for a log whose storage starts at
+    /// `retained_start`. The context also serves as the timers' clock.
+    pub(crate) fn new(context: E, retained_start: u64) -> Self {
         Self {
             size: context.gauge("size", "Logical operation end"),
             pruning_boundary: context
-                .gauge("pruning_boundary", "Oldest retained operation location"),
-            retained: context.gauge("retained", "Number of retained operations"),
+                .gauge("pruning_boundary", "Oldest readable operation location"),
+            retained: context.gauge("retained", "Number of operations retained in storage"),
             inactivity_floor: context.gauge(
                 "inactivity_floor",
                 "Application-declared pruning floor location",
@@ -105,6 +110,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             prune_calls: context.counter("prune_calls", "Number of prune calls"),
             prune_duration: Timed::register(&context, "prune_duration", "Duration of prune calls"),
             clock: Arc::new(context),
+            retained_start,
         }
     }
 }
@@ -134,6 +140,11 @@ impl<E: Clock> Metrics<E> {
         self.prune_duration.scoped(&self.clock)
     }
 
+    /// Record the log's retained start after a prune.
+    pub(crate) const fn set_retained_start(&mut self, retained_start: u64) {
+        self.retained_start = retained_start;
+    }
+
     /// Update state gauges.
     pub(crate) fn update(
         &self,
@@ -144,7 +155,9 @@ impl<E: Clock> Metrics<E> {
     ) {
         let _ = self.size.try_set(size);
         let _ = self.pruning_boundary.try_set(pruning_boundary);
-        let _ = self.retained.try_set(size.saturating_sub(pruning_boundary));
+        let _ = self
+            .retained
+            .try_set(size.saturating_sub(self.retained_start));
         let _ = self.inactivity_floor.try_set(inactivity_floor);
         let _ = self.last_commit.try_set(last_commit);
     }

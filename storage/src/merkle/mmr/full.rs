@@ -222,7 +222,7 @@ mod tests {
             }
             let prune_loc = Location::new(50);
             let prune_pos = Position::try_from(prune_loc).unwrap();
-            mmr = mmr.prune(prune_loc).await.unwrap();
+            (mmr, _) = mmr.prune(prune_loc).await.unwrap();
 
             // Reopen below the previous in-memory boundary and verify the retained pinned nodes.
             let cap = mmr.leaves() - 80;
@@ -243,7 +243,7 @@ mod tests {
             }
 
             // Make sure pruning to an older location is a no-op.
-            mmr = mmr.prune(prune_loc - 1).await.unwrap();
+            (mmr, _) = mmr.prune(prune_loc - 1).await.unwrap();
             assert_eq!(mmr.bounds().start, prune_loc);
 
             drop(mmr);

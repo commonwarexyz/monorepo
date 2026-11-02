@@ -94,8 +94,8 @@ struct FuzzInput {
 /// Tracking state for verifying recovery.
 ///
 /// Note: Reader ack state is NOT persisted. On restart, `ack_floor` equals
-/// `journal.bounds().start` (the pruning boundary). Items that were acked
-/// in-memory but not pruned will be re-delivered.
+/// `journal.bounds().start`, the start of the oldest retained section. Items that
+/// were acked in memory but whose section was not removed will be re-delivered.
 #[derive(Debug, Clone)]
 struct RecoveryState {
     /// Items that were successfully enqueued or committed (position -> value).
@@ -118,8 +118,8 @@ struct RecoveryState {
     /// they move to `committed`.
     uncommitted: BTreeMap<u64, u8>,
 
-    /// Blob-aligned pruning boundary established by the last successful Sync.
-    /// Recovery reports this boundary as the ack floor.
+    /// Start of the oldest section retained after the last successful Sync.
+    /// Recovery reports this position as the ack floor.
     synced_boundary: u64,
 
     /// Whether we observed a mutable storage error during the operation phase.
@@ -189,9 +189,9 @@ impl RecoveryState {
         self.current_ack_floor = ack_floor;
     }
 
-    /// Record the boundary pruned by a successful Sync, mirroring the journal's
-    /// clamp: the target blob is capped to the tail blob, boundaries are
-    /// blob-aligned, and the boundary never regresses.
+    /// Record the start of the oldest section retained after a successful Sync,
+    /// mirroring the journal's removal: the target section is capped to the tail
+    /// section, and the retained start never regresses.
     fn sync_succeeded(&mut self, ack_floor: u64, size: u64, items_per_section: u64) {
         let min_blob = (ack_floor / items_per_section).min(size / items_per_section);
         self.synced_boundary = self.synced_boundary.max(min_blob * items_per_section);
@@ -668,12 +668,13 @@ async fn verify_recovery(
         state.max_recovered_size()
     );
 
-    // Recovery reports ack_floor = journal.bounds().start (the pruning boundary),
-    // and with every operation successful the only prunes are from Syncs, so the
-    // recovered floor must equal the boundary the last successful Sync established.
+    // Recovery reports ack_floor = journal.bounds().start, the start of the oldest
+    // retained section, and with every operation successful the only prunes are from
+    // Syncs, so the recovered floor must equal the section start the last successful
+    // Sync established.
     assert_eq!(
         ack_floor, state.synced_boundary,
-        "recovered ack_floor diverged from the boundary pruned by the last successful sync"
+        "recovered ack_floor must equal the section start established by the last successful sync"
     );
 
     verify_recovered_items(&mut reader, state, size, ack_floor).await;

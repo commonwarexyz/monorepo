@@ -1,6 +1,6 @@
 use crate::{
     Context,
-    journal::{authenticated, contiguous::Mutable},
+    journal::authenticated,
     merkle::{
         Family, Location,
         full::{self, Merkle},
@@ -26,7 +26,8 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
+    C: authenticated::Backing<E, Item = Operation<F, K, V>>
+        + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
     C::Item: EncodeShared,
     H: Hasher,
     T: Translator,
@@ -36,7 +37,7 @@ where
     type Op = Operation<F, K, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = immutable::Config<T, C::Config, S>;
+    type Config = immutable::Config<T, <C as sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
     type Context = E;
 
@@ -107,7 +108,7 @@ where
         let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
-        let metrics = Metrics::new(context);
+        let metrics = Metrics::new(context, *journal.retained_start());
         let db = Self {
             journal,
             root,
