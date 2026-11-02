@@ -376,6 +376,8 @@ impl<E: Context> Writable<E> {
         self.drain_tail_predecessor_sync().await?;
         self.tail = self.tail.wait_for_sync().await?;
 
+        // A removed blob's cached pages drop with its last handle, so a snapshot that still holds
+        // the blob can keep reading them.
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
         let prev_oldest_blob_index = self.oldest_blob_index;
         self.sealed.drain(..drop_count);

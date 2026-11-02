@@ -3,7 +3,10 @@
 use arbitrary::Arbitrary;
 use commonware_utils::cache::Cache;
 use libfuzzer_sys::fuzz_target;
-use std::{collections::HashMap, num::NonZeroUsize};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroUsize,
+};
 
 /// Keys are confined to a small space so a small-capacity cache churns and
 /// evicts heavily, exercising eviction sweeps, Ghost history, and slot reuse.
@@ -22,7 +25,9 @@ enum Op {
     Put(u8, u16),
     GetOrInsert(u8, u16),
     GetOrInsertMut(u8, u16),
+    GetOrInsertMutWithPriorKey(u8, u16),
     Remove(u8),
+    RemoveAt(u8),
     Retain(u8),
     Len,
     IsEmpty,
@@ -86,12 +91,47 @@ fn run(plan: Plan) {
                 model.insert(k, v);
                 assert_eq!(cache.peek(&k).copied(), Some(v));
             }
+            Op::GetOrInsertMutWithPriorKey(k, v) => {
+                // The prior key held the returned slot before the call. It is the key itself on a
+                // hit, a resident evicted to make room, or nothing when the key took unused
+                // capacity.
+                let k = k % KEY_SPACE;
+                let before: Vec<Option<u8>> =
+                    (0..cap).map(|slot| cache.key_at(slot).copied()).collect();
+                let len = cache.len();
+                let (slot, stored, prior) = cache.get_or_insert_mut_with_prior_key(k, || v);
+                *stored = v;
+                assert_eq!(prior, before[slot]);
+                assert_eq!(cache.key_at(slot), Some(&k));
+                match prior {
+                    Some(prior) if prior == k => assert_eq!(cache.len(), len),
+                    Some(evicted) => {
+                        assert_eq!(cache.len(), len);
+                        assert!(!cache.contains(&evicted));
+                        assert!(model.remove(&evicted).is_some());
+                    }
+                    None => assert_eq!(cache.len(), len + 1),
+                }
+                model.insert(k, v);
+                assert_eq!(cache.peek(&k).copied(), Some(v));
+            }
             Op::Remove(k) => {
                 let k = k % KEY_SPACE;
                 let had = cache.contains(&k);
                 assert_eq!(cache.remove(&k), had);
                 model.remove(&k);
                 assert!(!cache.contains(&k));
+            }
+            Op::RemoveAt(slot) => {
+                // Slot numbers range past every capacity, covering out-of-range slots.
+                let slot = usize::from(slot);
+                let key = cache.key_at(slot).copied();
+                assert_eq!(cache.remove_at(slot), key.is_some());
+                assert_eq!(cache.key_at(slot), None);
+                if let Some(k) = key {
+                    model.remove(&k);
+                    assert!(!cache.contains(&k));
+                }
             }
             Op::Retain(k) => {
                 let k = k % KEY_SPACE;
@@ -125,6 +165,18 @@ fn run(plan: Plan) {
         }
         assert_eq!(cache.len(), present);
         assert_eq!(cache.is_empty(), present == 0);
+
+        // Live slots hold exactly the present keys, each in one slot, and no slot lies past
+        // capacity.
+        let mut live = HashSet::new();
+        for slot in 0..cap {
+            if let Some(&k) = cache.key_at(slot) {
+                assert!(live.insert(k));
+                assert!(cache.contains(&k));
+            }
+        }
+        assert_eq!(live.len(), present);
+        assert_eq!(cache.key_at(cap), None);
     }
 }
 
