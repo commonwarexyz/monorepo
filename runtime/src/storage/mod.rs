@@ -155,7 +155,7 @@ stability_scope!(ALPHA {
     pub mod faulty;
     pub mod memory;
 });
-stability_scope!(ALPHA, cfg(all(target_os = "linux", feature = "iouring")) {
+stability_scope!(ALPHA, cfg(target_os = "linux") {
     pub mod iouring;
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {

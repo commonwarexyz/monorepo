@@ -54,7 +54,7 @@ use crate::{
         Cursor as CursorTrait, Factory, Ordered, Unordered,
         partitioned::partition_index_and_sub_key,
     },
-    translator::Translator,
+    translator::{OrderedTranslator, Translator},
 };
 #[commonware_macros::stability(ALPHA)]
 use commonware_runtime::telemetry::metrics::{Batched, raw};
@@ -64,6 +64,7 @@ use commonware_runtime::{
 };
 #[commonware_macros::stability(ALPHA)]
 use commonware_utils::NZU32;
+use commonware_utils::prefetch;
 #[commonware_macros::stability(ALPHA)]
 use std::num::NonZeroU32;
 use std::{
@@ -84,6 +85,15 @@ const SPILL_THRESHOLD: usize = 512;
 /// build progress. Tests use batches of two so that ordinary test builds publish before install.
 #[commonware_macros::stability(ALPHA)]
 const WORKER_METRICS_BATCH: NonZeroU32 = if cfg!(test) { NZU32!(2) } else { NZU32!(4096) };
+
+/// How many probes ahead `get_many` prefetches a probe's partition header.
+const HEADER_AHEAD: usize = 12;
+
+/// How many probes ahead `get_many` reads a probe's header and prefetches its keys.
+const KEYS_AHEAD: usize = 8;
+
+/// How many probes ahead `get_many` searches a probe's keys and prefetches its first value.
+const SEARCH_AHEAD: usize = 4;
 
 /// A partitioned index storing each partition as sorted struct-of-arrays, spilling an over-full
 /// partition to a `BTreeMap` to bound its O(occupancy) insert cost (see `spilled` and the module
@@ -468,6 +478,32 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
     fn for_each_value(&self, f: impl FnMut(&V)) {
         self.index.for_each_value(f);
     }
+
+    // Hints the header line without reading it, so its miss overlaps the ops before
+    // `prefetch_entries` reads the header for the arrays' addresses.
+    fn prefetch_header(&self, key: &[u8]) {
+        if !prefetch::ENABLED {
+            return;
+        }
+
+        let (i, _) = partition_index_and_sub_key::<P>(key);
+        if let Some(partition) = self.index.partitions.get(i - self.offset) {
+            prefetch::prefetch(partition);
+        }
+    }
+
+    // Reads the header to hint the key and value arrays (see `Partition::prefetch_arrays`).
+    fn prefetch_entries(&self, key: &[u8]) {
+        if !prefetch::ENABLED {
+            return;
+        }
+
+        // A spilled partition's arrays are empty, so its side-table goes unhinted.
+        let (i, _) = partition_index_and_sub_key::<P>(key);
+        if let Some(partition) = self.index.partitions.get(i - self.offset) {
+            partition.prefetch_arrays();
+        }
+    }
 }
 
 impl<T: Translator, V: Send + Sync, const P: usize> Factory for Index<T, V, P> {
@@ -493,12 +529,16 @@ impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHa
         self.partition_values(i, &k).iter()
     }
 
-    fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V)) {
+    fn get_many<'a, K: AsRef<[u8]>>(
+        &'a self,
+        keys: impl IntoIterator<Item = K>,
+        mut visit: impl FnMut(usize, &'a V),
+    ) {
         // Probe in (partition, translated-key) order so consecutive probes hit the same partition
         // (one region of the 2^(8*P)-entry partition array) and the same value run within it,
         // instead of scattering across partitions in input order.
         let mut order: Vec<(usize, T::Key, usize)> = keys
-            .iter()
+            .into_iter()
             .enumerate()
             .map(|(key_idx, key)| {
                 let (partition, sub) = partition_index_and_sub_key::<P>(key.as_ref());
@@ -506,8 +546,55 @@ impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHa
             })
             .collect();
         order.sort_unstable();
-        for (partition, translated, key_idx) in order {
-            for value in self.partition_values(partition, &translated) {
+
+        // Pipeline the probes so their cache misses overlap. Each stage leads the next by enough
+        // probes that its loads are under way before the next stage reads them, so probe `j`'s
+        // reads are issued over four iterations:
+        //
+        //   visiting probe:     j-12 .......... j-8 ........... j-4 ........... j
+        //   header of probe j:  hinted -------> read, keys hinted
+        //   keys of probe j:                    hinted -------> searched, value hinted
+        //   values of probe j:                                  slot j % 4 ---> visited
+        //
+        // Probe `j`'s values wait in slot `j % SEARCH_AHEAD` until the search for probe
+        // `j + SEARCH_AHEAD` refills it.
+        let search = |&(partition, translated, _): &(usize, T::Key, usize)| {
+            let values = self.partition_values(partition, &translated);
+            if let Some(first) = values.first() {
+                prefetch::prefetch(first);
+            }
+            values
+        };
+        let empty: &[V] = &[];
+        let mut slots = [empty; SEARCH_AHEAD];
+        for (slot, probe) in slots.iter_mut().zip(&order) {
+            *slot = search(probe);
+        }
+        for (j, &(_, _, key_idx)) in order.iter().enumerate() {
+            if prefetch::ENABLED {
+                if let Some(&(ahead, _, _)) = order.get(j + HEADER_AHEAD) {
+                    // A header can straddle two lines, so also hint the line of its last byte.
+                    let header = self.partitions.as_ptr().wrapping_add(ahead);
+                    prefetch::prefetch(header);
+                    prefetch::prefetch(
+                        header
+                            .cast::<u8>()
+                            .wrapping_add(size_of::<Partition<T::Key, V>>() - 1),
+                    );
+                }
+                if let Some(&(ahead, _, _)) = order.get(j + KEYS_AHEAD) {
+                    self.partitions[ahead].prefetch_keys();
+                }
+            }
+
+            // Take this probe's values before its slot is refilled, then search ahead before
+            // visiting so the prefetch is not delayed by the callback.
+            let slot = &mut slots[j % SEARCH_AHEAD];
+            let values = *slot;
+            if let Some(ahead) = order.get(j + SEARCH_AHEAD) {
+                *slot = search(ahead);
+            }
+            for value in values {
                 visit(key_idx, value);
             }
         }
@@ -631,7 +718,7 @@ impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHa
     }
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHandle> Ordered
+impl<T: OrderedTranslator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHandle> Ordered
     for Index<T, V, P, G, C>
 {
     fn prev_translated_key<'a>(
@@ -730,6 +817,7 @@ mod tests {
     use commonware_formatting::hex;
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
+    use commonware_utils::GOLDEN_RATIO;
 
     fn new_index(context: deterministic::Context) -> Index<OneCap, u64, 1> {
         Index::new(context, OneCap)
@@ -1363,6 +1451,55 @@ mod tests {
             assert!(visits[1].is_empty());
             assert_eq!(visits[2], vec![1, 2, 3]);
             assert_eq!(visits[3], vec![4]);
+        });
+    }
+
+    #[test_traced]
+    fn test_soa_get_many_matches_get() {
+        deterministic::Runner::default().start(|context| async move {
+            // Enough probes to fill every stage of the `get_many` pipeline, over inline, spilled,
+            // and empty partitions, with translated-key collisions, misses, and repeated probes.
+            for (label, threshold) in [("inline", SPILL_THRESHOLD), ("spilling", 12)] {
+                let mut index =
+                    Index::<_, u64, 1>::with_threshold(context.child(label), OneCap, threshold);
+
+                // Fill only partitions 0..128, so the probes below also reach empty partitions.
+                // Their sizes range over 1..=32, largest first so the probes that fill the
+                // pipeline's slots hit. The low threshold spills some and leaves others inline, and
+                // translated keys repeat every 24 entries, so the largest hold collisions.
+                let mut value = 0u64;
+                for partition in 0..128u8 {
+                    for j in 0..32 - partition % 32 {
+                        index.insert(&[partition, j * 7 % 24], value);
+                        value += 1;
+                    }
+                }
+                if threshold < SPILL_THRESHOLD {
+                    assert!((1..128).contains(&index.spilled_count()));
+                } else {
+                    assert_eq!(index.spilled_count(), 0);
+                }
+
+                // Probe keys spread over every partition, then repeat the first 50 probes.
+                let mut probes: Vec<[u8; 2]> = (0..1_500u64)
+                    .map(|i| {
+                        let h = i.wrapping_mul(GOLDEN_RATIO).to_be_bytes();
+                        [h[0], h[1] % 32]
+                    })
+                    .collect();
+                probes.extend_from_within(..50);
+
+                // Each probe visits exactly the values `get` returns for it, and the probes include
+                // both misses and collisions.
+                let mut visits = vec![Vec::new(); probes.len()];
+                index.get_many(&probes, |idx, value| visits[idx].push(*value));
+                for (probe, visited) in probes.iter().zip(&visits) {
+                    let expected: Vec<u64> = index.get(probe).copied().collect();
+                    assert_eq!(visited, &expected, "probe {probe:?}");
+                }
+                assert!(visits.iter().any(Vec::is_empty));
+                assert!(visits.iter().any(|v| v.len() > 1));
+            }
         });
     }
 

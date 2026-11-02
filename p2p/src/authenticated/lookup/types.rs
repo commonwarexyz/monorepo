@@ -69,6 +69,7 @@ mod tests {
     };
     use commonware_codec::{Decode as _, Encode as _, Error};
     use commonware_runtime::IoBuf;
+    use commonware_utils::Widen;
 
     #[test]
     fn test_data_prefix_value() {
@@ -87,6 +88,12 @@ mod tests {
             payload.encode_size(),
             message_len + MAX_PAYLOAD_OVERHEAD as usize
         );
+    }
+
+    #[test]
+    fn test_ping_fits_framing_overhead() {
+        let overhead: usize = Widen::widen(MAX_PAYLOAD_OVERHEAD);
+        assert!(Message::Ping.encode_size() <= overhead);
     }
 
     #[test]

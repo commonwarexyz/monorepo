@@ -143,17 +143,17 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
+    /// * `namespace`: base namespace for domain separation
+    /// * `participants`: ordered set of participant identity keys
+    /// * `polynomial`: public polynomial for threshold verification
+    /// * `share`: local threshold share for signing
+    ///
     /// Returns `None` if the share's public key does not match any participant.
     ///
     /// # Panics
     ///
     /// Panics if the polynomial's participant count or degree does not match the
     /// committee, or if the share index does not identify a committee participant.
-    ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `participants` - ordered set of participant identity keys
-    /// * `polynomial` - public polynomial for threshold verification
-    /// * `share` - local threshold share for signing
     pub fn signer(
         namespace: &[u8],
         participants: Set<P>,
@@ -197,14 +197,14 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// A participant without signing material should use [`Self::member`] instead, so the
     /// scheme reports its membership.
     ///
+    /// * `namespace`: base namespace for domain separation
+    /// * `participants`: ordered set of participant identity keys
+    /// * `polynomial`: public polynomial for threshold verification
+    ///
     /// # Panics
     ///
     /// Panics if the polynomial's participant count or degree does not match the
     /// committee.
-    ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `participants` - ordered set of participant identity keys
-    /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier(namespace: &[u8], participants: Set<P>, polynomial: Sharing<V>) -> Self {
         Self::verifier_with_index(namespace, participants, polynomial, None)
     }
@@ -270,8 +270,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// This lightweight verifier can authenticate recovered threshold certificates but cannot
     /// verify individual votes or partial signatures.
     ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `identity` - public identity of the committee (constant across reshares)
+    /// * `namespace`: base namespace for domain separation
+    /// * `identity`: public identity of the committee (constant across reshares)
     pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
         Self {
             role: Role::CertificateVerifier {
@@ -747,6 +747,10 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
 
     fn is_batchable() -> bool {
         true
+    }
+
+    fn max_certificate_size(_participants: u32) -> usize {
+        Certificate::<V>::SIZE
     }
 
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {}
@@ -1715,6 +1719,10 @@ mod tests {
             .expect("assemble certificate");
 
         let encoded = certificate.encode();
+        assert_eq!(
+            encoded.len(),
+            Scheme::<V>::max_certificate_size(u32::try_from(schemes.len()).unwrap())
+        );
         let decoded = Certificate::<V>::decode_cfg(encoded, &()).expect("decode certificate");
         assert_eq!(decoded, certificate);
     }

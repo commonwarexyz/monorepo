@@ -12,10 +12,22 @@ use std::{sync::Arc, vec::Vec};
 /// Implementing this trait signifies that the encoded representation of this type *always* has the
 /// same byte length, regardless of the specific value.
 ///
-/// This automatically provides an implementation of [EncodeSize].
+/// This automatically provides implementations of [EncodeSize] and [MaxEncodeSize].
 pub trait FixedSize {
     /// The size of the encoded value (in bytes).
     const SIZE: usize;
+}
+
+/// Trait for types whose encoded size has a known upper bound.
+///
+/// Bounds follow the crate's [size policy](crate#size-bounds).
+pub trait MaxEncodeSize {
+    /// An upper bound on the encoded size, in bytes.
+    const MAX_ENCODE_SIZE: usize;
+}
+
+impl<T: FixedSize> MaxEncodeSize for T {
+    const MAX_ENCODE_SIZE: usize = T::SIZE;
 }
 
 /// Trait for types that can provide their encoded size in bytes.

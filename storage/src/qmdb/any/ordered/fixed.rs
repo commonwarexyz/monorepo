@@ -13,7 +13,7 @@ use crate::{
         Error,
         any::{FixedConfig as Config, FixedValue, ordered, value::FixedEncoding},
     },
-    translator::Translator,
+    translator::OrderedTranslator,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -42,7 +42,7 @@ impl<
     K: Array,
     V: FixedValue,
     H: Hasher,
-    T: Translator,
+    T: OrderedTranslator,
     S: Strategy,
 > Db<F, E, K, V, H, T, S>
 {
@@ -79,7 +79,7 @@ pub mod partitioned {
             Error,
             any::{FixedConfig as Config, FixedValue},
         },
-        translator::Translator,
+        translator::OrderedTranslator,
     };
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
@@ -112,7 +112,7 @@ pub mod partitioned {
         K: Array,
         V: FixedValue,
         H: Hasher,
-        T: Translator,
+        T: OrderedTranslator,
         const P: usize,
         S: Strategy,
     > Db<F, E, K, V, H, T, P, S>
@@ -156,6 +156,7 @@ pub(crate) mod test {
         qmdb::{
             SnapshotBuild as _,
             any::{
+                batch::Slot,
                 ordered::{
                     Update,
                     test::{
@@ -1521,7 +1522,7 @@ pub(crate) mod test {
     fn test_ordered_any_fixed_db_span_maintenance_under_collisions() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            async fn insert_random<T: Translator>(
+            async fn insert_random<T: OrderedTranslator>(
                 mut db: Db<mmr::Family, Context, Digest, i32, Sha256, T, Sequential>,
                 rng: &mut TestRng,
             ) -> Db<mmr::Family, Context, Digest, i32, Sha256, T, Sequential> {
@@ -2229,7 +2230,7 @@ pub(crate) mod test {
         is_send(async move {
             let (_, staged) = db.new_batch().stage(&[&key], db).await?;
             staged
-                .merkleize(Vec::new(), Vec::new(), None, db, &mut policy)
+                .merkleize(vec![Slot::Keep], Vec::new(), None, db, &mut policy)
                 .await
         });
     }
