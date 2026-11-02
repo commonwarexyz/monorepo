@@ -496,13 +496,72 @@ pub struct Reader<'a, E: Context, V: Codec> {
     metrics: Arc<Metrics<E>>,
 }
 
+/// The frames a prefetch warms: every frame position interleaved with its same-blob successor,
+/// and the immutable views of the data blobs holding them.
+#[commonware_macros::stability(ALPHA)]
+struct PrefetchFrames<B: RBlob> {
+    /// Frame positions and their same-blob successors, strictly increasing.
+    lookups: Vec<u64>,
+    /// Each frame's index in `lookups`.
+    frames: Vec<usize>,
+    /// The data blobs holding frames, ascending, with their immutable views.
+    blobs: Vec<(u64, Sealed<B>)>,
+    items_per_blob: u64,
+    /// The journal's size. The frame before it ends at the end of its blob.
+    size: u64,
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<B: RBlob> PrefetchFrames<B> {
+    /// The byte range of the frame at `idx` in `lookups`, in a blob of `blob_size` bytes, once
+    /// `offsets` resolves both of its ends.
+    fn range(&self, offsets: &[Option<u64>], idx: usize, blob_size: u64) -> Option<(u64, u64)> {
+        let start = offsets[idx]?;
+        let next = self.lookups[idx] + 1;
+        let end = if next.is_multiple_of(self.items_per_blob) || next == self.size {
+            blob_size
+        } else if self.lookups.get(idx + 1) == Some(&next) {
+            offsets[idx + 1]?
+        } else {
+            return None;
+        };
+        Some((start, end.checked_sub(start)?))
+    }
+
+    /// Collect the frames not yet `warmed` whose ranges `offsets` resolves, marking them warmed.
+    fn warm(&self, offsets: &[Option<u64>], warmed: &mut [bool]) -> super::blobs::Warm<B> {
+        let mut warm = super::blobs::Warm::new();
+        let (mut frames, mut warmed) = (self.frames.as_slice(), warmed);
+        for (blob, view) in &self.blobs {
+            let count = frames.partition_point(|&idx| {
+                position_to_blob(self.lookups[idx], self.items_per_blob) == *blob
+            });
+            let (group, rest) = frames.split_at(count);
+            let (flags, rest_flags) = std::mem::take(&mut warmed).split_at_mut(count);
+            (frames, warmed) = (rest, rest_flags);
+            let blob_size = view.size();
+            let ranges = group.iter().zip(flags).filter_map(|(&idx, warmed)| {
+                if *warmed {
+                    return None;
+                }
+                let range = self.range(offsets, idx, blob_size)?;
+                *warmed = true;
+                Some(range)
+            });
+            warm.push(view.clone(), ranges);
+        }
+        warm
+    }
+}
+
 impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
     /// See [Contiguous::prefetch].
     ///
     /// Reads each frame's offset and its same-blob successor's offset from the offsets journal
-    /// (through the page cache), then the pages covering the frames. Offset pages are warmed like
-    /// frame pages, so both get the same best-effort residency (see [Sealed::warm]). A blob's
-    /// last frame ends at the end of its blob. Bytes still in the tail's write buffer are skipped.
+    /// (through the page cache), then the pages covering the frames. Frames whose offsets are
+    /// cached are warmed while the other offsets are read. Offset pages are warmed like frame
+    /// pages, so both get the same best-effort residency (see [Sealed::warm]). A blob's last frame
+    /// ends at the end of its blob. Bytes still in the tail's write buffer are skipped.
     #[commonware_macros::stability(ALPHA)]
     pub(super) fn prefetch(
         &self,
@@ -511,99 +570,84 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         let items_per_blob = self.items_per_blob.get();
         let start = positions.partition_point(|&pos| pos < self.bounds.start);
         let end = positions.partition_point(|&pos| pos < self.bounds.end);
-
-        // Interleave every frame with its same-blob successor into one strictly increasing
-        // lookup list. `frames` holds each frame's index in `lookups`.
-        let mut lookups: Vec<u64> = Vec::with_capacity(2 * (end - start));
-        let mut frames: Vec<usize> = Vec::with_capacity(end - start);
-        let mut blobs: Vec<(u64, Sealed<E::Blob>)> = Vec::new();
+        let mut plan = PrefetchFrames {
+            lookups: Vec::with_capacity(2 * (end - start)),
+            frames: Vec::with_capacity(end - start),
+            blobs: Vec::new(),
+            items_per_blob,
+            size: self.bounds.end,
+        };
         for &position in &positions[start..end] {
             let blob = position_to_blob(position, items_per_blob);
-            if blobs.last().map(|&(last, _)| last) != Some(blob) {
+            if plan.blobs.last().map(|&(last, _)| last) != Some(blob) {
                 let Some(view) = self.data.immutable(blob) else {
                     continue;
                 };
-                blobs.push((blob, view));
+                plan.blobs.push((blob, view));
             }
-            if lookups.last() != Some(&position) {
-                lookups.push(position);
+            if plan.lookups.last() != Some(&position) {
+                plan.lookups.push(position);
             }
-            frames.push(lookups.len() - 1);
+            plan.frames.push(plan.lookups.len() - 1);
             let next = position + 1;
             if !next.is_multiple_of(items_per_blob) && next < self.bounds.end {
-                lookups.push(next);
+                plan.lookups.push(next);
             }
         }
+
         // Resolve the offsets the cache or write buffer holds now. The offsets journal's
         // immutable views supply the rest below.
-        let (mut offsets, _) = self.offsets.probe_uncounted(&lookups);
-        let offset_runs = self.offsets.immutable_runs(&lookups);
-        let end_position = self.bounds.end;
+        let (mut offsets, _) = self.offsets.probe_uncounted(&plan.lookups);
+        let offset_runs = self.offsets.immutable_runs(&plan.lookups);
 
         async move {
+            // Warm the frames whose offsets are resolved while reading the others.
+            let mut warmed = vec![false; plan.frames.len()];
+            let early = plan.warm(&offsets, &mut warmed).run();
+
             // Warm the pages of every offset in an immutable view, resolved or not, then read the
-            // missing offsets from the warmed pages. One batched read per offsets blob.
-            let offset_size = fixed::Inner::<E, u64>::CHUNK_SIZE;
-            let item_size = offset_size.get() as u64;
-            let (lookups, resolved) = (&lookups, &offsets);
-            let reads = offset_runs
-                .into_iter()
-                .map(|(run, blob, first)| async move {
-                    let ranges: Vec<(u64, u64)> = lookups[run.clone()]
-                        .iter()
-                        .map(|&pos| ((pos - first).saturating_mul(item_size), item_size))
-                        .collect();
-                    if let Err(err) = blob.warm(&ranges).await {
-                        warn!(?err, "prefetch of offset pages failed");
+            // missing offsets from the warmed pages, one batched read per offsets blob, and warm
+            // the frames they resolve.
+            let late = async {
+                let offset_size = fixed::Inner::<E, u64>::CHUNK_SIZE;
+                let item_size = offset_size.get() as u64;
+                let (lookups, resolved) = (&plan.lookups, &offsets);
+                let reads = offset_runs
+                    .into_iter()
+                    .map(|(run, blob, first)| async move {
+                        let ranges: Vec<(u64, u64)> = lookups[run.clone()]
+                            .iter()
+                            .map(|&pos| ((pos - first).saturating_mul(item_size), item_size))
+                            .collect();
+                        if let Err(err) = blob.warm(&ranges).await {
+                            warn!(?err, "prefetch of offset pages failed");
+                        }
+
+                        // Only offsets the view holds entirely can be read from it.
+                        let written = first.saturating_add(blob.size() / item_size);
+                        let missing: Vec<usize> = run
+                            .filter(|&idx| resolved[idx].is_none() && lookups[idx] < written)
+                            .collect();
+                        let items: Vec<u64> = missing
+                            .iter()
+                            .map(|&idx| (lookups[idx] - first) * item_size)
+                            .collect();
+                        let mut buf = vec![0u8; items.len() * offset_size.get()];
+                        let result = blob.read_many_into(&mut buf, &items, offset_size).await;
+                        (missing, buf, result)
+                    });
+                for (missing, buf, result) in join_all(reads).await {
+                    if let Err(err) = result {
+                        warn!(?err, "prefetch read of offsets failed");
+                        continue;
                     }
-
-                    // Only offsets the view holds entirely can be read from it.
-                    let written = first.saturating_add(blob.size() / item_size);
-                    let missing: Vec<usize> = run
-                        .filter(|&idx| resolved[idx].is_none() && lookups[idx] < written)
-                        .collect();
-                    let items: Vec<u64> = missing
-                        .iter()
-                        .map(|&idx| (lookups[idx] - first) * item_size)
-                        .collect();
-                    let mut buf = vec![0u8; items.len() * offset_size.get()];
-                    let result = blob.read_many_into(&mut buf, &items, offset_size).await;
-                    (missing, buf, result)
-                });
-            for (missing, buf, result) in join_all(reads).await {
-                if let Err(err) = result {
-                    warn!(?err, "prefetch read of offsets failed");
-                    continue;
+                    for (idx, item) in missing.into_iter().zip(buf.chunks(offset_size.get())) {
+                        offsets[idx] = <u64 as DecodeExt<()>>::decode(Copying(item)).ok();
+                    }
                 }
-                for (idx, item) in missing.into_iter().zip(buf.chunks(offset_size.get())) {
-                    offsets[idx] = <u64 as DecodeExt<()>>::decode(Copying(item)).ok();
-                }
-            }
-
-            // Read the pages covering each resolved frame.
-            let mut warm = super::blobs::Warm::new();
-            let mut frames = frames.as_slice();
-            for (blob, view) in blobs {
-                let count = frames
-                    .partition_point(|&idx| position_to_blob(lookups[idx], items_per_blob) == blob);
-                let (group, rest) = frames.split_at(count);
-                frames = rest;
-                let size = view.size();
-                let ranges = group.iter().filter_map(|&idx| {
-                    let start = offsets[idx]?;
-                    let next = lookups[idx] + 1;
-                    let end = if next.is_multiple_of(items_per_blob) || next == end_position {
-                        size
-                    } else if lookups.get(idx + 1) == Some(&next) {
-                        offsets[idx + 1]?
-                    } else {
-                        return None;
-                    };
-                    Some((start, end.checked_sub(start)?))
-                });
-                warm.push(view, ranges);
-            }
-            warm.run().await;
+                plan.warm(&offsets, &mut warmed).run().await;
+            };
+            futures::join!(early, late);
         }
     }
 
