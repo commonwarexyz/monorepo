@@ -2031,6 +2031,7 @@ version = "2026.11.0"
 dependencies = [
  "arbitrary",
  "blst",
+ "commonware-allocator",
  "commonware-invariants",
  "commonware-macros",
  "commonware-simd",
