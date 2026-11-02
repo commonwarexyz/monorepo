@@ -49,7 +49,7 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
 #[cfg(test)]
 mod tests {
     mod dispatch;
-    mod timing;
+    mod round;
     use super::{verifier::Batch, votes::Outcome, *};
     use crate::{
         Viewable,

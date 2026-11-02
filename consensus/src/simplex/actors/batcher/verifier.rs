@@ -61,7 +61,8 @@ pub struct Constructed<S: Scheme<D>, D: Digest> {
     retained: Retained<S, D>,
 }
 
-/// Verified votes returned by an incomplete attempt, tagged by kind.
+/// Verified votes a finished attempt returns for retry (empty after a certificate),
+/// tagged by kind so completion clears that kind's in-flight state.
 enum Retained<S: Scheme<D>, D: Digest> {
     Notarize(Vec<(Proposal<D>, Attestation<S>)>),
     Nullify(Vec<(Rnd, Attestation<S>)>),
@@ -210,7 +211,7 @@ impl<S: Scheme<D>, D: Digest> ConstructJob<S, D> {
     }
 }
 
-/// Buffered votes for one vote kind.
+/// An attempt tagged by vote kind.
 enum Work<S: Scheme<D>, D: Digest> {
     Notarize(Attempt<Proposal<D>, S>),
     Nullify(Attempt<Rnd, S>),
@@ -379,8 +380,9 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         })
     }
 
-    /// Merges a finished attempt with votes received while it was running.
-    fn finish_construct(&mut self, votes: Vec<(C, Attestation<S>)>, matches: impl Fn(&C) -> bool) {
+    /// Merges a finished attempt with votes received while it was running. If the kind
+    /// completed meanwhile, the returned votes are discarded.
+    fn finish_construct(&mut self, votes: Votes<C, S>, matches: impl Fn(&C) -> bool) {
         assert!(self.in_flight, "construction must be in flight");
         self.in_flight = false;
         if let State::Incomplete { verified, .. } = &mut self.state {
@@ -467,13 +469,10 @@ impl<D: Digest> ProposalState<D> {
 /// Candidate quorums use [optimistic assembly](CertificateScheme::optimistic_assemble). Verified
 /// votes are retained between attempts, and a verified quorum skips pending vote verification.
 ///
-/// Construction runs as an owned job, at most one per kind. A job owns the votes selected
-/// when it begins: all verified votes, plus the pending votes unless the verified votes
-/// already form a quorum (then those pending votes are discarded). The kind can buffer
-/// additional votes while the job runs. If the kind is still incomplete when the job
-/// finishes, [Self::finish_construct] merges back the verified votes it returns, dropping
-/// notarize and finalize votes for a displaced proposal. Finish every job unless the
-/// verifier is discarded.
+/// Construction runs as an owned job, at most one per kind; the kind can buffer additional
+/// votes while it runs. If the kind is still incomplete, [Self::finish_construct] merges back
+/// the job's verified votes, dropping notarize and finalize votes for a displaced proposal.
+/// Finish every job unless the verifier is discarded.
 ///
 /// [ed25519]: crate::simplex::scheme::ed25519
 /// [bls12381_multisig]: crate::simplex::scheme::bls12381_multisig
@@ -721,14 +720,11 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// the same kind arrived during construction.
     pub fn finish_construct(&mut self, result: Constructed<S, D>) -> Batch<Certificate<S, D>> {
         let proposal = self.proposal.proposal();
+        let matches = |context: &Proposal<D>| proposal.is_none_or(|proposal| context == proposal);
         match result.retained {
-            Retained::Notarize(votes) => self.notarize.finish_construct(votes, |context| {
-                proposal.is_none_or(|proposal| context == proposal)
-            }),
+            Retained::Notarize(votes) => self.notarize.finish_construct(votes, matches),
             Retained::Nullify(votes) => self.nullify.finish_construct(votes, |_| true),
-            Retained::Finalize(votes) => self.finalize.finish_construct(votes, |context| {
-                proposal.is_none_or(|proposal| context == proposal)
-            }),
+            Retained::Finalize(votes) => self.finalize.finish_construct(votes, matches),
         }
         result.batch
     }

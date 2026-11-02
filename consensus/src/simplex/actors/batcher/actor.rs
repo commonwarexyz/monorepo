@@ -416,6 +416,8 @@ where
 
     /// Records completed work even if its round was pruned. Certificates remain
     /// useful to the voter, whose retention policy is independent of the batcher's.
+    /// Returns the view to revisit if its round is retained, so merged-back and
+    /// buffered votes get another attempt.
     pub(super) fn handle_done(
         &mut self,
         voter: &mut voter::Mailbox<S, D>,
@@ -500,6 +502,9 @@ where
         let mut finalized = self.floor;
         let mut work: BTreeMap<View, Round<S, B, D, Re>> = BTreeMap::new();
 
+        // Views whose rounds may have become actionable. The set persists across
+        // iterations: dispatch keeps views skipped at capacity, and completions
+        // re-insert their view.
         let mut dirty_views = BTreeSet::new();
         let mut crypto_pool = Pool::default();
         select_loop! {
@@ -764,16 +769,16 @@ where
                     continue;
                 }
 
+                let viewport = self.viewport(finalized, current.view);
                 self.dispatch_ready(
                     &mut crypto_pool,
                     &mut work,
                     &mut dirty_views,
                     &mut voter,
-                    self.viewport(finalized, current.view),
+                    viewport,
                 );
 
                 // Drop any rounds that are no longer retained
-                let viewport = self.viewport(finalized, current.view);
                 while work
                     .first_key_value()
                     .is_some_and(|(&view, _)| !viewport.retains(view))

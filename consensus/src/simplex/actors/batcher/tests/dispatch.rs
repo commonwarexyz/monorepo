@@ -150,6 +150,8 @@ fn pruned_completion_forwards_certificate_and_records_fallback() {
             },
         );
         work.remove(&view).unwrap();
+        let delay = Duration::from_millis(50);
+        context.sleep(delay).await;
         let done = pool.next_completed().await;
         assert!(done.constructed.batch.fallback);
         assert_eq!(done.constructed.batch.processed, count);
@@ -175,6 +177,13 @@ fn pruned_completion_forwards_certificate_and_records_fallback() {
             "{metrics}"
         );
         assert!(metrics.contains("batcher_batch_size_count 1"), "{metrics}");
+        let observed: f64 = metrics
+            .lines()
+            .find_map(|line| line.strip_prefix("batcher_construct_latency_sum "))
+            .expect("construction histogram missing")
+            .parse()
+            .unwrap();
+        assert_eq!(observed, delay.as_secs_f64());
     });
 }
 
