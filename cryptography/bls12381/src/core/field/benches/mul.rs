@@ -1,7 +1,7 @@
 //! Throughput of lane multiplications.
 
 use super::utils::{Field, ONE, Radix28, Radix49, Representation, Residues, elements};
-use commonware_cryptography_bls12381::field::fp::BYTES;
+use commonware_cryptography_bls12381::core::field::fp::BYTES;
 use commonware_simd::{Operation, Simd, dispatch};
 use criterion::{BenchmarkGroup, Criterion, Throughput, criterion_group, measurement::WallTime};
 use std::{hint::black_box, marker::PhantomData};

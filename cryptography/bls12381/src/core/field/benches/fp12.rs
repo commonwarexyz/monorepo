@@ -1,7 +1,7 @@
 //! Throughput of dodecic extension operations, compared with blst.
 
 use super::utils::elements;
-use commonware_cryptography_bls12381::field::{
+use commonware_cryptography_bls12381::core::field::{
     arithmetic::Field,
     fp::{self, rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
     fp2::{self, Fp2},

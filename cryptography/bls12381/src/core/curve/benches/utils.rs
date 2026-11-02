@@ -1,6 +1,6 @@
 //! Fixtures shared by the curve benchmarks.
 
-use commonware_cryptography_bls12381::{
+use commonware_cryptography_bls12381::core::{
     curve::{g1, g2},
     field::{
         arithmetic::Field,

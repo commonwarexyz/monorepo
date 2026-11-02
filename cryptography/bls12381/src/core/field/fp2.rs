@@ -581,7 +581,7 @@ fn split(element: &[u8; BYTES]) -> (&[u8; FP_BYTES], &[u8; FP_BYTES]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::field::fp::{
+    use crate::core::field::fp::{
         rns::Rns,
         tests::{self as reference, Element},
         unsat28::Unsat28,

@@ -508,7 +508,7 @@ fn split(element: &[u8; BYTES]) -> (&[u8; FP6_BYTES], &[u8; FP6_BYTES]) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::field::{
+    use crate::core::field::{
         fp::{
             BYTES as FP_BYTES,
             rns::Rns,
@@ -960,7 +960,7 @@ pub(crate) mod tests {
             )
         };
         // (p - 1) / 6, little-endian.
-        let mut exponent = crate::field::fp::MODULUS;
+        let mut exponent = crate::core::field::fp::MODULUS;
         exponent[0] -= 1;
         let mut remainder = 0u128;
         for word in exponent.iter_mut().rev() {

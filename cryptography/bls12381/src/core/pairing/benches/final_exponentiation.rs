@@ -4,7 +4,7 @@ use super::utils::{
     POINTS, Radix28, Radix49, Representation, Residues, blst_final_exponentiation,
     blst_miller_loop, from_blst, pairs,
 };
-use commonware_cryptography_bls12381::{
+use commonware_cryptography_bls12381::core::{
     field::{
         arithmetic::Field,
         fp12::{BYTES, Fp12, ONE},
