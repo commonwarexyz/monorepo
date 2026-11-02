@@ -15,13 +15,18 @@ workspace = true
 
 [dependencies]
 commonware-macros.workspace = true
+commonware-math.workspace = true
 commonware-simd.workspace = true
+rand_core.workspace = true
+subtle.workspace = true
 
 [dev-dependencies]
 arbitrary.workspace = true
 blst.workspace = true
 commonware-allocator = { workspace = true, features = [ "mimalloc" ] }
 commonware-invariants.workspace = true
+commonware-math = { workspace = true, features = [ "arbitrary" ] }
+commonware-utils = { workspace = true, features = [ "std" ] }
 criterion.workspace = true
 
 [lib]
@@ -51,5 +56,7 @@ default = [ "std" ]
 core = []
 std = [
 	"commonware-macros/std",
+	"commonware-math/std",
 	"commonware-simd/std",
+	"subtle/std",
 ]

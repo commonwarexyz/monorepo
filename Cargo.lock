@@ -2056,8 +2056,12 @@ dependencies = [
  "commonware-allocator",
  "commonware-invariants",
  "commonware-macros",
+ "commonware-math",
  "commonware-simd",
+ "commonware-utils",
  "criterion",
+ "rand_core 0.10.1",
+ "subtle",
 ]
 
 [[package]]

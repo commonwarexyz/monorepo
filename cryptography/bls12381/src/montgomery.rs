@@ -3,14 +3,6 @@
 //! Every function takes little-endian words below the modulus and returns the same; the
 //! functions are `const fn` so field constants can be derived at compile time.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Only tests use the full arithmetic."
-    )
-)]
-
 /// Computes `-m^(-1) mod 2^64` for an odd modulus word `m` by Newton iteration.
 pub(crate) const fn negated_inverse(m: u64) -> u64 {
     let mut inv = 1u64;
@@ -66,7 +58,11 @@ pub(crate) const fn subtract_modulus<const N: usize>(
 }
 
 /// Returns `a + b mod modulus`.
-pub(crate) const fn add<const N: usize>(a: &[u64; N], b: &[u64; N], modulus: &[u64; N]) -> [u64; N] {
+pub(crate) const fn add<const N: usize>(
+    a: &[u64; N],
+    b: &[u64; N],
+    modulus: &[u64; N],
+) -> [u64; N] {
     let mut sum = [0; N];
     let mut carry = 0;
     let mut i = 0;
