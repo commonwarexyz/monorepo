@@ -2057,6 +2057,7 @@ dependencies = [
  "commonware-invariants",
  "commonware-macros",
  "commonware-math",
+ "commonware-parallel",
  "commonware-simd",
  "commonware-utils",
  "criterion",

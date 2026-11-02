@@ -16,6 +16,7 @@ workspace = true
 [dependencies]
 commonware-macros.workspace = true
 commonware-math.workspace = true
+commonware-parallel.workspace = true
 commonware-simd.workspace = true
 rand_core.workspace = true
 subtle.workspace = true
@@ -57,6 +58,7 @@ core = []
 std = [
 	"commonware-macros/std",
 	"commonware-math/std",
+	"commonware-parallel/std",
 	"commonware-simd/std",
 	"subtle/std",
 ]
