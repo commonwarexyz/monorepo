@@ -403,19 +403,23 @@ impl<S: Simd> Unsat28<S> {
     ) {
         // Products and reduction terms accumulate separately, so the two chains of additions can
         // proceed in parallel.
+        // Index arithmetic wraps rather than checks: release builds enable overflow checks, which
+        // change how the unrolled kernel compiles even though no check survives constant folding.
         let zero = simd.u64_splat(0);
         let mut column = *carry;
         for (h, column) in column.iter_mut().enumerate().take(Self::HALVES) {
             let mut products = zero;
-            for i in 0..LIMBS {
-                if i <= k && k - i < LIMBS {
-                    products = simd.u64_add(products, Self::widen(simd, h, a[i], b[k - i]));
+            for (i, a) in a.iter().enumerate() {
+                let j = k.wrapping_sub(i);
+                if i <= k && j < LIMBS {
+                    products = simd.u64_add(products, Self::widen(simd, h, *a, b[j]));
                 }
             }
             let mut reduction = zero;
             for (i, q) in q.iter().enumerate().take(k.min(LIMBS)) {
-                if k - i < LIMBS {
-                    let modulus = simd.u32_splat(P[k - i]);
+                let j = k.wrapping_sub(i);
+                if j < LIMBS {
+                    let modulus = simd.u32_splat(P[j]);
                     reduction = simd.u64_add(reduction, Self::widen(simd, h, *q, modulus));
                 }
             }
@@ -434,7 +438,7 @@ impl<S: Simd> Unsat28<S> {
             q[k] = multiplier;
         } else {
             let low = simd.u64_narrow_pair(column[0], column[1]);
-            limbs[k - LIMBS] = simd.u32_and(low, simd.u32_splat(MASK));
+            limbs[k.wrapping_sub(LIMBS)] = simd.u32_and(low, simd.u32_splat(MASK));
         }
         for (carry, column) in carry.iter_mut().zip(column).take(Self::HALVES) {
             *carry = simd.u64_shr::<LIMB_BITS>(column);
