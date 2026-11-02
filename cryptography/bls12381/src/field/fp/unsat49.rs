@@ -469,9 +469,9 @@ impl<S: Simd> Field<S> for Unsat49<S> {
     }
 
     #[inline(always)]
-    fn product_sub(simd: S, a: Self::Product, b: Self::Product) -> Self::Product {
-        // The subtrahend must be bounded by 63p; carrying covers limb borrows.
-        a.sub::<64>(simd, b.carry(simd))
+    fn product_sub<const K: u64>(simd: S, a: Self::Product, b: Self::Product) -> Self::Product {
+        // The subtrahend must be below Kp; carrying covers limb borrows.
+        a.sub::<K>(simd, b.carry(simd))
     }
 
     #[inline(always)]

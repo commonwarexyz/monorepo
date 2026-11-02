@@ -22,6 +22,9 @@ const ROUNDS: usize = 64;
 /// Subtraction bias for squaring, covering the imaginary component of any chained result.
 const SQUARE_BIAS: u64 = 128;
 
+/// Positional bias for reducing products, covering the negative sums of any chained product.
+const PRODUCT_BIAS: u64 = 64;
+
 /// A base field representation, selecting its element type on every backend.
 trait Representation {
     /// The representation's name in benchmark labels.
@@ -85,7 +88,7 @@ impl<S: Simd, R: Representation> Operation<S> for Chains<'_, R> {
                         Step::Mul => {
                             for _ in 0..ROUNDS {
                                 for chain in &mut chains {
-                                    *chain = chain.mul(simd, factor);
+                                    *chain = chain.mul::<PRODUCT_BIAS, S>(simd, factor);
                                 }
                             }
                         }
