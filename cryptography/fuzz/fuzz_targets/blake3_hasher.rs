@@ -8,18 +8,17 @@ use commonware_cryptography::{
     blake3::{Blake3 as OurBlake3, Digest},
     fuzz::Plan,
 };
-use commonware_parallel::{Manual, Rayon, Strategy as _};
+use commonware_parallel::{Rayon, mocks::Explorer};
 use commonware_utils::{NZUsize, TestRng};
 use libfuzzer_sys::fuzz_target;
 use rand::Rng as _;
 use std::sync::LazyLock;
 use zeroize::Zeroize;
 
-/// A four-worker strategy with adaptive decisions disabled, so it takes every split a hasher
-/// offers it. It is built once and reused across invocations because starting a thread pool is
-/// expensive.
-static STRATEGY: LazyLock<Manual<Rayon>> =
-    LazyLock::new(|| Rayon::new(NZUsize!(4)).unwrap().manual());
+/// A four-worker explorer that takes every split a hasher offers it. It is built once and reused
+/// across invocations because starting a thread pool is expensive.
+static STRATEGY: LazyLock<Explorer> =
+    LazyLock::new(|| Explorer::parallel(&Rayon::new(NZUsize!(4)).unwrap()));
 
 #[derive(Debug, Arbitrary)]
 enum Operation {
@@ -177,7 +176,7 @@ fn fuzz_from_hash_and_deref(data: &[u8]) {
     let ref_hash = RefBlake3::new().update(data).finalize();
     let our_digest: Digest = ref_hash.into();
 
-    // Test Deref trait - should be able to use as &[u8]
+    // Deref exposes the digest as a byte slice.
     let slice: &[u8] = &our_digest;
     assert_eq!(slice.len(), 32);
     assert_eq!(slice, our_digest.as_ref());

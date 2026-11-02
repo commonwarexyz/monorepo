@@ -1039,6 +1039,24 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         self.view().read_many_into(buf, offsets, item_size).await
     }
 
+    /// Like [`Self::read_many_into`], but each `(offset, len)` range has its own length. `buf`
+    /// holds the ranges back to back.
+    ///
+    /// Returns how many ranges were served entirely from the in-memory tail and page cache before
+    /// any blob read. Empty ranges count as served.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a range starts before the previous range ends, or if `buf` is not the ranges'
+    /// total length.
+    pub async fn read_ranges_into(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<usize, Error> {
+        self.view().read_ranges_into(buf, ranges).await
+    }
+
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
     /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
     pub fn try_read_many_sync_into(

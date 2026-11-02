@@ -9,7 +9,7 @@ use crate::{
         Cursor as CursorTrait, Ordered, Unordered,
         storage::{Cursor as CursorImpl, IndexEntry, Overflow, Values, push_displaced},
     },
-    translator::Translator,
+    translator::{OrderedTranslator, Translator},
 };
 use commonware_runtime::{
     Metrics,
@@ -136,7 +136,7 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Send + Sync> Ordered for Index<T, V> {
+impl<T: OrderedTranslator, V: Send + Sync> Ordered for Index<T, V> {
     fn prev_translated_key<'a>(
         &'a self,
         key: &[u8],
@@ -176,6 +176,10 @@ impl<T: Translator, V: Send + Sync> super::Factory for Index<T, V> {
 
 impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     type Value = V;
+
+    // A lookup warms the tree but repeats the full descent that the mutation of its key makes.
+    // Dependent node loads overlap few misses, so the extra descent costs more than warming saves.
+    const LOOKUP_WARMS_UPDATE: bool = false;
 
     fn get_many<'a, K: AsRef<[u8]>>(
         &'a self,

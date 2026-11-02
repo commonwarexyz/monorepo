@@ -163,7 +163,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
                 }
             }
             Message::PeerSet { index, responder } => {
-                let _ = responder.send(self.directory.get_peer_set(&index));
+                let _ = responder.send(self.directory.get_peer_set(index));
             }
             Message::Subscribe { responder } => {
                 // Create a new subscription channel
@@ -219,13 +219,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
                 // Block the peer
                 if self.directory.block(&public_key) {
                     self.notify_blocked();
+
+                    // Send the updated listenable IPs to the listener.
+                    let _ = self.listener.set(self.directory.listenable());
                 }
 
                 // Kill the peer if we're connected to it
                 self.kill_peer(&public_key);
-
-                // Send the updated listenable IPs to the listener.
-                let _ = self.listener.set(self.directory.listenable());
             }
             Message::SubscribeBlocked { sender } => {
                 // Start the subscriber from the current blocked set rather than

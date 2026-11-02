@@ -32,9 +32,10 @@ zeroize = { workspace = true, features = [ "zeroize_derive" ] }
 
 [dev-dependencies]
 arbitrary = { workspace = true, features = [ "derive" ] }
+commonware-allocator = { workspace = true, features = [ "mimalloc" ] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
-commonware-parallel = { workspace = true, features = [ "std" ] }
+commonware-parallel = { workspace = true, features = [ "std", "test-utils" ] }
 commonware-utils = { workspace = true, features = [ "std" ] }
 criterion.workspace = true
 ed25519-consensus.workspace = true

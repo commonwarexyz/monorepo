@@ -707,21 +707,25 @@ where
         self.validate_batch(&batch)?;
         let db_size = self.size();
 
-        // Apply journal.
-        self.journal = self.journal.apply_batch(&batch.journal_batch).await?;
-
-        // Apply snapshot inserts for the batch and every unapplied ancestor.
-        for (key, entry) in batch.diff.iter() {
-            self.snapshot.insert(key, *entry.loc);
-        }
-        for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.bounds.ancestors[i].size <= db_size {
-                continue;
-            }
-            for (key, entry) in ancestor_diff.iter() {
+        // Journal writes and snapshot inserts are independent until batch publication.
+        let apply_snapshot = async {
+            for (key, entry) in batch.diff.iter() {
                 self.snapshot.insert(key, *entry.loc);
             }
-        }
+            for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
+                if batch.bounds.ancestors[i].size <= db_size {
+                    continue;
+                }
+                for (key, entry) in ancestor_diff.iter() {
+                    self.snapshot.insert(key, *entry.loc);
+                }
+            }
+        };
+        let (journal, ()) = futures::join!(
+            self.journal.apply_batch(&batch.journal_batch),
+            apply_snapshot
+        );
+        self.journal = journal?;
 
         // Update state.
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
@@ -901,6 +905,50 @@ pub(super) mod tests {
             );
         }
         assert_eq!(db.get(&untouched).await.unwrap(), Some(untouched_value));
+        db.destroy().await.unwrap();
+    }
+
+    /// Speculative reads binary-search a merkleized batch's diff, so every key of a multi-key
+    /// batch must resolve before apply regardless of the order the keys were set in.
+    #[boxed]
+    pub(crate) async fn run_multi_key_batch_reads<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+
+        // Set the keys in descending order so the batch itself must order the diff.
+        let value = |i: u8| Sha256::fill(i.wrapping_add(100));
+        let mut batch = db.new_batch();
+        for i in (0..8u8).rev() {
+            batch = batch.set(Sha256::fill(i), value(i));
+        }
+        let parent = batch.merkleize(&db, None, Location::new(0)).await.unwrap();
+
+        let keys: Vec<_> = (0..8u8).map(Sha256::fill).collect();
+        let key_refs: Vec<_> = keys.iter().collect();
+        let expected: Vec<_> = (0..8u8).map(|i| Some(value(i))).collect();
+
+        // The batch resolves its own diff, an unmerkleized child resolves it through the parent,
+        // and a merkleized child resolves it as a retained ancestor diff.
+        assert_eq!(parent.get_many(&key_refs, &db).await.unwrap(), expected);
+        let draft = parent.new_batch::<Sha256>();
+        assert_eq!(draft.get_many(&key_refs, &db).await.unwrap(), expected);
+        let child = draft.merkleize(&db, None, Location::new(0)).await.unwrap();
+        assert_eq!(child.get_many(&key_refs, &db).await.unwrap(), expected);
+        for i in 0..8u8 {
+            assert_eq!(
+                child.get(&Sha256::fill(i), &db).await.unwrap(),
+                Some(value(i))
+            );
+        }
+
         db.destroy().await.unwrap();
     }
 

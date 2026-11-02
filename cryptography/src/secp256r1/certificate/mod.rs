@@ -14,7 +14,9 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
+use commonware_codec::{
+    Buf, EncodeSize, Error, FixedSize, Read, ReadRangeExt, Write, types::lazy::Lazy,
+};
 use commonware_utils::{
     Participant, Widen,
     iter::NonEmpty,
@@ -85,8 +87,8 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         self.participants.keys()
     }
 
-    /// Returns the index of "self" in the participant set, if available.
-    pub fn me(&self) -> Option<Participant> {
+    /// Returns the index this instance signs at, or `None` if it cannot sign.
+    pub fn signer_index(&self) -> Option<Participant> {
         self.signer.as_ref().map(|(index, _)| *index)
     }
 
@@ -249,6 +251,12 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         false
     }
 
+    /// Returns an upper bound on the encoded certificate size for at most `participants`
+    /// participants.
+    pub fn max_certificate_size(participants: u32) -> usize {
+        crate::certificate::max_individual_certificate_size(participants, Secp256r1Signature::SIZE)
+    }
+
     pub const fn certificate_codec_config(&self) -> <Certificate as commonware_codec::Read>::Cfg {
         self.participants.len()
     }
@@ -382,7 +390,10 @@ macro_rules! impl_certificate_secp256r1 {
         /// Secp256r1 signing scheme wrapper.
         #[derive(Clone, Debug)]
         pub struct Scheme<P: $crate::PublicKey> {
+            /// Verification state, plus the signing material of a signer.
             generic: $crate::secp256r1::certificate::Generic<P, $namespace>,
+            /// Index of the local identity key for an instance built with [`Self::member`].
+            member: Option<commonware_utils::Participant>,
         }
 
         impl<P: $crate::PublicKey> Scheme<P> {
@@ -398,10 +409,14 @@ macro_rules! impl_certificate_secp256r1 {
                         participants,
                         private_key,
                     )?,
+                    member: None,
                 })
             }
 
             /// Builds a verifier that can authenticate signatures and certificates.
+            ///
+            /// A participant without signing material should use [`Self::member`] instead, so the
+            /// scheme reports its membership.
             pub fn verifier(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::BiMap<P, $crate::secp256r1::standard::PublicKey>,
@@ -411,7 +426,33 @@ macro_rules! impl_certificate_secp256r1 {
                         namespace,
                         participants,
                     ),
+                    member: None,
                 }
+            }
+
+            /// Builds a committee member that verifies like [`Self::verifier`] but also knows
+            /// its own place in the participant set.
+            ///
+            /// The instance cannot sign, and [`Scheme::me`] returns [`Membership::Member`] at
+            /// the position of the identity key `public_key` in the participant set. Returns
+            /// `None` if `public_key` is not a participant identity key.
+            ///
+            /// [`Scheme::me`]: commonware_cryptography::certificate::Scheme::me
+            /// [`Membership::Member`]: commonware_cryptography::certificate::Membership::Member
+            pub fn member(
+                namespace: &[u8],
+                participants: commonware_utils::ordered::BiMap<P, $crate::secp256r1::standard::PublicKey>,
+                public_key: &P,
+            ) -> Option<Self> {
+                let member =
+                    commonware_utils::ordered::Quorum::index(participants.keys(), public_key)?;
+                Some(Self {
+                    generic: $crate::secp256r1::certificate::Generic::verifier(
+                        namespace,
+                        participants,
+                    ),
+                    member: Some(member),
+                })
             }
         }
 
@@ -462,6 +503,10 @@ macro_rules! impl_certificate_secp256r1 {
                 $crate::secp256r1::certificate::Generic::<P, $namespace>::is_batchable()
             }
 
+            fn max_certificate_size(participants: u32) -> usize {
+                $crate::secp256r1::certificate::Generic::<P, $namespace>::max_certificate_size(participants)
+            }
+
             fn certificate_codec_config(
                 &self,
             ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
@@ -476,8 +521,11 @@ macro_rules! impl_certificate_secp256r1 {
         impl<P: $crate::PublicKey> $crate::certificate::Scheme for Scheme<P> {
             type Signature = $crate::secp256r1::standard::Signature;
 
-            fn me(&self) -> Option<commonware_utils::Participant> {
-                self.generic.me()
+            fn me(&self) -> Option<$crate::certificate::Membership> {
+                self.generic
+                    .signer_index()
+                    .map($crate::certificate::Membership::Signer)
+                    .or(self.member.map($crate::certificate::Membership::Member))
             }
 
             fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
@@ -568,11 +616,11 @@ macro_rules! impl_certificate_secp256r1 {
 mod tests {
     use super::*;
     use crate::{
-        certificate::{Scheme as _, Verifier as _},
+        certificate::{Membership, Scheme as _, Verifier as _},
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;
-    use commonware_codec::{Decode, Encode};
+    use commonware_codec::{Decode, Encode, varint::MAX_U32_VARINT_SIZE};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_utils::{Faults, N3f1, TryCollect, non_empty, ordered::BiMap, test_rng};
@@ -632,6 +680,91 @@ mod tests {
         (signers, verifier)
     }
 
+    /// A member reports its membership, cannot sign, and verifies a quorum certificate, while a
+    /// key outside the committee yields no member.
+    #[test]
+    fn test_member_reports_membership_without_signing() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_signers(&mut rng, 4);
+        let participants = verifier.generic.participants.clone();
+        let subject = TestSubject {
+            message: Bytes::from_static(MESSAGE),
+        };
+
+        // A key outside the committee yields no member.
+        let outsider = PrivateKey::random(&mut rng).public_key();
+        assert!(Scheme::member(NAMESPACE, participants.clone(), &outsider).is_none());
+
+        // A member reports its membership but cannot sign. Verifiers report no membership, and
+        // each signer reports the index it signs at.
+        let index = Participant::new(2);
+        let key = participants.keys().key(index).unwrap().clone();
+        let member = Scheme::member(NAMESPACE, participants, &key).unwrap();
+        assert_eq!(member.me(), Some(Membership::Member(index)));
+        assert_eq!(member.me().unwrap().signer(), None);
+        assert!(member.sign::<Sha256Digest>(subject.clone()).is_none());
+        assert_eq!(verifier.me(), None);
+        for scheme in &schemes {
+            let Some(Membership::Signer(signer)) = scheme.me() else {
+                panic!("signer must report signing membership");
+            };
+            let attestation = scheme.sign::<Sha256Digest>(subject.clone()).unwrap();
+            assert_eq!(attestation.signer, signer);
+        }
+
+        // A member verifies a certificate assembled by a quorum of signers.
+        let attestations: Vec<_> = schemes
+            .iter()
+            .take(Widen::widen(N3f1::quorum(schemes.len())))
+            .map(|s| s.sign::<Sha256Digest>(subject.clone()).unwrap())
+            .collect();
+        let certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
+        assert!(member.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject,
+            &certificate,
+            &Sequential,
+        ));
+    }
+
+    /// A member is looked up by its identity key, so each identity key yields a member at its
+    /// position and no signing key yields a member.
+    #[test]
+    fn test_member_uses_identity_keys() {
+        let mut rng = test_rng();
+
+        // Build a committee whose signing keys differ from its identity keys.
+        let (_, verifier) = setup_signers(&mut rng, 4);
+        let identities = verifier.participants().clone();
+        let signing_keys: Vec<_> = (0..identities.len())
+            .map(|_| PrivateKey::random(&mut rng).public_key())
+            .collect();
+        let participants: BiMap<PublicKey, PublicKey> = identities
+            .iter()
+            .cloned()
+            .zip(signing_keys.iter().cloned())
+            .try_collect()
+            .unwrap();
+
+        // Each identity key yields a member at its position.
+        for (position, identity) in identities.iter().enumerate() {
+            let member = Scheme::member(NAMESPACE, participants.clone(), identity).unwrap();
+            assert_eq!(
+                member.me(),
+                Some(Membership::Member(Participant::from_usize(position)))
+            );
+        }
+
+        // No signing key yields a member.
+        for signing_key in &signing_keys {
+            assert!(Scheme::member(NAMESPACE, participants.clone(), signing_key).is_none());
+        }
+    }
+
+    // The counting scheme built inside this test uses only its signer and verifier constructors.
+    #[allow(dead_code)]
     #[test]
     fn test_optimistic_assemble_verifies_pending_once() {
         /// Counts message preparation without changing the signed subject.
@@ -670,7 +803,7 @@ mod tests {
                 .unwrap()
             })
             .collect();
-        schemes.sort_by_key(|scheme| scheme.me());
+        schemes.sort_by_key(|scheme| scheme.me().unwrap().index());
         let quorum = N3f1::quorum(schemes.len()) as usize;
         let verifier = Scheme::verifier(NAMESPACE, participants);
         let calls = Arc::new(AtomicUsize::new(0));
@@ -846,7 +979,7 @@ mod tests {
         assert!(result.invalid.is_empty());
         assert_eq!(result.verified.len(), quorum);
 
-        // Test 1: Corrupt one attestation - invalid signer index
+        // Corrupt one attestation's signer index.
         let mut attestations_corrupted = attestations.clone();
         attestations_corrupted[0].signer = Participant::new(999);
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
@@ -860,7 +993,7 @@ mod tests {
         assert_eq!(result.invalid, vec![Participant::new(999)]);
         assert_eq!(result.verified.len(), quorum - 1);
 
-        // Test 2: Corrupt one attestation - invalid signature
+        // Corrupt one attestation's signature.
         let mut attestations_corrupted = attestations;
         let first_signer = attestations_corrupted[0].signer;
         attestations_corrupted[0].signature = attestations_corrupted[1].signature.clone();
@@ -909,7 +1042,9 @@ mod tests {
         let (schemes, _) = setup_signers(&mut rng, 4);
 
         // Get indices and sort them to create attestations in guaranteed reverse order
-        let mut indexed: Vec<_> = (0..3).map(|i| (schemes[i].me().unwrap(), i)).collect();
+        let mut indexed: Vec<_> = (0..3)
+            .map(|i| (schemes[i].me().unwrap().index(), i))
+            .collect();
         indexed.sort_by_key(|(idx, _)| *idx);
 
         // Create attestations in reverse sorted order (guaranteed non-sorted)
@@ -1036,8 +1171,33 @@ mod tests {
             .assemble(non_empty![@attestations], &Sequential)
             .unwrap();
         let encoded = certificate.encode();
+        assert!(
+            encoded.len()
+                <= Scheme::<PublicKey>::max_certificate_size(u32::try_from(schemes.len()).unwrap())
+        );
         let decoded = Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
         assert_eq!(decoded, certificate);
+    }
+
+    #[test]
+    fn test_max_certificate_size() {
+        // The bound reserves the signature-list prefix at its type's maximum width.
+        let mut rng = test_rng();
+        let (schemes, _) = setup_signers(&mut rng, 128);
+        let attestations = schemes.iter().map(|s| {
+            s.sign::<Sha256Digest>(TestSubject {
+                message: Bytes::from_static(MESSAGE),
+            })
+            .unwrap()
+        });
+        let certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
+        let prefix_slack = MAX_U32_VARINT_SIZE - schemes.len().encode_size();
+        assert_eq!(
+            certificate.encode().len() + prefix_slack,
+            Scheme::<PublicKey>::max_certificate_size(u32::try_from(schemes.len()).unwrap())
+        );
     }
 
     #[test]

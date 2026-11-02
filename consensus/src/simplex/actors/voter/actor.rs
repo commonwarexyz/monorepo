@@ -139,7 +139,7 @@ enum ProposalState<D> {
 type PendingProposal<D, P> = Option<Request<ProposalRequest<D, P>, ProposalState<D>>>;
 
 /// The verification request in flight for the current or an optimistic future view, if any.
-type PendingVerification<D, P> = Option<Request<Context<D, P>, oneshot::Receiver<bool>>>;
+type PendingVerification = Option<Request<Rnd, oneshot::Receiver<bool>>>;
 
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
@@ -467,10 +467,7 @@ impl<
 
     /// Attempt to verify a proposed block.
     #[allow(clippy::async_yields_async)]
-    async fn try_verify(
-        &mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-    ) -> PendingVerification<D, S::PublicKey> {
+    async fn try_verify(&mut self, resolver: &mut resolver::Mailbox<S, D>) -> PendingVerification {
         // Check if we are ready to verify
         let (context, proposal) = match self.state.try_verify() {
             Verify::Ready(context, proposal) => (context, proposal),
@@ -493,15 +490,14 @@ impl<
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
         );
+        let round = context.round;
         let receiver = async {
             debug!(?proposal, "requested proposal verification");
-            self.automaton
-                .verify(context.clone(), proposal.payload)
-                .await
+            self.automaton.verify(context, proposal.payload).await
         }
         .instrument(span.clone())
         .await;
-        Some(Request(context, span, receiver))
+        Some(Request(round, span, receiver))
     }
 
     /// Drops obsolete pending application requests and dispatches eligible new ones.
@@ -509,7 +505,7 @@ impl<
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         pending_propose: &mut PendingProposal<D, S::PublicKey>,
-        pending_verify: &mut PendingVerification<D, S::PublicKey>,
+        pending_verify: &mut PendingVerification,
     ) {
         // Retain requests for the current and optimistic future views. Drop requests for exited
         // views, and a proposal request whose captured parent is no longer valid once a
@@ -821,22 +817,22 @@ impl<
     /// Returns the view to notify.
     fn process_verified(
         &mut self,
-        context: Context<D, S::PublicKey>,
+        round: Rnd,
         verified: Result<bool, oneshot::error::RecvError>,
     ) -> View {
-        let view = context.view();
+        let view = round.view();
         match verified {
             Ok(true) => {
                 // Mark verification complete
                 self.state.verified(view);
             }
             Ok(false) => {
-                warn!(round = ?context.round, "proposal failed verification");
+                warn!(?round, "proposal failed verification");
                 self.state
                     .verification_failed(view, TimeoutReason::InvalidProposal);
             }
             Err(err) => {
-                debug!(?err, round = ?context.round, "failed to verify proposal");
+                debug!(?err, ?round, "failed to verify proposal");
                 self.state
                     .verification_failed(view, TimeoutReason::IgnoredProposal);
             }
@@ -895,7 +891,7 @@ impl<
                     return (self, None);
                 }
                 trace!(%view, "received proposal");
-                if !self.state.set_proposal(view, proposal) {
+                if !self.state.set_proposal(view, &proposal) {
                     return (self, None);
                 }
                 (self, Some(view))
@@ -1230,7 +1226,7 @@ impl<
 
         // Process messages
         let mut pending_propose: PendingProposal<D, S::PublicKey> = None;
-        let mut pending_verify: PendingVerification<D, S::PublicKey> = None;
+        let mut pending_verify: PendingVerification = None;
         let mut certify_pool = AbortablePool::default();
         select_loop! {
             self.context,
@@ -1379,12 +1375,12 @@ impl<
                 };
                 view = proposed_view;
             },
-            (context, span, verified) = verify_wait => {
+            (round, span, verified) = verify_wait => {
                 // Clear verify waiter
                 pending_verify = None;
 
                 // Process the automaton's response
-                view = span.in_scope(|| self.process_verified(context, verified));
+                view = span.in_scope(|| self.process_verified(round, verified));
             },
             // Aborted futures are expected when old views are pruned
             Ok((round, span, certified)) = certify_wait else continue => {

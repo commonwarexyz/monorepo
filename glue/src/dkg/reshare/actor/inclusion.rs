@@ -835,7 +835,7 @@ where
                 .is_none()
                 .then(|| {
                     dealer
-                        .and_then(|dealer| dealer.finalized())
+                        .and_then(|dealer| dealer.finalized().cloned())
                         .map(Payload::DealerLog)
                 })
                 .flatten();
@@ -1211,7 +1211,7 @@ where
         }
 
         // One-shot DKG has no committed epoch and no lookahead committee.
-        let current = store.current();
+        let current = store.current().cloned();
         let dkg_participants = if current.is_none() {
             self.dkg_participants()
         } else {
@@ -1705,7 +1705,7 @@ mod tests {
             Ok(AckOutcome::Recorded)
         ));
         assert!(dealer.finalize::<N3f1>());
-        let signed_log = dealer.finalized().expect("signed dealer log");
+        let signed_log = dealer.finalized().cloned().expect("signed dealer log");
 
         // The inclusion actor is driven directly by its mailbox. Its marshal
         // handle remains readable but has no running actor, while the simulated
@@ -1748,7 +1748,6 @@ mod tests {
                 sharing_mode: SharingMode::NonZeroCounter,
                 reveal: Reveal::V1,
                 mailbox_size: NZUsize!(16),
-                muxer_size: 16,
                 partition_prefix: partition_prefix.into(),
                 page_cache: mocks::page_cache(),
                 write_buffer: mocks::IO_BUFFER,

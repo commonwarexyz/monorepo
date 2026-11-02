@@ -122,12 +122,19 @@ pub trait Unordered: Send + Sync {
     where
         Self: 'a;
 
+    /// Whether looking keys up in a batch ahead of mutating them makes the mutations cheaper: the
+    /// lookups' cache misses overlap, and each mutation then finds its lines cached.
+    /// Implementations whose lookup repeats most of the work of the mutation that follows set
+    /// this to `false`, since probing them ahead adds work rather than overlapping misses.
+    const LOOKUP_WARMS_UPDATE: bool = true;
+
     /// Returns an iterator over all values associated with a translated key.
     ///
     /// The iteration order is implementation-defined.
     fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + Send + 'a;
 
-    /// Visits every value associated with each key, calling `visit(key_idx, value)`.
+    /// Visits every value associated with each key, calling `visit(key_idx, value)` with the key's
+    /// position in `keys`.
     ///
     /// Probe order is implementation-defined: implementations may reorder probes for locality,
     /// so visits are identified by `key_idx` rather than issued in input order.
@@ -548,9 +555,7 @@ mod tests {
         assert_eq!(visits[3], vec![4]);
 
         // Empty input visits nothing.
-        index.get_many(core::iter::empty::<&[u8]>(), |_, _| {
-            panic!("no visits expected")
-        });
+        index.get_many::<&[u8]>([], |_, _| panic!("no visits expected"));
     }
 
     #[test_traced]

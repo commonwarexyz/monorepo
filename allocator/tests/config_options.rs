@@ -3,17 +3,17 @@
 #![cfg(feature = "mimalloc")]
 
 use commonware_allocator::mimalloc::{
-    ARENA_CHUNK_SIZE, Config, Effective, MiMalloc, Purge, Reserve, ReserveOutcome, Stats, Status,
-    is_global_allocator,
+    ARENA_CHUNK_SIZE, Config, EagerCommit, Effective, MiMalloc, Purge, Reserve, ReserveOutcome,
+    Stats, Status, is_global_allocator,
 };
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc::new(Config {
     purge: Purge::Never,
     reserve: Some(Reserve::unpinned(ARENA_CHUNK_SIZE + 1)),
-    allow_large_os_pages: Some(true),
-    arena_eager_commit: Some(false),
-    arena_reserve: Some(ARENA_CHUNK_SIZE + 1),
+    allow_large_os_pages: true,
+    arena_eager_commit: EagerCommit::Never,
+    arena_reserve: ARENA_CHUNK_SIZE + 1,
     ..Config::DEFAULT
 });
 

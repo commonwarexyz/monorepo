@@ -18,24 +18,12 @@ env:
 
 jobs:
   Tests:
-    name: "Tests${{ matrix.flags && format(' (flags: \"{0}\")', matrix.flags) }} (partition: ${{ matrix.partition }})"
+    name: "Tests (partition: ${{ matrix.partition }})"
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       matrix:
-        include:
-          - flags: ""
-            partition: "1/1"
-          - flags: "--features iouring"
-            partition: "1/5"
-          - flags: "--features iouring"
-            partition: "2/5"
-          - flags: "--features iouring"
-            partition: "3/5"
-          - flags: "--features iouring"
-            partition: "4/5"
-          - flags: "--features iouring"
-            partition: "5/5"
+        partition: ["1/5", "2/5", "3/5", "4/5", "5/5"]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -46,7 +34,6 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: ${{ matrix.flags || 'default' }}
         rust-cache-save: ${{ startsWith(matrix.partition, '1/') }}
         sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
         sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
@@ -57,4 +44,4 @@ jobs:
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
     - name: Run loom tests
-      run: just test-loom ${{ matrix.flags }} --partition hash:${{ matrix.partition }} --verbose
+      run: just test-loom --partition hash:${{ matrix.partition }} --verbose
