@@ -20,6 +20,7 @@ commonware-simd.workspace = true
 [dev-dependencies]
 arbitrary.workspace = true
 blst.workspace = true
+commonware-allocator = { workspace = true, features = [ "mimalloc" ] }
 commonware-invariants.workspace = true
 criterion.workspace = true
 
@@ -35,6 +36,11 @@ path = "src/field/benches/bench.rs"
 name = "curve"
 harness = false
 path = "src/curve/benches/bench.rs"
+
+[[bench]]
+name = "pairing"
+harness = false
+path = "src/pairing/benches/bench.rs"
 
 [features]
 default = [ "std" ]
