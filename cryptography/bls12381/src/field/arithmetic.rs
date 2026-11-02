@@ -70,7 +70,7 @@
 //! | Operation | Eager products, in units of `p` | Wide products, in units of `p^2` |
 //! |---|---|---|
 //! | [`accumulate`](Field::accumulate) | Integer and limb bounds add | Bound `C + D`, terms `T + V` |
-//! | [`product_sub`](Field::product_sub) | Requires `D <= 63`; carries the subtrahend; returns integer bound `C + 64`, minuend limb bound plus `3` | Requires `D <= 295936`; returns bound `C + 295936`, terms `T + 3` |
+//! | [`product_sub::<K>`](Field::product_sub) | Requires `D < K`; carries the subtrahend; returns integer bound `C + K`, minuend limb bound plus `3` | Ignores `K`; requires `D <= 295936`; returns bound `C + 295936`, terms `T + 3` |
 //! | [`lift`](Field::lift) | Preserves the value's integer and limb bounds | Integer bound `A`, one term |
 //! | [`reduce`](Field::reduce) | Preserves integer bound `C`, carries to limb bound `1` | Returns value bound `ceil(C / 645173) + 16 <= 17` |
 //!
@@ -78,9 +78,13 @@
 //!
 //! A [`Signed`] sum holds the products to add and the products to subtract separately, so
 //! subtracting one signed sum from another only accumulates. [`Field::reduce_signed`] subtracts
-//! once, through [`Field::product_sub`]: the negative sum must satisfy its subtrahend bound, and the
-//! positive sum plus its bias must satisfy [`Field::reduce`]. Without a negative sum, it reduces
-//! the positive sum directly.
+//! once, through [`Field::product_sub`] with the same bias `K`: the negative sum must satisfy its
+//! subtrahend bound, and the positive sum plus its bias must satisfy [`Field::reduce`]. Without a
+//! negative sum, it reduces the positive sum directly.
+//!
+//! The bias `K` applies only to eager products. A formula picks the smallest bias that covers each
+//! negative sum, since the bias adds to the integer bound of the reduced value. Wide products
+//! always subtract with their fixed bias, which their reduction removes.
 //!
 //! The default [`Field::cross`] uses Karatsuba. Each input pair must sum to a factor with limb
 //! bound at most `2`. Its eager positive sum has integer bound `E(A0 + A1, B0 + B1)` and limb
@@ -216,12 +220,13 @@ pub trait Field<S: Simd>: Copy {
     /// the product count alone does not establish this.
     fn accumulate(simd: S, a: Self::Product, b: Self::Product) -> Self::Product;
 
-    /// Returns `a - b` plus a representation-specific fixed multiple of `p` (or `p^2`).
+    /// Returns `a - b` plus `K * p` for eager products, or a representation-specific fixed
+    /// multiple of `p^2` for wide products.
     ///
-    /// The subtrahend must fit the representation's subtraction bias, and the result must fit
-    /// its integer, limb, and term bounds. The bias increases the integer bound even when the
-    /// mathematical difference is small.
-    fn product_sub(simd: S, a: Self::Product, b: Self::Product) -> Self::Product;
+    /// The subtrahend must fit the subtraction bias, and the result must fit its integer, limb, and
+    /// term bounds. The bias increases the integer bound even when the mathematical difference is
+    /// small. Representations with wide products ignore `K`.
+    fn product_sub<const K: u64>(simd: S, a: Self::Product, b: Self::Product) -> Self::Product;
 
     /// Lifts a value into the product representation without changing its field value.
     ///
@@ -270,16 +275,16 @@ pub trait Field<S: Simd>: Copy {
         }
     }
 
-    /// Reduces a signed sum, subtracting its negative sum once.
+    /// Reduces a signed sum, subtracting its negative sum once with the bias `K`.
     ///
-    /// The negative sum must satisfy [`Self::product_sub`]'s subtrahend bound, and the difference
-    /// must satisfy [`Self::reduce`].
+    /// The negative sum must satisfy [`Self::product_sub`]'s subtrahend bound for `K`, and the
+    /// difference must satisfy [`Self::reduce`].
     #[inline(always)]
-    fn reduce_signed(simd: S, sum: Signed<Self::Product>) -> Self {
+    fn reduce_signed<const K: u64>(simd: S, sum: Signed<Self::Product>) -> Self {
         let Some(neg) = sum.neg else {
             return Self::reduce(simd, sum.pos);
         };
-        Self::reduce(simd, Self::product_sub(simd, sum.pos, neg))
+        Self::reduce(simd, Self::product_sub::<K>(simd, sum.pos, neg))
     }
 }
 
@@ -341,11 +346,11 @@ mod tests {
             reference::add(reference::mul(ra, rb), reference::mul(rc, rd)),
         );
         assert_value(
-            F::reduce(simd, F::product_sub(simd, ab, cd)),
+            F::reduce(simd, F::product_sub::<64>(simd, ab, cd)),
             reference::sub(reference::mul(ra, rb), reference::mul(rc, rd)),
         );
         assert_value(
-            F::reduce_signed(simd, F::cross(simd, [a, c], [b, d], ab, cd)),
+            F::reduce_signed::<64>(simd, F::cross(simd, [a, c], [b, d], ab, cd)),
             reference::add(reference::mul(ra, rd), reference::mul(rc, rb)),
         );
         let mut sum = ab;
@@ -355,7 +360,7 @@ mod tests {
             expected = reference::add(expected, reference::mul(ra, rb));
         }
         assert_value(
-            F::reduce(simd, F::product_sub(simd, ab, sum)),
+            F::reduce(simd, F::product_sub::<64>(simd, ab, sum)),
             reference::sub(reference::mul(ra, rb), expected),
         );
         let reduced = F::reduce(simd, sum);
