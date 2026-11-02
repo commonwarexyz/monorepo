@@ -39,6 +39,11 @@
 //! Components without negative sums reduce without the bias. [`mul::<K>`](Fp2::mul) reduces a
 //! product with the bias `K`, and [`square`](Fp2::square) and [`mul_base`](Fp2::mul_base) reduce
 //! products without negative sums.
+//! [`reduce_tight::<K>`](Fp2::reduce_tight) applies [`Field::reduce_signed_tight`] instead, so the
+//! same requirements return components with integer bound at most [`TIGHT`], and
+//! [`carry_product`](Fp2::carry_product) carries every sum as for [`Field::carry_product`].
+//! [`invert`](Fp2::invert) accepts components with limb bound `1` and integer bound at most `TIGHT`
+//! and returns tight components.
 //!
 //! For example, components with limb bound `1` and integer bound at most `77` multiply with the
 //! bias `64` to components with integer bound at most `77` in every representation, so
@@ -48,7 +53,7 @@
 //! frame.
 
 use super::{
-    arithmetic::{Field, Signed},
+    arithmetic::{Field, Signed, TIGHT},
     fp::BYTES as FP_BYTES,
 };
 use commonware_simd::Simd;
@@ -78,7 +83,7 @@ impl<F> Fp2<F> {
     /// Loads up to one element per lane, filling the remaining lanes with `fill`.
     ///
     /// Interprets each component modulo `p` and returns the base field's initial bounds.
-    #[inline(always)]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn load<S: Simd>(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self
     where
         F: Field<S>,
@@ -101,7 +106,7 @@ impl<F> Fp2<F> {
     /// Stores the canonical value of each lane, dropping lanes beyond `elements`.
     ///
     /// Requires valid value bounds. Entries beyond [`Field::LANES`] are unchanged.
-    #[inline(always)]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn store<S: Simd>(self, simd: S, elements: &mut [[u8; BYTES]])
     where
         F: Field<S>,
@@ -475,6 +480,54 @@ impl<F> Fp2<F> {
             c1: F::reduce(simd, product.c1.pos),
         }
     }
+
+    /// Carries every sum of a product, as for [`Field::carry_product`].
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn carry_product<S: Simd>(simd: S, product: Product<F, S>) -> Product<F, S>
+    where
+        F: Field<S>,
+    {
+        Fp2 {
+            c0: carry::<S, F>(simd, product.c0),
+            c1: carry::<S, F>(simd, product.c1),
+        }
+    }
+
+    /// Reduces both components of a product to integer bound at most [`TIGHT`], as for
+    /// [`Field::reduce_signed_tight`] with the bias `K`.
+    /// Runs as its own kernel, so callers share one copy.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn reduce_tight<const K: u64, S: Simd>(simd: S, product: Product<F, S>) -> Self
+    where
+        F: Field<S>,
+    {
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| Self {
+                c0: F::reduce_signed_tight::<K>(simd, product.c0),
+                c1: F::reduce_signed_tight::<K>(simd, product.c1),
+            },
+        )
+    }
+
+    /// Returns the inverse `(c0 - c1 i) / (c0^2 + c1^2)`, or zero for zero.
+    ///
+    /// Both components must have limb bound `1` and integer bound at most [`TIGHT`]; so do the
+    /// result's. Inverts in the base field with [`Field::invert`].
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn invert<S: Simd>(self, simd: S) -> Self
+    where
+        F: Field<S>,
+    {
+        let norm = F::accumulate(
+            simd,
+            self.c0.product(simd, self.c0),
+            self.c1.product(simd, self.c1),
+        );
+        let inverse = F::reduce_tight(simd, norm).invert(simd);
+        let conjugate = self.conjugate::<{ TIGHT + 1 }, S>(simd).carry(simd);
+        Self::reduce_tight::<1, S>(simd, conjugate.product_base(simd, inverse))
+    }
 }
 
 /// Returns the sum of two optional products.
@@ -506,6 +559,15 @@ fn sub<S: Simd, F: Field<S>>(simd: S, a: Signed<F::Product>, b: Signed<F::Produc
     Signed {
         pos,
         neg: join::<S, F>(simd, a.neg, Some(b.pos)),
+    }
+}
+
+/// Carries both parts of a signed sum.
+#[cfg_attr(not(debug_assertions), inline(always))]
+fn carry<S: Simd, F: Field<S>>(simd: S, sum: Signed<F::Product>) -> Signed<F::Product> {
+    Signed {
+        pos: F::carry_product(simd, sum.pos),
+        neg: sum.neg.map(|neg| F::carry_product(simd, neg)),
     }
 }
 
