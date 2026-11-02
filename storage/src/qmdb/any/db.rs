@@ -240,17 +240,11 @@ where
         &self,
         keys: &[&U::Key],
     ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S> {
-        self.log.prefetch(&self.applied_positions(keys))
-    }
-
-    /// The sorted, distinct locations the snapshot holds for `keys`, including those of
-    /// colliding keys.
-    fn applied_positions(&self, keys: &[&U::Key]) -> Vec<u64> {
         let mut positions = Vec::with_capacity(keys.len());
         self.snapshot.get_many(keys, |_, &loc| positions.push(*loc));
         positions.sort_unstable();
         positions.dedup();
-        positions
+        self.log.prefetch(&positions)
     }
 
     /// Like [`Self::get_many`] but maps each matched update through `map`, which takes the

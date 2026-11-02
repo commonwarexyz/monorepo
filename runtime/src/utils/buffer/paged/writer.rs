@@ -523,9 +523,8 @@ impl<B: Blob> Writer<B> {
     /// Return a [Sealed] view of the full pages already written to the blob, excluding the write
     /// buffer. The view reads through the page cache under the writer's cache id.
     ///
-    /// An append-only writer never rewrites a written page under its cache id. Only a
-    /// [Recovery] writer may shrink the blob, and a reopened blob gets a fresh id. So the view
-    /// stays valid while the writer appends, and pages it warms into the cache stay correct.
+    /// Written pages never change under that id, so the view stays valid while the writer
+    /// appends, and pages it warms into the cache stay correct.
     #[commonware_macros::stability(ALPHA)]
     pub fn written(&self) -> Sealed<B> {
         Sealed::new(

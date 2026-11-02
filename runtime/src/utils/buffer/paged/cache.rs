@@ -912,10 +912,12 @@ impl CacheRef {
     /// request. On success, returns the number of pages this call read from the blob. The count
     /// excludes resident pages and pages joined from another reader's fetch or batch.
     ///
-    /// Resident pages are marked expected without recording use (see [cache::Cache::expect]),
-    /// except pages whose recorded use already gives them an expected entry's survival bound (see
-    /// [cache::Cache::is_referenced]). Those are found under the read lock and left in place, so
-    /// a warm of pages that are all referenced never takes the write lock.
+    /// Pages whose recorded use already gives them an expected entry's survival bound (see
+    /// [cache::Cache::is_referenced]) are found under the read lock and left in place, so a warm
+    /// of such pages never takes the write lock. The others are examined in chunks of
+    /// [MISSES_PER_LOCK], each under one hold of the write lock, like the misses of
+    /// [Self::read_after_misses]. Resident ones are marked expected without recording use (see
+    /// [cache::Cache::expect]).
     ///
     /// Pages another reader is fetching, alone or in a batch, are joined rather than read again.
     /// The warm waits on each like any reader, so the read completes even if the reader that
@@ -931,9 +933,6 @@ impl CacheRef {
     /// failure in one source does not stop the others. Once every source finishes, the warm
     /// returns the first error from the joined sources if any failed, and otherwise the first
     /// error from its own batch.
-    ///
-    /// The other pages are examined in chunks of [MISSES_PER_LOCK], each under one hold of the
-    /// write lock, like the misses of [Self::read_after_misses].
     #[commonware_macros::stability(ALPHA)]
     pub(super) async fn warm<B: Blob>(
         &self,
@@ -998,9 +997,14 @@ impl CacheRef {
             }
             (!unread.is_empty()).then(|| {
                 let (pages, physical) = unread.into_iter().unzip();
-                let insert = Cache::cache_expected;
-                let (batch, driver) =
-                    self.start_batch(&mut cache, blob, blob_id, pages, physical, insert);
+                let (batch, driver) = self.start_batch(
+                    &mut cache,
+                    blob,
+                    blob_id,
+                    pages,
+                    physical,
+                    Cache::cache_expected,
+                );
                 (Subscription::starting(batch, driver.clone()), driver)
             })
         };
@@ -2380,10 +2384,9 @@ mod tests {
         cache_ref: &CacheRef,
         pages: &[u64],
     ) -> Result<Vec<u8>, Error> {
-        let size = pages.last().map_or(0, |last| last + 1);
         let offsets: Vec<u64> = pages.iter().map(|page| page * PAGE_SIZE_U64).collect();
         let mut buf = vec![0u8; pages.len()];
-        full_view(blob, cache_ref, 0, size)
+        full_view(blob, cache_ref, 0, pages.last().map_or(0, |last| last + 1))
             .read_many_into(&mut buf, &offsets, NZUsize!(1))
             .await?;
         Ok(buf)

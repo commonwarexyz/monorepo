@@ -232,9 +232,7 @@ pub trait Contiguous: Send + Sync {
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>>;
 
     /// Return a future that reads the storage backing `positions` (strictly increasing) into
-    /// the page cache. Prefetching warms the pages through
-    /// [commonware_runtime::buffer::paged::Sealed::warm], so they get the same best-effort
-    /// residency.
+    /// the page cache, so later reads of them can avoid storage I/O.
     ///
     /// The future does not borrow the journal, so it can run alongside any journal operation, and
     /// it can be dropped at any point. Prefetching is best effort. Positions outside `bounds()`

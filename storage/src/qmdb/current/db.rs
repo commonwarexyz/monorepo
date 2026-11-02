@@ -324,10 +324,8 @@ where
     }
 
     /// Return a future that reads the storage holding the applied operations of `keys` into
-    /// the page cache. See [any::db::Db::prefetch].
-    ///
-    /// Merkleizing a change to the keys reads no other storage, since the ops roots the bitmap
-    /// grafts onto are retained in memory.
+    /// the page cache. Merkleizing a change to the keys reads no other storage. See
+    /// [any::db::Db::prefetch].
     pub fn prefetch(
         &self,
         keys: &[&U::Key],

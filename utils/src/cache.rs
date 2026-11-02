@@ -291,17 +291,15 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// Like [Self::get_or_insert_mut], for a key the caller expects to request soon but has not
     /// requested yet.
     ///
-    /// The entry is placed in Main, without recording use, where Main's eviction sweep will reach
-    /// it last. A missing key is admitted there, and a resident one is moved there (see
-    /// [Self::expect]). Admitting it displaces only a Main resident that was not referenced since
-    /// the sweep last passed it. A request before the sweep reaches the entry gives it the same
-    /// second chance as any referenced Main resident. An unrequested entry is evicted when the
-    /// sweep reaches it.
+    /// The entry is placed in Main without recording use, where Main's eviction sweep reaches it
+    /// last. A missing key is admitted there, displacing only a Main resident not referenced since
+    /// the sweep last passed it, and a resident one is moved there (see [Self::expect]). A request
+    /// before the sweep arrives gives the entry the usual second chance, and an unrequested entry
+    /// is evicted when the sweep reaches it.
     ///
-    /// Expected entries always reside in Main. A full Main evicts from itself even while Small has
-    /// unused capacity, which stays available to demand misses. An expected set therefore survives
-    /// until requested only while it fits in Main alongside Main's other admissions, regardless
-    /// of the cache's total capacity.
+    /// Expected entries never use Small, which stays available to demand misses. A set of them
+    /// therefore survives until requested only while it fits in Main alongside Main's other
+    /// admissions, regardless of the cache's total capacity.
     #[commonware_macros::stability(ALPHA)]
     pub fn get_or_insert_mut_expected<F: FnOnce() -> V>(
         &mut self,
@@ -350,8 +348,7 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// A referenced Main resident is passed over once by Main's eviction sweep, so it outlasts a
     /// full sweep from now, as a newly expected entry does. A Small resident that earned promotion
     /// leaves Small only by moving to Main ahead of the sweep. A caller that needs only that bound
-    /// can skip [Self::expect] for such a key, and the exclusive access it requires. Expecting a
-    /// referenced Main resident would extend its stay further, since it keeps the reference bit.
+    /// can skip [Self::expect], and the exclusive access it requires, for such a key.
     #[commonware_macros::stability(ALPHA)]
     pub fn is_referenced(&self, key: &K) -> bool {
         let Some(slot) = self.find_slot(key) else {
@@ -1345,7 +1342,7 @@ mod tests {
         // Main resident is expected first.
         let doomed = |cache: &Cache<u64, u64>| {
             let mut slot = cache.main.hand.unwrap();
-            while cache.slots[slot].state.0.load(Ordering::Relaxed) & REFERENCED != 0 {
+            while cache.slots[slot].state.is_referenced() {
                 slot = cache.topology[slot].next;
             }
             [
