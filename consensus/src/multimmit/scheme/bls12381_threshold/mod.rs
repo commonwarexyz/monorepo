@@ -2,14 +2,18 @@
 //!
 //! Multimmit uses three independent key roles:
 //!
-//! - ordinary BLS keys authenticate transaction blocks, leader blocks, votes, and novotes;
+//! - ordinary keys sign Pointcheval-Sanders synchronized aggregate signatures
+//!   ([`sas`](commonware_cryptography::bls12381::primitives::ops::sas)) over transaction blocks,
+//!   leader blocks, votes, and novotes, each in its [`Period`](super::Period);
 //! - a threshold sharing at the epoch's [`DaQuorum`](crate::multimmit::types::DaQuorum) (`n-2f`,
 //!   or `n-f` for binding certificates) produces constant-size data-availability certificates;
 //!   and
 //! - a `2f+1` threshold sharing produces constant-size nullifications.
 //!
 //! V-QCs and L-QCs aggregate the ordinary signatures represented by their compact
-//! signer-to-message transcripts. They are not recovered threshold signatures.
+//! signer-to-message transcripts. They are not recovered threshold signatures. Every signature in
+//! one certificate shares its view period, so a certificate verifies with one pairing product
+//! however many distinct vote bodies it covers.
 //!
 //! # Roles
 //!
@@ -20,8 +24,9 @@
 //! # Verification
 //!
 //! Every artifact decomposes into pairing claims after its structural checks. Individual
-//! verifiers check those claims directly, and batch verification checks the claims of many
-//! artifacts as one randomly scaled pairing product.
+//! verifiers check those claims directly. Batch verification checks the ordinary claims of many
+//! artifacts as one randomly scaled pairing product per period and the threshold claims as one
+//! per distinct message.
 
 /// Declares a method public under the `mocks` feature, so benches and tests outside the crate
 /// can drive it directly, and crate-private otherwise.
@@ -64,12 +69,7 @@ pub(crate) use assemble::SignatureVerification;
 pub(crate) use batch::CertificateVotes;
 use commonware_cryptography::{
     Digest, PublicKey,
-    bls12381::primitives::{
-        group::{Private, Share},
-        ops,
-        sharing::Sharing,
-        variant::Variant,
-    },
+    bls12381::primitives::{group::Share, ops::sas, sharing::Sharing, variant::Variant},
 };
 use commonware_math::algebra::Additive;
 use commonware_utils::{
@@ -120,9 +120,9 @@ pub enum Error {
     /// Two roster entries share an identity or an ordinary key.
     #[error("duplicate roster entry")]
     DuplicateParticipant,
-    /// An ordinary public key or its proof of possession is invalid.
-    #[error("invalid proof of possession")]
-    ProofOfPossession,
+    /// An ordinary public key or its proof of knowledge is invalid.
+    #[error("invalid proof of knowledge")]
+    ProofOfKnowledge,
     /// A threshold sharing has the wrong size or threshold, or a zero or repeated key.
     #[error("invalid threshold sharing")]
     Sharing,
@@ -159,8 +159,8 @@ pub(crate) enum DaRecoveryError {
 /// Both shares must belong to the participant whose ordinary key is `ordinary`.
 #[derive(Clone)]
 pub struct SignerKeys {
-    /// Ordinary BLS key registered in the [`Roster`].
-    pub ordinary: Private,
+    /// Ordinary synchronized aggregate signing key registered in the [`Roster`].
+    pub ordinary: sas::PrivateKey,
     /// Share of the data-availability sharing.
     pub da: Share,
     /// Share of the `2f+1` nullification sharing.
@@ -237,7 +237,7 @@ impl<V: Variant> Material<V> {
 /// `V` may be either [`commonware_cryptography::bls12381::primitives::variant::MinPk`] or
 /// [`commonware_cryptography::bls12381::primitives::variant::MinSig`].
 ///
-/// The ordinary signing roster is proof-of-possession checked by [`Roster`]. The DA and
+/// The ordinary signing roster is proof-of-knowledge checked by [`Roster`]. The DA and
 /// nullification sharings must be generated independently. The constructor checks their public
 /// structure, thresholds, and distinct group identities, but cannot prove how key material was
 /// generated.
@@ -245,7 +245,7 @@ impl<V: Variant> Material<V> {
 pub struct Scheme<P: PublicKey, V: Variant> {
     parameters: Arc<Parameters>,
     namespace: Namespace,
-    participants: BiMap<P, V::Public>,
+    participants: BiMap<P, sas::PublicKey<V>>,
     material: Material<V>,
 }
 
@@ -277,7 +277,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
         validate_public_material(parameters, roster.public_keys(), &da, &nullification)?;
 
-        let ordinary = ops::compute_public::<V>(&keys.ordinary);
+        let ordinary = sas::PublicKey::<V>::from_private(&keys.ordinary);
         let participant = roster
             .public_keys()
             .values()
@@ -397,8 +397,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         self.participants.keys()
     }
 
-    /// Returns the ordinary BLS public-key roster in identity-key order.
-    pub const fn public_keys(&self) -> &BiMap<P, V::Public> {
+    /// Returns the ordinary public-key roster in identity-key order.
+    pub const fn public_keys(&self) -> &BiMap<P, sas::PublicKey<V>> {
         &self.participants
     }
 
@@ -437,7 +437,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         self.material.keys().ok_or(Error::VerifierOnly)
     }
 
-    fn public(&self, participant: Participant) -> Option<&V::Public> {
+    fn public(&self, participant: Participant) -> Option<&sas::PublicKey<V>> {
         self.participants.value(usize::from(participant))
     }
 
@@ -505,7 +505,7 @@ impl<P: PublicKey, V: Variant> Epochable for Scheme<P, V> {
 /// Checks the public sharings of a signer or verifier against the epoch configuration.
 fn validate_public_material<P: PublicKey, V: Variant>(
     parameters: &Parameters,
-    participants: &BiMap<P, V::Public>,
+    participants: &BiMap<P, sas::PublicKey<V>>,
     da: &Sharing<V>,
     nullification: &Sharing<V>,
 ) -> Result<(), Error> {
@@ -518,9 +518,9 @@ fn validate_public_material<P: PublicKey, V: Variant>(
     if participants
         .values()
         .iter()
-        .any(|public| public == &V::Public::zero())
+        .any(|public| public.x() == &V::Public::zero() || public.y() == &V::Public::zero())
     {
-        return Err(Error::ProofOfPossession);
+        return Err(Error::ProofOfKnowledge);
     }
     let codec = parameters.codec_config();
     let total = codec.participants();
@@ -536,7 +536,7 @@ fn validate_public_material<P: PublicKey, V: Variant>(
 /// Checks the roster size and both group identities against the epoch configuration.
 fn validate_certificate_material<P: PublicKey, V: Variant>(
     parameters: &Parameters,
-    participants: &BiMap<P, V::Public>,
+    participants: &BiMap<P, sas::PublicKey<V>>,
     da: &V::Public,
     nullification: &V::Public,
 ) -> Result<(), Error> {
