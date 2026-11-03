@@ -3633,6 +3633,8 @@ mod tests {
                 .replay(SECTION, 0, NZUsize!(16), ReadOptions::default())
                 .await
                 .unwrap();
+
+            // Dropping a call before it is polled starts no read and leaves the replay usable.
             drop(replay.next());
             gate.arm();
             {

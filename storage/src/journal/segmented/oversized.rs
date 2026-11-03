@@ -6964,8 +6964,10 @@ mod tests {
             .await
             .unwrap();
 
-            // Warm the index while yielding the committed entry, then stop only a value read.
+            // Dropping a call before it is polled starts no read and leaves the replay usable.
             drop(replay.next());
+
+            // Warm the index while yielding the committed entry, then stop only a value read.
             assert_eq!(replay.next().await.unwrap().unwrap().2.id, 0);
             gate.arm();
             {
@@ -7071,6 +7073,8 @@ mod tests {
                 .replay(SECTION, 0, NZUsize!(64), ReadOptions::default())
                 .await
                 .unwrap();
+
+            // Dropping a call before it is polled starts no read and leaves the replay usable.
             drop(replay.next());
             gate.arm();
             {

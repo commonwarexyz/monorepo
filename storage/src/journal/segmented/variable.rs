@@ -126,7 +126,6 @@ struct SectionReplay<B: Blob> {
     skip_bytes: u64,
     offset: u64,
     valid_offset: u64,
-    pending: Option<(usize, usize)>,
 }
 
 /// The journal's state, boxed so the public [Journal] handle stays pointer-sized.
@@ -520,7 +519,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 skip_bytes,
                 offset: 0,
                 valid_offset: skip_bytes,
-                pending: None,
             });
         }
         let finished = sections.is_empty();
@@ -775,7 +773,6 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             skip_bytes: 0,
             offset: valid_offset,
             valid_offset,
-            pending: None,
         });
         self.repairing = false;
         Ok(())
@@ -840,70 +837,58 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
         while let Some(current) = self.sections.front_mut() {
             let blob_size = current.reader.blob_size();
 
-            // Resume a recorded frame header or decode the next one
-            let (item_size, varint_len) = match current.pending {
-                Some(header) => header,
-                None => {
-                    // Ensure we have enough data for varint header.
-                    // ensure() returns Ok(false) if exhausted with fewer bytes,
-                    // but we still try to decode from remaining bytes.
-                    match current.reader.ensure(MAX_U32_VARINT_SIZE).await {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            // Reader exhausted - check if buffer is empty
-                            if current.reader.remaining() == 0 {
-                                self.sections.pop_front();
-                                continue;
-                            }
-                            // Buffer still has data - continue to try decoding
-                        }
-                        Err(err) => {
-                            if let Err(err) = self.repair(err).await {
-                                return self.fail(err);
-                            }
-                            continue;
-                        }
-                    }
-
-                    // Skip bytes if needed (for start_offset)
-                    if current.skip_bytes > 0 {
-                        let to_skip =
-                            current.skip_bytes.min(current.reader.remaining() as u64) as usize;
-                        current.reader.advance(to_skip);
-                        current.skip_bytes -= to_skip as u64;
-                        current.offset += to_skip as u64;
+            // Ensure we have enough data for varint header.
+            // ensure() returns Ok(false) if exhausted with fewer bytes,
+            // but we still try to decode from remaining bytes.
+            match current.reader.ensure(MAX_U32_VARINT_SIZE).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    // Reader exhausted - check if buffer is empty
+                    if current.reader.remaining() == 0 {
+                        self.sections.pop_front();
                         continue;
                     }
+                    // Buffer still has data - continue to try decoding
+                }
+                Err(err) => {
+                    if let Err(err) = self.repair(err).await {
+                        return self.fail(err);
+                    }
+                    continue;
+                }
+            }
 
-                    // Try to decode length prefix
-                    let before_remaining = current.reader.remaining();
-                    match decode_length_prefix(&mut current.reader) {
-                        Ok(header) => {
-                            current.pending = Some(header);
-                            header
-                        }
-                        Err(err) => {
-                            // Could be incomplete varint - check if reader exhausted
-                            if current.reader.is_exhausted()
-                                || before_remaining < MAX_U32_VARINT_SIZE
-                            {
-                                // Treat as trailing bytes
-                                if current.valid_offset < blob_size
-                                    && current.offset < blob_size
-                                    && let Err(err) = self
-                                        .repair_tail("trailing bytes detected: truncating")
-                                        .await
-                                {
-                                    self.sections.pop_front();
-                                    return self.fail(err);
-                                }
-                                self.sections.pop_front();
-                                continue;
-                            }
+            // Skip bytes if needed (for start_offset)
+            if current.skip_bytes > 0 {
+                let to_skip = current.skip_bytes.min(current.reader.remaining() as u64) as usize;
+                current.reader.advance(to_skip);
+                current.skip_bytes -= to_skip as u64;
+                current.offset += to_skip as u64;
+                continue;
+            }
+
+            // Try to decode length prefix
+            let before_remaining = current.reader.remaining();
+            let (item_size, varint_len) = match decode_length_prefix(&mut current.reader) {
+                Ok(header) => header,
+                Err(err) => {
+                    // Could be incomplete varint - check if reader exhausted
+                    if current.reader.is_exhausted() || before_remaining < MAX_U32_VARINT_SIZE {
+                        // Treat as trailing bytes
+                        if current.valid_offset < blob_size
+                            && current.offset < blob_size
+                            && let Err(err) = self
+                                .repair_tail("trailing bytes detected: truncating")
+                                .await
+                        {
                             self.sections.pop_front();
                             return self.fail(err);
                         }
+                        self.sections.pop_front();
+                        continue;
                     }
+                    self.sections.pop_front();
+                    return self.fail(err);
                 }
             };
 
@@ -946,7 +931,6 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                 self.journal.0.compression.is_some(),
             ) {
                 Ok(decoded) => {
-                    current.pending = None;
                     current.valid_offset = next_offset;
                     current.offset = next_offset;
                     return Some(Ok((
@@ -4068,6 +4052,8 @@ mod tests {
                     .await
                     .unwrap()
             );
+
+            // Dropping a call before it is polled starts no read and leaves the replay usable.
             drop(replay.next());
             gate.arm();
             {
