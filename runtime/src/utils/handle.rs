@@ -856,9 +856,10 @@ mod tests {
         });
     }
 
-    /// Aborting an idle task that was polled more than once with the same waker, so its later
-    /// pending polls skipped registering it, still wakes the task, drops its future and closes
-    /// its handle.
+    /// Aborting an idle task that was polled more than once still wakes it, drops its future and
+    /// closes its handle. Tokio and io_uring poll a task with one waker, so its later pending
+    /// polls skipped registering it, while the deterministic runtime registers a new waker on
+    /// every pending poll.
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(crate::tokio::Runner::default())]
@@ -873,7 +874,8 @@ mod tests {
             let handle = context.child("pending").spawn(move |_| async move {
                 let _held = held;
                 // The first pending poll registers the task's waker. Its wake re-polls the
-                // task, whose second pending poll finds that waker already registered.
+                // task, whose second pending poll finds that waker already registered on the
+                // runtimes that reuse it.
                 reschedule().await;
                 started.send(()).unwrap();
                 future::pending::<()>().await;
