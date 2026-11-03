@@ -3915,7 +3915,7 @@ fn test_operation_and_sleep_follow_their_task_to_another_worker() {
         let (socket, mut peer) = UnixStream::pair().unwrap();
         socket.set_nonblocking(true).unwrap();
         let (move_task, moved) = oneshot::channel::<()>();
-        let (release, released) = oneshot::channel::<()>();
+        let (report_polls, polls_done) = oneshot::channel::<()>();
 
         // The task registers here, on worker zero, then waits for a wake.
         let mover = context.child("mover").spawn(move |context| async move {
@@ -3935,12 +3935,14 @@ fn test_operation_and_sleep_follow_their_task_to_another_worker() {
             assert!(futures::poll!(&mut sleep).is_pending());
 
             // The wake comes from the other worker, which polls this task and
-            // forwards both registrations from worker zero.
+            // forwards both registrations from worker zero. The root writes to
+            // the peer only after these polls, since a receive that completes
+            // before its forward is polled may return its result immediately.
             moved.await.unwrap();
             let polled = thread::current().id();
             assert!(futures::poll!(&mut recv).is_pending());
             assert!(futures::poll!(&mut sleep).is_pending());
-            released.await.unwrap();
+            report_polls.send(()).unwrap();
             let received = recv.await.unwrap();
             (registered, polled, received)
         });
@@ -3950,8 +3952,8 @@ fn test_operation_and_sleep_follow_their_task_to_another_worker() {
             move_task.send(()).unwrap();
         });
         waker.await.unwrap();
+        polls_done.await.unwrap();
         peer.write_all(b"x").unwrap();
-        release.send(()).unwrap();
 
         let (registered, polled, received) = mover.await.unwrap();
         assert_eq!(registered, thread::current().id());
