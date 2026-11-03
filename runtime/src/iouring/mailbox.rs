@@ -11,7 +11,7 @@
 //! The pool's idle state also signals a selected worker through its mailbox's
 //! [`Waker`], without a message. See [`super::idle`] for parking order.
 
-use super::{request::RequestOutput, sleep::TimerId, waiter::WaiterId, waker::Waker};
+use super::{request::RequestOutput, waiter::WaiterId, waker::Waker};
 use crate::Error;
 use commonware_utils::channel::oneshot;
 use std::mem;
@@ -30,9 +30,9 @@ pub enum Message {
     /// runnable, so unlike a task it cannot move to the waking worker or the
     /// global queue, and wakes from other threads reach it here.
     WakeRoot,
-    /// Transfer observation of an operation or timer to a channel.
+    /// Transfer observation of an operation to a channel.
     Forward(Forward),
-    /// Release observation of an operation or timer.
+    /// Release observation of an operation.
     Cancel(Cancel),
 }
 
@@ -40,16 +40,12 @@ pub enum Message {
 pub enum Forward {
     /// Deliver an operation's result through a thread-safe channel.
     Waiter(WaiterId, oneshot::Sender<Result<RequestOutput, Error>>),
-    /// Deliver a timer's result through a thread-safe channel.
-    Timer(TimerId, oneshot::Sender<Result<(), Error>>),
 }
 
 /// Registration whose observer is being released.
 pub enum Cancel {
     /// Stop observing an admitted operation or retained result.
     Waiter(WaiterId),
-    /// Cancel a timer whose sleep future was dropped.
-    Timer(TimerId),
 }
 
 /// Queue state synchronized between producers and the owning worker.

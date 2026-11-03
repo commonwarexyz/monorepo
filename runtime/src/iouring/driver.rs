@@ -1072,7 +1072,7 @@ pub mod tests {
     }
 
     /// Create an isolated open for tests that control durability completion.
-    fn make_file(name: &str) -> (PathBuf, Arc<Shared>) {
+    pub fn make_file(name: &str) -> (PathBuf, Arc<Shared>) {
         let directory =
             std::env::temp_dir().join(format!("commonware_driver_{name}_{}", std::process::id()));
         let hold = Hold::acquire(&directory).unwrap();

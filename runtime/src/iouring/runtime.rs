@@ -13,9 +13,9 @@
 //!   +-- Shared (Arc) <-------------------------- Local.shared
 //!   |     +-- Config, metrics, stop/panic signals
 //!   |     +-- Network, Storage
-//!   |     +-- Pool (each pool worker's mailbox and run queue, global queue,
-//!   |     |         idle state, shutdown barrier)
-//!   |     |     ^-- task headers (Weak)
+//!   |     +-- Pool (each pool worker's mailbox, run queue, and timer shard,
+//!   |     |       global queue, idle state, shutdown barrier)
+//!   |     |       ^-- task headers (Weak)
 //!   |     +-- Tasks (every live ordinary task, for teardown)
 //!   |     `-- Workers <------------------------ ActiveWorker
 //!   `-- supervision tree
@@ -26,7 +26,8 @@
 //!   +-- Rc<RefCell<Local>> <------------------------+
 //!   |     +-- Shared (Arc)
 //!   |     +-- Ready (owner's end of a pool worker's run queue)
-//!   |     +-- Timers (sleep registrations and deadlines)
+//!   |     +-- TimerShard (Arc, the pool's on a pool worker: sleep
+//!   |     |       registrations and deadlines, with a cached bound)
 //!   |     +-- Driver
 //!   |     |     +-- io_uring ring (SQ/CQ)
 //!   |     |     +-- Waiters (requests and unconsumed results)
@@ -91,22 +92,23 @@
 //! until worker cleanup and failure reporting finish. It retains only the
 //! [`Workers`] barrier, allowing that worker's [`Shared`] owners to be released first.
 //!
-//! I/O and sleeps register directly with the worker that first polls them. When
-//! one is polled later on another worker, the registering worker forwards its
-//! result through a channel. Mailboxes carry root wakes, observation transfers,
-//! and cancellation messages.
+//! I/O and sleeps register directly with the worker that first polls them.
+//! Polled later on another worker, I/O has the registering worker forward its
+//! result through a channel, while a sleep is polled and dropped directly in
+//! the registering worker's timer shard (see [`super::sleep`]). Mailboxes
+//! carry root wakes and the observation transfers and cancellations of I/O.
 //!
 //! Each turn polls a bounded batch of tasks and checks the root's wake flag,
 //! services I/O and timers, and applies a bounded batch of mailbox messages.
-//! Deferred callbacks run between these phases.
-//!
-//! A pool worker takes a share of the global queue every
-//! [`Config::with_global_queue_interval`] takes and whenever its own run queue
-//! is empty. Taking a share returns one runnable to poll next and queues the
-//! rest in the run queue, no more than it has room for and no more than would
-//! fill it to half. A pool worker that finds both queues empty after a service
-//! pass tries to steal before parking, or relies on workers already holding
-//! search counts when the search cap refuses it.
+//! Deferred callbacks run between these phases. A pool worker's service also
+//! expires the due timers of a peer stalled in a long poll (see
+//! [`super::sleep`]). A pool worker takes a share of the global queue every
+//! [`Config::with_global_queue_interval`] takes and whenever its own run
+//! queue is empty. A take returns one runnable to poll next and queues the
+//! rest of its share in the run queue, no more than it has room for and no
+//! more than fill it to half. A pool worker that finds both queues empty
+//! after a service pass tries to steal before parking, or relies on workers
+//! already holding search counts when the search cap refuses it.
 //!
 //! Before parking, the worker checks readiness again because polls and
 //! callbacks can produce more work. Pool workers coordinate through
@@ -141,8 +143,8 @@
 //! every pool worker waits for the others to finish polling and draining
 //!   |
 //!   v
-//! pool workers close mailbox and io_uring ring  --> join the pool workers
-//!                                                    |
+//! pool workers close mailbox, timer shard,      --> join the pool workers
+//!   and io_uring ring                                |
 //!                                                    v
 //!                                  collect a pool worker failure the root missed
 //!                                                    |
@@ -164,12 +166,13 @@
 //! destruction on dedicated threads can follow registration release.
 
 use super::{
+    clock,
     driver::Driver,
     idle::Searcher,
     mailbox::{Cancel, Forward, Mailbox, Message},
     pool::{MAX_WORKERS, Pool, Threads},
     request::{RequestOutput, RetiredResources},
-    sleep::{Sleep, Timers},
+    sleep::{self, RESCUE_INTERVAL, Sleep, TimerShard},
     spinner::{Config as SpinnerConfig, Spinner},
     task::{AfterPoll, Ready, RootWaker, Runnable},
     tasks::Tasks,
@@ -731,13 +734,12 @@ impl Shared {
 /// Ordinary children run on the pool, including those spawned by dedicated and
 /// blocking tasks. Task factories run on their caller, while ordinary futures
 /// run on the pool and can move between its workers, as can resources and
-/// pending I/O and sleep futures.
-///
-/// Registrations stay on their original worker. Closing that worker causes
-/// unresolved I/O futures to fail and unresolved sleeps to panic when polled.
-/// Pool workers close only at shutdown, after every pool task has been dropped,
-/// while dedicated and blocking tasks may still run. Detached sync completion
-/// handles can be awaited on any thread.
+/// pending I/O and sleep futures. Registrations stay on their original worker.
+/// Closing that worker causes unresolved I/O futures to fail and unresolved
+/// sleeps to panic when polled before their deadline. Pool workers close only
+/// at shutdown, after every pool task has been dropped, while dedicated and
+/// blocking tasks may still run. Detached sync completion handles can be
+/// awaited on any thread.
 pub struct Context {
     /// User-facing task and metric namespace.
     name: String,
@@ -1017,7 +1019,7 @@ impl crate::Storage for Context {
     }
 }
 
-/// Sync or timer completion notification published outside Local.
+/// Sync completion notification published outside Local.
 type Completion = (oneshot::Sender<Result<(), Error>>, Result<(), Error>);
 
 /// I/O result forwarded to another thread, including any returned buffers or descriptors.
@@ -1075,8 +1077,13 @@ pub struct Local {
     /// The io_uring ring's owner, taken only after kernel retirement so it can
     /// be dropped unborrowed.
     pub driver: Option<Driver>,
-    /// Sleeper registrations and deadlines.
-    pub timers: Timers,
+    /// Sleep registrations, in the pool's shard for this worker on a pool
+    /// worker, so that peers can expire them while this worker is stalled.
+    pub timers: Arc<TimerShard>,
+    /// Cached bound on the earliest firing time in `timers` in nanoseconds,
+    /// `u64::MAX` for none. Never later than that time, since only this
+    /// worker registers, so service and parking can skip the shard's lock.
+    pub timers_next: u64,
     /// Reject new registration and send wakes to the global queue, while
     /// allowing idempotent cancellation.
     pub closing: bool,
@@ -1098,17 +1105,20 @@ pub struct Local {
 impl Local {
     /// Construct an io_uring ring on the thread that will own all its
     /// submissions. A pool worker takes the mailbox the pool created for it and
-    /// the owner's end of its run queue, and panics if its index is out of
-    /// range or that end was already taken. A dedicated worker creates its own
-    /// mailbox and has no run queue. An I/O error at startup returns before the
-    /// run queue's owner is taken.
+    /// its timer shard and the owner's end of its run queue, and panics if its
+    /// index is out of range or that end was already taken. A dedicated worker
+    /// creates its own mailbox and timer shard and has no run queue. An I/O
+    /// error at startup returns before the run queue's owner is taken.
     fn new(shared: Arc<Shared>, role: Role) -> std::io::Result<Self> {
         #[cfg(test)]
         tests::before_startup(&shared.workers)?;
 
-        let mailbox = match role {
-            Role::Pool(index) => shared.pool.mailbox(index).clone(),
-            Role::Dedicated => Arc::new(Mailbox::new()?),
+        let (mailbox, timers) = match role {
+            Role::Pool(index) => (
+                shared.pool.mailbox(index).clone(),
+                shared.pool.timers()[index as usize].clone(),
+            ),
+            Role::Dedicated => (Arc::new(Mailbox::new()?), Arc::new(TimerShard::new())),
         };
         let now = Instant::now();
         let driver = Driver::new(
@@ -1131,7 +1141,8 @@ impl Local {
         Ok(Self {
             seat,
             driver: Some(driver),
-            timers: Timers::default(),
+            timers,
+            timers_next: u64::MAX,
             closing: false,
             now,
             root_ready: true,
@@ -1236,7 +1247,7 @@ impl Local {
         shared.pool.enqueue(&mut seat.ready, runnable);
     }
 
-    /// Release an operation or timer on its worker, directly or through its mailbox.
+    /// Release an operation on its worker, directly or through its mailbox.
     ///
     /// A worker whose mailbox is closed or gone has already taken responsibility
     /// for cleanup.
@@ -1257,7 +1268,6 @@ impl Local {
     fn release(&mut self, cancel: Cancel) {
         match cancel {
             Cancel::Waiter(id) => self.driver.as_mut().unwrap().orphan(id, &mut self.deferred),
-            Cancel::Timer(id) => self.timers.cancel(id, &mut self.deferred),
         }
     }
 
@@ -1291,11 +1301,12 @@ impl Local {
             || (seat.is_some() && self.shared.pool.has_global())
     }
 
-    /// Earliest absolute deadline across driver requests and sleepers.
+    /// Earliest absolute deadline across driver requests and sleepers, or a
+    /// time never later than it.
     fn next_deadline(&mut self) -> Option<Instant> {
         [
             self.driver.as_mut().unwrap().next_deadline(),
-            self.timers.next_deadline(),
+            clock::instant(self.timers_next),
         ]
         .into_iter()
         .flatten()
@@ -1437,7 +1448,7 @@ pub struct Deferred {
     pub outputs: Vec<RequestOutput>,
     /// Buffers and descriptors no longer used by the kernel.
     pub resources: Vec<RetiredResources>,
-    /// Detached sync and forwarded timer notifications without I/O output.
+    /// Detached sync notifications without I/O output.
     pub completions: Vec<Completion>,
     /// Forwarded I/O output or worker-closure errors.
     pub results: Vec<OperationResult>,
@@ -1508,6 +1519,8 @@ pub struct Worker {
     /// Configured interval between forced global checks. An empty run queue
     /// can trigger an earlier check.
     global_queue_interval: u32,
+    /// Earliest time of this pool worker's next check of its peers' timers.
+    rescue_at: Instant,
     /// False until kernel retirement and callback cleanup have finished.
     finished: bool,
 }
@@ -1531,6 +1544,7 @@ impl Worker {
             processed_seq: 0,
             until_global: global_queue_interval,
             global_queue_interval,
+            rescue_at: Instant::now(),
             finished: false,
         };
         worker.scope = Some(Scope::install(local));
@@ -1778,7 +1792,7 @@ impl Worker {
             self.close_mailbox(&mailbox);
         }
 
-        // Closing the driver and timer table below subsumes queued cancellations.
+        // Closing the driver below subsumes queued I/O cancellations.
         // Discard queued forwarding messages so their receivers observe closure.
         // Senders can run callbacks on drop, so destroy these messages outside
         // the local borrow.
@@ -1787,18 +1801,22 @@ impl Worker {
         }
 
         // Detach local and forwarded observers before running callbacks.
-        // Admission is closed, so subsequent handle drops find no registration
-        // to detach. Only driver service can produce further deferred work.
+        // Admission is closed, so later I/O handle drops find no registration
+        // to detach and sleeps registered here release no waker. Driver service
+        // can still produce deferred work, and so can callbacks that drop
+        // sleeps registered on other workers' open shards.
         {
             let mut local = self.local.borrow_mut();
             let Local {
                 driver,
                 timers,
+                timers_next,
                 deferred,
                 ..
             } = &mut *local;
             driver.as_mut().unwrap().close(deferred);
-            timers.clear(deferred);
+            timers.close(deferred);
+            *timers_next = u64::MAX;
             local.update_pending();
         }
         self.callbacks(None);
@@ -1813,11 +1831,13 @@ impl Worker {
 
             let mut local = self.local.borrow_mut();
 
+            // A callback can still drop a sleep registered on another worker's
+            // open shard, releasing its waker into this batch. Run it before
+            // finishing or waiting, since it may be what retained work awaits.
+            if !local.deferred.is_empty() {
+                continue;
+            }
             if local.driver.as_ref().unwrap().is_empty() {
-                assert!(
-                    local.deferred.is_empty(),
-                    "callbacks refilled deferred work after close"
-                );
                 break;
             }
 
@@ -1877,16 +1897,12 @@ impl Worker {
                 Message::Forward(forward) => {
                     let mut local = self.local.borrow_mut();
                     let Local {
-                        driver,
-                        timers,
-                        deferred,
-                        ..
+                        driver, deferred, ..
                     } = &mut *local;
                     match forward {
                         Forward::Waiter(id, sender) => {
                             driver.as_mut().unwrap().forward(id, sender, deferred);
                         }
-                        Forward::Timer(id, sender) => timers.forward(id, sender, deferred),
                     }
                 }
                 Message::Cancel(cancel) => self.local.borrow_mut().release(cancel),
@@ -1895,15 +1911,21 @@ impl Worker {
     }
 
     /// Service the io_uring ring and timers using one time sample, collecting
-    /// callbacks. Returns whether kernel service was deferred to an idle wait.
+    /// callbacks. A running pool worker also expires its peers' overdue
+    /// timers, at most once per [`RESCUE_INTERVAL`].
+    /// Returns whether kernel service was deferred to an idle wait.
     fn service(&mut self, defer_kernel_service: bool) -> bool {
         let mut local = self.local.borrow_mut();
         local.now = Instant::now();
         let Local {
+            seat,
             now,
             driver,
             timers,
+            timers_next,
+            closing,
             deferred,
+            shared,
             ..
         } = &mut *local;
         let result = driver
@@ -1913,7 +1935,24 @@ impl Worker {
         let outcome = result.expect("io_uring driver service failed");
 
         // Expiry defers observer notifications until after this borrow ends.
-        timers.expire(*now, deferred);
+        // The cached bound skips the shard until a registration may be due,
+        // and a pass that leaves due ones behind keeps it at or below now.
+        // Polls on this thread may complete sleeps due by this time.
+        let nanos = clock::nanos(*now);
+        clock::set_turn(nanos);
+        if *timers_next <= nanos {
+            *timers_next = timers.expire(nanos, deferred);
+        }
+
+        // A peer stalled in a long poll cannot serve its own timers. A closing
+        // worker runs no more tasks, so it leaves them to the others.
+        if let Some(seat) = seat
+            && !*closing
+            && *now >= self.rescue_at
+        {
+            self.rescue_at = *now + RESCUE_INTERVAL;
+            sleep::rescue(shared.pool.timers(), seat.index as usize, nanos, deferred);
+        }
         local.update_pending();
         outcome
     }
