@@ -28,9 +28,7 @@ use crate::{
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
-use commonware_runtime::{
-    Handle, Metrics, ReadOptions, Storage, Supervisor, buffer::paged::CacheRef,
-};
+use commonware_runtime::{Handle, Metrics, ReadOptions, Storage, buffer::paged::CacheRef};
 use commonware_storage::journal::{
     Error as StorageError,
     segmented::variable::{Config as StorageConfig, Journal, Replay},
@@ -272,10 +270,7 @@ where
         context: E,
         config: Config,
         covered: Cursor,
-    ) -> Result<SuffixReplay<E, V, D>, JournalError>
-    where
-        E: Supervisor,
-    {
+    ) -> Result<SuffixReplay<E, V, D>, JournalError> {
         let journal = Journal::init(context, Self::storage_config(&config)).await?;
         let replay = journal
             .replay(0, 0, config.replay_buffer, ReadOptions::default())
@@ -398,7 +393,7 @@ where
 }
 
 /// Streaming reader over the journal records a checkpoint does not cover.
-pub(crate) struct SuffixReplay<E: Storage + Metrics + Supervisor, V: Variant, D: Digest> {
+pub(crate) struct SuffixReplay<E: Storage + Metrics, V: Variant, D: Digest> {
     replay: Replay<E, JournalRecord<V, D>>,
     config: Config,
     covered: Cursor,
@@ -409,7 +404,7 @@ pub(crate) struct SuffixReplay<E: Storage + Metrics + Supervisor, V: Variant, D:
 
 impl<E, V, D> SuffixReplay<E, V, D>
 where
-    E: Storage + Metrics + Supervisor,
+    E: Storage + Metrics,
     V: Variant,
     D: Digest,
 {
@@ -509,7 +504,7 @@ mod tests {
         bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest,
     };
     use commonware_runtime::{
-        Blob as _, Runner, WriteOptions,
+        Blob as _, Runner, Supervisor as _, WriteOptions,
         buffer::paged::CacheRef,
         deterministic::{Context as DeterministicContext, Runner as DeterministicRunner},
     };

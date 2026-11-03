@@ -46,9 +46,9 @@ mod telemetry;
 mod tests;
 
 pub(crate) use actor::{Actor, Planes, VoterTypes};
-pub(crate) use config::{
-    Config, VoterLimits, blocked_counter, validation_capacity, validation_parallelism,
-};
+#[cfg(any(test, feature = "mocks"))]
+pub(crate) use config::validation_parallelism;
+pub(crate) use config::{Config, VoterLimits, blocked_counter, validation_capacity};
 pub(crate) use mailbox::{
     Completed, Completions, Endpoints, Inspector, Mailbox, Observations, Observed, Resolutions,
 };

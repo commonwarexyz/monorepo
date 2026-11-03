@@ -34,8 +34,8 @@ use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, ContextCell, Error as RuntimeError, Handle, Metrics, Spawner, Storage,
-    buffer::paged::CacheRef, spawn_cell, telemetry::traces::TracedExt as _,
+    ContextCell, Error as RuntimeError, Handle, Spawner, buffer::paged::CacheRef, spawn_cell,
+    telemetry::traces::TracedExt as _,
 };
 use commonware_storage::Context as StorageContext;
 use commonware_utils::{NZU64, NonZeroDuration, channel::oneshot};
@@ -275,7 +275,7 @@ impl ActorLimits {
 /// Multimmit's actors for one epoch, wired over recovered state but not yet started.
 pub(crate) struct Actors<E, H, P, V, T, C, B, W>
 where
-    E: Clock + CryptoRng + Spawner + Storage + Metrics + StorageContext,
+    E: CryptoRng + Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
     V: Variant,
@@ -311,7 +311,7 @@ pub(crate) fn wire_actors<E, H, P, V, A, R, F, T, C, B, K>(
     ) -> (voter::Actor<K>, voter::Mailbox<P, V, H::Digest>),
 ) -> Actors<E, H, P, V, T, C, B, voter::Actor<K>>
 where
-    E: Clock + CryptoRng + Spawner + Storage + Metrics + StorageContext,
+    E: CryptoRng + Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
     V: Variant,
@@ -406,7 +406,7 @@ type EngineActors<E, H, P, V, A, R, F, T, C, B> =
 /// Multimmit's actors for one epoch, recovered and wired but not yet running.
 pub struct Engine<E, H, P, V, A, R, F, T, C, B>
 where
-    E: Clock + CryptoRng + Spawner + Storage + Metrics + StorageContext,
+    E: CryptoRng + Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
     V: Variant,
@@ -423,7 +423,7 @@ where
 
 impl<E, H, P, V, A, R, F, T, C, B> Engine<E, H, P, V, A, R, F, T, C, B>
 where
-    E: Clock + CryptoRng + Spawner + Storage + Metrics + StorageContext,
+    E: CryptoRng + Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
     V: Variant,
