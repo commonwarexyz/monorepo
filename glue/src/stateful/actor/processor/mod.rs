@@ -136,10 +136,12 @@ struct ReplayPath<B: Block> {
     /// Selected branch ending at the target.
     blocks: Blocks<B>,
 
-    /// Missing blocks below the target, or `None` once the range is exhausted.
+    /// Missing blocks below the target, or `None` once every block below the target has been
+    /// acquired.
     range: Option<BlockRange<B>>,
 
-    /// The target, held by its request and processed last. It is never acquired.
+    /// The target, held by its request and processed last. It is never acquired: it is taken
+    /// once the range is exhausted.
     target: Option<Digested<B>>,
 
     /// Height and digest of the block that the next acquired block must extend.
@@ -159,47 +161,50 @@ impl<B: Block> ReplayPath<B> {
         self.range.is_none() && self.target.is_none() && self.next.is_none()
     }
 
-    /// Acquires the next block on the path, which must not be exhausted or hold an acquired block.
+    /// Acquires the next block below the target. The range must not be exhausted, and the path
+    /// must not hold an acquired block.
     ///
-    /// Returns [`PrepareBatchesError::Invalid`] if the block does not extend the preceding one,
-    /// if the target is no longer the selected block at its height, or if the range reports any
-    /// error other than [`BlocksError::Unavailable`]. Returns [`PrepareBatchesError::Incomplete`]
-    /// on [`BlocksError::Unavailable`], which is not a verdict.
+    /// Returns [`PrepareBatchesError::Invalid`] if the block does not extend the preceding one or
+    /// if the range ends early or reports any error other than [`BlocksError::Unavailable`].
+    /// Returns [`PrepareBatchesError::Incomplete`] on [`BlocksError::Unavailable`], which is not
+    /// a verdict.
     async fn acquire(&mut self) -> Result<(), PrepareBatchesError> {
         assert!(
             self.next.is_none(),
             "acquired block must be processed first"
         );
-        let acquired = match &mut self.range {
-            Some(range) => range.next().await,
-            None => None,
+        let range = self
+            .range
+            .as_mut()
+            .expect("acquisition requires missing blocks below the target");
+        let Some(acquired) = range.next().await else {
+            warn!(
+                expected_height = self.expected.0.get(),
+                "selected history ended below the recovery target"
+            );
+            return Err(PrepareBatchesError::Invalid);
         };
-        let block = match acquired {
-            Some(block) => block.map_err(|error| match error {
-                BlocksError::Unavailable => PrepareBatchesError::Incomplete,
-                _ => PrepareBatchesError::Invalid,
-            })?,
-            None => {
-                self.range = None;
-                let target = self
-                    .target
-                    .take()
-                    .expect("exhausted replay path must not acquire");
-                if self
-                    .blocks
-                    .digest(target.height())
-                    .is_some_and(|digest| digest != target.digest())
-                {
-                    warn!(
-                        target = ?target.digest(),
-                        "recovery target is no longer the selected block"
-                    );
-                    return Err(PrepareBatchesError::Invalid);
-                }
-                target
-            }
-        };
+        let block = acquired.map_err(|error| match error {
+            BlocksError::Unavailable => PrepareBatchesError::Incomplete,
+            _ => PrepareBatchesError::Invalid,
+        })?;
+        self.extend(&block)?;
 
+        // The range ends at the target's parent, so its last block releases the range.
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|target| target.height().previous() == Some(block.height()))
+        {
+            self.range = None;
+        }
+        self.next = Some(block);
+        Ok(())
+    }
+
+    /// Checks that `block` extends the preceding block on the path and records it as the parent
+    /// of the next one.
+    fn extend(&mut self, block: &Digested<B>) -> Result<(), PrepareBatchesError> {
         let (height, digest) = self.expected;
         if block.height().previous() != Some(height) || block.parent() != digest {
             warn!(
@@ -213,13 +218,38 @@ impl<B: Block> ReplayPath<B> {
             return Err(PrepareBatchesError::Invalid);
         }
         self.expected = (block.height(), block.digest());
-        self.next = Some(block);
         Ok(())
     }
 
-    /// Takes the acquired block and the selected branch ending at its parent.
-    fn take(&mut self) -> Option<(Digested<B>, Blocks<B>)> {
-        let block = self.next.take()?;
+    /// Takes the acquired block, or the held target once every block below it has been acquired,
+    /// with the selected branch ending at its parent. Returns `None` while the next block below
+    /// the target remains to be acquired or once the path is exhausted.
+    ///
+    /// Taking the target performs no I/O. Returns [`PrepareBatchesError::Invalid`] if the target
+    /// is no longer the selected block at its height or does not extend the preceding block.
+    fn take(&mut self) -> Result<Option<ReplayStep<B>>, PrepareBatchesError> {
+        let block = match self.next.take() {
+            Some(block) => block,
+            None if self.range.is_some() => return Ok(None),
+            None => {
+                let Some(target) = self.target.take() else {
+                    return Ok(None);
+                };
+                if self
+                    .blocks
+                    .digest(target.height())
+                    .is_some_and(|digest| digest != target.digest())
+                {
+                    warn!(
+                        target = ?target.digest(),
+                        "recovery target is no longer the selected block"
+                    );
+                    return Err(PrepareBatchesError::Invalid);
+                }
+                self.extend(&target)?;
+                target
+            }
+        };
         if let Some((_, depth)) = &mut self.measurement {
             *depth += 1;
         }
@@ -229,9 +259,12 @@ impl<B: Block> ReplayPath<B> {
                 .previous()
                 .expect("replayed block must have a parent"),
         );
-        Some((block, blocks))
+        Ok(Some((block, blocks)))
     }
 }
+
+/// A block on a replay path and the selected branch ending at its parent.
+type ReplayStep<B> = (Digested<B>, Blocks<B>);
 
 /// Cached speculative state for a block digest.
 struct PendingEntry<A, E>
@@ -1167,7 +1200,7 @@ where
             .previous()
             .expect("target above the branch anchor must have a parent");
         Ok(Some(ReplayPath {
-            range: Some(blocks.range(anchor.height.next()..=end)),
+            range: (anchor.height < end).then(|| blocks.range(anchor.height.next()..=end)),
             blocks: blocks.clone(),
             target: Some(target),
             expected: (anchor.height, anchor.digest),
@@ -1196,8 +1229,10 @@ where
             return Ok(());
         };
         while !path.exhausted() {
-            path.acquire().await?;
-            let (block, history) = path.take().expect("acquired block must be taken");
+            let Some((block, history)) = path.take()? else {
+                path.acquire().await?;
+                continue;
+            };
             if let Some(flight) = self.join_flight(app, context.child("replay"), block, history) {
                 flight.await?;
             }

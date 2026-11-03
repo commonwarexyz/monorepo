@@ -3,8 +3,9 @@
 //! A [`Verifier`] turns a verification or a proposal's parent recovery into work the actor can
 //! interleave with maintenance: [`Verifier::prepare`] finds where recovery starts without touching
 //! the application, [`Verifier::next`] selects one block to acquire or process at a time,
-//! [`Verifier::acquire`] acquires the next missing block from the selected branch, and
-//! [`Verifier::process`] processes a block once for all concurrent requests that need it.
+//! [`Verifier::acquire`] acquires the next missing block below the target from the selected
+//! branch, and [`Verifier::process`] processes a block once for all concurrent requests that
+//! need it.
 
 use super::{Application, Execution, ExecutionStep, PrepareBatchesError, ReplayPath};
 use commonware_consensus::{
@@ -49,7 +50,7 @@ impl<B: Block> Prepared<B> {
 
 /// The next action for a [`Prepared`] request.
 pub(in crate::stateful::actor) enum Next<B: Block> {
-    /// Acquire the next missing block with [`Verifier::acquire`].
+    /// Acquire the next missing block below the recovery target with [`Verifier::acquire`].
     Acquire,
     /// Process `block` on the selected branch ending at its parent.
     Process {
@@ -174,17 +175,21 @@ where
 
     /// Returns the next action: acquiring or processing each block on the missing path in height
     /// order, then processing the block itself when verifying.
+    ///
+    /// The held recovery target is selected without I/O once every block below it has been
+    /// acquired. Returns [`PrepareBatchesError::Invalid`] if it is no longer the selected block
+    /// at its height or does not extend the acquired path.
     pub(in crate::stateful::actor) fn next(
         &self,
         context: &E,
         prepared: &mut Prepared<A::Block>,
-    ) -> Next<A::Block> {
+    ) -> Result<Next<A::Block>, PrepareBatchesError> {
         // The missing path comes first. Once it is exhausted, the request's own block is the
         // last step.
         let (block, blocks) = match prepared.replay.as_mut() {
-            Some(path) => match path.take() {
+            Some(path) => match path.take()? {
                 Some(next) => next,
-                None if !path.exhausted() => return Next::Acquire,
+                None if !path.exhausted() => return Ok(Next::Acquire),
                 None => {
                     self.execution.finish_replay(context, path);
                     prepared.replay = None;
@@ -193,7 +198,7 @@ where
             },
             None => match prepared.block.take() {
                 Some(block) => (block, prepared.blocks.clone()),
-                None => return Next::Done,
+                None => return Ok(Next::Done),
             },
         };
 
@@ -204,11 +209,11 @@ where
             parent: block.parent(),
             round: block.context().round(),
         };
-        Next::Process {
+        Ok(Next::Process {
             step,
             block,
             blocks,
-        }
+        })
     }
 
     /// Acquires the next missing block for a request whose [`Self::next`] returned

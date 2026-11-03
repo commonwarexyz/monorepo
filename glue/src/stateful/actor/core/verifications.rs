@@ -486,7 +486,11 @@ where
         // concurrently and a shared call can outlive the request that started it. A step joins
         // the block's processing as it is admitted, so it stays alive for that step even if every
         // other holder is dropped before the step is first polled.
-        match self.verifier.next(&self.context, &mut prepared) {
+        let Ok(next) = self.verifier.next(&self.context, &mut prepared) else {
+            request.reject();
+            return;
+        };
+        match next {
             Next::Process {
                 step,
                 block,
