@@ -171,7 +171,6 @@ where
     E: Context,
     H: Hasher,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     pub(super) fn new(
         context: R,

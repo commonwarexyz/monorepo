@@ -81,7 +81,6 @@ where
     H: Hasher,
     V: Variant,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     /// Returns the pending families a batch must make durable, or `None` when it needs no cut.
     ///

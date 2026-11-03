@@ -22,7 +22,6 @@ where
     H: Hasher,
     V: Variant,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     /// Reclaims immutable-mode pending bodies covered by a durable promotion cursor, keeping every
     /// block the engine may still verify.

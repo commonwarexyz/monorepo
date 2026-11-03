@@ -86,7 +86,6 @@ where
     E: Context,
     H: Hasher,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     pub(super) fn new(
         materializer: Materializer<R, E, H, B>,
@@ -476,7 +475,6 @@ where
     H: Hasher,
     V: Variant,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     let mut records = Vec::new();
     let mut budget = SegmentBudget::new(max_bytes);
@@ -516,7 +514,6 @@ where
     H: Hasher,
     V: Variant,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     let mut segments = Vec::with_capacity(requests.len());
     for (mut reference, max_items) in requests {
@@ -567,7 +564,6 @@ where
     H: Hasher,
     V: Variant,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     // Pruning always keeps the row at its bound when rows above the floor index exist, so an
     // empty row archive leaves every missing committed row above the floor index inconsistent.
