@@ -154,19 +154,19 @@ runs:
 
     # kache caches the workspace's own crates, which rust-cache does not keep. It
     # runs after rust-cache so that RUSTC_WRAPPER stays out of rust-cache's key.
-    # Pull request jobs also write kache-pr, which every pull request shares. These
-    # settings must reach the daemon and every compile, so they go in the job environment.
+    # These settings must reach the daemon and every compile, so they go in the job
+    # environment.
     - name: Configure kache
       if: inputs.rust-cache-enabled == 'true'
       shell: bash
       run: |
         {
-          echo "KACHE_PULL_REQUEST_PREFIX=kache-pr"
           # Compiling a large test binary takes over 5 minutes, so a long download wait pays off.
           echo "KACHE_DEMAND_TIMEOUT_SECS=120"
           echo "KACHE_LOG=kache=warn"
         } >> "$GITHUB_ENV"
     - name: Setup kache
+      id: kache
       if: inputs.rust-cache-enabled == 'true'
       # A failed setup leaves the job uncached instead of failing it.
       continue-on-error: true
@@ -188,3 +188,29 @@ runs:
         manifest-key: ${{ steps.cache-key.outputs.key }}-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
         github-cache: false
         pr-comment: false
+
+    # kache only writes from pushes to protected branches, and its daemon keeps the write
+    # mode it started with. Hiding GITHUB_ACTIONS from every kache process, the daemon
+    # included, lets pull request and merge queue jobs write the shared prefix too, as
+    # sccache did. Fork pull requests get no credentials, so they cannot write.
+    - name: Let every job write the kache cache
+      if: inputs.rust-cache-enabled == 'true' && inputs.kache-r2-bucket != '' && steps.kache.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      run: |
+        real="$(command -v kache)"
+        shim="$RUNNER_TEMP/kache-shim"
+        mkdir -p "$shim"
+        # cc-rs recognizes the compiler wrapper by its file name, so the shim is named kache.
+        printf '#!/bin/sh\nexec env -u GITHUB_ACTIONS "%s" "$@"\n' "$real" >"$shim/kache"
+        chmod +x "$shim/kache"
+        "$shim/kache" daemon stop >/dev/null
+        "$shim/kache" daemon start >/dev/null
+        # Later steps, and the action's post step, run kache through the shim.
+        echo "$shim" >> "$GITHUB_PATH"
+        echo "RUSTC_WRAPPER=$shim/kache" >> "$GITHUB_ENV"
+        mode="$("$shim/kache" doctor --json 2>/dev/null | jq -r '.checks[]? | select(.label == "Remote writes") | .detail')"
+        echo "Remote writes: $mode"
+        if [ "$mode" != "read-write" ]; then
+          echo "::warning::kache cannot write the shared prefix: $mode"
+        fi
