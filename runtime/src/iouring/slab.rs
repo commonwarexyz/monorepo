@@ -118,6 +118,7 @@ impl<T> Slab<T> {
     }
 
     /// Number of live values.
+    #[cfg(test)]
     pub const fn len(&self) -> usize {
         self.len
     }

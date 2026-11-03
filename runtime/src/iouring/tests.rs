@@ -4,13 +4,14 @@
 
 use super::{
     super::{
-        driver::tests::fail_after_completion,
+        driver::tests::{fail_after_completion, make_file},
         idle::tests::{WakePoint, on_wake_point},
         operation::Operation,
         queue::CAPACITY,
-        request::{RecvRequest, Request},
+        request::{RecvRequest, Request, SyncRequest},
         task::{Task, tests::cancelled},
         tasks::tests::AFTER_INSERT,
+        waiter::Observer,
         waker::tests::state_bits,
     },
     *,
@@ -20,6 +21,7 @@ use crate::{
     Resolver as _, Runner as _, Sink as _, Storage as _, Stream as _, WriteOptions,
     utils::{extract_panic_message, reschedule},
 };
+use commonware_utils::sync::OwnedAsyncMutexGuard;
 use futures::{
     FutureExt,
     executor::block_on,
@@ -926,7 +928,11 @@ fn catch_up_callback_after_the_count_returns(catch_up: CatchUp) {
             move || {
                 let waker = waker(trigger);
                 let local = Local::current().unwrap();
-                local.borrow_mut().timers.insert_due(waker);
+                {
+                    let mut local = local.borrow_mut();
+                    let at = local.timers.insert_due(waker);
+                    local.timers_next = local.timers_next.min(at);
+                }
                 assert!(local.borrow().deferred.is_empty());
             }
         };
@@ -2728,9 +2734,9 @@ fn test_teardown_drops_every_future_before_clearing_timers() {
     impl Drop for TimerCheck {
         fn drop(&mut self) {
             // The future's own sleep drops after this guard, so its timer is
-            // still registered unless teardown has already closed the table.
+            // still registered unless teardown has already closed the shard.
             let local = Local::current().expect("future dropped off its worker");
-            if local.borrow_mut().timers.next_deadline().is_some() {
+            if !local.borrow().timers.is_closed() {
                 self.early.fetch_add(1, Ordering::Relaxed);
             }
             self.drops.fetch_add(1, Ordering::Relaxed);
@@ -3263,6 +3269,166 @@ fn test_callback_generated_work_prevents_parking() {
             }
         }
     }
+}
+
+/// A callback in cleanup's drain can drop a sleep registered on another
+/// worker's open shard, which releases that sleep's waker into the same
+/// callback batch. Cleanup must run such a batch before waiting for retained
+/// I/O, which here is a sync waiting for a durability permit that only the
+/// last waker in a chain of such releases frees.
+#[test]
+fn test_cleanup_runs_released_wakers_before_waiting_for_retained_io() {
+    /// A waker that drops its sleep when destroyed.
+    struct DropSleep(
+        /// The sleep to drop, taken once by the destructor.
+        Mutex<Option<Sleep>>,
+    );
+
+    // This waker owns a destructor, which Waker::noop cannot model.
+    #[allow(clippy::manual_noop_waker)]
+    impl Wake for DropSleep {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for DropSleep {
+        fn drop(&mut self) {
+            drop(self.0.lock().take());
+        }
+    }
+
+    /// A waker that releases a durability permit when destroyed.
+    struct ReleasePermit {
+        /// The held durability permit, taken once by the destructor.
+        permit: Arc<Mutex<Option<OwnedAsyncMutexGuard<()>>>>,
+        /// Set when the destructor runs, before the permit is released.
+        released: Arc<AtomicBool>,
+    }
+
+    // This waker owns a destructor, which Waker::noop cannot model.
+    #[allow(clippy::manual_noop_waker)]
+    impl Wake for ReleasePermit {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for ReleasePermit {
+        fn drop(&mut self) {
+            self.released.store(true, Ordering::SeqCst);
+            drop(self.permit.lock().take());
+        }
+    }
+
+    // Hold the file's durability permit, so a sync on it waits until a waker
+    // or the watchdog releases it.
+    let (directory, file) = make_file("cleanup_released_wakers");
+    let permit = Arc::new(Mutex::new(Some(
+        file.durability.clone().try_lock_owned().unwrap(),
+    )));
+    let released = Arc::new(AtomicBool::new(false));
+    let waited = Runner::new(config().with_worker_threads(1)).start(|_| async {
+        // Two sleeps on worker zero's shard: dropping the first releases a
+        // waker that drops the second, whose waker releases the permit.
+        let last = Waker::from(Arc::new(ReleasePermit {
+            permit: permit.clone(),
+            released: released.clone(),
+        }));
+        let mut second = Sleep::new(Duration::from_secs(60));
+        assert!(
+            Pin::new(&mut second)
+                .poll(&mut TaskContext::from_waker(&last))
+                .is_pending()
+        );
+        drop(last);
+        let middle = Waker::from(Arc::new(DropSleep(Mutex::new(Some(second)))));
+        let mut first = Sleep::new(Duration::from_secs(60));
+        assert!(
+            Pin::new(&mut first)
+                .poll(&mut TaskContext::from_waker(&middle))
+                .is_pending()
+        );
+        drop(middle);
+
+        // A dedicated worker retains a sync that waits for the permit, then
+        // cleans up with the first sleep's drop in its callback batch.
+        let shared = Local::current().unwrap().borrow().shared.clone();
+        let file = file.clone();
+        let permit = permit.clone();
+        let released = released.clone();
+        thread::spawn(move || {
+            let (mut worker, output) = Worker::run(
+                shared,
+                Role::Dedicated,
+                || async {
+                    let local = Local::current().unwrap();
+                    let mut local = local.borrow_mut();
+                    let Local {
+                        driver,
+                        now,
+                        deferred,
+                        ..
+                    } = &mut *local;
+                    driver.as_mut().unwrap().admit(
+                        Request::Sync(SyncRequest::new(file)),
+                        Observer::Orphaned,
+                        *now,
+                        deferred,
+                    );
+                },
+                None,
+            )
+            .unwrap();
+            assert!(output.is_some());
+
+            // Install the wake poll and consume startup signals, so the only
+            // wake left for a blocking wait is the permit's release.
+            worker.service(false);
+            let parked = worker
+                .local
+                .borrow_mut()
+                .driver
+                .as_mut()
+                .unwrap()
+                .park(worker.processed_seq, Some(Instant::now()));
+            parked.unwrap();
+            worker.service(false);
+            {
+                let local = worker.local.borrow();
+                let driver = local.driver.as_ref().unwrap();
+                assert!(!driver.is_empty());
+                assert!(!driver.has_pending_submissions());
+            }
+            worker
+                .local
+                .borrow_mut()
+                .deferred
+                .drops
+                .push(Waker::from(Arc::new(DropSleep(Mutex::new(Some(first))))));
+
+            // Without the release, cleanup would wait for the sync forever.
+            // Free the permit after a generous delay so a failure ends.
+            let watchdog = thread::spawn(move || {
+                let deadline = Instant::now() + TEST_TIMEOUT;
+                while !released.load(Ordering::SeqCst) {
+                    if Instant::now() >= deadline {
+                        drop(permit.lock().take());
+                        return false;
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                true
+            });
+            worker.cleanup();
+            assert!(worker.take_panic().is_none());
+            watchdog.join().unwrap()
+        })
+        .join()
+        .unwrap()
+    });
+
+    // Remove the file, then check that a released waker, not the watchdog,
+    // freed the permit.
+    drop(file);
+    fs::remove_dir_all(directory).unwrap();
+    assert!(waited, "cleanup waited before running released wakers");
 }
 
 #[test]

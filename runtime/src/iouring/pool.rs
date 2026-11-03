@@ -1,17 +1,22 @@
 //! The pool of workers that poll ordinary tasks.
 //!
-//! [`Pool`] is the state the workers share: every worker's mailbox and the
-//! shared end of its run queue, the pool-wide global queue, the pool's idle
-//! state, and the shutdown barrier. The runner creates it before any worker
-//! starts, every worker reaches it through the runner's shared services, and
-//! every task's header holds a weak reference to it, so a wake from any thread
-//! can find the task's pool without keeping the pool alive.
+//! [`Pool`] is the state the workers share: every worker's mailbox, the
+//! shared end of its run queue, and its timer shard, the pool-wide global
+//! queue, the pool's idle state, and the shutdown barrier. The runner creates
+//! it before any worker starts, every worker reaches it through the runner's
+//! shared services, and every task's header holds a weak reference to it, so
+//! a wake from any thread can find the task's pool without keeping the pool
+//! alive.
 //! [`Threads`] starts the workers after worker zero, each on a thread of its
 //! own, and joins them at shutdown.
 //!
 //! [`Idle`] tracks idle publications and search responsibility, and selects
 //! pool workers to wake. Their mailbox wakers deliver the signals.
 //! [`super::idle`] describes the parking sequence and wake policy.
+//!
+//! Each worker's [`TimerShard`] holds the sleeps registered on it. The pool
+//! keeps them so that a busy worker can expire the overdue timers of a peer
+//! stalled in a long poll (see [`super::sleep`]).
 //!
 //! # Placement
 //!
@@ -95,7 +100,8 @@
 //!
 //! ```text
 //! worker zero                            worker i (1..n)
-//!   Pool::new (mailboxes, run queues)
+//!   Pool::new (mailboxes, run queues,
+//!     timer shards)
 //!   enter, start worker i ------------->   enter, report ready
 //!   build and drive the root               drive tasks
 //!   root ends: close the task set,
@@ -106,6 +112,7 @@
 //!   drain all shards, starting at 0        drain all shards, starting at its own
 //!   finish <=========== barrier ==========> finish
 //!   close mailbox, drop inbox,             close mailbox, drop inbox,
+//!     close timer shard,                     close timer shard,
 //!     destroy io_uring ring                  destroy io_uring ring
 //!   join <------------------------------   exit
 //!   take a failure reported late
@@ -151,6 +158,7 @@ use super::{
     mailbox::{Mailbox, Message},
     queue::{self, CAPACITY, Overflow, Push, STEALABLE},
     runtime::{Panic, Role, Shared, Worker},
+    sleep::TimerShard,
     task::{Ready, Runnable},
 };
 use crate::utils::Panicker;
@@ -225,6 +233,8 @@ pub struct Pool {
     /// The shared end of every pool worker's run queue, indexed by worker.
     /// Each worker takes its owner when it starts.
     queues: Box<[LocalQueue]>,
+    /// Every pool worker's sleep timers, indexed by worker.
+    timers: Box<[Arc<TimerShard>]>,
     /// The global queue's length, stored under its lock and read without it.
     global_len: CachePadded<AtomicUsize>,
     /// The global queue.
@@ -262,6 +272,7 @@ impl Pool {
             idle: CachePadded::new(Idle::new()),
             mailboxes: mailboxes.into(),
             queues: (0..workers).map(|_| queue()).collect(),
+            timers: (0..workers).map(|_| Arc::new(TimerShard::new())).collect(),
             global_len: CachePadded::new(AtomicUsize::new(0)),
             global: CachePadded::new(Mutex::new(GlobalQueue {
                 open: true,
@@ -296,6 +307,11 @@ impl Pool {
     /// when it starts. Panics if the index is outside the pool.
     pub fn queue(&self, index: u32) -> &LocalQueue {
         &self.queues[index as usize]
+    }
+
+    /// Every pool worker's sleep timers, in worker order.
+    pub fn timers(&self) -> &[Arc<TimerShard>] {
+        &self.timers
     }
 
     /// Lock the global queue.
