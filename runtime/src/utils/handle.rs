@@ -223,11 +223,9 @@ where
             // its supervision subtree even if that destruction unwinds.
             let _guard = guard;
 
-            // Poll `f` until it completes, panics or is aborted. `FutureCell` catches its panics
-            // and `Abortable` resolves to `Aborted` once the handle or supervision aborts the
-            // task. This async block is the task's future, which the runtime polls only with the
-            // task's wakers, so it may use `Abortable::task`. The wrapper, and with it `f`, is
-            // dropped at the end of this statement, before any result is sent.
+            // Only this task's wakers poll this block, so the wrapper can skip re-registering
+            // an unchanged one. `f` is dropped at the end of this statement, before its result
+            // is sent.
             let result = Abortable::task(FutureCell(UnsafeCell::new(f)), abort_registration).await;
 
             // Handle result
