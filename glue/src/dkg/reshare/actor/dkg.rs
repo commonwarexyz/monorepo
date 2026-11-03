@@ -124,6 +124,7 @@ where
             .await;
         store.put_seed(Epoch::zero(), seed).await;
 
+        self.metrics.reconcile(&snapshot.dealers, &snapshot.players);
         self.prepare_epoch(
             store,
             EpochPreparation {
