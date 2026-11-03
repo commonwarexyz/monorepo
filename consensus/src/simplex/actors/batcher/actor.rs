@@ -340,12 +340,10 @@ where
         }
     }
 
-    /// Forwards known proposals and starts construction jobs for dirty views, visiting the
-    /// current view first.
-    ///
-    /// Jobs are capped at the strategy's parallelism. An eligible view skipped at capacity
-    /// stays dirty; finalized, missing, and out-of-window views are dropped. Every completion
-    /// for a retained round re-dirties its view (see [Self::handle_done]), so merged-back and
+    /// Forwards known proposals and starts a construction job for every ready kind of every
+    /// dirty view, submitting the current view first. The strategy bounds how many jobs run
+    /// at once. Finalized, missing, and out-of-window views are dropped. Every completion for
+    /// a retained round re-dirties its view (see [Self::handle_done]), so merged-back and
     /// buffered votes get another attempt.
     pub(super) fn dispatch_ready(
         &mut self,
@@ -361,7 +359,6 @@ where
         let mut ready = mem::take(dirty);
         let first = ready.take(&current);
         let signer = self.scheme.me().and_then(|m| m.signer());
-        let capacity = self.strategy.manual().parallelism();
         for view in first.into_iter().chain(ready) {
             // Skip verification and construction for views at or below
             // finalized. We still admit votes there (see [Viewport::retains])
@@ -392,7 +389,7 @@ where
             }
 
             let _guard = round.span().clone().entered();
-            while pool.len() < capacity {
+            loop {
                 // Submission may execute inline, so timing must start before begin_construct.
                 let timer = self.construct_latency.timer(self.context.as_ref());
                 let Some(job) = round.begin_construct(self.context.as_mut(), &self.strategy) else {
@@ -405,11 +402,6 @@ where
                         constructed: job.await,
                     }
                 });
-            }
-
-            // At capacity, the round may have more ready kinds: revisit it next pass.
-            if pool.len() == capacity {
-                dirty.insert(view);
             }
         }
     }
@@ -502,9 +494,9 @@ where
         let mut finalized = self.floor;
         let mut work: BTreeMap<View, Round<S, B, D, Re>> = BTreeMap::new();
 
-        // Views whose rounds may have become actionable. The set persists across
-        // iterations: dispatch keeps views skipped at capacity, and completions
-        // re-insert their view.
+        // Views whose rounds may have become actionable since the last dispatch.
+        // Completions re-insert their view so merged-back and buffered votes get
+        // another attempt.
         let mut dirty_views = BTreeSet::new();
         let mut crypto_pool = Pool::default();
         select_loop! {

@@ -1,13 +1,13 @@
 use super::*;
 use crate::simplex::Viewport;
 use commonware_utils::futures::Pool;
-use futures::{FutureExt as _, channel::oneshot};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Completing a full pool must wake skipped views without another vote, and
-/// the current view must win the newly available slot over older views.
+/// One pass starts a job for every ready kind of every dirty view, and each
+/// completion forwards its certificate and re-dirties its retained round
+/// without starting more work.
 #[test]
-fn completion_revisits_saturated_views_in_current_view_order() {
+fn dispatch_starts_every_ready_view_and_completions_revisit_rounds() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
         let Fixture {
             schemes,
@@ -48,6 +48,21 @@ fn completion_revisits_saturated_views_in_current_view_order() {
             }
             work.insert(view, round);
         }
+        // The current view also has a notarize quorum, so it has two ready kinds. We
+        // lead it, so no proposal is forwarded to the voter.
+        let current = work.get_mut(&View::new(2)).unwrap();
+        current.set_leader(Participant::new(0));
+        let proposal = Proposal::new(
+            Round::new(epoch, View::new(2)),
+            View::new(1),
+            Sha256::hash(&[b"dispatch_order"]),
+        );
+        for (index, scheme) in schemes.iter().take(quorum(5) as usize).enumerate() {
+            assert!(current.add_network(
+                participants[index].clone(),
+                Vote::Notarize(Notarize::sign(scheme, proposal.clone()).unwrap())
+            ));
+        }
         let viewport = Viewport {
             finalized: View::zero(),
             current: View::new(2),
@@ -55,35 +70,35 @@ fn completion_revisits_saturated_views_in_current_view_order() {
             lookahead: BatcherOptions::default().lookahead,
         };
         let mut pool = Pool::default();
-        let mut dirty = BTreeSet::from([View::new(3)]);
+        let mut dirty = BTreeSet::from([1, 2, 3].map(View::new));
         actor.dispatch_ready(&mut pool, &mut work, &mut dirty, &mut voter, viewport);
-        assert_eq!(pool.len(), 1);
-        let done = pool.next_completed().await;
-        assert_eq!(done.view, View::new(3));
-        let (release, gate) = oneshot::channel();
-        pool.push(async move {
-            gate.await.unwrap();
-            done
-        });
-        dirty.extend([View::new(1), View::new(2)]);
+        assert_eq!(pool.len(), 4);
+        assert!(dirty.is_empty());
+
+        // Re-dirtying a round whose jobs are still running starts nothing.
+        dirty.insert(View::new(2));
         actor.dispatch_ready(&mut pool, &mut work, &mut dirty, &mut voter, viewport);
-        assert_eq!(pool.len(), 1);
-        assert!(dirty.contains(&View::new(1)));
-        assert!(dirty.contains(&View::new(2)));
-        assert!(pool.next_completed().now_or_never().is_none());
-        release.send(()).unwrap();
-        for expected in [3, 2, 1].map(View::new) {
+        assert_eq!(pool.len(), 4);
+        assert!(dirty.is_empty());
+
+        let mut completed = Vec::new();
+        while !pool.is_empty() {
             let done = pool.next_completed().await;
-            assert_eq!(done.view, expected);
-            dirty.insert(actor.handle_done(&mut voter, &mut work, done).unwrap());
+            let view = done.view;
+            assert_eq!(actor.handle_done(&mut voter, &mut work, done), Some(view));
+            dirty.insert(view);
             let Some(voter::Message::Verified { certificate, .. }) = receiver.recv().await else {
                 panic!("completion must forward a certificate");
             };
-            assert_eq!(certificate.view(), expected);
+            assert_eq!(certificate.view(), view);
             assert!(certificate.verify(&mut context, &schemes[0], &Sequential));
-            actor.dispatch_ready(&mut pool, &mut work, &mut dirty, &mut voter, viewport);
-            assert!(pool.len() <= 1);
+            completed.push(view);
         }
+        completed.sort();
+        assert_eq!(completed, [1, 2, 2, 3].map(View::new));
+
+        // Certified kinds have nothing left to construct.
+        actor.dispatch_ready(&mut pool, &mut work, &mut dirty, &mut voter, viewport);
         assert!(pool.is_empty());
         assert!(dirty.is_empty());
     });
