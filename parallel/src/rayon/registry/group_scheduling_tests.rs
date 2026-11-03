@@ -5,7 +5,7 @@ use crate::rayon::{
     ThreadPool, ThreadPoolBuilder, Yield, join, placement_width, sleep::with_sleep_notification,
     thread_pool::Worker, yield_now,
 };
-use commonware_utils::{TestRng, sync::Mutex};
+use commonware_utils::{TestRng, Widen, sync::Mutex};
 use rand::RngExt as _;
 use std::{
     any::Any,
@@ -993,7 +993,7 @@ fn outside_spawns_preserve_each_producers_order_under_contention() {
                     let pool = &pool;
                     let order = &order;
                     scope.spawn(move || {
-                        let mut rng = TestRng::new(producer as u64);
+                        let mut rng = TestRng::new(Widen::widen(producer));
                         for index in 0..JOBS {
                             let placement = match rng.random_range(0..4) {
                                 0 => Placement::Local(0),

@@ -1889,7 +1889,7 @@ mod tests {
         let runs = drive_roots(
             &policy,
             Location::caller(),
-            2 * RESAMPLE_INTERVAL as usize,
+            2 * Widen::widen(RESAMPLE_INTERVAL),
             |placement| {
                 Duration::from_micros(match placement {
                     Placement::Wide => cold.next().unwrap_or(4_700),
@@ -1914,7 +1914,7 @@ mod tests {
         let runs = drive_roots(
             &policy,
             Location::caller(),
-            2 * RESAMPLE_INTERVAL as usize,
+            2 * Widen::widen(RESAMPLE_INTERVAL),
             |placement| {
                 Duration::from_micros(match placement {
                     Placement::Wide => {
@@ -1953,7 +1953,7 @@ mod tests {
         let runs = drive_roots(
             &policy,
             Location::caller(),
-            6 * RESAMPLE_INTERVAL as usize,
+            6 * Widen::widen(RESAMPLE_INTERVAL),
             |placement| {
                 Duration::from_micros(match placement {
                     Placement::Wide => {
@@ -1965,7 +1965,7 @@ mod tests {
             },
         );
         let wide = wide_runs(&runs);
-        assert!(wide[3] - wide[2] <= (RESAMPLE_INTERVAL << 2) as usize);
+        assert!(wide[3] - wide[2] <= Widen::widen(RESAMPLE_INTERVAL << 2));
     }
 
     /// A lucky probe can hand the lead to the slower Wide placement. Wide is then measured as the
@@ -1977,7 +1977,7 @@ mod tests {
         let runs = drive_roots(
             &policy,
             Location::caller(),
-            2 * RESAMPLE_INTERVAL as usize,
+            2 * Widen::widen(RESAMPLE_INTERVAL),
             |placement| {
                 Duration::from_micros(match placement {
                     Placement::Wide => {

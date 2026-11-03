@@ -1269,9 +1269,15 @@ mod tests {
     #[test]
     fn wide_takes_every_group_home_first() {
         let groups = synthetic(&[2, 2, 2]);
+
+        // Home the first group elsewhere, so the caller's home is not the group that a
+        // home-less order would list first anyway.
+        Groups::fake_domain(Some(2));
+        drop(groups.local().unwrap());
         Groups::fake_domain(Some(0));
         let local = groups.local().unwrap();
         let homed = local.index;
+        assert_eq!(homed, 1);
         let leases = groups.wide();
         assert_eq!(leases.len(), 3);
         assert_eq!(
@@ -2071,6 +2077,13 @@ mod tests {
             assert!(result.is_err());
             assert_eq!(during.into_inner(), Some(b));
             assert_eq!(allowed_cpus(), original);
+            assert!(
+                groups
+                    .groups()
+                    .iter()
+                    .all(|group| group.state.lock().in_flight() == 0),
+                "a panicking placed call must release its leases"
+            );
         }
     }
 }

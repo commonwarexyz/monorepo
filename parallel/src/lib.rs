@@ -2435,6 +2435,33 @@ mod test {
         (std::panic::Location::caller(), placements.into_inner())
     }
 
+    /// A worker's nested placed call records its sample under the placement it runs under, so
+    /// a worker confined to one group trains that group's estimate rather than the whole pool's.
+    #[test]
+    fn workers_nested_call_records_the_sample_under_its_own_placement() {
+        for (placement, local) in [
+            (crate::rayon::Placement::Local(1), true),
+            (crate::rayon::Placement::Wide { near: 1 }, false),
+        ] {
+            let strategy = synthetic_groups(&[2, 2]);
+            let (site, _) = strategy
+                .groups
+                .pool()
+                .install_in(placement, || placed_map(&strategy));
+            let (wide_ns, local_ns) = strategy
+                .policy
+                .as_ref()
+                .unwrap()
+                .run_placement_estimates(site, 64, 64, strategy.parallelism)
+                .unwrap();
+            assert_eq!(
+                (wide_ns.is_some(), local_ns.is_some()),
+                (!local, local),
+                "{placement:?}: {wide_ns:?} {local_ns:?}"
+            );
+        }
+    }
+
     /// A placed call from a thread whose domain has no home, or is unknown, still compares one
     /// group with the whole pool. Its local runs take the least loaded full-width group, even
     /// while every full-width group is busy, never the narrower final group, and record local
@@ -4082,6 +4109,31 @@ mod test {
             Some(42),
             "the moved future must run pool work while it waits"
         );
+    }
+
+    /// A run placed on one group of a grouped strategy plans no more batches than that group has
+    /// workers, and a run placed on the whole pool plans the strategy's parallelism.
+    #[test]
+    fn placed_runs_plan_the_width_of_their_placement() {
+        let strategy = synthetic_groups(&[2, 2]);
+        let batches = |placed: &Rayon| {
+            placed.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
+                batches
+                    .map_collect_vec(|ranges| ranges, |range| range)
+                    .len()
+            })
+        };
+        assert_eq!(strategy.planned(1), 2);
+        let local = strategy.placed(Placement::Local(1));
+        assert_eq!(local.parallelism, 2);
+        assert_eq!(batches(&local), 2);
+        let wide = strategy.placed(Placement::Wide { near: 0 });
+        assert_eq!(wide.parallelism, 4);
+        assert_eq!(batches(&wide), 4);
+        let narrow = strategy
+            .with_parallelism(NonZeroUsize::MIN)
+            .placed(Placement::Local(0));
+        assert_eq!(narrow.parallelism, 1);
     }
 
     #[test]
