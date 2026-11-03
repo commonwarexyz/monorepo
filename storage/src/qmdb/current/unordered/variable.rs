@@ -156,7 +156,7 @@ mod test {
             let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key).await.unwrap().unwrap(), value);
             let root = db.root();
-            let (proved_value, proof) = db.key_value_proof(&key).await.unwrap();
+            let (proof, proved_value) = db.key_value_proof(&key).await.unwrap();
             assert_eq!(proved_value, value);
             assert!(VecKeyTest::verify_key_value_proof(
                 key.clone(),

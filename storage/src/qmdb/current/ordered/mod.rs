@@ -209,7 +209,7 @@ pub mod tests {
             let db = db.apply_batch(merkleized).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
-            let (proved_value, proof) = db.key_value_proof(&k).await.unwrap();
+            let (proof, proved_value) = db.key_value_proof(&k).await.unwrap();
             assert_eq!(proved_value, v1);
 
             // Proof should be verifiable against current root.
@@ -238,7 +238,7 @@ pub mod tests {
             assert!(!proof.verify::<Sha256, V>(k, v2, &root));
 
             // But the new value should verify against a new proof.
-            let (proved_value, proof) = db.key_value_proof(&k).await.unwrap();
+            let (proof, proved_value) = db.key_value_proof(&k).await.unwrap();
             assert_eq!(proved_value, v2);
             assert!(proof.verify::<Sha256, V>(k, proved_value, &root));
 
@@ -438,7 +438,7 @@ pub mod tests {
                     Operation::CommitFloor(_, _) => continue,
                     _ => unreachable!("expected update or commit floor operation"),
                 };
-                let (proved_value, proof) = db.key_value_proof(&key).await.unwrap();
+                let (proof, proved_value) = db.key_value_proof(&key).await.unwrap();
                 assert_eq!(proved_value, value);
                 let max_digests = proof.proof.range_proof.proof.digests.len();
                 let encoded = proof.encode();
@@ -507,7 +507,7 @@ pub mod tests {
                 let root = db.root();
 
                 // Create a proof for the current value of k.
-                let (proved_value, proof) = db.key_value_proof(&k).await.unwrap();
+                let (proof, proved_value) = db.key_value_proof(&k).await.unwrap();
                 assert_eq!(proved_value, v);
                 assert!(
                     proof.verify::<Sha256, V>(k, proved_value, &root),

@@ -407,7 +407,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     let current_root = db.root();
 
                     match db.key_value_proof(&k).await {
-                        Ok((value, proof)) => {
+                        Ok((proof, value)) => {
                             let expected = committed_state.get(key).copied().flatten().expect("key should exist in committed state");
                             assert_eq!(value, Value::new(expected));
                             let verification_result = Db::<F>::verify_key_value_proof(

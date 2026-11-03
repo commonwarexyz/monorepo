@@ -2179,7 +2179,7 @@ pub mod tests {
             // Forge attempt: package `b`'s authenticated update as an exclusion proof for `c`. The
             // span [b, c) does not cover `c`, so the verifier rejects it (pre-fix the span was
             // [b, a), which cyclically covered `c` and verified).
-            let (_, kvp) = db.key_value_proof(&b).await.unwrap();
+            let (kvp, _) = db.key_value_proof(&b).await.unwrap();
             let forged = ordered::proof::constant::ExclusionProof::KeyValue(kvp.proof, span_b);
             assert!(!forged.verify::<Sha256>(&c, &root));
 
@@ -3015,7 +3015,7 @@ pub mod tests {
             assert_eq!(reopened.get(&k).await.unwrap(), expected);
 
             // key_value_proof: RangeProof::new must also handle pruned chunk 0.
-            let (value, _proof) = reopened.key_value_proof(&k).await.unwrap();
+            let (_proof, value) = reopened.key_value_proof(&k).await.unwrap();
             assert_eq!(Some(value), expected);
 
             reopened.destroy().await.unwrap();
@@ -3272,7 +3272,7 @@ pub mod tests {
                 db = mmb_commit(db, [(key(1), Some(val(round)))]).await;
             }
 
-            let (value, proof) = db.key_value_proof(&k).await.unwrap();
+            let (proof, value) = db.key_value_proof(&k).await.unwrap();
             assert_eq!(value, val(60_000 + 199));
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
                 k,
@@ -3295,7 +3295,7 @@ pub mod tests {
 
             assert_eq!(reopened.root(), target_root);
 
-            let (value, proof) = reopened.key_value_proof(&k).await.unwrap();
+            let (proof, value) = reopened.key_value_proof(&k).await.unwrap();
             assert_eq!(value, val(60_000 + 199));
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
                 k,
@@ -3532,7 +3532,7 @@ pub mod tests {
                     "root mismatch after prune at round {round}"
                 );
 
-                let (value, proof) = db.key_value_proof(&k).await.unwrap();
+                let (proof, value) = db.key_value_proof(&k).await.unwrap();
                 assert_eq!(Some(value), expected);
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(k, value, &proof, &db.root()),
@@ -3560,7 +3560,7 @@ pub mod tests {
                     "value mismatch after reopen at round {round}"
                 );
 
-                let (value, proof) = db.key_value_proof(&k).await.unwrap();
+                let (proof, value) = db.key_value_proof(&k).await.unwrap();
                 assert_eq!(Some(value), expected);
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(k, value, &proof, &db.root()),
@@ -5198,7 +5198,7 @@ pub mod tests {
             let db = db.apply_batch(child).await.unwrap();
             let root = db.root();
             assert_eq!(root, speculative_root);
-            let (value, proof) = db.key_value_proof(&keys[0]).await.unwrap();
+            let (proof, value) = db.key_value_proof(&keys[0]).await.unwrap();
             assert_eq!(value, val(10));
             assert_eq!(proof.next_key, keys[1]);
             assert!(
@@ -5206,7 +5206,7 @@ pub mod tests {
                     keys[0], value, &root
                 )
             );
-            let (value, proof) = db.key_value_proof(&keys[1]).await.unwrap();
+            let (proof, value) = db.key_value_proof(&keys[1]).await.unwrap();
             assert_eq!(value, val(11));
             assert_eq!(proof.next_key, keys[0]);
             assert!(
@@ -5463,10 +5463,10 @@ pub mod tests {
                 async fn assert_proves(&self, live: &BTreeMap<Digest, Digest>, evicted: &[Digest]) {
                     let root = self.root();
                     for (key, value) in live {
-                        let (proven_value, proof) = self.key_value_proof(key).await.unwrap();
-                        assert_eq!(proven_value, *value);
+                        let (proof, proved_value) = self.key_value_proof(key).await.unwrap();
+                        assert_eq!(proved_value, *value);
                         assert!(
-                            Self::verify_key_value_proof(*key, proven_value, &proof, &root),
+                            Self::verify_key_value_proof(*key, proved_value, &proof, &root),
                             "{key} fails to prove its value",
                         );
                     }
@@ -6216,8 +6216,8 @@ pub mod tests {
     {
         async fn assert_link(&self, key: Digest, value: Digest, next: Digest) {
             assert_eq!(self.get(&key).await.unwrap(), Some(value), "{key} diverged");
-            let (proven_value, proof) = self.key_value_proof(&key).await.unwrap();
-            assert_eq!(proven_value, value, "{key} diverged");
+            let (proof, proved_value) = self.key_value_proof(&key).await.unwrap();
+            assert_eq!(proved_value, value, "{key} diverged");
             assert_eq!(proof.next_key, next, "{key} links to the wrong key");
             assert!(
                 proof.verify::<Sha256, V>(key, value, &self.root()),

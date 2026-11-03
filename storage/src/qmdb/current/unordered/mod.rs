@@ -194,7 +194,7 @@ pub mod tests {
             let db = db.apply_batch(merkleized).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
-            let (proved_value, proof) = db.key_value_proof(&k).await.unwrap();
+            let (proof, proved_value) = db.key_value_proof(&k).await.unwrap();
             assert_eq!(proved_value, v1);
 
             // Proof should be verifiable against current root.
@@ -228,7 +228,7 @@ pub mod tests {
             ));
 
             // But the new value should verify against a new proof.
-            let (proved_value, proof) = db.key_value_proof(&k).await.unwrap();
+            let (proof, proved_value) = db.key_value_proof(&k).await.unwrap();
             assert_eq!(proved_value, v2);
             assert!(TestDb::<F, C, V>::verify_key_value_proof(
                 k,
@@ -437,7 +437,7 @@ pub mod tests {
                     }
                 };
 
-                let (proved_value, proof) = db.key_value_proof(&key).await.unwrap();
+                let (proof, proved_value) = db.key_value_proof(&key).await.unwrap();
                 assert_eq!(proved_value, value);
                 // Proof should validate against the current value and correct root.
                 assert!(TestDb::<F, C, V>::verify_key_value_proof(
@@ -507,7 +507,7 @@ pub mod tests {
                 let root = db.root();
 
                 // Create a proof for the current value of k.
-                let (proved_value, proof) = db.key_value_proof(&k).await.unwrap();
+                let (proof, proved_value) = db.key_value_proof(&k).await.unwrap();
                 assert_eq!(proved_value, v);
                 assert!(
                     TestDb::<F, C, V>::verify_key_value_proof(k, proved_value, &proof, &root),

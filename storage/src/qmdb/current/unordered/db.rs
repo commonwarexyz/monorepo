@@ -73,7 +73,8 @@ impl<
 where
     Operation<F, K, V>: Codec,
 {
-    /// Return the current value of `key` and a proof authenticating it against [`Self::root`].
+    /// Return a proof authenticating the current value of `key` against [`Self::root`], and that
+    /// value.
     ///
     /// # Errors
     ///
@@ -81,12 +82,12 @@ where
     pub async fn key_value_proof(
         &self,
         key: &K,
-    ) -> Result<(V::Value, KeyValueProof<F, H::Digest, N>), Error<F>> {
+    ) -> Result<(KeyValueProof<F, H::Digest, N>, V::Value), Error<F>> {
         let op_loc = self.any.get_with_loc(key).await?;
         let Some((value, loc)) = op_loc else {
             return Err(Error::<F>::KeyNotFound);
         };
         let proof = self.operation_proof(loc).await?;
-        Ok((value, proof))
+        Ok((proof, value))
     }
 }
