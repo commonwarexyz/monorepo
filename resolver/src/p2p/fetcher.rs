@@ -233,7 +233,8 @@ where
     /// Number of dispatched requests that left each key unresolved, saturating at `u32::MAX`.
     retries: AHashMap<Key, u32>,
 
-    /// Per-peer throughput score expressed as a sampling weight.
+    /// Sampling weight from the throughput score of each peer in the latest tracked peer set.
+    /// A peer appears once its performance is recorded after it joins the set.
     performance: GaugeFamily<Peer<P>>,
 
     /// Status of request creation attempts (Success when eligible peers exist, Dropped otherwise)
@@ -594,18 +595,26 @@ where
         peers.sort_unstable();
         peers.dedup();
 
-        // Retained peers keep their throughput history. New or rejoining peers start
-        // without observations, at the minimum weight.
-        let peers: Vec<_> = peers
+        // One pass over both sorted rosters classifies every peer. Retained peers keep their
+        // throughput history. New or rejoining peers start without observations, at the
+        // minimum weight. Departed peers leave the performance metric.
+        let mut previous = mem::take(&mut self.participants.peers)
             .into_iter()
-            .map(|peer| {
-                let score = self
-                    .participants
-                    .index(&peer)
-                    .map_or_else(Score::default, |index| self.participants.peers[index].1);
-                (peer, score)
-            })
-            .collect();
+            .peekable();
+        let mut merged = Vec::with_capacity(peers.len());
+        for peer in peers {
+            while let Some((departed, _)) = previous.next_if(|(p, _)| *p < peer) {
+                self.performance.remove_by(&departed);
+            }
+            let score = previous
+                .next_if(|(p, _)| *p == peer)
+                .map_or_else(Score::default, |(_, score)| score);
+            merged.push((peer, score));
+        }
+        for (departed, _) in previous {
+            self.performance.remove_by(&departed);
+        }
+        let peers = merged;
 
         // Local and blocked peers retain their roster entries but are excluded from
         // both sampling modes. Unblocking can restore their current weights in place.
@@ -718,9 +727,10 @@ mod tests {
     use commonware_runtime::{
         IoBufs, KeyedRateLimiter, Quota, Runner as _, Supervisor as _,
         deterministic::{self, Context, Runner},
+        telemetry::metrics::metric_samples,
     };
     use commonware_utils::{NZDuration, NZU32, sync::RwLock};
-    use std::{slice, sync::Arc, time::Duration};
+    use std::{collections::BTreeMap, slice, sync::Arc, time::Duration};
 
     #[derive(Debug)]
     struct CheckedSender<'a, S: UnlimitedSender> {
@@ -1495,6 +1505,74 @@ mod tests {
             fetcher.set_blocked([peer1.clone()]);
             assert_eq!(fetcher.get_eligible_peers(&MockKey(1)), vec![peer2]);
             assert!(fetcher.participants.index(&peer1).is_some());
+        });
+    }
+
+    /// The performance metric covers only peers of the latest tracked set.
+    #[test]
+    fn test_reconcile_prunes_departed_peer_performance() {
+        Runner::default().start(|context| async move {
+            let mut fetcher = create_test_fetcher(context.child("fetcher"));
+
+            // Key order places one departure on each side of the retained peer, so both
+            // removal paths of the roster walk run.
+            let mut peers = [1, 2, 3].map(|seed| PrivateKey::from_seed(seed).public_key());
+            peers.sort();
+            let [low, mid, high] = peers;
+            let label = |peer: &PublicKey| format!("peer=\"{peer}\"");
+            let exported = || -> BTreeMap<String, u64> {
+                metric_samples(&context.encode(), "fetcher_peer_performance")
+                    .map(|(labels, value)| (labels.to_string(), value.parse().unwrap()))
+                    .collect()
+            };
+            let expected = |fetcher: &Fetcher<_, _, _>, peers: &[&PublicKey]| {
+                peers
+                    .iter()
+                    .map(|peer| (label(peer), peer_weight(fetcher, peer)))
+                    .collect::<BTreeMap<_, _>>()
+            };
+
+            // Observed peers are exported with their current weights.
+            fetcher.reconcile(&[low.clone(), mid.clone(), high.clone()]);
+            fetcher.record_response(&low, Duration::from_millis(10), 1024);
+            fetcher.record_response(&mid, Duration::from_millis(20), 1024);
+            fetcher.record_response(&high, Duration::from_millis(30), 1024);
+            assert_eq!(exported(), expected(&fetcher, &[&low, &mid, &high]));
+            let retained = peer_weight(&fetcher, &mid);
+
+            // Send `low` a request that stays outstanding after it departs.
+            let mut sender = WrappedSender::new(SuccessMockSender::default());
+            fetcher.add_targets(MockKey(1), [low.clone()]);
+            fetcher.add_ready(MockKey(1));
+            let (id, peer) = send_next(&mut fetcher, &mut sender);
+            assert_eq!(peer, low);
+
+            // Departure removes the gauges on both sides of the retained peer. The retained
+            // peer keeps its weight through this and an identical reconcile.
+            fetcher.reconcile(slice::from_ref(&mid));
+            let surviving = expected(&fetcher, &[&mid]);
+            assert_eq!(peer_weight(&fetcher, &mid), retained);
+            assert_eq!(exported(), surviving);
+            fetcher.reconcile(slice::from_ref(&mid));
+            assert_eq!(peer_weight(&fetcher, &mid), retained);
+            assert_eq!(exported(), surviving);
+
+            // A late response from a departed peer does not revive its gauge.
+            assert!(fetcher.pop_response(id, &low).is_some());
+            fetcher.record_response(&low, Duration::from_millis(10), 1024);
+            assert_eq!(exported(), surviving);
+
+            // A rejoining peer starts without observations and is exported once observed.
+            fetcher.reconcile(&[low.clone(), mid.clone()]);
+            assert_eq!(peer_weight(&fetcher, &low), Score::default().weight());
+            assert_eq!(exported(), surviving);
+            fetcher.record_response(&low, Duration::from_millis(10), 1024);
+            assert_eq!(exported(), expected(&fetcher, &[&low, &mid]));
+
+            // An empty roster removes every gauge.
+            fetcher.reconcile(&[]);
+            assert!(exported().is_empty());
+            assert_cached_weights(&fetcher);
         });
     }
 
