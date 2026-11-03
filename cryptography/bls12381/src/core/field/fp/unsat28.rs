@@ -187,15 +187,18 @@ impl<S: Simd> Unsat28<S> {
     #[inline(always)]
     pub fn splat(simd: S, element: &[u8; BYTES]) -> Self {
         let limbs = limbs_from_words(words_from_bytes(element));
-        Self::raw(simd, &[limbs; MAX_LANES], 10).to_lanes(simd)
+        Self::constant(simd, &limbs, 10).to_lanes(simd)
     }
 
     /// Loads up to `S::U32_LANES` elements, one per lane, filling the remaining lanes with `fill`.
     #[inline(always)]
     pub fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
-        let mut lanes = [limbs_from_words(words_from_bytes(fill)); MAX_LANES];
-        for (lane, element) in lanes.iter_mut().zip(elements) {
-            *lane = limbs_from_words(words_from_bytes(element));
+        let fill = limbs_from_words(words_from_bytes(fill));
+        let mut lanes = [[0; LIMBS]; MAX_LANES];
+        for (i, lane) in lanes.iter_mut().enumerate().take(S::U32_LANES) {
+            *lane = elements
+                .get(i)
+                .map_or(fill, |element| limbs_from_words(words_from_bytes(element)));
         }
         // Integers below 2^384 are below 10p.
         Self::raw(simd, &lanes, 10).to_lanes(simd)
@@ -206,27 +209,27 @@ impl<S: Simd> Unsat28<S> {
     pub fn store(self, simd: S, elements: &mut [[u8; BYTES]]) {
         let canonical = self
             .carry(simd)
-            .mul(simd, Self::raw(simd, &[FROM_LANES; MAX_LANES], 1))
+            .mul(simd, Self::constant(simd, &FROM_LANES, 1))
             .subtract_modulus(simd);
-        let lanes = canonical.store_raw(simd);
-        for (element, limbs) in elements.iter_mut().zip(lanes).take(S::U32_LANES) {
+        let rows = canonical.store_raw(simd);
+        for (lane, element) in elements.iter_mut().enumerate().take(S::U32_LANES) {
+            let limbs = core::array::from_fn(|i| rows[i][lane]);
             *element = bytes_from_words(&words_from_limbs(limbs));
         }
     }
 
-    /// Transposes carried per-lane limbs, bounded by `bound * p`, into limb rows.
+    /// Transposes the carried limbs of the first `S::U32_LANES` lanes, bounded by `bound * p`,
+    /// into limb rows.
     #[inline(always)]
     fn raw(simd: S, lanes: &[[u32; LIMBS]; MAX_LANES], bound: u64) -> Self {
         const { assert!(Self::HALVES > 0) };
-        let mut rows = [[0; MAX_LANES]; LIMBS];
-        for (lane, limbs) in lanes.iter().enumerate() {
-            for (row, limb) in rows.iter_mut().zip(limbs) {
-                row[lane] = *limb;
-            }
-        }
         let mut limbs = [simd.u32_splat(0); LIMBS];
-        for (limb, row) in limbs.iter_mut().zip(&rows) {
-            *limb = simd.u32_load(row);
+        for (i, limb) in limbs.iter_mut().enumerate() {
+            let mut row = [0; MAX_LANES];
+            for (value, lane) in row.iter_mut().zip(lanes).take(S::U32_LANES) {
+                *value = lane[i];
+            }
+            *limb = simd.u32_load(&row);
         }
         Self {
             limbs,
@@ -235,18 +238,28 @@ impl<S: Simd> Unsat28<S> {
         }
     }
 
-    /// Returns each lane's limbs, without any conversion.
+    /// Returns every lane set to the carried `limbs`, bounded by `bound * p`.
     #[inline(always)]
-    fn store_raw(self, simd: S) -> [[u32; LIMBS]; MAX_LANES] {
-        let mut lanes = [[0; LIMBS]; MAX_LANES];
-        for (i, row) in self.limbs.into_iter().enumerate() {
-            let mut values = [0; MAX_LANES];
-            simd.u32_store(row, &mut values);
-            for (lane, value) in lanes.iter_mut().zip(values) {
-                lane[i] = value;
-            }
+    fn constant(simd: S, limbs: &[u32; LIMBS], bound: u64) -> Self {
+        let mut rows = [simd.u32_splat(0); LIMBS];
+        for (row, limb) in rows.iter_mut().zip(limbs) {
+            *row = simd.u32_splat(*limb);
         }
-        lanes
+        Self {
+            limbs: rows,
+            bound: DebugCounter::new(bound),
+            limb_bound: DebugCounter::new(1),
+        }
+    }
+
+    /// Returns the limb rows, without any conversion. Lanes beyond `S::U32_LANES` are zero.
+    #[inline(always)]
+    fn store_raw(self, simd: S) -> [[u32; MAX_LANES]; LIMBS] {
+        let mut rows = [[0; MAX_LANES]; LIMBS];
+        for (row, limb) in rows.iter_mut().zip(self.limbs) {
+            simd.u32_store(limb, row);
+        }
+        rows
     }
 
     /// Loads per-lane limbs in this module's representation, bounded by `bound * p`.
@@ -261,7 +274,7 @@ impl<S: Simd> Unsat28<S> {
     /// Converts an integer `a` into this module's Montgomery form `a * 2^392`.
     #[inline(always)]
     fn to_lanes(self, simd: S) -> Self {
-        self.mul(simd, Self::raw(simd, &[TO_LANES; MAX_LANES], 1))
+        self.mul(simd, Self::constant(simd, &TO_LANES, 1))
     }
 
     /// Returns `self + rhs`, without carrying.
@@ -583,7 +596,7 @@ impl<S: Simd> Field<S> for Unsat28<S> {
 
     #[inline(always)]
     fn neg<const K: u64>(self, simd: S) -> Self {
-       self.neg::<K>(simd)
+        self.neg::<K>(simd)
     }
 
     #[inline(always)]
@@ -646,9 +659,7 @@ impl<S: Simd> Field<S> for Unsat28<S> {
     /// Carries, then multiplies by one in Montgomery form, which is below `p`.
     #[inline(always)]
     fn reduce_tight(simd: S, product: Self::Product) -> Self {
-        product
-            .carry(simd)
-            .mul(simd, Self::raw(simd, &[ONE; MAX_LANES], 1))
+        product.carry(simd).mul(simd, Self::constant(simd, &ONE, 1))
     }
 }
 
