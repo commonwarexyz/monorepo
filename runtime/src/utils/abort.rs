@@ -220,20 +220,23 @@ impl<F, const TASK: bool> Abortable<F, TASK> {
     /// which an executor may represent differently while it reuses the original's addresses.
     fn register(&self, waker: &Waker) {
         if TASK {
-            let registered = &self.shared.registered;
             // Identify the waker by the two addresses `Waker::will_wake` compares. They are only
             // compared, never dereferenced.
+            let registered = &self.shared.registered;
             let data = waker.data().addr();
             let vtable = std::ptr::from_ref(waker.vtable()).addr();
+
             if registered.data.load(Ordering::Relaxed) == data
                 && registered.vtable.load(Ordering::Relaxed) == vtable
             {
                 return;
             }
+
             // Remember this waker so the next poll with it skips the registration below.
             registered.data.store(data, Ordering::Relaxed);
             registered.vtable.store(vtable, Ordering::Relaxed);
         }
+
         register(&self.shared.waker, waker);
     }
 }
@@ -270,7 +273,6 @@ impl<F: Future, const TASK: bool> Future for Abortable<F, TASK> {
 #[cfg(all(test, not(feature = "loom")))]
 #[commonware_macros::test_group("miri")]
 mod tests {
-    //! Unit tests of the abort protocol. They need no runtime, so they also run under Miri.
     use super::*;
     use commonware_utils::sync::Mutex;
     use futures::{future, task::ArcWake};
@@ -557,8 +559,6 @@ mod tests {
 
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
-    //! Models the abort protocol: an abort racing a poll that leaves the task pending must
-    //! either be observed by that poll or wake the waker it registered (the latest one).
     use super::*;
     use loom::{sync::atomic::AtomicUsize, thread};
     use std::task::{RawWaker, RawWakerVTable};
