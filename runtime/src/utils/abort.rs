@@ -7,20 +7,49 @@
 //! already completed keeps its output.
 //!
 //! Each poll of the wrapper checks the flag, polls the future and, if the future is pending,
-//! registers the poll's waker in the slot and checks the flag again. The second check catches an
-//! abort that landed between the first check and the registration, whose wake could not reach the
-//! newly registered waker.
+//! registers the poll's waker in the slot and checks the flag again:
+//!
+//! ```text
+//! poll of the wrapper                   shared state            AbortHandle::abort
+//! -------------------                   ------------            ------------------
+//! 1. flag set? ------------- load ----> [ aborted ] <---- store -- a. set the flag
+//! 2. poll the future: pending               |
+//! 3. register the waker ---- store ---> [ waker   ] <---- take --- b. wake the waker
+//! 4. flag set? ------------- load ----> [ aborted ]
+//! -> Pending, or Ready(Err(Aborted)) at 1 or 4
+//! ```
+//!
+//! An abort that lands between 1 and 3 may find the slot empty and wake nothing, so 4 checks
+//! again, and registering orders that check after the abort. An abort that lands after 3 wakes
+//! the registered waker, and the poll it causes sees the flag at 1.
 //!
 //! Executors usually poll a task with the same waker every time, and registering it again would
 //! only repeat atomic read-modify-writes on the shared allocation. The wrapper of a runtime task
 //! ([Abortable::task]) therefore records the data and vtable addresses of the waker it last
-//! registered and skips registration while they match, so its steady-state pending polls only
-//! read the shared state. This relies on the runtime polling the task's future only with wakers
-//! of that task. The deterministic runtime builds a new waker for every poll, so its tasks keep
-//! registering on every pending poll. Other wrappers ([Abortable::new], used by completion
-//! handles) may be polled by any executor, and one may reuse a dropped waker's addresses for
-//! another task, so they register on every pending poll.
+//! registered and skips step 3 while they match, so its steady-state pending polls only read the
+//! shared state:
 //!
+//! ```text
+//! task wrapper, a later pending poll           shared state
+//! ----------------------------------           ------------
+//! 3. same addresses as last time? -- load ---> [ registered ]
+//!    yes: skip, the slot still holds           [ waker      ]  a clone that wakes this task
+//!    a waker of this task                      [ aborted    ]
+//! ```
+//!
+//! This relies on the runtime polling the task's future only with wakers of that task, so the
+//! recorded addresses keep naming the task for as long as the registration stands. The
+//! deterministic runtime builds a new waker for every poll, so its tasks keep registering on
+//! every pending poll. Other wrappers ([Abortable::new], used by completion handles) may be
+//! polled by any task, and a waker's addresses name its task only while that waker lives:
+//!
+//! ```text
+//! task A polls with waker S (addresses x) ---> [ waker ]  a clone that wakes A
+//! S is dropped, and an executor may hand task B a waker S' with the same addresses x
+//! task B polls with S': x == x, yet the clone in the slot still wakes A
+//! ```
+//!
+//! So those wrappers register on every pending poll, and the slot compares the clone it holds.
 //! Either wrapper adds one pointer to the future it wraps.
 
 use std::{
