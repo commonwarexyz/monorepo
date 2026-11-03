@@ -7,6 +7,10 @@
 //!
 //! [`a_late_validator_state_syncs_to_a_certified_checkpoint`] is the end-to-end state sync example.
 //! Its documentation lists each step it shows.
+//!
+//! [`a_late_validator_resumes_state_sync_after_a_crash`] crashes the whole runtime while a late
+//! validator state-syncs, restarts every validator on the storage the crash left, and checks that
+//! the late validator resumes the sync toward the newest target it persisted.
 
 use super::{
     checkpoint_recovery::{Archive, archive as checkpoint_archive},
@@ -17,7 +21,7 @@ use super::{
 };
 use crate::{
     executor::{
-        self, Checkpoints, Executor, Halt, StoreConfig,
+        self, Checkpoints, Execute, Executor, Halt, StoreConfig, Update,
         probe::{self, Local, Probe},
     },
     stateful::{
@@ -27,7 +31,7 @@ use crate::{
     },
 };
 use commonware_broadcast::buffered;
-use commonware_codec::Decode as _;
+use commonware_codec::{Decode as _, Encode as _};
 use commonware_consensus::{
     Application, Epochable as _, Heightable as _,
     aggregation::{
@@ -52,6 +56,7 @@ use commonware_cryptography::{
     Digested, Digestible as _, Hasher as _, Sha256, bls12381::primitives::variant::MinPk,
     certificate::Verifier as _, ed25519, sha256::Digest,
 };
+use commonware_macros::select;
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_resolver::p2p as resolver;
@@ -72,16 +77,18 @@ use commonware_storage::{
 use commonware_utils::{
     NZDuration, NZU32, NZU64, NZUsize,
     acknowledgement::Exact,
-    channel::{mpsc, oneshot},
+    channel::{mpsc, oneshot, ring},
     probability,
     sync::Mutex,
 };
 use std::{
     collections::HashMap,
+    future,
     num::{NonZeroU64, NonZeroUsize},
+    pin::pin,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -117,6 +124,7 @@ type Input = TransactionBlock<Sha256, MockBody>;
 type Marshal = marshal::Mailbox<Sha256, MinPk, MockBody>;
 type Scheme = CheckpointScheme<ed25519::PublicKey, MinPk>;
 type Chain = executor::Mailbox<State>;
+type StatefulMailbox = ordered::Mailbox<deterministic::Context, Tally<Input>, Sequential>;
 type Resolver = qmdb_resolver::Mailbox<Qmdb<deterministic::Context>, mmr::Family, Op, Digest>;
 type Op = <Qmdb<deterministic::Context> as Source>::Op;
 type SyncResponse = Response<mmr::Family, Op, Digest>;
@@ -130,57 +138,89 @@ fn checkpoint_scope(committee: &Committee<MinPk>) -> (Epoch, Height, Height) {
     )
 }
 
-/// One injected corruption of a state sync response, and the sync engine's verdict on it.
+/// What the sync engine did with a request whose response was corrupted.
+#[derive(Clone, Debug)]
+struct Judged {
+    /// The request the corrupted response answered.
+    request: Request<mmr::Family>,
+    /// The sync engine's verdict on each response to the request, the corrupted one first.
+    verdicts: Vec<bool>,
+    /// Once the sync engine accepts a response to the request, whether that response encodes
+    /// exactly as the honest response did before it was corrupted.
+    accepted_original: Option<bool>,
+    /// Set if the sync engine abandoned the request before accepting a response to it, as it may
+    /// when it moves to a newer target.
+    abandoned: bool,
+}
+
+/// Corrupts state sync responses, one request at a time, and records what the sync engine did
+/// with each corrupted request.
 #[derive(Clone)]
 struct Corruption {
-    /// Set until a response is corrupted.
+    /// Set while the next response that updates a key should be corrupted.
     armed: Arc<AtomicBool>,
-    /// The sync engine's verdict on each corrupted response.
-    verdicts: Arc<Mutex<Vec<bool>>>,
+    /// Every corrupted request, in the order it was corrupted.
+    judged: Arc<Mutex<Vec<Judged>>>,
 }
 
 impl Corruption {
     fn new() -> Self {
         Self {
             armed: Arc::new(AtomicBool::new(true)),
-            verdicts: Arc::default(),
+            judged: Arc::default(),
         }
     }
 
-    /// Records the sync engine's verdict on a corrupted response, then passes it, and the
-    /// verdicts on every later candidate for the same request, to the resolver's `feedback`.
+    /// Records the sync engine's verdict on the corrupted response to `request`, and on every
+    /// later response the resolver fetches for the same request, and passes each verdict to the
+    /// resolver's `feedback`. `original` is the encoding of the response before it was corrupted.
+    ///
+    /// If the engine abandons the request before accepting a response to it, the next response
+    /// that updates a key is corrupted instead.
     fn judge(
         &self,
         context: deterministic::Context,
+        request: Request<mmr::Family>,
+        original: Vec<u8>,
         feedback: Feedback<SyncResponse>,
     ) -> Feedback<SyncResponse> {
         let (verdict, mut judged) = oneshot::channel();
         let (candidates, next) = mpsc::channel(1);
         let corruption = self.clone();
+        let index = {
+            let mut all = self.judged.lock();
+            all.push(Judged {
+                request,
+                verdicts: Vec::new(),
+                accepted_original: None,
+                abandoned: false,
+            });
+            all.len() - 1
+        };
         context.spawn(move |_| async move {
             let mut feedback = feedback;
-            let mut corrupted = true;
+            // The encoding of the response being judged, or `None` for the corrupted one.
+            let mut candidate: Option<Vec<u8>> = None;
             loop {
                 let Ok(valid) = judged.await else {
-                    // The engine dropped the corrupted response unjudged, so corrupt another.
-                    if corrupted {
-                        corruption.armed.store(true, Ordering::SeqCst);
-                    }
+                    corruption.abandon(index);
                     return;
                 };
-                if corrupted {
-                    corruption.verdicts.lock().push(valid);
-                    corrupted = false;
-                }
+                corruption.judged.lock()[index].verdicts.push(valid);
                 if valid {
+                    let matches = candidate.as_ref() == Some(&original);
+                    corruption.judged.lock()[index].accepted_original = Some(matches);
                     feedback.accept();
                     return;
                 }
                 let Some((response, next_feedback)) = feedback.reject().await else {
+                    corruption.abandon(index);
                     return;
                 };
+                candidate = Some(response.encode().to_vec());
                 let (verdict, next_judged) = oneshot::channel();
                 if candidates.send((response, verdict)).await.is_err() {
+                    corruption.abandon(index);
                     return;
                 }
                 feedback = next_feedback;
@@ -189,19 +229,231 @@ impl Corruption {
         });
         Feedback::new(verdict, next)
     }
+
+    /// Records that the engine abandoned the corrupted request at `index`, and corrupts the next
+    /// response that updates a key.
+    fn abandon(&self, index: usize) {
+        self.judged.lock()[index].abandoned = true;
+        self.armed.store(true, Ordering::SeqCst);
+    }
 }
 
-/// The QMDB resolver of a validator, which may corrupt one response it fetched from a peer.
+/// Where a joining validator's process is cut while it state-syncs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cut {
+    /// After the sync engines received one response and the executor persisted a target above
+    /// its first, with every later response withheld so that the sync cannot complete.
+    MidSync,
+    /// After the application returned the block its state reached, which the executor has not
+    /// installed as its base, and the executor persisted a target above that block.
+    Synced,
+}
+
+/// Observes the state sync a joining validator's executor runs, and may hold it at a [`Cut`].
+#[derive(Clone)]
+struct SyncWatch {
+    cut: Option<Cut>,
+    /// Heights of the targets the executor offered the sync: the first target, then each update.
+    offered: Arc<Mutex<Vec<u64>>>,
+    /// Requests admitted for serving. Only [`Cut::MidSync`] limits it, to one.
+    admitted: Arc<AtomicUsize>,
+    /// Responses the resolver returned to the sync engines.
+    received: Arc<AtomicUsize>,
+    /// The block the application's state reached.
+    reached: Arc<Mutex<Option<Digested<State>>>>,
+    /// Set once the cut is reached.
+    at_cut: Arc<AtomicBool>,
+}
+
+impl SyncWatch {
+    fn new(cut: Option<Cut>) -> Self {
+        Self {
+            cut,
+            offered: Arc::default(),
+            admitted: Arc::default(),
+            received: Arc::default(),
+            reached: Arc::default(),
+            at_cut: Arc::default(),
+        }
+    }
+
+    /// Admits a request for serving, or returns `None` if [`Cut::MidSync`] withholds it.
+    fn admit(&self) -> Option<Admission> {
+        if self.cut != Some(Cut::MidSync) {
+            return Some(Admission(None));
+        }
+        self.admitted
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| Admission(Some(Arc::clone(&self.admitted))))
+    }
+
+    /// Records that the resolver returned a response to an admitted request.
+    fn served(&self, admission: Admission) {
+        admission.keep();
+        self.received.fetch_add(1, Ordering::SeqCst);
+        self.check_mid_sync();
+    }
+
+    /// Records that the executor offered the sync a target at `height`. The executor persists
+    /// every target before it offers it.
+    fn offer(&self, height: u64) {
+        self.offered.lock().push(height);
+        self.check_mid_sync();
+    }
+
+    fn check_mid_sync(&self) {
+        if self.cut == Some(Cut::MidSync)
+            && self.received.load(Ordering::SeqCst) > 0
+            && self.offered.lock().len() > 1
+        {
+            self.at_cut.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Returns whether the cut was reached.
+    fn cut_reached(&self) -> bool {
+        self.at_cut.load(Ordering::SeqCst)
+    }
+}
+
+/// A request admitted for serving. Unless the resolver returns a response to it, dropping it
+/// releases the admission, so a failed or cancelled request does not hold it.
+struct Admission(Option<Arc<AtomicUsize>>);
+
+impl Admission {
+    /// Keeps the admission taken, so no later request is admitted.
+    fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for Admission {
+    fn drop(&mut self) {
+        if let Some(admitted) = self.0.take() {
+            admitted.store(0, Ordering::SeqCst);
+        }
+    }
+}
+
+/// The executor's application for every validator: the ordered mode, with its state sync
+/// observed by a [`SyncWatch`]. Every call passes through to the ordered mode, and only a watch
+/// with a [`Cut`] changes what the executor sees.
+#[derive(Clone)]
+struct Watched {
+    inner: StatefulMailbox,
+    watch: SyncWatch,
+}
+
+impl Execute<deterministic::Context> for Watched {
+    type Input = Input;
+    type Block = State;
+
+    async fn genesis(&mut self) -> State {
+        self.inner.genesis().await
+    }
+
+    fn resume(&mut self, tip: Digested<State>) {
+        self.inner.resume(tip);
+    }
+
+    fn certified(&mut self, block: Digested<State>) {
+        self.inner.certified(block);
+    }
+
+    /// Passes the first target and every update to the ordered mode, recording their heights,
+    /// then records the block the ordered mode reached.
+    ///
+    /// At [`Cut::Synced`], the reached block is never returned: the executor never installs it
+    /// as its base. The cut is reached once the executor has offered, and so persisted, a target
+    /// above that block.
+    async fn sync(
+        &mut self,
+        target: Digested<State>,
+        updates: ring::Receiver<Update<State>>,
+    ) -> Digested<State> {
+        let watch = self.watch.clone();
+        watch.offer(target.height().get());
+        let (forward, forwarded) = ring::channel(NZUsize!(1));
+        let mut updates = Some(updates);
+        let reached = {
+            let mut sync = pin!(self.inner.sync(target, forwarded));
+            loop {
+                let reached = select! {
+                    reached = &mut sync => Some(reached),
+                    update = next_offer(&mut updates) => {
+                        match update {
+                            Some(update) => {
+                                watch.offer(update.block.height().get());
+                                forward.send_lossy(update);
+                            }
+                            None => updates = None,
+                        }
+                        None
+                    },
+                };
+                if let Some(reached) = reached {
+                    break reached;
+                }
+            }
+        };
+        *watch.reached.lock() = Some(reached.clone());
+        if watch.cut != Some(Cut::Synced) {
+            return reached;
+        }
+        let height = reached.height().get();
+        let mut above = watch.offered.lock().iter().any(|&h| h > height);
+        while !above {
+            let Some(update) = next_offer(&mut updates).await else {
+                break;
+            };
+            let offered = update.block.height().get();
+            watch.offer(offered);
+            above = offered > height;
+        }
+        if above {
+            watch.at_cut.store(true, Ordering::SeqCst);
+        }
+        future::pending().await
+    }
+
+    async fn execute(
+        self,
+        context: (deterministic::Context, executor::Context<Digest>),
+        ancestry: impl Ancestry<State>,
+        input: Digested<Input>,
+    ) -> Digested<State> {
+        self.inner.execute(context, ancestry, input).await
+    }
+
+    async fn prepare(self, context: deterministic::Context, input: Digested<Input>) {
+        self.inner.prepare(context, input).await
+    }
+}
+
+/// Waits for the next target the executor offers, if it still offers any.
+async fn next_offer(updates: &mut Option<ring::Receiver<Update<State>>>) -> Option<Update<State>> {
+    match updates {
+        Some(updates) => updates.recv().await,
+        None => future::pending().await,
+    }
+}
+
+/// The QMDB resolver of a validator, which may corrupt responses it fetched from a peer, and may
+/// withhold responses at a [`Cut`].
 ///
-/// A corrupted response sets a different value for a key it updates. It is still well formed and
-/// matches its request, so only its proof against the state root of the certified block can
-/// show that it is wrong. Once the sync engine rejects it, the resolver blocks the peer that
-/// served it, as it would block a peer that corrupted it, and fetches it from another peer.
+/// The corruption happens after an honest peer's response arrives, so it stands in for a peer
+/// that served a wrong response; no peer here encodes one. A corrupted response sets a different
+/// value for a key it updates. It is still well formed and matches its request, so only its proof
+/// against the state root of the certified block can show that it is wrong. Once the sync engine
+/// rejects it, the resolver blocks the peer that served it and fetches the same request from
+/// another peer.
 #[derive(Clone)]
 struct Snapshots {
     context: Arc<deterministic::Context>,
     resolver: Resolver,
     corruption: Option<Corruption>,
+    watch: Option<SyncWatch>,
 }
 
 impl Source for Snapshots {
@@ -211,18 +463,33 @@ impl Source for Snapshots {
     type Error = <Resolver as Source>::Error;
 
     async fn serve(&self, request: Request<mmr::Family>) -> source::Result<Self> {
+        let admission = match &self.watch {
+            Some(watch) => match watch.admit() {
+                Some(admission) => Some(admission),
+                // The cut withholds every later response, so the sync cannot complete.
+                None => return future::pending().await,
+            },
+            None => None,
+        };
         let (mut response, feedback) = self.resolver.serve(request).await?;
+        if let (Some(watch), Some(admission)) = (&self.watch, admission) {
+            watch.served(admission);
+        }
         let Some(corruption) = &self.corruption else {
             return Ok((response, feedback));
         };
         let Some(feedback) = feedback else {
             return Ok((response, None));
         };
-        if !corruption.armed.load(Ordering::SeqCst) || !corrupt(&mut response) {
+        if !corruption.armed.load(Ordering::SeqCst) {
+            return Ok((response, Some(feedback)));
+        }
+        let original = response.encode().to_vec();
+        if !corrupt(&mut response) {
             return Ok((response, Some(feedback)));
         }
         corruption.armed.store(false, Ordering::SeqCst);
-        let feedback = corruption.judge(self.context.child("verdict"), feedback);
+        let feedback = corruption.judge(self.context.child("verdict"), request, original, feedback);
         Ok((response, Some(feedback)))
     }
 }
@@ -321,7 +588,7 @@ fn assert_prepared_ahead(tally: &Tally<Input>) {
 struct Validator {
     chain: Chain,
     marshal: Marshal,
-    stateful: ordered::Mailbox<deterministic::Context, Tally<Input>, Sequential>,
+    stateful: StatefulMailbox,
     checkpoints: Checkpoints<Scheme, State>,
     archive: Archive,
     tally: Tally<Input>,
@@ -384,12 +651,14 @@ impl Cluster {
 
     /// Starts validator `index`. A joining validator starts its executor from the newest
     /// checkpoint its peers certified, and its marshal from a floor they serve. With a
-    /// `corruption`, the validator corrupts one state sync response it fetches.
+    /// `corruption`, the validator corrupts state sync responses it fetches. With a `watch`, the
+    /// executor's state sync is observed, and may be held at a cut.
     async fn start(
         &self,
         index: usize,
         joining: bool,
         corruption: Option<Corruption>,
+        watch: Option<SyncWatch>,
     ) -> Validator {
         let context = self
             .context
@@ -491,6 +760,7 @@ impl Cluster {
             context: Arc::new(context.child("snapshots")),
             resolver: resolvers,
             corruption,
+            watch: watch.clone(),
         };
         let tally = Tally::default();
         let (stateful, stateful_mailbox) = ordered::Stateful::init(
@@ -519,7 +789,10 @@ impl Cluster {
             Executor::<_, _, Marshal, _, TwoCap, Exact, Sequential>::init(
                 context.child("executor"),
                 executor::Config {
-                    execute: stateful_mailbox.clone(),
+                    execute: Watched {
+                        inner: stateful_mailbox.clone(),
+                        watch: watch.unwrap_or_else(|| SyncWatch::new(None)),
+                    },
                     consumer: stateful_mailbox.clone(),
                     ack_window: ACK_WINDOW,
                     start: if joining {
@@ -712,7 +985,7 @@ fn validators_execute_certify_and_prune_one_chain() {
         let committee = Cluster::new(context.child("committee")).await;
         let mut validators = Vec::new();
         for index in 0..VALIDATORS as usize {
-            validators.push(committee.start(index, false, None).await);
+            validators.push(committee.start(index, false, None, None).await);
         }
         // The run is long enough for pruning to reach blocks the engine still verifies: pruning
         // those would stall the chain.
@@ -779,8 +1052,10 @@ fn validators_execute_certify_and_prune_one_chain() {
 ///    the peers and accepts a checkpoint only if the certificate verifies under the committee's
 ///    checkpoint key and scope, and the block it names is the one the certificate certifies.
 /// 3. The executor offers that block to the application, which fetches the state the block
-///    commits to from the peers. One fetched response is corrupted. The sync engine checks it
-///    against the certified state root, rejects it, and completes state sync.
+///    commits to from the peers. A fetched response is corrupted after it arrives. The sync
+///    engine checks it against the certified state root and rejects it, the resolver blocks the
+///    peer that served it, and another peer's response to the same request, which encodes as the
+///    response did before it was corrupted, is accepted. State sync then completes.
 /// 4. The late validator holds the chain only from the checkpoint it synced to, which is not the
 ///    first checkpoint. Its application hook receives no block at or below that checkpoint.
 /// 5. It then executes the inputs after the checkpoint and produces the same blocks, and so the
@@ -793,7 +1068,7 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
         let committee = Cluster::new(context.child("committee")).await;
         let mut validators = Vec::new();
         for index in 0..VALIDATORS as usize - 1 {
-            validators.push(committee.start(index, false, None).await);
+            validators.push(committee.start(index, false, None, None).await);
         }
         until_applied(&context, validators.iter().map(|v| &v.tally), 48).await;
 
@@ -821,17 +1096,26 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
         // later.
         let corruption = Corruption::new();
         let late = committee
-            .start(VALIDATORS as usize - 1, true, Some(corruption.clone()))
+            .start(
+                VALIDATORS as usize - 1,
+                true,
+                Some(corruption.clone()),
+                None,
+            )
             .await;
         until_applied(&context, [&late.tally], 1).await;
         let first = late.tally.applied.lock()[0];
         let base = first / INTERVAL.get() * INTERVAL.get() - 1;
+        // Read the base block now. Once the late validator executes past it and certifies newer
+        // checkpoints, pruning may remove it from the executed chain.
+        let base_block = late.chain.block_at(Height::new(base)).await;
         assert!(
             base > INTERVAL.get()
-                && late.chain.block_at(Height::new(base)).await.is_some()
+                && base_block.is_some()
                 && late.chain.block_at(Height::new(base - 1)).await.is_none(),
             "the late validator applied height {first}, not after a checkpoint"
         );
+        let base_block = base_block.unwrap();
 
         // The application hook received no block at or below the checkpoint.
         assert!(
@@ -842,12 +1126,48 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
                 .all(|&height| height > base)
         );
 
-        // The sync engine rejected the corrupted response before catch-up completed.
+        // The sync engine rejected every corrupted response it judged. For at least one corrupted
+        // request, it then accepted a response that the resolver fetched for the same request,
+        // and that response encodes exactly as the honest response did before it was corrupted.
+        // Any other corrupted request was abandoned, as when the sync moves to a newer target,
+        // and a later response was corrupted in its place.
+        let judged = corruption.judged.lock().clone();
+        assert!(!judged.is_empty(), "no state sync response was corrupted");
+        for request in &judged {
+            assert_ne!(
+                request.verdicts.first(),
+                Some(&true),
+                "the sync engine accepted a corrupted response to {}",
+                request.request
+            );
+        }
+        let replaced: Vec<_> = judged
+            .iter()
+            .filter(|request| request.accepted_original.is_some())
+            .collect();
         assert!(
-            !corruption.armed.load(Ordering::SeqCst),
-            "no state sync response was corrupted"
+            !replaced.is_empty(),
+            "no corrupted request was answered again: {judged:?}"
         );
-        assert_eq!(corruption.verdicts.lock().as_slice(), &[false]);
+        for request in replaced {
+            assert!(!request.abandoned);
+            assert_eq!(request.verdicts.first(), Some(&false));
+            assert_eq!(request.verdicts.last(), Some(&true));
+            assert_eq!(
+                request.accepted_original,
+                Some(true),
+                "the response accepted for {} differs from the honest one",
+                request.request
+            );
+        }
+
+        // The late validator blocked at least one peer.
+        let identity = &committee.committee.identities[VALIDATORS as usize - 1];
+        let blocked = committee.oracle.blocked().await.unwrap();
+        assert!(
+            blocked.iter().any(|(blocker, _)| blocker == identity),
+            "the late validator blocked no peer"
+        );
 
         // It then follows the chain the validators execute. Equal blocks commit to equal state
         // roots, so the state it synced and the state it then executed match its peers'.
@@ -926,7 +1246,6 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
             highest,
             &Sequential
         ));
-        let base_block = late.chain.block_at(Height::new(base)).await.unwrap();
         assert_eq!(
             late.checkpoints.height(certificate.item.position),
             Some(Height::new(base))
@@ -959,5 +1278,207 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
                 &[("origin", &origin), ("channel", &channel)],
             ) > 0.0
         );
+    });
+}
+
+/// What the first run of [`a_late_validator_resumes_state_sync_after_a_crash`] saw at its cut.
+struct AtCut {
+    /// Height of the newest target the executor offered the sync, and so persisted, before the
+    /// cut.
+    newest: u64,
+    /// Height of the block the application's state reached, at [`Cut::Synced`].
+    reached: Option<u64>,
+}
+
+/// A late validator crashes while it state-syncs, restarts on the same storage, and resumes the
+/// sync toward the newest target it persisted.
+///
+/// The first run starts the late validator as in
+/// [`a_late_validator_state_syncs_to_a_certified_checkpoint`] and holds its state sync at `cut`.
+/// Ending the run there crashes the runtime: every task is dropped, and storage keeps only what
+/// was synced. Every validator then restarts with the same identity and storage.
+///
+/// After the restart, the late validator's executor resumes the sync toward the newest target it
+/// persisted, which is above the first target and, at [`Cut::Synced`], above the block its
+/// database already reached. The block the resumed sync reaches is the one the honest validators
+/// executed at its height. The application hook receives no block at or below it in either run.
+/// The late validator then executes the same blocks as its peers, recovers every checkpoint
+/// certificate through its base, and sends checkpoint acknowledgements.
+#[rstest::rstest]
+#[case::mid_sync(Cut::MidSync)]
+#[case::synced(Cut::Synced)]
+fn a_late_validator_resumes_state_sync_after_a_crash(#[case] cut: Cut) {
+    let joiner = VALIDATORS as usize - 1;
+    let runner = deterministic::Runner::timed(Duration::from_secs(300));
+    let (at_cut, checkpoint) = runner.start_and_recover(move |context| async move {
+        let committee = Cluster::new(context.child("committee")).await;
+        let mut validators = Vec::new();
+        for index in 0..joiner {
+            validators.push(committee.start(index, false, None, None).await);
+        }
+        until_applied(&context, validators.iter().map(|v| &v.tally), 48).await;
+
+        let watch = SyncWatch::new(Some(cut));
+        let late = committee
+            .start(joiner, true, None, Some(watch.clone()))
+            .await;
+        while !watch.cut_reached() {
+            context.sleep(Duration::from_millis(50)).await;
+        }
+
+        // The executor persisted a target but installed no base, so the application hook
+        // received no block.
+        assert!(!late.chain.awaits_floor().await);
+        assert!(!late.chain.has_base().await);
+        assert!(late.tally.applied.lock().is_empty());
+        let offered = watch.offered.lock().clone();
+        let newest = *offered.last().expect("a target was offered");
+        let reached = watch
+            .reached
+            .lock()
+            .as_ref()
+            .map(|block| block.height().get());
+        match cut {
+            Cut::MidSync => {
+                // One response arrived and every later one is withheld, so the sync has not
+                // completed.
+                assert_eq!(watch.received.load(Ordering::SeqCst), 1);
+                assert_eq!(reached, None, "the sync completed with one response");
+                assert!(newest > offered[0]);
+            }
+            Cut::Synced => {
+                let reached = reached.expect("the sync reached a block");
+                assert!(newest > reached);
+            }
+        }
+
+        // Returning ends the run here, which crashes the runtime.
+        AtCut { newest, reached }
+    });
+
+    deterministic::Runner::from(checkpoint).start(move |mut context| async move {
+        let committee = Cluster::new(context.child("committee")).await;
+        let mut validators = Vec::new();
+        for index in 0..joiner {
+            validators.push(committee.start(index, false, None, None).await);
+        }
+        let watch = SyncWatch::new(None);
+        let late = committee
+            .start(joiner, true, None, Some(watch.clone()))
+            .await;
+        let base = loop {
+            if let Some(base) = watch.reached.lock().clone() {
+                break base;
+            }
+            context.sleep(Duration::from_millis(50)).await;
+        };
+
+        // The resumed sync started from the newest target persisted before the crash, or from a
+        // later one persisted after the watch last saw an offer, and fetched from peers.
+        let first = watch.offered.lock()[0];
+        assert!(first >= at_cut.newest);
+        if let Some(reached) = at_cut.reached {
+            assert!(first > reached);
+        }
+        assert!(watch.received.load(Ordering::SeqCst) > 0);
+        let height = base.height().get();
+        assert!(height >= first);
+        assert_eq!(
+            (height + 1) % INTERVAL.get(),
+            0,
+            "the base is not a checkpoint"
+        );
+
+        // The base is the block an honest validator executed at its height, and so commits to the
+        // state root it computed there. The honest validator may still be catching up after the
+        // restart, so wait for the block, but fail at once if it applied past the base and no
+        // longer holds it.
+        let honest = loop {
+            let applied_past = validators[0].tally.applied() > height;
+            if let Some(block) = validators[0].chain.block_at(base.height()).await {
+                break block;
+            }
+            assert!(
+                !applied_past,
+                "the honest validator applied past height {height} but no longer holds its block"
+            );
+            context.sleep(Duration::from_millis(50)).await;
+        };
+        assert_eq!(honest.digest(), base.digest());
+        assert_eq!(honest.inner().targets(), base.inner().targets());
+
+        // Execution resumes after the base, and the application hook receives no block at or
+        // below it. Equal blocks commit to equal state roots.
+        let target = height + 2 * INTERVAL.get();
+        until_applied(&context, [&late.tally, &validators[0].tally], target).await;
+        assert!(
+            late.tally
+                .applied
+                .lock()
+                .iter()
+                .all(|&applied| applied > height)
+        );
+        assert_eq!(
+            late.chain.block_at(Height::new(target)).await.unwrap(),
+            validators[0]
+                .chain
+                .block_at(Height::new(target))
+                .await
+                .unwrap()
+        );
+
+        // Every mandatory checkpoint through the base was recovered, and the certificate for the
+        // base verifies under the committee's checkpoint key and scope and names the base.
+        let index = joiner.to_string();
+        let position = (height + 1) / INTERVAL.get() - 1;
+        while metric_sum(
+            &context.encode(),
+            "aggregation_frontier",
+            &[("index", &index)],
+        ) <= position as f64
+        {
+            context.sleep(Duration::from_millis(50)).await;
+        }
+        let trusted = committee
+            .committee
+            .verifier
+            .checkpoint(CHECKPOINT_NAMESPACE);
+        let (epoch, lowest, highest) = checkpoint_scope(&committee.committee);
+        let key = RecoveryKey {
+            namespace: aggregation::scheme::Scheme::<Digest>::recovery_namespace(&trusted),
+            epoch,
+            position: Height::new(position),
+        };
+        let encoded = loop {
+            if let Some(encoded) = late.archive.get(&key) {
+                break encoded;
+            }
+            context.sleep(Duration::from_millis(50)).await;
+        };
+        let certificate =
+            Certificate::<Scheme, Digest>::decode_cfg(encoded, &trusted.certificate_codec_config())
+                .expect("archived certificate decodes");
+        assert!(certificate.verify_for(
+            &mut context,
+            &trusted,
+            epoch,
+            lowest,
+            highest,
+            &Sequential
+        ));
+        assert_eq!(certificate.item.digest, base.digest());
+
+        // The metrics registry is new after the restart, so these acknowledgements were sent
+        // after it.
+        let origin = committee.committee.identities[joiner].to_string();
+        let channel = AGGREGATION.to_string();
+        while metric_sum(
+            &context.encode(),
+            "messages_sent_total",
+            &[("origin", &origin), ("channel", &channel)],
+        ) <= 0.0
+        {
+            context.sleep(Duration::from_millis(50)).await;
+        }
     });
 }
