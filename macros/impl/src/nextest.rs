@@ -1,10 +1,5 @@
 use proc_macro2::Span;
-use std::{
-    collections::HashSet,
-    env, fs,
-    path::PathBuf,
-    sync::OnceLock,
-};
+use std::{collections::HashSet, env, fs, path::PathBuf, sync::OnceLock};
 use syn::LitStr;
 use toml::Value;
 
