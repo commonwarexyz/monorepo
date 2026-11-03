@@ -381,7 +381,7 @@ where
                 round.span().in_scope(|| voter.proposal(proposal));
             }
 
-            // Start jobs only inside the lookahead window. This bounds new future work.
+            // Start jobs only inside the lookahead window. This limits new work for future views.
             // Jobs for pruned rounds still run until they finish.
             if !self.lookahead.admits(current, view) {
                 trace!(%current, %view, "skipping out-of-window round processing");

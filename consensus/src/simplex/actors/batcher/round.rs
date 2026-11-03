@@ -383,9 +383,10 @@ impl<
         Some(proposal)
     }
 
-    /// Starts a job for the first ready kind, in the order notarize, nullify, finalize.
-    /// A kind with a running job is not ready, so repeated calls start at most one job per kind.
-    /// The job owns its votes. Votes that arrive later stay buffered.
+    /// Returns a job for the first ready kind, in the order notarize, nullify, finalize. A kind
+    /// with an unfinished job is not ready. So each kind has at most one unfinished job at a time.
+    /// The job owns its votes. Votes that arrive later stay buffered. The caller must submit the
+    /// job and pass its result to [Self::finish_construct].
     pub fn begin_construct<E: CryptoRng>(&mut self, rng: &mut E) -> Option<ConstructJob<S, D>> {
         [Kind::Notarization, Kind::Nullification, Kind::Finalization]
             .into_iter()

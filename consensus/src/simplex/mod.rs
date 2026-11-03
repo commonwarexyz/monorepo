@@ -212,8 +212,8 @@
 //! they certify `v`, so the finalization for `v` typically arrives shortly after entering `v+1`.
 //!
 //! Healing does not revisit earlier views. A `finalize` vote for a view certified while the gate
-//! was blocked is retried only if some later message for that view reaches the voter, which
-//! ordinarily none does (the batcher normally drops duplicate certificates). If more than `f`
+//! was blocked is retried only if some later message for that view reaches the voter. Usually no
+//! later message arrives, because the batcher drops most duplicate certificates. If more than `f`
 //! participants were blocked, that view may never gather its own finalization certificate, and
 //! neither may any later view in the term (healing itself requires a same-term finalization, which
 //! cannot assemble while more than `f` participants withhold `finalize`). Such a view is either
