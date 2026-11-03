@@ -50,10 +50,6 @@ pub(crate) struct Metrics<P: PublicKey> {
     pub(crate) latest_share: GaugeFamily<Peer<P>>,
     /// Latest epoch where a valid ack was received, per player of the installed epoch.
     pub(crate) latest_ack: GaugeFamily<Peer<P>>,
-    /// Dealers of the installed epoch.
-    dealers: Set<P>,
-    /// Players of the installed epoch.
-    players: Set<P>,
     /// Current DKG epoch.
     pub(crate) current_epoch: Gauge,
     /// Current DKG round.
@@ -87,21 +83,17 @@ impl<P: PublicKey> Metrics<P> {
                 "latest_ack",
                 "Epoch of latest valid ack received per player",
             ),
-            dealers: Set::default(),
-            players: Set::default(),
             current_epoch,
             current_round,
             phase,
         }
     }
 
-    /// Installs an epoch's dealers and players and removes the per-peer gauges of peers that
-    /// left their role. A peer that keeps its role keeps its latest epoch.
-    pub(crate) fn reconcile(&mut self, dealers: &Set<P>, players: &Set<P>) {
-        prune(&self.latest_share, &self.dealers, dealers);
-        prune(&self.latest_ack, &self.players, players);
-        self.dealers = dealers.clone();
-        self.players = players.clone();
+    /// Installs an epoch's dealers and players by dropping the gauges of every other peer. A
+    /// peer that keeps its role keeps its latest epoch.
+    pub(crate) fn reconcile(&self, dealers: &Set<P>, players: &Set<P>) {
+        retain(&self.latest_share, dealers);
+        retain(&self.latest_ack, players);
     }
 
     /// Records the current epoch and its ceremony round.
@@ -139,14 +131,17 @@ impl<P: PublicKey> Metrics<P> {
     }
 }
 
-/// Removes the gauges of peers in `previous` that are absent from `current`.
-fn prune<P: PublicKey>(family: &GaugeFamily<Peer<P>>, previous: &Set<P>, current: &Set<P>) {
-    let mut current = current.iter().peekable();
-    for peer in previous.iter() {
-        while current.next_if(|p| *p < peer).is_some() {}
-        if current.next_if(|p| *p == peer).is_none() {
-            family.remove_by(peer);
-        }
+/// Drops every gauge in `family` whose peer is outside `peers`. Kept gauges keep their values.
+fn retain<P: PublicKey>(family: &GaugeFamily<Peer<P>>, peers: &Set<P>) {
+    // Read the kept values before clearing. Each lookup holds the family's read lock and
+    // `clear` needs the write lock.
+    let kept: Vec<_> = peers
+        .iter()
+        .filter_map(|peer| family.get_by(peer).map(|gauge| (peer.clone(), gauge.get())))
+        .collect();
+    family.clear();
+    for (peer, value) in kept {
+        family.get_or_create_by(&peer).set(value);
     }
 }
 
@@ -167,7 +162,7 @@ mod tests {
     fn reconcile_prunes_peers_that_left_their_role() {
         deterministic::Runner::default().start(|context| async move {
             let reshare = context.child("reshare");
-            let mut metrics = Metrics::new(&reshare);
+            let metrics = Metrics::new(&reshare);
             let peers: Vec<PublicKey> = (0..3)
                 .map(|seed| PrivateKey::from_seed(seed).public_key())
                 .collect();
