@@ -2,7 +2,7 @@ use proc_macro2::Span;
 use std::{
     collections::HashSet,
     env, fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::OnceLock,
 };
 use syn::LitStr;
@@ -124,7 +124,11 @@ fn resolve_nextest_config_path() -> Result<PathBuf, String> {
         }
     }
 
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Read at expansion time: `env!` would embed this crate's checkout path
+    // in the proc-macro, so every checkout would compile a distinct artifact.
+    let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .ok_or_else(|| "CARGO_MANIFEST_DIR is not set".to_string())?;
     for current in manifest_dir.ancestors() {
         let candidate = current.join(".config").join("nextest.toml");
         if candidate.is_file() {
