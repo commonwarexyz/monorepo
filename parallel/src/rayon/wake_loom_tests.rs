@@ -206,7 +206,7 @@ fn wait_for_sleep(registry: &Registry, group: usize) {
 }
 
 /// Selects Local work but leaves the worker registered idle for a later `work_found` call.
-fn selected_local(registry: &Registry, group: usize, offset: usize) -> IdleState {
+fn select_local(registry: &Registry, group: usize, offset: usize) -> IdleState {
     let idle = registry.groups[group].sleep.start_looking(offset);
     registry.inject_local(group);
     assert_eq!(registry.find_work(group), Some(Tag::Local));
@@ -225,7 +225,7 @@ fn injection_races_sleep() {
                 // Completed work leaves the jobs event counter active, so publication does not
                 // have to increment it.
                 if prior_work {
-                    let _idle = selected_local(&registry, groups - 1, 0);
+                    let _idle = select_local(&registry, groups - 1, 0);
                     registry.work_found(groups - 1, Tag::Local);
                 }
 
@@ -251,7 +251,7 @@ fn injection_races_local_idle_exit() {
             let registry = Registry::new(&vec![1; groups]);
             let remote = worker(&registry, groups - 1, 0);
             wait_for_sleep(&registry, groups - 1);
-            let _idle = selected_local(&registry, 0, 0);
+            let _idle = select_local(&registry, 0, 0);
 
             // Race the idle decrement and wide-queue check against publication.
             let leaving = {
@@ -286,7 +286,7 @@ fn injection_races_local_wake_handoff() {
         let remote = worker(&registry, 2, 0);
         wait_for_sleep(&registry, 0);
         wait_for_sleep(&registry, 2);
-        let _idle = selected_local(&registry, 0, 0);
+        let _idle = select_local(&registry, 0, 0);
 
         // The first worker has selected a Local job. Its peer can take the next one.
         registry.inject_local(0);

@@ -191,7 +191,7 @@ fn nested_waits_service_later_work() {
     clippy::disallowed_types,
     reason = "Exercise the channel used by Strategy::spawn."
 )]
-fn release_one_sleeping_worker(
+fn release_sleeping_worker(
     threads: usize,
     width: usize,
     target: usize,
@@ -247,7 +247,7 @@ fn release_one_sleeping_worker(
 #[test]
 fn workers_wait_independently() {
     assert_eq!(
-        release_one_sleeping_worker(2, 0, 1, |_, tx| tx.send(42).unwrap()),
+        release_sleeping_worker(2, 0, 1, |_, tx| tx.send(42).unwrap()),
         Ok(42)
     );
 }
@@ -256,9 +256,9 @@ fn workers_wait_independently() {
 /// reach the exact group and offset where it sleeps.
 #[commonware_macros::test_group("miri")]
 #[test]
-fn result_wakes_a_sleeping_worker_of_a_later_group() {
+fn result_wakes_later_group_worker() {
     assert_eq!(
-        release_one_sleeping_worker(4, 2, 3, |_, tx| tx.send(42).unwrap()),
+        release_sleeping_worker(4, 2, 3, |_, tx| tx.send(42).unwrap()),
         Ok(42)
     );
 }
@@ -267,16 +267,16 @@ fn result_wakes_a_sleeping_worker_of_a_later_group() {
 /// worker, which observes the cancellation.
 #[commonware_macros::test_group("miri")]
 #[test]
-fn canceled_sender_wakes_a_sleeping_worker_of_a_later_group() {
-    assert!(release_one_sleeping_worker(4, 2, 3, |_, tx| drop(tx)).is_err());
+fn canceled_sender_wakes_later_group_worker() {
+    assert!(release_sleeping_worker(4, 2, 3, |_, tx| drop(tx)).is_err());
 }
 
 /// A queued producer in another group wakes only the worker waiting for its result.
 #[commonware_macros::test_group("miri")]
 #[test]
-fn queued_work_wakes_a_sleeping_worker_of_a_later_group() {
+fn queued_work_wakes_later_group_worker() {
     for cancel in [false, true] {
-        let result = release_one_sleeping_worker(4, 2, 3, |pool, tx| {
+        let result = release_sleeping_worker(4, 2, 3, |pool, tx| {
             // Keep the producer in another group until the waiting workers are asleep.
             let (started_tx, started_rx) = mpsc::channel();
             let (release_tx, release_rx) = mpsc::channel();

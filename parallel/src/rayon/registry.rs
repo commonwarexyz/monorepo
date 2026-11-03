@@ -311,7 +311,7 @@ impl Registry {
     }
 
     /// Panics unless `placement` names one of the registry's groups.
-    pub(super) fn check(&self, placement: Placement) {
+    pub(super) fn check_placement(&self, placement: Placement) {
         let (Placement::Local(group) | Placement::Wide { near: group }) = placement;
         assert!(
             group < self.groups.len(),
@@ -754,20 +754,20 @@ impl WorkerThread {
             Tag::Wide => {
                 let queue_was_empty = self.wide.is_empty();
                 self.wide.push(job.tagged(Tag::Wide));
-                self.registry.new_wide_jobs(self.group, queue_was_empty);
+                self.registry.new_wide_job(self.group, queue_was_empty);
             }
         }
     }
 
     /// Whether both of our deques are empty.
     #[inline]
-    pub(super) fn local_deque_is_empty(&self) -> bool {
+    pub(super) fn deques_are_empty(&self) -> bool {
         self.local.is_empty() && self.wide.is_empty()
     }
 
     /// Tries this worker's current-placement deque, then its other deque, then its broadcasts.
     #[inline]
-    pub(super) fn take_local_job(&self) -> Option<JobRef> {
+    pub(super) fn take_own_job(&self) -> Option<JobRef> {
         let (own, other) = match self.tag.get() {
             Tag::Local => (&self.local, &self.wide),
             Tag::Wide => (&self.wide, &self.local),
@@ -815,7 +815,7 @@ impl WorkerThread {
         'outer: while !latch.probe() {
             // Check for local work *before* we start marking ourself idle,
             // especially to avoid modifying shared sleep state.
-            if let Some(job) = self.take_local_job() {
+            if let Some(job) = self.take_own_job() {
                 // SAFETY: a job taken from a deque executes once, on a worker of its pool.
                 unsafe { self.execute(job) };
                 continue;
@@ -859,7 +859,7 @@ impl WorkerThread {
             self.wait_until(&registry.thread_infos[index].terminate);
 
             // Should not be any work left in our queue.
-            debug_assert!(self.take_local_job().is_none());
+            debug_assert!(self.take_own_job().is_none());
 
             // Let tests that wait for the workers to stop know we are done.
             Latch::set(&registry.thread_infos[index].stopped);
@@ -900,7 +900,7 @@ impl WorkerThread {
     /// Native future waits use the same search. Their completion also depends on the future's
     /// producer making progress, and the producer can depend on work outside the job tree.
     fn find_work(&self) -> Option<JobRef> {
-        self.take_local_job()
+        self.take_own_job()
             .or_else(|| self.steal_local())
             .or_else(|| self.steal_wide())
             .or_else(|| self.registry.injector.pop(self.group))
@@ -930,7 +930,7 @@ impl WorkerThread {
     /// local work to do.
     fn steal_local(&self) -> Option<JobRef> {
         // we only steal when we don't have any work to do locally
-        debug_assert!(self.local_deque_is_empty());
+        debug_assert!(self.deques_are_empty());
 
         // otherwise, try to steal
         let thread_infos = &self.registry.thread_infos.as_slice();
@@ -971,7 +971,7 @@ impl WorkerThread {
     /// local work to do.
     fn steal_wide(&self) -> Option<JobRef> {
         // we only steal when we don't have any work to do locally
-        debug_assert!(self.local_deque_is_empty());
+        debug_assert!(self.deques_are_empty());
 
         // otherwise, try to steal
         let thread_infos = &self.registry.thread_infos.as_slice();

@@ -23,7 +23,7 @@ impl Registry {
     /// transition. These paired fences keep a queued injection visible when its publisher counted
     /// the worker idle. Internal pushes use upstream's lighter protocol, with the publishing
     /// worker able to pop its own jobs.
-    pub(super) fn new_wide_jobs(&self, near: usize, queue_was_empty: bool) {
+    pub(super) fn new_wide_job(&self, near: usize, queue_was_empty: bool) {
         let n_groups = self.groups.len();
         let mut uncovered = 1;
         for group in (near..n_groups).chain(0..near) {
@@ -37,13 +37,13 @@ impl Registry {
     }
 
     /// Signals that a job was pushed into the wide injector, then offers it as
-    /// [`Self::new_wide_jobs`] does.
+    /// [`Self::new_wide_job`] does.
     #[inline]
     pub(super) fn new_injected_wide_job(&self, near: usize, queue_was_empty: bool) {
         // Pair with the sleepers' and idle exits' fences, so the job is visible to any worker
         // the walk counts as idle or sleeping.
         fence(Ordering::SeqCst);
-        self.new_wide_jobs(near, queue_was_empty);
+        self.new_wide_job(near, queue_was_empty);
     }
 
     /// Leaves the idle state and continues the wake chain for wide work.
@@ -67,7 +67,7 @@ impl Registry {
             }
         }
 
-        self.new_wide_jobs((group + 1) % self.groups.len(), false);
+        self.new_wide_job((group + 1) % self.groups.len(), false);
     }
 
     /// Whether a job is waiting in `group`'s incoming queue or in the Wide queue.

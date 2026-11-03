@@ -273,7 +273,7 @@ impl Policy {
     }
 
     /// Records the wall time of a run that followed `plan`.
-    pub(super) fn record_run_placed(
+    pub(super) fn record_run(
         &self,
         caller: &'static Location<'static>,
         len: usize,
@@ -492,7 +492,7 @@ impl Policy {
 
     /// Records the wall time of a run on `execution` for this call site.
     #[cfg(test)]
-    pub(super) fn record_run(
+    pub(super) fn record_execution(
         &self,
         caller: &'static Location<'static>,
         len: usize,
@@ -528,7 +528,7 @@ impl Policy {
     }
 
     #[cfg(test)]
-    pub(super) fn get_entry(
+    pub(super) fn run_estimates(
         &self,
         caller: &'static Location<'static>,
         len: usize,
@@ -761,7 +761,7 @@ impl RunEntry {
     }
 
     // Returns the path to run, serial or `placement`, and whether the caller should time it and
-    // report the elapsed time to [`Policy::record_run_placed`]. The decision is made on that
+    // report the elapsed time to [`Policy::record_run`]. The decision is made on that
     // placement's cadence.
     fn choose(&mut self, placement: Placement, parallelism: usize) -> (RunExecution, bool) {
         let serial_ns = self.serial_ns;
@@ -835,7 +835,7 @@ pub(super) struct RunPlan {
     pub(super) execution: RunExecution,
     /// The placement a parallel run uses. A serial run always carries [`Placement::Wide`].
     pub(super) placement: Placement,
-    /// Whether the run is timed and recorded with [`Policy::record_run_placed`].
+    /// Whether the run is timed and recorded with [`Policy::record_run`].
     pub(super) measure: bool,
 }
 
@@ -1057,7 +1057,7 @@ mod tests {
         }
     }
 
-    const fn plan_of(execution: SpawnExecution, spawner: Spawner, measure: bool) -> SpawnPlan {
+    const fn spawn_plan(execution: SpawnExecution, spawner: Spawner, measure: bool) -> SpawnPlan {
         SpawnPlan {
             execution,
             spawner,
@@ -1350,7 +1350,7 @@ mod tests {
     /// A stale parallel estimate that lost to serial is probed on the cadence until the probes
     /// bring it under serial, and the preference flips.
     #[test]
-    fn recovers_from_a_stale_estimate() {
+    fn recovers_from_stale_estimate() {
         // An established parallel estimate of 2ms favors serial at 1ms. The projection remains
         // under budget (2ms x 4 = 8ms), so probes can discover parallel's current cost of 0.5ms.
         let mut entry = RunEntry::default();
@@ -1451,7 +1451,7 @@ mod tests {
 
     /// The established serial estimate stays above parallel after one unusually fast sample.
     #[test]
-    fn one_fast_sample_preserves_an_established_preference() {
+    fn fast_sample_preserves_established_preference() {
         let mut entry = RunEntry::default();
         for _ in 0..2 {
             entry.record(RunExecution::Parallel, Duration::from_micros(800));
@@ -1518,7 +1518,7 @@ mod tests {
     /// Each confirming boundary doubles the probe interval, from the base interval or from the
     /// gap's doublings, up to the cap.
     #[test]
-    fn cadence_backs_off_with_each_confirmation() {
+    fn cadence_backs_off_after_confirmations() {
         // A loser within 2x of the winner starts at the base interval. The first boundary has no
         // earlier preference to confirm, and every later one confirms the one before, so each
         // interval after the second doubles until it reaches the cap.
@@ -1539,7 +1539,7 @@ mod tests {
     /// A flip between boundaries clears the confirmations at once, so the next call crosses a
     /// boundary and the intervals back off from the base interval again.
     #[test]
-    fn cadence_resets_confirmations_on_a_flip() {
+    fn cadence_resets_confirmations_on_flip() {
         // Serial holds through enough boundaries to reach the cap, and parallel becomes preferred
         // a thousand calls into the next capped interval.
         let mut cadence = Cadence::default();
@@ -1561,7 +1561,7 @@ mod tests {
     /// A boundary whose probe is disallowed still times the preferred path and confirms the
     /// ordering, so later probes land where they would have without the gate.
     #[test]
-    fn cadence_counts_a_disallowed_boundary_as_a_confirmation() {
+    fn cadence_counts_disallowed_boundaries() {
         // The first three boundaries cannot probe the loser, so they time the preferred path. The
         // preferred path held at each, so each still counts. The probes that follow land where they
         // would have without the gate: 800, 1,600, and 3,200 calls from the start, or 400, 1,200,
@@ -1580,7 +1580,7 @@ mod tests {
     /// A loser that falls further behind keeps confirming, movement within the same multiple keeps
     /// the interval, and closing a whole multiple clears the confirmations.
     #[test]
-    fn cadence_resets_confirmations_when_the_loser_closes_a_multiple() {
+    fn cadence_resets_when_gap_multiple_shrinks() {
         // The loser starts within 2x of the winner, and two boundaries confirm serial.
         let mut cadence = Cadence::default();
         assert_eq!(
@@ -1733,7 +1733,7 @@ mod tests {
         let location = Location::caller();
         assert_eq!(
             policy.choose_spawn(location, 64, 1, Spawner::Outside),
-            plan_of(SpawnExecution::Inline, Spawner::Outside, false)
+            spawn_plan(SpawnExecution::Inline, Spawner::Outside, false)
         );
     }
 
@@ -1781,20 +1781,20 @@ mod tests {
 
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, Spawner::Outside),
-            plan_of(SpawnExecution::Offload, Spawner::Outside, true)
+            spawn_plan(SpawnExecution::Offload, Spawner::Outside, true)
         );
         policy.record_spawn_job(
             location,
             64,
             PARALLELISM,
-            plan_of(SpawnExecution::Offload, Spawner::Outside, true),
+            spawn_plan(SpawnExecution::Offload, Spawner::Outside, true),
             Duration::from_micros(25),
         );
         policy.record_spawn_round_trip(
             location,
             64,
             PARALLELISM,
-            plan_of(SpawnExecution::Offload, Spawner::Outside, true),
+            spawn_plan(SpawnExecution::Offload, Spawner::Outside, true),
             Duration::from_micros(10),
             Duration::ZERO,
         );
@@ -1802,7 +1802,7 @@ mod tests {
         // The boundary probes inline (the worker wall fits the budget).
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, Spawner::Outside),
-            plan_of(SpawnExecution::Inline, Spawner::Outside, true)
+            spawn_plan(SpawnExecution::Inline, Spawner::Outside, true)
         );
 
         // The probe's inline wall beats the overhead, so the entry flips inline: recording it
@@ -1810,14 +1810,14 @@ mod tests {
         policy.record_spawn_inline(location, 64, PARALLELISM, Duration::from_micros(8));
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, Spawner::Outside),
-            plan_of(SpawnExecution::Inline, Spawner::Outside, false)
+            spawn_plan(SpawnExecution::Inline, Spawner::Outside, false)
         );
     }
 
     /// Admitted external roots seed the Wide and then the Local descendant placement from their job
     /// samples, a worker's own spawn trains neither, and the choice then prefers the faster one.
     #[test]
-    fn grouped_spawn_learns_from_external_job_samples() {
+    fn spawn_placement_learns_external_job_times() {
         let policy = Policy::default();
         let location = Location::caller();
         let key = super::Key::new(location, 64, 64, PARALLELISM);
@@ -1891,7 +1891,7 @@ mod tests {
             .collect()
     }
 
-    fn wide_runs(runs: &[(Placement, bool)]) -> Vec<usize> {
+    fn wide_roots(runs: &[(Placement, bool)]) -> Vec<usize> {
         runs.iter()
             .enumerate()
             .filter_map(|(index, &(placement, _))| (placement == Placement::Wide).then_some(index))
@@ -1901,7 +1901,7 @@ mod tests {
     /// Wide's seed and first probe ran cold, so Local leads. Wide's next probe beats Local, and
     /// Wide takes the lead at once.
     #[test]
-    fn spawn_placement_faster_probe_overrides_a_cold_loser() {
+    fn spawn_placement_recovers_cold_loser() {
         let policy = Policy::default();
         let mut cold = [10_000, 5_600].into_iter();
         let runs = drive_roots(
@@ -1915,7 +1915,7 @@ mod tests {
                 })
             },
         );
-        let probe = wide_runs(&runs)[2];
+        let probe = wide_roots(&runs)[2];
         assert!(
             runs[probe + 1..]
                 .iter()
@@ -1926,7 +1926,7 @@ mod tests {
     /// One slow sample of the leading Wide placement hands the lead to Local. Wide is then sampled
     /// only at probes, and its first probe restores the lead.
     #[test]
-    fn spawn_placement_faster_probe_recovers_from_a_preferred_spike() {
+    fn spawn_placement_recovers_after_spike() {
         let policy = Policy::default();
         let mut measured = 0;
 
@@ -1954,7 +1954,7 @@ mod tests {
             .nth(1)
             .unwrap()
             .0;
-        let probe = wide_runs(&runs)
+        let probe = wide_roots(&runs)
             .into_iter()
             .find(|&index| index > spike)
             .unwrap();
@@ -1988,14 +1988,14 @@ mod tests {
                 })
             },
         );
-        let wide = wide_runs(&runs);
+        let wide = wide_roots(&runs);
         assert!(wide[3] - wide[2] <= Widen::widen(RESAMPLE_INTERVAL << 2));
     }
 
     /// A lucky probe can hand the lead to the slower Wide placement. Wide is then measured as the
     /// preferred placement, and its true wall time returns the lead to Local within two samples.
     #[test]
-    fn spawn_placement_lucky_probe_reverts_within_two_samples() {
+    fn spawn_placement_reverts_lucky_probe() {
         let policy = Policy::default();
         let mut probes = 0;
 
@@ -2016,7 +2016,7 @@ mod tests {
         );
 
         // The lucky probe hands Wide the lead.
-        let lucky = wide_runs(&runs)[2];
+        let lucky = wide_roots(&runs)[2];
         let back = lucky
             + runs[lucky..]
                 .iter()
@@ -2035,7 +2035,7 @@ mod tests {
     /// A root's round trip records only the hand-off overhead, so a placement whose job sample
     /// never arrives stays unseeded and is offered again.
     #[test]
-    fn grouped_spawn_round_trip_does_not_train_descendant_placement() {
+    fn spawn_round_trip_skips_placement() {
         let policy = Policy::default();
         let location = Location::caller();
         let plan = policy.choose_spawn(location, 64, PARALLELISM, Spawner::Outside);
@@ -2070,7 +2070,7 @@ mod tests {
     /// Overflow roots run without a placement and their job samples train only the job estimate,
     /// so the placement seeds and the loser probe wait for admitted roots.
     #[test]
-    fn unplaced_spawns_leave_placement_seeds_and_probes_unchanged() {
+    fn spawn_overflow_leaves_seeds_untouched() {
         let policy = Policy::default();
         let location = Location::caller();
         let key = super::Key::new(location, 64, 64, PARALLELISM);
@@ -2125,7 +2125,7 @@ mod tests {
     /// A choice seeds Wide and then Local, probes the loser at once, and then prefers the faster
     /// placement until the loser's interval passes.
     #[test]
-    fn choice_seeds_both_pools_then_prefers_the_faster() {
+    fn choice_seeds_then_prefers_faster_placement() {
         let mut choice = Choice::default();
 
         // Each placement is seeded once, in order, and the seeds leave the choice due for an
@@ -2147,7 +2147,7 @@ mod tests {
 
     /// Equal estimates leave Wide preferred.
     #[test]
-    fn choice_ties_go_to_the_shared_pool() {
+    fn choice_ties_prefer_wide() {
         let mut choice = Choice::default();
 
         // With equal estimates and the cadence between boundaries, the call uses Wide.
@@ -2162,7 +2162,7 @@ mod tests {
     /// replaced by that sample, so the placement can win before its next probe. Later samples,
     /// and a second sample slower than the seed, blend as usual.
     #[test]
-    fn choice_faster_second_sample_replaces_the_seed() {
+    fn choice_second_sample_replaces_slow_seed() {
         let mut choice = Choice::default();
         assert_eq!(choice.choose(None), (Placement::Wide, true));
         choice.record(Placement::Wide, 6_000_000);
@@ -2188,7 +2188,7 @@ mod tests {
     /// A caller with a choice of placements whose Local seed fails, and whose Wide seed was slow,
     /// still moves to Wide once Wide's probe beats Local. A failed call records nothing.
     #[test]
-    fn errored_seed_and_slow_first_seed_still_prefer_the_faster_placement() {
+    fn choice_recovers_after_failed_local_seed() {
         let policy = Policy::default();
         let location = Location::caller();
         let plan = |placement| RunPlan {
@@ -2198,7 +2198,7 @@ mod tests {
         };
         let call = || policy.choose_run(location, 10, 10, PARALLELISM, EITHER);
         let record = |plan, millis| {
-            policy.record_run_placed(
+            policy.record_run(
                 location,
                 10,
                 10,
@@ -2225,7 +2225,7 @@ mod tests {
     /// Drives one call through the run policy and returns its execution path and placement.
     /// `pools` are the placements the caller may use. `wall` gives the time each path and
     /// placement takes, and the call records it only when its plan is measured.
-    fn run_with(
+    fn run_call(
         policy: &Policy,
         location: &'static Location<'static>,
         pools: Pools,
@@ -2233,7 +2233,7 @@ mod tests {
     ) -> (RunExecution, Placement) {
         let plan = policy.choose_run(location, 10, 10, PARALLELISM, pools);
         if plan.measure {
-            policy.record_run_placed(
+            policy.record_run(
                 location,
                 10,
                 10,
@@ -2248,14 +2248,14 @@ mod tests {
     /// A caller with a choice seeds Wide, seeds Local, probes the loser, and then takes the serial
     /// seed that the Local seed left due.
     #[test]
-    fn run_local_seed_offers_serial_at_its_first_execution_decision() {
+    fn choice_local_seed_keeps_serial_due() {
         let policy = Policy::default();
         let location = Location::caller();
         let wall = walls(Placement::Local, 50, 100, 200);
 
         // Four calls at one site: the two placement seeds, the loser probe, and the serial seed.
         let plans: Vec<_> = (0..4)
-            .map(|_| run_with(&policy, location, EITHER, wall))
+            .map(|_| run_call(&policy, location, EITHER, wall))
             .collect();
         assert_eq!(
             plans,
@@ -2269,7 +2269,7 @@ mod tests {
 
         // Serial and the preferred placement both have estimates afterwards.
         assert_eq!(
-            policy.get_entry(location, 10, 10, PARALLELISM),
+            policy.run_estimates(location, 10, 10, PARALLELISM),
             Some((Some(50_000), Some(100_000)))
         );
     }
@@ -2279,30 +2279,30 @@ mod tests {
     /// no boundary due. The caller runs serial from its next call on and probes Wide once the
     /// interval its loss sets has passed.
     #[test]
-    fn run_pool_seeded_after_serial_leaves_its_cadence_fresh() {
+    fn confined_seed_preserves_cadence_after_serial() {
         let policy = Policy::default();
         let location = Location::caller();
         let wall = walls(Placement::Wide, 50, 100, 80);
         let local = confined(Placement::Local);
         assert_eq!(
-            run_with(&policy, location, local, wall),
+            run_call(&policy, location, local, wall),
             (RunExecution::Parallel, Placement::Local)
         );
         assert_eq!(
-            run_with(&policy, location, local, wall),
+            run_call(&policy, location, local, wall),
             (RunExecution::Serial, Placement::Wide)
         );
 
         // The Wide seed arrives after serial is priced, so it leaves no boundary due.
         let shared = confined(Placement::Wide);
         assert_eq!(
-            run_with(&policy, location, shared, wall),
+            run_call(&policy, location, shared, wall),
             (RunExecution::Parallel, Placement::Wide)
         );
 
         // Wide is twice as slow as serial, so its first probe comes after double the base interval.
         let probes: Vec<u32> = (1..=2 * RESAMPLE_INTERVAL)
-            .filter(|_| run_with(&policy, location, shared, wall).0 == RunExecution::Parallel)
+            .filter(|_| run_call(&policy, location, shared, wall).0 == RunExecution::Parallel)
             .collect();
         assert_eq!(probes, [2 * RESAMPLE_INTERVAL]);
     }
@@ -2311,12 +2311,12 @@ mod tests {
     /// the first caller with a choice seeds Local at once. Once the seed boundary has probed the
     /// loser, the faster placement is preferred, and a caller confined to Wide keeps it.
     #[test]
-    fn run_placement_is_learned_only_with_a_local_pool() {
+    fn confined_wide_leaves_local_seed_due() {
         let policy = Policy::default();
         let location = Location::caller();
 
         // A Wide sample and a far slower serial sample make parallel the preferred path.
-        policy.record_run(
+        policy.record_execution(
             location,
             10,
             10,
@@ -2324,7 +2324,7 @@ mod tests {
             RunExecution::Parallel,
             Duration::from_millis(1),
         );
-        policy.record_run(
+        policy.record_execution(
             location,
             10,
             10,
@@ -2342,7 +2342,7 @@ mod tests {
         let shared = confined(Placement::Wide);
         let seen: Vec<_> = [shared, EITHER, EITHER, EITHER, EITHER, shared]
             .into_iter()
-            .map(|pools| run_with(&policy, location, pools, wall))
+            .map(|pools| run_call(&policy, location, pools, wall))
             .collect();
         assert_eq!(
             seen,
@@ -2361,7 +2361,7 @@ mod tests {
     /// slower than serial. Serial sits between the two placements, so an estimate that blended both
     /// would hand the site to serial after every probe of Wide.
     #[test]
-    fn run_parallel_estimate_follows_the_preferred_pool() {
+    fn choice_parallel_estimate_tracks_preferred_placement() {
         let policy = Policy::default();
         let location = Location::caller();
         let wall = |execution, placement| match (execution, placement) {
@@ -2381,7 +2381,7 @@ mod tests {
                 placement,
                 measure: true,
             };
-            policy.record_run_placed(
+            policy.record_run(
                 location,
                 10,
                 10,
@@ -2401,7 +2401,7 @@ mod tests {
         let mut wide_probes = 0;
         let mut serial_runs = 0;
         for _ in 0..calls {
-            match run_with(&policy, location, EITHER, wall) {
+            match run_call(&policy, location, EITHER, wall) {
                 (RunExecution::Parallel, Placement::Local) => parallel_local += 1,
                 (RunExecution::Parallel, Placement::Wide) => wide_probes += 1,
                 (RunExecution::Serial, _) => serial_runs += 1,
@@ -2410,7 +2410,7 @@ mod tests {
 
         // The parallel estimate reports the preferred placement, Wide keeps being probed, and
         // serial only ever runs as a probe.
-        let (serial_ns, parallel_ns) = policy.get_entry(location, 10, 10, PARALLELISM).unwrap();
+        let (serial_ns, parallel_ns) = policy.run_estimates(location, 10, 10, PARALLELISM).unwrap();
         assert_eq!(parallel_ns, Some(80_000));
         assert_eq!(serial_ns, Some(100_000));
         assert!(
@@ -2430,7 +2430,7 @@ mod tests {
     /// project 12.8 ms and never sample serial. An affordable, faster serial path must also slow
     /// the probes of the wide placement.
     #[test]
-    fn run_serial_projection_uses_the_local_parallelism() {
+    fn local_projection_uses_group_parallelism() {
         for pools in [EITHER, confined(Placement::Local)] {
             let policy = Policy::default();
             let location = Location::caller();
@@ -2447,7 +2447,7 @@ mod tests {
                     (RunExecution::Parallel, Placement::Local) => Duration::from_micros(200),
                     (RunExecution::Parallel, Placement::Wide) => Duration::from_micros(300),
                 };
-                policy.record_run_placed(location, 10, 10, parallelism, plan, wall);
+                policy.record_run(location, 10, 10, parallelism, plan, wall);
                 if plan.execution == RunExecution::Serial {
                     serial_runs += 1;
                 } else if plan.placement == Placement::Wide {
@@ -2468,7 +2468,7 @@ mod tests {
     /// Expensive local runs keep serial over budget. When the same work becomes cheaper, timed
     /// parallel runs must bring the projection down and permit a serial sample.
     #[test]
-    fn run_serial_projection_follows_recent_local_runs() {
+    fn local_projection_tracks_recent_runs() {
         let policy = Policy::default();
         let location = Location::caller();
         let parallelism = 64;
@@ -2483,7 +2483,7 @@ mod tests {
                 "serial must not run while the local projection exceeds the budget"
             );
             if plan.measure {
-                policy.record_run_placed(
+                policy.record_run(
                     location,
                     10,
                     10,
@@ -2504,7 +2504,7 @@ mod tests {
                     RunExecution::Serial => Duration::from_micros(150),
                     RunExecution::Parallel => Duration::from_micros(200),
                 };
-                policy.record_run_placed(location, 10, 10, parallelism, plan, wall);
+                policy.record_run(location, 10, 10, parallelism, plan, wall);
             }
             serial_runs += usize::from(plan.execution == RunExecution::Serial);
         }
@@ -2527,7 +2527,7 @@ mod tests {
                 placement,
                 measure: true,
             };
-            policy.record_run_placed(
+            policy.record_run(
                 location,
                 10,
                 10,
@@ -2550,7 +2550,7 @@ mod tests {
                 (RunExecution::Serial, Placement::Wide, 100),
             ],
         );
-        let (serial_ns, parallel_ns) = policy.get_entry(location, 10, 10, PARALLELISM).unwrap();
+        let (serial_ns, parallel_ns) = policy.run_estimates(location, 10, 10, PARALLELISM).unwrap();
         assert_eq!((serial_ns, parallel_ns), (Some(100_000), Some(80_000)));
     }
 
@@ -2575,7 +2575,7 @@ mod tests {
     /// `MAX_RESAMPLE_SHIFT + 1` times slower than the winner. Its probe interval is then capped,
     /// whatever the confirmations, and a cadence advances at most once per call, so it gets at most
     /// one probe per capped interval.
-    const fn loser_probes(calls: u32) -> u32 {
+    const fn capped_probes(calls: u32) -> u32 {
         calls / (RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT)
     }
 
@@ -2631,18 +2631,18 @@ mod tests {
 
     /// Drives a caller confined to `pool` through [`DISCOVERY`] calls, then returns how many of
     /// the next [`SETTLED`] run on that placement.
-    fn pool_runs_once_settled(
+    fn settled_parallel_runs(
         policy: &Policy,
         location: &'static Location<'static>,
         pool: Placement,
         wall: impl Fn(RunExecution, Placement) -> Duration + Copy,
     ) -> u32 {
         for _ in 0..DISCOVERY {
-            run_with(policy, location, confined(pool), wall);
+            run_call(policy, location, confined(pool), wall);
         }
         let runs = (0..SETTLED)
             .filter(|_| {
-                run_with(policy, location, confined(pool), wall) == (RunExecution::Parallel, pool)
+                run_call(policy, location, confined(pool), wall) == (RunExecution::Parallel, pool)
             })
             .count();
         u32::try_from(runs).unwrap()
@@ -2653,7 +2653,7 @@ mod tests {
     /// that placement, and must leave both placement estimates intact so a caller with a choice
     /// uses the preferred placement at once.
     #[test]
-    fn run_confined_to_one_pool_is_decided_against_that_pool() {
+    fn confined_calls_compare_own_placement() {
         for pool in [Placement::Wide, Placement::Local] {
             let policy = Policy::default();
             let location = Location::caller();
@@ -2666,7 +2666,7 @@ mod tests {
             // Run enough confined calls to distinguish sustained use of the slower placement from
             // its occasional probes.
             for _ in 0..calls {
-                match run_with(&policy, location, confined(pool), wall) {
+                match run_call(&policy, location, confined(pool), wall) {
                     (RunExecution::Serial, _) => serial_runs += 1,
                     (RunExecution::Parallel, placement) => {
                         assert_eq!(
@@ -2682,15 +2682,16 @@ mod tests {
             // kept their estimates, and a caller with a choice takes the preferred placement at
             // once.
             assert!(
-                pool_runs <= loser_probes(calls),
+                pool_runs <= capped_probes(calls),
                 "{pool:?}: the caller must use its placement only for probes, ran {pool_runs} \
                  there and {serial_runs} serial"
             );
             assert_eq!(serial_runs + pool_runs, calls);
-            let (serial_ns, parallel_ns) = policy.get_entry(location, 10, 10, PARALLELISM).unwrap();
+            let (serial_ns, parallel_ns) =
+                policy.run_estimates(location, 10, 10, PARALLELISM).unwrap();
             assert_eq!((serial_ns, parallel_ns), (Some(100_000), Some(80_000)));
             assert_eq!(
-                run_with(&policy, location, EITHER, wall),
+                run_call(&policy, location, EITHER, wall),
                 (RunExecution::Parallel, other(pool))
             );
         }
@@ -2700,7 +2701,7 @@ mod tests {
     /// decision that is right for it, with no relearning in between, each paying only its own
     /// cadences' probes.
     #[test]
-    fn run_interleaved_callers_each_use_their_fastest_path() {
+    fn interleaved_callers_choose_fastest_paths() {
         let wall = walls(Placement::Wide, 100, 900, 80);
         let calls = 20_000;
         for parity in 0..2 {
@@ -2715,12 +2716,12 @@ mod tests {
             // Alternate the two kinds of caller and count where each went.
             for call in 0..calls {
                 if call % 2 == parity {
-                    match run_with(&policy, location, EITHER, wall) {
+                    match run_call(&policy, location, EITHER, wall) {
                         (RunExecution::Parallel, Placement::Local) => with_pool_local += 1,
                         _ => with_pool_other += 1,
                     }
                 } else {
-                    match run_with(&policy, location, confined(Placement::Wide), wall) {
+                    match run_call(&policy, location, confined(Placement::Wide), wall) {
                         (RunExecution::Serial, _) => without_pool_serial += 1,
                         _ => without_pool_wide += 1,
                     }
@@ -2732,14 +2733,14 @@ mod tests {
             // of Local and every probe confirms Local, so its probes back off from the base
             // interval. Wide loses by more than the capped margin.
             assert!(
-                with_pool_other <= steady_probes(calls / 2, 0) + loser_probes(calls / 2),
+                with_pool_other <= steady_probes(calls / 2, 0) + capped_probes(calls / 2),
                 "parity {parity}: the caller with a choice must leave Local only for probes, ran \
                  {with_pool_local} local and {with_pool_other} elsewhere"
             );
 
             // The confined caller runs serial apart from its own cadence's probes.
             assert!(
-                without_pool_wide <= loser_probes(calls / 2),
+                without_pool_wide <= capped_probes(calls / 2),
                 "parity {parity}: the confined caller must run serial apart from its probes, \
                  ran {without_pool_serial} serial and {without_pool_wide} wide"
             );
@@ -2750,13 +2751,13 @@ mod tests {
     /// slower than serial, but the caller's placement actually beats serial. A confined caller must
     /// find that out through its own cadence's probes and then run there.
     #[test]
-    fn run_confined_to_one_pool_rediscovers_it_once_faster() {
+    fn confined_calls_rediscover_faster_placement() {
         for pool in [Placement::Wide, Placement::Local] {
             let policy = Policy::default();
             let location = Location::caller();
             seed_preferred(&policy, location, other(pool));
             let pool_runs =
-                pool_runs_once_settled(&policy, location, pool, walls(pool, 100, 50, 80));
+                settled_parallel_runs(&policy, location, pool, walls(pool, 100, 50, 80));
             assert!(
                 pool_runs >= SETTLED - 1,
                 "{pool:?}: the caller must settle on its placement, ran {pool_runs} of {SETTLED} \
@@ -2769,13 +2770,13 @@ mod tests {
     /// rises from 100 us to 200 us and that placement falls from 900 us to 150 us, the caller moves
     /// to its placement even though the other placement remains faster.
     #[test]
-    fn run_confined_to_one_pool_notices_serial_slowing_down() {
+    fn confined_calls_notice_serial_slowdown() {
         for pool in [Placement::Wide, Placement::Local] {
             let policy = Policy::default();
             let location = Location::caller();
             seed_preferred(&policy, location, other(pool));
             let pool_runs =
-                pool_runs_once_settled(&policy, location, pool, walls(pool, 200, 150, 80));
+                settled_parallel_runs(&policy, location, pool, walls(pool, 200, 150, 80));
             assert!(
                 pool_runs >= SETTLED - 1,
                 "{pool:?}: the caller must settle on its placement, ran {pool_runs} of {SETTLED} \
@@ -2788,7 +2789,7 @@ mod tests {
     /// so the run cadence prefers serial. A confined caller decides on its own cadence. Its probes
     /// find that its placement has become faster than serial, and the caller moves to it.
     #[test]
-    fn run_confined_to_one_pool_is_decided_on_its_own_cadence_while_serial_wins() {
+    fn confined_calls_probe_while_serial_wins() {
         for pool in [Placement::Wide, Placement::Local] {
             let policy = Policy::default();
             let location = Location::caller();
@@ -2806,7 +2807,7 @@ mod tests {
 
             // The placement now runs at half of serial's wall.
             let pool_runs =
-                pool_runs_once_settled(&policy, location, pool, walls(pool, 100, 50, 120));
+                settled_parallel_runs(&policy, location, pool, walls(pool, 100, 50, 120));
             assert!(
                 pool_runs >= SETTLED - 1,
                 "{pool:?}: the caller must settle on its placement, ran {pool_runs} of {SETTLED} \
@@ -2827,7 +2828,7 @@ mod tests {
     /// over `SETTLED` calls the choice probes exactly once. The run cadence skips that call and
     /// probes serial at most once.
     #[test]
-    fn run_with_a_choice_rediscovers_a_pool_while_serial_wins() {
+    fn choice_rediscovers_placement_while_serial_wins() {
         for pool in [Placement::Wide, Placement::Local] {
             let policy = Policy::default();
             let location = Location::caller();
@@ -2848,13 +2849,13 @@ mod tests {
 
             // Let the choice and the run cadence rediscover the placement.
             for _ in 0..DISCOVERY {
-                run_with(&policy, location, EITHER, wall);
+                run_call(&policy, location, EITHER, wall);
             }
 
             // Once settled, count the calls that stay on the placement.
             let pool_runs = (0..SETTLED)
                 .filter(|_| {
-                    run_with(&policy, location, EITHER, wall) == (RunExecution::Parallel, pool)
+                    run_call(&policy, location, EITHER, wall) == (RunExecution::Parallel, pool)
                 })
                 .count();
             let pool_runs = u32::try_from(pool_runs).unwrap();
@@ -2871,7 +2872,7 @@ mod tests {
     /// so a caller with a choice probes each of them once per capped interval at most, however
     /// close the placements are to each other.
     #[test]
-    fn run_with_a_choice_probes_pools_that_lose_to_serial_on_the_capped_interval() {
+    fn choice_caps_probes_while_serial_wins() {
         for pool in [Placement::Wide, Placement::Local] {
             let policy = Policy::default();
             let location = Location::caller();
@@ -2891,10 +2892,10 @@ mod tests {
 
             // Count every parallel run over many capped intervals.
             let parallel_runs = (0..calls)
-                .filter(|_| run_with(&policy, location, EITHER, wall).0 == RunExecution::Parallel)
+                .filter(|_| run_call(&policy, location, EITHER, wall).0 == RunExecution::Parallel)
                 .count();
             assert!(
-                parallel_runs <= 2 * Widen::widen(loser_probes(calls)),
+                parallel_runs <= 2 * Widen::widen(capped_probes(calls)),
                 "{pool:?}: each placement must be probed at most once per capped interval, ran \
                  {parallel_runs} parallel"
             );
@@ -2908,7 +2909,7 @@ mod tests {
     /// later ones back off only with confirmations. Serial's wall time must not stretch that
     /// interval to the cap.
     #[test]
-    fn run_with_a_choice_paces_pool_probes_without_serial_once_the_budget_gates_it() {
+    fn choice_ignores_ineligible_serial_when_pacing() {
         for pool in [Placement::Wide, Placement::Local] {
             let policy = Policy::default();
             let location = Location::caller();
@@ -2929,7 +2930,7 @@ mod tests {
             // Record the calls on which the other placement was probed.
             let other_runs: Vec<u32> = (0..calls)
                 .filter(|_| {
-                    run_with(&policy, location, EITHER, wall)
+                    run_call(&policy, location, EITHER, wall)
                         == (RunExecution::Parallel, other(pool))
                 })
                 .collect();
@@ -2952,7 +2953,7 @@ mod tests {
     /// arbitrates within. A confined caller therefore stays on its placement, where the tuner
     /// leaves big work, and never samples serial.
     #[test]
-    fn run_confined_to_one_pool_keeps_big_work_there() {
+    fn confined_calls_keep_big_work_parallel() {
         for pool in [Placement::Wide, Placement::Local] {
             let policy = Policy::default();
             let location = Location::caller();
@@ -2972,7 +2973,7 @@ mod tests {
             // Serial never runs for the confined caller.
             let serial_runs = (0..2_000)
                 .filter(|_| {
-                    run_with(&policy, location, confined(pool), wall).0 == RunExecution::Serial
+                    run_call(&policy, location, confined(pool), wall).0 == RunExecution::Serial
                 })
                 .count();
             assert_eq!(serial_runs, 0, "{pool:?}: serial must never run");
@@ -2984,7 +2985,7 @@ mod tests {
     /// but is actually faster, so its probes find that out, and afterwards serial is probed on that
     /// cadence alone.
     #[test]
-    fn run_confined_to_one_pool_pays_only_its_own_probes() {
+    fn confined_calls_pay_only_own_probes() {
         for pool in [Placement::Wide, Placement::Local] {
             let policy = Policy::default();
             let location = Location::caller();
@@ -2993,14 +2994,14 @@ mod tests {
             // serial.
             let remembered = walls(pool, 100, 900, 900);
             assert_eq!(
-                run_with(&policy, location, confined(pool), remembered),
+                run_call(&policy, location, confined(pool), remembered),
                 (RunExecution::Parallel, pool)
             );
             assert_eq!(
-                run_with(&policy, location, confined(pool), remembered),
+                run_call(&policy, location, confined(pool), remembered),
                 (RunExecution::Serial, Placement::Wide)
             );
-            let (serial_ns, _) = policy.get_entry(location, 10, 10, PARALLELISM).unwrap();
+            let (serial_ns, _) = policy.run_estimates(location, 10, 10, PARALLELISM).unwrap();
             assert_eq!(serial_ns, Some(100_000));
             let seeded = match pool {
                 Placement::Wide => (Some(900_000), None),
@@ -3014,7 +3015,7 @@ mod tests {
             // With the placement actually faster, the caller settles there and leaves it for
             // exactly one serial probe per settled window.
             let pool_runs =
-                pool_runs_once_settled(&policy, location, pool, walls(pool, 100, 60, 60));
+                settled_parallel_runs(&policy, location, pool, walls(pool, 100, 60, 60));
             assert_eq!(
                 pool_runs,
                 SETTLED - 1,
@@ -3027,7 +3028,7 @@ mod tests {
     /// group's width, although a caller with a choice would seed Wide first. Its parallel samples
     /// train only the Local estimate, so the first caller with a choice still seeds Wide.
     #[test]
-    fn run_confined_to_one_pool_never_consults_the_placement() {
+    fn confined_calls_leave_choice_untouched() {
         let policy = Policy::default();
         let location = Location::caller();
         let local = confined(Placement::Local);
@@ -3042,7 +3043,7 @@ mod tests {
                 measure: true,
             }
         );
-        policy.record_run_placed(
+        policy.record_run(
             location,
             10,
             10,
@@ -3054,12 +3055,12 @@ mod tests {
         // Its next call seeds serial, and no later call probes Wide.
         let wall = walls(Placement::Local, 100, 80, 900);
         assert_eq!(
-            run_with(&policy, location, local, wall),
+            run_call(&policy, location, local, wall),
             (RunExecution::Serial, Placement::Wide)
         );
         for _ in 0..RESAMPLE_INTERVAL {
             assert_ne!(
-                run_with(&policy, location, local, wall),
+                run_call(&policy, location, local, wall),
                 (RunExecution::Parallel, Placement::Wide)
             );
         }
@@ -3070,7 +3071,7 @@ mod tests {
             Some((None, Some(80_000)))
         );
         assert_eq!(
-            run_with(&policy, location, EITHER, wall),
+            run_call(&policy, location, EITHER, wall),
             (RunExecution::Parallel, Placement::Wide)
         );
     }
@@ -3080,7 +3081,7 @@ mod tests {
     /// must make the same decisions, probes and samples included, as when it calls alone. A caller
     /// never advances the cadence of a placement it does not decide on.
     #[test]
-    fn run_callers_of_different_pools_keep_independent_cadences() {
+    fn interleaved_callers_keep_independent_cadences() {
         let wall = |execution, placement| {
             Duration::from_micros(match (execution, placement) {
                 (RunExecution::Serial, _) => 100,
@@ -3106,7 +3107,7 @@ mod tests {
             let plan = policy.choose_run(location, 10, 10, PARALLELISM, pools);
             if plan.measure {
                 let elapsed = wall(plan.execution, plan.placement);
-                policy.record_run_placed(location, 10, 10, PARALLELISM, plan, elapsed);
+                policy.record_run(location, 10, 10, PARALLELISM, plan, elapsed);
             }
             plan
         };
@@ -3137,7 +3138,7 @@ mod tests {
     /// a caller with a choice decides on. When Local slows past Wide, that caller moves to Wide on
     /// its next call without timing Local itself.
     #[test]
-    fn run_confined_to_the_local_pool_keeps_the_choosers_estimate_live() {
+    fn confined_local_samples_update_shared_choice() {
         let policy = Policy::default();
         let location = Location::caller();
 
@@ -3155,12 +3156,12 @@ mod tests {
         // Workers time Local slowing past Wide.
         let slow = walls(Placement::Local, 1_000, 300, 120);
         for _ in 0..RESAMPLE_INTERVAL {
-            run_with(&policy, location, confined(Placement::Local), slow);
+            run_call(&policy, location, confined(Placement::Local), slow);
         }
 
         // The caller with a choice moves to Wide at once.
         assert_eq!(
-            run_with(&policy, location, EITHER, slow),
+            run_call(&policy, location, EITHER, slow),
             (RunExecution::Parallel, Placement::Wide)
         );
     }
@@ -3174,7 +3175,7 @@ mod tests {
     /// cadence skips the choice's four probes, so its boundaries slip by at most four calls and
     /// both sets land within the window.
     #[test]
-    fn run_with_the_local_pool_decides_once_per_call_on_a_shared_preferred_entry() {
+    fn choice_advances_run_cadence_once() {
         let policy = Policy::default();
         let location = Location::caller();
 
@@ -3189,7 +3190,7 @@ mod tests {
                 placement,
                 measure: true,
             };
-            policy.record_run_placed(
+            policy.record_run(
                 location,
                 10,
                 10,
@@ -3208,7 +3209,7 @@ mod tests {
         // Count the calls that leave Wide over one settled window.
         let other = (0..settled)
             .filter(|_| {
-                run_with(&policy, location, EITHER, wall)
+                run_call(&policy, location, EITHER, wall)
                     != (RunExecution::Parallel, Placement::Wide)
             })
             .count();
@@ -3226,7 +3227,7 @@ mod tests {
     /// callers keep with the caller that has a choice, Local's run cadence must keep timing that
     /// caller's local runs, so the estimate follows Local when it slows down.
     #[test]
-    fn run_interleaved_callers_keep_the_local_estimate_live() {
+    fn interleaved_callers_refresh_local_estimate() {
         let wall = |slow: bool| {
             move |execution, placement| match (execution, placement) {
                 (RunExecution::Serial, _) => {
@@ -3254,7 +3255,7 @@ mod tests {
                     placement,
                     measure: true,
                 };
-                policy.record_run_placed(
+                policy.record_run(
                     location,
                     10,
                     10,
@@ -3273,7 +3274,7 @@ mod tests {
                     } else {
                         confined(Placement::Wide)
                     };
-                    run_with(&policy, location, pools, wall(call >= calls / 2))
+                    run_call(&policy, location, pools, wall(call >= calls / 2))
                         == (RunExecution::Parallel, Placement::Local)
                 })
                 .count();
@@ -3288,7 +3289,7 @@ mod tests {
                 "period {period} phase {phase}: the caller must keep Local, ran \
                  {local_runs} local"
             );
-            let (_, parallel_ns) = policy.get_entry(location, 10, 10, PARALLELISM).unwrap();
+            let (_, parallel_ns) = policy.run_estimates(location, 10, 10, PARALLELISM).unwrap();
             assert!(
                 parallel_ns.unwrap() >= 7_900_000,
                 "period {period} phase {phase}: the local estimate must follow Local as it slows, \
@@ -3305,7 +3306,7 @@ mod tests {
     /// calls it runs, so Local is timed again and preferred once more. In a strict alternation both
     /// estimates refresh apace, and the caller with a choice must keep Local.
     #[test]
-    fn run_interleaved_callers_rediscover_a_faster_local_pool() {
+    fn interleaved_callers_rediscover_faster_local_placement() {
         let wall = |execution, placement| match (execution, placement) {
             (RunExecution::Serial, _) => Duration::from_micros(60),
             (RunExecution::Parallel, Placement::Local) => Duration::from_micros(30),
@@ -3332,7 +3333,7 @@ mod tests {
                 } else {
                     confined(Placement::Wide)
                 };
-                let run = run_with(&policy, location, pools, wall);
+                let run = run_call(&policy, location, pools, wall);
                 if call >= settled && chooser {
                     with_pool += 1;
                     local_runs += u32::from(run == (RunExecution::Parallel, Placement::Local));
@@ -3349,7 +3350,7 @@ mod tests {
                 local_runs
                     >= with_pool
                         - (steady_probes(with_pool, 0) + 1)
-                        - (loser_probes(with_pool) + 1),
+                        - (capped_probes(with_pool) + 1),
                 "period {period} phase {phase}: the caller must keep Local, ran \
                  {local_runs} of {with_pool} local"
             );
@@ -3363,7 +3364,7 @@ mod tests {
     /// re-check it every `RESAMPLE_INTERVAL` calls. A caller confined to Wide decides it on Wide's
     /// fresh cadence.
     #[test]
-    fn run_backs_off_a_stable_close_race_until_it_flips() {
+    fn confined_races_back_off_until_flip() {
         let policy = Policy::default();
         let location = Location::caller();
 
@@ -3380,7 +3381,7 @@ mod tests {
         let runs_of = |execution, calls: u32, serial: u64| -> Vec<u32> {
             let wall = walls(Placement::Wide, serial, 120, 120);
             (1..=calls)
-                .filter(|_| run_with(&policy, location, pools, wall).0 == execution)
+                .filter(|_| run_call(&policy, location, pools, wall).0 == execution)
                 .collect()
         };
 
@@ -3424,7 +3425,7 @@ mod tests {
     /// Serial beats Wide by a sixth, and a steady race backs a caller confined to Wide off to the
     /// cap. The last of its 6,400 calls is a boundary with five confirmations.
     #[test]
-    fn run_resets_confidence_on_a_flip_between_boundaries() {
+    fn confined_flips_reset_confirmations_between_boundaries() {
         let policy = Policy::default();
         let location = Location::caller();
 
@@ -3439,7 +3440,7 @@ mod tests {
         );
         let pools = confined(Placement::Wide);
         let run = |serial, pool| {
-            run_with(
+            run_call(
                 &policy,
                 location,
                 pools,
@@ -3476,7 +3477,7 @@ mod tests {
     /// settles on Wide the call after the thirteenth probe, 11,601 calls in, where the gap alone
     /// would take 10,501.
     #[test]
-    fn run_rediscovers_a_stale_pool_while_a_noisy_close_race_backs_off() {
+    fn confined_noisy_races_rediscover_stale_placement() {
         let pools = confined(Placement::Wide);
         let policy = Policy::default();
         let location = Location::caller();
@@ -3497,7 +3498,7 @@ mod tests {
         let faster = walls(Placement::Wide, 100, 50, 50);
         let mut pool_runs = Vec::new();
         let settled = (1..=DISCOVERY).find(|&call| {
-            let on_pool = run_with(&policy, location, pools, faster).0 == RunExecution::Parallel;
+            let on_pool = run_call(&policy, location, pools, faster).0 == RunExecution::Parallel;
             let settled = on_pool && pool_runs.last() == Some(&(call - 1));
             if on_pool {
                 pool_runs.push(call);
@@ -3541,7 +3542,7 @@ mod tests {
             })
         };
         let probes: Vec<u32> = (1..=20_000)
-            .filter(|_| run_with(&policy, location, pools, noisy).0 == RunExecution::Parallel)
+            .filter(|_| run_call(&policy, location, pools, noisy).0 == RunExecution::Parallel)
             .collect();
         assert_eq!(
             probes,
@@ -3590,7 +3591,7 @@ mod tests {
     /// often workers call, outside callers must keep comparing inline execution against their own
     /// overhead estimate.
     #[test]
-    fn spawn_worker_round_trips_leave_outside_callers_inline() {
+    fn spawn_workers_preserve_outside_inline_preference() {
         for pattern in [
             &[false][..],
             &[false, true, true],
@@ -3621,7 +3622,7 @@ mod tests {
     /// A call site used only by workers learns from their round trips. A 1 us job against a 3 us
     /// own-pool overhead settles inline.
     #[test]
-    fn spawn_site_only_workers_call_reaches_inline() {
+    fn spawn_workers_learn_inline_preference() {
         let policy = Policy::default();
         let location = Location::caller();
         let job = Duration::from_micros(1);
@@ -3654,7 +3655,7 @@ mod tests {
                 location,
                 64,
                 PARALLELISM,
-                plan_of(SpawnExecution::Offload, Spawner::Outside, true),
+                spawn_plan(SpawnExecution::Offload, Spawner::Outside, true),
                 job,
             );
             for (spawner, worker) in [(Spawner::Worker, true), (Spawner::Outside, false)] {
@@ -3662,7 +3663,7 @@ mod tests {
                     location,
                     64,
                     PARALLELISM,
-                    plan_of(SpawnExecution::Offload, spawner, true),
+                    spawn_plan(SpawnExecution::Offload, spawner, true),
                     job + overhead(worker),
                     job,
                 );
@@ -3714,7 +3715,7 @@ mod tests {
     /// A worker's round trip can be recorded before its job sample. That record marks the entry as
     /// recorded and trains only the overhead kept for workers.
     #[test]
-    fn spawn_recorded_observes_own_pool_round_trip_before_job_recording() {
+    fn spawn_recorded_accepts_worker_round_trip() {
         let policy = Policy::default();
         let location = Location::caller();
 
@@ -3722,7 +3723,7 @@ mod tests {
         let plan = policy.choose_spawn(location, 64, PARALLELISM, Spawner::Worker);
         assert_eq!(
             plan,
-            plan_of(SpawnExecution::Offload, Spawner::Worker, true)
+            spawn_plan(SpawnExecution::Offload, Spawner::Worker, true)
         );
         assert!(!policy.spawn_recorded(location, 64, PARALLELISM));
 
@@ -3774,7 +3775,7 @@ mod tests {
     /// 400 (three), 200 and 200 (two), and then 100, 100, and 200 inside the last multiple as the
     /// count climbs again. Recovery takes 61,200 calls.
     #[test]
-    fn spawn_recovers_from_a_stale_inline_estimate() {
+    fn spawn_recovers_stale_inline_estimate() {
         // An entry with a live 15 ms inline estimate, a 2 us job wall, and a 50 us overhead.
         let mut entry = SpawnEntry::default();
         for _ in 0..2 {

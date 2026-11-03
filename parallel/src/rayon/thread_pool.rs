@@ -268,7 +268,7 @@ impl ThreadPool {
         OP: FnOnce() -> R + Send,
         R: Send,
     {
-        self.registry.check(placement);
+        self.registry.check_placement(placement);
         self.registry.in_worker_placed(placement, |_, _| op())
     }
 
@@ -289,7 +289,7 @@ impl ThreadPool {
         OP: Fn() -> R + Sync,
         R: Send,
     {
-        self.registry.check(Placement::Local(group));
+        self.registry.check_placement(Placement::Local(group));
         let workers = self.registry.group_range(group);
         self.broadcast(|context| workers.contains(&context.index()).then(&op))
             .into_iter()
@@ -344,7 +344,7 @@ impl ThreadPool {
     where
         OP: FnOnce() + Send + 'static,
     {
-        self.registry.check(placement);
+        self.registry.check_placement(placement);
         // SAFETY: `self` holds a reference that keeps the registry from terminating.
         unsafe { spawn::spawn_in(op, &self.registry, placement) }
     }
@@ -364,7 +364,7 @@ impl ThreadPool {
     where
         OP: Fn() + Send + Sync + 'static,
     {
-        self.registry.check(Placement::Local(group));
+        self.registry.check_placement(Placement::Local(group));
         let workers = self.registry.group_range(group);
         self.spawn_broadcast(move |context| {
             if workers.contains(&context.index()) {

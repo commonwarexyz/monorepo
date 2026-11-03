@@ -108,7 +108,7 @@ mod tests {
     /// search instead of blocking, leaves the queued jobs in place, and runs them in arrival
     /// order once the lock is released.
     #[test]
-    fn contended_admission_keeps_the_worker_available() {
+    fn contended_admission_keeps_worker_available() {
         // One worker in one group, so every queued job waits for this worker's search.
         let pool = Arc::new(
             ThreadPoolBuilder::new()
