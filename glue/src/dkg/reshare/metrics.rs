@@ -175,6 +175,7 @@ mod tests {
             metrics.reconcile(&all, &all);
             metrics.record_share(&peers[0], 1);
             metrics.record_share(&peers[1], 1);
+            metrics.record_ack(&peers[0], 1);
             metrics.record_ack(&peers[2], 1);
             assert_eq!(
                 exported("reshare_latest_share"),
@@ -182,17 +183,20 @@ mod tests {
             );
             assert_eq!(
                 exported("reshare_latest_ack"),
-                BTreeMap::from([(label(&peers[2]), 1)])
+                BTreeMap::from([(label(&peers[0]), 1), (label(&peers[2]), 1)])
             );
 
-            // Leaving a role removes that role's gauge. A retained dealer keeps its epoch, and
-            // a dealer appears only once it deals.
+            // Leaving a role removes that role's gauge, a peer that keeps its role keeps its
+            // epoch, and a dealer appears only once it deals.
             metrics.reconcile(&set(&[&peers[1], &peers[2]]), &set(&[&peers[0]]));
             assert_eq!(
                 exported("reshare_latest_share"),
                 BTreeMap::from([(label(&peers[1]), 1)])
             );
-            assert!(exported("reshare_latest_ack").is_empty());
+            assert_eq!(
+                exported("reshare_latest_ack"),
+                BTreeMap::from([(label(&peers[0]), 1)])
+            );
             metrics.record_share(&peers[1], 2);
             metrics.record_share(&peers[2], 2);
             assert_eq!(

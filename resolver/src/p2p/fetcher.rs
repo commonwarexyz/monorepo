@@ -1513,8 +1513,12 @@ mod tests {
     fn test_reconcile_prunes_departed_peer_performance() {
         Runner::default().start(|context| async move {
             let mut fetcher = create_test_fetcher(context.child("fetcher"));
-            let peer1 = PrivateKey::from_seed(1).public_key();
-            let peer2 = PrivateKey::from_seed(2).public_key();
+
+            // Key order places one departure on each side of the retained peer, so both
+            // removal paths of the roster walk run.
+            let mut peers = [1, 2, 3].map(|seed| PrivateKey::from_seed(seed).public_key());
+            peers.sort();
+            let [low, mid, high] = peers;
             let label = |peer: &PublicKey| format!("peer=\"{peer}\"");
             let exported = || -> BTreeMap<String, u64> {
                 metric_samples(&context.encode(), "fetcher_peer_performance")
@@ -1529,33 +1533,46 @@ mod tests {
             };
 
             // Observed peers are exported with their current weights.
-            fetcher.reconcile(&[peer1.clone(), peer2.clone()]);
-            fetcher.record_response(&peer1, Duration::from_millis(10), 1024);
-            fetcher.record_response(&peer2, Duration::from_millis(20), 1024);
-            assert_eq!(exported(), expected(&fetcher, &[&peer1, &peer2]));
+            fetcher.reconcile(&[low.clone(), mid.clone(), high.clone()]);
+            fetcher.record_response(&low, Duration::from_millis(10), 1024);
+            fetcher.record_response(&mid, Duration::from_millis(20), 1024);
+            fetcher.record_response(&high, Duration::from_millis(30), 1024);
+            assert_eq!(exported(), expected(&fetcher, &[&low, &mid, &high]));
+            let retained = peer_weight(&fetcher, &mid);
 
-            // Send `peer1` a request that stays outstanding after it departs.
+            // Send `low` a request that stays outstanding after it departs.
             let mut sender = WrappedSender::new(SuccessMockSender::default());
-            fetcher.add_targets(MockKey(1), [peer1.clone()]);
+            fetcher.add_targets(MockKey(1), [low.clone()]);
             fetcher.add_ready(MockKey(1));
             let (id, peer) = send_next(&mut fetcher, &mut sender);
-            assert_eq!(peer, peer1);
+            assert_eq!(peer, low);
 
-            // Departure removes the gauge, and the surviving peer keeps its weight.
-            fetcher.reconcile(slice::from_ref(&peer2));
-            let surviving = expected(&fetcher, &[&peer2]);
+            // Departure removes the gauges on both sides of the retained peer. The retained
+            // peer keeps its weight through this and an identical reconcile.
+            fetcher.reconcile(slice::from_ref(&mid));
+            let surviving = expected(&fetcher, &[&mid]);
+            assert_eq!(peer_weight(&fetcher, &mid), retained);
+            assert_eq!(exported(), surviving);
+            fetcher.reconcile(slice::from_ref(&mid));
+            assert_eq!(peer_weight(&fetcher, &mid), retained);
             assert_eq!(exported(), surviving);
 
             // A late response from a departed peer does not revive its gauge.
-            assert!(fetcher.pop_response(id, &peer1).is_some());
-            fetcher.record_response(&peer1, Duration::from_millis(10), 1024);
+            assert!(fetcher.pop_response(id, &low).is_some());
+            fetcher.record_response(&low, Duration::from_millis(10), 1024);
             assert_eq!(exported(), surviving);
 
-            // A rejoining peer is exported again only once it is observed.
-            fetcher.reconcile(&[peer1.clone(), peer2.clone()]);
+            // A rejoining peer starts without observations and is exported once observed.
+            fetcher.reconcile(&[low.clone(), mid.clone()]);
+            assert_eq!(peer_weight(&fetcher, &low), Score::default().weight());
             assert_eq!(exported(), surviving);
-            fetcher.record_response(&peer1, Duration::from_millis(10), 1024);
-            assert_eq!(exported(), expected(&fetcher, &[&peer1, &peer2]));
+            fetcher.record_response(&low, Duration::from_millis(10), 1024);
+            assert_eq!(exported(), expected(&fetcher, &[&low, &mid]));
+
+            // An empty roster removes every gauge.
+            fetcher.reconcile(&[]);
+            assert!(exported().is_empty());
+            assert_cached_weights(&fetcher);
         });
     }
 
