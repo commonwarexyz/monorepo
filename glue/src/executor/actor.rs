@@ -20,7 +20,7 @@ use commonware_cryptography::{Digested, Digestible};
 use commonware_macros::{select, select_loop};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    ContextCell, Handle, Spawner, spawn_cell,
     telemetry::metrics::{
         Gauge, GaugeExt as _, MetricsExt as _,
         histogram::{self, Buckets, Timed},
@@ -195,7 +195,7 @@ impl<D: Copy + Eq + Hash> Preparations<D> {
 /// See the [module documentation](super).
 pub struct Executor<E, X, L, R, T, A, S>
 where
-    E: Rng + Spawner + Metrics + Clock + StorageContext,
+    E: Rng + Spawner + StorageContext,
     X: Execute<E>,
     L: Ledger<Block = X::Input>,
     R: Reporter<Activity = Finalized<X::Block>>,
@@ -254,7 +254,7 @@ where
 
 impl<E, X, L, R, T, A, S> Executor<E, X, L, R, T, A, S>
 where
-    E: Rng + Spawner + Metrics + Clock + StorageContext,
+    E: Rng + Spawner + StorageContext,
     X: Execute<E>,
     L: Ledger<Block = X::Input>,
     R: Reporter<Activity = Finalized<X::Block>>,

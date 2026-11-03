@@ -1710,6 +1710,7 @@ dependencies = [
  "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
+ "futures",
  "tracing",
  "tracing-subscriber",
 ]

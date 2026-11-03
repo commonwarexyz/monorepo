@@ -220,7 +220,6 @@ where
     H: Hasher<Digest = B::Digest>,
     V: Variant,
     B: Codec + Digestible,
-    B::Cfg: Clone,
 {
     let name = |suffix: &str| format!("{}_{suffix}", config.partition_prefix);
     let bodies: FinalBody<T, E, H, B> = FinalizedArchive::init_immutable(

@@ -245,7 +245,7 @@ async fn spawn_catalog<E>(
     context: E,
 ) -> (Client, Handle<Result<(), Fatal>>, DeliveryReceiver)
 where
-    E: Context + Spawner + RuntimeMetrics,
+    E: Context + Spawner,
 {
     let (delivery, receiver) = delivery::channel(context.child("delivery_mailbox"));
     let Opened {
@@ -276,7 +276,7 @@ async fn spawn_catalog_with_promoter<E>(
     DeliveryReceiver,
 )
 where
-    E: Context + Spawner + RuntimeMetrics,
+    E: Context + Spawner,
 {
     let (delivery, receiver) = delivery::channel(context.child("delivery_mailbox"));
     let Opened {

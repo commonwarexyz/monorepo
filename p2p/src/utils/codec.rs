@@ -221,9 +221,6 @@ where
     }
 
     /// Start the background receiver.
-    ///
-    /// Returns a [`Handle`] that must be kept alive for the background receiver to continue
-    /// running. Dropping the handle will abort the background receiver.
     pub fn start(mut self) -> Handle<()> {
         spawn_cell!(self.context, self.run())
     }
@@ -536,8 +533,8 @@ mod tests {
             }
             let metrics = context.encode();
             assert!(
-                metrics.contains("bg_decode_total{status=\"Invalid\"} 1"),
-                "{metrics}"
+                metrics.contains("bg_decode_total{status=\"Invalid\"} 1\n"),
+                "decode metric must count one invalid message: {metrics}"
             );
         });
     }
@@ -698,9 +695,10 @@ mod tests {
             let (tx, receiver) = mpsc::unbounded_channel();
 
             let capacity = 3u32;
-            for i in 0..capacity + 2 {
+            let overflow = 2u32;
+            for i in 0..capacity + overflow {
                 tx.send((sender.clone(), IoBuf::from(i.encode())))
-                    .expect("mock receiver should be open");
+                    .expect("mock receiver must be open");
             }
             drop(tx);
 
@@ -715,10 +713,11 @@ mod tests {
                 NoopBlocker::default(),
                 Sequential,
             );
+
             // Keep the metric registered after the receiver exits.
             let _decode = bg.decode.clone();
             let handle = bg.start();
-            handle.await.expect("background receiver should complete");
+            handle.await.expect("background receiver must complete");
 
             // Only the first `capacity` messages survive.
             for expected in 0..capacity {
@@ -729,12 +728,16 @@ mod tests {
             assert!(rx.recv().await.is_none());
             let metrics = context.encode();
             assert!(
-                metrics.contains("bg_decode_total{status=\"Dropped\"} 2"),
-                "{metrics}"
+                metrics.contains(&format!(
+                    "bg_decode_total{{status=\"Dropped\"}} {overflow}\n"
+                )),
+                "decode metric must count each message dropped by the full mailbox: {metrics}"
             );
             assert!(
-                metrics.contains("bg_decode_total{status=\"Success\"} 3"),
-                "{metrics}"
+                metrics.contains(&format!(
+                    "bg_decode_total{{status=\"Success\"}} {capacity}\n"
+                )),
+                "decode metric must count each delivered message: {metrics}"
             );
         });
     }

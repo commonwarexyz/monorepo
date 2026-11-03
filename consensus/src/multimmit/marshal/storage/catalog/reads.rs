@@ -35,7 +35,6 @@ where
     H: Hasher,
     V: Variant,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     /// Returns the L-QC with `id`, finalized or pending.
     pub(crate) async fn lqc(

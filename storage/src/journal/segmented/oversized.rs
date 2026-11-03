@@ -1087,9 +1087,8 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
 
     /// Capture an owned reader of the values currently appended to `section`.
     ///
-    /// Flushes and syncs the values through [Glob::snapshot]. This does not sync the index or
-    /// publish a tracked recovery marker. The reader supports concurrent appends and removal,
-    /// but truncation into its captured extent makes affected reads unspecified.
+    /// Syncs the values but not the index, and publishes no tracked recovery marker. See
+    /// [Reader] for the reader's bounds and lifetime.
     #[commonware_macros::stability(ALPHA)]
     pub async fn value_snapshot(
         mut self,
@@ -1105,8 +1104,8 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
     /// Call after a flush of `section` (such as [Oversized::start_sync]) and before any further
     /// append to it: the reader reads the value blob directly, so buffered values count toward its
     /// extent but are unreadable. The reader is usable before the sync completes; if the sync
-    /// handle fails, discard the reader along with the journal. Appends and removal after capture
-    /// do not affect the reader, but rewinds into its extent make affected reads unspecified.
+    /// handle fails, discard the reader along with the journal. See [Reader] for the reader's
+    /// bounds and lifetime.
     ///
     /// Returns [Error::AlreadyPrunedToSection] for a pruned section and
     /// [Error::SectionOutOfRange] for a section without values.
@@ -1271,9 +1270,8 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
         Ok(self)
     }
 
-    /// Make all accepted entries durable, persist their tracked recovery markers, and close.
-    ///
-    /// A journal opened without tracked recovery has no markers, so closing it only syncs every
+    /// Make all accepted entries durable, persist their tracked recovery markers, and close. A
+    /// journal opened without tracked recovery has no markers, so closing it only syncs every
     /// section.
     #[commonware_macros::stability(ALPHA)]
     pub async fn close(self) -> Result<(), Error> {
@@ -2025,6 +2023,7 @@ mod tests {
         });
     }
 
+    /// Open a tracked journal and drain its replay.
     async fn init_tracked<E: Context>(
         context: &E,
         cfg: Config<()>,
@@ -2195,10 +2194,11 @@ mod tests {
             let reopen = context.child("reopen");
             let journal = init_tracked(&reopen, cfg, metadata_partition).await;
             assert!(
-                journal
-                    .get_value(1, first_offset, first_size)
-                    .await
-                    .is_err()
+                matches!(
+                    journal.get_value(1, first_offset, first_size).await,
+                    Err(Error::ChecksumMismatch(_, _))
+                ),
+                "a value covered by the marker must not be validated on reopen"
             );
             assert_eq!(
                 journal
@@ -2257,6 +2257,8 @@ mod tests {
         });
     }
 
+    /// Check that sections 1 and 2 hold consistent prefixes within the given entry counts,
+    /// returning their counts.
     async fn assert_close_prefixes(
         journal: &Oversized<deterministic::Context, TestEntry, TestValue>,
         minimum: u64,
@@ -2434,29 +2436,9 @@ mod tests {
             let (journal, handle) = journal.start_sync(1).await.expect("failed to start sync");
             let _reader = journal.capture(1).expect("failed to capture reader");
             assert!(
-                handle.await.is_err(),
+                matches!(handle.await, Err(RError::Io(_))),
                 "value sync failure must reach caller"
             );
-        });
-    }
-
-    #[test_traced]
-    fn test_capture_pruned_section() {
-        deterministic::Runner::default().start(|context| async move {
-            let cfg = test_cfg();
-            let journal = Oversized::<_, TestEntry, TestValue>::init(context, cfg)
-                .await
-                .expect("failed to init");
-            let (journal, _, _, _) = journal
-                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
-                .await
-                .expect("failed to append");
-            let (journal, pruned) = journal.prune(2).await.expect("failed to prune");
-            assert!(pruned);
-            assert!(matches!(
-                journal.capture(1),
-                Err(Error::AlreadyPrunedToSection(2))
-            ));
         });
     }
 
@@ -2472,15 +2454,52 @@ mod tests {
                 .await
                 .unwrap();
             let (journal, reader) = journal.value_snapshot(1).await.unwrap();
+
+            // Later appends must stay outside the captured extent.
             let (journal, _, next_offset, next_size) = journal
                 .append(1, TestEntry::new(1, 0, 0), &[9; 16])
                 .await
                 .unwrap();
             let journal = journal.sync(1).await.unwrap();
             assert_eq!(reader.get(offset, size).await.unwrap(), [7; 16]);
-            assert!(reader.get(next_offset, next_size).await.is_err());
+            assert!(matches!(
+                reader.get(next_offset, next_size).await,
+                Err(Error::Runtime(RError::BlobInsufficientLength))
+            ));
+
+            // The reader must outlive the journal.
             journal.destroy().await.unwrap();
             assert_eq!(reader.get(offset, size).await.unwrap(), [7; 16]);
+        });
+    }
+
+    #[test_traced]
+    fn test_value_snapshot_leaves_index_unsynced() {
+        deterministic::Runner::default().start(|context| async move {
+            // Fail every index sync so any index sync would fail the snapshot.
+            let cfg = test_cfg();
+            let faulty = SyncFaultContext {
+                inner: context,
+                fail_partition: cfg.index_partition.clone(),
+            };
+            let journal = Oversized::<_, TestEntry, TestValue>::init(faulty, cfg)
+                .await
+                .unwrap();
+            let (journal, _, offset, size) = journal
+                .append(1, TestEntry::new(0, 0, 0), &[7; 16])
+                .await
+                .unwrap();
+
+            // The value snapshot must succeed without syncing the index.
+            let (journal, reader) = journal
+                .value_snapshot(1)
+                .await
+                .expect("value snapshot must not sync the index");
+            assert_eq!(reader.get(offset, size).await.unwrap(), [7; 16]);
+            assert!(matches!(
+                journal.sync(1).await,
+                Err(Error::Runtime(RError::Io(_)))
+            ));
         });
     }
 
@@ -2529,6 +2548,7 @@ mod tests {
                     (TestEntry::new(2, 0, 0), [2; 16]),
                     (TestEntry::new(3, 0, 0), [3; 16]),
                 ];
+                // A singleton batch must behave like a single append.
                 let oversized = Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
@@ -2545,6 +2565,7 @@ mod tests {
                         .unwrap(),
                     [0; 16]
                 );
+                // A larger batch must place adjacent values behind matching index entries.
                 let (oversized, last, locations) = oversized
                     .append_many(
                         5,
@@ -2567,6 +2588,7 @@ mod tests {
                 }
                 drop(oversized.sync(5).await.unwrap());
 
+                // Reopening must recover every synced entry and value.
                 let oversized =
                     Oversized::<_, TestEntry, TestValue>::init(context.child("second"), cfg)
                         .await
@@ -2581,6 +2603,80 @@ mod tests {
                 }
                 oversized.destroy().await.unwrap();
             });
+        }
+    }
+
+    #[test_traced]
+    fn test_oversized_append_many_recovers_index_prefix() {
+        /// Number of entries in the interrupted batch.
+        const ENTRIES: u64 = 4;
+
+        let physical_page = TestEntry::SIZE as u64 + 12;
+        for compression in [None, Some(3)] {
+            for kept in 0..=ENTRIES {
+                deterministic::Runner::default().start(|context| async move {
+                    // Make a whole batch durable with one index entry per physical page.
+                    let mut cfg = entry_cfg();
+                    cfg.compression = compression;
+                    let oversized = Oversized::<_, TestEntry, TestValue>::init(
+                        context.child("first"),
+                        cfg.clone(),
+                    )
+                    .await
+                    .unwrap();
+                    let values = (1..=ENTRIES).map(|id| [id as u8; 16]).collect::<Vec<_>>();
+                    let (oversized, _, locations) = oversized
+                        .append_many(
+                            1,
+                            (1..=ENTRIES)
+                                .zip(&values)
+                                .map(|(id, value)| (TestEntry::new(id, 0, 0), value)),
+                        )
+                        .await
+                        .unwrap();
+                    drop(oversized.sync(1).await.unwrap());
+
+                    // Simulate a crash that kept every value but only a prefix of the index.
+                    let (index, _) = context
+                        .open(&cfg.index_partition, &1u64.to_be_bytes())
+                        .await
+                        .unwrap();
+                    index.resize(kept * physical_page).await.unwrap();
+                    index.sync().await.unwrap();
+                    drop(index);
+
+                    // Recovery must keep the index prefix and its values.
+                    let oversized =
+                        Oversized::<_, TestEntry, TestValue>::init(context.child("second"), cfg)
+                            .await
+                            .unwrap();
+                    for position in 0..kept {
+                        let entry = oversized.get(1, position).await.unwrap();
+                        assert_eq!(entry.id, position + 1);
+                        assert_eq!(entry.value_location(), locations[position as usize]);
+                        let (offset, size) = entry.value_location();
+                        assert_eq!(
+                            oversized.get_value(1, offset, size).await.unwrap(),
+                            values[position as usize]
+                        );
+                    }
+
+                    // Values past the prefix must be removed, so the next append starts at the
+                    // end of the last kept value.
+                    let end = kept.checked_sub(1).map_or(0, |last| {
+                        let (offset, size) = locations[last as usize];
+                        byte_end(offset, size)
+                    });
+                    let id = kept + 1;
+                    let (oversized, position, offset, _) = oversized
+                        .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                        .await
+                        .unwrap();
+                    assert_eq!(position, kept);
+                    assert_eq!(offset, end, "recovery must remove orphan values");
+                    oversized.destroy().await.unwrap();
+                });
+            }
         }
     }
 

@@ -119,7 +119,7 @@
 
 use crate::{
     Context,
-    index::Factory as IndexFactory,
+    index::{Factory as IndexFactory, Ordered as OrderedIndex},
     journal::{
         authenticated,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -127,9 +127,13 @@ use crate::{
     merkle::{Family, Location, full::Config as MerkleConfig},
     qmdb::{
         Error as QmdbError,
-        any::operation::{Operation, Update},
+        any::operation::{
+            Operation, Update,
+            update::{Ordered as OrderedUpdate, Unordered as UnorderedUpdate},
+        },
         bitmap::Shared,
         metrics::Metrics,
+        operation::Key,
         single_operation_root,
     },
     translator::Translator,
@@ -152,6 +156,8 @@ pub mod value;
 pub use value::{FixedValue, ValueEncoding, VariableValue};
 pub mod ordered;
 pub(crate) mod sync;
+#[cfg(any(test, feature = "test-traits"))]
+mod test_trait_impls;
 pub mod unordered;
 
 /// Compute the authenticated root of a newly initialized database without opening storage.
@@ -204,33 +210,62 @@ pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
 /// Configuration for an `Any` authenticated db with variable-sized values.
 pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
-/// Initialize an `Any` authenticated db from the given config.
-/// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
-/// `None` selects the latest retained state.
-///
-/// The selected state is durable before return. Zero is invalid because the initial commit
-/// requires one operation. Subsequent appends may exceed this initialization bound.
-pub async fn init<F, E, U, H, I, J, S>(
-    context: E,
-    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
-    max_size: Option<Location<F>>,
-) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, QmdbError<F>>
+impl<F, E, K, V, C, I, H, S> db::Db<F, E, C, I, H, UnorderedUpdate<K, V>, BITMAP_CHUNK_BYTES, S>
 where
     F: Family,
     E: Context + Spawner,
-    U: Update,
-    H: Hasher,
+    K: Key,
+    V: ValueEncoding,
+    C: authenticated::Backing<E, Item = Operation<F, UnorderedUpdate<K, V>>> + 'static,
     I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
-    J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
+    H: Hasher,
     S: Strategy,
-    Operation<F, U>: Codec,
+    Operation<F, UnorderedUpdate<K, V>>: Codec,
 {
-    init_with_bitmap::<F, E, U, H, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None, max_size, None)
-        .await
+    /// Initialize an unordered `Any` authenticated db from the given config. Uncommitted log
+    /// operations are discarded. `Some(max_size)` selects the latest retained commit with at most
+    /// `max_size` operations. `None` selects the latest retained state.
+    ///
+    /// The selected state is durable before return. Zero is invalid because the initial commit
+    /// requires one operation. Subsequent appends may exceed this initialization bound.
+    pub async fn init(
+        context: E,
+        cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, QmdbError<F>> {
+        init_with_bitmap(context, cfg, None, max_size, None).await
+    }
 }
 
-/// Like [`init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes pruned
-/// chunks from grafted metadata). `bitmap = None` allocates internally.
+impl<F, E, K, V, C, I, H, S> db::Db<F, E, C, I, H, OrderedUpdate<K, V>, BITMAP_CHUNK_BYTES, S>
+where
+    F: Family,
+    E: Context + Spawner,
+    K: Key,
+    V: ValueEncoding,
+    C: authenticated::Backing<E, Item = Operation<F, OrderedUpdate<K, V>>> + 'static,
+    I: IndexFactory<Value = Location<F>> + OrderedIndex + crate::qmdb::SnapshotBuild<F>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, OrderedUpdate<K, V>>: Codec,
+{
+    /// Initialize an ordered `Any` authenticated db from the given config. Uncommitted log
+    /// operations are discarded. `Some(max_size)` selects the latest retained commit with at most
+    /// `max_size` operations. `None` selects the latest retained state.
+    ///
+    /// The selected state is durable before return. Zero is invalid because the initial commit
+    /// requires one operation. Subsequent appends may exceed this initialization bound.
+    pub async fn init(
+        context: E,
+        cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, QmdbError<F>> {
+        init_with_bitmap(context, cfg, None, max_size, None).await
+    }
+}
+
+/// Like [`db::Db::init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes
+/// pruned chunks from grafted metadata). `bitmap = None` allocates internally.
 #[boxed]
 pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     context: E,
@@ -718,7 +753,12 @@ pub(crate) mod test {
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.root(), committed_root);
         assert_eq!(db.size(), committed_size);
-        assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
+        assert_eq!(db.get(&key0).await.unwrap(), Some(value0.clone()));
+        let missing = Sha256::hash(&[&1u64.to_be_bytes()]);
+        assert_eq!(
+            db.get_many(&[&key0, &missing]).await.unwrap(),
+            [Some(value0), None]
+        );
 
         db.destroy().await.unwrap();
     }
@@ -7389,7 +7429,7 @@ pub(crate) mod test {
 
     async fn open_mmb_db(context: Context, suffix: &str) -> MmbVariable {
         let cfg = variable_db_config::<OneCap>(suffix);
-        super::init(context, cfg, None).await.unwrap()
+        MmbVariable::init(context, cfg, None).await.unwrap()
     }
 
     async fn commit_writes_mmb(

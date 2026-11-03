@@ -26,9 +26,7 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_cryptography::{Digested, Hasher, bls12381::primitives::variant::Variant};
 use commonware_macros::select_loop;
-use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell,
-};
+use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell};
 use commonware_storage::Context;
 use commonware_utils::{
     Acknowledgement as _, acknowledgement::Exact, channel::fallible::OneshotExt as _,
@@ -180,7 +178,7 @@ where
 
 impl<E, H, V, B, A> Actor<E, H, V, B, A>
 where
-    E: Clock + Spawner + RuntimeMetrics + Context,
+    E: Spawner + Context,
     H: Hasher,
     V: Variant,
     B: Body<H>,

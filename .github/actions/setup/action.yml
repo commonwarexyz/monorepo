@@ -140,7 +140,7 @@ runs:
         echo "target=${target}" >> "$GITHUB_OUTPUT"
     - name: Setup rust cache
       if: inputs.rust-cache-enabled == 'true'
-      uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         save-if: ${{ github.ref == 'refs/heads/main' && inputs.rust-cache-save == 'true' }}
         key: ${{ steps.cache-key.outputs.key }}
@@ -148,6 +148,9 @@ runs:
         cache-workspace-crates: false
         workspaces: . -> ${{ steps.rust-cache-workspace.outputs.target }}
         cache-bin: true
+        # rust-cache saves no dependencies when its cargo metadata call fails,
+        # so keep the compiler wrapper out of its commands.
+        cmd-format: env -u RUSTC_WRAPPER {0}
 
     # rust-cache and sccache cover different parts of the build. rust-cache
     # restores Cargo state: downloaded crates, git dependencies, installed

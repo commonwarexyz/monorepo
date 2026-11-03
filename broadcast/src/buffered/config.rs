@@ -16,9 +16,9 @@ where
 
     /// Capacity of the application inbox.
     ///
-    /// Application requests beyond this capacity follow the mailbox overflow policy. Decoded
-    /// messages queue in a separate inbox that holds the network receiver's
-    /// [`capacity`](commonware_p2p::Receiver::capacity), and are dropped when it is full.
+    /// Requests beyond this capacity wait in order. While in overflow, broadcasts with the same
+    /// digest combine recipients and are handled once at the first broadcast's position, including
+    /// cache updates and subscriber notifications. Canceled overflow requests are discarded.
     pub mailbox_size: NonZeroUsize,
 
     /// The maximum number of cached items per sender.
@@ -37,12 +37,7 @@ where
     /// Blocks peers whose messages fail to decode.
     pub blocker: B,
 
-    /// Strategy for decoding inbound messages and computing their digests off the engine's event
-    /// loop.
-    ///
-    /// Decoding embeds any validation the item's codec performs (for example, digest checks on
-    /// large payloads), so a parallel strategy keeps that work from serializing behind the
-    /// engine's other duties. Parallel decodes may complete out of order, so cache recency
-    /// follows decode completion order rather than network arrival order.
+    /// Strategy for decoding inbound messages and computing their digests. Messages are cached in
+    /// the order they finish decoding, which may differ from arrival order.
     pub strategy: T,
 }

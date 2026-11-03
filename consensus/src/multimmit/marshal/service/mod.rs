@@ -105,7 +105,6 @@ where
     H: Hasher<Digest = B::Digest>,
     V: Variant,
     B: Codec + Digestible,
-    B::Cfg: Clone + Send + 'static,
     P: PublicKey,
 {
     let bounds = config.actor_bounds()?;
@@ -197,7 +196,6 @@ where
     H: Hasher,
     V: Variant,
     B: Body<H>,
-    B::Cfg: Send + 'static,
     P: PublicKey,
 {
     /// Returns a consensus [`Relay`](crate::Relay) that broadcasts blocks staged through this

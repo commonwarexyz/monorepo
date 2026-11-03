@@ -218,7 +218,6 @@ where
     H: Hasher,
     V: Variant,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     /// Creates the catalog and its mailbox.
     ///

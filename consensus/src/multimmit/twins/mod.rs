@@ -128,7 +128,7 @@ struct PumpedReceiver<E, S: PumpStrategy<E>> {
 
 impl<E, S> PumpedReceiver<E, S>
 where
-    E: Debug + std::error::Error + Send + Sync + 'static,
+    E: std::error::Error + Send + Sync + 'static,
     S: PumpStrategy<E>,
 {
     /// Spawns `strategy`'s pump over `inner` on `context`.
@@ -158,7 +158,7 @@ impl<E, S: PumpStrategy<E>> Debug for PumpedReceiver<E, S> {
 
 impl<E, S> commonware_p2p::Receiver for PumpedReceiver<E, S>
 where
-    E: Debug + std::error::Error + Send + Sync + 'static,
+    E: std::error::Error + Send + Sync + 'static,
     S: PumpStrategy<E>,
 {
     type Error = E;

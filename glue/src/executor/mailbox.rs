@@ -81,7 +81,7 @@ pub(super) enum Message<B: Digestible> {
 }
 
 /// Keeps every request in order, and drops reads whose caller left.
-impl<B: Digestible + Send + Sync + 'static> Policy for Message<B> {
+impl<B: Digestible> Policy for Message<B> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {

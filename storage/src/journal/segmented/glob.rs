@@ -133,9 +133,9 @@ fn coalesced_runs(
 ///
 /// Appends do not extend this reader's bounds. Dropping the glob or removing its section does
 /// not invalidate the reader. Truncating into its extent makes reads of the affected bytes
-/// unspecified; callers must finish those reads before reusing their locations.
-///
-/// The reader shares the section's open blob handle; see [Storage::open] for handle uniqueness.
+/// unspecified; callers must finish those reads before reusing their locations. While a reader
+/// is alive, reopening its section (for example through [Glob::init]) fails with
+/// [RError::BlobAlreadyOpen] unless the section was removed first. Clone a reader to share it.
 #[commonware_macros::stability(ALPHA)]
 pub struct Reader<B: Blob, V: Codec> {
     blob: Arc<B>,
@@ -158,13 +158,12 @@ impl<B: Blob, V: Codec> Clone for Reader<B, V> {
 
 #[commonware_macros::stability(ALPHA)]
 impl<B: Blob, V: CodecShared> Reader<B, V> {
-    /// Open an existing section without recovering, writing, or syncing its contents.
+    /// Open an existing section for reading without Glob recovery.
     ///
     /// Captures the stored byte length. The caller must exclude mutation and removal while
     /// opening, and keep the captured bytes unchanged while reading. For an appendable glob, use
     /// [Glob::snapshot] instead. Missing sections return [Error::SectionOutOfRange] without
-    /// creating a blob. Opening fails while another handle to the section is alive (see
-    /// [Storage::open]); share one reader by cloning it.
+    /// creating a blob.
     pub async fn open(
         context: &impl Storage<Blob = B>,
         cfg: Config<V::Cfg>,
@@ -578,10 +577,8 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
 
     /// Capture an owned reader of all values currently appended to `section`.
     ///
-    /// Syncs the section to flush buffered bytes and resolve pending write failures before
-    /// sharing its blob. A completed sync is reused when no newer writes have occurred.
-    /// The reader supports concurrent appends and section removal; truncation into its captured
-    /// extent make affected reads unspecified.
+    /// Syncs the section first, so the reader covers no bytes with a pending write failure. See
+    /// [Reader] for its bounds and lifetime.
     ///
     /// Returns [Error::AlreadyPrunedToSection] for a pruned section and
     /// [Error::SectionOutOfRange] for a missing section.
@@ -595,13 +592,7 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
 
     /// Capture an owned reader of the current extent of `section` without I/O.
     ///
-    /// Call after a flush of `section` (such as [Glob::start_sync]) and before any further append
-    /// to it: the reader reads the blob directly, so buffered bytes count toward its extent but
-    /// are unreadable. The reader is usable before the sync completes; if the sync handle fails,
-    /// discard the reader along with the glob.
-    ///
-    /// Returns [Error::AlreadyPrunedToSection] for a pruned section and
-    /// [Error::SectionOutOfRange] for a missing section.
+    /// See [super::oversized::Oversized::capture] for the preconditions.
     #[commonware_macros::stability(ALPHA)]
     pub(super) fn capture(&self, section: u64) -> Result<Reader<E::Blob, V>, Error> {
         self.0.capture(section)
@@ -860,6 +851,7 @@ mod tests {
                     write_buffer: NZUsize!(8),
                     ..test_cfg()
                 };
+                // A batch larger than the write buffer must reach storage in one write.
                 let values = [[1u8; 64], [2; 64], [3; 64]];
                 let glob = Glob::init(context.child("first"), cfg.clone())
                     .await
@@ -878,6 +870,7 @@ mod tests {
                     assert_eq!(glob.get(7, offset, size).await.unwrap(), *value);
                 }
 
+                // The same values appended one at a time must each take their own write.
                 recordings.clear();
                 let mut glob = glob;
                 let mut single_locations = Vec::new();
@@ -889,9 +882,10 @@ mod tests {
                 assert_eq!(
                     recordings.snapshot().writes.len(),
                     values.len(),
-                    "large single appends should require one physical write each"
+                    "large single appends must require one physical write each"
                 );
 
+                // Both sections must hold identical bytes.
                 let glob = glob.sync_all().await.unwrap();
                 let total_size = locations
                     .last()
@@ -925,6 +919,7 @@ mod tests {
                     assert_eq!(batch_bytes.as_ref(), single_bytes.as_ref());
                 }
 
+                // Reopening must read back the batch.
                 let (glob, removed) = glob.remove_section(8).await.unwrap();
                 assert!(removed);
                 drop(glob.sync(7).await.unwrap());
@@ -1001,11 +996,13 @@ mod tests {
                     compression,
                     ..test_cfg()
                 };
+                // Snapshot one value.
                 let glob = Glob::<_, [u8; 64]>::init(context, cfg).await.unwrap();
                 let (glob, offset, size) = glob.append(1, &[42; 64]).await.unwrap();
                 let (glob, reader) = glob.snapshot(1).await.unwrap();
                 assert_eq!(reader.size(), u64::from(size));
 
+                // Reads must proceed alongside appends, which must stay outside the extent.
                 let ((glob, next_offset, next_size), value) =
                     futures::try_join!(glob.append(1, &[7; 64]), reader.get(offset, size)).unwrap();
                 assert_eq!(value, [42; 64]);
@@ -1015,6 +1012,7 @@ mod tests {
                     Err(Error::Runtime(RError::BlobInsufficientLength))
                 ));
 
+                // A clone must outlive the original and the removal and recreation of its section.
                 let retained = reader.clone();
                 drop(reader);
                 let (glob, removed) = glob.remove_section(1).await.unwrap();
@@ -1023,11 +1021,13 @@ mod tests {
                 let glob = glob.sync(1).await.unwrap();
                 assert_eq!(retained.get(offset, size).await.unwrap(), [42; 64]);
 
+                // Pruning the section must not invalidate its reader.
                 let (glob, offset, size) = glob.append(2, &[11; 64]).await.unwrap();
                 let (glob, pruned_reader) = glob.snapshot(2).await.unwrap();
                 let (glob, _) = glob.prune(3).await.unwrap();
                 assert_eq!(pruned_reader.get(offset, size).await.unwrap(), [11; 64]);
 
+                // Destroying the glob must not invalidate its reader.
                 let (glob, offset, size) = glob.append(3, &[13; 64]).await.unwrap();
                 let (glob, destroyed_reader) = glob.snapshot(3).await.unwrap();
                 glob.destroy().await.unwrap();
@@ -1055,7 +1055,7 @@ mod tests {
 
             let (glob, second) = glob.start_sync(0).await.unwrap();
             let repeated = glob.capture(0).unwrap();
-            assert_eq!(pending.starts(), 1, "the pending cut should be reused");
+            assert_eq!(pending.starts(), 1, "the pending cut must be reused");
             assert_eq!(repeated.size(), reader.size());
             assert!(matches!(glob.capture(1), Err(Error::SectionOutOfRange(1))));
 
@@ -1115,8 +1115,15 @@ mod tests {
             let (glob, reader) = glob.snapshot(0).await.unwrap();
             drop(glob);
             recordings.clear();
-            for (offset, size) in [(u64::MAX, size), (1, size), (0, 0), (0, 3)] {
-                assert!(reader.get(offset, size).await.is_err());
+            assert!(matches!(
+                reader.get(u64::MAX, size).await,
+                Err(Error::OffsetOverflow)
+            ));
+            for (offset, size) in [(1, size), (0, 0), (0, 3)] {
+                assert!(matches!(
+                    reader.get(offset, size).await,
+                    Err(Error::Runtime(RError::BlobInsufficientLength))
+                ));
             }
             assert!(recordings.snapshot().reads.is_empty());
             assert_eq!(reader.get(0, size).await.unwrap(), 42);
@@ -1162,6 +1169,64 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_snapshot_reuses_completed_sync() {
+        deterministic::Runner::default().start(|context| async move {
+            // Let every started sync complete immediately.
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let glob = Glob::<_, u32>::init(context, test_cfg()).await.unwrap();
+            let (glob, offset, size) = glob.append(0, &42).await.unwrap();
+            let (glob, handle) = glob.start_sync(0).await.unwrap();
+            handle.await.unwrap();
+            assert_eq!(pending.starts(), 1);
+
+            // Without newer writes, the snapshot must reuse the completed sync.
+            let (glob, reader) = glob.snapshot(0).await.unwrap();
+            assert_eq!(
+                pending.starts(),
+                1,
+                "snapshot must reuse the completed sync"
+            );
+            assert_eq!(reader.get(offset, size).await.unwrap(), 42);
+            drop(glob);
+        });
+    }
+
+    #[test_traced]
+    fn test_reader_blocks_reopen_until_dropped() {
+        deterministic::Runner::default().start(|context| async move {
+            // Retain a reader after dropping its glob.
+            let glob = Glob::<_, u32>::init(context.child("first"), test_cfg())
+                .await
+                .unwrap();
+            let (glob, offset, size) = glob.append(0, &42).await.unwrap();
+            let (glob, reader) = glob.snapshot(0).await.unwrap();
+            drop(glob);
+
+            // Reopening must fail while the reader holds the section's blob.
+            assert!(matches!(
+                Glob::<_, u32>::init(context.child("second"), test_cfg()).await,
+                Err(Error::Runtime(RError::BlobAlreadyOpen(_, _)))
+            ));
+
+            // Dropping every clone must release the section.
+            let retained = reader.clone();
+            drop(reader);
+            assert_eq!(retained.get(offset, size).await.unwrap(), 42);
+            drop(retained);
+            let glob = Glob::<_, u32>::init(context.child("third"), test_cfg())
+                .await
+                .unwrap();
+            assert_eq!(glob.get(0, offset, size).await.unwrap(), 42);
+            glob.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_reader_open_is_read_only() {
         deterministic::Runner::default().start(|context| async move {
             let cfg = test_cfg();
@@ -1171,6 +1236,7 @@ mod tests {
             let (glob, offset, size) = glob.append(1, &42).await.unwrap();
             drop(glob.sync(1).await.unwrap());
 
+            // Count durability operations without blocking them, and record every read and write.
             let pending = PendingSyncs::default();
             pending.arm();
             pending.unblock();
@@ -1178,6 +1244,7 @@ mod tests {
                 inner: context.child("reader"),
                 pending: pending.clone(),
             });
+            // Opening a missing section must not create it.
             assert!(matches!(
                 Reader::<_, u32>::open(&context, cfg.clone(), 2).await,
                 Err(Error::SectionOutOfRange(2))
@@ -1186,6 +1253,7 @@ mod tests {
                 context.scan(&cfg.partition).await.unwrap(),
                 vec![1u64.to_be_bytes().to_vec()]
             );
+            // Opening must not read the section, and reading it must not write or sync.
             let reader = Reader::<_, u32>::open(&context, cfg, 1).await.unwrap();
             assert_eq!(reader.size(), u64::from(size));
             assert!(recordings.snapshot().reads.is_empty());
@@ -1215,12 +1283,19 @@ mod tests {
                 let (glob, reader) = glob.snapshot(0).await.unwrap();
                 drop(glob);
                 let pair_bytes = (locations[0].1 + locations[1].1) as usize;
+                // Each case lists the requested values, the expected physical reads, and the budget.
                 let cases: &[(&[usize], usize, usize)] = &[
+                    // No locations require no reads.
                     (&[], 0, usize::MAX),
+                    // Adjacent frames share one read.
                     (&[0, 1, 2, 3], 1, usize::MAX),
+                    // A gap splits the reads.
                     (&[0, 1, 3, 4], 2, usize::MAX),
+                    // Only consecutive, increasing, adjacent requests share a read.
                     (&[4, 1, 1, 2], 3, usize::MAX),
+                    // The budget splits adjacent frames.
                     (&[0, 1, 2, 3], 2, pair_bytes),
+                    // A frame larger than the budget is read alone.
                     (&[0, 1], 2, 1),
                 ];
                 for &(indices, reads, budget) in cases {
@@ -1259,15 +1334,21 @@ mod tests {
             let (glob, offset, size) = glob.append(0, &42).await.unwrap();
             let (_, reader) = glob.snapshot(0).await.unwrap();
             recordings.clear();
-            for invalid in [(u64::MAX, size), (offset + 1, size), (0, 0), (0, 3)] {
-                assert!(
+            assert!(matches!(
+                reader
+                    .get_many(&[(offset, size), (u64::MAX, size)], NZUsize!(64))
+                    .await,
+                Err(Error::OffsetOverflow)
+            ));
+            for invalid in [(offset + 1, size), (0, 0), (0, 3)] {
+                assert!(matches!(
                     reader
                         .get_many(&[(offset, size), invalid], NZUsize!(64))
-                        .await
-                        .is_err()
-                );
-                assert!(recordings.snapshot().reads.is_empty());
+                        .await,
+                    Err(Error::Runtime(RError::BlobInsufficientLength))
+                ));
             }
+            assert!(recordings.snapshot().reads.is_empty());
         });
     }
 
