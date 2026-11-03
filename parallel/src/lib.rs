@@ -1453,9 +1453,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// one group, the strategy first tries to use or establish a home in the caller's domain, then
     /// falls back to the least loaded full-width group. The caller waits for this work to finish.
     /// When that group's home is another domain, the calling thread may be moved there for the
-    /// call, within its own affinity mask. Joins use the same placement choices or run serially on
-    /// the caller. Parallel sorts from such a thread use one group to limit cross-domain access to
-    /// the values.
+    /// call, within its own affinity mask. The caller's own code in that call, such as a
+    /// [`Strategy::run_batches`] body, runs under that mask, and threads it creates inherit it.
+    /// Joins use the same placement choices or run serially on the caller. Parallel sorts from
+    /// such a thread use one group to limit cross-domain access to the values.
     ///
     /// A worker's nested strategy calls, joins, and spawned jobs inherit its placement. They
     /// stay in its group under a local placement and spread over the pool under a wide one.
