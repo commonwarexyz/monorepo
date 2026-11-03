@@ -125,6 +125,16 @@ mod tests {
     }
 
     #[test]
+    fn sum_matches_additions() {
+        shared::check_sum::<G2>(G2::sum);
+    }
+
+    #[test]
+    fn mul_each_matches_multiplications() {
+        shared::check_mul_each::<G2>(G2::mul_each);
+    }
+
+    #[test]
     fn representations_agree() {
         shared::check_representations::<G2>();
     }

@@ -6,6 +6,10 @@
 //! items; 32-bit lanes elsewhere. Elements cross the boundary as canonical coordinates, so every
 //! kernel loads its inputs and stores its outputs, and loaded coordinates satisfy the bounds of
 //! the curve formulas.
+//!
+//! Operations over slices of elements ([`Sum`], [`MultiplyEach`], and [`Msm`]) hold one element
+//! per lane, so they amortize the boundary and fill every lane; the single-element operations
+//! use one lane and measure latency.
 
 use super::Scalar;
 use crate::core::{
@@ -25,6 +29,10 @@ const WINDOW_BITS: usize = 4;
 
 /// Number of windows in a scalar.
 const SCALAR_WINDOWS: usize = 256 / WINDOW_BITS;
+
+/// Fewest elements for which [`Sum`] favors the wide representations, whose lane sums cost
+/// additions of their own.
+const SUM_BATCH: usize = MAX_LANES;
 
 /// An operation written once over every base field representation.
 pub trait Kernel: Sized {
@@ -243,6 +251,36 @@ fn multiply<S: Simd, P: Points<S>>(
     result
 }
 
+/// Loads each of up to [`Field::LANES`] elements into its own lane.
+#[inline(always)]
+fn lanes<S: Simd, F: Field<S>, G: Group>(simd: S, elements: &[G]) -> G::Points<S, F> {
+    const { assert!(F::LANES <= MAX_LANES) };
+    debug_assert!(elements.len() <= F::LANES);
+    let mut coordinates = [G::IDENTITY; MAX_LANES];
+    for (lane, element) in elements.iter().enumerate() {
+        coordinates[lane] = *element.coordinates();
+    }
+    G::Points::<S, F>::load(simd, &coordinates[..elements.len()], &G::IDENTITY)
+}
+
+/// Returns, in each lane, that lane's element times its scalar, for up to [`Field::LANES`] of each.
+#[inline(always)]
+fn products<S: Simd, F: Field<S>, G: Group>(
+    simd: S,
+    identity: G::Points<S, F>,
+    elements: &[G],
+    scalars: &[Scalar],
+) -> G::Points<S, F> {
+    let mut words = [[0; 4]; MAX_LANES];
+    for (lane, scalar) in scalars.iter().enumerate().take(elements.len()) {
+        words[lane] = scalar.to_words();
+    }
+    let base = lanes::<S, F, G>(simd, elements);
+    multiply(simd, base, identity, SCALAR_WINDOWS, |window| {
+        words.map(|words| digit(&words, window))
+    })
+}
+
 /// Adds two elements.
 #[derive(Clone, Copy)]
 pub struct Add<G>(pub G, pub G);
@@ -296,6 +334,63 @@ impl<G: Group> Kernel for Multiply<'_, G> {
     }
 }
 
+/// Returns the sum of the elements, one element per lane.
+#[derive(Clone, Copy)]
+pub struct Sum<'a, G>(pub &'a [G]);
+
+impl<G: Group> Kernel for Sum<'_, G> {
+    type Output = G;
+
+    fn batch(&self) -> bool {
+        self.0.len() > SUM_BATCH
+    }
+
+    // Debug builds keep this a call so that each representation's frame stays separate.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn run<S: Simd, F: Field<S>>(self, simd: S) -> G {
+        let mut total = G::Points::<S, F>::load(simd, &[], &G::IDENTITY);
+        for elements in self.0.chunks(F::LANES) {
+            total = total.add(simd, lanes::<S, F, G>(simd, elements));
+        }
+        sum_lanes::<S, F, G>(simd, total)
+    }
+}
+
+/// Multiplies each element by the scalar at the same index, one element per lane.
+pub struct MultiplyEach<'a, G> {
+    /// The elements, replaced by their multiples.
+    pub elements: &'a mut [G],
+    /// The scalars, one per element.
+    pub scalars: &'a [Scalar],
+}
+
+impl<G: Group> Kernel for MultiplyEach<'_, G> {
+    type Output = ();
+
+    fn batch(&self) -> bool {
+        true
+    }
+
+    // Debug builds keep this a call so that each representation's frame stays separate.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn run<S: Simd, F: Field<S>>(self, simd: S) {
+        const { assert!(F::LANES <= MAX_LANES) };
+        let identity = G::Points::<S, F>::load(simd, &[], &G::IDENTITY);
+        let count = self.elements.len().min(self.scalars.len());
+        for (elements, scalars) in self.elements[..count]
+            .chunks_mut(F::LANES)
+            .zip(self.scalars[..count].chunks(F::LANES))
+        {
+            let product = products::<S, F, G>(simd, identity, elements, scalars);
+            let mut coordinates = [G::IDENTITY; MAX_LANES];
+            product.store(simd, &mut coordinates[..elements.len()]);
+            for (element, coordinates) in elements.iter_mut().zip(coordinates) {
+                *element = G::from_coordinates(coordinates);
+            }
+        }
+    }
+}
+
 /// Returns the sum of the elements times their scalars, one element per lane.
 #[derive(Clone, Copy)]
 pub struct Msm<'a, G> {
@@ -315,26 +410,14 @@ impl<G: Group> Kernel for Msm<'_, G> {
     // Debug builds keep this a call so that each representation's frame stays separate.
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn run<S: Simd, F: Field<S>>(self, simd: S) -> G {
-        const { assert!(F::LANES <= MAX_LANES) };
         let identity = G::Points::<S, F>::load(simd, &[], &G::IDENTITY);
         let mut total = identity;
-        for (elements, scalars) in self
-            .elements
+        let count = self.elements.len().min(self.scalars.len());
+        for (elements, scalars) in self.elements[..count]
             .chunks(F::LANES)
-            .zip(self.scalars.chunks(F::LANES))
+            .zip(self.scalars[..count].chunks(F::LANES))
         {
-            let mut coordinates = [G::IDENTITY; MAX_LANES];
-            let mut words = [[0; 4]; MAX_LANES];
-            for (lane, (element, scalar)) in elements.iter().zip(scalars).enumerate() {
-                coordinates[lane] = *element.coordinates();
-                words[lane] = scalar.to_words();
-            }
-            let lanes = elements.len().min(scalars.len());
-            let base = G::Points::<S, F>::load(simd, &coordinates[..lanes], &G::IDENTITY);
-            let product = multiply(simd, base, identity, SCALAR_WINDOWS, |window| {
-                words.map(|words| digit(&words, window))
-            });
-            total = total.add(simd, product);
+            total = total.add(simd, products::<S, F, G>(simd, identity, elements, scalars));
         }
         sum_lanes::<S, F, G>(simd, total)
     }
