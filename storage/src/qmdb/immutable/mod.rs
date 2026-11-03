@@ -100,7 +100,7 @@ pub mod batch;
 mod compact;
 pub mod fixed;
 mod operation;
-pub mod sync;
+pub(crate) mod sync;
 pub mod variable;
 
 pub use compact::{
@@ -559,13 +559,21 @@ where
     ///     - the last operation performed, or
     ///     - the operation `max_ops` from the start.
     ///  2. the operations corresponding to the leaves in this range.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `start_loc`
+    ///   >= the number of operations.
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
+    ///   with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
+    ///   been pruned.
     pub async fn proof(
         &self,
-        start_index: Location<F>,
+        start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, K, V>>), Error<F>> {
         let op_count = self.bounds().end;
-        self.historical_proof(op_count, start_index, max_ops).await
+        self.historical_proof(op_count, start_loc, max_ops).await
     }
 
     /// Prune operations prior to `loc` without changing the db's root. Keys whose operations

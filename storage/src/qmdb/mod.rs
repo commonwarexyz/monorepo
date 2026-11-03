@@ -335,7 +335,7 @@ pub enum Error<F: Family> {
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
 
-    /// An error from the Merkle structure over the operations log.
+    /// An error from an underlying Merkle structure.
     #[error("merkle error: {0}")]
     Merkle(#[from] crate::merkle::Error<F>),
 
@@ -343,7 +343,7 @@ pub enum Error<F: Family> {
     #[error("metadata error: {0}")]
     Metadata(#[from] crate::metadata::Error),
 
-    /// An error from the operations log.
+    /// An error from an underlying journal.
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
 
@@ -368,8 +368,8 @@ pub enum Error<F: Family> {
     #[error("unexpected data at location: {0}")]
     UnexpectedData(Location<F>),
 
-    /// A requested location is at or past the database's size. The payloads are the location and
-    /// the size.
+    /// A requested location is at or past the size of the database or batch being read. The
+    /// payloads are the location and that size.
     #[error("location out of bounds: {0} >= {1}")]
     LocationOutOfBounds(Location<F>, Location<F>),
 
