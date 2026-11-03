@@ -115,6 +115,16 @@ mod tests {
     }
 
     #[test]
+    fn sum_matches_additions() {
+        shared::check_sum::<G1>(G1::sum);
+    }
+
+    #[test]
+    fn mul_each_matches_multiplications() {
+        shared::check_mul_each::<G1>(G1::mul_each);
+    }
+
+    #[test]
     fn representations_agree() {
         shared::check_representations::<G1>();
     }

@@ -2,9 +2,10 @@
 //! the pairing into the target group [`GT`].
 //!
 //! [`G1`] and [`G2`] hold canonical projective coordinates. Each operation runs as one SIMD
-//! kernel on the best available backend, so batch operations such as
-//! [`Space::msm`](commonware_math::algebra::Space::msm) amortize the conversions at the kernel
-//! boundary that single operations pay every time.
+//! kernel on the best available backend. Operations over slices of elements ([`G1::sum`],
+//! [`G1::mul_each`], [`Space::msm`](commonware_math::algebra::Space::msm), and
+//! [`pairings`]) hold one element per lane, so they fill every lane and amortize the
+//! conversions at the kernel boundary that single operations pay every time.
 //!
 //! Elements arise only from the generators through the group operations, so every element lies
 //! in the subgroup of prime order `r`.
@@ -17,7 +18,7 @@ mod scalar;
 
 pub use g1::G1;
 pub use g2::G2;
-pub use pairing::{GT, multi_pairing, pairing};
+pub use pairing::{GT, multi_pairing, pairing, pairings};
 pub use scalar::Scalar;
 
 /// Most elements of [`Space::msm`](commonware_math::algebra::Space::msm) that one kernel
@@ -187,6 +188,27 @@ macro_rules! group_traits {
                 Self(GENERATOR)
             }
         }
+
+        impl $group {
+            /// Returns the sum of the elements, as when aggregating keys or signatures.
+            ///
+            /// Adds one element per lane, so it costs far less than adding them one at a time.
+            pub fn sum(elements: &[Self]) -> Self {
+                $crate::group::kernel::dispatch($crate::group::kernel::Sum(elements))
+            }
+
+            /// Multiplies each element by the scalar at the same index, in place, without
+            /// branching on the scalars.
+            ///
+            /// Multiplies one element per lane. Elements beyond the scalars are unchanged, and
+            /// scalars beyond the elements are ignored.
+            pub fn mul_each(elements: &mut [Self], scalars: &[$crate::group::Scalar]) {
+                $crate::group::kernel::dispatch($crate::group::kernel::MultiplyEach {
+                    elements,
+                    scalars,
+                });
+            }
+        }
     };
 }
 
@@ -197,13 +219,33 @@ use group_traits;
 mod tests {
     use super::{
         MSM_CHUNK, Scalar,
-        kernel::{Group, Kernel, Msm, Multiply},
+        kernel::{Group, Kernel, MAX_LANES, Msm, Multiply, MultiplyEach, Sum},
     };
     use crate::core::field::fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49};
     use commonware_math::algebra::CryptoGroup;
     use commonware_parallel::Sequential;
     use commonware_simd::{Operation, Simd, check_consistent};
     use std::{fmt::Debug, vec, vec::Vec};
+
+    /// Elements of a slice operation, more than the lanes of the widest representation.
+    const SLICE: usize = 2 * MAX_LANES + 3;
+
+    /// Returns the first `count` positive multiples of the generator and distinct scalars.
+    fn multiples<G: CryptoGroup<Scalar = Scalar>>(count: usize) -> (Vec<G>, Vec<Scalar>) {
+        let generator = G::generator();
+        let mut scalar = Scalar::from_u64(3);
+        let mut scalars = Vec::with_capacity(count);
+        let mut points = Vec::with_capacity(count);
+        let mut point = G::zero();
+        for i in 0..count {
+            scalar = scalar * &scalar + &Scalar::from_u64(i as u64);
+            scalars.push(scalar);
+            // The point is (i + 1) times the generator.
+            point += &generator;
+            points.push(point.clone());
+        }
+        (points, scalars)
+    }
 
     /// Returns scalars that cover zero, one, `r - 1`, and full-width values.
     fn scalars() -> Vec<Scalar> {
@@ -251,17 +293,7 @@ mod tests {
     pub fn check_msm<G: CryptoGroup<Scalar = Scalar>>() {
         let generator = G::generator();
         let count = MSM_CHUNK + 3;
-        let mut scalar = Scalar::from_u64(3);
-        let mut scalars = Vec::with_capacity(count);
-        let mut points = Vec::with_capacity(count);
-        let mut point = G::zero();
-        for i in 0..count {
-            scalar = scalar * &scalar + &Scalar::from_u64(i as u64);
-            scalars.push(scalar);
-            // The point is (i + 1) times the generator.
-            point += &generator;
-            points.push(point.clone());
-        }
+        let (points, scalars) = multiples::<G>(count);
         for count in [0, 1, 5, count] {
             let exponent = scalars[..count]
                 .iter()
@@ -280,6 +312,55 @@ mod tests {
             G::msm(&points[..3], &scalars[..5], &Sequential),
             G::msm(&points[..3], &scalars[..3], &Sequential)
         );
+    }
+
+    /// Checks a sum of a slice against one addition at a time, across lane boundaries.
+    pub fn check_sum<G: CryptoGroup<Scalar = Scalar>>(sum: impl Fn(&[G]) -> G) {
+        let (points, _) = multiples::<G>(SLICE);
+        for count in [0, 1, 5, SLICE] {
+            // The sum of the first count positive multiples.
+            let expected = G::generator() * &Scalar::from_u64((count * (count + 1) / 2) as u64);
+            assert_eq!(sum(&points[..count]), expected);
+        }
+        let mut with_identities = points.clone();
+        with_identities[1] = G::zero();
+        with_identities[SLICE - 1] = G::zero();
+        assert_eq!(
+            sum(&with_identities),
+            sum(&points) - &points[1] - &points[SLICE - 1]
+        );
+    }
+
+    /// Checks multiplying a slice against one multiplication at a time, across lane boundaries.
+    pub fn check_mul_each<G: CryptoGroup<Scalar = Scalar>>(mul_each: impl Fn(&mut [G], &[Scalar])) {
+        let (points, scalars) = multiples::<G>(SLICE);
+        for count in [0, 1, 5, SLICE] {
+            let mut products = points.clone();
+            mul_each(&mut products[..count], &scalars);
+            for (i, (product, point)) in products.iter().zip(&points).enumerate() {
+                let expected = if i < count {
+                    point.clone() * &scalars[i]
+                } else {
+                    point.clone()
+                };
+                assert_eq!(*product, expected);
+            }
+        }
+        // The longer input is truncated.
+        let mut products = points.clone();
+        mul_each(&mut products, &scalars[..3]);
+        for (i, (product, point)) in products.iter().zip(&points).enumerate() {
+            let expected = if i < 3 {
+                point.clone() * &scalars[i]
+            } else {
+                point.clone()
+            };
+            assert_eq!(*product, expected);
+        }
+        let mut products = points;
+        products[2] = G::zero();
+        mul_each(&mut products, &scalars);
+        assert_eq!(products[2], G::zero());
     }
 
     /// Runs a kernel in every representation, checking that they compute the same element.
@@ -314,6 +395,7 @@ mod tests {
                 scalars: &scalars,
             })
         });
+        check_consistent(|| Representations(Sum(&elements)));
         let words = scalars[5].to_words();
         check_consistent(|| {
             Representations(Multiply {
@@ -321,5 +403,39 @@ mod tests {
                 words: &words,
             })
         });
+        check_consistent(|| EachRepresentations(&elements, &scalars));
+    }
+
+    /// Runs [`MultiplyEach`] in every representation, checking that they compute the same
+    /// elements.
+    struct EachRepresentations<'a, G>(&'a [G], &'a [Scalar]);
+
+    impl<S: Simd, G: Group + PartialEq + Debug> Operation<S> for EachRepresentations<'_, G> {
+        type Output = ();
+
+        fn portable(self, simd: S) {
+            simd.execute(|simd: S| {
+                let mut expected = self.0.to_vec();
+                MultiplyEach {
+                    elements: &mut expected,
+                    scalars: self.1,
+                }
+                .run::<S, Unsat49<S>>(simd);
+                let mut unsat28 = self.0.to_vec();
+                MultiplyEach {
+                    elements: &mut unsat28,
+                    scalars: self.1,
+                }
+                .run::<S, Unsat28<S>>(simd);
+                assert_eq!(unsat28, expected);
+                let mut rns = self.0.to_vec();
+                MultiplyEach {
+                    elements: &mut rns,
+                    scalars: self.1,
+                }
+                .run::<S, Rns<S>>(simd);
+                assert_eq!(rns, expected);
+            });
+        }
     }
 }

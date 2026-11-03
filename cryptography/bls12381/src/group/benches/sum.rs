@@ -1,5 +1,6 @@
-//! Summing elements one addition at a time, as when aggregating keys or signatures, compared with
-//! blst.
+//! Summing elements, as when aggregating keys or signatures, compared with blst's bulk addition.
+//!
+//! The sum holds one element per lane, so every size fills the lanes.
 
 use super::utils::Curve;
 use commonware_cryptography_bls12381::group::{G1, G2};
@@ -7,33 +8,20 @@ use criterion::{Criterion, Throughput, criterion_group};
 use std::hint::black_box;
 
 /// Element counts.
-const SIZES: [usize; 2] = [128, 1024];
+const SIZES: [usize; 3] = [128, 1024, 16384];
 
 fn bench<C: Curve>(c: &mut Criterion) {
     let mut group = c.benchmark_group(module_path!());
+    let (all_points, all_blst_points) = C::points(SIZES[SIZES.len() - 1], 8);
     for n in SIZES {
-        let (points, blst_points) = C::points(n, 8);
+        let (points, blst_points) = (&all_points[..n], &all_blst_points[..n]);
         group.throughput(Throughput::Elements(n as u64));
         group.bench_function(
             format!("curve={} impl=commonware n={n}", C::NAME),
-            |bencher| {
-                bencher.iter(|| {
-                    let mut sum = C::zero();
-                    for point in black_box(&points) {
-                        sum += point;
-                    }
-                    black_box(sum)
-                })
-            },
+            |bencher| bencher.iter(|| black_box(C::sum(black_box(points)))),
         );
         group.bench_function(format!("curve={} impl=blst n={n}", C::NAME), |bencher| {
-            bencher.iter(|| {
-                let mut sum = C::Blst::default();
-                for point in black_box(&blst_points) {
-                    sum = C::blst_add(&sum, point);
-                }
-                black_box(sum)
-            })
+            bencher.iter(|| black_box(C::blst_sum(black_box(blst_points))))
         });
     }
     group.finish();

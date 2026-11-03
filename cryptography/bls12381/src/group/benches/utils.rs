@@ -47,6 +47,12 @@ pub trait Curve: CryptoGroup<Scalar = Scalar> + Copy {
     /// blst's affine points.
     type BlstAffine: Copy + Default;
 
+    /// Returns the sum of the points.
+    fn sum(points: &[Self]) -> Self;
+
+    /// Multiplies each point by the scalar at the same index, in place.
+    fn mul_each(points: &mut [Self], scalars: &[Scalar]);
+
     /// Returns `scalar` times the generator, and the same point in blst.
     fn multiple(scalar: &Scalar) -> (Self, Self::Blst) {
         (
@@ -89,6 +95,10 @@ pub trait Curve: CryptoGroup<Scalar = Scalar> + Copy {
     /// Converts points to affine coordinates in blst, with one shared inversion.
     fn blst_to_affine(points: &[Self::Blst]) -> Vec<Self::BlstAffine>;
 
+    /// Returns the sum of the points with blst's bulk addition, converting the points to affine
+    /// coordinates first, as it requires.
+    fn blst_sum(points: &[Self::Blst]) -> Self::Blst;
+
     /// Returns `sum(scalars[i] * points[i])` with blst's Pippenger method, converting the points
     /// to affine coordinates first, as an MSM over projective points must.
     fn blst_msm(points: &[Self::Blst], scalars: &[u8]) -> Self::Blst;
@@ -97,13 +107,22 @@ pub trait Curve: CryptoGroup<Scalar = Scalar> + Copy {
 macro_rules! curve {
     (
         $group:ident, $name:literal, $point:ident, $affine:ident, $generator:ident, $add:ident,
-        $double:ident, $mult:ident, $to_affine:ident, $scratch:ident, $pippenger:ident
+        $double:ident, $mult:ident, $to_affine:ident, $sum:ident, $scratch:ident,
+        $pippenger:ident
     ) => {
         impl Curve for $group {
             const NAME: &'static str = $name;
 
             type Blst = blst::$point;
             type BlstAffine = blst::$affine;
+
+            fn sum(points: &[Self]) -> Self {
+                $group::sum(points)
+            }
+
+            fn mul_each(points: &mut [Self], scalars: &[Scalar]) {
+                $group::mul_each(points, scalars);
+            }
 
             fn blst_generator() -> Self::Blst {
                 // SAFETY: blst returns a pointer to its static generator.
@@ -137,6 +156,16 @@ macro_rules! curve {
                 let pointers: Vec<*const Self::Blst> = points.iter().map(ptr::from_ref).collect();
                 // SAFETY: `pointers` holds one valid point per output slot.
                 unsafe { blst::$to_affine(out.as_mut_ptr(), pointers.as_ptr(), points.len()) };
+                out
+            }
+
+            fn blst_sum(points: &[Self::Blst]) -> Self::Blst {
+                let affine = Self::blst_to_affine(points);
+                // blst reads one contiguous array through the first of null-terminated pointers.
+                let points = [affine.as_ptr(), ptr::null()];
+                let mut out = Self::Blst::default();
+                // SAFETY: the array holds `affine.len()` points.
+                unsafe { blst::$sum(&mut out, points.as_ptr(), affine.len()) };
                 out
             }
 
@@ -177,6 +206,7 @@ curve!(
     blst_p1_double,
     blst_p1_mult,
     blst_p1s_to_affine,
+    blst_p1s_add,
     blst_p1s_mult_pippenger_scratch_sizeof,
     blst_p1s_mult_pippenger
 );
@@ -191,6 +221,7 @@ curve!(
     blst_p2_double,
     blst_p2_mult,
     blst_p2s_to_affine,
+    blst_p2s_add,
     blst_p2s_mult_pippenger_scratch_sizeof,
     blst_p2s_mult_pippenger
 );

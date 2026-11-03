@@ -72,6 +72,15 @@ pub fn pairing(p: &G1, q: &G2) -> GT {
     multi_pairing(&[(*p, *q)])
 }
 
+/// Computes the pairing of each pair into the output at the same index, as when verifying many
+/// signatures separately.
+///
+/// Pairs one pair per lane. Outputs beyond the pairs are unchanged, and pairs beyond the outputs
+/// are ignored.
+pub fn pairings(pairs: &[(G1, G2)], outputs: &mut [GT]) {
+    kernel::dispatch(Each(pairs, outputs));
+}
+
 /// Returns the product of the pairings of `pairs`, with one shared final exponentiation, or
 /// [`GT::ONE`] for no pairs.
 ///
@@ -102,6 +111,15 @@ impl Kernel for Product {
 #[derive(Clone, Copy)]
 struct Pairings<'a>(&'a [(G1, G2)]);
 
+/// Returns a pair that pairs to one and fills unused lanes: its G1 coordinates are zero, which
+/// the final exponentiation maps to one, and its G2 point is the generator, whose lines have
+/// nonzero constant terms.
+fn fill() -> (G1Affine, G2Affine) {
+    let generator = <G2 as commonware_math::algebra::CryptoGroup>::generator();
+    let [x, y, _] = *generator.coordinates();
+    ([[0; FP_BYTES]; 2], [x, y])
+}
+
 impl Kernel for Pairings<'_> {
     type Output = GT;
 
@@ -114,10 +132,8 @@ impl Kernel for Pairings<'_> {
     fn run<S: Simd, F: Field<S>>(self, simd: S) -> GT {
         const { assert!(F::LANES <= MAX_LANES) };
         // Pairs with an identity contribute one, so only the others are prepared. Unused lanes
-        // hold a pair whose G1 coordinates are zero, which the final exponentiation maps to one.
-        let generator = <G2 as commonware_math::algebra::CryptoGroup>::generator();
-        let [x, y, _] = *generator.coordinates();
-        let fill: (G1Affine, G2Affine) = ([[0; FP_BYTES]; 2], [x, y]);
+        // hold the fill pair.
+        let fill = fill();
         let mut pairs = self
             .0
             .iter()
@@ -148,6 +164,54 @@ impl Kernel for Pairings<'_> {
         let mut output = [fp12::ONE];
         final_exponentiation(simd, product.product_of_lanes(simd)).store(simd, &mut output);
         GT(output[0])
+    }
+}
+
+/// Computes the pairing of each pair, one pair per lane.
+struct Each<'a>(&'a [(G1, G2)], &'a mut [GT]);
+
+impl Kernel for Each<'_> {
+    type Output = ();
+
+    fn batch(&self) -> bool {
+        self.0.len() > 1
+    }
+
+    // Debug builds keep this a call so that each representation's frame stays separate.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn run<S: Simd, F: Field<S>>(self, simd: S) {
+        const { assert!(F::LANES <= MAX_LANES) };
+        let fill = fill();
+        // The fill pair in projective coordinates, which convert to its affine coordinates.
+        let mut filler = (g1::IDENTITY, g2::IDENTITY);
+        filler.0[2][FP_BYTES - 1] = 1;
+        filler.1 = *<G2 as commonware_math::algebra::CryptoGroup>::generator().coordinates();
+        let count = self.0.len().min(self.1.len());
+        for (pairs, outputs) in self.0[..count]
+            .chunks(F::LANES)
+            .zip(self.1[..count].chunks_mut(F::LANES))
+        {
+            // Pairs with an identity pair to one, so their lanes hold the fill pair, which the
+            // conversion to affine coordinates accepts.
+            let mut points = [filler; MAX_LANES];
+            for (lane, (p, q)) in pairs.iter().enumerate() {
+                if !p.is_identity() && !q.is_identity() {
+                    points[lane] = (*p.coordinates(), *q.coordinates());
+                }
+            }
+            let affine = to_affine::<S, F>(simd, &points[..pairs.len()]);
+            let prepared = Pair::<F>::load(simd, &affine[..pairs.len()], &fill);
+            let lines = miller_loop(simd, &[prepared]);
+            let mut results = [fp12::ONE; MAX_LANES];
+            final_exponentiation(simd, lines).store(simd, &mut results[..pairs.len()]);
+            for ((output, (p, q)), result) in outputs.iter_mut().zip(pairs).zip(results) {
+                *output = if p.is_identity() || q.is_identity() {
+                    GT::ONE
+                } else {
+                    GT(result)
+                };
+            }
+        }
     }
 }
 
@@ -239,6 +303,33 @@ mod tests {
     }
 
     #[test]
+    fn pairings_match_separate_pairings() {
+        // More pairs than the lanes of the widest representation, with identities among them.
+        let mut pairs: Vec<(G1, G2)> = (1..=MAX_LANES as u64 + 3)
+            .map(|k| (multiple(k), multiple(k + 5)))
+            .collect();
+        pairs[1].0 = G1::zero();
+        pairs[MAX_LANES].1 = G2::zero();
+        let expected: Vec<GT> = pairs.iter().map(|(p, q)| pairing(p, q)).collect();
+        assert_eq!(expected[1], GT::ONE);
+        assert_eq!(expected[MAX_LANES], GT::ONE);
+        let unchanged = pairing(&multiple(2), &multiple(3));
+        let mut outputs = vec![GT::ONE; pairs.len() + 1];
+        outputs[pairs.len()] = unchanged;
+        pairings(&pairs, &mut outputs);
+        assert_eq!(outputs[..pairs.len()], expected);
+        assert_eq!(outputs[pairs.len()], unchanged);
+        // The longer input is truncated.
+        let mut outputs = vec![GT::ONE; 3];
+        pairings(&pairs, &mut outputs);
+        assert_eq!(outputs, expected[..3]);
+        let mut outputs = vec![unchanged; 3];
+        pairings(&pairs[..2], &mut outputs);
+        assert_eq!(outputs, [expected[0], expected[1], unchanged]);
+        pairings(&[], &mut []);
+    }
+
+    #[test]
     fn products_match_separate_pairings() {
         // More pairs than share squarings in every lane of the widest representation.
         let ks = 1..=(SHARED * MAX_LANES) as u64 + 3;
@@ -287,5 +378,27 @@ mod tests {
             (multiple::<G1>(6), multiple::<G2>(7)),
         ];
         commonware_simd::check_consistent(|| Representations(Pairings(&pairs)));
+        commonware_simd::check_consistent(|| EachRepresentations(&pairs));
+    }
+
+    /// Runs the kernel of [`pairings`] in every representation, checking that they agree.
+    struct EachRepresentations<'a>(&'a [(G1, G2)]);
+
+    impl<S: Simd> commonware_simd::Operation<S> for EachRepresentations<'_> {
+        type Output = Vec<GT>;
+
+        fn portable(self, simd: S) -> Vec<GT> {
+            use crate::core::field::fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49};
+            simd.execute(|simd: S| {
+                let mut expected = vec![GT::ONE; self.0.len()];
+                Each(self.0, &mut expected).run::<S, Unsat49<S>>(simd);
+                let mut outputs = vec![GT::ONE; self.0.len()];
+                Each(self.0, &mut outputs).run::<S, Unsat28<S>>(simd);
+                assert_eq!(outputs, expected);
+                Each(self.0, &mut outputs).run::<S, Rns<S>>(simd);
+                assert_eq!(outputs, expected);
+                expected
+            })
+        }
     }
 }
