@@ -352,6 +352,7 @@ pub(crate) mod test {
         },
         merkle::Location as GenericLocation,
         qmdb::{
+            ProofExt as _,
             any::{FixedConfig, MerkleConfig, VariableConfig, db::Db},
             chain::Bounds,
         },
@@ -990,8 +991,6 @@ pub(crate) mod test {
         V: CodecShared + Clone + Eq + std::hash::Hash + std::fmt::Debug,
         <D as Provable<mmr::Family>>::Operation: Codec,
     {
-        use crate::qmdb::ProofExt as _;
-
         const ELEMENTS: u64 = 1000;
 
         let mut map = HashMap::<Digest, V>::default();
@@ -1110,7 +1109,6 @@ pub(crate) mod test {
         D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
         <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
-        use crate::qmdb::ProofExt as _;
         use commonware_utils::NZU64;
 
         // Add some operations
@@ -1176,7 +1174,6 @@ pub(crate) mod test {
         D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
         <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
     {
-        use crate::qmdb::ProofExt as _;
         use commonware_utils::NZU64;
 
         // Apply two single-write batches and capture the commit-boundary size after the
