@@ -290,7 +290,7 @@ mod tests {
     /// verified against the extracted proof digests. A 3-leaf MMR with start_loc=1 has a pinned
     /// node at position 0 (L0) which is a sibling within the range peak, not a fold-prefix peak.
     #[test]
-    fn test_verify_proof_and_pinned_nodes_sibling_case() {
+    fn test_verify_range_inclusion_with_pinned_nodes_sibling_case() {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         let mut mmr = Mmr::new();
         let elements: Vec<Digest> = (0..3).map(test_digest).collect();
@@ -315,14 +315,20 @@ mod tests {
 
         // Correct pinned nodes must verify.
         assert!(
-            proof.verify_proof_and_pinned_nodes(&hasher, start_loc, &elements[1..], &pinned, &root),
+            proof.verify_range_inclusion_with_pinned_nodes(
+                &hasher,
+                start_loc,
+                &elements[1..],
+                &pinned,
+                &root
+            ),
             "valid pinned nodes should verify"
         );
 
         // Wrong pinned digest must fail.
         let bad_pinned = vec![test_digest(99)];
         assert!(
-            !proof.verify_proof_and_pinned_nodes(
+            !proof.verify_range_inclusion_with_pinned_nodes(
                 &hasher,
                 start_loc,
                 &elements[1..],
@@ -335,7 +341,7 @@ mod tests {
         // Extra pinned node must fail.
         let extra_pinned = vec![pinned[0], test_digest(42)];
         assert!(
-            !proof.verify_proof_and_pinned_nodes(
+            !proof.verify_range_inclusion_with_pinned_nodes(
                 &hasher,
                 start_loc,
                 &elements[1..],
@@ -347,14 +353,20 @@ mod tests {
 
         // Empty pinned nodes must fail (start_loc > 0 requires at least one).
         assert!(
-            !proof.verify_proof_and_pinned_nodes(&hasher, start_loc, &elements[1..], &[], &root),
+            !proof.verify_range_inclusion_with_pinned_nodes(
+                &hasher,
+                start_loc,
+                &elements[1..],
+                &[],
+                &root
+            ),
             "missing pinned nodes should fail"
         );
     }
 
-    /// Test verify_proof_and_pinned_nodes when pinned nodes ARE fold-prefix peaks.
+    /// Test verify_range_inclusion_with_pinned_nodes when pinned nodes ARE fold-prefix peaks.
     #[test]
-    fn test_verify_proof_and_pinned_nodes_fold_prefix_case() {
+    fn test_verify_range_inclusion_with_pinned_nodes_fold_prefix_case() {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         let mut mmr = Mmr::new();
         // 10-leaf MMR: peaks at positions covering [0-7] and [8-9].
@@ -379,13 +391,19 @@ mod tests {
         assert_eq!(pinned.len(), 1, "should have one fold-prefix peak");
 
         assert!(
-            proof.verify_proof_and_pinned_nodes(&hasher, start_loc, &elements[8..], &pinned, &root),
+            proof.verify_range_inclusion_with_pinned_nodes(
+                &hasher,
+                start_loc,
+                &elements[8..],
+                &pinned,
+                &root
+            ),
             "valid fold-prefix pinned nodes should verify"
         );
 
         // Wrong digest must fail.
         assert!(
-            !proof.verify_proof_and_pinned_nodes(
+            !proof.verify_range_inclusion_with_pinned_nodes(
                 &hasher,
                 start_loc,
                 &elements[8..],

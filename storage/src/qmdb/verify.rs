@@ -97,7 +97,7 @@ impl<F: Family, D: Digest> ProofExt<F, D> for Proof<F, D> {
         pinned_nodes: &[D],
         root: &D,
     ) -> bool {
-        self.verify_proof_and_pinned_nodes(
+        self.verify_range_inclusion_with_pinned_nodes(
             &qmdb::hasher::<H>(),
             start_loc,
             &encode_ops(ops),

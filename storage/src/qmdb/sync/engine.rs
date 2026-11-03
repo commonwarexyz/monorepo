@@ -99,9 +99,13 @@ where
                 op,
                 pinned_nodes,
             },
-        ) => {
-            proof.verify_proof_and_pinned_nodes(&hasher, *start, &[op.encode()], pinned_nodes, root)
-        }
+        ) => proof.verify_range_inclusion_with_pinned_nodes(
+            &hasher,
+            *start,
+            &[op.encode()],
+            pinned_nodes,
+            root,
+        ),
         _ => false,
     }
 }

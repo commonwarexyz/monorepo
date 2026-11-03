@@ -344,7 +344,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     ///
     /// Returns `true` only if the proof reconstructs to `root` and every pinned node digest is
     /// accounted for. When `start_loc` is 0, `pinned_nodes` must be empty.
-    pub fn verify_proof_and_pinned_nodes<H, E>(
+    pub fn verify_range_inclusion_with_pinned_nodes<H, E>(
         &self,
         hasher: &H,
         start_loc: Location<F>,
@@ -356,16 +356,22 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        self.try_verify_proof_and_pinned_nodes(hasher, start_loc, elements, pinned_nodes, root)
-            .is_some()
+        self.try_verify_range_inclusion_with_pinned_nodes(
+            hasher,
+            start_loc,
+            elements,
+            pinned_nodes,
+            root,
+        )
+        .is_some()
     }
 
-    /// Fallible implementation of [`verify_proof_and_pinned_nodes`](Self::verify_proof_and_pinned_nodes).
+    /// Fallible implementation of [Self::verify_range_inclusion_with_pinned_nodes].
     ///
     /// Returns `Some(())` if the proof and pins are consistent with `root`, `None` otherwise. The
     /// `Option` return lets the body use `?` on each fallible step; the public wrapper converts to
     /// `bool` via `.is_some()`.
-    fn try_verify_proof_and_pinned_nodes<H, E>(
+    fn try_verify_range_inclusion_with_pinned_nodes<H, E>(
         &self,
         hasher: &H,
         start_loc: Location<F>,
@@ -3185,7 +3191,7 @@ mod tests {
         );
     }
 
-    /// `verify_proof_and_pinned_nodes` must accept pinned nodes at
+    /// `verify_range_inclusion_with_pinned_nodes` must accept pinned nodes at
     /// `F::nodes_to_pin(start_loc)` positions for any `(leaves, start_loc)` pair.
     ///
     /// `nodes_to_pin(L)` returns the peaks of the tree at size L (the peaks you'd
@@ -3193,7 +3199,7 @@ mod tests {
     /// tree that lie entirely before leaf L. These can disagree when the larger tree
     /// has merged smaller peaks into larger subtrees. The verifier must handle this
     /// for both families.
-    fn verify_proof_and_pinned_nodes_across_sizes<F: Family>() {
+    fn verify_range_inclusion_with_pinned_nodes_across_sizes<F: Family>() {
         // Sweep (leaves, start) pairs. Larger trees with start far from a peak
         // boundary are more likely to produce pinned positions that don't appear
         // as siblings in the proof walk.
@@ -3231,14 +3237,14 @@ mod tests {
                 .unwrap();
 
             assert!(
-                proof.verify_proof_and_pinned_nodes(
+                proof.verify_range_inclusion_with_pinned_nodes(
                     &hasher,
                     Location::<F>::new(start),
                     &[start.to_be_bytes()],
                     &pinned,
                     &root
                 ),
-                "verify_proof_and_pinned_nodes failed: leaves={n}, start={start}"
+                "verify_range_inclusion_with_pinned_nodes failed: leaves={n}, start={start}"
             );
         }
     }
@@ -3332,8 +3338,8 @@ mod tests {
         full_peak_range_blueprint_does_not_descend::<mmr::Family>();
     }
     #[test]
-    fn mmr_verify_proof_and_pinned_nodes_across_sizes() {
-        verify_proof_and_pinned_nodes_across_sizes::<mmr::Family>();
+    fn mmr_verify_range_inclusion_with_pinned_nodes_across_sizes() {
+        verify_range_inclusion_with_pinned_nodes_across_sizes::<mmr::Family>();
     }
 
     #[test]
@@ -3433,7 +3439,7 @@ mod tests {
         full_peak_range_blueprint_does_not_descend::<mmb::Family>();
     }
     #[test]
-    fn mmb_verify_proof_and_pinned_nodes_across_sizes() {
-        verify_proof_and_pinned_nodes_across_sizes::<mmb::Family>();
+    fn mmb_verify_range_inclusion_with_pinned_nodes_across_sizes() {
+        verify_range_inclusion_with_pinned_nodes_across_sizes::<mmb::Family>();
     }
 }
