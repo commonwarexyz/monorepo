@@ -209,8 +209,8 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
     pub fn verify_bit_inclusion(
         hasher: &impl Hasher<mmr::Family, Digest = D>,
         proof: &Proof<D>,
-        chunk: &[u8; N],
         bit: u64,
+        chunk: &[u8; N],
         root: &D,
     ) -> bool {
         let bit_len = *proof.leaves;
@@ -665,8 +665,8 @@ mod tests {
                 !TestMerkleizedBitMap::<SHA256_SIZE>::verify_bit_inclusion(
                     &hasher,
                     &proof,
-                    &[0u8; SHA256_SIZE],
                     0,
+                    &[0u8; SHA256_SIZE],
                     &Sha256::fill(0x00),
                 ),
                 "proof without digests shouldn't verify or panic"
@@ -705,7 +705,7 @@ mod tests {
             // Canonical proof verifies.
             assert!(
                 TestMerkleizedBitMap::<SHA256_SIZE>::verify_bit_inclusion(
-                    &hasher, &proof, &chunk, bit, &root
+                    &hasher, &proof, bit, &chunk, &root
                 ),
                 "canonical bitmap proof should verify"
             );
@@ -715,7 +715,7 @@ mod tests {
             tampered.inactive_peaks = 1;
             assert!(
                 !TestMerkleizedBitMap::<SHA256_SIZE>::verify_bit_inclusion(
-                    &hasher, &tampered, &chunk, bit, &root
+                    &hasher, &tampered, bit, &chunk, &root
                 ),
                 "bitmap proof with nonzero inactive_peaks must not verify"
             );
@@ -795,7 +795,7 @@ mod tests {
                                 );
                             }
                             let valid = TestMerkleizedBitMap::<N>::verify_bit_inclusion(
-                                &hasher, &relocated, &chunk, bit, &root,
+                                &hasher, &relocated, bit, &chunk, &root,
                             );
                             // Only populated bits at the original tail position may verify.
                             assert_eq!(
@@ -849,7 +849,7 @@ mod tests {
                             proof.leaves = Location::new(claimed_len);
                             assert_eq!(
                                 TestMerkleizedBitMap::<1>::verify_bit_inclusion(
-                                    &hasher, &proof, &chunk, bit, &root,
+                                    &hasher, &proof, bit, &chunk, &root,
                                 ),
                                 claimed_len == bit_len,
                                 "bagging={bagging:?}, bit_len={bit_len}, bit={bit}, claimed_len={claimed_len}",
@@ -906,14 +906,14 @@ mod tests {
             let (proof, chunk) = bitmap.proof(&hasher, 0).await.unwrap();
             assert!(
                 TestMerkleizedBitMap::<SHA256_SIZE>::verify_bit_inclusion(
-                    &hasher, &proof, &chunk, 255, &root
+                    &hasher, &proof, 255, &chunk, &root
                 ),
                 "failed to prove bit in only chunk"
             );
             // bit outside range should not verify
             assert!(
                 !TestMerkleizedBitMap::<SHA256_SIZE>::verify_bit_inclusion(
-                    &hasher, &proof, &chunk, 256, &root
+                    &hasher, &proof, 256, &chunk, &root
                 ),
                 "should not be able to prove bit outside of chunk"
             );
@@ -1237,7 +1237,7 @@ mod tests {
                     // Proof should verify for the original chunk containing the bit.
                     assert!(
                         MerkleizedBitMap::<TestContext, _, N, Sequential>::verify_bit_inclusion(
-                            &hasher, &proof, &chunk, i, &root
+                            &hasher, &proof, i, &chunk, &root
                         ),
                         "failed to prove bit {i}",
                     );
@@ -1246,7 +1246,7 @@ mod tests {
                     let corrupted = flip_bit(i, &chunk);
                     assert!(
                         !MerkleizedBitMap::<TestContext, _, N, Sequential>::verify_bit_inclusion(
-                            &hasher, &proof, &corrupted, i, &root
+                            &hasher, &proof, i, &corrupted, &root
                         ),
                         "proving bit {i} after flipping should have failed",
                     );

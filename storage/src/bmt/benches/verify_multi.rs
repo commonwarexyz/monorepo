@@ -35,9 +35,7 @@ fn bench_verify_multi(c: &mut Criterion) {
                         samples.sort_unstable_by_key(|(pos, _)| *pos);
                         let positions: Vec<u32> = samples.iter().map(|(pos, _)| *pos).collect();
                         let proof = tree.multi_proof(&positions).unwrap();
-                        let elements: Vec<_> =
-                            samples.iter().map(|(pos, elem)| (*pos, *elem)).collect();
-                        (elements, proof)
+                        (samples, proof)
                     },
                     |(elements, proof)| {
                         assert!(

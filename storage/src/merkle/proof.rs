@@ -161,7 +161,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        match self.reconstruct_root_inner(hasher, start_loc, elements, None) {
+        match self.reconstruct_root(hasher, start_loc, elements) {
             Ok(reconstructed_root) => *root == reconstructed_root,
             Err(_error) => {
                 #[cfg(feature = "std")]
