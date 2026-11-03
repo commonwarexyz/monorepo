@@ -495,9 +495,9 @@ impl Barrier {
 /// # Mutation Safety
 ///
 /// Calls to [`Self::apply`], [`Self::finalize`], and [`Self::prune`] must not overlap.
-/// Cancelling a pending call may leave some members completed, others untouched, and others lost.
-/// Discard the entire set and all handles to its members, including clones and readers, and
-/// recover on restart, even if every member remains accessible.
+/// Cancelling a pending call may leave some members completed, others untouched, and others
+/// [lost](Shared). Discard the entire set and all handles to its members, including clones and
+/// readers, and recover on restart, even if every member remains accessible.
 ///
 /// Implementations panic if a database mutation fails (see
 /// [Failures](crate::stateful::db#failures)).
@@ -3834,18 +3834,18 @@ mod tests {
             let readers = <DbSet as DatabaseSet<deterministic::Context>>::readers(&databases);
             let reader2 = readers.1.read().await;
 
-            // The first member finishes while the second waits for its read lock to be released.
-            {
-                let apply = <DbSet as DatabaseSet<deterministic::Context>>::apply(
-                    &databases,
-                    (TestMerkleized, TestMerkleized),
-                );
-                pin_mut!(apply);
-                assert!(apply.as_mut().now_or_never().is_none());
-            }
+            // The first member finishes while the second waits for `reader2` to be released.
+            let mut apply = Box::pin(<DbSet as DatabaseSet<deterministic::Context>>::apply(
+                &databases,
+                (TestMerkleized, TestMerkleized),
+            ));
+            assert!(apply.as_mut().now_or_never().is_none());
+
+            // Cancel the apply, then release the reader it was waiting behind.
+            drop(apply);
             drop(reader2);
 
-            // Both cells remain readable even though the cancelled operation applied only one batch.
+            // Neither member was lost, yet only the first applied its batch.
             assert!(readers.0.read().now_or_never().is_some());
             assert!(readers.1.read().now_or_never().is_some());
             assert_eq!(first.applied.load(Ordering::Relaxed), 1);
