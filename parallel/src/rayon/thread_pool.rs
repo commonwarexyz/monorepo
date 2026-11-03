@@ -222,7 +222,7 @@ impl ThreadPool {
     /// Looks for and executes one unit of work if the current thread is part of this pool.
     ///
     /// Returns `Some(Yield::Executed)` if anything was executed, `Some(Yield::Idle)` if
-    /// nothing was available, or `None` if the current thread is not part of this pool.
+    /// the search found no work, or `None` if the current thread is not part of this pool.
     pub fn yield_now(&self) -> Option<Yield> {
         let curr = self.registry.current_thread()?;
         Some(curr.yield_now())
@@ -438,7 +438,7 @@ pub(crate) fn current_thread_index() -> Option<usize> {
 /// yield to the OS scheduler yourself if no work was found.
 ///
 /// Returns `Some(Yield::Executed)` if anything was executed, `Some(Yield::Idle)` if
-/// nothing was available, or `None` if this thread is not part of any pool at all.
+/// the search found no work, or `None` if this thread is not part of any pool at all.
 #[cfg(test)]
 pub(crate) fn yield_now() -> Option<Yield> {
     // SAFETY: a non-null pointer is this thread's worker state, which outlives the call.

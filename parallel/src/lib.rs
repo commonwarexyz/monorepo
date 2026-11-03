@@ -2277,7 +2277,10 @@ mod test {
         mocks::Explorer,
         rayon::{self, Placement, ThreadPoolBuilder},
     };
-    use commonware_utils::Widen;
+    use commonware_utils::{
+        Widen,
+        sync::{Condvar, Mutex},
+    };
     use core::{num::NonZeroUsize, ops::Range};
     use futures::FutureExt;
     use proptest::prelude::*;
@@ -2348,25 +2351,25 @@ mod test {
     #[test]
     fn forced_parallel_work_can_use_an_idle_group() {
         // Release blocked workers during unwinding as well as normal cleanup.
-        struct Release(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+        struct Release(Arc<(Mutex<bool>, Condvar)>);
         impl Drop for Release {
             fn drop(&mut self) {
-                *self.0.0.lock().unwrap() = true;
+                *self.0.0.lock() = true;
                 self.0.1.notify_all();
             }
         }
 
         // Occupy the first group so only the second can start the forced operation.
         let strategy = synthetic_groups(&[2, 2]);
-        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
         let release_guard = Release(release.clone());
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         strategy.groups.pool().spawn_broadcast(move |context| {
             if context.index() < 2 {
-                let mut released = release.0.lock().unwrap();
+                let mut released = release.0.lock();
                 ready_tx.send(context.index()).unwrap();
                 while !*released {
-                    released = release.1.wait(released).unwrap();
+                    release.1.wait(&mut released);
                 }
             }
         });

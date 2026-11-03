@@ -9,7 +9,8 @@ use super::{
     sleep::{Sleep, THREADS_MAX},
     unwind,
 };
-use crossbeam_deque::{Injector, Steal, Stealer, Worker};
+use crossbeam_deque::{Steal, Stealer, Worker};
+use injector::Injector;
 use std::{
     cell::Cell,
     hash::{DefaultHasher, Hasher},
@@ -25,6 +26,7 @@ use std::{
 
 #[cfg(test)]
 mod group_scheduling_tests;
+mod injector;
 mod wake;
 
 #[cfg(test)]
@@ -139,7 +141,7 @@ pub(super) struct Registry {
 
     /// Jobs placed [`Placement::Wide`] by threads that are not workers of this registry, taken by
     /// any worker.
-    wide_injected_jobs: Injector<JobRef>,
+    wide_injected_jobs: Injector,
 
     /// The pushing halves of the workers' broadcast deques, indexed by worker.
     broadcasts: Mutex<Vec<Worker<JobRef>>>,
@@ -163,7 +165,7 @@ pub(super) struct Registry {
 struct Group {
     /// Jobs placed [`Placement::Local`] on the group by a thread that is not one of its workers.
     /// Only the group's workers take them.
-    injected_jobs: Injector<JobRef>,
+    injected_jobs: Injector,
 
     /// Governs when the group's workers sleep and wake, indexed by their offset in the group.
     sleep: Sleep,
@@ -211,6 +213,7 @@ impl Registry {
             })
             .unzip();
 
+        let (group_injected_jobs, wide_injected_jobs) = Injector::new(group_widths.len());
         let registry = Arc::new(Self {
             thread_infos: local_stealers
                 .into_iter()
@@ -219,14 +222,15 @@ impl Registry {
                 .collect(),
             groups: group_widths
                 .iter()
-                .map(|&width| Group {
-                    injected_jobs: Injector::new(),
+                .zip(group_injected_jobs)
+                .map(|(&width, injected_jobs)| Group {
+                    injected_jobs,
                     sleep: Sleep::new(width),
                 })
                 .collect(),
             group_width,
             group_widths,
-            wide_injected_jobs: Injector::new(),
+            wide_injected_jobs,
             broadcasts: Mutex::new(broadcasts),
             terminate_count: AtomicUsize::new(1),
             start_handler: builder.take_start_handler(),
@@ -371,26 +375,12 @@ impl Registry {
         match placement {
             Placement::Local(group) => {
                 let group = &self.groups[group];
-                let queue_was_empty = group.injected_jobs.is_empty();
-
-                group.injected_jobs.push(injected_job.tagged(Tag::Local));
+                let queue_was_empty = group.injected_jobs.push(injected_job.tagged(Tag::Local));
                 group.sleep.new_injected_jobs(1, queue_was_empty);
             }
             Placement::Wide { near } => {
-                let queue_was_empty = self.wide_injected_jobs.is_empty();
-
-                self.wide_injected_jobs.push(injected_job.tagged(Tag::Wide));
+                let queue_was_empty = self.wide_injected_jobs.push(injected_job.tagged(Tag::Wide));
                 self.new_injected_wide_job(near, queue_was_empty);
-            }
-        }
-    }
-
-    fn pop_injected_job(injected_jobs: &Injector<JobRef>) -> Option<JobRef> {
-        loop {
-            match injected_jobs.steal() {
-                Steal::Success(job) => return Some(job),
-                Steal::Empty => return None,
-                Steal::Retry => {}
             }
         }
     }
@@ -611,12 +601,6 @@ pub(super) struct WorkerThread {
     /// The current job's placement, used to select the deque this worker pushes to.
     tag: Cell<Tag>,
 
-    /// Whether this worker's next search looks for jobs any worker may take before its group's
-    /// injector. A job taken from the group's injector sets it, and a job taken from another
-    /// worker's wide deque or the wide injector clears it, so a steady stream of either kind
-    /// cannot hold back a waiting job of the other.
-    wide_first: Cell<bool>,
-
     /// A weak random number generator.
     rng: XorShift64Star,
 
@@ -645,7 +629,6 @@ impl From<ThreadBuilder> for WorkerThread {
             // Code that runs on a worker outside any job, such as a thread taken over with
             // `use_current_thread`, places its jobs on the whole pool.
             tag: Cell::new(Tag::Wide),
-            wide_first: Cell::new(false),
             rng: XorShift64Star::new(),
             registry: thread.registry,
         }
@@ -889,15 +872,11 @@ impl WorkerThread {
 
     /// Finds a job to run.
     ///
-    /// The search covers our own deques and broadcasts, our group-mates' local deques, our
-    /// group's injector, every other worker's wide deque (our group-mates' first), and the wide
-    /// injector, in that order. Our own deques come first whatever their placement. Among other
-    /// workers' jobs and injected ones, those placed on our group come before those any worker
-    /// may take, except that a search following a job taken from our group's injector tries the
-    /// other workers' wide deques and the wide injector before our group's injector. Jobs from
-    /// our group's injector therefore alternate with jobs any worker may take while both wait.
-    /// Among the latter, jobs that other workers have already queued come before injected ones, as
-    /// upstream finishes stolen work before taking on new work.
+    /// The search covers our own deques and broadcasts, our group-mates' Local deques, and
+    /// every other worker's Wide deque (our group-mates' first), before taking the oldest
+    /// incoming job across our group's Local injector and the shared Wide injector. Incoming
+    /// jobs are ordered by arrival, without reserving a share for either placement. This orders
+    /// admission only: jobs may finish in any order, and deque work keeps priority.
     ///
     /// Joins and installs wait on descendant work, so their waits follow the job tree and cannot
     /// form a cycle. Their liveness follows upstream's argument under its assumptions that jobs
@@ -925,33 +904,14 @@ impl WorkerThread {
     /// Native future waits use the same search. Their completion also depends on the future's
     /// producer making progress, and the producer can depend on work outside the job tree.
     fn find_work(&self) -> Option<JobRef> {
-        // Alternate group injection with Wide work when both keep producing jobs.
-        let wide = || {
-            let job = self
-                .steal_wide()
-                .or_else(|| Registry::pop_injected_job(&self.registry.wide_injected_jobs));
-            if job.is_some() {
-                self.wide_first.set(false);
-            }
-            job
-        };
-        let group_injected = || {
-            let job = Registry::pop_injected_job(&self.registry.groups[self.group].injected_jobs);
-            if job.is_some() {
-                self.wide_first.set(true);
-            }
-            job
-        };
-
-        // Own queues and the group's Local deques keep priority over shared sources.
         self.take_local_job()
             .or_else(|| self.steal_local())
+            .or_else(|| self.steal_wide())
             .or_else(|| {
-                if self.wide_first.get() {
-                    wide().or_else(group_injected)
-                } else {
-                    group_injected().or_else(wide)
-                }
+                Injector::pop(
+                    &self.registry.groups[self.group].injected_jobs,
+                    &self.registry.wide_injected_jobs,
+                )
             })
     }
 

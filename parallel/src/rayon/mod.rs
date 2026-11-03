@@ -58,8 +58,8 @@
 //!   nested helping, and unwinding. The bridge's splitter sizes its split budget by the width
 //!   of the calling worker's placement in place of `current_num_threads`, which is removed.
 //! - Each group owns its Local injector and sleep states. All groups share a Wide injector.
-//!   Workers alternate between jobs from their group's injector and Wide jobs, and take Wide
-//!   jobs from other workers' deques before the Wide injector. Wide publication and idle exits
+//!   Workers search eligible deques before taking the oldest incoming job across their group's
+//!   Local injector and the Wide injector. Wide publication and idle exits
 //!   propagate wakeups between groups. Native worker waits wake the owning worker through its
 //!   group and offset.
 //! - Internal placement methods run and spawn work within groups. Public pool operations remain
