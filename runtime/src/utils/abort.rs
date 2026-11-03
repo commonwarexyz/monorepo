@@ -16,9 +16,10 @@
 //! ([Abortable::task]) therefore records the data and vtable addresses of the waker it last
 //! registered and skips registration while they match, so its steady-state pending polls only
 //! read the shared state. This relies on the runtime polling the task's future only with wakers
-//! of that task. Other wrappers ([Abortable::new], used by completion handles) cannot rely on
-//! that, because an executor may reuse a dropped waker's addresses for another task, so they
-//! register on every pending poll.
+//! of that task. The deterministic runtime builds a new waker for every poll, so its tasks keep
+//! registering on every pending poll. Other wrappers ([Abortable::new], used by completion
+//! handles) may be polled by any executor, and one may reuse a dropped waker's addresses for
+//! another task, so they register on every pending poll.
 //!
 //! Either wrapper adds one pointer to the future it wraps.
 
@@ -87,7 +88,9 @@ struct Shared {
     aborted: AtomicBool,
     /// The waker of the last poll that left the [Abortable] pending.
     ///
-    /// Only [AbortHandle::abort] wakes (and so empties) this slot, after setting `aborted`.
+    /// Only an [AbortHandle::abort] empties this slot, after setting `aborted`, either by
+    /// taking and waking the waker itself or through a registration that raced it and woke
+    /// the waker on its behalf.
     waker: AtomicWaker,
     /// The waker a task [Abortable] last registered in `waker`.
     registered: Registered,
@@ -220,8 +223,7 @@ impl<F, const TASK: bool> Abortable<F, TASK> {
     /// which an executor may represent differently while it reuses the original's addresses.
     fn register(&self, waker: &Waker) {
         if TASK {
-            // Identify the waker by the two addresses `Waker::will_wake` compares. They are only
-            // compared, never dereferenced.
+            // Identify the waker by the two addresses `Waker::will_wake` compares.
             let registered = &self.shared.registered;
             let data = waker.data().addr();
             let vtable = std::ptr::from_ref(waker.vtable()).addr();
@@ -261,7 +263,9 @@ impl<F: Future, const TASK: bool> Future for Abortable<F, TASK> {
         }
 
         // Register for the abort wake, then check again so an abort that raced the poll is
-        // not lost. Registration orders this check after any abort it observed.
+        // not lost. A registration orders this check after any abort it observed. When a task
+        // wrapper skips the registration, a racing abort instead wakes the waker that stayed
+        // registered, and that wake happens before the poll it schedules.
         this.register(cx.waker());
         if this.is_aborted() {
             return Poll::Ready(Err(Aborted));
@@ -407,8 +411,8 @@ mod tests {
         let (first, first_waker) = counter();
         let (second, second_waker) = counter();
 
-        // The first poll registers the first waker, the second skips registration because the
-        // waker is unchanged, and the third replaces it with the second waker.
+        // The first poll registers the first waker, the second leaves it registered, and the
+        // third replaces it with the second waker.
         assert!(poll(&mut future, &first_waker).is_pending());
         assert!(poll(&mut future, &first_waker).is_pending());
         assert!(poll(&mut future, &second_waker).is_pending());
@@ -420,14 +424,14 @@ mod tests {
         assert_eq!(poll(&mut future, &second_waker), Poll::Ready(Err(Aborted)));
     }
 
-    /// A waker whose later registrations were skipped still receives the abort wake, once.
+    /// A waker that stays registered across repeated polls receives the abort wake, once.
     #[test]
     fn abort_wakes_repeatedly_registered_waker() {
         let (handle, registration) = AbortHandle::new_pair();
         let mut future = Abortable::task(future::pending::<()>(), registration);
         let (counter, waker) = counter();
 
-        // Only the first poll registers, the later ones skip registration.
+        // The later polls leave the first poll's registration in place.
         for _ in 0..3 {
             assert!(poll(&mut future, &waker).is_pending());
         }
