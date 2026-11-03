@@ -73,7 +73,7 @@ pub(crate) fn offload_timed<C, S, T, O>(
     op: O,
 ) -> impl Future<Output = (Span, Result<T, WorkerPanicked>)> + Send
 where
-    C: Clock + Send + 'static,
+    C: Clock,
     S: Strategy,
     O: FnOnce(C, S) -> T + Send + 'static,
     T: Send + 'static,

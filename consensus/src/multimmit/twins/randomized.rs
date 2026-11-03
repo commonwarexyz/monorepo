@@ -119,7 +119,7 @@ struct RandomizedDelivery {
 
 impl<E> PumpStrategy<E> for RandomizedDelivery
 where
-    E: Debug + std::error::Error + Send + Sync + 'static,
+    E: std::error::Error + Send + Sync + 'static,
 {
     type Tag = ();
     type Observer = WireEvidence;

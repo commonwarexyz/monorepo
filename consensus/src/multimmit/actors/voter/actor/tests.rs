@@ -971,8 +971,9 @@ fn every_validator_recovers_receipt_chain_certificates() {
             Tuning::default(),
         )
         .unwrap();
+        let validator_context = context.child("validator");
         let mut validator = ChainTasks::<TestTypes>::new(
-            &context.child("validator"),
+            &validator_context,
             &profile,
             &scheme,
             Sequential,
@@ -1241,8 +1242,9 @@ fn only_receipt_chain_recovery_tasks_are_labelled_by_chain() {
                 Tuning::default(),
             )
             .unwrap();
+            let tasks_context = context.child(label);
             let _tasks = ChainTasks::<TestTypes>::new(
-                &context.child(label),
+                &tasks_context,
                 &profile,
                 &Arc::new(committee.signers[0].clone()),
                 Sequential,

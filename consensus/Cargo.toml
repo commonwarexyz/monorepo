@@ -74,6 +74,7 @@ mocks = [
 	"commonware-cryptography/mocks",
 	"commonware-p2p/mocks",
 	"commonware-resolver/mocks",
+	"commonware-runtime/test-utils",
 	"dep:rand_distr",
 ]
 arbitrary = [

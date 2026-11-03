@@ -122,7 +122,6 @@ where
     H: Hasher,
     V: Variant,
     B: Body<H>,
-    B::Cfg: Send + 'static,
 {
     /// Creates the actor, the bridge for the network `commonware_resolver` engine, and the
     /// mailbox for marshal.
