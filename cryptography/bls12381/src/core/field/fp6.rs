@@ -23,9 +23,9 @@
 //! Every coefficient of a product is a signed sum of at most nine extension products' sums, so
 //! for eager representations each positive and each negative sum has limb bound at most `9`.
 //! Products of products accumulate them, after [`carry_product`](Fp6::carry_product) where the sums
-//! would exceed the limb limits. [`reduce::<K>`](Fp6::reduce) and
-//! [`reduce_tight::<K>`](Fp6::reduce_tight) reduce each coefficient as [`Fp2::reduce`] and
-//! [`Fp2::reduce_tight`] do, under the same requirements on each component's sums.
+//! would exceed the limb limits. [`reduce_tight::<K>`](Fp6::reduce_tight) reduces each
+//! coefficient as [`Fp2::reduce_tight`] does, under the same requirements on each component's
+//! sums.
 //! [`invert`](Fp6::invert) accepts components with limb bound `1` and integer bound at most
 //! [`TIGHT`] and returns tight components.
 
@@ -317,19 +317,6 @@ impl<F> Fp6<F> {
             c0: Fp2::<F>::carry_product(simd, product.c0),
             c1: Fp2::<F>::carry_product(simd, product.c1),
             c2: Fp2::<F>::carry_product(simd, product.c2),
-        }
-    }
-
-    /// Reduces every coefficient of a product, as [`Fp2::reduce`] does with the bias `K`.
-    #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn reduce<const K: u64, S: Simd>(simd: S, product: Product<F, S>) -> Self
-    where
-        F: Field<S>,
-    {
-        Self {
-            c0: Fp2::<F>::reduce::<K, S>(simd, product.c0),
-            c1: Fp2::<F>::reduce::<K, S>(simd, product.c1),
-            c2: Fp2::<F>::reduce::<K, S>(simd, product.c2),
         }
     }
 
