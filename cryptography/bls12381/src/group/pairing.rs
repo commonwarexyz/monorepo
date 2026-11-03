@@ -102,7 +102,7 @@ impl Kernel for Product {
         let a = Fp12::<F>::load(simd, &[], &self.0.0);
         let b = Fp12::<F>::load(simd, &[], &self.1.0);
         let mut output = [fp12::ONE];
-        a.mul(simd, b).store(simd, &mut output);
+        a.mul(simd, &b).store(simd, &mut output);
         GT(output[0])
     }
 }
@@ -154,7 +154,7 @@ impl Kernel for Pairings<'_> {
             count += 1;
             if count == SHARED || pairs.peek().is_none() {
                 let lines = miller_loop(simd, &prepared[..count]);
-                product = Some(product.map_or(lines, |product| product.mul(simd, lines)));
+                product = Some(product.map_or(lines, |product| product.mul(simd, &lines)));
                 count = 0;
             }
         }

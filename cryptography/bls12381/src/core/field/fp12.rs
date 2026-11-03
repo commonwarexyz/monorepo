@@ -150,7 +150,10 @@ const fn encode(c0: [u64; WORDS], c1: [u64; WORDS]) -> [u8; FP2_BYTES] {
     let mut bytes = [0; FP2_BYTES];
     let mut i = 0;
     while i < WORDS {
-        let (high, low) = (c1[WORDS - 1 - i].to_be_bytes(), c0[WORDS - 1 - i].to_be_bytes());
+        let (high, low) = (
+            c1[WORDS - 1 - i].to_be_bytes(),
+            c0[WORDS - 1 - i].to_be_bytes(),
+        );
         let mut k = 0;
         while k < 8 {
             bytes[8 * i + k] = high[k];
@@ -232,7 +235,7 @@ impl<F> Fp12<F> {
     ///
     /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn mul<S: Simd>(self, simd: S, rhs: Self) -> Self
+    pub fn mul<S: Simd>(&self, simd: S, rhs: &Self) -> Self
     where
         F: Field<S>,
     {
@@ -254,7 +257,7 @@ impl<F> Fp12<F> {
     ///
     /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn square<S: Simd>(self, simd: S) -> Self
+    pub fn square<S: Simd>(&self, simd: S) -> Self
     where
         F: Field<S>,
     {
@@ -276,14 +279,14 @@ impl<F> Fp12<F> {
     /// and integer bound at most [`LINE_BOUND`].
     /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn mul_by_line<S: Simd>(self, simd: S, line: [Fp2<F>; 3]) -> Self
+    pub fn mul_by_line<S: Simd>(&self, simd: S, line: &[Fp2<F>; 3]) -> Self
     where
         F: Field<S>,
     {
         simd.execute(
             #[inline(always)]
             move |simd: S| {
-                let [l0, l2, l3] = line;
+                let [l0, l2, l3] = *line;
                 let t0 = self.c0.product_by_01(simd, l0, l2);
                 let t1 = self.c1.product_by_1(simd, l3);
                 let sum = self.c0.add(simd, self.c1).carry(simd);
@@ -302,7 +305,7 @@ impl<F> Fp12<F> {
     /// takes nine extension squarings. The result is unspecified outside the subgroup.
     /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn cyclotomic_square<S: Simd>(self, simd: S) -> Self
+    pub fn cyclotomic_square<S: Simd>(&self, simd: S) -> Self
     where
         F: Field<S>,
     {
@@ -338,7 +341,7 @@ impl<F> Fp12<F> {
     /// Reduces the negated coefficient tightly, so the result stays within [`BOUND`].
     /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn conjugate<S: Simd>(self, simd: S) -> Self
+    pub fn conjugate<S: Simd>(&self, simd: S) -> Self
     where
         F: Field<S>,
     {
@@ -359,7 +362,7 @@ impl<F> Fp12<F> {
     /// Conjugates every coefficient of `w^j` and multiplies it by `(1 + i)^(j (p - 1) / 6)`.
     /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn frobenius<S: Simd>(self, simd: S) -> Self
+    pub fn frobenius<S: Simd>(&self, simd: S) -> Self
     where
         F: Field<S>,
     {
@@ -399,7 +402,7 @@ impl<F> Fp12<F> {
     /// Inverts the norm in `Fp6` with [`Fp6::invert`].
     /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn invert<S: Simd>(self, simd: S) -> Self
+    pub fn invert<S: Simd>(&self, simd: S) -> Self
     where
         F: Field<S>,
     {
@@ -437,7 +440,7 @@ impl<F> Fp12<F> {
             let half = count.div_ceil(2);
             let low = Self::load(simd, &lanes[..half], &ONE);
             let high = Self::load(simd, &lanes[half..count], &ONE);
-            low.mul(simd, high).store(simd, &mut lanes[..half]);
+            low.mul(simd, &high).store(simd, &mut lanes[..half]);
             count = half;
         }
         Self::load(simd, &[], &lanes[0])
@@ -508,7 +511,9 @@ fn three_times<S: Simd, F: Field<S>, const ADD: bool>(
 /// Splits an element's encoding into its `c1` and `c0` encodings.
 #[inline(always)]
 fn split(element: &[u8; BYTES]) -> (&[u8; FP6_BYTES], &[u8; FP6_BYTES]) {
-    let (c1, c0) = element.split_first_chunk::<FP6_BYTES>().expect("two coefficients");
+    let (c1, c0) = element
+        .split_first_chunk::<FP6_BYTES>()
+        .expect("two coefficients");
     (c1, c0.try_into().expect("two coefficients"))
 }
 
@@ -744,7 +749,7 @@ pub(crate) mod tests {
     }
 
     fn mul<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        x.a.mul(simd, x.b)
+        x.a.mul(simd, &x.b)
     }
 
     fn square<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
@@ -752,7 +757,7 @@ pub(crate) mod tests {
     }
 
     fn mul_by_line<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        x.a.mul_by_line(simd, x.line)
+        x.a.mul_by_line(simd, &x.line)
     }
 
     fn cyclotomic_square<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
@@ -775,9 +780,9 @@ pub(crate) mod tests {
     fn chain<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
         let mut y = x.a;
         for _ in 0..ROUNDS {
-            y = check_bound(simd, y.mul(simd, x.b));
+            y = check_bound(simd, y.mul(simd, &x.b));
             y = check_bound(simd, y.square(simd));
-            y = check_bound(simd, y.mul_by_line(simd, x.line));
+            y = check_bound(simd, y.mul_by_line(simd, &x.line));
             y = check_bound(simd, y.conjugate(simd));
             y = check_bound(simd, y.frobenius(simd));
             y = check_bound(simd, y.invert(simd));
@@ -930,7 +935,10 @@ pub(crate) mod tests {
             };
             lane_inputs.c = cyclotomic(&element(&mut u).unwrap());
             for coefficient in &mut lane_inputs.line {
-                let (c0, c1) = (reference::canonical(&mut u).unwrap(), reference::canonical(&mut u).unwrap());
+                let (c0, c1) = (
+                    reference::canonical(&mut u).unwrap(),
+                    reference::canonical(&mut u).unwrap(),
+                );
                 coefficient[..FP_BYTES].copy_from_slice(&reference::to_bytes(c1));
                 coefficient[FP_BYTES..].copy_from_slice(&reference::to_bytes(c0));
             }
@@ -945,7 +953,10 @@ pub(crate) mod tests {
             for (representation, output) in outputs.iter().enumerate() {
                 for (lane, (output, expected)) in output.iter().zip(&expected).enumerate() {
                     for k in 0..OUTPUTS {
-                        assert!(output[k] == expected[k], "output {k}, representation {representation}, lane {lane}");
+                        assert!(
+                            output[k] == expected[k],
+                            "output {k}, representation {representation}, lane {lane}"
+                        );
                     }
                 }
             }
