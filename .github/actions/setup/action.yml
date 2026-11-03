@@ -154,23 +154,17 @@ runs:
 
     # kache caches the workspace's own crates, which rust-cache does not keep. It
     # runs after rust-cache so that RUSTC_WRAPPER stays out of rust-cache's key.
-    # These settings must reach the daemon and every compile, so they go in the job
-    # environment.
-    - name: Configure kache
+    # Compiling a large test binary takes over 5 minutes, so a long download wait pays
+    # off. The daemon and every compile read the wait, so it goes in the job environment.
+    - name: Setup kache
       if: inputs.rust-cache-enabled == 'true'
       shell: bash
-      run: |
-        {
-          # Compiling a large test binary takes over 5 minutes, so a long download wait pays off.
-          echo "KACHE_DEMAND_TIMEOUT_SECS=120"
-          echo "KACHE_LOG=kache=warn"
-        } >> "$GITHUB_ENV"
+      run: echo "KACHE_DEMAND_TIMEOUT_SECS=120" >> "$GITHUB_ENV"
     - name: Setup kache
       id: kache
       if: inputs.rust-cache-enabled == 'true'
       # A failed setup leaves the job uncached instead of failing it.
       continue-on-error: true
-      # Two commits after v1, which cannot read the remote from kache 2.0 stats output.
       uses: kunobi-ninja/kache-action@1a33fb2ff51be23eb9e87abeae6edb65be78f71c
       with:
         version: v2.0.0
@@ -180,9 +174,7 @@ runs:
         s3-prefix: kache
         s3-access-key-id: ${{ inputs.kache-r2-access-key-id }}
         s3-secret-access-key: ${{ inputs.kache-r2-secret-access-key }}
-        # On the same filesystem as CARGO_TARGET_DIR, so restores can hardlink.
         cache-dir: ${{ runner.os == 'Linux' && '/mnt/kache' || '' }}
-        # The store on the runner, not the remote. The largest jobs store about 50 GiB.
         max-size: 50GiB
         cache-executables: true
         manifest-key: ${{ steps.cache-key.outputs.key }}-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
