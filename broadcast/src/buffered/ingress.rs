@@ -146,6 +146,7 @@ impl<P: PublicKey, M: Digestible> Policy for Message<P, M> {
             return;
         }
 
+        // Keep each get or subscription request in arrival order with its own responder.
         overflow.queue.push_back(PendingEntry::Message(message));
     }
 }
