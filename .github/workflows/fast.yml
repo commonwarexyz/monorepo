@@ -269,6 +269,7 @@ jobs:
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: neoverse-n2
+            native-if-supported: true
             simd-backend: arm_v9
             cpu-features: "neon sha2 sha3 sve sve2"
           - os: ubuntu-24.04-arm
@@ -277,6 +278,7 @@ jobs:
             rustflags: "-C target-feature=+sha2,+sve2"
             static-features: "sha2 sve2 !sha3"
             qemu: neoverse-n2
+            native-if-supported: true
             cpu-features: "neon sha2 sha3 sve sve2"
           # Neoverse N1 has SHA-2 without SHA-3 or SVE.
           - os: ubuntu-24.04-arm
@@ -315,6 +317,7 @@ jobs:
             rustflags: "-C target-feature=+neon,+sha2,+sve,+sve2"
             static-features: "neon sha2 sve sve2"
             qemu: neoverse-n2
+            native-if-supported: true
             cpu-features: "neon sha2 sve sve2"
             simd-backend: arm_v9
           - os: ubuntu-24.04-arm
@@ -372,6 +375,15 @@ jobs:
     - name: Install QEMU
       if: ${{ matrix.qemu }}
       run: |
+        # Pilot: run natively when this runner already has every CPU feature the row expects.
+        if [ "${{ matrix.native-if-supported }}" = "true" ]; then
+          rustc --edition 2024 -O -o "$RUNNER_TEMP/check_cpu_features" .github/scripts/check_cpu_features.rs
+          if "$RUNNER_TEMP/check_cpu_features" ${{ matrix.cpu-features }}; then
+            echo "This runner has the ${{ matrix.qemu }} CPU features, so the tests run natively."
+            exit 0
+          fi
+          echo "This runner lacks the ${{ matrix.qemu }} CPU features, so the tests run under QEMU."
+        fi
         sudo apt-get update
         sudo apt-get install -y qemu-user
         emulator="qemu-$(uname -m) -cpu ${{ matrix.qemu }}"
