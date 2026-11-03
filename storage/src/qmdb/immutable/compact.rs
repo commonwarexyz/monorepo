@@ -152,8 +152,8 @@ where
 
     /// Inclusion proof for the operations returned by [`Self::operations`], anchored at
     /// this batch's tip. The pair verifies against [`Self::root`] via
-    /// [`crate::qmdb::verify_proof`]. Together with [`Self::pinned_nodes`] they verify via
-    /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    /// [`crate::qmdb::ProofExt::verify`]. Together with [`Self::pinned_nodes`] they verify via
+    /// [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
     /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
@@ -188,7 +188,7 @@ where
     /// The Merkle frontier at the first operation returned by [`Self::operations`]
     /// ([`Family::nodes_to_pin`]), which lets a consumer holding only this batch's base rebuild
     /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
-    /// nodes verify against [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    /// nodes verify against [`Self::root`] via [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
     /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
@@ -687,10 +687,7 @@ mod tests {
         journal::contiguous::{Contiguous as _, fixed, variable::Config as JournalConfig},
         merkle::{mmb, mmr},
         metadata::{Config as MetadataConfig, Metadata},
-        qmdb::{
-            any::value::FixedEncoding, compact::witness, verify_proof,
-            verify_proof_and_pinned_nodes,
-        },
+        qmdb::{ProofExt as _, any::value::FixedEncoding, compact::witness},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -939,8 +936,7 @@ mod tests {
         let root = batch.root();
         let original_proof = batch.proof(&db).unwrap();
         let original_pins = batch.pinned_nodes(&db).unwrap();
-        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
-            &original_proof,
+        assert!(original_proof.verify_with_pinned_nodes::<Sha256, _>(
             start,
             &ops,
             &original_pins,
@@ -1062,14 +1058,8 @@ mod tests {
             child_proof.inactive_peaks,
             F::inactive_peaks(child_end, floor),
         );
-        assert!(verify_proof::<Sha256, _, _>(
-            &child_proof,
-            child_start,
-            &child_ops,
-            &child_root
-        ));
-        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
-            &child_proof,
+        assert!(child_proof.verify::<Sha256, _>(child_start, &child_ops, &child_root));
+        assert!(child_proof.verify_with_pinned_nodes::<Sha256, _>(
             child_start,
             &child_ops,
             &child_pins,
@@ -1080,8 +1070,7 @@ mod tests {
         assert!(child_pins.len() > 1);
         let mut reordered_child_pins = child_pins.clone();
         reordered_child_pins.swap(0, 1);
-        assert!(!verify_proof_and_pinned_nodes::<Sha256, _, _>(
-            &child_proof,
+        assert!(!child_proof.verify_with_pinned_nodes::<Sha256, _>(
             child_start,
             &child_ops,
             &reordered_child_pins,
@@ -1094,8 +1083,7 @@ mod tests {
         let db = db.apply_batch(parent).await.unwrap();
         let child_proof_after = child.proof(&db).unwrap();
         assert_eq!(child.pinned_nodes(&db).unwrap(), child_pins);
-        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
-            &child_proof_after,
+        assert!(child_proof_after.verify_with_pinned_nodes::<Sha256, _>(
             child_start,
             &child_ops,
             &child_pins,
@@ -1132,8 +1120,7 @@ mod tests {
             commit_proof.inactive_peaks,
             F::inactive_peaks(commit_end, commit_floor)
         );
-        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
-            &commit_proof,
+        assert!(commit_proof.verify_with_pinned_nodes::<Sha256, _>(
             commit_start,
             &commit_ops,
             &commit_pins,
@@ -1178,13 +1165,11 @@ mod tests {
         let late_root = late.root();
         let late_proof = late.proof(&db).unwrap();
         let late_pins = late.pinned_nodes(&db).unwrap();
-        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
-            &late_proof,
-            late_start,
-            &late_ops,
-            &late_pins,
-            &late_root
-        ));
+        assert!(
+            late_proof.verify_with_pinned_nodes::<Sha256, _>(
+                late_start, &late_ops, &late_pins, &late_root
+            )
+        );
         let db = db.apply_batch(late).await.unwrap();
 
         db.destroy().await.unwrap();

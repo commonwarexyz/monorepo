@@ -990,7 +990,7 @@ pub(crate) mod test {
         V: CodecShared + Clone + Eq + std::hash::Hash + std::fmt::Debug,
         <D as Provable<mmr::Family>>::Operation: Codec,
     {
-        use crate::qmdb::verify_proof;
+        use crate::qmdb::ProofExt as _;
 
         const ELEMENTS: u64 = 1000;
 
@@ -1056,7 +1056,7 @@ pub(crate) mod test {
         for loc in *inactivity_floor..*bounds.end {
             let loc = Location::new(loc);
             let (proof, ops) = db.proof(loc, NZU64!(10)).await.unwrap();
-            assert!(verify_proof::<Sha256, _, _>(&proof, loc, &ops, &root));
+            assert!(proof.verify::<Sha256, _>(loc, &ops, &root));
         }
 
         db.destroy().await.unwrap();
@@ -1110,7 +1110,7 @@ pub(crate) mod test {
         D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
         <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
-        use crate::qmdb::verify_proof;
+        use crate::qmdb::ProofExt as _;
         use commonware_utils::NZU64;
 
         // Add some operations
@@ -1140,12 +1140,7 @@ pub(crate) mod test {
         assert_eq!(historical_proof.leaves, regular_proof.leaves);
         assert_eq!(historical_proof.digests, regular_proof.digests);
         assert_eq!(historical_ops, regular_ops);
-        assert!(verify_proof::<Sha256, _, _>(
-            &historical_proof,
-            start_loc,
-            &historical_ops,
-            &root_hash,
-        ));
+        assert!(historical_proof.verify::<Sha256, _>(start_loc, &historical_ops, &root_hash));
 
         // Add more operations to the database
         {
@@ -1167,12 +1162,7 @@ pub(crate) mod test {
         assert_eq!(historical_proof2.leaves, original_op_count);
         assert_eq!(historical_proof2.digests, regular_proof.digests);
         assert_eq!(historical_ops2, regular_ops);
-        assert!(verify_proof::<Sha256, _, _>(
-            &historical_proof2,
-            start_loc,
-            &historical_ops2,
-            &root_hash,
-        ));
+        assert!(historical_proof2.verify::<Sha256, _>(start_loc, &historical_ops2, &root_hash));
 
         db.destroy().await.unwrap();
     }
@@ -1186,7 +1176,7 @@ pub(crate) mod test {
         D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
         <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
     {
-        use crate::qmdb::verify_proof;
+        use crate::qmdb::ProofExt as _;
         use commonware_utils::NZU64;
 
         // Apply two single-write batches and capture the commit-boundary size after the
@@ -1221,12 +1211,7 @@ pub(crate) mod test {
             let mut tampered_proof = proof.clone();
             tampered_proof.digests[0] = Sha256::hash(&[b"invalid"]);
             let root_hash = db.root();
-            assert!(!verify_proof::<Sha256, _, _>(
-                &tampered_proof,
-                Location::new(1),
-                &ops,
-                &root_hash,
-            ));
+            assert!(!tampered_proof.verify::<Sha256, _>(Location::new(1), &ops, &root_hash));
         }
 
         // Appending an extra digest should cause verification to fail
@@ -1234,12 +1219,7 @@ pub(crate) mod test {
             let mut tampered_proof = proof.clone();
             tampered_proof.digests.push(Sha256::hash(&[b"invalid"]));
             let root_hash = db.root();
-            assert!(!verify_proof::<Sha256, _, _>(
-                &tampered_proof,
-                Location::new(1),
-                &ops,
-                &root_hash,
-            ));
+            assert!(!tampered_proof.verify::<Sha256, _>(Location::new(1), &ops, &root_hash));
         }
 
         // Changing the ops should cause verification to fail
@@ -1249,12 +1229,7 @@ pub(crate) mod test {
             // Swap first two ops if we have at least 2
             if tampered_ops.len() >= 2 {
                 tampered_ops.swap(0, 1);
-                assert!(!verify_proof::<Sha256, _, _>(
-                    &proof,
-                    Location::new(1),
-                    &tampered_ops,
-                    &root_hash,
-                ));
+                assert!(!proof.verify::<Sha256, _>(Location::new(1), &tampered_ops, &root_hash));
             }
         }
 
@@ -1263,34 +1238,19 @@ pub(crate) mod test {
             let root_hash = db.root();
             let mut tampered_ops = ops.clone();
             tampered_ops.push(tampered_ops[0].clone());
-            assert!(!verify_proof::<Sha256, _, _>(
-                &proof,
-                Location::new(1),
-                &tampered_ops,
-                &root_hash,
-            ));
+            assert!(!proof.verify::<Sha256, _>(Location::new(1), &tampered_ops, &root_hash));
         }
 
         // Changing the start location should cause verification to fail
         {
             let root_hash = db.root();
-            assert!(!verify_proof::<Sha256, _, _>(
-                &proof,
-                Location::new(2),
-                &ops,
-                &root_hash,
-            ));
+            assert!(!proof.verify::<Sha256, _>(Location::new(2), &ops, &root_hash));
         }
 
         // Changing the root digest should cause verification to fail
         {
             let invalid_root = Sha256::hash(&[b"invalid"]);
-            assert!(!verify_proof::<Sha256, _, _>(
-                &proof,
-                Location::new(1),
-                &ops,
-                &invalid_root,
-            ));
+            assert!(!proof.verify::<Sha256, _>(Location::new(1), &ops, &invalid_root));
         }
 
         // Changing the proof leaves count should cause verification to fail
@@ -1298,12 +1258,7 @@ pub(crate) mod test {
             let mut tampered_proof = proof.clone();
             tampered_proof.leaves = Location::new(100);
             let root_hash = db.root();
-            assert!(!verify_proof::<Sha256, _, _>(
-                &tampered_proof,
-                Location::new(1),
-                &ops,
-                &root_hash,
-            ));
+            assert!(!tampered_proof.verify::<Sha256, _>(Location::new(1), &ops, &root_hash));
         }
 
         db.destroy().await.unwrap();
@@ -2394,7 +2349,7 @@ pub(crate) mod test {
 
     // Generate one slow test per variant across the MMR-only variants (for
     // tests that use mmr::Family-specific features like Location::new or
-    // verify_proof).
+    // ProofExt::verify).
     macro_rules! test_for_mmr_variants {
         (with_reopen: $f:ident, $traced:literal) => {
             with_mmr_variants!(test_for_variant!(with_reopen: $f, $traced));

@@ -2,7 +2,7 @@
 //! Contains the implementation of [crate::qmdb::sync::Database] for [Db], covering every
 //! variant (ordered/unordered, fixed/variable, any snapshot index).
 //!
-//! Callers verifying `any` sync proofs directly should use [`crate::qmdb::verify_proof`].
+//! Callers verifying `any` sync proofs directly should use [`crate::qmdb::ProofExt::verify`].
 
 use crate::{
     Context,
