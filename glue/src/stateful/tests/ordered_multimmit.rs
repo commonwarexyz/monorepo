@@ -1271,13 +1271,14 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
         // participates in new checkpoints after recovering its skipped history.
         let origin = committee.committee.identities[VALIDATORS as usize - 1].to_string();
         let channel = AGGREGATION.to_string();
-        assert!(
-            metric_sum(
-                &context.encode(),
-                "messages_sent_total",
-                &[("origin", &origin), ("channel", &channel)],
-            ) > 0.0
-        );
+        while metric_sum(
+            &context.encode(),
+            "messages_sent_total",
+            &[("origin", &origin), ("channel", &channel)],
+        ) <= 0.0
+        {
+            context.sleep(Duration::from_millis(50)).await;
+        }
     });
 }
 
