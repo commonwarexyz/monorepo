@@ -2,7 +2,10 @@ use crate::{
     Context,
     journal::{authenticated, contiguous::Contiguous},
     merkle::{Family, Location},
-    qmdb::sync::{Journal, Target},
+    qmdb::{
+        operation::Floored,
+        sync::{Journal, Target},
+    },
     translator::Translator,
 };
 use commonware_codec::{Encode, EncodeShared};
@@ -102,14 +105,13 @@ pub(crate) fn journal_covers_range<F: Family>(
 }
 
 /// Shared body for [`Database::local_pinned_nodes`] implementations backed by an authenticated
-/// journal. Returns the pinned nodes at `target.range.start()`, computed by replaying `journal`
-/// from the boundary of the frontier read from `config` under `context`, if `journal` still holds
-/// the operations in between.
+/// journal. Replays the local frontier through the target end and reuses its pins only if the
+/// rebuilt root matches the target.
 pub(crate) async fn local_pinned_nodes<F, E, H, S>(
     context: E,
     config: authenticated::Config<S>,
     target: &Target<F, H::Digest>,
-    journal: &impl Contiguous<Item: EncodeShared>,
+    journal: &impl Contiguous<Item: EncodeShared + Floored<F>>,
 ) -> Result<Option<Vec<H::Digest>>, crate::qmdb::Error<F>>
 where
     F: Family,
@@ -118,12 +120,16 @@ where
     S: Strategy,
 {
     let hasher = crate::qmdb::hasher::<H>();
+    let floor = crate::qmdb::find_inactivity_floor_at(journal, target.range.end()).await?;
+    let inactive_peaks = F::inactive_peaks(target.range.end(), floor);
     Ok(authenticated::pinned_nodes_from_frontier(
         context,
         &config,
         journal,
         &hasher,
         target.range.start(),
+        target.root,
+        inactive_peaks,
     )
     .await?)
 }
@@ -136,7 +142,11 @@ mod tests {
         merkle::{Location, mmr::Family as MmrFamily},
         qmdb::{
             keyless::{self, fixed::Operation},
-            sync::{self, Target, engine::Config, source::tests::FailSource},
+            sync::{
+                self, Request, Source as _, Target,
+                engine::Config,
+                source::tests::{FailSource, SequenceSource},
+            },
         },
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
@@ -226,7 +236,7 @@ mod tests {
             drop(db);
 
             let db = sync_to("local", 51).await.unwrap();
-            assert_eq!(db.bounds(), Location::new(28)..Location::new(51));
+            assert_eq!(db.bounds(), Location::new(30)..Location::new(51));
             assert_eq!(db.root(), root);
             drop(db);
             let db = Db::init(context.child("reopen"), config, None)
@@ -254,6 +264,75 @@ mod tests {
         assert!(!journal_covers_range(0..0, &range));
     }
 
+    #[test]
+    fn sync_fetches_pins_for_a_different_local_prefix() {
+        deterministic::Runner::default().start(|context| async move {
+            type Db =
+                keyless::fixed::Db<MmrFamily, deterministic::Context, U64, Sha256, Sequential>;
+            let local_config = keyless::Config {
+                merkle: merkle_config(),
+                log: journal_config(),
+            };
+            let mut source_config = local_config.clone();
+            source_config.merkle.metadata_partition.push_str("-source");
+            source_config.log.partition.push_str("-source");
+            let populate = |label: &'static str, config, value| {
+                let context = context.child(label);
+                async move {
+                    let db = Db::init(context, config, None).await.unwrap();
+                    let batch = db
+                        .new_batch()
+                        .append(U64::new(value))
+                        .merkleize(&db, None, Location::new(0))
+                        .await
+                        .unwrap();
+                    db.apply_batch(batch).await.unwrap().sync().await.unwrap()
+                }
+            };
+            let local = populate("local", local_config.clone(), 11).await;
+            let source_db = populate("source", source_config, 22).await;
+            assert_eq!(local.bounds(), Location::new(0)..Location::new(3));
+            assert_ne!(local.root(), source_db.root());
+            drop(local);
+
+            let root = source_db.root();
+            let response = source_db
+                .serve(Request::Boundary {
+                    size: Location::new(3),
+                    start: Location::new(2),
+                })
+                .await
+                .unwrap()
+                .0;
+            let source = SequenceSource::new(vec![response]);
+            let observed = source.clone();
+            let db = sync::sync::<Db, _>(Config {
+                context: context.child("sync"),
+                source,
+                target: Target {
+                    root,
+                    range: non_empty_range!(Location::new(2), Location::new(3)),
+                },
+                max_outstanding_requests: NZUsize!(1),
+                fetch_batch_size: NZU64!(1),
+                apply_batch_size: NZU64!(1),
+                db_config: local_config.clone(),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await
+            .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(observed.take_verdicts().await, vec![true]);
+            drop(db);
+            let reopened = Db::init(context.child("reopen"), local_config, None)
+                .await
+                .unwrap();
+            assert_eq!(reopened.root(), root);
+        });
+    }
+
     /// Local pins come from replaying the sync journal from the frontier's boundary, and are
     /// unavailable once the sync journal no longer holds the operations from that boundary.
     #[test]
@@ -279,12 +358,13 @@ mod tests {
                 .unwrap();
             let (log, boundary) = log.prune(Location::new(30)).await.unwrap();
             assert_eq!(boundary, Location::new(28));
+            let root = log.root(0).unwrap();
             let expected = log.pinned_nodes_at(Location::new(30)).await.unwrap();
             drop(log.sync().await.unwrap());
 
             for (start, pins) in [(30, Some(expected)), (35, None)] {
                 let target = Target {
-                    root: Digest::from([0; 32]),
+                    root,
                     range: non_empty_range!(Location::new(start), Location::new(50)),
                 };
                 let journal = Ops::new(

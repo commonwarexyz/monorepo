@@ -4,7 +4,7 @@
 use crate::{
     Context,
     journal::Error,
-    merkle::{Family, Location},
+    merkle::{Family, Location, MAX_PINNED_NODES},
     metadata::{self, Metadata},
 };
 use commonware_cryptography::Digest;
@@ -27,7 +27,7 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
             context,
             metadata::Config {
                 partition,
-                codec_config: ((), ((..=64).into(), ())),
+                codec_config: ((), ((..=MAX_PINNED_NODES).into(), ())),
             },
         )
         .await?;

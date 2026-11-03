@@ -38,13 +38,7 @@ pub use proof::{
 pub use read::Readable;
 use thiserror::Error;
 
-/// Safe upper bound on the number of pinned nodes for any u64-backed Merkle family.
-///
-/// Pinned nodes are produced by [`Family::nodes_to_pin`], whose default
-/// implementation returns the peaks of the sub-structure at the prune
-/// location. A structure with `n` leaves has at most `popcount(n)` peaks, and
-/// since [`Location`] is backed by a `u64`, `n <= u64::MAX` yields at most 64
-/// peaks.
+/// Maximum number of peaks or canonical pinned nodes returned by a [`Family`].
 pub const MAX_PINNED_NODES: usize = 64;
 
 /// Defines the strategy used to fold peaks into the final root digest.
@@ -73,6 +67,13 @@ impl Bagging {
 /// Provides the per-family constants and conversion functions that differentiate
 /// MMR from MMB (or other future Merkle structures). Families capture structural topology
 /// only; bagging is owned by the [`hasher::Hasher`] instance and supplied by the consumer.
+///
+/// At every valid size, the nodes at height `h` cover exactly the aligned leaf intervals
+/// `[k * 2^h, (k + 1) * 2^h)` for `k` in `0..n`, for some `n`. Nodes of a given height are
+/// appended in increasing `k` order; nodes of different heights may be interleaved.
+///
+/// [`Self::peaks`] and [`Self::nodes_to_pin`] each return at most [`MAX_PINNED_NODES`]
+/// entries for every valid size or pruning location, including overridden pinned-node sets.
 pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
     /// Domain tag committed by every root of this family.
     ///

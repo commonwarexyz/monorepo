@@ -110,7 +110,7 @@ impl<D: Copy> GraftRoots<D> {
         self.roots.extend(chunks.map(|chunk| {
             ops_tree
                 .get_node(graft_root_position::<F, N>(chunk))
-                .expect("newly graftable root must be in the in-memory ops tree")
+                .expect("newly graftable root must be available")
         }));
     }
 
@@ -779,10 +779,10 @@ where
         self.any = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
 
         // Retain the roots of chunks that became graftable in the operations just applied, then
-        // release the roots of chunks wholly below the new inactivity floor. The any layer applies
-        // without flushing, so its in-memory ops tree still holds every newly graftable root.
+        // release the roots of chunks wholly below the new inactivity floor. The batch retains
+        // these nodes independently of the ops tree's resident height.
         self.graft_roots
-            .extend_to::<F, N>(*batch.grafted.leaves() as usize, &self.any.log.merkle);
+            .extend_to::<F, N>(*batch.grafted.leaves() as usize, &batch.inner.journal_batch);
         self.graft_roots
             .release_below_floor::<N>(self.any.inactivity_floor_loc);
         Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
@@ -2192,6 +2192,199 @@ mod tests {
             let canonical_root = db.root();
 
             assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
+        });
+    }
+}
+
+#[cfg(test)]
+mod graft_height_tests {
+    use crate::{
+        mmr,
+        qmdb::{
+            current::{tests::fixed_config, unordered::fixed::Db},
+            floor::Hold,
+        },
+        translator::TwoCap,
+    };
+    use bytes::BufMut;
+    use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
+    use commonware_cryptography::{Hasher, Sha256, sha256};
+    use commonware_math::algebra::Random;
+    use commonware_parallel::{Sequential, Strategy};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use commonware_utils::{Array, Span};
+    use core::{fmt, ops::Deref};
+    use rand::CryptoRng;
+
+    // A 16-byte output places the graft height below the supported cache ceiling.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    struct D16([u8; 16]);
+    impl fmt::Display for D16 {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{:02x?}", self.0)
+        }
+    }
+    impl AsRef<[u8]> for D16 {
+        fn as_ref(&self) -> &[u8] {
+            &self.0
+        }
+    }
+    impl Deref for D16 {
+        type Target = [u8];
+        fn deref(&self) -> &[u8] {
+            &self.0
+        }
+    }
+    impl Write for D16 {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.0.write(buf);
+        }
+    }
+    impl Read for D16 {
+        type Cfg = ();
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+            Ok(Self(<[u8; 16]>::read(buf)?))
+        }
+    }
+    impl FixedSize for D16 {
+        const SIZE: usize = 16;
+    }
+    impl Span for D16 {}
+    impl Array for D16 {}
+    impl commonware_cryptography::Digest for D16 {
+        const EMPTY: Self = Self([0; 16]);
+    }
+    impl Random for D16 {
+        fn random(mut rng: impl CryptoRng) -> Self {
+            let mut out = [0; 16];
+            rng.fill_bytes(&mut out);
+            Self(out)
+        }
+    }
+
+    #[derive(Default)]
+    struct Sha256128(Sha256);
+    fn truncate(digest: sha256::Digest) -> D16 {
+        D16(digest.0[..16].try_into().unwrap())
+    }
+    impl Hasher for Sha256128 {
+        type Digest = D16;
+        fn hash(parts: &[&[u8]]) -> D16 {
+            truncate(Sha256::hash(parts))
+        }
+        fn hash_pair(left: &[&[u8]], right: &[&[u8]], _: &impl Strategy) -> (D16, D16) {
+            (Self::hash(left), Self::hash(right))
+        }
+        fn update(&mut self, bytes: &[u8]) -> &mut Self {
+            self.0.update(bytes);
+            self
+        }
+        fn finalize(self) -> (Self, D16) {
+            let (reset, digest) = self.0.finalize();
+            (Self(reset), truncate(digest))
+        }
+    }
+
+    async fn run<F: crate::merkle::Graftable>(
+        context: deterministic::Context,
+        resident_height: u32,
+        writes: u16,
+        descendant: bool,
+    ) -> D16 {
+        type TestDb<F> = Db<
+            F,
+            deterministic::Context,
+            sha256::Digest,
+            sha256::Digest,
+            Sha256128,
+            TwoCap,
+            16,
+            Sequential,
+        >;
+        let mut cfg = fixed_config::<TwoCap>("graft-height");
+        cfg.merkle_config.cache.resident_height = resident_height;
+        let db = TestDb::<F>::init(context.child("initial"), cfg.clone(), None)
+            .await
+            .unwrap();
+        let mut batch = db.new_batch();
+        for i in 0..writes {
+            let key = Sha256::hash(&[&i.to_be_bytes()]);
+            batch = batch.write(key, Some(key));
+        }
+        let parent = batch.merkleize(&db, None, &mut Hold).await.unwrap();
+        let batch = if descendant {
+            let child = parent
+                .new_batch::<Sha256128>()
+                .write(Sha256::hash(&[b"child"]), Some(Sha256::hash(&[b"value"])))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            drop(parent);
+            child
+        } else {
+            parent
+        };
+        db.validate_batch(&batch).unwrap();
+        let expected = batch.root();
+        let db = db.apply_batch(batch).await.unwrap();
+        assert_eq!(db.root(), expected);
+        for i in 0..writes {
+            let key = Sha256::hash(&[&i.to_be_bytes()]);
+            assert_eq!(db.get(&key).await.unwrap(), Some(key));
+        }
+        let db = db.commit().await.unwrap();
+        drop(db);
+        let db = TestDb::<F>::init(context.child("reopen"), cfg, None)
+            .await
+            .unwrap();
+        assert_eq!(db.root(), expected);
+        db.destroy().await.unwrap();
+        expected
+    }
+
+    #[test]
+    fn test_graft_roots_below_resident_height_mmr() {
+        deterministic::Runner::default().start(|context| async move {
+            let expected = run::<mmr::Family>(context.child("control"), 7, 254, false).await;
+            assert_eq!(
+                run::<mmr::Family>(context.child("candidate"), 8, 254, false).await,
+                expected
+            );
+        });
+    }
+
+    #[test]
+    fn test_graft_roots_below_resident_height_mmb() {
+        deterministic::Runner::default().start(|context| async move {
+            let expected =
+                run::<crate::merkle::mmb::Family>(context.child("control"), 7, 381, false).await;
+            assert_eq!(
+                run::<crate::merkle::mmb::Family>(context.child("candidate"), 8, 381, false).await,
+                expected
+            );
+        });
+    }
+
+    #[test]
+    fn test_graft_roots_with_dropped_ancestor_mmr() {
+        deterministic::Runner::default().start(|context| async move {
+            let expected = run::<mmr::Family>(context.child("control"), 7, 254, true).await;
+            assert_eq!(
+                run::<mmr::Family>(context.child("candidate"), 8, 254, true).await,
+                expected
+            );
+        });
+    }
+
+    #[test]
+    fn test_graft_roots_with_dropped_ancestor_mmb() {
+        deterministic::Runner::default().start(|context| async move {
+            let expected =
+                run::<crate::merkle::mmb::Family>(context.child("control"), 7, 381, true).await;
+            assert_eq!(
+                run::<crate::merkle::mmb::Family>(context.child("candidate"), 8, 381, true).await,
+                expected
+            );
         });
     }
 }

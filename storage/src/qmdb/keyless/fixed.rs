@@ -27,6 +27,7 @@ pub type CompactConfig<S> = super::CompactConfig<(), S>;
 mod tests {
     use super::*;
     use crate::{
+        journal::contiguous::Contiguous as _,
         merkle::{Family, Location, mmb, mmr},
         qmdb::{
             Error,
@@ -83,6 +84,249 @@ mod tests {
         Db<F, deterministic::Context, commonware_utils::sequence::U64, Sha256, Rayon>;
     type TestCompactDb<F> =
         CompactDb<F, deterministic::Context, commonware_utils::sequence::U64, Sha256, Sequential>;
+
+    async fn bounded_init_preserves_latest_after_missing_commit<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let cfg = db_config("bounded-missing-commit", Sequential);
+        let mut db = TestDb::<F>::init(context.child("initial"), cfg.clone(), None)
+            .await
+            .unwrap();
+        for _ in 0..6 {
+            let batch = db
+                .new_batch()
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+            db = db.apply_batch(batch).await.unwrap();
+        }
+        let old_end = db.bounds().end;
+        assert_eq!(*old_end, 7);
+        let batch = db.new_batch().merkleize(&db, None, old_end).await.unwrap();
+        db = db.apply_batch(batch).await.unwrap();
+        let latest_root = db.root();
+        let latest_end = db.bounds().end;
+        let faults = context.storage_fault_config();
+        faults.write().remove_rate = Some(probability!(1.0));
+        assert!(db.prune(old_end).await.is_err());
+        faults.write().remove_rate = None;
+
+        let result = TestDb::<F>::init(context.child("bounded"), cfg.clone(), Some(old_end)).await;
+        assert!(matches!(
+            result,
+            Err(Error::Journal(crate::journal::Error::ItemPruned(7)))
+        ));
+        let db = TestDb::<F>::init(context.child("latest"), cfg, None)
+            .await
+            .unwrap();
+        assert_eq!(db.bounds().end, latest_end);
+        assert_eq!(db.root(), latest_root);
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_bounded_init_preserves_latest_after_missing_commit_mmr() {
+        deterministic::Runner::default()
+            .start(bounded_init_preserves_latest_after_missing_commit::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_bounded_init_preserves_latest_after_missing_commit_mmb() {
+        deterministic::Runner::default()
+            .start(bounded_init_preserves_latest_after_missing_commit::<mmb::Family>);
+    }
+
+    async fn bounded_init_rejects_commit_below_frontier<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let cfg = db_config("bounded-retained-commit", Sequential);
+        let mut db = TestDb::<F>::init(context.child("initial"), cfg.clone(), None)
+            .await
+            .unwrap();
+        for _ in 0..7 {
+            let batch = db
+                .new_batch()
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+            db = db.apply_batch(batch).await.unwrap();
+        }
+        let old_end = db.bounds().end;
+        let batch = db.new_batch().merkleize(&db, None, old_end).await.unwrap();
+        let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
+        let latest_root = db.root();
+        let latest_end = db.bounds().end;
+        let pins = db.journal.pinned_nodes_at(old_end).await.unwrap();
+        let crate::journal::authenticated::Journal {
+            journal,
+            frontier,
+            hasher,
+            ..
+        } = db.journal;
+        drop(frontier);
+        let journal =
+            crate::journal::authenticated::Journal::<F, _, _, Sha256, _>::from_components(
+                context.child("import"),
+                &cfg.merkle,
+                journal,
+                hasher,
+                old_end,
+                pins,
+                NZU64!(8),
+            )
+            .await
+            .unwrap();
+        assert_eq!(journal.journal.bounds().start, 7);
+        assert_eq!(journal.bounds().start, *old_end);
+        drop(journal);
+
+        let result = TestDb::<F>::init(context.child("bounded"), cfg.clone(), Some(old_end)).await;
+        assert!(matches!(
+            result,
+            Err(Error::Journal(crate::journal::Error::ItemPruned(8)))
+        ));
+        let db = TestDb::<F>::init(context.child("latest"), cfg, None)
+            .await
+            .unwrap();
+        assert_eq!(db.bounds().end, latest_end);
+        assert_eq!(db.root(), latest_root);
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_bounded_init_rejects_commit_below_frontier_mmr() {
+        deterministic::Runner::default()
+            .start(bounded_init_rejects_commit_below_frontier::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_bounded_init_rejects_commit_below_frontier_mmb() {
+        deterministic::Runner::default()
+            .start(bounded_init_rejects_commit_below_frontier::<mmb::Family>);
+    }
+
+    async fn imported_padding_is_not_authenticated<F: Family>(
+        context: deterministic::Context,
+        check_reads: bool,
+    ) {
+        async fn history<F: Family>(
+            context: deterministic::Context,
+            cfg: Config<Sequential>,
+            metadata: u64,
+        ) -> TestDb<F> {
+            let mut db = TestDb::<F>::init(context, cfg, None).await.unwrap();
+            for commit in 1..=8 {
+                let metadata = (commit == 7).then(|| U64::new(metadata));
+                let batch = db
+                    .new_batch()
+                    .merkleize(&db, metadata, Location::new(0))
+                    .await
+                    .unwrap();
+                db = db.apply_batch(batch).await.unwrap();
+            }
+            db.sync().await.unwrap()
+        }
+
+        let cfg = db_config("imported-padding-local", Sequential);
+        let local = history::<F>(context.child("local"), cfg.clone(), 22).await;
+        let source = history::<F>(
+            context.child("source"),
+            db_config("imported-padding-source", Sequential),
+            11,
+        )
+        .await;
+        let root = source.root();
+        assert_ne!(local.root(), root);
+        drop(local);
+        let db: TestDb<F> = sync::sync(sync::engine::Config {
+            context: context.child("import"),
+            source: Arc::new(source),
+            target: sync::Target {
+                root,
+                range: non_empty_range!(Location::new(8), Location::new(9)),
+            },
+            max_outstanding_requests: NZUsize!(1),
+            fetch_batch_size: NZU64!(1),
+            apply_batch_size: NZU64!(1),
+            db_config: cfg.clone(),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(db.root(), root);
+
+        if check_reads {
+            assert_eq!(db.bounds(), Location::new(8)..Location::new(9));
+            assert!(matches!(
+                db.journal.read(7).await,
+                Err(crate::journal::Error::ItemPruned(7))
+            ));
+            assert!(matches!(
+                db.journal.read_many(&[7, 8]).await,
+                Err(crate::journal::Error::ItemPruned(7))
+            ));
+            assert!(db.journal.try_read_sync(7).is_none());
+            let cached = db.journal.try_read_many_sync(&[7, 8]);
+            assert!(cached[0].is_none());
+            assert!(matches!(
+                db.journal
+                    .replay(7..9, NZUsize!(1024), Default::default())
+                    .await,
+                Err(crate::journal::Error::ItemPruned(7))
+            ));
+            assert!(
+                db.journal
+                    .historical_proof(Location::new(8), Location::new(7), NZU64!(1), 0)
+                    .await
+                    .is_err()
+            );
+        }
+        drop(db);
+
+        let bounded = TestDb::<F>::init(
+            context.child("bounded"),
+            cfg.clone(),
+            Some(Location::new(8)),
+        )
+        .await;
+        assert!(matches!(
+            bounded,
+            Err(Error::Journal(crate::journal::Error::ItemPruned(8)))
+        ));
+        let latest = TestDb::<F>::init(context.child("latest"), cfg, None)
+            .await
+            .unwrap();
+        assert_eq!(latest.root(), root);
+        assert_eq!(latest.bounds().end, Location::new(9));
+        assert_eq!(latest.get_metadata().await.unwrap(), None);
+        latest.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_imported_padding_rejects_bounded_commit_mmr() {
+        deterministic::Runner::default()
+            .start(|context| imported_padding_is_not_authenticated::<mmr::Family>(context, false));
+    }
+
+    #[test_traced]
+    fn test_imported_padding_rejects_bounded_commit_mmb() {
+        deterministic::Runner::default()
+            .start(|context| imported_padding_is_not_authenticated::<mmb::Family>(context, false));
+    }
+
+    #[test_traced]
+    fn test_imported_padding_rejects_reads_mmr() {
+        deterministic::Runner::default()
+            .start(|context| imported_padding_is_not_authenticated::<mmr::Family>(context, true));
+    }
+
+    #[test_traced]
+    fn test_imported_padding_rejects_reads_mmb() {
+        deterministic::Runner::default()
+            .start(|context| imported_padding_is_not_authenticated::<mmb::Family>(context, true));
+    }
 
     async fn open_db<F: Family>(context: deterministic::Context) -> TestDb<F> {
         open_db_with_suffix("partition", context).await

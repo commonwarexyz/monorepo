@@ -16,7 +16,7 @@ use crate::{
         Error,
         any::{
             self, ValueEncoding,
-            batch::{DiffCursors, DiffEntry, RetainedAncestors, Staged as AnyStaged},
+            batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
             operation::{Operation, update},
         },
         bitmap::{Candidates, Shared, fill_from},
@@ -499,17 +499,10 @@ where
         let (prepared, staged) = inner
             .resolve_updates_prefetched(slots, unstaged, &db.any, &*policy, &bitmap_parent)
             .await?;
-        let (inner, retained_ancestors) = prepared
+        let inner = prepared
             .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
             .await?;
-        compute_current_layer(
-            inner,
-            retained_ancestors,
-            db,
-            &grafted_parent,
-            &bitmap_parent,
-        )
-        .await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -571,17 +564,10 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let (inner, staged) = inner.resolve_updates(slots, unstaged, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
-        let (inner, retained_ancestors) = prepared
+        let inner = prepared
             .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
             .await?;
-        compute_current_layer(
-            inner,
-            retained_ancestors,
-            db,
-            &grafted_parent,
-            &bitmap_parent,
-        )
-        .await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -625,17 +611,10 @@ where
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let prepared = inner.prepare(&db.any)?;
-        let (inner, retained_ancestors) = prepared
+        let inner = prepared
             .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
             .await?;
-        compute_current_layer(
-            inner,
-            retained_ancestors,
-            db,
-            &grafted_parent,
-            &bitmap_parent,
-        )
-        .await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -679,17 +658,10 @@ where
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let prepared = inner.prepare(&db.any)?;
-        let (inner, retained_ancestors) = prepared
+        let inner = prepared
             .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
             .await?;
-        compute_current_layer(
-            inner,
-            retained_ancestors,
-            db,
-            &grafted_parent,
-            &bitmap_parent,
-        )
-        .await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -804,12 +776,8 @@ where
 ///
 /// Builds a chunk overlay from the diff, computes grafted MMR leaves from dirty chunks, and
 /// produces the `Arc<MerkleizedBatch>` directly.
-///
-/// `_retained_ancestors` is held only to keep ancestor batches alive while grafting and root
-/// computation read their nodes through weak parent links.
 async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
     inner: Arc<any::batch::MerkleizedBatch<F, H::Digest, U, S>>,
-    _retained_ancestors: RetainedAncestors<F, H::Digest, U, S>,
     db: &super::db::Db<F, E, C, I, H, U, N, S>,
     grafted_parent: &Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
     bitmap_parent: &BitmapBatch<N>,

@@ -13,8 +13,8 @@
 //! Value reads through a batch that the database is compatible with are exact. An exact read
 //! returns the batch's writes, then its ancestors' writes newest first, then the database,
 //! regardless of which ancestors the database has applied or which handles were dropped. Proof
-//! and pinned-node reads also need the ancestors' Merkle nodes, so they require those ancestors
-//! to be held.
+//! and pinned-node reads likewise use the Merkle records retained from the ancestors and read
+//! older nodes from the database's Merkle store.
 //!
 //! Merkleization returns [`Error::StaleBatch`] for a stale batch, and also once an unapplied
 //! ancestor is dropped, because merkleize reads ancestor operations through weak parent links. It

@@ -147,9 +147,8 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// all un-synced nodes, and the pinned node set as derived from both its own pruning boundary
     /// and the full structure's pruning boundary.
     ///
-    /// Held in an [`Arc`] to keep this by-value handle small. Nothing else holds it, so
-    /// [`Arc::make_mut`] never copies.
-    mem: Arc<Mem<F, D>>,
+    /// Stored on the heap to keep this by-value handle small.
+    mem: Box<Mem<F, D>>,
 
     /// The highest position for which this structure has been pruned, or 0 if it has never been
     /// pruned.
@@ -202,7 +201,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Recovery<F, E, D, S> {
         // any reconstructed nodes.
         let journal = (*self.journal).finish(*self.retained_size).await?;
         Merkle {
-            mem: Arc::new(self.mem),
+            mem: Box::new(self.mem),
             pruned_to_pos: self.effective_prune_pos,
             journal,
             metadata: self.metadata,
@@ -568,7 +567,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let journal = (*journal).finish(*journal_size).await?;
 
         Ok(Self {
-            mem: Arc::new(mem),
+            mem: Box::new(mem),
             pruned_to_pos: prune_pos,
             journal,
             metadata,
@@ -756,7 +755,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         // Now that the missing nodes are readable from the journal, it's safe to prune them from
         // the mem. We prune to the previously captured leaf count.
-        let mem = Arc::make_mut(&mut self.mem);
+        let mem = &mut self.mem;
         mem.prune(sync_target_leaves)
             .expect("captured leaves is in bounds");
         mem.add_pinned_nodes(pinned_nodes);
@@ -789,7 +788,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         (self, pinned_nodes) = self.update_metadata(pos).await?;
 
         (self.journal, _) = self.journal.prune(*pos).await?;
-        Arc::make_mut(&mut self.mem).add_pinned_nodes(pinned_nodes);
+        self.mem.add_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
         Ok(self)
@@ -886,7 +885,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
     ) -> Result<Self, Error<F>> {
-        Arc::make_mut(&mut self.mem).apply_batch(batch)?;
+        self.mem.apply_batch(batch)?;
         Ok(self)
     }
 

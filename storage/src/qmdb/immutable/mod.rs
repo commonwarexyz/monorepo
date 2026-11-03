@@ -490,9 +490,7 @@ where
     pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error<F>> {
         // The journal always ends with a commit operation.
         let last_commit_loc = self.size() - 1;
-        let Operation::Commit(metadata, _floor) =
-            self.journal.journal.read(*last_commit_loc).await?
-        else {
+        let Operation::Commit(metadata, _floor) = self.journal.read(*last_commit_loc).await? else {
             unreachable!("no commit operation at location of last commit {last_commit_loc}");
         };
 

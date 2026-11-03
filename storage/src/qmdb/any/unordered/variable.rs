@@ -863,18 +863,16 @@ pub(crate) mod test {
             assert!(caller_ancestors.is_none());
             assert!(weak_grandparent.upgrade().is_some());
 
-            let (batch, retained_ancestors) = prepared
+            let batch = prepared
                 .merkleize_with_floor_walk(None, updates, db.bitmap.as_ref(), &mut Proportional)
                 .await
                 .unwrap();
             assert_eq!(batch.root(), expected_root);
-            // Current's additional root computation needs this post-merkleization lifetime.
-            assert!(weak_grandparent.upgrade().is_some());
+            assert!(weak_grandparent.upgrade().is_none());
             assert_eq!(
                 batch.get(&key(100), &db).await.unwrap(),
                 Some(to_bytes(1_001))
             );
-            drop(retained_ancestors);
 
             let db = db.apply_batch(batch).await.unwrap();
             for (k, value) in [(0, 3_000), (1, 2_000), (100, 1_001), (101, 3_001)] {

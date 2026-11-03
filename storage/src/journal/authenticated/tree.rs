@@ -404,33 +404,30 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
     ) -> Result<Self, merkle::Error<F>> {
-        let runs = batch.unapplied(&self.mem)?;
-        if runs.iter().any(|(_, overwrites)| !overwrites.is_empty()) {
-            return Err(merkle::Error::DataCorrupted("batch overwrites nodes"));
-        }
-        // Apply each batch of the chain in turn, so the peaks at every size in it stay pinned
-        // until the next flush.
-        for (run, _) in runs {
-            let start = self.size();
+        let initial = self.size();
+        let mut end = initial;
+        for run in batch.unapplied(&self.mem)? {
+            let start = end;
             let node = |pos: Position<F>| {
                 let index = usize::try_from((*pos).checked_sub(*start)?).ok()?;
                 run.get(index).copied()
             };
-            let end = start + run.len() as u64;
+            end = start + run.len() as u64;
             self.resident.extend(end, node)?;
-
-            // Peaks before `start` are already pinned in `mem`.
-            let leaves = Location::try_from(end)?;
-            let peaks = F::nodes_to_pin(leaves)
-                .filter(|&pos| pos >= start)
-                .map(|pos| {
-                    node(pos)
-                        .map(|digest| (pos, digest))
-                        .ok_or(merkle::Error::MissingNode(pos))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Arc::make_mut(&mut self.mem).skip_to(leaves, peaks)?;
         }
+
+        // Earlier published peaks stay pinned; batches own the nodes between them and this tip.
+        let leaves = Location::try_from(end)?;
+        let peaks = F::nodes_to_pin(leaves)
+            .filter(|&pos| pos >= initial)
+            .map(|pos| {
+                batch
+                    .get_node(pos)
+                    .map(|digest| (pos, digest))
+                    .ok_or(merkle::Error::MissingNode(pos))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Arc::make_mut(&mut self.mem).skip_to(leaves, peaks)?;
         Ok(self)
     }
 
@@ -893,8 +890,7 @@ mod tests {
         deterministic::Runner::default().start(appends_near_maximum::<mmb::Family>);
     }
 
-    /// Applying the tip of a chain keeps the peaks at every size in it until the next flush, so
-    /// each batch still proves its leaves once its ancestors are dropped.
+    /// Each batch in an applied chain proves its leaves after its ancestors are dropped.
     async fn applied_chain<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
         let ops = Operations::new(20);

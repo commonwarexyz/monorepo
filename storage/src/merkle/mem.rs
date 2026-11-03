@@ -5,7 +5,8 @@
 //! `mmr::mem::Mmr` and `mmb::mem::Mmb` via type aliases.
 
 use crate::merkle::{
-    Error, Family, Location, Position, Proof, RangePlan, Readable, batch, hasher::Hasher,
+    Error, Family, Location, MAX_PINNED_NODES, Position, Proof, RangePlan, Readable, batch,
+    hasher::Hasher,
 };
 use alloc::{
     collections::{BTreeMap, VecDeque},
@@ -152,8 +153,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     ) -> Result<D, Error<F>> {
         let size = self.size();
         let leaves = Location::try_from(size).expect("invalid merkle size");
-        // A u64 leaf count has at most 64 peaks, so a fixed buffer avoids a heap allocation.
-        let mut peaks = [Position::<F>::default(); 64];
+        let mut peaks = [Position::<F>::default(); MAX_PINNED_NODES];
         let mut count = 0;
         for (pos, _) in F::peaks(size) {
             peaks[count] = pos;

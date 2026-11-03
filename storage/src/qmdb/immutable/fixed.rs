@@ -28,7 +28,7 @@ pub type CompactConfig<S> = super::CompactConfig<(), S>;
 mod tests {
     use super::*;
     use crate::{
-        journal::authenticated::Config as MerkleConfig,
+        journal::{authenticated::Config as MerkleConfig, contiguous::Contiguous as _},
         merkle::{Family, Location, mmb, mmr},
         qmdb::{
             Error,
@@ -76,6 +76,193 @@ mod tests {
             translator: TwoCap,
             init_buffer: NZUsize!(1 << 21),
         }
+    }
+
+    async fn bounded_init_after_failed_prune<F: Family>(context: deterministic::Context) {
+        let cfg = config("bounded-failed-prune");
+        let mut db = Db::<F, _, Digest, Digest, Sha256, _, _>::init(
+            context.child("initial"),
+            cfg.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let key = Sha256::fill(1);
+        let value = Sha256::fill(2);
+        let batch = db
+            .new_batch()
+            .set(key, value)
+            .merkleize(&db, None, Location::new(1))
+            .await
+            .unwrap();
+        db = db.apply_batch(batch).await.unwrap();
+        for _ in 0..3 {
+            let batch = db
+                .new_batch()
+                .merkleize(&db, None, Location::new(1))
+                .await
+                .unwrap();
+            db = db.apply_batch(batch).await.unwrap();
+        }
+        let old_end = db.size();
+        assert_eq!(*old_end, 6);
+        let batch = db.new_batch().merkleize(&db, None, old_end).await.unwrap();
+        db = db.apply_batch(batch).await.unwrap();
+        let latest_root = db.root();
+        let latest_end = db.size();
+
+        // The frontier becomes durable before the first obsolete blob is removed.
+        let faults = context.storage_fault_config();
+        faults.write().remove_rate = Some(probability!(1.0));
+        assert!(db.prune(Location::new(5)).await.is_err());
+        faults.write().remove_rate = None;
+
+        let result = Db::<F, _, Digest, Digest, Sha256, _, _>::init(
+            context.child("bounded"),
+            cfg.clone(),
+            Some(old_end),
+        )
+        .await;
+        assert!(matches!(result, Err(Error::HistoricalFloorPruned(size)) if size == old_end));
+
+        let db = Db::<F, _, Digest, Digest, Sha256, _, _>::init(context.child("latest"), cfg, None)
+            .await
+            .unwrap();
+        assert_eq!(db.size(), latest_end);
+        assert_eq!(db.root(), latest_root);
+        assert_eq!(db.get(&key).await.unwrap(), None);
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_bounded_init_rejects_pruned_floor_before_truncation_mmr() {
+        deterministic::Runner::default().start(bounded_init_after_failed_prune::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_bounded_init_rejects_pruned_floor_before_truncation_mmb() {
+        deterministic::Runner::default().start(bounded_init_after_failed_prune::<mmb::Family>);
+    }
+
+    async fn boundary_padding_is_unavailable<F: Family>(
+        context: deterministic::Context,
+        from_sync: bool,
+    ) {
+        let cfg = config("bounded-boundary-blob");
+        let mut db = Db::<F, _, Digest, Digest, Sha256, _, _>::init(
+            context.child("initial"),
+            cfg.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        for _ in 0..4 {
+            let batch = db
+                .new_batch()
+                .merkleize(&db, None, Location::new(0))
+                .await
+                .unwrap();
+            db = db.apply_batch(batch).await.unwrap();
+        }
+        let key = Sha256::fill(1);
+        let value = Sha256::fill(2);
+        let batch = db
+            .new_batch()
+            .set(key, value)
+            .merkleize(&db, None, Location::new(5))
+            .await
+            .unwrap();
+        db = db.apply_batch(batch).await.unwrap();
+        let old_end = db.size();
+        let batch = db
+            .new_batch()
+            .merkleize(&db, None, Location::new(if from_sync { 5 } else { 6 }))
+            .await
+            .unwrap();
+        let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
+        let latest_root = db.root();
+        let latest_end = db.size();
+        let start = Location::new(6);
+        let pins = db.journal.pinned_nodes_at(start).await.unwrap();
+        let crate::journal::authenticated::Journal {
+            journal,
+            frontier,
+            hasher,
+            ..
+        } = db.journal;
+        drop(frontier);
+
+        if from_sync {
+            let result = <Db<F, _, Digest, Digest, Sha256, _, _> as crate::qmdb::sync::Database>::from_sync_result(
+                context.child("sync"),
+                cfg,
+                journal,
+                Some(pins),
+                commonware_utils::non_empty_range!(start, latest_end),
+                NZU64!(8),
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(Error::Journal(crate::journal::Error::ItemPruned(5)))
+            ));
+            return;
+        }
+
+        // A synced frontier can fall inside the oldest retained blob.
+        let journal =
+            crate::journal::authenticated::Journal::<F, _, _, Sha256, _>::from_components(
+                context.child("import"),
+                &cfg.merkle_config,
+                journal,
+                hasher,
+                start,
+                pins,
+                NZU64!(8),
+            )
+            .await
+            .unwrap();
+        assert_eq!(journal.journal.bounds().start, 5);
+        assert_eq!(journal.bounds().start, *start);
+        drop(journal);
+
+        let result = Db::<F, _, Digest, Digest, Sha256, _, _>::init(
+            context.child("bounded"),
+            cfg.clone(),
+            Some(old_end),
+        )
+        .await;
+        assert!(matches!(result, Err(Error::HistoricalFloorPruned(size)) if size == old_end));
+        let db = Db::<F, _, Digest, Digest, Sha256, _, _>::init(context.child("latest"), cfg, None)
+            .await
+            .unwrap();
+        assert_eq!(db.size(), latest_end);
+        assert_eq!(db.root(), latest_root);
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_bounded_init_rejects_boundary_padding_mmr() {
+        deterministic::Runner::default()
+            .start(|context| boundary_padding_is_unavailable::<mmr::Family>(context, false));
+    }
+
+    #[test_traced]
+    fn test_bounded_init_rejects_boundary_padding_mmb() {
+        deterministic::Runner::default()
+            .start(|context| boundary_padding_is_unavailable::<mmb::Family>(context, false));
+    }
+
+    #[test_traced]
+    fn test_sync_rejects_boundary_padding_mmr() {
+        deterministic::Runner::default()
+            .start(|context| boundary_padding_is_unavailable::<mmr::Family>(context, true));
+    }
+
+    #[test_traced]
+    fn test_sync_rejects_boundary_padding_mmb() {
+        deterministic::Runner::default()
+            .start(|context| boundary_padding_is_unavailable::<mmb::Family>(context, true));
     }
 
     async fn open_db<F: Family>(

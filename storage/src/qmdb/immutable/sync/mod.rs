@@ -77,14 +77,14 @@ where
             return Err(Error::HistoricalFloorPruned(size));
         }
         let inactivity_floor_loc =
-            crate::qmdb::find_inactivity_floor_at::<F, _>(&journal.journal, size).await?;
+            crate::qmdb::find_inactivity_floor_at::<F, _>(&journal, size).await?;
 
         // Replay the log from the inactivity floor to build the snapshot.
         let snapshot = immutable::build_snapshot(
             context.child("snapshot"),
             db_config.translator,
             inactivity_floor_loc,
-            &journal.journal,
+            &journal,
             db_config.init_buffer,
         )
         .await?;
