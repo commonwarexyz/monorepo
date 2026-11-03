@@ -243,11 +243,11 @@ impl<F> Fp12<F> {
             #[inline(always)]
             move |simd: S| {
                 let (a, b) = (self, rhs);
-                let t0 = a.c0.product(simd, b.c0);
-                let t1 = a.c1.product(simd, b.c1);
+                let t0 = a.c0.product(simd, &b.c0);
+                let t1 = a.c1.product(simd, &b.c1);
                 let a01 = a.c0.add(simd, a.c1).carry(simd);
                 let b01 = b.c0.add(simd, b.c1).carry(simd);
-                combine::<S, F>(simd, t0, t1, a01.product(simd, b01))
+                combine::<S, F>(simd, t0, t1, a01.product(simd, &b01))
             },
         )
     }
@@ -417,8 +417,8 @@ impl<F> Fp12<F> {
                 let inverse = Fp6::<F>::reduce_tight::<BIAS, S>(simd, norm).invert(simd);
                 let negated = self.c1.neg::<{ BOUND + 1 }, S>(simd).carry(simd);
                 Self {
-                    c0: Fp6::<F>::reduce_tight::<BIAS, S>(simd, self.c0.product(simd, inverse)),
-                    c1: Fp6::<F>::reduce_tight::<BIAS, S>(simd, negated.product(simd, inverse)),
+                    c0: Fp6::<F>::reduce_tight::<BIAS, S>(simd, self.c0.product(simd, &inverse)),
+                    c1: Fp6::<F>::reduce_tight::<BIAS, S>(simd, negated.product(simd, &inverse)),
                 }
             },
         )
@@ -799,7 +799,7 @@ pub(crate) mod tests {
     }
 
     fn product6<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        let product = x.a.c0.product(simd, x.b.c0);
+        let product = x.a.c0.product(simd, &x.b.c0);
         embed6(simd, Fp6::<F>::reduce_tight::<BIAS, S>(simd, product))
     }
 
