@@ -30,8 +30,7 @@ use std::{
 };
 
 // Loom cannot model futures' `AtomicWaker`, whose atomics are not Loom's, so Loom builds swap in
-// a mutex model with the same contract. `register` is a free function in both builds so its call
-// site does not depend on which one is in use.
+// a mutex model with the same contract.
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
         use loom::sync::{
@@ -41,29 +40,39 @@ cfg_if::cfg_if! {
 
         /// A linearizable model of [futures::task::AtomicWaker]: a wake that follows a
         /// registration wakes that registration's waker (or one it will wake).
-        struct AtomicWaker(Mutex<Option<Waker>>);
+        struct AtomicWaker {
+            /// The registered waker.
+            slot: Mutex<Option<Waker>>,
+            /// Calls to [AtomicWaker::register], which a task wrapper's repeated polls with one
+            /// waker make only once.
+            registrations: AtomicUsize,
+        }
 
         impl AtomicWaker {
             /// Creates a slot that holds no waker.
             fn new() -> Self {
-                Self(Mutex::new(None))
+                Self {
+                    slot: Mutex::new(None),
+                    registrations: AtomicUsize::new(0),
+                }
+            }
+
+            /// Stores a clone of `waker`, unless the stored waker already wakes the same task
+            /// ([futures::task::AtomicWaker::register] keeps it in that case too).
+            fn register(&self, waker: &Waker) {
+                self.registrations.fetch_add(1, Ordering::Relaxed);
+                let mut slot = self.slot.lock().unwrap();
+                if !slot.as_ref().is_some_and(|old| old.will_wake(waker)) {
+                    *slot = Some(waker.clone());
+                }
             }
 
             /// Takes the registered waker, if any, and wakes it outside the lock.
             fn wake(&self) {
-                let waker = self.0.lock().unwrap().take();
+                let waker = self.slot.lock().unwrap().take();
                 if let Some(waker) = waker {
                     waker.wake();
                 }
-            }
-        }
-
-        /// Stores a clone of `waker` in `slot`, unless the stored waker already wakes the same
-        /// task ([futures::task::AtomicWaker::register] keeps it in that case too).
-        fn register(slot: &AtomicWaker, waker: &Waker) {
-            let mut slot = slot.0.lock().unwrap();
-            if !slot.as_ref().is_some_and(|old| old.will_wake(waker)) {
-                *slot = Some(waker.clone());
             }
         }
     } else {
@@ -72,11 +81,6 @@ cfg_if::cfg_if! {
             Arc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         };
-
-        /// Registers `waker` in `slot`.
-        fn register(slot: &AtomicWaker, waker: &Waker) {
-            slot.register(waker);
-        }
     }
 }
 
@@ -148,7 +152,8 @@ impl AbortHandle {
     /// Aborts the paired [Abortable]: its next poll resolves to [Aborted] without polling the
     /// wrapped future, and a pending task is woken so that poll happens.
     ///
-    /// A future that already completed is unaffected.
+    /// A poll already in progress runs to completion, and a future that completes keeps its
+    /// output.
     pub(crate) fn abort(&self) {
         // Relaxed suffices. The wake happens before the poll it schedules (the `Waker`
         // contract), so that poll observes the flag, and a registration racing this wake
@@ -168,6 +173,7 @@ impl AbortHandle {
 ///
 /// `TASK` marks the future of a runtime task (see [Abortable::task]), whose pending polls skip
 /// registering an unchanged waker.
+#[must_use = "futures do nothing unless you `.await` or poll them"]
 pub(crate) struct Abortable<F, const TASK: bool = false> {
     /// The wrapped future, structurally pinned.
     future: F,
@@ -194,7 +200,7 @@ impl<F> Abortable<F, true> {
     /// Only the task future that `Handle::init` builds may own the result. The runtime's
     /// executors poll that future only with wakers of its task, and it passes their context
     /// through, so whichever waker is registered wakes the task that a later poll's waker wakes.
-    pub(crate) fn task(future: F, registration: AbortRegistration) -> Self {
+    pub(super) fn task(future: F, registration: AbortRegistration) -> Self {
         Self {
             future,
             shared: registration.shared,
@@ -203,7 +209,7 @@ impl<F> Abortable<F, true> {
 }
 
 impl<F, const TASK: bool> Abortable<F, TASK> {
-    /// Returns whether the paired [AbortHandle] aborted this future.
+    /// Returns whether [AbortHandle::abort] was called on the paired handle.
     pub(crate) fn is_aborted(&self) -> bool {
         self.shared.aborted.load(Ordering::Relaxed)
     }
@@ -239,7 +245,7 @@ impl<F, const TASK: bool> Abortable<F, TASK> {
             registered.vtable.store(vtable, Ordering::Relaxed);
         }
 
-        register(&self.shared.waker, waker);
+        self.shared.waker.register(waker);
     }
 }
 
@@ -378,8 +384,7 @@ mod tests {
     /// Drops a slot waker, which owns nothing.
     const unsafe fn slot_drop(_: *const ()) {}
 
-    /// The wrapper adds only the shared-state pointer to the task future, so it does not grow
-    /// the runtime's task allocation.
+    /// The wrapper adds exactly one pointer, to the shared state, to the future it wraps.
     #[test]
     fn wrapper_adds_one_pointer() {
         assert_eq!(
@@ -641,9 +646,16 @@ mod loom_tests {
             match result {
                 Poll::Ready(result) => assert_eq!(result, Err(Aborted)),
                 Poll::Pending => {
-                    // Wait for the wake itself rather than for the aborter to finish, so only
-                    // the wake orders the poll it schedules, which must observe the flag the
-                    // abort set before waking.
+                    // A pending poll registered its waker, unless the registered one was unchanged.
+                    let registrations = if same_waker { 1 } else { polls_before + 1 };
+                    assert_eq!(
+                        future.shared.waker.registrations.load(Ordering::Relaxed),
+                        registrations
+                    );
+
+                    // Wait for the wake rather than joining the aborter first, so the join cannot
+                    // order the next poll, which must observe the flag the abort set before
+                    // waking.
                     loop {
                         let finished = done.load(Ordering::SeqCst);
                         if counter.load(Ordering::SeqCst) >= 1 {
