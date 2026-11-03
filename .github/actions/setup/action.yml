@@ -156,7 +156,7 @@ runs:
     # after rust-cache so that RUSTC_WRAPPER stays out of rust-cache's key. Compiling a
     # large test binary takes over 5 minutes, so a long download wait pays off. The daemon
     # and every compile read the wait, so it goes in the job environment.
-    - name: Setup kache
+    - name: Configure kache
       if: inputs.rust-cache-enabled == 'true' && inputs.kache-r2-bucket != ''
       shell: bash
       run: echo "KACHE_DEMAND_TIMEOUT_SECS=120" >> "$GITHUB_ENV"
