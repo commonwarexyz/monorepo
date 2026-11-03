@@ -15,6 +15,8 @@ pub mod signal;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod thread;
 
+pub(crate) mod abort;
+
 mod handle;
 #[commonware_macros::stability(ALPHA)]
 pub(crate) use handle::Panicked;

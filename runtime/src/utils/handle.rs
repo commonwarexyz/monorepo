@@ -1,7 +1,11 @@
 use crate::{
     Error,
     telemetry::metrics::raw::Gauge,
-    utils::{extract_panic_message, supervision::Tree},
+    utils::{
+        abort::{AbortHandle, Abortable, Aborted},
+        extract_panic_message,
+        supervision::Tree,
+    },
 };
 use commonware_utils::{
     channel::oneshot,
@@ -10,7 +14,6 @@ use commonware_utils::{
 use futures::{
     future::{Either, poll_fn, select},
     pin_mut,
-    stream::{AbortHandle, Abortable, Aborted},
 };
 use std::{
     any::Any,
@@ -221,7 +224,7 @@ where
             let _guard = guard;
 
             // Run future with panic catching and abort support
-            let result = Abortable::new(FutureCell(UnsafeCell::new(f)), abort_registration).await;
+            let result = Abortable::task(FutureCell(UnsafeCell::new(f)), abort_registration).await;
 
             // Handle result
             match result {
@@ -641,16 +644,16 @@ mod tests {
     use crate::{
         Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic,
         telemetry::metrics::raw::Gauge,
-        utils::{extract_panic_message, reschedule, supervision::Tree},
+        utils::{abort::AbortHandle, extract_panic_message, reschedule, supervision::Tree},
     };
     use commonware_utils::{channel::oneshot, sync::Mutex};
-    use futures::{FutureExt as _, future, poll, stream::AbortHandle};
+    use futures::{FutureExt as _, future, poll};
     use rstest::rstest;
     use std::{
         panic::{AssertUnwindSafe, catch_unwind},
         sync::{
             Arc,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
 
@@ -810,6 +813,91 @@ mod tests {
 
             assert!(sender.send(Ok(())).is_ok());
             assert!(matches!(handle.await, Err(Error::Aborted)));
+        });
+    }
+
+    /// Aborting a task that has been polled (and so registered its waker) drops its future and
+    /// closes its handle.
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn abort_polled_task_drops_future() {
+        deterministic::Runner::default().start(|context| async move {
+            let (held, released) = oneshot::channel::<()>();
+            let (started, polled) = oneshot::channel::<()>();
+            let handle = context.child("pending").spawn(move |_| async move {
+                let _held = held;
+                started.send(()).unwrap();
+                future::pending::<()>().await;
+            });
+            polled.await.unwrap();
+            handle.abort();
+            assert!(released.await.is_err());
+            assert!(matches!(handle.await, Err(Error::Closed)));
+        });
+    }
+
+    /// Aborting a task after it completed leaves its output in the handle.
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn abort_after_completion_keeps_output() {
+        deterministic::Runner::default().start(|context| async move {
+            let (done, completed) = oneshot::channel::<()>();
+            let handle = context.child("done").spawn(move |_| async move {
+                done.send(()).unwrap();
+                7
+            });
+            completed.await.unwrap();
+            handle.abort();
+            assert_eq!(handle.await.unwrap(), 7);
+        });
+    }
+
+    /// Aborts race polls of tasks that keep rescheduling themselves on other workers, every
+    /// task still observes its abort, drops its future and closes its handle.
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::new(
+        crate::tokio::Config::default().with_worker_threads(4)
+    ))]
+    #[cfg_attr(
+        target_os = "linux",
+        case::iouring(crate::iouring::Runner::new(
+            crate::iouring::Config::default().with_worker_threads(4)
+        ))
+    )]
+    fn abort_races_polls<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            for _ in 0..50 {
+                let polls = Arc::new(AtomicUsize::new(0));
+                let mut handles = Vec::new();
+                let mut releases = Vec::new();
+                for _ in 0..16 {
+                    let (held, released) = oneshot::channel::<()>();
+                    let polls = polls.clone();
+                    handles.push(context.child("spinner").spawn(move |_| async move {
+                        let _held = held;
+                        loop {
+                            polls.fetch_add(1, Ordering::Relaxed);
+                            reschedule().await;
+                        }
+                    }));
+                    releases.push(released);
+                }
+                while polls.load(Ordering::Relaxed) < 64 {
+                    reschedule().await;
+                }
+                for handle in &handles {
+                    handle.abort();
+                }
+                for handle in handles {
+                    assert!(matches!(handle.await, Err(Error::Closed)));
+                }
+                for released in releases {
+                    assert!(released.await.is_err());
+                }
+            }
         });
     }
 
