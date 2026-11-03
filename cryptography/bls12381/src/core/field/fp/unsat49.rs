@@ -129,6 +129,7 @@ impl<S: Simd> Copy for Unsat49<S> {}
 
 impl<S: Simd> Unsat49<S> {
     /// Returns every lane set to `element`.
+    #[cfg(test)]
     #[inline(always)]
     pub fn splat(simd: S, element: &[u8; BYTES]) -> Self {
         let limbs = limbs_from_words(words_from_bytes(element));
@@ -196,19 +197,11 @@ impl<S: Simd> Unsat49<S> {
 
     /// Loads per-lane limbs in this module's representation, bounded by `bound * p`.
     ///
-    /// The limbs must be carried, as returned by [`Self::to_limbs`] after [`Self::carry`].
+    /// The limbs must be carried.
+    #[cfg(test)]
     #[inline(always)]
     pub fn from_limbs(simd: S, lanes: &[[u64; LIMBS]; MAX_LANES], bound: u64) -> Self {
         Self::raw(simd, lanes, bound)
-    }
-
-    /// Returns each lane's carried limbs in this module's representation, without any
-    /// conversion, for a value bounded by `bound * p`.
-    #[inline(always)]
-    pub fn to_limbs(self, simd: S, bound: u64) -> [[u64; LIMBS]; MAX_LANES] {
-        self.limb_bound.assert_le(1);
-        self.bound.assert_le(bound);
-        self.store_raw(simd)
     }
 
     /// Converts an integer `a` into this module's Montgomery form `a * 2^392`.
@@ -264,6 +257,7 @@ impl<S: Simd> Unsat49<S> {
     }
 
     /// Returns `2 * self`, without carrying.
+    #[cfg(test)]
     #[inline(always)]
     pub fn double(self, simd: S) -> Self {
         self.add(simd, self)
@@ -390,6 +384,7 @@ impl<S: Simd> Unsat49<S> {
     }
 
     /// Returns `self * self`.
+    #[cfg(test)]
     #[inline(always)]
     pub fn square(self, simd: S) -> Self {
         self.mul(simd, self)

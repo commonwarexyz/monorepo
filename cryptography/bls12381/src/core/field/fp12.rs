@@ -37,6 +37,13 @@ pub const BYTES: usize = 2 * FP6_BYTES;
 pub const BOUND: u64 = TIGHT;
 
 /// Largest integer bound of a component of a line coefficient, in units of `p`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Documents the line contract, which the tests check."
+    )
+)]
 pub const LINE_BOUND: u64 = 64;
 
 /// The encoding of one.

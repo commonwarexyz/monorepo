@@ -6,9 +6,11 @@
 //! # Coordinate bounds
 //!
 //! Every coordinate a formula accepts or returns has positional limb bound `1` and integer bound at
-//! most [`BOUND`], as defined by the [base field arithmetic](crate::core::field::arithmetic). Loaded
-//! coordinates and every formula's outputs satisfy this, so points chain through any number of
-//! operations without carrying or canonicalizing between them.
+//! most `73`, as defined by the [base field arithmetic](crate::core::field::arithmetic): the
+//! positional representations return at most `73` from the subtraction in [`Point::add`]'s `X`
+//! coordinate, and residues reduce to at most `17`. Loaded coordinates and every formula's outputs
+//! satisfy this, so points chain through any number of operations without carrying or
+//! canonicalizing between them.
 //!
 //! Subtractions remove small multiples of reduced products of coordinates. Such a product is
 //! bounded by `4p` in the positional representations and by `17p` in residues, so a multiple
@@ -28,12 +30,6 @@ pub const IDENTITY: Coordinates = {
     identity[1][BYTES - 1] = 1;
     identity
 };
-
-/// Largest integer bound of a coordinate, in units of `p`.
-///
-/// The positional representations return at most `73` from the subtraction in [`Point::add`]'s
-/// `X` coordinate, and residues reduce to at most `17`.
-pub const BOUND: u64 = 73;
 
 /// Largest integer bound of a reduced value in residues, in units of `p`.
 ///
