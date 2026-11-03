@@ -235,9 +235,13 @@ fn add_step<S: Simd, F: Field<S>>(simd: S, t: Point<F>, pair: &Pair<F>) -> (Poin
 /// This is the second half of a pairing: the final exponentiation of [`miller_loop`] of one pair is
 /// its pairing. The result is the same as blst's.
 pub fn final_exponentiation<S: Simd, F: Field<S>>(simd: S, f: Fp12<F>) -> Fp12<F> {
+    let coefficients = Fp12::<F>::frobenius_coefficients(simd);
     // The easy part: f^((p^6 - 1) (p^2 + 1)) lies in the cyclotomic subgroup.
     let easy = f.conjugate(simd).mul(simd, &f.invert(simd));
-    let easy = easy.frobenius(simd).frobenius(simd).mul(simd, &easy);
+    let easy = easy
+        .frobenius(simd, &coefficients)
+        .frobenius(simd, &coefficients)
+        .mul(simd, &easy);
 
     let y0 = easy.cyclotomic_square(simd);
     let y1 = raise_to_z(simd, y0);
@@ -247,12 +251,17 @@ pub fn final_exponentiation<S: Simd, F: Field<S>>(simd: S, f: Fp12<F>) -> Fp12<F
     let y2 = raise_to_z(simd, y1);
     let y3 = raise_to_z(simd, y2);
     let y3 = y3.mul(simd, &y1.conjugate(simd));
-    let y1 = y1.frobenius(simd).frobenius(simd).frobenius(simd);
-    let y2 = y2.frobenius(simd).frobenius(simd);
+    let y1 = y1
+        .frobenius(simd, &coefficients)
+        .frobenius(simd, &coefficients)
+        .frobenius(simd, &coefficients);
+    let y2 = y2
+        .frobenius(simd, &coefficients)
+        .frobenius(simd, &coefficients);
     let y1 = y1.mul(simd, &y2);
     let y2 = raise_to_z(simd, y3).mul(simd, &y0).mul(simd, &easy);
     let y1 = y1.mul(simd, &y2);
-    y1.mul(simd, &y3.frobenius(simd))
+    y1.mul(simd, &y3.frobenius(simd, &coefficients))
 }
 
 /// Returns `a^(z / 2)` for `a` in the cyclotomic subgroup.
