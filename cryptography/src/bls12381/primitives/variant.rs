@@ -1,5 +1,7 @@
 //! Different variants of the BLS signature scheme.
 
+#[stability(ALPHA)]
+use super::group::FixedBase;
 use super::{
     Error,
     group::{
@@ -44,6 +46,10 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         + Hash
         + Copy;
 
+    /// Precomputed multiples of fixed public keys, built by [`Self::precompute_publics`].
+    #[stability(ALPHA)]
+    type PublicTable: Send + Sync;
+
     /// The domain separator tag (DST) for a proof of possession.
     const PROOF_OF_POSSESSION: DST;
 
@@ -81,6 +87,29 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
 
     /// Compute the pairing `e(G1, G2) -> GT`.
     fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT;
+
+    /// Precomputes a row of `2^(wbits - 1)` multiples for each of `publics`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `wbits` is outside `2..=MAX_FIXED_BASE_WBITS`, any key is the identity, or the
+    /// table size overflows `usize`.
+    #[stability(ALPHA)]
+    fn precompute_publics(publics: &[Self::Public], wbits: usize) -> Self::PublicTable;
+
+    /// Returns `sum scalar * publics[index]` over `entries`, for the `publics` a table was
+    /// precomputed from.
+    ///
+    /// # Warning
+    ///
+    /// This function may be variable time in the scalars: use it only with public scalars, such as
+    /// batch-verification weights.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an index is out of range.
+    #[stability(ALPHA)]
+    fn mul_public_table(table: &Self::PublicTable, entries: &[(usize, Scalar)]) -> Self::Public;
 }
 
 /// A [Variant] with a public key of type [G1] and a signature of type [G2].
@@ -90,6 +119,9 @@ pub struct MinPk {}
 impl Variant for MinPk {
     type Public = G1;
     type Signature = G2;
+
+    #[stability(ALPHA)]
+    type PublicTable = <G1 as FixedBase>::Table;
 
     const PROOF_OF_POSSESSION: DST = G2_PROOF_OF_POSSESSION;
     const MESSAGE: DST = G2_MESSAGE;
@@ -206,6 +238,16 @@ impl Variant for MinPk {
 
         GT::from_blst_fp12(result)
     }
+
+    #[stability(ALPHA)]
+    fn precompute_publics(publics: &[Self::Public], wbits: usize) -> Self::PublicTable {
+        G1::precompute(publics, wbits)
+    }
+
+    #[stability(ALPHA)]
+    fn mul_public_table(table: &Self::PublicTable, entries: &[(usize, Scalar)]) -> Self::Public {
+        G1::mul_table(table, entries)
+    }
 }
 
 impl Debug for MinPk {
@@ -221,6 +263,9 @@ pub struct MinSig {}
 impl Variant for MinSig {
     type Public = G2;
     type Signature = G1;
+
+    #[stability(ALPHA)]
+    type PublicTable = <G2 as FixedBase>::Table;
 
     const PROOF_OF_POSSESSION: DST = G1_PROOF_OF_POSSESSION;
     const MESSAGE: DST = G1_MESSAGE;
@@ -336,6 +381,16 @@ impl Variant for MinSig {
         }
 
         GT::from_blst_fp12(result)
+    }
+
+    #[stability(ALPHA)]
+    fn precompute_publics(publics: &[Self::Public], wbits: usize) -> Self::PublicTable {
+        G2::precompute(publics, wbits)
+    }
+
+    #[stability(ALPHA)]
+    fn mul_public_table(table: &Self::PublicTable, entries: &[(usize, Scalar)]) -> Self::Public {
+        G2::mul_table(table, entries)
     }
 }
 
