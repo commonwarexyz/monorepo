@@ -11,7 +11,7 @@
 
 use commonware_macros::boxed;
 
-pub mod engine;
+pub(crate) mod engine;
 pub use engine::Config;
 pub(crate) use engine::Engine;
 

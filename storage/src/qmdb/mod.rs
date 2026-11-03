@@ -68,7 +68,7 @@
 //!
 //! The `test-traits` feature compiles `any::traits`, whose `DbAny` and `Provable` traits give the
 //! crate's tests and benchmarks one interface over the keyed mutable variants ([any] and
-//! [current]). Without the feature, each variant exposes only its inherent methods.
+//! [current]). Outside unit-test builds, this shared interface requires the `test-traits` feature.
 //!
 //! # Acknowledgments
 //!
