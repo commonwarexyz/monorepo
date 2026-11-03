@@ -33,12 +33,11 @@ use crate::{
     },
     types::{Attributable as _, Height, Round, View},
 };
-use commonware_codec::{Decode, Encode, Read, types::lazy::Lazy};
+use commonware_codec::{Decode, Encode, types::lazy::Lazy};
 use commonware_cryptography::{
     Hasher, Sha256, Signer,
     bls12381::primitives::{
         group::Scalar,
-        ops::{self, aggregate},
         sharing::Sharing,
         variant::{MinPk, MinSig, Variant},
     },

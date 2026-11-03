@@ -58,8 +58,8 @@ pub fn test_config(
 
 /// Constructs deterministic key material for `config` and ordered `identities`.
 ///
-/// Randomness is consumed for ordinary keys, then the DA sharing, then the nullification
-/// sharing.
+/// Randomness is consumed for ordinary keys and their proofs of knowledge, then the DA sharing,
+/// then the nullification sharing.
 pub fn keys<V: Variant>(
     rng: &mut TestRng,
     config: &Protocol<Sha256Digest>,
