@@ -24,7 +24,7 @@
 
 use super::{
     arithmetic::{Field, TIGHT},
-    fp::WORDS,
+    fp::{BYTES as FP_BYTES, WORDS},
     fp2::{BYTES as FP2_BYTES, Fp2},
     fp6::{self, BYTES as FP6_BYTES, Fp6},
 };
@@ -207,7 +207,23 @@ impl<F> Fp12<F> {
     where
         F: Field<S>,
     {
-        Self::load(simd, &[], &ONE)
+        let zero = F::load(simd, &[], &[0; FP_BYTES]);
+        let mut one = [0; FP_BYTES];
+        one[FP_BYTES - 1] = 1;
+        let one = F::load(simd, &[], &one);
+        let zero2 = Fp2 { c0: zero, c1: zero };
+        Self {
+            c0: Fp6 {
+                c0: Fp2 { c0: one, c1: zero },
+                c1: zero2,
+                c2: zero2,
+            },
+            c1: Fp6 {
+                c0: zero2,
+                c1: zero2,
+                c2: zero2,
+            },
+        }
     }
 
     /// Stores the canonical value of each lane, dropping lanes beyond `elements`.
@@ -357,12 +373,24 @@ impl<F> Fp12<F> {
         )
     }
 
+    /// Loads the factors `(1 + i)^(j (p - 1) / 6)` for `j` from `1` to `5` in every lane.
+    ///
+    /// Components have the base field's initial bounds.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn frobenius_coefficients<S: Simd>(simd: S) -> [Fp2<F>; 5]
+    where
+        F: Field<S>,
+    {
+        core::array::from_fn(|j| Fp2::load(simd, &[], &FROBENIUS[j]))
+    }
+
     /// Returns the Frobenius image `self^p`.
     ///
     /// Conjugates every coefficient of `w^j` and multiplies it by `(1 + i)^(j (p - 1) / 6)`.
+    /// Requires the factors returned by [`Self::frobenius_coefficients`].
     /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn frobenius<S: Simd>(&self, simd: S) -> Self
+    pub fn frobenius<S: Simd>(&self, simd: S, coefficients: &[Fp2<F>; 5]) -> Self
     where
         F: Field<S>,
     {
@@ -378,7 +406,7 @@ impl<F> Fp12<F> {
                 b[0] = Fp2::<F>::reduce_tight::<1, S>(simd, conjugate.lift(simd));
                 for j in 1..6 {
                     let conjugate = a[j].conjugate::<{ BOUND + 1 }, S>(simd).carry(simd);
-                    let gamma = Fp2::load(simd, &[], &FROBENIUS[j - 1]);
+                    let gamma = coefficients[j - 1];
                     b[j] = Fp2::<F>::reduce_tight::<BIAS, S>(simd, conjugate.product(simd, gamma));
                 }
                 Self {
@@ -522,7 +550,6 @@ pub(crate) mod tests {
     use super::*;
     use crate::core::field::{
         fp::{
-            BYTES as FP_BYTES,
             rns::Rns,
             tests::{self as reference, Element},
             unsat28::Unsat28,
@@ -769,7 +796,8 @@ pub(crate) mod tests {
     }
 
     fn frobenius<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        x.a.frobenius(simd)
+        let coefficients = Fp12::<F>::frobenius_coefficients(simd);
+        x.a.frobenius(simd, &coefficients)
     }
 
     fn invert<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
@@ -778,13 +806,14 @@ pub(crate) mod tests {
 
     /// Every operation on the outputs of others.
     fn chain<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
+        let coefficients = Fp12::<F>::frobenius_coefficients(simd);
         let mut y = x.a;
         for _ in 0..ROUNDS {
             y = check_bound(simd, y.mul(simd, &x.b));
             y = check_bound(simd, y.square(simd));
             y = check_bound(simd, y.mul_by_line(simd, &x.line));
             y = check_bound(simd, y.conjugate(simd));
-            y = check_bound(simd, y.frobenius(simd));
+            y = check_bound(simd, y.frobenius(simd, &coefficients));
             y = check_bound(simd, y.invert(simd));
         }
         y
