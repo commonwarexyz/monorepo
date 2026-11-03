@@ -45,11 +45,6 @@ impl<
 where
     Operation<F, K, V>: Codec,
 {
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        self.any.get(key).await
-    }
-
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
     /// the provided `root`.
     pub fn verify_key_value_proof(

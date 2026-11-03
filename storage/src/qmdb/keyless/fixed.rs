@@ -458,7 +458,7 @@ mod tests {
 
             // Import a suffix whose logical inactivity floor precedes its retained start.
             let client_cfg = db_config("synced-range-client", Sequential);
-            let client: TestDb<mmr::Family> = sync::sync(sync::engine::Config {
+            let client: TestDb<mmr::Family> = sync::sync(sync::Config {
                 context: context.child("client"),
                 db_config: client_cfg.clone(),
                 target: sync::Target {
@@ -1052,7 +1052,7 @@ mod tests {
     fn test_keyless_fixed_sync() {
         use crate::{
             merkle::Location,
-            qmdb::sync::{self, Target, engine::Config},
+            qmdb::sync::{self, Config, Target},
         };
         use commonware_utils::{non_empty_range, sequence::U64};
         use std::sync::Arc;

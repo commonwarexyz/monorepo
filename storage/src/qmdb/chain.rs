@@ -249,7 +249,7 @@ pub(crate) fn merkleizable<'a, T, F: Family, D: Digest>(
 ///
 /// # Errors
 ///
-/// Returns [`Error::FloorRegressed`] if `floor < start` and [`Error::FloorBeyondSize`] if
+/// Returns [`Error::FloorRegressed`] if `floor < start` and [`Error::FloorBeyondCommit`] if
 /// `floor > commit_loc`.
 pub(crate) fn validate_merkleize_floor<F: Family>(
     start: Location<F>,
@@ -260,7 +260,7 @@ pub(crate) fn validate_merkleize_floor<F: Family>(
         return Err(Error::FloorRegressed(floor, start));
     }
     if floor > commit_loc {
-        return Err(Error::FloorBeyondSize(floor, commit_loc));
+        return Err(Error::FloorBeyondCommit(floor, commit_loc));
     }
     Ok(())
 }

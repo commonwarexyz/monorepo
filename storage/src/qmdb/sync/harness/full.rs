@@ -8,11 +8,7 @@ use crate::{
     merkle::{self, Location},
     qmdb::{
         self,
-        sync::{
-            self, Engine, Target,
-            engine::{Config, NextStep},
-            source::tests::FailSource,
-        },
+        sync::{self, Config, Engine, Target, engine::NextStep, source::tests::FailSource},
     },
 };
 use commonware_cryptography::sha256;
@@ -1004,12 +1000,12 @@ pub(crate) fn compact_engine_config<DB, S>(
     source: S,
     target: sync::CompactTarget<DB::Family, DB::Digest>,
     db_config: DB::Config,
-) -> sync::engine::Config<DB, S>
+) -> sync::Config<DB, S>
 where
     DB: sync::Database,
     S: sync::SourceFor<DB>,
 {
-    sync::engine::Config {
+    sync::Config {
         context,
         db_config,
         fetch_batch_size: NZU64!(1),
