@@ -71,7 +71,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
-        Manager as _, Recipients, Sender as _, TrackedPeers,
+        Manager as _, Receiver as _, Recipients, Sender as _, TrackedPeers,
         simulated::{Control, Link, Manager, Network, Oracle, Receiver, Sender},
     };
     use commonware_parallel::Sequential;
@@ -80,6 +80,7 @@ mod tests {
         telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{NZU32, NZUsize, Probability, probability};
+    use futures::FutureExt as _;
     use std::{
         collections::{BTreeMap, VecDeque},
         sync::{
@@ -1042,6 +1043,69 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_overflow_coalesces_duplicate_broadcasts() {
+        /// Number of queued broadcasts of the same message to the first recipient.
+        const DUPLICATES: usize = 16;
+
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|context| async move {
+            // Keep raw receivers for both recipients to count the copies they get.
+            let (peers, mut registrations, oracle) =
+                initialize_simulation(context.child("network"), 3, probability!(1.0)).await;
+            let sender = peers[0].clone();
+            let first = peers[1].clone();
+            let second = peers[2].clone();
+            let network = registrations.remove(&sender).unwrap();
+            let (_, mut first_receiver) = registrations.remove(&first).unwrap();
+            let (_, mut second_receiver) = registrations.remove(&second).unwrap();
+
+            // Give the sender a one-slot inbox and fill it before its engine starts.
+            let mut sender_config = config(&sender, &oracle);
+            sender_config.mailbox_size = NZUsize!(1);
+            let (engine, mailbox) = TestEngine::new(context.child("sender"), sender_config);
+            let message = TestMessage::shared(b"coalesced");
+            let subscription = mailbox.subscribe(message.digest());
+
+            // Queue duplicate broadcasts to the first recipient, then one to the second.
+            let broadcast = Digested::precomputed(message.clone(), message.digest());
+            for _ in 0..DUPLICATES {
+                assert!(
+                    mailbox
+                        .broadcast(Recipients::One(first.clone()), broadcast.clone())
+                        .accepted()
+                );
+            }
+            assert!(
+                mailbox
+                    .broadcast(Recipients::One(second.clone()), broadcast)
+                    .accepted()
+            );
+
+            // The coalesced broadcast must resolve the subscription and reach each recipient once.
+            engine.start(network);
+            let received = subscription
+                .await
+                .expect("subscriber must receive the queued broadcast");
+            assert_eq!(received.inner(), &message);
+            for receiver in [&mut first_receiver, &mut second_receiver] {
+                let (from, bytes) = receiver
+                    .recv()
+                    .await
+                    .expect("recipient must stay connected");
+                assert_eq!(from, sender);
+                assert_eq!(bytes, message.encode().as_ref());
+            }
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+            for receiver in [&mut first_receiver, &mut second_receiver] {
+                assert!(
+                    receiver.recv().now_or_never().is_none(),
+                    "recipient must receive the broadcast once"
+                );
+            }
+        });
+    }
+
+    #[test_traced]
     fn test_ref_count_across_peers() {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         runner.start(|context| async move {
@@ -1467,6 +1531,43 @@ mod tests {
         for seed in 0..25 {
             clean_shutdown(seed);
         }
+    }
+
+    #[test_traced]
+    fn test_closed_network_receiver_stops_engine() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
+            // Registering the channel again closes the receiver the engine starts with.
+            let (peers, mut registrations, oracle) =
+                initialize_simulation(context.child("network"), 1, probability!(1.0)).await;
+            let peer = peers[0].clone();
+            let network = registrations.remove(&peer).unwrap();
+            let _replacement = oracle
+                .control(peer.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (engine, mailbox) = TestEngine::new(context.child("peer"), config(&peer, &oracle));
+
+            // The engine must stop once its ingress reports the closed receiver.
+            engine
+                .start(network)
+                .await
+                .expect("engine must stop cleanly after its network receiver closes");
+
+            // Requests after the stop must observe the closed mailbox.
+            let message = TestMessage::shared(b"after-stop");
+            assert_eq!(
+                mailbox.broadcast(
+                    Recipients::All,
+                    Digested::precomputed(message.clone(), message.digest())
+                ),
+                Feedback::Closed
+            );
+            assert!(mailbox.get(message.digest()).await.is_none());
+            context.sleep(A_JIFFY).await;
+            assert_eq!(count_running_tasks(&context, "peer"), 0);
+        });
     }
 
     #[test_traced]
