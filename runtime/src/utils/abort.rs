@@ -2,7 +2,8 @@
 //!
 //! The runtime owns the state (the protocol of [futures::stream::Abortable]) so a poll that leaves
 //! a task pending can skip registering a waker that is already registered. Steady-state task polls
-//! then only read the shared state, and the task future grows by one pointer.
+//! then only read the shared state, and the task future grows by one pointer. Wrappers that any
+//! executor may poll, such as those behind completion handles, register on every pending poll.
 
 use std::{
     future::Future,
@@ -10,6 +11,9 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
+// Loom cannot model futures' `AtomicWaker`, whose atomics are not Loom's, so Loom builds swap in
+// a mutex model with the same contract. `register` is a free function in both builds so its call
+// site does not depend on which one is in use.
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
         use loom::sync::{
@@ -22,10 +26,12 @@ cfg_if::cfg_if! {
         struct AtomicWaker(Mutex<Option<Waker>>);
 
         impl AtomicWaker {
+            /// Creates a slot that holds no waker.
             fn new() -> Self {
                 Self(Mutex::new(None))
             }
 
+            /// Takes the registered waker, if any, and wakes it outside the lock.
             fn wake(&self) {
                 let waker = self.0.lock().unwrap().take();
                 if let Some(waker) = waker {
@@ -34,6 +40,8 @@ cfg_if::cfg_if! {
             }
         }
 
+        /// Stores a clone of `waker` in `slot`, unless the stored waker already wakes the same
+        /// task ([futures::task::AtomicWaker::register] keeps it in that case too).
         fn register(slot: &AtomicWaker, waker: &Waker) {
             let mut slot = slot.0.lock().unwrap();
             if !slot.as_ref().is_some_and(|old| old.will_wake(waker)) {
@@ -47,6 +55,7 @@ cfg_if::cfg_if! {
             atomic::{AtomicBool, AtomicUsize, Ordering},
         };
 
+        /// Registers `waker` in `slot`.
         fn register(slot: &AtomicWaker, waker: &Waker) {
             slot.register(waker);
         }
@@ -74,18 +83,22 @@ struct Shared {
 /// relaxed accesses suffice. It lives in the shared state rather than in the [Abortable] so
 /// the task future, and with it the runtime's task allocation, does not grow.
 struct Registered {
+    /// [Waker::data] of the registered waker, as an address.
     data: AtomicUsize,
+    /// [Waker::vtable] of the registered waker, as an address.
     vtable: AtomicUsize,
 }
 
-/// Aborts the paired [Abortable].
+/// Aborts the paired [Abortable]. Clones abort the same future.
 #[derive(Clone)]
 pub(crate) struct AbortHandle {
+    /// State shared with the [Abortable].
     shared: Arc<Shared>,
 }
 
 /// The task side of an [AbortHandle], consumed by [Abortable::new] or [Abortable::task].
 pub(crate) struct AbortRegistration {
+    /// State shared with the [AbortHandle], moved into the [Abortable].
     shared: Arc<Shared>,
 }
 
@@ -117,7 +130,9 @@ impl AbortHandle {
     ///
     /// A future that already completed is unaffected.
     pub(crate) fn abort(&self) {
-        // The wake synchronizes with the poll it schedules, which then observes the flag.
+        // Relaxed suffices. The wake happens before the poll it schedules (the `Waker`
+        // contract), so that poll observes the flag, and a registration racing this wake
+        // synchronizes with it inside `AtomicWaker` before the poll checks the flag again.
         self.shared.aborted.store(true, Ordering::Relaxed);
         self.shared.waker.wake();
     }
@@ -134,7 +149,9 @@ impl AbortHandle {
 /// `TASK` marks the future of a runtime task (see [Abortable::task]), whose pending polls skip
 /// registering an unchanged waker.
 pub(crate) struct Abortable<F, const TASK: bool = false> {
+    /// The wrapped future, structurally pinned.
     future: F,
+    /// State shared with the [AbortHandle].
     shared: Arc<Shared>,
 }
 
@@ -187,6 +204,8 @@ impl<F, const TASK: bool> Abortable<F, TASK> {
     fn register(&self, waker: &Waker) {
         if TASK {
             let registered = &self.shared.registered;
+            // Identify the waker by the two addresses `Waker::will_wake` compares. They are only
+            // compared, never dereferenced.
             let data = waker.data().addr();
             let vtable = std::ptr::from_ref(waker.vtable()).addr();
             if registered.data.load(Ordering::Relaxed) == data
@@ -194,6 +213,7 @@ impl<F, const TASK: bool> Abortable<F, TASK> {
             {
                 return;
             }
+            // Remember this waker so the next poll with it skips the registration below.
             registered.data.store(data, Ordering::Relaxed);
             registered.vtable.store(vtable, Ordering::Relaxed);
         }
@@ -208,6 +228,8 @@ impl<F: Future, const TASK: bool> Future for Abortable<F, TASK> {
         // SAFETY: Only `future` is structurally pinned. `Abortable` has no `Drop` impl, is
         // `Unpin` only when `F` is, and never moves `future` out of this reference.
         let this = unsafe { self.get_unchecked_mut() };
+
+        // Once aborted, the future is never polled again, even if it was never polled at all.
         if this.is_aborted() {
             return Poll::Ready(Err(Aborted));
         }
@@ -231,6 +253,7 @@ impl<F: Future, const TASK: bool> Future for Abortable<F, TASK> {
 #[cfg(all(test, not(feature = "loom")))]
 #[commonware_macros::test_group("miri")]
 mod tests {
+    //! Unit tests of the abort protocol. They need no runtime, so they also run under Miri.
     use super::*;
     use commonware_utils::sync::Mutex;
     use futures::{future, task::ArcWake};
@@ -241,6 +264,7 @@ mod tests {
         thread,
     };
 
+    /// Counts the wakes of the wakers built over it.
     struct Counter(AtomicUsize);
 
     impl ArcWake for Counter {
@@ -249,12 +273,14 @@ mod tests {
         }
     }
 
+    /// Returns a counter and a waker that increments it.
     fn counter() -> (std::sync::Arc<Counter>, Waker) {
         let counter = std::sync::Arc::new(Counter(AtomicUsize::new(0)));
         let waker = futures::task::waker(counter.clone());
         (counter, waker)
     }
 
+    /// Polls `future` once with `waker`.
     fn poll<F: Future + Unpin>(future: &mut F, waker: &Waker) -> Poll<F::Output> {
         Pin::new(future).poll(&mut Context::from_waker(waker))
     }
@@ -262,38 +288,47 @@ mod tests {
     /// Wake counts of two wakers that share their data pointer, one per vtable.
     struct Twins([AtomicUsize; 2]);
 
+    /// One vtable per twin, so the twins differ only in their vtable.
     static TWIN_VTABLES: [RawWakerVTable; 2] = [twin_vtable::<0>(), twin_vtable::<1>()];
 
+    /// Builds the vtable of twin `I`.
     const fn twin_vtable<const I: usize>() -> RawWakerVTable {
         RawWakerVTable::new(twin_clone::<I>, twin_wake::<I>, twin_wake::<I>, twin_drop)
     }
 
+    /// Returns the waker of twin `I` over `twins`.
     fn twin_waker<const I: usize>(twins: &Twins) -> Waker {
         let raw = RawWaker::new(std::ptr::from_ref(twins).cast(), &TWIN_VTABLES[I]);
-        // SAFETY: The vtable functions only read the `Twins` behind the data pointer, which
-        // the test keeps alive until every waker pointing at it is dropped.
+        // SAFETY: The vtable functions only use the `Twins` behind the data pointer through
+        // shared references, and the test keeps it alive until every waker pointing at it is
+        // dropped.
         unsafe { Waker::from_raw(raw) }
     }
 
+    /// Clones a waker of twin `I`. Twin wakers borrow `Twins`, so there is nothing to count.
     const unsafe fn twin_clone<const I: usize>(data: *const ()) -> RawWaker {
         RawWaker::new(data, &TWIN_VTABLES[I])
     }
 
+    /// Counts a wake of twin `I`.
     unsafe fn twin_wake<const I: usize>(data: *const ()) {
         // SAFETY: `data` points at a live `Twins` (see `twin_waker`).
         let twins = unsafe { &*data.cast::<Twins>() };
         twins.0[I].fetch_add(1, Ordering::SeqCst);
     }
 
+    /// Drops a twin waker, which owns nothing.
     const unsafe fn twin_drop(_: *const ()) {}
 
     /// The executor record a slot waker points at. The executor assigns it to another task once
     /// the waker is dropped, while a clone points at its task directly.
     struct Slot(Mutex<std::sync::Arc<Counter>>);
 
+    /// Vtable of slot wakers. Waking one wakes the task currently assigned to its slot.
     static SLOT_VTABLE: RawWakerVTable =
         RawWakerVTable::new(slot_clone, slot_wake, slot_wake, slot_drop);
 
+    /// Returns a waker that points at `slot`, like an executor's per-poll waker.
     fn slot_waker(slot: &Slot) -> Waker {
         let raw = RawWaker::new(std::ptr::from_ref(slot).cast(), &SLOT_VTABLE);
         // SAFETY: The vtable functions only use the `Slot` behind the data pointer, which the
@@ -301,6 +336,7 @@ mod tests {
         unsafe { Waker::from_raw(raw) }
     }
 
+    /// Clones a slot waker into an owned waker that points at the slot's current task directly.
     unsafe fn slot_clone(data: *const ()) -> RawWaker {
         // SAFETY: `data` points at a live `Slot` (see `slot_waker`).
         let slot = unsafe { &*data.cast::<Slot>() };
@@ -309,12 +345,14 @@ mod tests {
         RawWaker::new(waker.data(), waker.vtable())
     }
 
+    /// Wakes the task currently assigned to the slot.
     unsafe fn slot_wake(data: *const ()) {
         // SAFETY: `data` points at a live `Slot` (see `slot_waker`).
         let slot = unsafe { &*data.cast::<Slot>() };
         ArcWake::wake_by_ref(&slot.0.lock());
     }
 
+    /// Drops a slot waker, which owns nothing.
     const unsafe fn slot_drop(_: *const ()) {}
 
     /// The wrapper adds only the shared-state pointer to the task future, so it does not grow
@@ -327,39 +365,55 @@ mod tests {
         );
     }
 
+    /// An abort before the first poll resolves the wrapper without polling its future.
     #[test]
     fn abort_before_poll_skips_future() {
+        // Abort before the wrapper is even built.
         let (handle, registration) = AbortHandle::new_pair();
         handle.abort();
         assert!(handle.is_aborted());
+
+        // The first poll resolves without polling the future, which would panic.
         let mut future = Abortable::new(future::lazy(|_| panic!("polled")), registration);
         let (_, waker) = counter();
         assert_eq!(poll(&mut future, &waker), Poll::Ready(Err(Aborted)));
     }
 
+    /// A task wrapper keeps an unchanged waker registered and replaces it with a new one, so an
+    /// abort wakes only the latest waker.
     #[test]
     fn abort_wakes_latest_waker() {
         let (handle, registration) = AbortHandle::new_pair();
         let mut future = Abortable::task(future::pending::<()>(), registration);
         let (first, first_waker) = counter();
         let (second, second_waker) = counter();
+
+        // The first poll registers the first waker, the second skips registration because the
+        // waker is unchanged, and the third replaces it with the second waker.
         assert!(poll(&mut future, &first_waker).is_pending());
         assert!(poll(&mut future, &first_waker).is_pending());
         assert!(poll(&mut future, &second_waker).is_pending());
+
+        // The abort wakes only the latest waker, and the woken poll resolves.
         handle.abort();
         assert_eq!(first.0.load(Ordering::SeqCst), 0);
         assert_eq!(second.0.load(Ordering::SeqCst), 1);
         assert_eq!(poll(&mut future, &second_waker), Poll::Ready(Err(Aborted)));
     }
 
+    /// A waker whose later registrations were skipped still receives the abort wake, once.
     #[test]
     fn abort_wakes_repeatedly_registered_waker() {
         let (handle, registration) = AbortHandle::new_pair();
         let mut future = Abortable::task(future::pending::<()>(), registration);
         let (counter, waker) = counter();
+
+        // Only the first poll registers, the later ones skip registration.
         for _ in 0..3 {
             assert!(poll(&mut future, &waker).is_pending());
         }
+
+        // The waker the first poll registered is woken exactly once.
         handle.abort();
         assert_eq!(counter.0.load(Ordering::SeqCst), 1);
         assert_eq!(poll(&mut future, &waker), Poll::Ready(Err(Aborted)));
@@ -372,8 +426,12 @@ mod tests {
         let twins = Twins([AtomicUsize::new(0), AtomicUsize::new(0)]);
         let (handle, registration) = AbortHandle::new_pair();
         let mut future = Abortable::task(future::pending::<()>(), registration);
+
+        // Poll with twin 0, then with twin 1, which has the same data pointer.
         assert!(poll(&mut future, &twin_waker::<0>(&twins)).is_pending());
         assert!(poll(&mut future, &twin_waker::<1>(&twins)).is_pending());
+
+        // Twin 1 replaced twin 0, so only twin 1 is woken.
         handle.abort();
         assert_eq!(twins.0[0].load(Ordering::SeqCst), 0);
         assert_eq!(twins.0[1].load(Ordering::SeqCst), 1);
@@ -389,24 +447,36 @@ mod tests {
         let slot = Slot(Mutex::new(first.clone()));
         let (handle, registration) = AbortHandle::new_pair();
         let mut future = Abortable::new(future::pending::<()>(), registration);
+
+        // The first task polls, then drops its waker. The registered clone points at the first
+        // task directly.
         let waker = slot_waker(&slot);
         assert!(poll(&mut future, &waker).is_pending());
         drop(waker);
+
+        // The executor assigns the slot to the second task, whose waker has the same addresses.
         *slot.0.lock() = second.clone();
         let waker = slot_waker(&slot);
         assert!(poll(&mut future, &waker).is_pending());
+
+        // The second task's waker was registered, so the abort wakes only the second task.
         handle.abort();
         assert_eq!(first.0.load(Ordering::SeqCst), 0);
         assert_eq!(second.0.load(Ordering::SeqCst), 1);
         assert_eq!(poll(&mut future, &waker), Poll::Ready(Err(Aborted)));
     }
 
+    /// An abort after the future completed does not affect the output it already returned.
     #[test]
     fn abort_after_completion_keeps_output() {
         let (handle, registration) = AbortHandle::new_pair();
         let mut future = Abortable::new(future::ready(7), registration);
         let (_, waker) = counter();
+
+        // The future completes on its first poll, so no waker is ever registered.
         assert_eq!(poll(&mut future, &waker), Poll::Ready(Ok(7)));
+
+        // A later abort finds nothing to wake and only sets the flag.
         handle.abort();
         assert!(handle.is_aborted());
     }
@@ -417,6 +487,7 @@ mod tests {
     fn concurrent_abort_and_poll() {
         let rounds = if cfg!(miri) { 100 } else { 2_000 };
         for _ in 0..rounds {
+            // An aborter thread waits for the start signal, aborts, then reports it is done.
             let (handle, registration) = AbortHandle::new_pair();
             let start = std::sync::Arc::new(StdAtomicBool::new(false));
             let done = std::sync::Arc::new(StdAtomicBool::new(false));
@@ -431,9 +502,13 @@ mod tests {
                     done.store(true, Ordering::Release);
                 })
             };
+
+            // Release the aborter, so its abort races the polls below.
             let mut future = Abortable::task(future::pending::<()>(), registration);
             let (counter, waker) = counter();
             start.store(true, Ordering::Release);
+
+            // Poll until the wrapper resolves, which it must do as aborted.
             let mut seen = 0;
             loop {
                 match poll(&mut future, &waker) {
@@ -457,6 +532,7 @@ mod tests {
                     },
                 }
             }
+
             aborter.join().unwrap();
         }
     }
@@ -470,6 +546,7 @@ mod loom_tests {
     use loom::{sync::atomic::AtomicUsize, thread};
     use std::task::{RawWaker, RawWakerVTable};
 
+    /// Vtable of the counter wakers.
     static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop_waker);
 
     /// A waker over a leaked counter (loom atomics live only within one model execution, and
@@ -482,23 +559,28 @@ mod loom_tests {
         (counter, unsafe { Waker::from_raw(raw) })
     }
 
+    /// Clones a counter waker. The counter is leaked, so there is nothing to count.
     unsafe fn clone(data: *const ()) -> RawWaker {
         RawWaker::new(data, &VTABLE)
     }
 
+    /// Wakes a counter waker, consuming it.
     unsafe fn wake(data: *const ()) {
         // SAFETY: Same contract as `wake_by_ref`.
         unsafe { wake_by_ref(data) }
     }
 
+    /// Wakes a counter waker by incrementing its counter.
     unsafe fn wake_by_ref(data: *const ()) {
         // SAFETY: `data` is a leaked `AtomicUsize` (see `counter`).
         let counter = unsafe { &*data.cast::<AtomicUsize>() };
         counter.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// Drops a counter waker, which owns nothing.
     const unsafe fn drop_waker(_: *const ()) {}
 
+    /// Polls `future` once with `waker`.
     fn poll<F: Future + Unpin>(future: &mut F, waker: &Waker) -> Poll<F::Output> {
         Pin::new(future).poll(&mut Context::from_waker(waker))
     }
@@ -508,6 +590,8 @@ mod loom_tests {
     /// registration after an earlier poll) and with a new waker otherwise.
     fn race(polls_before: usize, same_waker: bool) {
         loom::model(move || {
+            // Make `polls_before` pending polls with the first waker, then pick the waker of
+            // the raced poll.
             let (handle, registration) = AbortHandle::new_pair();
             let mut future = Abortable::task(std::future::pending::<()>(), registration);
             let (first, first_waker) = counter();
@@ -520,10 +604,12 @@ mod loom_tests {
                 counter()
             };
 
+            // Race an abort against one poll.
             let aborter = thread::spawn(move || handle.abort());
             let result = poll(&mut future, &waker);
             aborter.join().unwrap();
 
+            // Either that poll saw the abort, or it registered a waker the abort woke.
             match result {
                 Poll::Ready(result) => assert_eq!(result, Err(Aborted)),
                 Poll::Pending => {
@@ -535,16 +621,19 @@ mod loom_tests {
         });
     }
 
+    /// An abort races the first poll, which registers the waker.
     #[test]
     fn abort_races_first_poll() {
         race(0, true);
     }
 
+    /// An abort races a repeat poll with the registered waker, which skips registration.
     #[test]
     fn abort_races_repeat_poll_same_waker() {
         race(1, true);
     }
 
+    /// An abort races a repeat poll with a new waker, which replaces the registered one.
     #[test]
     fn abort_races_repeat_poll_new_waker() {
         race(1, false);
