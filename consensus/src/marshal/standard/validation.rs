@@ -196,7 +196,7 @@ where
     B: Block + Codec,
 {
     let (parent_view, parent_commitment) = context.parent;
-    let blocks = marshal.blocks(parent.height(), ancestry);
+    let blocks = marshal.blocks_with_parent(parent.height(), parent_commitment, ancestry);
     let validity_request = application
         .verify(
             (runtime_context.child("app_verify"), context.clone()),

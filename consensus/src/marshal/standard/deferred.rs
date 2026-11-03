@@ -509,7 +509,7 @@ where
                 return Resolved::Reuse(parent.digest(), parent);
             }
 
-            let blocks = marshal.blocks(parent.height(), ancestry);
+            let blocks = marshal.blocks_with_parent(parent.height(), parent_commitment, ancestry);
             Resolved::Build(parent, blocks, build_duration.timer(&*context), ())
         }
     }

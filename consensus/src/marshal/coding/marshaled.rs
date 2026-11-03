@@ -429,7 +429,8 @@ where
                         return Some(false);
                     }
 
-                    let blocks = marshal.blocks(parent.height(), ancestry);
+                    let blocks =
+                        marshal.blocks_with_parent(parent.height(), parent_commitment, ancestry);
                     let validity_request = application
                         .verify(
                             (
@@ -691,7 +692,7 @@ where
                 return Resolved::Reuse(parent.commitment(), parent);
             }
 
-            let blocks = marshal.blocks(parent.height(), ancestry);
+            let blocks = marshal.blocks_with_parent(parent.height(), parent_commitment, ancestry);
             Resolved::Build(
                 parent.inner_digested(),
                 blocks,
