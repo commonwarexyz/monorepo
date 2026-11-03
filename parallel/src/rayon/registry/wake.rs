@@ -57,7 +57,7 @@ impl Registry {
             // Pair with the injector's fence so an injection either sees this worker active
             // or appears in the queue check below.
             fence(Ordering::SeqCst);
-            if self.wide_injected_jobs.is_empty()
+            if self.injector.is_empty(self.injector.wide())
                 && self
                     .thread_infos
                     .iter()
@@ -70,8 +70,8 @@ impl Registry {
         self.new_wide_jobs((group + 1) % self.groups.len(), false);
     }
 
-    /// Whether a job is waiting in `group`'s injector or in the wide injector.
+    /// Whether a job is waiting in `group`'s incoming queue or in the Wide queue.
     pub(super) fn has_injected_job(&self, group: usize) -> bool {
-        !self.groups[group].injected_jobs.is_empty() || !self.wide_injected_jobs.is_empty()
+        !self.injector.is_empty(group) || !self.injector.is_empty(self.injector.wide())
     }
 }

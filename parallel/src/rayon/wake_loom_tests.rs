@@ -78,10 +78,25 @@ impl Queue {
     }
 }
 
-/// Local publications and sleep counters for one worker group.
+/// Sleep counters for one worker group.
 struct Group {
-    injected_jobs: Queue,
     sleep: Sleep,
+}
+
+/// The incoming queues exposed to the shared registry code: one Local queue per group, then the
+/// Wide queue.
+struct Injector {
+    queues: Vec<Queue>,
+}
+
+impl Injector {
+    fn wide(&self) -> usize {
+        self.queues.len() - 1
+    }
+
+    fn is_empty(&self, queue: usize) -> bool {
+        self.queues[queue].is_empty()
+    }
 }
 
 /// Per-worker wide queue exposed to the shared registry code.
@@ -93,7 +108,7 @@ struct ThreadInfo {
 struct Registry {
     groups: Vec<Group>,
     thread_infos: Vec<ThreadInfo>,
-    wide_injected_jobs: Queue,
+    injector: Injector,
 }
 
 impl Registry {
@@ -104,7 +119,6 @@ impl Registry {
             groups: widths
                 .iter()
                 .map(|&width| Group {
-                    injected_jobs: Queue::default(),
                     sleep: Sleep::new(width),
                 })
                 .collect(),
@@ -113,29 +127,34 @@ impl Registry {
                     wide: Queue::default(),
                 })
                 .collect(),
-            wide_injected_jobs: Queue::default(),
+            injector: Injector {
+                queues: (0..=widths.len()).map(|_| Queue::default()).collect(),
+            },
         })
     }
 
     fn inject_wide(&self, near: usize) {
-        let queue_was_empty = self.wide_injected_jobs.is_empty();
-        self.wide_injected_jobs.push();
+        let wide = &self.injector.queues[self.injector.wide()];
+        let queue_was_empty = wide.is_empty();
+        wide.push();
         self.new_injected_wide_job(near, queue_was_empty);
     }
 
     fn inject_local(&self, group: usize) {
-        let group = &self.groups[group];
-        let queue_was_empty = group.injected_jobs.is_empty();
-        group.injected_jobs.push();
-        group.sleep.new_injected_jobs(1, queue_was_empty);
+        let queue = &self.injector.queues[group];
+        let queue_was_empty = queue.is_empty();
+        queue.push();
+        self.groups[group]
+            .sleep
+            .new_injected_jobs(1, queue_was_empty);
     }
 
     fn find_work(&self, group: usize) -> Option<Tag> {
         // A worker counted as coverage for Wide work may choose a Local job first.
-        if self.groups[group].injected_jobs.take() {
+        if self.injector.queues[group].take() {
             Some(Tag::Local)
         } else if self.thread_infos.iter().any(|info| info.wide.take())
-            || self.wide_injected_jobs.take()
+            || self.injector.queues[self.injector.wide()].take()
         {
             Some(Tag::Wide)
         } else {
@@ -216,7 +235,7 @@ fn injection_races_sleep() {
 
                 // Joining requires the worker to find and consume the injected job.
                 assert_eq!(searching.join().unwrap(), Tag::Wide);
-                assert!(registry.wide_injected_jobs.is_empty());
+                assert!(registry.injector.is_empty(registry.injector.wide()));
             });
         }
     }
@@ -251,7 +270,7 @@ fn injection_races_local_idle_exit() {
                 "the local idle exit must hand off the injected job"
             );
             assert_eq!(remote.join().unwrap(), Tag::Wide);
-            assert!(registry.wide_injected_jobs.is_empty());
+            assert!(registry.injector.is_empty(registry.injector.wide()));
         });
     }
 }
@@ -290,6 +309,6 @@ fn injection_races_local_wake_handoff() {
             "a local wake must retain the wide handoff obligation"
         );
         assert_eq!(remote.join().unwrap(), Tag::Wide);
-        assert!(registry.wide_injected_jobs.is_empty());
+        assert!(registry.injector.is_empty(registry.injector.wide()));
     });
 }

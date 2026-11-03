@@ -3,44 +3,48 @@ use crossbeam_utils::CachePadded;
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex, TryLockError,
+        Mutex, TryLockError,
         atomic::{AtomicBool, Ordering},
     },
 };
 
+/// The jobs waiting in each queue, in one admission order across all of them.
 struct Queues {
-    jobs: Vec<VecDeque<(u64, JobRef)>>,
+    jobs: Box<[VecDeque<(u64, JobRef)>]>,
     next: u64,
 }
 
-/// An incoming queue in the registry's shared admission order. The empty flag supports the
-/// scheduler's wake protocol without requiring the queue lock.
+/// A registry's incoming queues: one Local queue per group, then the shared Wide queue, under one
+/// admission order. The empty flags support the scheduler's wake protocol without requiring the
+/// queue lock.
 pub(super) struct Injector {
-    queues: Arc<Mutex<Queues>>,
-    index: usize,
-    empty: CachePadded<AtomicBool>,
+    queues: Mutex<Queues>,
+
+    /// Whether each queue is empty, indexed like the queues.
+    empty: Box<[CachePadded<AtomicBool>]>,
 }
 
 impl Injector {
-    /// Creates the Local injectors and the shared Wide injector under one admission lock.
-    pub(super) fn new(groups: usize) -> (Vec<Self>, Self) {
-        let queues = Arc::new(Mutex::new(Queues {
-            jobs: (0..=groups).map(|_| VecDeque::new()).collect(),
-            next: 0,
-        }));
-        let mut injectors: Vec<_> = (0..=groups)
-            .map(|index| Self {
-                queues: Arc::clone(&queues),
-                index,
-                empty: CachePadded::new(AtomicBool::new(true)),
-            })
-            .collect();
-        let wide = injectors.pop().unwrap();
-        (injectors, wide)
+    /// Creates the Local queues of `groups` groups and the Wide queue after them.
+    pub(super) fn new(groups: usize) -> Self {
+        Self {
+            queues: Mutex::new(Queues {
+                jobs: (0..=groups).map(|_| VecDeque::new()).collect(),
+                next: 0,
+            }),
+            empty: (0..=groups)
+                .map(|_| CachePadded::new(AtomicBool::new(true)))
+                .collect(),
+        }
     }
 
-    /// Queues a job and returns whether the queue was empty.
-    pub(super) fn push(&self, job: JobRef) -> bool {
+    /// The index of the Wide queue.
+    pub(super) const fn wide(&self) -> usize {
+        self.empty.len() - 1
+    }
+
+    /// Queues a job in `queue` and returns whether that queue was empty.
+    pub(super) fn push(&self, queue: usize, job: JobRef) -> bool {
         let mut queues = self.queues.lock().unwrap();
 
         // Assign the order and publish the job in the same critical section.
@@ -49,49 +53,46 @@ impl Injector {
         queues.next = order
             .checked_add(1)
             .unwrap_or_else(|| std::process::abort());
-        let jobs = &mut queues.jobs[self.index];
+        let jobs = &mut queues.jobs[queue];
         let was_empty = jobs.is_empty();
         jobs.push_back((order, job));
         if was_empty {
-            self.empty.store(false, Ordering::Release);
+            self.empty[queue].store(false, Ordering::Release);
         }
         was_empty
     }
 
-    /// Takes the oldest eligible incoming job, or declines if another thread holds the lock.
-    /// The shared lock covers the head comparison and removal, so an older arrival cannot be
-    /// skipped. Contending workers resume their work search without parking.
-    pub(super) fn pop(local: &Self, wide: &Self) -> Option<JobRef> {
-        debug_assert!(Arc::ptr_eq(&local.queues, &wide.queues));
-        if local.is_empty() && wide.is_empty() {
+    /// Takes the oldest job across `group`'s Local queue and the Wide queue, or declines if another
+    /// thread holds the lock. The lock covers the head comparison and removal, so an older arrival
+    /// cannot be skipped. Contending workers resume their work search without parking.
+    pub(super) fn pop(&self, group: usize) -> Option<JobRef> {
+        let wide = self.wide();
+        if self.is_empty(group) && self.is_empty(wide) {
             return None;
         }
 
-        let mut queues = match wide.queues.try_lock() {
+        let mut queues = match self.queues.try_lock() {
             Ok(queues) => queues,
             Err(TryLockError::WouldBlock) => return None,
             Err(TryLockError::Poisoned(error)) => panic!("{error}"),
         };
-        let take_local = match (
-            queues.jobs[local.index].front(),
-            queues.jobs[wide.index].front(),
-        ) {
-            (Some((local, _)), Some((wide, _))) => local < wide,
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
+        let queue = match (queues.jobs[group].front(), queues.jobs[wide].front()) {
+            (Some((local, _)), Some((wide_order, _))) if local < wide_order => group,
+            (Some(_), None) => group,
+            (Some(_), Some(_)) | (None, Some(_)) => wide,
             (None, None) => return None,
         };
-        let injector = if take_local { local } else { wide };
-        let jobs = &mut queues.jobs[injector.index];
+        let jobs = &mut queues.jobs[queue];
         let (_, job) = jobs.pop_front().unwrap();
         if jobs.is_empty() {
-            injector.empty.store(true, Ordering::Release);
+            self.empty[queue].store(true, Ordering::Release);
         }
         Some(job)
     }
 
-    pub(super) fn is_empty(&self) -> bool {
-        self.empty.load(Ordering::Acquire)
+    /// Whether `queue` is empty.
+    pub(super) fn is_empty(&self, queue: usize) -> bool {
+        self.empty[queue].load(Ordering::Acquire)
     }
 }
 
@@ -135,11 +136,11 @@ mod tests {
         }
 
         let registry = pool.registry();
-        let held = registry.wide_injected_jobs.queues.lock().unwrap();
+        let held = registry.injector.queues.lock().unwrap();
         phase_tx.send(()).unwrap();
         let yielded = yielded_rx.recv_timeout(timeout);
-        let jobs_remain =
-            !registry.groups[0].injected_jobs.is_empty() && !registry.wide_injected_jobs.is_empty();
+        let injector = &registry.injector;
+        let jobs_remain = !injector.is_empty(0) && !injector.is_empty(injector.wide());
         drop(held);
         phase_tx.send(()).unwrap();
         let completed = [

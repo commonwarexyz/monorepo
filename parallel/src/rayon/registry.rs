@@ -139,9 +139,10 @@ pub(super) struct Registry {
     /// The width of each group, in group order.
     group_widths: Box<[usize]>,
 
-    /// Jobs placed [`Placement::Wide`] by threads that are not workers of this registry, taken by
-    /// any worker.
-    wide_injected_jobs: Injector,
+    /// Jobs placed by threads that are not workers of their placement, in one admission order:
+    /// a [`Placement::Local`] queue per group that only the group's workers take, and a
+    /// [`Placement::Wide`] queue that any worker takes.
+    injector: Injector,
 
     /// The pushing halves of the workers' broadcast deques, indexed by worker.
     broadcasts: Mutex<Vec<Worker<JobRef>>>,
@@ -154,19 +155,14 @@ pub(super) struct Registry {
     terminate_count: AtomicUsize,
 }
 
-/// The jobs placed on one group by threads that are not its workers, and the sleep states of its
-/// workers.
+/// The sleep states of one group's workers.
 ///
 /// A job placed [`Placement::Local`] on the group runs only on the group's workers, and its
 /// notification reaches only the group's sleep protocol, which runs upstream's code over exactly
 /// those workers. Upstream's argument that no wakeup is lost therefore holds for such a job with
 /// the pool restricted to the group. Every worker of the group searches its group-mates' local
-/// deques and its group's injector, and a sleeper's final check reads that injector.
+/// deques and its group's incoming queue, and a sleeper's final check reads that queue.
 struct Group {
-    /// Jobs placed [`Placement::Local`] on the group by a thread that is not one of its workers.
-    /// Only the group's workers take them.
-    injected_jobs: Injector,
-
     /// Governs when the group's workers sleep and wake, indexed by their offset in the group.
     sleep: Sleep,
 }
@@ -213,7 +209,6 @@ impl Registry {
             })
             .unzip();
 
-        let (group_injected_jobs, wide_injected_jobs) = Injector::new(group_widths.len());
         let registry = Arc::new(Self {
             thread_infos: local_stealers
                 .into_iter()
@@ -222,15 +217,13 @@ impl Registry {
                 .collect(),
             groups: group_widths
                 .iter()
-                .zip(group_injected_jobs)
-                .map(|(&width, injected_jobs)| Group {
-                    injected_jobs,
+                .map(|&width| Group {
                     sleep: Sleep::new(width),
                 })
                 .collect(),
+            injector: Injector::new(group_widths.len()),
             group_width,
             group_widths,
-            wide_injected_jobs,
             broadcasts: Mutex::new(broadcasts),
             terminate_count: AtomicUsize::new(1),
             start_handler: builder.take_start_handler(),
@@ -374,12 +367,15 @@ impl Registry {
 
         match placement {
             Placement::Local(group) => {
-                let group = &self.groups[group];
-                let queue_was_empty = group.injected_jobs.push(injected_job.tagged(Tag::Local));
-                group.sleep.new_injected_jobs(1, queue_was_empty);
+                let queue_was_empty = self.injector.push(group, injected_job.tagged(Tag::Local));
+                self.groups[group]
+                    .sleep
+                    .new_injected_jobs(1, queue_was_empty);
             }
             Placement::Wide { near } => {
-                let queue_was_empty = self.wide_injected_jobs.push(injected_job.tagged(Tag::Wide));
+                let queue_was_empty = self
+                    .injector
+                    .push(self.injector.wide(), injected_job.tagged(Tag::Wide));
                 self.new_injected_wide_job(near, queue_was_empty);
             }
         }
@@ -907,12 +903,7 @@ impl WorkerThread {
         self.take_local_job()
             .or_else(|| self.steal_local())
             .or_else(|| self.steal_wide())
-            .or_else(|| {
-                Injector::pop(
-                    &self.registry.groups[self.group].injected_jobs,
-                    &self.registry.wide_injected_jobs,
-                )
-            })
+            .or_else(|| self.registry.injector.pop(self.group))
     }
 
     pub(super) fn yield_now(&self) -> Yield {
