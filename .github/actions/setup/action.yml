@@ -152,10 +152,10 @@ runs:
         # so keep the compiler wrapper out of its commands.
         cmd-format: env -u RUSTC_WRAPPER {0}
 
-    # kache caches the workspace's own crates, which rust-cache does not keep. It
-    # runs after rust-cache so that RUSTC_WRAPPER stays out of rust-cache's key.
-    # Compiling a large test binary takes over 5 minutes, so a long download wait pays
-    # off. The daemon and every compile read the wait, so it goes in the job environment.
+    # kache caches the workspace's own crates, which rust-cache does not keep. It runs
+    # after rust-cache so that RUSTC_WRAPPER stays out of rust-cache's key. Compiling a
+    # large test binary takes over 5 minutes, so a long download wait pays off. The daemon
+    # and every compile read the wait, so it goes in the job environment.
     - name: Setup kache
       if: inputs.rust-cache-enabled == 'true'
       shell: bash
@@ -163,21 +163,21 @@ runs:
     - name: Setup kache
       id: kache
       if: inputs.rust-cache-enabled == 'true'
+      uses: kunobi-ninja/kache-action@1a33fb2ff51be23eb9e87abeae6edb65be78f71c
       # A failed setup leaves the job uncached instead of failing it.
       continue-on-error: true
-      uses: kunobi-ninja/kache-action@1a33fb2ff51be23eb9e87abeae6edb65be78f71c
       with:
         version: v2.0.0
-        s3-bucket: ${{ inputs.kache-r2-bucket }}
-        s3-endpoint: ${{ inputs.kache-r2-endpoint }}
         s3-region: auto
         s3-prefix: kache
+        s3-bucket: ${{ inputs.kache-r2-bucket }}
+        s3-endpoint: ${{ inputs.kache-r2-endpoint }}
         s3-access-key-id: ${{ inputs.kache-r2-access-key-id }}
         s3-secret-access-key: ${{ inputs.kache-r2-secret-access-key }}
+        manifest-key: ${{ steps.cache-key.outputs.key }}-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
         cache-dir: ${{ runner.os == 'Linux' && '/mnt/kache' || '' }}
         max-size: 50GiB
         cache-executables: true
-        manifest-key: ${{ steps.cache-key.outputs.key }}-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
         github-cache: false
         pr-comment: false
 
@@ -185,7 +185,7 @@ runs:
     # mode it started with. Hiding GITHUB_ACTIONS from every kache process, the daemon
     # included, lets pull request and merge queue jobs write the shared prefix too, as
     # sccache did. Fork pull requests get no credentials, so they cannot write.
-    - name: Let every job write the kache cache
+    - name: Enable kache writes
       if: inputs.rust-cache-enabled == 'true' && inputs.kache-r2-bucket != '' && steps.kache.outcome == 'success'
       continue-on-error: true
       shell: bash
