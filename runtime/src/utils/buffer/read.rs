@@ -154,8 +154,7 @@ impl<B: Blob> Read<B> {
     /// allocation on later refills.
     ///
     /// Returns an error if not enough bytes are available.
-    /// On error or cancellation, restores the starting position. A subsequent read may need
-    /// to refill the buffer.
+    /// On error or cancellation, restores the starting position.
     pub async fn read(&mut self, len: usize) -> Result<IoBufs, Error> {
         if len == 0 {
             return Ok(IoBufs::default());
