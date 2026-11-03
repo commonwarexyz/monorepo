@@ -39,6 +39,6 @@ where
 
     /// Strategy for decoding inbound messages and computing their digests.
     ///
-    /// Cache recency follows decode completion order. This can differ from network arrival order.
+    /// Messages are cached in the order they finish decoding, which may differ from arrival order.
     pub strategy: T,
 }
