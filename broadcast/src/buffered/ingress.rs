@@ -18,10 +18,6 @@ pub(crate) enum Message<P: PublicKey, M: Digestible> {
     },
 
     /// Subscribe to receive a message by digest.
-    ///
-    /// The responder will be sent the message when it is available; either
-    /// instantly (if cached) or when it is received from the network. The request can be canceled
-    /// by dropping the responder.
     Subscribe {
         digest: M::Digest,
         responder: oneshot::Sender<Digested<M>>,
@@ -44,13 +40,21 @@ impl<P: PublicKey, M: Digestible> Message<P, M> {
     }
 }
 
+/// A queued request with broadcast recipients stored separately for coalescing.
 enum PendingEntry<P: PublicKey, M: Digestible> {
+    /// A get or subscription request.
     Message(Message<P, M>),
+    /// A broadcast whose recipients are held in [`Pending::broadcasts`].
     Broadcast(Digested<M>),
 }
 
+/// Requests waiting for room in the engine's inbox.
+///
+/// Each pending broadcast digest occurs exactly once in both `queue` and `broadcasts`.
 pub(crate) struct Pending<P: PublicKey, M: Digestible> {
+    /// Requests in arrival order, with coalesced broadcasts at their first position.
     queue: VecDeque<PendingEntry<P, M>>,
+    /// Recipients for exactly the broadcasts in `queue`.
     broadcasts: BTreeMap<M::Digest, Recipients<P>>,
 }
 
@@ -64,10 +68,7 @@ impl<P: PublicKey, M: Digestible> Default for Pending<P, M> {
 }
 
 impl<P: PublicKey, M: Digestible> Pending<P, M> {
-    /// Puts a message the mailbox rejected back at the front of the queue.
-    ///
-    /// A rejected broadcast gets its recipients back in the side map, so later broadcasts of the
-    /// same message keep coalescing into it.
+    /// Restores a rejected message and its recipient index at the front of the queue.
     fn requeue_front(&mut self, rejected: Message<P, M>) {
         match rejected {
             Message::Broadcast {
@@ -103,7 +104,7 @@ impl<P: PublicKey, M: Digestible> Overflow<Message<P, M>> for Pending<P, M> {
                     let recipients = self
                         .broadcasts
                         .remove(&message.digest())
-                        .expect("every queued broadcast has recipients");
+                        .expect("queued broadcast must have recipients");
                     Message::Broadcast {
                         recipients,
                         message,
@@ -111,6 +112,7 @@ impl<P: PublicKey, M: Digestible> Overflow<Message<P, M>> for Pending<P, M> {
                 }
             };
 
+            // Retain the rejected message before allowing any later request to advance.
             if let Some(rejected) = push(message) {
                 self.requeue_front(rejected);
                 break;
@@ -127,6 +129,7 @@ impl<P: PublicKey, M: Digestible> Policy for Message<P, M> {
             return;
         }
 
+        // Merge at the first queued occurrence so duplicates cannot postpone its delivery.
         if let Self::Broadcast {
             recipients,
             message,
@@ -159,9 +162,9 @@ impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
 
     /// Subscribe to a message by digest.
     ///
-    /// The responder will be sent the message when it is available; either
-    /// instantly (if cached) or when it is received from the network. The request can be canceled
-    /// by dropping the responder.
+    /// Resolves with the message if cached when this request is handled. Otherwise, waits for
+    /// a matching local broadcast or network message to be handled. Dropping the receiver
+    /// cancels the request.
     ///
     /// If the engine has shut down, the returned receiver will resolve to `Canceled`.
     pub fn subscribe(&self, digest: M::Digest) -> oneshot::Receiver<Digested<M>> {
@@ -172,7 +175,7 @@ impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
         receiver
     }
 
-    /// Get a message by digest.
+    /// Get the message cached under this digest when the request is handled.
     ///
     /// If the engine has shut down, returns `None`.
     pub async fn get(&self, digest: M::Digest) -> Option<Digested<M>> {

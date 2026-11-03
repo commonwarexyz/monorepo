@@ -43,8 +43,6 @@ stability_scope!(BETA {
     pub type Channel = u64;
 
     /// Enum indicating the set of recipients to send a message to.
-    ///
-    /// Sets merge with [`Recipients::union_with`].
     #[derive(Clone, Debug)]
     pub enum Recipients<P: PublicKey> {
         All,
@@ -55,10 +53,9 @@ stability_scope!(BETA {
     impl<P: PublicKey> Recipients<P> {
         /// Adds the recipients in `other` to `self`.
         ///
-        /// [`Recipients::All`] absorbs any other set. Two equal [`Recipients::One`] stay one
-        /// peer; any other explicit union becomes [`Recipients::Some`] with its peers sorted and
-        /// deduplicated. An empty [`Recipients::Some`] stays explicit and never widens to
-        /// [`Recipients::All`].
+        /// [`Recipients::All`] absorbs any other set. Two equal [`Recipients::One`] remain
+        /// [`Recipients::One`]. All other explicit unions become [`Recipients::Some`] with
+        /// sorted, deduplicated peers, including when the result is empty.
         pub fn union_with(&mut self, other: Self) {
             match (&mut *self, other) {
                 (Self::All, _) => return,

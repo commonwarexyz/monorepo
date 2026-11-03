@@ -39,6 +39,7 @@ impl Conformance for CodingStorageConformance {
 fn marshal_commit<H: TestHarness>(seed: u64) -> Vec<u8> {
     // Fixture inputs must be independent of the executor's scheduling RNG.
     let mut rng = TestRng::new(seed);
+
     let runner = deterministic::Runner::new(
         deterministic::Config::default()
             .with_seed(seed)

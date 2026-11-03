@@ -14,8 +14,8 @@ pub struct Sequencer<P: PublicKey> {
 pub struct Metrics<P: PublicKey> {
     /// Number of broadcasts received by peer
     pub peer: CounterFamily<Sequencer<P>>,
-    /// Cache admission outcomes. The ingress receiver's `decode` counter tracks decode failures
-    /// and ingress drops.
+    /// Number of decoded messages by cache admission status. Decode failures and ingress drops
+    /// are counted by the `ingress_decode` metric.
     pub receive: status::Counter,
     /// Number of `subscribe` requests by status
     pub subscribe: status::Counter,
@@ -31,7 +31,10 @@ impl<P: PublicKey> Metrics<P> {
     pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
         Self {
             peer: context.family("peer", "Number of broadcasts received by peer"),
-            receive: context.family("receive", "Number of received messages by status"),
+            receive: context.family(
+                "receive",
+                "Number of decoded messages by cache admission status",
+            ),
             subscribe: context.family("subscribe", "Number of `subscribe` requests by status"),
             get: context.family("get", "Number of `get` requests by status"),
             waiters: context.gauge("waiters", "Number of digests being awaited"),

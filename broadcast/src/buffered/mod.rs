@@ -41,12 +41,10 @@
 //!
 //! A background receiver decodes inbound messages off the engine's event loop with
 //! [`Config::strategy`] and blocks peers whose messages fail to decode with [`Config::blocker`].
-//! Decoded messages wait in an inbox that holds the network receiver's
+//! Decoded messages wait in an inbox sized to the network receiver's
 //! [`capacity`](commonware_p2p::Receiver::capacity) and are dropped when it is full.
 //!
-//! Application requests wait in a separate inbox of [`Config::mailbox_size`] entries. While it is
-//! full, requests whose responder was dropped are discarded, and pending broadcasts of the same
-//! message are coalesced into one broadcast to the union of their recipients.
+//! Application requests wait in a separate inbox sized by [`Config::mailbox_size`].
 
 mod config;
 pub use config::Config;
@@ -145,6 +143,7 @@ mod tests {
         }
     }
 
+    /// Message that counts how often its digest is computed.
     #[derive(Clone)]
     struct CountingMessage {
         value: u64,
@@ -329,10 +328,10 @@ mod tests {
         });
         assert_eq!(drained.len(), 1);
         let Message::Broadcast { recipients, .. } = drained.pop_front().unwrap() else {
-            panic!("coalesced entry is a broadcast");
+            panic!("coalesced entry must be a broadcast");
         };
         let Recipients::Some(recipients) = recipients else {
-            panic!("distinct recipients are merged");
+            panic!("distinct recipients must merge into Recipients::Some");
         };
         assert_eq!(recipients, vec![first, second]);
 
@@ -414,16 +413,17 @@ mod tests {
             },
         );
 
-        let mut drained = None;
+        let mut drained = VecDeque::new();
         overflow.drain(|message| {
-            drained = Some(message);
+            drained.push_back(message);
             None
         });
-        let Some(Message::Broadcast { recipients, .. }) = drained else {
-            panic!("coalesced broadcast is retained");
+        assert_eq!(drained.len(), 1);
+        let Some(Message::Broadcast { recipients, .. }) = drained.pop_front() else {
+            panic!("coalesced broadcast must be retained");
         };
         let Recipients::Some(recipients) = recipients else {
-            panic!("distinct recipients are merged");
+            panic!("distinct recipients must merge into Recipients::Some");
         };
         assert_eq!(recipients, vec![first, second]);
     }
@@ -1166,52 +1166,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_malformed_network_payload_does_not_break_valid_traffic() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(10));
-        runner.start(|context| async move {
-            let (peers, mut registrations, oracle) =
-                initialize_simulation(context.child("network"), 3, probability!(1.0)).await;
-
-            let attacker = peers[0].clone();
-            let honest = peers[1].clone();
-            let victim = peers[2].clone();
-
-            let (mut attacker_sender, _) = registrations.remove(&attacker).unwrap();
-            let mailboxes =
-                spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
-            let honest_mailbox = mailboxes.get(&honest).unwrap().clone();
-            let victim_mailbox = mailboxes.get(&victim).unwrap().clone();
-
-            // Send malformed bytes that cannot decode into `TestMessage`.
-            let sent = attacker_sender.send(
-                Recipients::One(victim.clone()),
-                IoBuf::from(vec![0xFF]),
-                false,
-            );
-            assert_eq!(sent, vec![victim.clone()]);
-            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
-
-            // The victim should still process later valid traffic.
-            let message = TestMessage::shared(b"valid-after-malformed");
-            assert!(
-                honest_mailbox
-                    .broadcast(
-                        Recipients::One(victim.clone()),
-                        Digested::precomputed(message.clone(), message.digest())
-                    )
-                    .accepted()
-            );
-            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
-
-            let received = victim_mailbox
-                .subscribe(message.digest())
-                .await
-                .expect("victim should receive valid message after malformed payload");
-            assert_eq!(received.inner(), &message);
-        });
-    }
-
-    #[test_traced]
     fn test_invalid_message_blocks_peer() {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         runner.start(|context| async move {
@@ -1244,6 +1198,7 @@ mod tests {
                 from_attacker.encode(),
                 false,
             );
+
             // Valid traffic from an honest peer still flows.
             let from_honest = TestMessage::shared(b"from-honest-peer");
             assert!(
@@ -1259,7 +1214,7 @@ mod tests {
             let received = victim_mailbox
                 .subscribe(from_honest.digest())
                 .await
-                .expect("victim should receive valid traffic from honest peers");
+                .expect("victim must receive valid traffic from honest peers");
             assert_eq!(received.inner(), &from_honest);
             assert!(
                 victim_mailbox.get(from_attacker.digest()).await.is_none(),
@@ -1799,9 +1754,8 @@ mod tests {
         });
     }
 
-    /// Local `broadcast` queued before the engine run loop starts must still be cached when the
-    /// peer is already in `latest.primary` (regression for biased handling of
-    /// `peer_set_subscription` vs mailbox).
+    /// A broadcast queued before startup is cached when the local peer is in the initial primary
+    /// set. The engine applies that peer set before handling queued requests.
     #[test_traced]
     fn test_broadcast_queued_before_start_respects_initial_latest_primary() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
@@ -1834,7 +1788,7 @@ mod tests {
                     .as_ref()
                     .map(Digested::inner),
                 Some(&msg),
-                "sender is in the initial latest.primary set, so its own broadcast is cached"
+                "a sender in the initial latest.primary set must cache its own broadcast"
             );
         });
     }

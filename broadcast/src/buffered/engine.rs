@@ -79,7 +79,7 @@ where
     /// Blocks peers whose messages fail to decode.
     blocker: B,
 
-    /// Strategy used to decode and digest inbound messages off the event loop.
+    /// Strategy for decoding inbound messages and computing their digests.
     strategy: T,
 
     ////////////////////////////////////////
@@ -173,8 +173,8 @@ where
             self.blocker.clone(),
             self.strategy.clone(),
         );
-        // Keep the handle alive so the background decoder is not aborted.
-        let _ingress_handle = ingress.start();
+        ingress.start();
+
         let mut peer_set_subscription = self.peer_provider.subscribe().await;
 
         select_loop! {
@@ -216,7 +216,7 @@ where
                     self.handle_get(digest, responder);
                 }
             },
-            // Handle incoming messages, already decoded off-loop by the background receiver
+            // Handle messages decoded by the background receiver
             Some((peer, msg)) = receiver.recv() else {
                 error!("ingress receiver closed");
                 break;
