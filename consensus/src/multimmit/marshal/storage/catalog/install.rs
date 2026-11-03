@@ -43,7 +43,6 @@ where
     H: Hasher,
     V: Variant,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     /// Installs a floor with its authenticated artifacts.
     ///

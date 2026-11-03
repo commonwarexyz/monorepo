@@ -257,7 +257,6 @@ where
     E: Context,
     H: Hasher,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     /// Opens the segment, returning its journals and every validated record in order.
     ///
@@ -303,7 +302,6 @@ where
     E: Context,
     H: Hasher,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     /// Appends the batch and returns the located rows for [`PendingBlocks::finish_put`].
     pub(crate) async fn run(self) -> Result<Append<E, H, B>, Error> {
@@ -376,7 +374,6 @@ where
     E: Context,
     H: Hasher,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     /// Opens pending custody, recovering each segment before publishing its metadata as custody.
     pub(crate) async fn init(context: E, config: PendingConfig<B::Cfg>) -> Result<Self, Error> {

@@ -287,7 +287,6 @@ where
     H: Hasher,
     V: Variant,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     /// Opens every catalog-owned store under `context` and seeds a fresh namespace from
     /// `config.start`.
