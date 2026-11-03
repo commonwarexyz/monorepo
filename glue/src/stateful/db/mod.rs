@@ -80,9 +80,10 @@
 //! # Failures
 //!
 //! Database failures are fatal. [`DatabaseSet`] implementations panic when a database fails to
-//! open, apply, finalize, or prune, and [`Barrier::durable`] panics when a deferred sync fails. A
-//! mutation that is cancelled also loses its database until restart (see [`Shared`]). A database
-//! that fails state sync is reported through the error returned by [`StateSyncSet::sync`].
+//! open, apply, finalize, or prune, and [`Barrier::durable`] panics when a deferred sync fails.
+//! Cancelling a mutation can leave some databases usable, but the set and all its handles must
+//! still be discarded and recovered on restart (see [`DatabaseSet`]). A database that fails state
+//! sync is reported through the error returned by [`StateSyncSet::sync`].
 
 use commonware_actor::mailbox::{self, Policy};
 use commonware_consensus::{
@@ -494,6 +495,10 @@ impl Barrier {
 /// # Mutation Safety
 ///
 /// Calls to [`Self::apply`], [`Self::finalize`], and [`Self::prune`] must not overlap.
+/// Cancelling a pending call may leave some members completed, others untouched, and others lost.
+/// Discard the entire set and all handles to its members, including clones and readers, and
+/// recover on restart, even if every member remains accessible.
+///
 /// Implementations panic if a database mutation fails (see
 /// [Failures](crate::stateful::db#failures)).
 pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
@@ -561,6 +566,8 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     ///
     /// Returns once every database exposes its batch as an independently recoverable checkpoint.
     /// Durability starts separately with [`Self::finalize`].
+    ///
+    /// See [Mutation Safety](DatabaseSet#mutation-safety) for cancellation requirements.
     fn apply(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send;
 
     /// Starts persisting every checkpoint applied before this call.
@@ -568,12 +575,16 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// The returned [`Barrier`] resolves once that state is durable in every database. Batches
     /// applied while it is pending are not covered and need a later finalization. The barrier
     /// must be awaited before finalizing again.
+    ///
+    /// See [Mutation Safety](DatabaseSet#mutation-safety) for cancellation requirements.
     fn finalize(&self) -> impl Future<Output = Barrier> + Send;
 
     /// Prunes each database to its target in `targets`.
     ///
     /// The state represented by `targets` must already be durable, and no barrier may be pending.
     /// Pruning effects must be durable before this returns.
+    ///
+    /// See [Mutation Safety](DatabaseSet#mutation-safety) for cancellation requirements.
     fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
     /// Returns the targets of the latest applied checkpoints (which need not be durable yet).
@@ -1982,7 +1993,9 @@ mod tests {
         Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate, dispatch_queued_tips,
         drain_generation_updates, mailbox,
     };
-    use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
+    use crate::stateful::tests::mocks::{
+        FlushControl, TestDb as ObservedDb, TestMerkleized, TestUnmerkleized, anchor as mock_anchor,
+    };
     use commonware_cryptography::sha256;
     use commonware_macros::select;
     use commonware_runtime::{
@@ -3804,6 +3817,39 @@ mod tests {
 
             drop(reader1);
             apply.await;
+        });
+    }
+
+    #[test]
+    fn tuple_apply_cancellation_leaves_completed_and_untouched_members() {
+        deterministic::Runner::default().start(|_context| async move {
+            type DbSet = (Shared<ObservedDb>, Shared<ObservedDb>);
+
+            let first = FlushControl::default();
+            let second = FlushControl::default();
+            let databases = (
+                Shared::new("test", ObservedDb::gated(first.clone())),
+                Shared::new("test", ObservedDb::gated(second.clone())),
+            );
+            let readers = <DbSet as DatabaseSet<deterministic::Context>>::readers(&databases);
+            let reader2 = readers.1.read().await;
+
+            // The first member finishes while the second waits for its read lock to be released.
+            {
+                let apply = <DbSet as DatabaseSet<deterministic::Context>>::apply(
+                    &databases,
+                    (TestMerkleized, TestMerkleized),
+                );
+                pin_mut!(apply);
+                assert!(apply.as_mut().now_or_never().is_none());
+            }
+            drop(reader2);
+
+            // Both cells remain readable even though the cancelled operation applied only one batch.
+            assert!(readers.0.read().now_or_never().is_some());
+            assert!(readers.1.read().now_or_never().is_some());
+            assert_eq!(first.applied.load(Ordering::Relaxed), 1);
+            assert_eq!(second.applied.load(Ordering::Relaxed), 0);
         });
     }
 
