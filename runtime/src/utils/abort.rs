@@ -44,9 +44,14 @@
 //! polled by any task, and a waker's addresses name its task only while that waker lives:
 //!
 //! ```text
-//! task A polls with waker S (addresses x) ---> [ waker ]  a clone that wakes A
-//! S is dropped, and an executor may hand task B a waker S' with the same addresses x
-//! task B polls with S': x == x, yet the clone in the slot still wakes A
+//!                                                  slot holds        an abort wakes
+//!                                                  ----------        --------------
+//! task A polls with waker S (addresses x) -------> a clone of S      A
+//! task A drops S
+//! the executor reuses x for task B's waker S'
+//! task B polls with S' (addresses x)
+//!   skipping, "x is unchanged" ------------------> a clone of S      A, and B waits forever
+//!   registering ---------------------------------> a clone of S'     B
 //! ```
 //!
 //! So those wrappers register on every pending poll, and the slot compares the clone it holds.
