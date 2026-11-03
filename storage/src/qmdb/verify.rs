@@ -1,3 +1,5 @@
+//! Verification of Merkle proofs over QMDB operations through [ProofExt].
+
 use crate::{
     merkle::{Error, Family, Location, Position, Proof, verification::ProofStore},
     qmdb,
