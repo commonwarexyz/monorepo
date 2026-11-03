@@ -2902,7 +2902,7 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_compact_floor_beyond_size() {
+    fn test_compact_floor_beyond_commit() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "immutable-floor-beyond").await;
 
@@ -2910,8 +2910,8 @@ mod tests {
 
             assert!(matches!(
                 batch,
-                Err(Error::FloorBeyondCommit(floor, tip))
-                    if floor == Location::new(2) && tip == Location::new(1)
+                Err(Error::FloorBeyondCommit(floor, commit))
+                    if floor == Location::new(2) && commit == Location::new(1)
             ));
         });
     }

@@ -3798,7 +3798,7 @@ pub(super) mod tests {
 
     /// Verify that merkleizing a batch with a floor beyond its commit location returns an error.
     #[boxed]
-    pub(crate) async fn run_floor_beyond_size<F: Family, V, C>(
+    pub(crate) async fn run_floor_beyond_commit<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3811,7 +3811,7 @@ pub(super) mod tests {
         let db = open_db(context.child("test")).await;
 
         // DB has 1 op (initial commit). A batch with 1 set + 1 commit = total_size 3.
-        // Setting floor=100 exceeds total_size.
+        // Setting floor=100 puts it past the commit at location 2.
         let k1 = Sha256::fill(1u8);
         let v1 = Sha256::fill(2u8);
         let result = db
