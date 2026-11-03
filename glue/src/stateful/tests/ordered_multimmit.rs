@@ -30,13 +30,15 @@ use crate::{
         ordered,
     },
 };
+use bytes::Bytes;
+use commonware_actor::{Feedback as SendFeedback, Unreliable};
 use commonware_broadcast::buffered;
 use commonware_codec::{Decode as _, Encode as _};
 use commonware_consensus::{
-    Application, Epochable as _, Heightable as _,
+    Application, Automaton, Epochable as _, Heightable as _,
     aggregation::{
         self,
-        types::{Certificate, RecoveryKey},
+        types::{Ack, Certificate, RecoveryKey},
     },
     ancestry::Ancestry,
     multimmit::{
@@ -53,15 +55,21 @@ use commonware_consensus::{
     types::{Epoch, Height, Participant, ViewDelta},
 };
 use commonware_cryptography::{
-    Digested, Digestible as _, Hasher as _, Sha256, bls12381::primitives::variant::MinPk,
-    certificate::Verifier as _, ed25519, sha256::Digest,
+    Digested, Digestible as _, Hasher as _, Sha256,
+    bls12381::primitives::variant::MinPk,
+    certificate::{Scheme as _, Verifier as _},
+    ed25519,
+    sha256::Digest,
 };
 use commonware_macros::select;
-use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network, Oracle};
+use commonware_p2p::{
+    CheckedSender, LimitedSender, Recipients,
+    simulated::{Config as NetworkConfig, Link, Network, Oracle},
+};
 use commonware_parallel::Sequential;
 use commonware_resolver::p2p as resolver;
 use commonware_runtime::{
-    Clock as _, Handle, Metrics as _, Quota, Runner as _, Spawner as _, Supervisor as _,
+    Clock as _, Handle, IoBufs, Metrics as _, Quota, Runner as _, Spawner as _, Supervisor as _,
     buffer::paged::{self, CacheRef},
     deterministic,
     telemetry::metrics::metric_sum,
@@ -83,14 +91,14 @@ use commonware_utils::{
 };
 use std::{
     collections::HashMap,
-    future,
+    future, mem,
     num::{NonZeroU64, NonZeroUsize},
     pin::pin,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_ORDERED_MULTIMMIT_TEST";
@@ -108,6 +116,9 @@ const INTERVAL: NonZeroU64 = NZU64!(8);
 
 /// Inputs marshal delivers before one is acknowledged.
 const ACK_WINDOW: NonZeroUsize = NZUsize!(16);
+
+/// Checkpoints each aggregation engine works on at once, starting at its frontier.
+const WINDOW: NonZeroU64 = NZU64!(8);
 
 const DATA: u64 = 0;
 const CONSENSUS: u64 = 1;
@@ -516,6 +527,133 @@ impl AttachableResolver<Qmdb<deterministic::Context>> for Snapshots {
     }
 }
 
+/// Holds the checkpoint digests aggregation asks for at and above a position, until released.
+#[derive(Clone, Default)]
+struct Gate(Arc<Mutex<Held>>);
+
+#[derive(Default)]
+struct Held {
+    /// The lowest position held, while the gate is closed.
+    from: Option<u64>,
+    /// The position of every held request, with the signal that releases it.
+    requests: Vec<(u64, oneshot::Sender<()>)>,
+}
+
+impl Gate {
+    /// Holds every later request for a position at or above `from`.
+    fn close(&self, from: u64) {
+        let mut held = self.0.lock();
+        assert!(held.from.is_none(), "the gate is already closed");
+        held.from = Some(from);
+    }
+
+    /// Returns how many requests for `position` are held.
+    fn held(&self, position: u64) -> usize {
+        self.0
+            .lock()
+            .requests
+            .iter()
+            .filter(|(held, _)| *held == position)
+            .count()
+    }
+
+    /// Releases every held request, and holds no new ones.
+    fn open(&self) {
+        let requests = {
+            let mut held = self.0.lock();
+            held.from = None;
+            mem::take(&mut held.requests)
+        };
+        for (_, release) in requests {
+            let _ = release.send(());
+        }
+    }
+
+    /// Returns once a request for `position` may proceed.
+    async fn pass(&self, position: u64) {
+        let released = {
+            let mut held = self.0.lock();
+            if held.from.is_none_or(|from| position < from) {
+                return;
+            }
+            let (release, released) = oneshot::channel();
+            held.requests.push((position, release));
+            released
+        };
+        let _ = released.await;
+    }
+}
+
+/// The aggregation automaton of a validator: its executed chain's checkpoints, with the digests
+/// it answers held by a [`Gate`] if it has one.
+#[derive(Clone)]
+struct Gated {
+    inner: Checkpoints<Scheme, State>,
+    gate: Option<Gate>,
+}
+
+impl Automaton for Gated {
+    type Context = Height;
+    type Digest = Digest;
+
+    async fn propose(&mut self, checkpoint: Height) -> oneshot::Receiver<Digest> {
+        if let Some(gate) = &self.gate {
+            gate.pass(checkpoint.get()).await;
+        }
+        self.inner.propose(checkpoint).await
+    }
+
+    async fn verify(&mut self, checkpoint: Height, digest: Digest) -> oneshot::Receiver<bool> {
+        self.inner.verify(checkpoint, digest).await
+    }
+}
+
+/// A sender that records every message it sends, if it has a record.
+#[derive(Clone)]
+struct Recording<S> {
+    inner: S,
+    sent: Option<Arc<Mutex<Vec<Bytes>>>>,
+}
+
+impl<S: LimitedSender> LimitedSender for Recording<S> {
+    type PublicKey = S::PublicKey;
+    type Checked<'a>
+        = RecordingChecked<S::Checked<'a>>
+    where
+        Self: 'a;
+
+    fn check(
+        &mut self,
+        recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'_>, SystemTime> {
+        let sent = self.sent.clone();
+        let inner = self.inner.check(recipients)?;
+        Ok(RecordingChecked { inner, sent })
+    }
+}
+
+/// A checked send of a [`Recording`] sender.
+struct RecordingChecked<C> {
+    inner: C,
+    sent: Option<Arc<Mutex<Vec<Bytes>>>>,
+}
+
+impl<C: CheckedSender> CheckedSender for RecordingChecked<C> {
+    type PublicKey = C::PublicKey;
+
+    fn recipients(&self) -> Vec<Self::PublicKey> {
+        self.inner.recipients()
+    }
+
+    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<SendFeedback> {
+        let message: IoBufs = message.into();
+        if let Some(sent) = &self.sent {
+            sent.lock().push(Bytes::from(message.clone().coalesce()));
+        }
+        self.inner.send(message, priority)
+    }
+}
+
 /// Builds each producer block with a body worth its chain and height.
 #[derive(Clone)]
 struct Producer;
@@ -592,6 +730,9 @@ struct Validator {
     checkpoints: Checkpoints<Scheme, State>,
     archive: Archive,
     tally: Tally<Input>,
+    /// Every message a late joining validator sent on its aggregation channel, in order. Empty
+    /// for every other validator.
+    sent_acks: Arc<Mutex<Vec<Bytes>>>,
     _engine: Running<Digest>,
     _marshal: ServiceHandle,
     _handles: Vec<Handle<()>>,
@@ -616,6 +757,8 @@ struct Cluster {
     context: deterministic::Context,
     committee: Committee<MinPk>,
     oracle: Oracle<ed25519::PublicKey, deterministic::Context>,
+    /// Holds the checkpoint digests of every validator that does not join late.
+    gate: Gate,
 }
 
 impl Cluster {
@@ -646,6 +789,7 @@ impl Cluster {
             context,
             committee,
             oracle,
+            gate: Gate::default(),
         }
     }
 
@@ -864,14 +1008,17 @@ impl Cluster {
                 first: checkpoint_scope.1,
                 last: checkpoint_scope.2,
                 scheme: scheme.clone(),
-                automaton: checkpoints.clone(),
+                automaton: Gated {
+                    inner: checkpoints.clone(),
+                    gate: (!joining).then(|| self.gate.clone()),
+                },
                 reporter,
                 blocker: control.clone(),
                 priority_acks: false,
                 rebroadcast_timeout: NZDuration!(Duration::from_millis(500)),
                 recovery_after_rebroadcasts: NZU64!(2),
                 recoverer: recovery.clone(),
-                window: NZU64!(8),
+                window: WINDOW,
                 journal_partition: format!("{prefix}_aggregation"),
                 journal_write_buffer: NZUsize!(4_096),
                 journal_replay_buffer: NZUsize!(4_096),
@@ -883,7 +1030,13 @@ impl Cluster {
         )
         .expect("checkpoint scope is not registered");
         handles.push(recovery_resolver.start(channel(CHECKPOINT_RESOLVER)));
-        let aggregation = aggregation.start(channel(AGGREGATION));
+        let sent_acks = Arc::<Mutex<Vec<Bytes>>>::default();
+        let (sender, receiver) = channel(AGGREGATION);
+        let sender = Recording {
+            inner: sender,
+            sent: joining.then(|| Arc::clone(&sent_acks)),
+        };
+        let aggregation = aggregation.start((sender, receiver));
         handles.push(
             context
                 .child("aggregation_result")
@@ -970,6 +1123,7 @@ impl Cluster {
             checkpoints,
             archive,
             tally,
+            sent_acks,
             _engine: engine,
             _marshal: marshal_handle,
             _handles: handles,
@@ -1267,19 +1421,98 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
             &Sequential
         ));
 
-        // Only locally signed acknowledgements use the aggregation channel. The late validator
-        // participates in new checkpoints after recovering its skipped history.
-        let origin = committee.committee.identities[VALIDATORS as usize - 1].to_string();
-        let channel = AGGREGATION.to_string();
-        while metric_sum(
-            &context.encode(),
-            "messages_sent_total",
-            &[("origin", &origin), ("channel", &channel)],
-        ) <= 0.0
-        {
-            context.sleep(Duration::from_millis(50)).await;
-        }
+        // The late validator signs new checkpoints after recovering its skipped history.
+        sign_new_checkpoint(&mut context, &committee, &late).await;
     });
+}
+
+/// Has the late validator sign a new checkpoint, then waits for that checkpoint's certificate.
+///
+/// Aggregation signs a checkpoint only while it is uncertified, and peers can certify a checkpoint
+/// without the late validator before it executes the block. So this picks a position no peer has
+/// asked its automaton for yet, holds every peer's digest at and above it, and releases the peers
+/// only after the late validator signed that position.
+async fn sign_new_checkpoint(
+    context: &mut deterministic::Context,
+    committee: &Cluster,
+    late: &Validator,
+) {
+    let joiner = VALIDATORS as usize - 1;
+
+    // An engine asks its automaton for each position in its window, which starts at its frontier,
+    // only after it sets its frontier metric, and nothing else runs until the gate closes. So no
+    // validator has asked for a position at or beyond the largest frontier plus the window.
+    let encoded = context.encode();
+    let frontier = (0..VALIDATORS as usize)
+        .map(|index| {
+            let index = index.to_string();
+            metric_sum(&encoded, "aggregation_frontier", &[("index", &index)]) as u64
+        })
+        .max()
+        .expect("the committee has validators");
+    let position = frontier
+        .checked_add(WINDOW.get())
+        .expect("the gated position fits the checkpoint range");
+    committee.gate.close(position);
+
+    // Every peer asks for the position and is held, so no peer signs it.
+    while committee.gate.held(position) < joiner {
+        context.sleep(Duration::from_millis(50)).await;
+    }
+
+    // The late validator signs the position with its own key, over the block it executed there.
+    let trusted = committee
+        .committee
+        .verifier
+        .checkpoint(CHECKPOINT_NAMESPACE);
+    let signer = trusted
+        .participants()
+        .position(&committee.committee.identities[joiner])
+        .map(Participant::from_usize)
+        .expect("the late validator participates");
+    let ack = loop {
+        let found = late.sent_acks.lock().iter().find_map(|message| {
+            let ack = Ack::<Scheme, Digest>::decode_cfg(message.clone(), &())
+                .expect("the aggregation channel carries acknowledgements");
+            (ack.item.position.get() == position).then_some(ack)
+        });
+        if let Some(ack) = found {
+            break ack;
+        }
+        context.sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(ack.attestation.signer, signer);
+    assert!(ack.verify(context, &trusted, &Sequential));
+    let height = late.checkpoints.height(Height::new(position)).unwrap();
+    let block = late
+        .chain
+        .block_at(height)
+        .await
+        .expect("the late validator retains the block it signed");
+    assert_eq!(ack.item.digest, block.digest());
+
+    // No peer signed the position, so it has no certificate yet. Releasing the peers certifies it.
+    let (epoch, lowest, highest) = checkpoint_scope(&committee.committee);
+    let key = RecoveryKey {
+        namespace: aggregation::scheme::Scheme::<Digest>::recovery_namespace(&trusted),
+        epoch,
+        position: Height::new(position),
+    };
+    assert_eq!(committee.gate.held(position), joiner);
+    assert!(late.archive.get(&key).is_none());
+    committee.gate.open();
+    let encoded = loop {
+        if let Some(encoded) = late.archive.get(&key) {
+            break encoded;
+        }
+        context.sleep(Duration::from_millis(50)).await;
+    };
+    let certificate =
+        Certificate::<Scheme, Digest>::decode_cfg(encoded, &trusted.certificate_codec_config())
+            .expect("archived certificate decodes");
+    assert!(certificate.verify_for(context, &trusted, epoch, lowest, highest, &Sequential));
+    assert_eq!(certificate.item.position, Height::new(position));
+    assert_eq!(certificate.item.digest, ack.item.digest);
 }
 
 /// What the first run of [`a_late_validator_resumes_state_sync_after_a_crash`] saw at its cut.
@@ -1304,7 +1537,7 @@ struct AtCut {
 /// database already reached. The block the resumed sync reaches is the one the honest validators
 /// executed at its height. The application hook receives no block at or below it in either run.
 /// The late validator then executes the same blocks as its peers, recovers every checkpoint
-/// certificate through its base, and sends checkpoint acknowledgements.
+/// certificate through its base, and signs a new checkpoint.
 #[rstest::rstest]
 #[case::mid_sync(Cut::MidSync)]
 #[case::synced(Cut::Synced)]
@@ -1469,17 +1702,7 @@ fn a_late_validator_resumes_state_sync_after_a_crash(#[case] cut: Cut) {
         ));
         assert_eq!(certificate.item.digest, base.digest());
 
-        // The metrics registry is new after the restart, so these acknowledgements were sent
-        // after it.
-        let origin = committee.committee.identities[joiner].to_string();
-        let channel = AGGREGATION.to_string();
-        while metric_sum(
-            &context.encode(),
-            "messages_sent_total",
-            &[("origin", &origin), ("channel", &channel)],
-        ) <= 0.0
-        {
-            context.sleep(Duration::from_millis(50)).await;
-        }
+        // The late validator signs new checkpoints after the restart.
+        sign_new_checkpoint(&mut context, &committee, &late).await;
     });
 }
