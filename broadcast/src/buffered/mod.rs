@@ -365,6 +365,55 @@ mod tests {
     }
 
     #[test]
+    fn policy_coalesces_at_first_broadcast_position() {
+        // Queue a broadcast, an unrelated get, then a duplicate of the broadcast.
+        let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
+        let message = TestMessage::shared(b"first position");
+        let message = Digested::precomputed(message.clone(), message.digest());
+        let other = TestMessage::shared(b"unrelated get");
+        let first = PrivateKey::from_seed(1).public_key();
+        let second = PrivateKey::from_seed(2).public_key();
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Broadcast {
+                recipients: Recipients::One(first.clone()),
+                message: message.clone(),
+            },
+        );
+        let (responder, _receiver) = commonware_utils::channel::oneshot::channel();
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Get {
+                digest: other.digest(),
+                responder,
+            },
+        );
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Broadcast {
+                recipients: Recipients::One(second.clone()),
+                message,
+            },
+        );
+
+        // Draining must yield the merged broadcast before the get.
+        let mut drained = VecDeque::new();
+        overflow.drain(|message| {
+            drained.push_back(message);
+            None
+        });
+        assert_eq!(drained.len(), 2);
+        let Some(Message::Broadcast { recipients, .. }) = drained.pop_front() else {
+            panic!("coalesced broadcast must keep the first broadcast's position");
+        };
+        let Recipients::Some(recipients) = recipients else {
+            panic!("distinct recipients must merge into Recipients::Some");
+        };
+        assert_eq!(recipients, vec![first, second]);
+        assert!(matches!(drained.pop_front(), Some(Message::Get { .. })));
+    }
+
+    #[test]
     fn policy_reuses_carried_digests_of_overflow_broadcasts() {
         /// Number of distinct broadcasts that the overflow queue must retain.
         const MESSAGES: usize = 1_000;

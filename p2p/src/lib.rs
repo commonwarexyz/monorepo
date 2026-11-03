@@ -509,6 +509,13 @@ mod tests {
             assert!(matches!(merged, Recipients::All));
             return;
         }
+        let equal_ones =
+            matches!((left, right), (Recipients::One(l), Recipients::One(r)) if l == r);
+        assert_eq!(
+            matches!(merged, Recipients::One(_)),
+            equal_ones,
+            "only two equal One recipients may stay One"
+        );
         let mut expected = BTreeSet::new();
         for recipients in [left, right] {
             match recipients {
