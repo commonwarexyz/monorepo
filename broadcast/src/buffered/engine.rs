@@ -174,7 +174,6 @@ where
             self.strategy.clone(),
         );
         ingress.start();
-
         let mut peer_set_subscription = self.peer_provider.subscribe().await;
 
         select_loop! {

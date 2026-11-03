@@ -751,7 +751,6 @@ where
                 self.strategy.clone(),
             );
         receiver_service.start();
-
         let mut peer_set_subscription = self.peer_provider.subscribe().await;
 
         select_loop! {
