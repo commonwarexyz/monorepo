@@ -24,8 +24,7 @@
 //! - Exports `ThreadPool`, `ThreadPoolBuilder`, `ThreadPoolBuildError`, and `Yield` through
 //!   `commonware_parallel::rayon`. Retained free functions are crate-private or test-only.
 //! - Removed the global pool, `build_global`, `initialize`, `Registry::current`, the `primed`
-//!   latch, and `GlobalPoolAlreadyInitialized`. Internal `join` and `placement_width` require a
-//!   calling worker.
+//!   latch, and `GlobalPoolAlreadyInitialized`. Internal `join` requires a calling worker.
 //! - Removed free `spawn`, `broadcast`, and `spawn_broadcast`.
 //! - Removed scopes and their `CountLatch` operations, FIFO scheduling, `yield_local`,
 //!   `current_thread_has_pending_tasks`, `max_num_threads`, and `ThreadPool::join`.
@@ -54,15 +53,17 @@
 //!   `Vec::with_capacity` in place of `new` followed by `reserve`.
 //! - Adapted docs to the retained API, clarified queued join execution, removed inaccessible
 //!   doctests and section banners, and named the scheduler in its abort message.
-//!
 //! - Workers form fixed groups with separate Local and Wide deques. Local jobs stay within one
 //!   group. Wide jobs can run on any worker. Jobs carry their placement through stealing,
-//!   nested helping, and unwinding. The bridge splits according to that placement's width.
+//!   nested helping, and unwinding. The bridge's splitter sizes its split budget by the width
+//!   of the calling worker's placement in place of `current_num_threads`, which is removed.
 //! - Each group owns its Local injector and sleep states. All groups share a Wide injector.
-//!   Wide publication and idle exits propagate wakeups between groups. Native worker waits
-//!   wake the owning worker through its group and offset.
-//! - Internal placement methods run, spawn, and broadcast work within groups. Public pool
-//!   operations remain available. A ranged broadcast implementation also supports group homing.
+//!   Workers alternate between jobs from their group's injector and Wide jobs, and take Wide
+//!   jobs from other workers' deques before the Wide injector. Wide publication and idle exits
+//!   propagate wakeups between groups. Native worker waits wake the owning worker through its
+//!   group and offset.
+//! - Internal placement methods run and spawn work within groups. Public pool operations remain
+//!   available.
 //! - Added group eligibility, wake propagation, and placement-restoration tests, plus Loom
 //!   models of the wake protocol.
 //!
@@ -87,17 +88,18 @@ mod unwind;
 #[cfg(all(test, feature = "loom"))]
 mod wake_loom_tests;
 
-#[cfg(all(target_os = "linux", not(miri)))]
-pub(crate) use self::thread_pool::in_worker;
-pub use self::thread_pool::{ThreadPool, Yield};
+#[cfg(any(test, all(target_os = "linux", not(miri))))]
+pub(crate) use self::thread_pool::current_thread_index;
 #[cfg(test)]
-pub(crate) use self::thread_pool::{current_thread_index, yield_now};
+pub(crate) use self::thread_pool::yield_now;
+pub use self::thread_pool::{ThreadPool, Yield};
 pub(crate) use self::{
     bridge::{fold_init, map_collect_vec, map_init_collect_vec, try_fold, try_map_collect_vec},
     join::join,
     registry::Placement,
     sort::{par_mergesort, par_quicksort},
 };
+pub(crate) use sleep::THREADS_MAX;
 
 /// Returns the number of workers eligible to run the calling worker's current job.
 ///

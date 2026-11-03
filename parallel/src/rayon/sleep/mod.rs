@@ -218,21 +218,20 @@ impl Sleep {
     /// Signals that `num_jobs` new jobs were injected into the thread
     /// pool from outside. This function will ensure that there are
     /// threads available to process them, waking threads from sleep
-    /// if necessary. Returns how many of the jobs this group leaves
-    /// uncovered, as `new_jobs` describes.
+    /// if necessary.
     ///
     /// # Parameters
     ///
     /// - `num_jobs`: lower bound on number of jobs available for stealing.
     ///   We'll try to get at least one thread per job.
     #[inline]
-    pub(super) fn new_injected_jobs(&self, num_jobs: u32, queue_was_empty: bool) -> u32 {
+    pub(super) fn new_injected_jobs(&self, num_jobs: u32, queue_was_empty: bool) {
         // This fence is needed to guarantee that threads
         // as they are about to fall asleep, observe any
         // new jobs that may have been injected.
         fence(Ordering::SeqCst);
 
-        self.new_jobs(num_jobs, queue_was_empty)
+        self.new_jobs(num_jobs, queue_was_empty);
     }
 
     /// Signals that `num_jobs` new jobs were pushed onto a thread's
@@ -241,16 +240,15 @@ impl Sleep {
     /// if necessary. However, this is not guaranteed: under certain
     /// race conditions, the function may fail to wake any new
     /// threads; in that case the existing thread should eventually
-    /// pop the job. Returns how many of the jobs this group leaves
-    /// uncovered, as `new_jobs` describes.
+    /// pop the job.
     ///
     /// # Parameters
     ///
     /// - `num_jobs`: lower bound on number of jobs available for stealing.
     ///   We'll try to get at least one thread per job.
     #[inline]
-    pub(super) fn new_internal_jobs(&self, num_jobs: u32, queue_was_empty: bool) -> u32 {
-        self.new_jobs(num_jobs, queue_was_empty)
+    pub(super) fn new_internal_jobs(&self, num_jobs: u32, queue_was_empty: bool) {
+        self.new_jobs(num_jobs, queue_was_empty);
     }
 
     /// Notifies the group of new work and returns the number of jobs left uncovered.
@@ -260,7 +258,7 @@ impl Sleep {
     /// uncovered without waking a worker therefore had no sleeper available to wake. This
     /// accounting reserves no worker for a job.
     #[inline]
-    fn new_jobs(&self, num_jobs: u32, queue_was_empty: bool) -> u32 {
+    pub(super) fn new_jobs(&self, num_jobs: u32, queue_was_empty: bool) -> u32 {
         // Read the counters and, if sleepy workers have announced themselves, announce that
         // work is now available.
         let counters = self

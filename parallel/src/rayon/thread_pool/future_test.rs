@@ -1,5 +1,5 @@
 use super::ThreadPool;
-use crate::rayon::{ThreadPoolBuilder, sleep::with_sleep_notification};
+use crate::rayon::{ThreadPoolBuilder, registry::Placement, sleep::with_sleep_notification};
 use commonware_utils::sync::Mutex;
 use futures::{channel::oneshot, future::poll_fn};
 use std::{
@@ -269,11 +269,36 @@ fn canceled_sender_wakes_a_sleeping_worker_of_a_later_group() {
     assert!(release_one_sleeping_worker(4, 2, 3, |_, tx| drop(tx)).is_err());
 }
 
+/// A queued producer in another group wakes only the worker waiting for its result.
 #[commonware_macros::test_group("miri")]
 #[test]
 fn queued_work_wakes_a_sleeping_worker_of_a_later_group() {
-    assert_eq!(
-        release_one_sleeping_worker(4, 2, 3, |pool, tx| pool.spawn(move || tx.send(42).unwrap())),
-        Ok(42)
-    );
+    for cancel in [false, true] {
+        let result = release_one_sleeping_worker(4, 2, 3, |pool, tx| {
+            // Keep the producer in another group until the waiting workers are asleep.
+            let (started_tx, started_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            pool.spawn_in(Placement::Local(0), move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                if !cancel {
+                    tx.send(42).unwrap();
+                }
+            });
+            started_rx.recv().unwrap();
+
+            // Let incidental wakeups settle so only the result can wake the waiting worker.
+            while pool.sleeping_workers() < 3 {
+                thread::yield_now();
+            }
+            release_tx.send(()).unwrap();
+        });
+
+        // Both completion and cancellation must reach the same waiting worker.
+        if cancel {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result, Ok(42));
+        }
+    }
 }

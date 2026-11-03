@@ -563,7 +563,7 @@ fn node(pool: &Arc<ThreadPool>, counts: &Arc<Counts>, expected: Placement, seed:
     let choice = usize::try_from(roll >> 40).unwrap() % (groups + 1);
     let placement = if choice == groups {
         Placement::Wide {
-            near: usize::try_from(roll >> 20).unwrap() % groups,
+            near: usize::try_from((roll >> 20) % u64::try_from(groups).unwrap()).unwrap(),
         }
     } else {
         Placement::Local(choice)
@@ -840,12 +840,13 @@ fn group_broadcasts_reach_only_their_group() {
         record.lock().push(
             runner
                 .current_worker()
-                .map(|worker| (worker.index, worker.group)),
+                .map(|worker| (worker.index, worker.placement)),
         );
     });
-    wait_until("the broadcast runs", || !ran.lock().is_empty());
-    thread::sleep(Duration::from_millis(20));
-    assert_eq!(*ran.lock(), [Some((4, 2))]);
+
+    // Per-worker broadcast order makes this wait for the selected callback and every no-op.
+    pool.broadcast(|_| ());
+    assert_eq!(*ran.lock(), [Some((4, Placement::Local(2)))]);
 }
 
 /// A job spawned from a thread outside the pool runs under the placement the spawn names: on the
@@ -888,6 +889,138 @@ fn a_spawn_from_outside_the_pool_runs_under_the_placement_it_names() {
             .iter()
             .all(|placement| matches!(placement, Some(Placement::Wide { .. }))),
         "{placements:?}"
+    );
+}
+
+/// With no deque work, both classes of injected jobs make progress while the other has a backlog.
+#[test]
+fn outside_spawns_of_either_placement_make_progress() {
+    within(|| {
+        // Exercise both source orders with one worker so completion order is observable.
+        const LATER: usize = 4;
+        let pool = pool(1, 1);
+        for (first, later) in [
+            (Placement::Wide { near: 0 }, Placement::Local(0)),
+            (Placement::Local(0), Placement::Wide { near: 0 }),
+        ] {
+            let order = Arc::new(Mutex::new(Vec::new()));
+            let record = |label: &'static str| {
+                let order = Arc::clone(&order);
+                move || order.lock().push(label)
+            };
+
+            // Hold the only worker until every job below is queued.
+            let (started_tx, started_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            pool.spawn_in(Placement::Local(0), move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            started_rx.recv().unwrap();
+            pool.spawn_in(first, record("first"));
+            for _ in 0..LATER {
+                pool.spawn_in(later, record("later"));
+            }
+            release_tx.send(()).unwrap();
+
+            // The older job must run before the other source drains its backlog.
+            wait_until("every queued job runs", || order.lock().len() == LATER + 1);
+            let order = order.lock();
+            let first = order.iter().position(|label| *label == "first").unwrap();
+            assert!(
+                first < LATER,
+                "the first job must not wait for every job in the other injector: {order:?}"
+            );
+        }
+    });
+}
+
+/// Queues a job on the whole pool from a thread taken over with `use_current_thread`, outside
+/// any job, so it stays on that thread's own wide deque while the thread runs its own code. Threads
+/// outside the pool then place `injected` jobs on the group and, when `wide` is set, as many on
+/// the whole pool. Returns the position at which the other worker ran the taken-over thread's job
+/// and the labels of every job in the order they ran.
+fn taken_over_wide_job_position(injected: usize, wide: bool) -> (usize, Vec<&'static str>) {
+    within(move || {
+        // Keep the owner in user code while the managed worker runs queued work.
+        let pool = Arc::new(
+            ThreadPoolBuilder::new()
+                .num_threads(2)
+                .use_current_thread()
+                .build()
+                .unwrap(),
+        );
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let from_outside = |submit: Box<dyn FnOnce(&ThreadPool) + Send>| {
+            let pool = Arc::clone(&pool);
+            thread::spawn(move || submit(&pool)).join().unwrap();
+        };
+
+        // Hold the other worker with a job from the group's injector until every job below is
+        // queued.
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        from_outside(Box::new(move |pool| {
+            pool.spawn_in(Placement::Local(0), move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+        }));
+        started_rx.recv().unwrap();
+        {
+            let order = Arc::clone(&order);
+            pool.spawn(move || order.lock().push("taken over"));
+        }
+        {
+            let order = Arc::clone(&order);
+            from_outside(Box::new(move |pool| {
+                for _ in 0..injected {
+                    let local = Arc::clone(&order);
+                    pool.spawn_in(Placement::Local(0), move || local.lock().push("local"));
+                    if wide {
+                        let order = Arc::clone(&order);
+                        pool.spawn_in(Placement::Wide { near: 0 }, move || {
+                            order.lock().push("wide");
+                        });
+                    }
+                }
+            }));
+        }
+        release_tx.send(()).unwrap();
+
+        let total = injected * (1 + usize::from(wide)) + 1;
+        wait_until("every queued job runs", || order.lock().len() == total);
+        let order = order.lock().clone();
+        let position = order
+            .iter()
+            .position(|label| *label == "taken over")
+            .unwrap();
+        (position, order)
+    })
+}
+
+/// A thread taken over with `use_current_thread` that queues a job on the whole pool outside any
+/// job keeps it on its own wide deque while it runs its own code. Another worker must take it
+/// without first running every job that threads outside the pool place on the group after it.
+#[test]
+fn a_wide_job_queued_by_a_taken_over_thread_is_not_held_back_by_group_spawns() {
+    const LOCAL: usize = 8;
+    let (position, order) = taken_over_wide_job_position(LOCAL, false);
+    assert!(
+        position < LOCAL,
+        "the wide job must not wait for every group job queued after it: {order:?}"
+    );
+}
+
+/// A job a taken-over thread keeps on its own wide deque is not held back by injected jobs either,
+/// even while threads outside the pool keep both the group's injector and the wide injector busy.
+#[test]
+fn a_wide_job_queued_by_a_taken_over_thread_is_not_held_back_by_injected_jobs() {
+    const INJECTED: usize = 8;
+    let (position, order) = taken_over_wide_job_position(INJECTED, true);
+    assert!(
+        position < INJECTED,
+        "the wide job must not wait for every job injected after it: {order:?}"
     );
 }
 

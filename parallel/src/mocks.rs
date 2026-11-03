@@ -29,7 +29,7 @@ pub const WORKERS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 /// the most parallel shapes cut more batches and tiles than the pool has threads.
 pub const TASKS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 
-/// Returns a strategy on a new pool of `workers` threads that plans for `parallelism` tasks.
+/// Returns a strategy on a new pool of `workers` threads that plans for up to `parallelism` tasks.
 ///
 /// Planning more tasks than the pool has threads cuts more batches and tiles than can run at
 /// once, so threads that finish early claim the pending ones.
@@ -75,8 +75,9 @@ impl Rayon {
     /// Returns a copy of the strategy with the same pool and planning parallelism but no policy.
     ///
     /// Without a policy, parallel bodies run whenever the planning parallelism exceeds one, and
-    /// batches and tiles are planned at that parallelism. A spawned job is handed off whenever
-    /// the pool has more than one worker.
+    /// batches and tiles are planned at that parallelism, or at most a group's width when placed
+    /// on one group of several. A spawned job is handed off whenever the pool has more than one
+    /// worker.
     pub(crate) fn without_policy(&self) -> Self {
         Self {
             policy: None,
@@ -196,7 +197,7 @@ impl Strategy for Explorer {
             // the pool only when the calling thread is the pool's worker, as on a runtime whose
             // executor thread is registered with the pool. Otherwise a job the explorer chose to
             // hand off would stay with the caller unnoticed.
-            let pool = &self.strategy.thread_pool;
+            let pool = self.strategy.groups.pool();
             assert!(
                 pool.current_num_threads() > 1 || pool.current_thread_index().is_some(),
                 "a handed-off job must run on a multi-worker pool or on the pool's own worker"
@@ -454,7 +455,7 @@ impl Strategy for Explorer {
 /// a seeded run, use [`Explorer::seeded`] with its seed on a strategy planning [`TASKS`] tasks.
 ///
 /// Each call builds that strategy and drops it on return. The pool outlives the call only while
-/// `f` keeps a clone of an [`Explorer`].
+/// `f` keeps a clone of an [`Explorer`] or a job `f` handed off is still finishing.
 ///
 /// # Panics
 ///
@@ -663,7 +664,7 @@ mod tests {
     fn explore_drops_its_pool_on_return() {
         // Every run shares one pool, and nothing holds it once `explore` returns.
         let mut pools = Vec::new();
-        explore(|strategy| pools.push(Arc::downgrade(&strategy.strategy.thread_pool)));
+        explore(|strategy| pools.push(Arc::downgrade(strategy.strategy.groups.pool())));
         assert!(pools.iter().all(|pool| pool.ptr_eq(&pools[0])));
         assert!(
             pools[0].upgrade().is_none(),
