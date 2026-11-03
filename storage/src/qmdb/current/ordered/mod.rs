@@ -12,8 +12,6 @@
 pub mod db;
 pub mod fixed;
 pub mod proof;
-#[cfg(any(test, feature = "test-traits"))]
-mod test_trait_impls;
 pub mod variable;
 
 /// Wire tag for [proof::constant::ExclusionProof::KeyValue].
@@ -97,7 +95,7 @@ pub mod tests {
         let partition = "build-small".to_string();
         let db: C = open_db(context.child("first"), partition.clone()).await;
         assert_eq!(db.inactivity_floor_loc(), Location::<F>::new(0));
-        assert_eq!(db.oldest_retained(), 0);
+        assert_eq!(db.bounds().start, Location::<F>::new(0));
         let root0 = db.root();
         drop(db);
         let db: C = open_db(context.child("second"), partition.clone()).await;
