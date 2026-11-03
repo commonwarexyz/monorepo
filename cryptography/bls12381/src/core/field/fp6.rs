@@ -160,7 +160,7 @@ impl<F> Fp6<F> {
     /// Every component of both factors must have limb bound `1`.
     /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn product<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
+    pub fn product<S: Simd>(&self, simd: S, rhs: &Self) -> Product<F, S>
     where
         F: Field<S>,
     {
@@ -188,7 +188,7 @@ impl<F> Fp6<F> {
     /// Every component must have limb bound `1` and integer bound at most [`SQUARE_BOUND`].
     /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn square_product<S: Simd>(self, simd: S) -> Product<F, S>
+    pub fn square_product<S: Simd>(&self, simd: S) -> Product<F, S>
     where
         F: Field<S>,
     {
@@ -361,7 +361,11 @@ impl<F> Fp6<F> {
                     Fp2::<F>::product_mul_by_nonresidue(simd, c2.square_product::<K, S>(simd)),
                     c0.product(simd, c1),
                 );
-                let a2 = Fp2::<F>::product_sub(simd, c1.square_product::<K, S>(simd), c0.product(simd, c2));
+                let a2 = Fp2::<F>::product_sub(
+                    simd,
+                    c1.square_product::<K, S>(simd),
+                    c0.product(simd, c2),
+                );
                 let a0 = Fp2::<F>::reduce_tight::<BIAS, S>(simd, a0);
                 let a1 = Fp2::<F>::reduce_tight::<BIAS, S>(simd, a1);
                 let a2 = Fp2::<F>::reduce_tight::<BIAS, S>(simd, a2);
