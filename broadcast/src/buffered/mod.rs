@@ -21,6 +21,13 @@
 //! `max_message_size`, less the subchannel prefix on a
 //! [Muxer](commonware_p2p::utils::mux::Muxer) subchannel.
 //!
+//! # Ingress
+//!
+//! A background receiver decodes inbound messages off the engine's event loop with
+//! [`Config::strategy`] and blocks peers whose messages fail to decode with [`Config::blocker`].
+//! Decoded messages wait in an inbox sized to the network receiver's
+//! [`capacity`](commonware_p2p::Receiver::capacity) and are dropped when it is full.
+//!
 //! # Message Caching
 //!
 //! The engine receives messages from other peers and caches them. The cache is a bounded queue of
@@ -36,15 +43,6 @@
 //! buffer messages. When a peer is no longer a primary of any tracked set, its buffered messages
 //! are evicted unless buffered by any other primary peer. A peer that only leaves the latest set
 //! keeps its messages through the overlap window.
-//!
-//! # Ingress
-//!
-//! A background receiver decodes inbound messages off the engine's event loop with
-//! [`Config::strategy`] and blocks peers whose messages fail to decode with [`Config::blocker`].
-//! Decoded messages wait in an inbox sized to the network receiver's
-//! [`capacity`](commonware_p2p::Receiver::capacity) and are dropped when it is full.
-//!
-//! Application requests wait in a separate inbox sized by [`Config::mailbox_size`].
 
 mod config;
 pub use config::Config;
