@@ -122,7 +122,7 @@ pub fn miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<F> 
     };
     let mut product = shared_miller_loop(simd, first);
     for chunk in chunks {
-        product = product.mul(simd, shared_miller_loop(simd, chunk));
+        product = product.mul(simd, &shared_miller_loop(simd, chunk));
     }
     product
 }
@@ -144,13 +144,13 @@ fn shared_miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<
         }
         for (point, pair) in points.iter_mut().zip(pairs) {
             let (doubled, line) = double_step(simd, *point, pair);
-            f = f.mul_by_line(simd, line);
+            f = f.mul_by_line(simd, &line);
             *point = doubled;
         }
         if (Z >> bit) & 1 == 1 {
             for (point, pair) in points.iter_mut().zip(pairs) {
                 let (sum, line) = add_step(simd, *point, pair);
-                f = f.mul_by_line(simd, line);
+                f = f.mul_by_line(simd, &line);
                 *point = sum;
             }
         }
@@ -175,16 +175,19 @@ fn double_step<S: Simd, F: Field<S>>(
         #[inline(always)]
         move |simd: S| {
             let doubling = t.doubling(simd);
-            let xx3 = t
-                .x
-                .ready::<1, S>(simd)
-                .square::<{ g2::BOUND + 1 }, S>(simd)
-                .mul_small::<3, S>(simd)
-                .carry(simd);
+            let xx3 =
+                t.x.ready::<1, S>(simd)
+                    .square::<{ g2::BOUND + 1 }, S>(simd)
+                    .mul_small::<3, S>(simd)
+                    .carry(simd);
             // y^2 is below 18p in every representation.
             let l0 = doubling.b3zz.sub::<18, S>(simd, doubling.yy).carry(simd);
             let l2 = xx3.mul_base(simd, pair.x);
-            let l3 = doubling.yz.double(simd).carry(simd).mul_base(simd, pair.negated_y);
+            let l3 = doubling
+                .yz
+                .double(simd)
+                .carry(simd)
+                .mul_base(simd, pair.negated_y);
             (doubling.point, [l0, l2, l3])
         },
     )
@@ -196,11 +199,7 @@ fn double_step<S: Simd, F: Field<S>>(
 /// The line is `[qx y - qy x, (qy z - y) xp, -(qx z - x) yp]` and the point is [`Point::add`]'s.
 /// Runs as its own kernel, so callers share one copy.
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn add_step<S: Simd, F: Field<S>>(
-    simd: S,
-    t: Point<F>,
-    pair: &Pair<F>,
-) -> (Point<F>, [Fp2<F>; 3]) {
+fn add_step<S: Simd, F: Field<S>>(simd: S, t: Point<F>, pair: &Pair<F>) -> (Point<F>, [Fp2<F>; 3]) {
     let pair = *pair;
     simd.execute(
         #[inline(always)]
@@ -237,23 +236,23 @@ fn add_step<S: Simd, F: Field<S>>(
 /// its pairing. The result is the same as blst's.
 pub fn final_exponentiation<S: Simd, F: Field<S>>(simd: S, f: Fp12<F>) -> Fp12<F> {
     // The easy part: f^((p^6 - 1) (p^2 + 1)) lies in the cyclotomic subgroup.
-    let easy = f.conjugate(simd).mul(simd, f.invert(simd));
-    let easy = easy.frobenius(simd).frobenius(simd).mul(simd, easy);
+    let easy = f.conjugate(simd).mul(simd, &f.invert(simd));
+    let easy = easy.frobenius(simd).frobenius(simd).mul(simd, &easy);
 
     let y0 = easy.cyclotomic_square(simd);
     let y1 = raise_to_z(simd, y0);
     let y2 = raise_to_half_z(simd, y1);
-    let y1 = y1.mul(simd, easy.conjugate(simd)).conjugate(simd);
-    let y1 = y1.mul(simd, y2);
+    let y1 = y1.mul(simd, &easy.conjugate(simd)).conjugate(simd);
+    let y1 = y1.mul(simd, &y2);
     let y2 = raise_to_z(simd, y1);
     let y3 = raise_to_z(simd, y2);
-    let y3 = y3.mul(simd, y1.conjugate(simd));
+    let y3 = y3.mul(simd, &y1.conjugate(simd));
     let y1 = y1.frobenius(simd).frobenius(simd).frobenius(simd);
     let y2 = y2.frobenius(simd).frobenius(simd);
-    let y1 = y1.mul(simd, y2);
-    let y2 = raise_to_z(simd, y3).mul(simd, y0).mul(simd, easy);
-    let y1 = y1.mul(simd, y2);
-    y1.mul(simd, y3.frobenius(simd))
+    let y1 = y1.mul(simd, &y2);
+    let y2 = raise_to_z(simd, y3).mul(simd, &y0).mul(simd, &easy);
+    let y1 = y1.mul(simd, &y2);
+    y1.mul(simd, &y3.frobenius(simd))
 }
 
 /// Returns `a^(z / 2)` for `a` in the cyclotomic subgroup.
@@ -264,7 +263,7 @@ fn raise_to_half_z<S: Simd, F: Field<S>>(simd: S, a: Fp12<F>) -> Fp12<F> {
     for bit in (0..62).rev() {
         result = result.cyclotomic_square(simd);
         if (HALF_Z >> bit) & 1 == 1 {
-            result = result.mul(simd, a);
+            result = result.mul(simd, &a);
         }
     }
     result.conjugate(simd)
@@ -433,7 +432,9 @@ mod tests {
 
     #[test]
     fn pairings_match_blst() {
-        let lanes: Vec<_> = (0..MAX_LANES as u8).map(|seed| lane(seed, 1, false)).collect();
+        let lanes: Vec<_> = (0..MAX_LANES as u8)
+            .map(|seed| lane(seed, 1, false))
+            .collect();
         check(&lanes, test_dispatch(Pairings(&lanes, 2)));
         // Run every representation and vector width even on hosts without native SIMD.
         check(&lanes, Pairings(&lanes, 1).portable(EmulatedNeon));
@@ -443,7 +444,9 @@ mod tests {
     #[test]
     fn multi_pairings_match_blst() {
         // More pairs than share squarings, the last of them neutral.
-        let lanes: Vec<_> = (0..MAX_LANES as u8).map(|seed| lane(seed, PAIRS, true)).collect();
+        let lanes: Vec<_> = (0..MAX_LANES as u8)
+            .map(|seed| lane(seed, PAIRS, true))
+            .collect();
         check(&lanes, test_dispatch(Pairings(&lanes, 1)));
         check(&lanes, Pairings(&lanes, 1).portable(EmulatedX86V4C));
     }
@@ -500,7 +503,11 @@ mod tests {
         }
         // Without the last lane's pair, an even count leaves one e(-P, 2 Q).
         if F::LANES > 1 && F::LANES % 2 == 0 {
-            let pair = Pair::<F>::load(simd, &pairs[..F::LANES - 1], &([[0; FP_BYTES]; 2], g2(None).0));
+            let pair = Pair::<F>::load(
+                simd,
+                &pairs[..F::LANES - 1],
+                &([[0; FP_BYTES]; 2], g2(None).0),
+            );
             let product = miller_loop(simd, &[pair]).product_of_lanes(simd);
             final_exponentiation(simd, product).store(simd, &mut output);
             assert!(output[0] != ONE);
