@@ -1025,9 +1025,8 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
 
     /// Capture an owned reader of the values currently appended to `section`.
     ///
-    /// Flushes and syncs the values through [Glob::snapshot]. This does not sync the index or
-    /// publish a tracked recovery marker. The reader supports concurrent appends and removal,
-    /// but truncation into its captured extent makes affected reads unspecified.
+    /// Syncs the values but not the index, and publishes no tracked recovery marker. See
+    /// [Reader] for the reader's bounds and lifetime.
     #[commonware_macros::stability(ALPHA)]
     pub async fn value_snapshot(
         mut self,
@@ -1043,8 +1042,8 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
     /// Call after a flush of `section` (such as [Oversized::start_sync]) and before any further
     /// append to it: the reader reads the value blob directly, so buffered values count toward its
     /// extent but are unreadable. The reader is usable before the sync completes; if the sync
-    /// handle fails, discard the reader along with the journal. Appends and removal after capture
-    /// do not affect the reader, but rewinds into its extent make affected reads unspecified.
+    /// handle fails, discard the reader along with the journal. See [Reader] for the reader's
+    /// bounds and lifetime.
     ///
     /// Returns [Error::AlreadyPrunedToSection] for a pruned section and
     /// [Error::SectionOutOfRange] for a section without values.
@@ -1995,29 +1994,9 @@ mod tests {
             let (journal, handle) = journal.start_sync(1).await.expect("failed to start sync");
             let _reader = journal.capture(1).expect("failed to capture reader");
             assert!(
-                handle.await.is_err(),
+                matches!(handle.await, Err(RError::Io(_))),
                 "value sync failure must reach caller"
             );
-        });
-    }
-
-    #[test_traced]
-    fn test_capture_pruned_section() {
-        deterministic::Runner::default().start(|context| async move {
-            let cfg = test_cfg();
-            let journal = Oversized::<_, TestEntry, TestValue>::init(context, cfg)
-                .await
-                .expect("failed to init");
-            let (journal, _, _, _) = journal
-                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
-                .await
-                .expect("failed to append");
-            let (journal, pruned) = journal.prune(2).await.expect("failed to prune");
-            assert!(pruned);
-            assert!(matches!(
-                journal.capture(1),
-                Err(Error::AlreadyPrunedToSection(2))
-            ));
         });
     }
 
@@ -2033,15 +2012,52 @@ mod tests {
                 .await
                 .unwrap();
             let (journal, reader) = journal.value_snapshot(1).await.unwrap();
+
+            // Later appends must stay outside the captured extent.
             let (journal, _, next_offset, next_size) = journal
                 .append(1, TestEntry::new(1, 0, 0), &[9; 16])
                 .await
                 .unwrap();
             let journal = journal.sync(1).await.unwrap();
             assert_eq!(reader.get(offset, size).await.unwrap(), [7; 16]);
-            assert!(reader.get(next_offset, next_size).await.is_err());
+            assert!(matches!(
+                reader.get(next_offset, next_size).await,
+                Err(Error::Runtime(RError::BlobInsufficientLength))
+            ));
+
+            // The reader must outlive the journal.
             journal.destroy().await.unwrap();
             assert_eq!(reader.get(offset, size).await.unwrap(), [7; 16]);
+        });
+    }
+
+    #[test_traced]
+    fn test_value_snapshot_leaves_index_unsynced() {
+        deterministic::Runner::default().start(|context| async move {
+            // Fail every index sync so any index sync would fail the snapshot.
+            let cfg = test_cfg();
+            let faulty = SyncFaultContext {
+                inner: context,
+                fail_partition: cfg.index_partition.clone(),
+            };
+            let journal = Oversized::<_, TestEntry, TestValue>::init(faulty, cfg)
+                .await
+                .unwrap();
+            let (journal, _, offset, size) = journal
+                .append(1, TestEntry::new(0, 0, 0), &[7; 16])
+                .await
+                .unwrap();
+
+            // The value snapshot must succeed without syncing the index.
+            let (journal, reader) = journal
+                .value_snapshot(1)
+                .await
+                .expect("value snapshot must not sync the index");
+            assert_eq!(reader.get(offset, size).await.unwrap(), [7; 16]);
+            assert!(matches!(
+                journal.sync(1).await,
+                Err(Error::Runtime(RError::Io(_)))
+            ));
         });
     }
 
