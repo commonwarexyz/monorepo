@@ -5,9 +5,8 @@ use std::{
     sync::{Arc, Weak},
 };
 
-/// Minimum number of stale weak pointers a parent accumulates before it
-/// compacts its child list, so short lists batch their cleanup. Longer lists
-/// wait until half of their entries are stale (see [`Children::push`]).
+/// Minimum stale-child count a parent accumulates before [`Children::push`]
+/// compacts its child list, so short lists batch their cleanup.
 const STALE_CHILD_THRESHOLD: usize = 32;
 
 /// Tracks the relationship between runtime contexts.
@@ -35,9 +34,9 @@ struct Children {
 }
 
 impl Children {
-    /// Appends a weak reference to `child`, compacting stale entries first if
-    /// the stale count has reached the larger of [`STALE_CHILD_THRESHOLD`] and
-    /// half the list, so compaction stays amortized constant time per push.
+    /// Appends a weak reference to `child`, first compacting the list when the
+    /// stale count reaches both [`STALE_CHILD_THRESHOLD`] and half the list, so
+    /// compaction costs amortized constant time per push.
     fn push(&mut self, child: &Arc<Tree>) {
         if self.stale >= STALE_CHILD_THRESHOLD.max(self.links.len() / 2) {
             self.links.retain(|weak| weak.strong_count() > 0);
@@ -388,6 +387,9 @@ mod tests {
     #[test]
     fn child_reaping_scales_with_list_length() {
         let root = Tree::root();
+
+        // Fill the list with 1,000 live children, so half of it (500) is well
+        // above `STALE_CHILD_THRESHOLD`.
         let mut children: Vec<_> = (0..1_000)
             .map(|_| {
                 let (child, aborted) = Tree::child(&root);
@@ -396,7 +398,8 @@ mod tests {
             })
             .collect();
 
-        // Past the fixed threshold but below half the list: no compaction.
+        // A stale count above `STALE_CHILD_THRESHOLD` but below half the list
+        // does not compact.
         children.drain(..33);
         let (first, _) = Tree::child(&root);
         {
@@ -405,7 +408,7 @@ mod tests {
             assert_eq!(inner.children.stale, 33);
         }
 
-        // The bar grows with the list: compaction waits for half to be stale.
+        // Half of 1,001 entries is 500, so 499 stale entries do not compact.
         children.drain(..466);
         let (second, _) = Tree::child(&root);
         {
@@ -413,6 +416,9 @@ mod tests {
             assert_eq!(inner.children.links.len(), 1_002);
             assert_eq!(inner.children.stale, 499);
         }
+
+        // Each push lengthens the list, so 500 stale entries fall one short of
+        // half of 1,002.
         children.drain(..1);
         let (third, _) = Tree::child(&root);
         {
@@ -420,6 +426,9 @@ mod tests {
             assert_eq!(inner.children.links.len(), 1_003);
             assert_eq!(inner.children.stale, 500);
         }
+
+        // Reaching half the list (501 of 1,003) removes every stale entry
+        // before the new child is appended.
         children.drain(..1);
         let (fourth, _) = Tree::child(&root);
         {
