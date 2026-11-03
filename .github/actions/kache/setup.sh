@@ -2,7 +2,7 @@
 # Installs and starts kache. Any failure leaves the job uncached instead of failing it.
 set -euo pipefail
 
-KACHE_VERSION=v1.2.2
+KACHE_VERSION=v2.0.0
 
 disable() {
   echo "::warning::$1, kache disabled for this job."
@@ -19,19 +19,19 @@ command -v jq >/dev/null || disable "jq is unavailable"
 case "$RUNNER_OS-$RUNNER_ARCH" in
   Linux-X64)
     target=x86_64-unknown-linux-musl
-    sha256=f2f6555dee50945c2a90a7fb793c2084a00cc6459d08ac2306d38d905064321b
+    sha256=6c59665faf1b14d0944391e6f2a1b510195e6be92c63060a9d1770ed00676824
     ;;
   Linux-ARM64)
     target=aarch64-unknown-linux-musl
-    sha256=38856cee613f6ee0ec579099fc9205b840a0b45bb763f4b8fa782d25d93c18ef
+    sha256=8c5ca4d1d4b6fc66e5175c8a1150e1daa85099080646322058d9083c72986bba
     ;;
   macOS-ARM64)
     target=aarch64-apple-darwin
-    sha256=10d09e146852a8df8796cf642ca58872107a7f391b7647ec8cc253cf289af0a9
+    sha256=b46139f7d42895c62962450886dd35f4554c17531209ea69b2db053d2a142bcb
     ;;
   macOS-X64)
     target=x86_64-apple-darwin
-    sha256=9a1c3ecc89cf36b23512a93868226140d46f1f70cf6cb648bfe08eeafb25a368
+    sha256=0ab8b29f659d159de78f70376c6ffa7730879f18fcde397567b683796eb5fd73
     ;;
   *)
     disable "No kache build is pinned for $RUNNER_OS-$RUNNER_ARCH"
@@ -72,6 +72,10 @@ esac
 # the remote goes in a config file. Every pull request reads and writes pull_request_prefix.
 config="$root/config.toml"
 cat >"$config" <<EOF
+[cache]
+# Waiting for a large cached test binary still beats compiling it, which takes over 300 s.
+demand_timeout_secs = 120
+
 [cache.remote]
 type = "s3"
 bucket = "$R2_BUCKET"

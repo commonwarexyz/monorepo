@@ -10,6 +10,13 @@ case "$GITHUB_EVENT_NAME" in
     ;;
 esac
 
+# Pilot validation only: wait up to 10 minutes for every queued upload, so the next run can
+# restore everything this run built.
+for _ in $(seq 300); do
+  [ -n "$(find "$KACHE_CACHE_DIR" -maxdepth 2 -path '*/upload-queue*/*.json')" ] || break
+  sleep 2
+done
+
 # One line each of machine-readable statistics, for comparing runs.
 if stats="$(kache stats --json 2>/dev/null)"; then
   echo "kache-stats: $(jq -c . <<<"$stats")"
