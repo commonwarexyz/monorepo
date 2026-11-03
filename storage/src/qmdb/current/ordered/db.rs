@@ -97,27 +97,28 @@ impl<
 where
     Operation<F, K, V>: Codec,
 {
-    /// Generate and return a proof of the current value of `key`, along with the other
-    /// [KeyValueProof] required to verify the proof. Returns KeyNotFound error if the key is not
-    /// currently assigned any value.
+    /// Return the current value of `key` and a proof authenticating it against [`Self::root`].
     ///
     /// # Errors
     ///
     /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
     pub async fn key_value_proof(
         &self,
-        key: K,
-    ) -> Result<KeyValueProof<F, K, H::Digest, N>, Error<F>> {
-        let op_loc = self.any.get_with_loc(&key).await?;
+        key: &K,
+    ) -> Result<(V::Value, KeyValueProof<F, K, H::Digest, N>), Error<F>> {
+        let op_loc = self.any.get_with_loc(key).await?;
         let Some((data, loc)) = op_loc else {
             return Err(Error::<F>::KeyNotFound);
         };
         let proof = self.operation_proof(loc).await?;
 
-        Ok(KeyValueProof {
-            proof,
-            next_key: data.next_key,
-        })
+        Ok((
+            data.value,
+            KeyValueProof {
+                proof,
+                next_key: data.next_key,
+            },
+        ))
     }
 
     /// Generate and return a proof that the specified `key` does not exist in the db.

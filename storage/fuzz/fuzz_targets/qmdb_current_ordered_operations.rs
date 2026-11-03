@@ -464,9 +464,10 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     committed_op_count = db.bounds().end;
                     let current_root = db.root();
 
-                    match db.key_value_proof(k.clone()).await {
-                        Ok(proof) => {
-                            let value = db.get(&k).await.expect("get should not fail").expect("key should exist");
+                    match db.key_value_proof(&k).await {
+                        Ok((value, proof)) => {
+                            let expected = committed_state.get(key).copied().expect("key should exist in committed state");
+                            assert_eq!(value, Value::new(expected));
                             let verification_result = proof.verify::<Sha256, FixedEncoding<Value>>(k, value, &current_root);
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");
                         }
