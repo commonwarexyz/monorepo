@@ -8,7 +8,7 @@ use commonware_consensus::{
     Block, Reporter,
     ancestry::BlockProvider,
     marshal::{Delivery, Finalized, Ledger, Linear},
-    types::{Epoch, Height, OutputIndex},
+    types::{Epoch, Height, OutputIndex, Round},
 };
 use commonware_cryptography::{Digested, Digestible};
 use commonware_utils::channel::oneshot;
@@ -56,7 +56,7 @@ pub(super) enum Message<B: Digestible> {
 }
 
 /// Keeps every request in order, and drops reads whose caller left.
-impl<B: Digestible + Send + Sync + 'static> Policy for Message<B> {
+impl<B: Digestible> Policy for Message<B> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
@@ -194,6 +194,7 @@ impl<B: Block> BlockProvider for Mailbox<B> {
     fn subscribe_parent(
         &self,
         block: &Digested<B>,
+        _bound: Option<Round>,
     ) -> impl Future<Output = Option<Digested<B>>> + Send + 'static {
         let mailbox = self.clone();
         let parent = block.inner().height().previous();
