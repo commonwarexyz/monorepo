@@ -135,7 +135,7 @@ use crate::ThreadPool;
 use commonware_utils::sync::Mutex;
 use std::{
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     thread::ThreadId,
@@ -149,8 +149,6 @@ const SLACK_FROM: usize = 6;
 
 cfg_if::cfg_if! {
     if #[cfg(all(target_os = "linux", not(miri)))] {
-        use std::sync::OnceLock;
-
         /// Byte size of `cpu_set_t`, as passed to the affinity syscalls.
         const CPU_SET_BYTES: usize = std::mem::size_of::<libc::cpu_set_t>();
 
@@ -528,14 +526,11 @@ std::thread_local! {
     static FAKE_DOMAIN: std::cell::Cell<Option<u16>> = const { std::cell::Cell::new(None) };
 }
 
-/// A group's home and the work in flight on it. The group is idle while no thread has work in
-/// flight on it. Claims, releases, and homing all hold the group's lock on this state, so a group
-/// found idle gains no work before it is homed.
+/// The work in flight on a group. The group is idle while no thread has work in flight on it.
+/// Claims, releases, and homing all hold the group's lock on this state, so a group found idle
+/// gains no work before it is homed.
 #[derive(Debug)]
 struct State {
-    /// The requested home domain, or `None` before the group has been homed.
-    home: Option<u16>,
-
     /// The tick of the group's latest claim of any kind, so [`Groups::least_loaded`] breaks ties
     /// toward the group used least recently.
     last_used: u64,
@@ -585,7 +580,11 @@ pub(crate) struct Group {
     /// group qualifies, as in a pool of one worker.
     placeable: bool,
 
-    /// The group's home and the work in flight on it.
+    /// The requested home domain. It is set at most once, at build or by the first homing, and
+    /// read without the state lock.
+    home: OnceLock<u16>,
+
+    /// The work in flight on the group.
     state: Mutex<State>,
 }
 
@@ -594,8 +593,8 @@ impl Group {
         Self {
             width,
             placeable: width > 1 && width == full,
+            home: OnceLock::new(),
             state: Mutex::new(State {
-                home: None,
                 last_used: 0,
                 submitters: Vec::new(),
                 admitted_roots: 0,
@@ -810,7 +809,7 @@ impl Groups {
         let groups = {
             if let Some(partition) = &partition {
                 for (group, &(home, _)) in groups.groups.iter().zip(partition.homes.iter()) {
-                    group.state.lock().home = Some(home);
+                    assert!(group.home.set(home).is_ok(), "a group must be homed once");
                 }
             }
             Self { affinity, ..groups }
@@ -861,20 +860,20 @@ impl Groups {
     pub(crate) fn local(self: &Arc<Self>) -> Option<Lease> {
         let domain = self.current_domain()?;
 
-        // Once published, a home never changes. Its group lock protects lease claims.
+        // A home is set once and read without the state lock, which protects lease claims.
         let claim_home = || {
             for (index, group) in self.groups.iter().enumerate() {
-                let mut state = group.state.lock();
-                if state.home == Some(domain) {
-                    let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
-                    state.claim(tick);
-                    return Some(Lease {
-                        groups: Arc::clone(self),
-                        index,
-                        submitter: std::thread::current().id(),
-                        admitted: false,
-                    });
+                if group.home.get() != Some(&domain) {
+                    continue;
                 }
+                let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
+                group.state.lock().claim(tick);
+                return Some(Lease {
+                    groups: Arc::clone(self),
+                    index,
+                    submitter: std::thread::current().id(),
+                    admitted: false,
+                });
             }
             None
         };
@@ -908,10 +907,10 @@ impl Groups {
             .filter(|(_, group)| group.placeable())
         {
             let mut state = group.state.lock();
-            if state.home.is_some() || !state.submitters.is_empty() {
+            if group.home.get().is_some() || !state.submitters.is_empty() {
                 continue;
             }
-            state.home = Some(domain);
+            assert!(group.home.set(domain).is_ok(), "a group must be homed once");
             state.claim(tick);
             let lease = Lease {
                 groups: Arc::clone(self),
@@ -940,7 +939,7 @@ impl Groups {
                 allowed,
                 self.groups
                     .iter()
-                    .map(|group| (group.width, group.state.lock().home)),
+                    .map(|group| (group.width, group.home.get().copied())),
             );
             let requests: Vec<Option<(Option<CpuSet>, usize)>> = homes
                 .into_iter()
@@ -967,7 +966,7 @@ impl Groups {
         let home = self.current_domain().and_then(|domain| {
             self.groups
                 .iter()
-                .position(|group| group.state.lock().home == Some(domain))
+                .position(|group| group.home.get() == Some(&domain))
         });
         let home = home.unwrap_or(0);
         let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
@@ -1025,7 +1024,7 @@ impl Groups {
             return None;
         }
         let (topology, _) = self.affinity.as_ref()?;
-        let home = self.groups[group].state.lock().home?;
+        let home = *self.groups[group].home.get()?;
         if self.current_domain() == Some(home) {
             return None;
         }
@@ -1059,7 +1058,7 @@ impl Groups {
                 let home = self
                     .groups
                     .iter()
-                    .position(|group| group.state.lock().home == Some(domain));
+                    .position(|group| group.home.get() == Some(&domain));
                 if home.is_some_and(|index| self.groups[index].busy_with_others()) {
                     None
                 } else {
@@ -1092,7 +1091,7 @@ impl Groups {
                 format!(
                     "group {index}: width {} home {:?} in_flight {}",
                     group.width,
-                    state.home,
+                    group.home.get().copied(),
                     state.in_flight(),
                 )
             })
@@ -1145,7 +1144,7 @@ mod tests {
         let groups = synthetic(&[2, 2]);
         Groups::fake_domain(Some(1));
         let lease = groups.local().expect("an idle group must be homed");
-        assert_eq!(leased(&groups, &lease).state.lock().home, Some(1));
+        assert_eq!(leased(&groups, &lease).home.get().copied(), Some(1));
         assert_eq!(leased(&groups, &lease).state.lock().in_flight(), 1);
         let again = groups
             .local()
@@ -1178,13 +1177,12 @@ mod tests {
         let (fallback, admitted) = groups.for_job();
         assert!(admitted);
         assert_eq!(fallback.group(), 0);
-        assert_eq!(leased(&groups, &b).state.lock().home, Some(1));
+        assert_eq!(leased(&groups, &b).home.get().copied(), Some(1));
         drop((fallback, b));
         assert!(groups.local().is_none());
         for (group, home) in groups.groups().iter().zip([0, 1]) {
-            let state = group.state.lock();
-            assert_eq!(state.home, Some(home));
-            assert_eq!(state.in_flight(), 0);
+            assert_eq!(group.home.get(), Some(&home));
+            assert_eq!(group.state.lock().in_flight(), 0);
         }
         Groups::fake_domain(None);
     }
@@ -1195,7 +1193,7 @@ mod tests {
     fn fixed_homes_never_move() {
         let groups = synthetic(&[2, 2]);
         for (group, home) in groups.groups.iter().zip([0, 1]) {
-            group.state.lock().home = Some(home);
+            group.home.set(home).unwrap();
         }
 
         Groups::fake_domain(Some(2));
@@ -1204,7 +1202,7 @@ mod tests {
         assert!(admitted);
         drop(lease);
         for (group, home) in groups.groups().iter().zip([0, 1]) {
-            assert_eq!(group.state.lock().home, Some(home));
+            assert_eq!(group.home.get().copied(), Some(home));
         }
 
         Groups::fake_domain(Some(1));
@@ -1221,14 +1219,14 @@ mod tests {
         let work = groups.wide();
         Groups::fake_domain(Some(1));
         assert!(groups.local().is_none());
-        assert_eq!(groups.groups()[1].state.lock().home, None);
+        assert_eq!(groups.groups()[1].home.get().copied(), None);
         assert_eq!(groups.groups()[1].state.lock().in_flight(), 1);
 
         drop(work);
         let lease = groups.local().unwrap();
         assert_eq!(lease.group(), 1);
-        assert_eq!(groups.groups()[0].state.lock().home, Some(0));
-        assert_eq!(leased(&groups, &lease).state.lock().home, Some(1));
+        assert_eq!(groups.groups()[0].home.get().copied(), Some(0));
+        assert_eq!(leased(&groups, &lease).home.get().copied(), Some(1));
         drop(lease);
         Groups::fake_domain(None);
     }
@@ -1244,9 +1242,10 @@ mod tests {
             groups.local().unwrap()
         };
 
-        // Holding the second group's lock stalls a search for a home group partway, and the
-        // sleep gives both callers time to ask for a group before either can home one.
-        let held = groups.groups()[1].state.lock();
+        // Holding the first group's state lock stalls the first creator inside the homing
+        // section, and the sleep gives the other caller time to miss the fast path and queue on
+        // the homing lock before any home exists.
+        let held = groups.groups()[0].state.lock();
         let leases = std::thread::scope(|scope| {
             let first = scope.spawn(caller);
             let second = scope.spawn(caller);
@@ -1262,7 +1261,7 @@ mod tests {
         let homes = groups
             .groups()
             .iter()
-            .filter(|group| group.state.lock().home == Some(0))
+            .filter(|group| group.home.get() == Some(&0))
             .count();
         assert_eq!(homes, 1, "the domain must have one home group");
     }
@@ -1367,7 +1366,7 @@ mod tests {
         let groups = synthetic(&[2, 2]);
         Groups::fake_domain(Some(1));
         let (job, _) = groups.for_job();
-        assert_eq!(leased(&groups, &job).state.lock().home, Some(1));
+        assert_eq!(leased(&groups, &job).home.get().copied(), Some(1));
         Groups::fake_domain(None);
         let busy_index = job.index;
         let (other, _) = groups.for_job();
@@ -1491,7 +1490,7 @@ mod tests {
             Groups::fake_domain(Some(0));
             assert_eq!(groups.local().unwrap().group(), 0);
             Groups::fake_domain(None);
-            assert_eq!(groups.groups()[1].state.lock().home, None);
+            assert_eq!(groups.groups()[1].home.get().copied(), None);
         }
     }
 
@@ -1760,16 +1759,17 @@ mod tests {
                 // Only full-width groups can acquire fixed homes.
                 let width = groups.groups()[0].width();
                 assert!(
-                    groups.groups().iter().all(|group| {
-                        group.state.lock().home.is_none() || group.width() == width
-                    }),
+                    groups
+                        .groups()
+                        .iter()
+                        .all(|group| group.home.get().is_none() || group.width() == width),
                     "a fixed home must have the full group width"
                 );
                 if groups.pool().current_num_threads() == count {
                     assert_eq!(width, domain_width);
                     for (index, group) in groups.groups().iter().enumerate() {
                         assert_eq!(
-                            group.state.lock().home,
+                            group.home.get().copied(),
                             topology.domain_of(cpus[index * domain_width])
                         );
                     }
@@ -1800,7 +1800,7 @@ mod tests {
             let homes: Vec<_> = groups
                 .groups()
                 .iter()
-                .map(|group| group.state.lock().home)
+                .map(|group| group.home.get().copied())
                 .collect();
             assert_eq!(
                 homes,
@@ -1830,7 +1830,7 @@ mod tests {
                 assert_eq!(lease.is_some(), home == &b);
                 Groups::fake_domain(None);
                 assert_eq!(
-                    groups.groups()[0].state.lock().home,
+                    groups.groups()[0].home.get().copied(),
                     topology.domain_of(b[0])
                 );
 
@@ -1938,7 +1938,7 @@ mod tests {
                         groups
                             .groups()
                             .iter()
-                            .all(|group| group.state.lock().home.is_none())
+                            .all(|group| group.home.get().is_none())
                     );
                     let masks = groups.pool().broadcast(|_| allowed_cpus());
                     assert!(masks.iter().all(|mask| mask == &cpus));
@@ -1948,7 +1948,7 @@ mod tests {
                     Groups::fake_domain(None);
                     let lease = lease.expect("the wide domain must take a home");
                     assert_eq!(
-                        groups.groups()[lease.group()].state.lock().home,
+                        groups.groups()[lease.group()].home.get().copied(),
                         topology.domain_of(wide[0])
                     );
                 }
