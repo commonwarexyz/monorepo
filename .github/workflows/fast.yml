@@ -220,13 +220,13 @@ jobs:
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx !sha avx512f avx512bw avx512vl !avx512ifma !gfni !vpclmulqdq"
             skip-cache-save: true
-          # Zen 2 has AVX2 and SHA-NI without AVX-512.
+          # Zen 2 has AVX2 and SHA-NI without AVX-512 or VPCLMULQDQ.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: EPYC-Rome
             simd-backend: x86_v3
-            cpu-features: "avx2 bmi2 adx sha !avx512f"
+            cpu-features: "avx2 bmi2 adx sha !avx512f !vpclmulqdq"
             skip-cache-save: true
           - os: ubuntu-latest
             package: commonware-cryptography
@@ -234,7 +234,7 @@ jobs:
             rustflags: "-C target-feature=+avx2,+sha"
             static-features: "avx2 sha !avx512f"
             qemu: EPYC-Rome
-            cpu-features: "avx2 bmi2 adx sha !avx512f"
+            cpu-features: "avx2 bmi2 adx sha !avx512f !vpclmulqdq"
           # Broadwell has AVX2, BMI2, and ADX without SHA-NI or AVX-512.
           - os: ubuntu-latest
             package: commonware-cryptography
@@ -335,8 +335,8 @@ jobs:
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
-    # A row that names an emulated CPU runs natively when the runner has every CPU feature
-    # the row lists and none of those it excludes, and under the emulator otherwise.
+    # A row that names an emulated CPU runs natively when the runner has every feature in its
+    # `cpu-features` and none of those it excludes, and under the emulator otherwise.
     - name: Check native CPU features
       if: ${{ matrix.sde || matrix.qemu }}
       id: native
