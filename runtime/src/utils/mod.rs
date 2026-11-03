@@ -11,11 +11,10 @@ use std::{
 };
 
 commonware_macros::stability_mod!(BETA, pub mod buffer);
+pub(crate) mod abort;
 pub mod signal;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod thread;
-
-pub(crate) mod abort;
 
 mod handle;
 #[commonware_macros::stability(ALPHA)]
