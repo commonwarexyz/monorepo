@@ -621,20 +621,37 @@ mod loom_tests {
                 counter()
             };
 
-            // Race an abort against one poll.
-            let aborter = thread::spawn(move || handle.abort());
+            // Race an abort against one poll. The aborter reports when it is done, so a
+            // pending poll can tell a wake that is still coming from one that was lost.
+            let done = Arc::new(AtomicBool::new(false));
+            let aborter = {
+                let done = done.clone();
+                thread::spawn(move || {
+                    handle.abort();
+                    done.store(true, Ordering::SeqCst);
+                })
+            };
             let result = poll(&mut future, &waker);
-            aborter.join().unwrap();
 
             // Either that poll saw the abort, or it registered a waker the abort woke.
             match result {
                 Poll::Ready(result) => assert_eq!(result, Err(Aborted)),
                 Poll::Pending => {
-                    // The pending poll's waker was woken, and the woken poll sees the abort.
-                    assert!(counter.load(Ordering::SeqCst) >= 1, "abort wake lost");
+                    // Wait for the wake itself rather than for the aborter to finish, so only
+                    // the wake orders the poll it schedules, which must observe the flag the
+                    // abort set before waking.
+                    loop {
+                        let finished = done.load(Ordering::SeqCst);
+                        if counter.load(Ordering::SeqCst) >= 1 {
+                            break;
+                        }
+                        assert!(!finished, "abort wake lost");
+                        thread::yield_now();
+                    }
                     assert_eq!(poll(&mut future, &waker), Poll::Ready(Err(Aborted)));
                 }
             }
+            aborter.join().unwrap();
         });
     }
 
