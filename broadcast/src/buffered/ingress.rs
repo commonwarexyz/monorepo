@@ -93,6 +93,7 @@ impl<P: PublicKey, M: Digestible> Overflow<Message<P, M>> for Pending<P, M> {
         F: FnMut(Message<P, M>) -> Option<Message<P, M>>,
     {
         while let Some(entry) = self.queue.pop_front() {
+            // Skip canceled requests and rebuild broadcasts with their coalesced recipients.
             let message = match entry {
                 PendingEntry::Message(message) => {
                     if message.response_closed() {
