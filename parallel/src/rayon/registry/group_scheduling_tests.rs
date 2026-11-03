@@ -160,6 +160,9 @@ fn installs_place_their_operation_and_restore_the_previous_placement() {
         pool.install_in(Placement::Wide { near: 0 }, || placement(&pool)),
         Some(Placement::Wide { .. })
     ));
+
+    // A nested Wide install must restore the outer Local placement before that placement is
+    // passed to a spawned job.
     let observed = pool.install_in(Placement::Local(1), || {
         let local = placement(&pool);
         let wide = pool.install_in(Placement::Wide { near: 0 }, || placement(&pool));
@@ -169,6 +172,9 @@ fn installs_place_their_operation_and_restore_the_previous_placement() {
         pool.spawn_in(restored.unwrap(), move || {
             tx.send(placement(&spawner)).unwrap();
         });
+
+        // Yield rather than block, so the spawned job can run on this worker if no other worker
+        // takes it.
         let spawned = loop {
             if let Ok(placement) = rx.try_recv() {
                 break placement;
@@ -264,6 +270,7 @@ fn local_jobs_run_only_on_their_group() {
     let strays = AtomicUsize::new(0);
     let leaves = AtomicUsize::new(0);
     thread::scope(|scope| {
+        // Keep the whole pool searching with trees placed on the whole pool.
         scope.spawn(|| {
             while !stop.load(Ordering::Relaxed) {
                 pool.install_in(Placement::Wide { near: 0 }, || {
@@ -271,6 +278,9 @@ fn local_jobs_run_only_on_their_group() {
                 });
             }
         });
+
+        // A tree per group, each leaf checking that it runs on a worker of its group under the
+        // Local placement.
         let trees: Vec<_> = (0..GROUPS)
             .map(|group| {
                 let (pool, strays, leaves) = (&pool, &strays, &leaves);
@@ -295,6 +305,8 @@ fn local_jobs_run_only_on_their_group() {
         }
         stop.store(true, Ordering::Relaxed);
     });
+
+    // Every leaf ran, and none on another group.
     assert_eq!(leaves.into_inner(), GROUPS * LEAVES);
     assert_eq!(
         strays.into_inner(),
@@ -376,10 +388,13 @@ fn a_wide_job_waiting_on_its_groups_local_job_helps_its_mate() {
     let pool = Arc::new(pool(4, 2));
     within(move || {
         pool.install_in(Placement::Wide { near: 0 }, || {
+            // From the Wide job, install on the worker's own group and join there.
             let group = pool.current_worker().unwrap().group;
             pool.install_in(Placement::Local(group), || {
                 let mate_started = AtomicBool::new(false);
                 let nested_started = AtomicBool::new(false);
+
+                // The first closure waits for the mate, so the mate must take the second.
                 join(
                     || {
                         wait_until("the mate takes the second closure", || {
@@ -388,6 +403,8 @@ fn a_wide_job_waiting_on_its_groups_local_job_helps_its_mate() {
                     },
                     || {
                         mate_started.store(true, Ordering::SeqCst);
+
+                        // The mate's join needs the waiting worker to take the nested closure.
                         join(
                             || {
                                 wait_until("the waiting worker takes the nested closure", || {
@@ -604,6 +621,8 @@ fn random_placements_all_complete() {
         let registry = Arc::clone(pool.registry());
         let counts = Arc::new(Counts::default());
         let mut rng = TestRng::new(round);
+
+        // Eight random roots, each a Local or Wide placement with a seed for its job tree.
         let roots: Vec<(Placement, u64)> = (0..8)
             .map(|_| {
                 let placement = match rng.random_range(0..4usize) {
@@ -615,6 +634,8 @@ fn random_placements_all_complete() {
                 (placement, rng.random_range(0..u64::MAX))
             })
             .collect();
+
+        // Start each root from its own thread, installing even seeds and spawning odd seeds.
         thread::scope(|scope| {
             for &(placement, seed) in &roots {
                 let (pool, counts) = (&pool, &counts);
@@ -632,6 +653,9 @@ fn random_placements_all_complete() {
                 });
             }
         });
+
+        // Release the test's handle to the pool. Its workers must still run every detached job and
+        // then stop.
         drop(pool);
         wait_until("every detached job ran", || {
             counts.pending.load(Ordering::SeqCst) == 0
@@ -865,12 +889,14 @@ fn a_spawn_from_outside_the_pool_runs_under_the_placement_it_names() {
         }
     };
 
+    // Jobs placed on group 1 run on its workers under its Local placement.
     for _ in 0..8 {
         pool.spawn_in(Placement::Local(1), record());
     }
     wait_until("the spawns on group 1 run", || ran.lock().len() == 8);
     assert_eq!(*ran.lock(), vec![Some((Placement::Local(1), 1)); 8]);
 
+    // Jobs placed on the whole pool, near either group, run under a Wide placement.
     ran.lock().clear();
     for _ in 0..8 {
         pool.spawn_in(Placement::Wide { near: 1 }, record());
@@ -986,9 +1012,13 @@ fn outside_spawns_preserve_each_producers_order_under_contention() {
     within(|| {
         const JOBS: usize = 1000;
         let pool = Arc::new(pool(4, 2));
+
+        // One producer alone, then four producers racing.
         for producers in [1, 4] {
             let order = Arc::new(Mutex::new(vec![Vec::new(); 4]));
             thread::scope(|scope| {
+                // Each producer spawns jobs with random placements, and each job records which
+                // worker ran it.
                 for producer in 0..producers {
                     let pool = &pool;
                     let order = &order;
@@ -1013,6 +1043,8 @@ fn outside_spawns_preserve_each_producers_order_under_contention() {
             wait_until("every producer's jobs run", || {
                 order.lock().iter().map(Vec::len).sum::<usize>() == producers * JOBS
             });
+
+            // On each worker, every producer's jobs ran in the order it spawned them.
             for jobs in order.lock().iter() {
                 let mut last = vec![None; producers];
                 for &(producer, index) in jobs {

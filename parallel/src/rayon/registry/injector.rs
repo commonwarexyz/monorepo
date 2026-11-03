@@ -104,8 +104,12 @@ mod tests {
         time::Duration,
     };
 
+    /// A worker whose search finds the admission lock held by another thread reports an idle
+    /// search instead of blocking, leaves the queued jobs in place, and runs them in arrival
+    /// order once the lock is released.
     #[test]
     fn contended_admission_keeps_the_worker_available() {
+        // One worker in one group, so every queued job waits for this worker's search.
         let pool = Arc::new(
             ThreadPoolBuilder::new()
                 .num_threads(1)
@@ -114,6 +118,9 @@ mod tests {
                 .unwrap(),
         );
         let timeout = Duration::from_secs(10);
+
+        // Hold the worker inside a job. On the first command it searches while the test thread
+        // holds the admission lock, and on the second it returns to the worker loop.
         let (ready_tx, ready_rx) = mpsc::channel();
         let (phase_tx, phase_rx) = mpsc::channel();
         let (yielded_tx, yielded_rx) = mpsc::channel();
@@ -126,6 +133,7 @@ mod tests {
         });
         ready_rx.recv_timeout(timeout).unwrap();
 
+        // Queue one Local and one Wide job, in that order, that only the parked worker can run.
         let (job_tx, job_rx) = mpsc::channel();
         for (index, placement) in [Placement::Local(0), Placement::Wide { near: 0 }]
             .into_iter()
@@ -135,6 +143,8 @@ mod tests {
             pool.spawn_in(placement, move || job_tx.send(index).unwrap());
         }
 
+        // Hold the admission lock across the worker's search, record what the search reported and
+        // whether the jobs stayed queued, then release the lock and the worker.
         let registry = pool.registry();
         let held = registry.injector.queues.lock().unwrap();
         phase_tx.send(()).unwrap();
@@ -148,6 +158,8 @@ mod tests {
             job_rx.recv_timeout(timeout).unwrap(),
         ];
 
+        // The search declined without blocking, both jobs stayed queued, and the worker ran them
+        // in arrival order afterwards.
         assert_eq!(yielded.unwrap(), Some(Yield::Idle));
         assert!(jobs_remain);
         assert_eq!(completed, [0, 1]);

@@ -263,6 +263,8 @@ fn result_wakes_a_sleeping_worker_of_a_later_group() {
     );
 }
 
+/// Dropping the sender of the result that a sleeping worker of a later group awaits wakes that
+/// worker, which observes the cancellation.
 #[commonware_macros::test_group("miri")]
 #[test]
 fn canceled_sender_wakes_a_sleeping_worker_of_a_later_group() {

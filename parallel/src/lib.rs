@@ -2470,16 +2470,20 @@ mod test {
     #[test]
     fn placed_call_without_a_home_compares_a_remote_group() {
         for caller in [Some(2), None] {
+            // Two full groups homed in domains 0 and 1 and held busy, plus a narrower third group.
             let strategy = synthetic_groups(&[2, 2, 1]);
             crate::topology::Groups::fake_domain(Some(0));
             let first = strategy.groups.local().unwrap();
             crate::topology::Groups::fake_domain(Some(1));
             let second = strategy.groups.local().unwrap();
+
+            // Two placed calls from a domain without a home, or from an unknown one.
             crate::topology::Groups::fake_domain(caller);
             let runs: Vec<_> = (0..2).map(|_| placed_map(&strategy)).collect();
             crate::topology::Groups::fake_domain(None);
             drop((first, second));
 
+            // The calls tried one group, and only a full-width one.
             let local: Vec<_> = runs
                 .iter()
                 .flat_map(|(_, placements)| placements)
@@ -2496,6 +2500,8 @@ mod test {
                 )),
                 "{caller:?}: local runs must use a full-width group: {local:?}"
             );
+
+            // The local run was recorded.
             let (_, local_ns) = strategy
                 .policy
                 .as_ref()
@@ -2506,6 +2512,8 @@ mod test {
                 local_ns.is_some(),
                 "{caller:?}: the local run must be recorded"
             );
+
+            // No home moved, and the narrow group gained none.
             let report = strategy.groups_report();
             for line in [
                 "group 0: width 2 home Some(0)",
@@ -2622,6 +2630,8 @@ mod test {
     #[test]
     fn a_workers_sort_stays_under_its_placement() {
         let grouped = synthetic_groups(&[2, 2]);
+
+        // Both sorts, on a strategy with and without a policy.
         let strategies = [false, true].into_iter().flat_map(|unstable| {
             [
                 (grouped.without_policy(), unstable),
@@ -2629,6 +2639,7 @@ mod test {
             ]
         });
         for (strategy, unstable) in strategies {
+            // Sort a reversed input and record the placement seen by every comparison.
             let sort = || {
                 let placements = commonware_utils::sync::Mutex::new(Vec::new());
                 let mut items: Vec<u64> = (0..1024).rev().collect();
@@ -2644,6 +2655,8 @@ mod test {
                 assert_eq!(items, (0..1024).collect::<Vec<_>>());
                 placements.into_inner()
             };
+
+            // Under a Local job, every comparison runs under that placement.
             let local = crate::rayon::Placement::Local(1);
             let placements = strategy.groups.pool().install_in(local, sort);
             assert!(!placements.is_empty());
@@ -2651,6 +2664,8 @@ mod test {
                 placements.iter().all(|&p| p == Some(local)),
                 "{placements:?}"
             );
+
+            // Under a Wide job, every comparison runs under the worker's Wide placement.
             let wide = crate::rayon::Placement::Wide { near: 0 };
             let (placements, own) = strategy
                 .groups
@@ -3443,12 +3458,16 @@ mod test {
         );
     }
 
+    /// A job detached from a worker under a Local placement keeps its claim on that group until it
+    /// finishes.
     #[commonware_macros::test_group("miri")]
     #[test]
     fn detached_local_job_keeps_its_group_busy() {
         check_detached_job_lease(false);
     }
 
+    /// A job detached from a worker under a Wide placement keeps its claims on every group until it
+    /// finishes.
     #[commonware_macros::test_group("miri")]
     #[test]
     fn detached_wide_job_keeps_every_group_busy() {
@@ -3461,6 +3480,8 @@ mod test {
         let strategy = synthetic_groups(&[2, 2]);
         let placed = strategy.placed(crate::rayon::Placement::Wide { near: 0 });
         let pool = strategy.groups.pool();
+
+        // Wait for every worker to sleep, so each wakeup below is the call's.
         let start = Instant::now();
         while pool.sleeping_workers() < pool.current_num_threads() {
             assert!(
@@ -3472,6 +3493,8 @@ mod test {
         let before = pool.wakeups();
         let me = std::thread::current().id();
         let on_caller = AtomicUsize::new(0);
+
+        // Run a Wide map and note whether any item ran on the caller.
         let out = placed.map_collect_vec(0..64u64, |x| {
             std::thread::sleep(Duration::from_millis(1));
             if std::thread::current().id() == me {
@@ -3480,6 +3503,8 @@ mod test {
             x
         });
         assert_eq!(out, (0..64).collect::<Vec<_>>());
+
+        // Both groups woke, and no item ran on the caller.
         let after = pool.wakeups();
         for group in 0..2 {
             let workers = group * 2..group * 2 + 2;
@@ -4158,6 +4183,9 @@ mod test {
                 .with_parallelism(NonZeroUsize::new(4).unwrap())
                 .without_policy();
             let pool = strategy.groups.pool().clone();
+
+            // From a worker, map over the input with a nested map per item, recording the workers
+            // that ran items.
             let (sums, workers) = pool.install_in(Placement::Wide { near: 0 }, || {
                 let workers = commonware_utils::sync::Mutex::new(std::collections::HashSet::new());
                 let sums = strategy.map_collect_vec(0..16u64, |x| {
@@ -4172,6 +4200,9 @@ mod test {
                 });
                 (sums, workers.into_inner())
             });
+
+            // Every item ran on a worker of the pool, every worker took part, and nothing was left
+            // queued.
             assert_eq!(sums, (0..16u64).map(|x| x * 120).collect::<Vec<_>>());
             assert!(workers.iter().all(Option::is_some), "{workers:?}");
             assert_eq!(workers.len(), threads, "{workers:?}");
