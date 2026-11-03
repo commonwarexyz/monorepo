@@ -9,7 +9,8 @@ use super::{
     sleep::{Sleep, THREADS_MAX},
     unwind,
 };
-use crossbeam_deque::{Injector, Steal, Stealer, Worker};
+use crossbeam_deque::{Steal, Stealer, Worker};
+use injector::Injector;
 use std::{
     cell::Cell,
     hash::{DefaultHasher, Hasher},
@@ -25,6 +26,7 @@ use std::{
 
 #[cfg(test)]
 mod group_scheduling_tests;
+mod injector;
 mod wake;
 
 #[cfg(test)]
@@ -139,7 +141,7 @@ pub(super) struct Registry {
 
     /// Jobs placed [`Placement::Wide`] by threads that are not workers of this registry, taken by
     /// any worker.
-    wide_injected_jobs: Injector<JobRef>,
+    wide_injected_jobs: Injector,
 
     /// The pushing halves of the workers' broadcast deques, indexed by worker.
     broadcasts: Mutex<Vec<Worker<JobRef>>>,
@@ -158,12 +160,12 @@ pub(super) struct Registry {
 /// A job placed [`Placement::Local`] on the group runs only on the group's workers, and its
 /// notification reaches only the group's sleep protocol, which runs upstream's code over exactly
 /// those workers. Upstream's argument that no wakeup is lost therefore holds for such a job with
-/// the pool restricted to the group: every worker of the group searches its group-mates' local
+/// the pool restricted to the group. Every worker of the group searches its group-mates' local
 /// deques and its group's injector, and a sleeper's final check reads that injector.
 struct Group {
     /// Jobs placed [`Placement::Local`] on the group by a thread that is not one of its workers.
     /// Only the group's workers take them.
-    injected_jobs: Injector<JobRef>,
+    injected_jobs: Injector,
 
     /// Governs when the group's workers sleep and wake, indexed by their offset in the group.
     sleep: Sleep,
@@ -211,6 +213,7 @@ impl Registry {
             })
             .unzip();
 
+        let (group_injected_jobs, wide_injected_jobs) = Injector::new(group_widths.len());
         let registry = Arc::new(Self {
             thread_infos: local_stealers
                 .into_iter()
@@ -219,14 +222,15 @@ impl Registry {
                 .collect(),
             groups: group_widths
                 .iter()
-                .map(|&width| Group {
-                    injected_jobs: Injector::new(),
+                .zip(group_injected_jobs)
+                .map(|(&width, injected_jobs)| Group {
+                    injected_jobs,
                     sleep: Sleep::new(width),
                 })
                 .collect(),
             group_width,
             group_widths,
-            wide_injected_jobs: Injector::new(),
+            wide_injected_jobs,
             broadcasts: Mutex::new(broadcasts),
             terminate_count: AtomicUsize::new(1),
             start_handler: builder.take_start_handler(),
@@ -344,17 +348,13 @@ impl Registry {
         // SAFETY: a non-null pointer is this thread's worker state, which outlives the call.
         let worker_thread = unsafe { WorkerThread::current().as_ref() }
             .filter(|worker_thread| worker_thread.registry().id() == self.id());
-        let tag = match (worker_thread, placement) {
-            (Some(worker_thread), Placement::Local(group)) if group == worker_thread.group => {
-                Tag::Local
-            }
-            (Some(_), Placement::Wide { .. }) => Tag::Wide,
-            _ => return self.inject(placement, job_ref),
-        };
-        if let Some(worker_thread) = worker_thread {
+        let eligible = worker_thread
+            .and_then(|worker_thread| Some((worker_thread, worker_thread.tag_for(placement)?)));
+        match eligible {
             // SAFETY: `worker_thread` is this thread's worker state, and the caller keeps the job
             // valid until it executes.
-            unsafe { worker_thread.push_as(tag, job_ref) };
+            Some((worker_thread, tag)) => unsafe { worker_thread.push_as(tag, job_ref) },
+            None => self.inject(placement, job_ref),
         }
     }
 
@@ -375,40 +375,22 @@ impl Registry {
         match placement {
             Placement::Local(group) => {
                 let group = &self.groups[group];
-                let queue_was_empty = group.injected_jobs.is_empty();
-
-                group.injected_jobs.push(injected_job.tagged(Tag::Local));
+                let queue_was_empty = group.injected_jobs.push(injected_job.tagged(Tag::Local));
                 group.sleep.new_injected_jobs(1, queue_was_empty);
             }
             Placement::Wide { near } => {
-                let queue_was_empty = self.wide_injected_jobs.is_empty();
-
-                self.wide_injected_jobs.push(injected_job.tagged(Tag::Wide));
-                self.new_wide_jobs(near, queue_was_empty, true);
+                let queue_was_empty = self.wide_injected_jobs.push(injected_job.tagged(Tag::Wide));
+                self.new_injected_wide_job(near, queue_was_empty);
             }
         }
     }
 
-    fn pop_injected_job(injected_jobs: &Injector<JobRef>) -> Option<JobRef> {
-        loop {
-            match injected_jobs.steal() {
-                Steal::Success(job) => return Some(job),
-                Steal::Empty => return None,
-                Steal::Retry => {}
-            }
-        }
-    }
-
-    /// Pushes one job into each selected worker's broadcast queue. Only that worker can execute
-    /// the job, after draining its own deques and before stealing other work.
+    /// Pushes one job into each worker's broadcast queue. Only that worker can execute the job,
+    /// after draining its own deques and before stealing other work.
     ///
-    /// **Panics** if not given exactly as many jobs as there are threads in `workers`.
-    pub(super) fn inject_broadcast(
-        &self,
-        workers: Range<usize>,
-        injected_jobs: impl ExactSizeIterator<Item = JobRef>,
-    ) {
-        assert_eq!(workers.len(), injected_jobs.len());
+    /// **Panics** if not given exactly as many jobs as there are threads.
+    pub(super) fn inject_broadcast(&self, injected_jobs: impl ExactSizeIterator<Item = JobRef>) {
+        assert_eq!(self.num_threads(), injected_jobs.len());
         {
             let broadcasts = self.broadcasts.lock().unwrap();
 
@@ -423,11 +405,11 @@ impl Registry {
                 "inject_broadcast() sees state.terminate as true"
             );
 
-            for (worker, job_ref) in broadcasts[workers.clone()].iter().zip(injected_jobs) {
+            for (worker, job_ref) in broadcasts.iter().zip(injected_jobs) {
                 worker.push(job_ref.tagged(Tag::Local));
             }
         }
-        for i in workers {
+        for i in 0..self.num_threads() {
             self.notify_worker_latch_is_set(i);
         }
     }
@@ -450,14 +432,10 @@ impl Registry {
             if worker_thread.registry().id() != self.id() {
                 return self.in_worker_cross(worker_thread, placement, op);
             }
-            let tag = match placement {
-                Placement::Local(group) if group != worker_thread.group => {
-                    return self.in_worker_cross(worker_thread, placement, op);
-                }
-                Placement::Local(_) => Tag::Local,
-                Placement::Wide { .. } => Tag::Wide,
-            };
-            worker_thread.run_as(tag, || op(worker_thread, false))
+            match worker_thread.tag_for(placement) {
+                Some(tag) => worker_thread.run_as(tag, || op(worker_thread, false)),
+                None => self.in_worker_cross(worker_thread, placement, op),
+            }
         }
     }
 
@@ -716,6 +694,17 @@ impl WorkerThread {
         self.group
     }
 
+    /// The tag under which we may run or push work placed under `placement`, or `None` when
+    /// `placement` is local to another group.
+    #[inline]
+    const fn tag_for(&self, placement: Placement) -> Option<Tag> {
+        match placement {
+            Placement::Local(group) if group != self.group => None,
+            Placement::Local(_) => Some(Tag::Local),
+            Placement::Wide { .. } => Some(Tag::Wide),
+        }
+    }
+
     /// The placement of the job we run.
     #[inline]
     pub(super) const fn placement(&self) -> Placement {
@@ -769,8 +758,7 @@ impl WorkerThread {
             Tag::Wide => {
                 let queue_was_empty = self.wide.is_empty();
                 self.wide.push(job.tagged(Tag::Wide));
-                self.registry
-                    .new_wide_jobs(self.group, queue_was_empty, false);
+                self.registry.new_wide_jobs(self.group, queue_was_empty);
             }
         }
     }
@@ -884,11 +872,11 @@ impl WorkerThread {
 
     /// Finds a job to run.
     ///
-    /// The search covers our own deques and broadcasts, our group-mates' local deques, our
-    /// group's injector, every other worker's wide deque (our group-mates' first), and the wide
-    /// injector, in that order. Our own deques come first whatever their placement. Among other
-    /// workers' jobs and injected ones, those placed on our group come before those any worker
-    /// may take.
+    /// The search covers our own deques and broadcasts, our group-mates' Local deques, and
+    /// every other worker's Wide deque (our group-mates' first), before taking the oldest
+    /// incoming job across our group's Local injector and the shared Wide injector. Incoming
+    /// jobs are ordered by arrival, without reserving a share for either placement. This orders
+    /// admission only: jobs may finish in any order, and deque work keeps priority.
     ///
     /// Joins and installs wait on descendant work, so their waits follow the job tree and cannot
     /// form a cycle. Their liveness follows upstream's argument under its assumptions that jobs
@@ -916,16 +904,15 @@ impl WorkerThread {
     /// Native future waits use the same search. Their completion also depends on the future's
     /// producer making progress, and the producer can depend on work outside the job tree.
     fn find_work(&self) -> Option<JobRef> {
-        // Try to find some work to do. We give preference first
-        // to things in our local deque, then in other workers
-        // deques, and finally to injected jobs from the
-        // outside. The idea is to finish what we started before
-        // we take on something new.
         self.take_local_job()
             .or_else(|| self.steal_local())
-            .or_else(|| Registry::pop_injected_job(&self.registry.groups[self.group].injected_jobs))
             .or_else(|| self.steal_wide())
-            .or_else(|| Registry::pop_injected_job(&self.registry.wide_injected_jobs))
+            .or_else(|| {
+                Injector::pop(
+                    &self.registry.groups[self.group].injected_jobs,
+                    &self.registry.wide_injected_jobs,
+                )
+            })
     }
 
     pub(super) fn yield_now(&self) -> Yield {

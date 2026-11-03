@@ -127,7 +127,7 @@ impl ThreadPool {
         R: Send,
     {
         // SAFETY: `self` holds a reference that keeps the registry from terminating.
-        unsafe { broadcast::broadcast_in(op, &self.registry, 0..self.registry.num_threads()) }
+        unsafe { broadcast::broadcast_in(op, &self.registry) }
     }
 
     /// Returns the number of threads in the thread pool.
@@ -214,7 +214,7 @@ impl ThreadPool {
         OP: Fn(BroadcastContext<'_>) + Send + Sync + 'static,
     {
         // SAFETY: `self` holds a reference that keeps the registry from terminating.
-        unsafe { broadcast::spawn_broadcast_in(op, &self.registry, 0..self.registry.num_threads()) }
+        unsafe { broadcast::spawn_broadcast_in(op, &self.registry) }
     }
 
     /// Cooperatively yields execution to the scheduler.
@@ -222,7 +222,7 @@ impl ThreadPool {
     /// Looks for and executes one unit of work if the current thread is part of this pool.
     ///
     /// Returns `Some(Yield::Executed)` if anything was executed, `Some(Yield::Idle)` if
-    /// nothing was available, or `None` if the current thread is not part of this pool.
+    /// the search found no work, or `None` if the current thread is not part of this pool.
     pub fn yield_now(&self) -> Option<Yield> {
         let curr = self.registry.current_thread()?;
         Some(curr.yield_now())
@@ -275,7 +275,8 @@ impl ThreadPool {
     /// Executes `op` once on every worker of `group` and returns the results in worker order.
     ///
     /// Each worker runs `op` after draining its own deques and before stealing other work.
-    /// A worker runs broadcasts in the order they were queued.
+    /// A worker runs broadcasts in the order they were queued. The other workers receive a
+    /// broadcast that does nothing, and the call waits for them too.
     ///
     /// # Panics
     ///
@@ -289,10 +290,11 @@ impl ThreadPool {
         R: Send,
     {
         self.registry.check(Placement::Local(group));
-        // SAFETY: `self` holds a reference that keeps the registry from terminating.
-        unsafe {
-            broadcast::broadcast_in(|_| op(), &self.registry, self.registry.group_range(group))
-        }
+        let workers = self.registry.group_range(group);
+        self.broadcast(|context| workers.contains(&context.index()).then(&op))
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     /// Returns the width of each group of the pool's workers, in group order.
@@ -302,7 +304,8 @@ impl ThreadPool {
     }
 
     /// Returns the placement of the job the calling worker runs, or `None` if the calling thread
-    /// is not a worker of this pool.
+    /// is not a worker of this pool. A Wide placement names the calling worker's own group as
+    /// `near`.
     ///
     /// The placement is a snapshot that holds until the thread runs another job or installs an
     /// operation under another placement.
@@ -349,26 +352,25 @@ impl ThreadPool {
     /// Spawns an asynchronous task on every worker of `group` and returns at once. Each worker
     /// runs it after it has exhausted its local work, before it attempts to steal from other
     /// workers, and runs broadcasts in the order they were queued. The task may outlast the
-    /// current stack frame, so it cannot capture any references onto the stack.
+    /// current stack frame, so it cannot capture any references onto the stack. The other
+    /// workers receive a broadcast that does nothing.
     ///
     /// # Panics
     ///
     /// Panics if `group` is not a group of the pool. If the task panics on any thread, the
     /// process aborts, since the panic has nowhere to propagate.
-    #[cfg(any(test, all(target_os = "linux", not(miri))))]
+    #[cfg(test)]
     pub(crate) fn spawn_broadcast_in<OP>(&self, group: usize, op: OP)
     where
         OP: Fn() + Send + Sync + 'static,
     {
         self.registry.check(Placement::Local(group));
-        // SAFETY: `self` holds a reference that keeps the registry from terminating.
-        unsafe {
-            broadcast::spawn_broadcast_in(
-                move |_| op(),
-                &self.registry,
-                self.registry.group_range(group),
-            )
-        }
+        let workers = self.registry.group_range(group);
+        self.spawn_broadcast(move |context| {
+            if workers.contains(&context.index()) {
+                op();
+            }
+        });
     }
 }
 
@@ -417,19 +419,12 @@ pub(crate) struct Worker {
 /// See also: [the `ThreadPool::current_thread_index()` method][m].
 ///
 /// [m]: ThreadPool::current_thread_index()
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "linux", not(miri))))]
 #[inline]
 pub(crate) fn current_thread_index() -> Option<usize> {
     // SAFETY: a non-null pointer is this thread's worker state, which outlives the call.
     let curr = unsafe { WorkerThread::current().as_ref()? };
     Some(curr.index())
-}
-
-/// Whether the calling thread is a worker of any `ThreadPool`.
-#[cfg(all(target_os = "linux", not(miri)))]
-#[inline]
-pub(crate) fn in_worker() -> bool {
-    !WorkerThread::current().is_null()
 }
 
 /// Cooperatively yields execution to the scheduler.
@@ -443,7 +438,7 @@ pub(crate) fn in_worker() -> bool {
 /// yield to the OS scheduler yourself if no work was found.
 ///
 /// Returns `Some(Yield::Executed)` if anything was executed, `Some(Yield::Idle)` if
-/// nothing was available, or `None` if this thread is not part of any pool at all.
+/// the search found no work, or `None` if this thread is not part of any pool at all.
 #[cfg(test)]
 pub(crate) fn yield_now() -> Option<Yield> {
     // SAFETY: a non-null pointer is this thread's worker state, which outlives the call.
