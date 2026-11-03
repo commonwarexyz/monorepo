@@ -8,7 +8,7 @@ use commonware_cryptography::{
     PublicKey,
     bls12381::primitives::{
         group::{Private, Scalar, Share},
-        ops,
+        ops::sas,
         sharing::{Mode, ModeVersion, Sharing},
         variant::Variant,
     },
@@ -30,7 +30,7 @@ pub struct DealtSharing<V: Variant> {
 
 /// The key material one trusted dealer created for a committee.
 pub struct Dealt<P: PublicKey, V: Variant> {
-    /// The proof-of-possession checked ordinary-key roster.
+    /// The proof-of-knowledge checked ordinary-key roster.
     pub roster: Roster<P, V>,
     /// The public data-availability sharing, at the epoch's DA quorum.
     pub da: Sharing<V>,
@@ -49,8 +49,8 @@ pub struct Dealt<P: PublicKey, V: Variant> {
 /// suits tests, benchmarks, and deployments run by one operator; a committee without such a party
 /// should run a distributed key generation instead.
 ///
-/// Randomness is drawn for the ordinary keys in participant order, then for the data-availability
-/// sharing, then for the nullification sharing.
+/// Randomness is drawn for each ordinary key and its proof of knowledge in participant order, then
+/// for the data-availability sharing, then for the nullification sharing.
 ///
 /// # Errors
 ///
@@ -70,8 +70,13 @@ where
     let roster_input = identities
         .iter()
         .map(|identity| {
-            let (private, public) = ops::keypair::<_, V>(&mut *rng);
-            let proof = Roster::<P, V>::proof_of_possession(parameters.namespace(), &private);
+            let (private, public) = sas::keypair::<_, V>(&mut *rng);
+            let proof = Roster::<P, V>::proof_of_knowledge(
+                &mut *rng,
+                parameters.namespace(),
+                identity,
+                &private,
+            );
             ordinary.push(private);
             (identity.clone(), public, proof)
         })
