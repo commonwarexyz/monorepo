@@ -1,6 +1,6 @@
 use super::{
     Verifier,
-    verifier::{Batch, Constructed, ProposalState},
+    verifier::{Batch, ConstructJob, Constructed, ProposalState},
     votes::{ObservedVote, Outcome, VoteTracker},
 };
 use crate::{
@@ -17,10 +17,9 @@ use crate::{
 };
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
-use commonware_parallel::Strategy;
 use commonware_utils::{N3f1, ordered::Quorum};
 use rand_core::CryptoRng;
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 use tracing::Span;
 
 /// Per-view state for vote accumulation and certificate tracking.
@@ -387,15 +386,10 @@ impl<
     /// Starts a job for the first ready kind, in the order notarize, nullify, finalize.
     /// A kind with a running job is not ready, so repeated calls start at most one job per kind.
     /// The job owns its votes. Votes that arrive later stay buffered.
-    pub fn begin_construct<E: CryptoRng>(
-        &mut self,
-        rng: &mut E,
-        strategy: &impl Strategy,
-    ) -> Option<impl Future<Output = Constructed<S, D>> + Send + 'static> {
-        let job = [Kind::Notarization, Kind::Nullification, Kind::Finalization]
+    pub fn begin_construct<E: CryptoRng>(&mut self, rng: &mut E) -> Option<ConstructJob<S, D>> {
+        [Kind::Notarization, Kind::Nullification, Kind::Finalization]
             .into_iter()
-            .find_map(|kind| self.verifier.begin_construct(kind, rng))?;
-        Some(job.spawn(strategy))
+            .find_map(|kind| self.verifier.begin_construct(kind, rng))
     }
 
     /// Merges the job's verified votes back and records its certificate.
@@ -445,6 +439,7 @@ impl<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_parallel::Strategy;
 
     impl<
         S: Scheme<D>,
@@ -459,7 +454,7 @@ mod tests {
             rng: &mut E,
             strategy: &impl Strategy,
         ) -> Option<Batch<Certificate<S, D>>> {
-            let result = self.begin_construct(rng, strategy)?.await;
+            let result = self.begin_construct(rng)?.spawn(strategy).await;
             Some(self.finish_construct(result))
         }
     }

@@ -136,7 +136,7 @@ where
         );
         let construct_latency = context.histogram(
             "construct_latency",
-            "latency of vote verification and certificate assembly",
+            "time from construction job submission until its result is handled",
             Buckets::CRYPTOGRAPHY,
         );
         let construct_fallback = context.counter(
@@ -342,10 +342,9 @@ where
     }
 
     /// Forwards known proposals and starts a job for each ready kind of each dirty view.
-    /// Visits the current view first. Skips finalized views and views without a round.
+    /// Visits the current view first, so its proposal and jobs are submitted first.
+    /// Skips finalized views and views without a round.
     /// Starts no jobs for views outside the lookahead window.
-    /// A finished job marks its view dirty again if its round still exists (see
-    /// [Self::handle_done]).
     pub(super) fn dispatch_ready(
         &mut self,
         pool: &mut Pool<'static, Done<S, D>>,
@@ -382,20 +381,17 @@ where
                 round.span().in_scope(|| voter.proposal(proposal));
             }
 
-            // We only process bounded future work. This keeps memory and
-            // verification bounded while still enabling optimistic lookahead.
+            // Start jobs only inside the lookahead window. This bounds new future work.
+            // Jobs for pruned rounds still run until they finish.
             if !self.lookahead.admits(current, view) {
                 trace!(%current, %view, "skipping out-of-window round processing");
                 continue;
             }
 
             let _guard = round.span().clone().entered();
-            loop {
-                // The strategy can run the job during submission, so start the timer first.
+            while let Some(job) = round.begin_construct(self.context.as_mut()) {
                 let timer = self.construct_latency.timer(self.context.as_ref());
-                let Some(job) = round.begin_construct(self.context.as_mut(), &self.strategy) else {
-                    break;
-                };
+                let job = job.spawn(&self.strategy);
                 pool.push(async move {
                     Done {
                         view,
@@ -494,8 +490,7 @@ where
         let mut finalized = self.floor;
         let mut work: BTreeMap<View, Round<S, B, D, Re>> = BTreeMap::new();
 
-        // Views that can have new work. A finished job adds its view again if its round still
-        // exists.
+        // Views that can have new work.
         let mut dirty_views = BTreeSet::new();
         let mut pool = Pool::default();
         select_loop! {

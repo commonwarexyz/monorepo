@@ -38,14 +38,14 @@ async fn test_construct_proposal_switch_restores_buffered_finalizes() {
             false,
         );
     }
-    let job = round.begin_construct(&mut rng, &Sequential).unwrap();
+    let job = round.begin_construct(&mut rng).unwrap().spawn(&Sequential);
 
     // Our finalize for B sets the proposal to B. This adds back the B votes that A filtered out.
     round.accept_vote(
         Vote::Finalize(Finalize::sign(&schemes[4], b.clone()).unwrap()),
         true,
     );
-    assert!(round.begin_construct(&mut rng, &Sequential).is_none());
+    assert!(round.begin_construct(&mut rng).is_none());
     let batch = round.finish_construct(job.await);
     assert!(batch.certificate.is_none());
     let batch = round.try_construct(&mut rng, &Sequential).await.unwrap();
@@ -59,5 +59,5 @@ async fn test_construct_proposal_switch_restores_buffered_finalizes() {
     assert_eq!(finalization.proposal, b);
     assert!(certificate.verify(&mut rng, &schemes[0], &Sequential));
     assert!(round.has_certificate(Kind::Finalization));
-    assert!(round.begin_construct(&mut rng, &Sequential).is_none());
+    assert!(round.begin_construct(&mut rng).is_none());
 }

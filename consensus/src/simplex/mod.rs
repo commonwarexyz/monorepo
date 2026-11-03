@@ -213,13 +213,13 @@
 //!
 //! Healing does not revisit earlier views. A `finalize` vote for a view certified while the gate
 //! was blocked is retried only if some later message for that view reaches the voter, which
-//! ordinarily none does (the batcher drops duplicate certificates). If more than `f` participants
-//! were blocked, that view may never gather its own finalization certificate, and neither may any
-//! later view in the term (healing itself requires a same-term finalization, which cannot assemble
-//! while more than `f` participants withhold `finalize`). Such a view is either finalized
-//! transitively by the finalization of a descendant in a later term or skipped entirely by a
-//! covering nullification, since the timeouts that blocked the gate also mean forced inclusion does
-//! not apply to it.
+//! ordinarily none does (the batcher normally drops duplicate certificates). If more than `f`
+//! participants were blocked, that view may never gather its own finalization certificate, and
+//! neither may any later view in the term (healing itself requires a same-term finalization, which
+//! cannot assemble while more than `f` participants withhold `finalize`). Such a view is either
+//! finalized transitively by the finalization of a descendant in a later term or skipped entirely
+//! by a covering nullification, since the timeouts that blocked the gate also mean forced inclusion
+//! does not apply to it.
 //!
 //! ### Optimistic Validation
 //!
