@@ -85,9 +85,11 @@ mod tests {
     type TestCompactDb<F> =
         CompactDb<F, deterministic::Context, commonware_utils::sequence::U64, Sha256, Sequential>;
 
+    /// A rejected bounded reopen leaves the latest durable commit recoverable after a failed prune.
     async fn bounded_init_preserves_latest_after_missing_commit<F: Family>(
         context: deterministic::Context,
     ) {
+        // Fill the first blob with commits that retain the full history.
         let cfg = db_config("bounded-missing-commit", Sequential);
         let mut db = TestDb::<F>::init(context.child("initial"), cfg.clone(), None)
             .await
@@ -102,20 +104,27 @@ mod tests {
         }
         let old_end = db.bounds().end;
         assert_eq!(*old_end, 7);
+
+        // Make the next commit eligible to prune the first blob.
         let batch = db.new_batch().merkleize(&db, None, old_end).await.unwrap();
         db = db.apply_batch(batch).await.unwrap();
         let latest_root = db.root();
         let latest_end = db.bounds().end;
+
+        // Fail deletion after the prune has made the latest commit and frontier durable.
         let faults = context.storage_fault_config();
         faults.write().remove_rate = Some(probability!(1.0));
         assert!(db.prune(old_end).await.is_err());
         faults.write().remove_rate = None;
 
+        // The bounded selection has no commit at or above the durable frontier.
         let result = TestDb::<F>::init(context.child("bounded"), cfg.clone(), Some(old_end)).await;
         assert!(matches!(
             result,
             Err(Error::Journal(crate::journal::Error::ItemPruned(7)))
         ));
+
+        // Rejecting the selection must leave the latest durable state available.
         let db = TestDb::<F>::init(context.child("latest"), cfg, None)
             .await
             .unwrap();
@@ -126,19 +135,23 @@ mod tests {
 
     #[test_traced]
     fn test_bounded_init_preserves_latest_after_missing_commit_mmr() {
+        // A failed prune must not let a bounded reopen discard the latest durable commit.
         deterministic::Runner::default()
             .start(bounded_init_preserves_latest_after_missing_commit::<mmr::Family>);
     }
 
     #[test_traced]
     fn test_bounded_init_preserves_latest_after_missing_commit_mmb() {
+        // A failed prune must not let a bounded reopen discard the latest durable commit.
         deterministic::Runner::default()
             .start(bounded_init_preserves_latest_after_missing_commit::<mmb::Family>);
     }
 
+    /// A commit retained as blob padding cannot satisfy a bounded reopen below the frontier.
     async fn bounded_init_rejects_commit_below_frontier<F: Family>(
         context: deterministic::Context,
     ) {
+        // Place the last old commit in the blob that will contain the imported frontier.
         let cfg = db_config("bounded-retained-commit", Sequential);
         let mut db = TestDb::<F>::init(context.child("initial"), cfg.clone(), None)
             .await
@@ -152,10 +165,14 @@ mod tests {
             db = db.apply_batch(batch).await.unwrap();
         }
         let old_end = db.bounds().end;
+
+        // Persist a newer commit whose inactivity floor permits importing at the old end.
         let batch = db.new_batch().merkleize(&db, None, old_end).await.unwrap();
         let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
         let latest_root = db.root();
         let latest_end = db.bounds().end;
+
+        // Import at the old end while retaining the preceding commit as blob padding.
         let pins = db.journal.pinned_nodes_at(old_end).await.unwrap();
         let crate::journal::authenticated::Journal {
             journal,
@@ -180,11 +197,14 @@ mod tests {
         assert_eq!(journal.bounds().start, *old_end);
         drop(journal);
 
+        // The cap selects only commits below the authenticated frontier.
         let result = TestDb::<F>::init(context.child("bounded"), cfg.clone(), Some(old_end)).await;
         assert!(matches!(
             result,
             Err(Error::Journal(crate::journal::Error::ItemPruned(8)))
         ));
+
+        // The failed bounded selection must preserve the newer committed state.
         let db = TestDb::<F>::init(context.child("latest"), cfg, None)
             .await
             .unwrap();
@@ -195,25 +215,30 @@ mod tests {
 
     #[test_traced]
     fn test_bounded_init_rejects_commit_below_frontier_mmr() {
+        // Blob padding below the frontier must not supply a bounded recovery commit.
         deterministic::Runner::default()
             .start(bounded_init_rejects_commit_below_frontier::<mmr::Family>);
     }
 
     #[test_traced]
     fn test_bounded_init_rejects_commit_below_frontier_mmb() {
+        // Blob padding below the frontier must not supply a bounded recovery commit.
         deterministic::Runner::default()
             .start(bounded_init_rejects_commit_below_frontier::<mmb::Family>);
     }
 
+    /// Imported history excludes local blob padding from reads and commit selection.
     async fn imported_padding_is_not_authenticated<F: Family>(
         context: deterministic::Context,
         check_reads: bool,
     ) {
+        /// Create durable histories that differ only in metadata before the imported range.
         async fn history<F: Family>(
             context: deterministic::Context,
             cfg: Config<Sequential>,
             metadata: u64,
         ) -> TestDb<F> {
+            // Put the distinguishing metadata in the commit immediately before the import.
             let mut db = TestDb::<F>::init(context, cfg, None).await.unwrap();
             for commit in 1..=8 {
                 let metadata = (commit == 7).then(|| U64::new(metadata));
@@ -224,9 +249,12 @@ mod tests {
                     .unwrap();
                 db = db.apply_batch(batch).await.unwrap();
             }
+
+            // Both the differing prefix and the common final commit must survive reopen.
             db.sync().await.unwrap()
         }
 
+        // Leave a conflicting local prefix under the partition that receives the import.
         let cfg = db_config("imported-padding-local", Sequential);
         let local = history::<F>(context.child("local"), cfg.clone(), 22).await;
         let source = history::<F>(
@@ -238,6 +266,8 @@ mod tests {
         let root = source.root();
         assert_ne!(local.root(), root);
         drop(local);
+
+        // Import only the final commit and authenticate it with the source root.
         let db: TestDb<F> = sync::sync(sync::engine::Config {
             context: context.child("import"),
             source: Arc::new(source),
@@ -257,6 +287,7 @@ mod tests {
         .unwrap();
         assert_eq!(db.root(), root);
 
+        // Reads and proofs must exclude the local commit retained below the import boundary.
         if check_reads {
             assert_eq!(db.bounds(), Location::new(8)..Location::new(9));
             assert!(matches!(
@@ -267,9 +298,13 @@ mod tests {
                 db.journal.read_many(&[7, 8]).await,
                 Err(crate::journal::Error::ItemPruned(7))
             ));
+
+            // Cached reads obey the same boundary as storage reads.
             assert!(db.journal.try_read_sync(7).is_none());
             let cached = db.journal.try_read_many_sync(&[7, 8]);
             assert!(cached[0].is_none());
+
+            // Neither replay nor historical proofs may expose the unauthenticated prefix.
             assert!(matches!(
                 db.journal
                     .replay(7..9, NZUsize!(1024), Default::default())
@@ -285,6 +320,7 @@ mod tests {
         }
         drop(db);
 
+        // A bounded reopen cannot select the conflicting local commit in the padding.
         let bounded = TestDb::<F>::init(
             context.child("bounded"),
             cfg.clone(),
@@ -295,6 +331,8 @@ mod tests {
             bounded,
             Err(Error::Journal(crate::journal::Error::ItemPruned(8)))
         ));
+
+        // An unbounded reopen must retain the imported root and its final commit metadata.
         let latest = TestDb::<F>::init(context.child("latest"), cfg, None)
             .await
             .unwrap();
@@ -306,24 +344,28 @@ mod tests {
 
     #[test_traced]
     fn test_imported_padding_rejects_bounded_commit_mmr() {
+        // A bounded reopen must reject commits in unauthenticated import padding.
         deterministic::Runner::default()
             .start(|context| imported_padding_is_not_authenticated::<mmr::Family>(context, false));
     }
 
     #[test_traced]
     fn test_imported_padding_rejects_bounded_commit_mmb() {
+        // A bounded reopen must reject commits in unauthenticated import padding.
         deterministic::Runner::default()
             .start(|context| imported_padding_is_not_authenticated::<mmb::Family>(context, false));
     }
 
     #[test_traced]
     fn test_imported_padding_rejects_reads_mmr() {
+        // Read paths must reject unauthenticated import padding.
         deterministic::Runner::default()
             .start(|context| imported_padding_is_not_authenticated::<mmr::Family>(context, true));
     }
 
     #[test_traced]
     fn test_imported_padding_rejects_reads_mmb() {
+        // Read paths must reject unauthenticated import padding.
         deterministic::Runner::default()
             .start(|context| imported_padding_is_not_authenticated::<mmb::Family>(context, true));
     }

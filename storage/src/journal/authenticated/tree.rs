@@ -404,6 +404,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
     ) -> Result<Self, merkle::Error<F>> {
+        // Collect resident nodes from each unapplied record before advancing the tree's tip.
         let initial = self.size();
         let mut end = initial;
         for run in batch.unapplied(&self.mem)? {
@@ -416,7 +417,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             self.resident.extend(end, node)?;
         }
 
-        // Earlier published peaks stay pinned; batches own the nodes between them and this tip.
+        // Pin the new tip's peaks alongside peaks from earlier published states. Batches retain
+        // the appended nodes needed to prove intermediate states.
         let leaves = Location::try_from(end)?;
         let peaks = F::nodes_to_pin(leaves)
             .filter(|&pos| pos >= initial)
@@ -892,9 +894,12 @@ mod tests {
 
     /// Each batch in an applied chain proves its leaves after its ancestors are dropped.
     async fn applied_chain<F: Family>(context: deterministic::Context) {
+        // Start from an applied prefix so proofs need both base nodes and nodes from the chain.
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
         let ops = Operations::new(20);
         let tree = replayed::<F>(&context, &ops, &hasher, 2, 9).await;
+
+        // Retain each intermediate batch while building a tip that includes every append.
         let (mut chain, mut tip, mut start) = (Vec::new(), tree.to_batch(), 9);
         for len in [3, 1, 2, 5] {
             let mut batch = tip.new_batch();
@@ -908,8 +913,12 @@ mod tests {
             ));
             start += len;
         }
+
+        // Publish the final tip without separately applying intermediate batches.
         let tree = tree.apply_batch(&tip).unwrap();
         drop(tip);
+
+        // Consume batches from oldest to newest, checking each proof after its ancestors drop.
         for (range, batch) in chain {
             let leaves: Vec<_> = (*range.start..*range.end)
                 .map(|loc| ops.item(loc).encode())
@@ -920,6 +929,8 @@ mod tests {
                 .unwrap();
             assert!(proof.verify_range_inclusion(&hasher, &leaves, range.start, &root));
         }
+
+        // Compare reconstructed nodes with a tree that retains every node.
         let expected = oracle::<F>(&ops, &hasher);
         let positions: Vec<_> = (0..*expected.size()).map(Position::new).collect();
         let nodes = tree.get_nodes(&ops, &hasher, &positions).await.unwrap();

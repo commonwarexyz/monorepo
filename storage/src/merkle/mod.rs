@@ -64,13 +64,13 @@ impl Bagging {
 
 /// Marker trait for Merkle-family data structures.
 ///
-/// Provides the per-family constants and conversion functions that differentiate
-/// MMR from MMB (or other future Merkle structures). Families capture structural topology
-/// only; bagging is owned by the [`hasher::Hasher`] instance and supplied by the consumer.
+/// Provides the per-family constants and conversions that distinguish MMR, MMB, and other
+/// Merkle structures. Families capture structural topology. Bagging is owned by the
+/// [`hasher::Hasher`] instance and supplied by the consumer.
 ///
 /// At every valid size, the nodes at height `h` cover exactly the aligned leaf intervals
 /// `[k * 2^h, (k + 1) * 2^h)` for `k` in `0..n`, for some `n`. Nodes of a given height are
-/// appended in increasing `k` order; nodes of different heights may be interleaved.
+/// appended in increasing `k` order. Nodes of different heights may be interleaved.
 ///
 /// [`Self::peaks`] and [`Self::nodes_to_pin`] each return at most [`MAX_PINNED_NODES`]
 /// entries for every valid size or pruning location, including overridden pinned-node sets.

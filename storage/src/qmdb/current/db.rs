@@ -2216,7 +2216,8 @@ mod graft_height_tests {
     use core::{fmt, ops::Deref};
     use rand::CryptoRng;
 
-    // A 16-byte output places the graft height below the supported cache ceiling.
+    /// A 16-byte digest. Bitmap chunks must be a multiple of the digest size, so this digest
+    /// admits 16-byte chunks. Their graft height of 7 lies below the maximum resident height of 8.
     #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
     struct D16([u8; 16]);
     impl fmt::Display for D16 {
@@ -2262,6 +2263,7 @@ mod graft_height_tests {
         }
     }
 
+    /// SHA-256 truncated to a `D16` digest.
     #[derive(Default)]
     struct Sha256128(Sha256);
     fn truncate(digest: sha256::Digest) -> D16 {
@@ -2285,6 +2287,9 @@ mod graft_height_tests {
         }
     }
 
+    /// Apply `writes` keys under the given ops-tree `resident_height` and return the root. With
+    /// `descendant`, the applied batch is a child whose parent holds the writes and is dropped
+    /// first. The applied and reopened roots must match the merkleized root.
     async fn run<F: crate::merkle::Graftable>(
         context: deterministic::Context,
         resident_height: u32,
@@ -2301,17 +2306,26 @@ mod graft_height_tests {
             16,
             Sequential,
         >;
+
+        // Open a database whose ops tree caches nodes at or above `resident_height`. At height 8
+        // the resident cache excludes the height-7 graft roots.
         let mut cfg = fixed_config::<TwoCap>("graft-height");
         cfg.merkle_config.cache.resident_height = resident_height;
         let db = TestDb::<F>::init(context.child("initial"), cfg.clone(), None)
             .await
             .unwrap();
+
+        // Write enough keys that applying the batch completes bitmap chunks and must record their
+        // graft roots.
         let mut batch = db.new_batch();
         for i in 0..writes {
             let key = Sha256::hash(&[&i.to_be_bytes()]);
             batch = batch.write(key, Some(key));
         }
         let parent = batch.merkleize(&db, None, &mut Hold).await.unwrap();
+
+        // A child applied after its parent is dropped must still supply the graft roots for
+        // chunks the parent completed.
         let batch = if descendant {
             let child = parent
                 .new_batch::<Sha256128>()
@@ -2324,6 +2338,8 @@ mod graft_height_tests {
         } else {
             parent
         };
+
+        // The applied root matches the merkleized root, and each numbered key is readable.
         db.validate_batch(&batch).unwrap();
         let expected = batch.root();
         let db = db.apply_batch(batch).await.unwrap();
@@ -2332,6 +2348,8 @@ mod graft_height_tests {
             let key = Sha256::hash(&[&i.to_be_bytes()]);
             assert_eq!(db.get(&key).await.unwrap(), Some(key));
         }
+
+        // A committed database reopens with the same root.
         let db = db.commit().await.unwrap();
         drop(db);
         let db = TestDb::<F>::init(context.child("reopen"), cfg, None)
@@ -2345,6 +2363,8 @@ mod graft_height_tests {
     #[test]
     fn test_graft_roots_below_resident_height_mmr() {
         deterministic::Runner::default().start(|context| async move {
+            // Resident height 7 caches the height-7 graft roots and height 8 excludes them. Both
+            // must produce the same root.
             let expected = run::<mmr::Family>(context.child("control"), 7, 254, false).await;
             assert_eq!(
                 run::<mmr::Family>(context.child("candidate"), 8, 254, false).await,
@@ -2356,6 +2376,8 @@ mod graft_height_tests {
     #[test]
     fn test_graft_roots_below_resident_height_mmb() {
         deterministic::Runner::default().start(|context| async move {
+            // Resident height 7 caches the height-7 graft roots and height 8 excludes them. Both
+            // must produce the same root.
             let expected =
                 run::<crate::merkle::mmb::Family>(context.child("control"), 7, 381, false).await;
             assert_eq!(
@@ -2368,6 +2390,9 @@ mod graft_height_tests {
     #[test]
     fn test_graft_roots_with_dropped_ancestor_mmr() {
         deterministic::Runner::default().start(|context| async move {
+            // Resident height 8 excludes the height-7 graft roots from the resident cache, so a
+            // child applied after its parent is dropped must carry them. Both heights must produce
+            // the same root.
             let expected = run::<mmr::Family>(context.child("control"), 7, 254, true).await;
             assert_eq!(
                 run::<mmr::Family>(context.child("candidate"), 8, 254, true).await,
@@ -2379,6 +2404,9 @@ mod graft_height_tests {
     #[test]
     fn test_graft_roots_with_dropped_ancestor_mmb() {
         deterministic::Runner::default().start(|context| async move {
+            // Resident height 8 excludes the height-7 graft roots from the resident cache, so a
+            // child applied after its parent is dropped must carry them. Both heights must produce
+            // the same root.
             let expected =
                 run::<crate::merkle::mmb::Family>(context.child("control"), 7, 381, true).await;
             assert_eq!(

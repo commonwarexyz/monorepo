@@ -5091,6 +5091,7 @@ pub(crate) mod tests {
     #[test]
     fn proportional_floor_passes_trailing_superseded_candidates() {
         deterministic::Runner::default().start(|context| async move {
+            // Use a fresh database so the floor candidates have predictable operation locations.
             let config = fixed_db_config::<OneCap>("proportional-trailing");
             let db = AnyUnordered::init(context.child("db"), config, None)
                 .await
@@ -5145,6 +5146,7 @@ pub(crate) mod tests {
     #[test]
     fn eviction_before_predecessor_matches_across_rounds() {
         deterministic::Runner::default().start(|context| async move {
+            // Use ordered keys so evicting the middle key requires relinking its predecessor.
             let config = fixed_db_config::<OneCap>("eviction-rounds");
             let db = AnyOrdered::init(context.child("db"), config, None)
                 .await
@@ -5200,6 +5202,8 @@ pub(crate) mod tests {
                         |value| db.new_batch().write(a, Some(value)),
                     );
                     let mut prepared = batch.prepare(&db).unwrap();
+
+                    // Split after the evicted key so its predecessor is visited in another round.
                     if split {
                         prepared.prefetched = Some((
                             Round {
@@ -5209,6 +5213,8 @@ pub(crate) mod tests {
                             loc(3),
                         ));
                     }
+
+                    // Candidate visits must retain their order across the prefetch boundary.
                     let merkleized = prepared
                         .merkleize_with_floor_walk(
                             None,
@@ -5222,6 +5228,8 @@ pub(crate) mod tests {
                     assert_eq!(policy.locations(), [loc(2), loc(3), loc(predecessor)]);
                     batches.push(merkleized);
                 }
+
+                // The batch's operations and root must be independent of round boundaries.
                 assert_same(&db, &batches[0], &batches[1]);
 
                 // After its write, if any, the batch deletes the evicted key and rewrites the
@@ -5248,6 +5256,8 @@ pub(crate) mod tests {
                 assert_eq!(merkleized.get_prev_key(&c, &db).await.unwrap(), Some(a));
                 applied = Some(merkleized);
             }
+
+            // The applied database must expose the repaired links and omit the evicted key.
             let db = db.apply_batch(applied.unwrap()).await.unwrap();
             assert_links(&db, &BTreeMap::from([(a, again), (c, c)]), &[b]).await;
             db.destroy().await.unwrap();

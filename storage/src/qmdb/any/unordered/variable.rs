@@ -805,6 +805,7 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_prepared_staged_merkleize_retains_ancestors() {
         deterministic::Runner::default().start(|context| async move {
+            // Create an applied base for a speculative chain.
             let db = create_test_db(context.child("prepared")).await;
             let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
             let mut seed = db.new_batch();
@@ -814,6 +815,7 @@ pub(crate) mod test {
             let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
             let db = db.apply_batch(seed).await.unwrap();
 
+            // Keep one value only in the grandparent's diff so descendants must read that ancestor.
             let grandparent = db
                 .new_batch()
                 .write(key(0), Some(to_bytes(1_000)))
@@ -828,6 +830,8 @@ pub(crate) mod test {
                 .await
                 .unwrap();
             assert!(!parent.diff.iter().any(|(k, _)| *k == key(100)));
+
+            // Compute the reference root while the caller holds every ancestor handle.
             let expected_root = parent
                 .new_batch::<Sha256>()
                 .write(key(0), Some(to_bytes(3_000)))
@@ -837,6 +841,7 @@ pub(crate) mod test {
                 .unwrap()
                 .root();
 
+            // Stage an overwrite that reads its current value from the grandparent.
             let target = key(0);
             let (values, staged) = parent
                 .new_batch::<Sha256>()
@@ -844,6 +849,8 @@ pub(crate) mod test {
                 .await
                 .unwrap();
             assert_eq!(values, vec![Some(to_bytes(1_000))]);
+
+            // Check ancestor ownership after prefetch releases the caller's handles.
             let weak_grandparent = Arc::downgrade(&grandparent);
             let mut caller_ancestors = Some((grandparent, parent));
             let (prepared, updates) = staged
@@ -853,7 +860,7 @@ pub(crate) mod test {
                     &db,
                     &Proportional,
                     FnCandidates(|floor, tip, limit, out: &mut Vec<_>| {
-                        // Preparation must retain the chain before prefetch starts.
+                        // Release the caller's handles at the start of prefetch.
                         drop(caller_ancestors.take());
                         db.bitmap.as_ref().fill(floor, tip, limit, out)
                     }),
@@ -863,6 +870,7 @@ pub(crate) mod test {
             assert!(caller_ancestors.is_none());
             assert!(weak_grandparent.upgrade().is_some());
 
+            // The finished batch must retain inherited values without retaining ancestor handles.
             let batch = prepared
                 .merkleize_with_floor_walk(None, updates, db.bitmap.as_ref(), &mut Proportional)
                 .await
@@ -874,6 +882,7 @@ pub(crate) mod test {
                 Some(to_bytes(1_001))
             );
 
+            // Apply the completed chain and verify values from each generation.
             let db = db.apply_batch(batch).await.unwrap();
             for (k, value) in [(0, 3_000), (1, 2_000), (100, 1_001), (101, 3_001)] {
                 assert_eq!(db.get(&key(k)).await.unwrap(), Some(to_bytes(value)));

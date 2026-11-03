@@ -38,11 +38,11 @@
 //! [`Mem::apply_batch`] to replay uncommitted ancestors without requiring the
 //! ancestor batches to still be alive.
 //!
-//! [`MerkleizedBatch::get_node`] reads from the retained ancestor data. A `Weak` pointer
-//! to the parent is kept for walking the chain to collect ancestor batch data. Committed-and-dropped
-//! ancestors truncate the `Weak` walk, leaving their data in the committed [`Mem`]. Each retained record carries the size and peaks before
-//! and after its changes, so [`Mem::apply_batch`] can find the structure's state in the
-//! chain and replay only the records that follow it.
+//! [`MerkleizedBatch::get_node`] reads from the retained ancestor data. A `Weak` parent
+//! pointer supports collecting ancestor data for new descendants. Dropping a committed
+//! ancestor ends that walk, with its data available in the committed [`Mem`]. Each retained
+//! record carries the size and peaks before and after its changes, so [`Mem::apply_batch`]
+//! can find the structure's state in the chain and replay only the records that follow it.
 //!
 //! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc`
 //! (keeping it alive for the walk), and the `Weak` chain is walked to collect
@@ -61,9 +61,10 @@
 //!
 //! Unapplied ancestor batches must stay alive while merkleizing descendants. Once merkleized,
 //! a batch retains the data needed for node reads and application even after its ancestors are
-//! dropped. Applying a sibling fork to the base invalidates the chain. [`Mem::apply_batch`]
-//! returns an error unless the structure is at a state the chain reached before the batch:
-//! the base of its oldest retained ancestor or the tip of one of them.
+//! dropped. Applying a sibling fork to the base invalidates the chain. Applying a descendant
+//! can invalidate a batch's proofs by overwriting nodes those proofs read from the base.
+//! [`Mem::apply_batch`] returns an error unless the structure is at a state the chain reached
+//! before the batch: the base of its oldest retained ancestor or the tip of one of them.
 //!
 //! Pruning the base after a batch has been merkleized does not invalidate it: prune and apply
 //! commute (see [`Mem::apply_batch`]). An unmerkleized batch still reads sibling digests from the
@@ -660,9 +661,8 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
 
     /// Resolve a node from this batch and its retained ancestor data, newest first.
     ///
-    /// Returns `None` for positions that only exist in the committed [`Mem`].
-    /// Callers that need committed data should fall back to [`Mem::get_node`]
-    /// (or use a layered adapter such as the one in `qmdb::current::batch`).
+    /// Returns `None` for positions that exist only in the committed [`Mem`]. Read those
+    /// positions with [`Mem::get_node`] or a reader that combines the batch and base.
     pub fn get_node(&self, pos: Position<F>) -> Option<D> {
         if pos >= self.size() {
             return None;
@@ -1523,6 +1523,7 @@ mod tests {
     /// locates its appended nodes from its own parent size. Nodes that exist only in the committed
     /// base read as `None`.
     fn get_node_resolves_from_writing_batch<F: Family>() {
+        // Use distinct digests to identify which batch supplies each node above a committed base.
         let hasher: H = Standard::new(ForwardFold);
         let base = build_reference::<F>(&hasher, 10);
         let (x, y, z, w) = (
@@ -1566,11 +1567,11 @@ mod tests {
                 assert_eq!(batch.get_node(batch.size()), None);
             };
 
-        // An empty batch holds no nodes of its own, so every read walks its ancestors.
+        // An empty batch holds no nodes of its own, so every read uses retained ancestor records.
         let empty = b.new_batch().merkleize(&base, &hasher);
         check_ancestor_nodes(&empty);
 
-        // C returns its own leaf 9 and leaf 11 and reads other nodes through `empty`.
+        // C returns its own leaf 9 and leaf 11 and reads older nodes from retained records.
         let c = empty
             .new_batch()
             .update_leaf_digest(Location::new(9), z)
@@ -1582,12 +1583,15 @@ mod tests {
         assert_eq!(c.get_node(leaf_11), Some(w));
         check_ancestor_nodes(&c);
 
+        // Overwrite leaf 0 again, then give the last batch no nodes of its own.
         let d = c
             .new_batch()
             .update_leaf_digest(Location::new(0), w)
             .unwrap()
             .merkleize(&base, &hasher);
         let e = d.new_batch().merkleize(&base, &hasher);
+
+        // Drop every ancestor handle. The empty tip must retain the latest values from the chain.
         drop((a, b, empty, c, d));
         assert_eq!(e.get_node(leaf_0), Some(w));
         assert_eq!(e.get_node(leaf_9), Some(z));

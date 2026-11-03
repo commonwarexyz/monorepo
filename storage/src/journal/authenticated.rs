@@ -2666,14 +2666,18 @@ mod tests {
     /// A frontier written ahead of its operations' deletion opens at that boundary and finishes the
     /// deletion, and a frontier outside the retained operations is corrupt.
     async fn frontier_before_deletion<F: Family + PartialEq>(context: Context) {
+        // Establish durable operations and the pins needed to prune partway through a blob.
         let mut journal =
             create_journal_with_ops::<F>(context.child("initial"), "ahead", 100).await;
         let root = journal.root(0).unwrap();
         let boundary = Location::new(45);
         let pins = journal.pinned_nodes_at(boundary).await.unwrap();
-        // Write the frontier as a prune would, then stop before deleting any blob.
+
+        // Persist the frontier while leaving all operation blobs in place.
         journal.frontier = journal.frontier.set(boundary, pins).await.unwrap();
         drop(journal);
+
+        // Use the same stored state for capped selection and complete recovery.
         let prepare = |label: &'static str, max_size| {
             TestJournal::<F>::prepare(
                 context.child(label),
@@ -2694,7 +2698,7 @@ mod tests {
             )
         };
 
-        // The digests start at the boundary, so a selection can't end before it.
+        // A capped selection needs a retained item at or above the frontier.
         assert!(matches!(
             prepare("below", Some(44)).await,
             Err(Error::Journal(JournalError::ItemPruned(45)))
@@ -2704,6 +2708,7 @@ mod tests {
             Err(Error::Journal(JournalError::ItemPruned(45)))
         ));
 
+        // Recovery keeps the blob padding below the authenticated range.
         let journal = open("recovered").await.unwrap();
         assert_eq!(journal.merkle.bounds().start, boundary);
         assert_eq!(journal.journal.bounds(), 42..100);
@@ -2711,12 +2716,16 @@ mod tests {
         assert_eq!(journal.root(0).unwrap(), root);
         let (proof, ops) = journal.proof(boundary, NZU64!(10), 0).await.unwrap();
         assert!(verify_proof(&proof, &ops, boundary, &root, &journal.hasher));
+
+        // A same-blob prune preserves the frontier, while crossing a blob advances it.
         let (journal, start) = journal.prune(Location::new(46)).await.unwrap();
         assert_eq!((start, journal.merkle.bounds().start), (boundary, boundary));
         let (journal, start) = journal.prune(Location::new(60)).await.unwrap();
         assert_eq!(start, Location::new(56));
         assert_eq!(journal.root(0).unwrap(), root);
         drop(journal);
+
+        // The later pruning boundary and root survive another reopen.
         let mut journal = open("again").await.unwrap();
         assert_eq!(journal.bounds(), 56..100);
         assert_eq!(journal.root(0).unwrap(), root);
@@ -2796,7 +2805,9 @@ mod tests {
     /// A journal built from synced operations records the synced boundary, and reopens there with
     /// the same root.
     async fn from_components_records_boundary<F: Family + PartialEq>(context: Context) {
+        // Cover empty history, the full range, a retained suffix, and a fully pruned journal.
         for (start, count) in [(0, 0), (0, 50), (20, 50), (50, 50)] {
+            // Keep the durable operations and the pins for this import boundary.
             let suffix = format!("import-{start}-{count}");
             let journal =
                 create_journal_with_ops::<F>(context.child("source"), &suffix, count).await;
@@ -2811,6 +2822,7 @@ mod tests {
             } = journal;
             drop(frontier);
 
+            // Importing the components records the boundary without changing the root.
             let journal = TestJournal::<F>::from_components(
                 context.child("import"),
                 &merkle_config(&suffix),
@@ -2826,6 +2838,7 @@ mod tests {
             assert_eq!(journal.frontier.boundary(), (start, pins));
             drop(journal);
 
+            // Recovery must rebuild the same root from the persisted boundary.
             let journal = TestJournal::<F>::new(
                 context.child("reopen"),
                 merkle_config(&suffix),
@@ -2842,23 +2855,28 @@ mod tests {
 
     #[test]
     fn test_from_components_records_boundary_mmr() {
+        // Imported boundaries and roots must survive recovery across the valid range.
         deterministic::Runner::default().start(from_components_records_boundary::<mmr::Family>);
     }
 
     #[test]
     fn test_from_components_records_boundary_mmb() {
+        // Imported boundaries and roots must survive recovery across the valid range.
         deterministic::Runner::default().start(from_components_records_boundary::<mmb::Family>);
     }
 
+    /// An import outside the durable operation range leaves the existing frontier recoverable.
     async fn from_components_rejects_outside_bounds<F: Family + PartialEq>(
         context: Context,
         below: bool,
     ) {
+        // Supply valid pins so rejection depends on operation availability.
         let start = Location::new(if below { 15 } else { 21 });
         let source = create_journal_with_ops::<F>(context.child("pins"), "pins", 21).await;
         let pins = source.pinned_nodes_at(start).await.unwrap();
         drop(source);
 
+        // The import falls below a pruned prefix or above the durable end.
         let config = merkle_config("invalid-components");
         let mut raw_config = journal_config("invalid-components");
         raw_config.items_per_blob = if below { NZU64!(8) } else { NZU64!(32) };
@@ -2875,9 +2893,13 @@ mod tests {
             (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
         }
         journal = journal.sync().await.unwrap();
+
+        // Remove the blob containing the proposed start in the lower-bound case.
         if below {
             (journal, _) = journal.prune(Location::new(16)).await.unwrap();
         }
+
+        // Keep the existing state to verify that rejection does not replace its frontier.
         let root = journal.root(0).unwrap();
         let bounds = journal.bounds();
         let Journal {
@@ -2887,6 +2909,8 @@ mod tests {
             ..
         } = journal;
         drop(frontier);
+
+        // Reject the import before writing the supplied frontier.
         assert!(matches!(
             TestJournal::<F>::from_components(
                 context.child("invalid"),
@@ -2901,6 +2925,7 @@ mod tests {
             Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
         ));
 
+        // The original operation range and root must remain recoverable.
         let reopened = TestJournal::<F>::new(
             context.child("reopen"),
             config,
@@ -2916,24 +2941,28 @@ mod tests {
 
     #[test]
     fn test_from_components_rejects_below_bounds_mmr() {
+        // An import below the durable range must leave the existing state recoverable.
         deterministic::Runner::default()
             .start(|context| from_components_rejects_outside_bounds::<mmr::Family>(context, true));
     }
 
     #[test]
     fn test_from_components_rejects_below_bounds_mmb() {
+        // An import below the durable range must leave the existing state recoverable.
         deterministic::Runner::default()
             .start(|context| from_components_rejects_outside_bounds::<mmb::Family>(context, true));
     }
 
     #[test]
     fn test_from_components_rejects_above_bounds_mmr() {
+        // An import above the durable range must leave the existing state recoverable.
         deterministic::Runner::default()
             .start(|context| from_components_rejects_outside_bounds::<mmr::Family>(context, false));
     }
 
     #[test]
     fn test_from_components_rejects_above_bounds_mmb() {
+        // An import above the durable range must leave the existing state recoverable.
         deterministic::Runner::default()
             .start(|context| from_components_rejects_outside_bounds::<mmb::Family>(context, false));
     }
@@ -3721,11 +3750,13 @@ mod tests {
     /// Verify stacking: create batch A, merkleize, create batch B from merkleized A,
     /// merkleize, and apply. Verify root and items.
     async fn test_speculative_batch_stacking_inner<F: Family + PartialEq>(context: Context) {
+        // Seed the journal with history shared by both batches.
         let mut journal = create_journal_with_ops::<F>(context, "batch_stacking", 10).await;
 
         let op_a = create_operation::<F>(100);
         let op_b = create_operation::<F>(200);
 
+        // Build a child batch whose root includes its parent operation.
         let (merkleized_a, merkleized_b) = {
             let batch_a = journal.new_batch().add(op_a.clone());
             let merkleized_a = batch_a.merkleize(journal.merkle.mem());
@@ -3735,6 +3766,7 @@ mod tests {
             (merkleized_a, merkleized_b)
         };
 
+        // Applying the child must leave its parent proof valid at the parent root.
         let expected_root = batch_root(&journal, &merkleized_b);
         journal = journal.apply_batch(&merkleized_b).await.unwrap();
         let proof = journal.speculative_proof(&merkleized_a, 0).unwrap();
@@ -3747,6 +3779,7 @@ mod tests {
         ));
         drop(merkleized_a);
 
+        // The child retains its proof and pins after the separate parent handle is dropped.
         let proof = journal.speculative_proof(&merkleized_b, 0).unwrap();
         assert!(verify_proof(
             &proof,
@@ -3760,6 +3793,7 @@ mod tests {
             journal.pinned_nodes_at(Location::new(11)).await.unwrap(),
         );
 
+        // The applied chain must publish both operations under the child root.
         assert_eq!(journal_root(&journal), expected_root);
         assert_eq!(*journal.size(), 12);
 
@@ -3785,18 +3819,19 @@ mod tests {
     /// Verify sequential batch application: apply batch A, then build and apply batch B
     /// from the committed state. Verify root and items.
     async fn test_speculative_batch_sequential_inner<F: Family + PartialEq>(context: Context) {
+        // Seed the common history for two successive batch applications.
         let mut journal = create_journal_with_ops::<F>(context, "batch_sequential", 10).await;
 
         let op_a = create_operation::<F>(100);
         let op_b = create_operation::<F>(200);
 
-        // Apply batch A.
+        // Publish the first batch before constructing the next one.
         let batch_a = journal.new_batch().add(op_a.clone());
         let merkleized_a = batch_a.merkleize(journal.merkle.mem());
         journal = journal.apply_batch(&merkleized_a).await.unwrap();
         assert_eq!(*journal.size(), 11);
 
-        // Apply batch B (built on top of the committed A).
+        // Build the second batch from the journal containing the first batch.
         let batch_b = journal.new_batch().add(op_b.clone());
         let merkleized_b = batch_b.merkleize(journal.merkle.mem());
         let expected_root = batch_root(&journal, &merkleized_b);
@@ -3805,6 +3840,7 @@ mod tests {
         assert_eq!(journal_root(&journal), expected_root);
         assert_eq!(*journal.size(), 12);
 
+        // The first batch proof must still verify at its own root after the second is applied.
         let proof = journal.speculative_proof(&merkleized_a, 0).unwrap();
         assert!(verify_proof(
             &proof,

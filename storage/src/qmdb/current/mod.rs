@@ -611,9 +611,8 @@ pub mod tests {
                     let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                     for depth in [0u8, 1u8, 2u8] {
-                        // Hold every unapplied ancestor until the child is merkleized.
-                        // Speculative batch Merkle lookups walk weak parent links for in-memory
-                        // ancestor nodes.
+                        // Hold every unapplied ancestor until the child is merkleized, which
+                        // captures their operations and Merkle records.
                         let mut stack = Vec::new();
                         match depth {
                             0 => {}

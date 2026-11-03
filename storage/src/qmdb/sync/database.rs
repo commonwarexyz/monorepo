@@ -105,8 +105,10 @@ pub(crate) fn journal_covers_range<F: Family>(
 }
 
 /// Shared body for [`Database::local_pinned_nodes`] implementations backed by an authenticated
-/// journal. Replays the local frontier through the target end and reuses its pins only if the
-/// rebuilt root matches the target.
+/// journal. Returns the pinned nodes at `target.range.start()`, rebuilt by replaying `journal`
+/// from the boundary of the frontier read from `config` through the target end. Returns `None`
+/// if that boundary lies after the target start, `journal` does not hold the operations from the
+/// boundary through the target start, or the rebuilt root differs from the target root.
 pub(crate) async fn local_pinned_nodes<F, E, H, S>(
     context: E,
     config: authenticated::Config<S>,
@@ -180,9 +182,9 @@ mod tests {
         }
     }
 
-    /// A sync keeps the local operations before its target's start until it records the new
-    /// boundary. A failed sync leaves the database as it was, and a sync to a target the database
-    /// already holds rebuilds the pins from those operations without asking the source.
+    /// When the local journal covers the target start, a sync keeps the earlier operations until
+    /// it records the new boundary, even if the source fails. A sync to a target the local
+    /// operations already authenticate rebuilds the pins from them without asking the source.
     #[test]
     fn sync_keeps_operations_until_the_boundary_moves() {
         deterministic::Runner::default().start(|context| async move {
@@ -192,6 +194,8 @@ mod tests {
                 merkle: merkle_config(),
                 log: journal_config(),
             };
+
+            // Create 51 operations ending in a commit whose inactivity floor is 30.
             let mut db = Db::init(context.child("create"), config.clone(), None)
                 .await
                 .unwrap();
@@ -224,6 +228,9 @@ mod tests {
                     reached_target_tx: None,
                 })
             };
+
+            // A sync to a size the source cannot serve fails and leaves the local operations and
+            // root unchanged.
             assert!(matches!(
                 sync_to("failed", 60).await,
                 Err(sync::Error::Source(_))
@@ -235,6 +242,9 @@ mod tests {
             assert_eq!(db.root(), root);
             drop(db);
 
+            // A sync to the size the database already holds rebuilds its pins locally without
+            // asking the failing source. It then records the target start 30 as its boundary,
+            // which persists across a reopen.
             let db = sync_to("local", 51).await.unwrap();
             assert_eq!(db.bounds(), Location::new(30)..Location::new(51));
             assert_eq!(db.root(), root);
@@ -267,6 +277,9 @@ mod tests {
     #[test]
     fn sync_fetches_pins_for_a_different_local_prefix() {
         deterministic::Runner::default().start(|context| async move {
+            // Build a local and a source database in separate partitions. Each holds one append
+            // at location 1 with a distinct value and a commit at 2, so they share a size of 3 but
+            // differ in root.
             type Db =
                 keyless::fixed::Db<MmrFamily, deterministic::Context, U64, Sha256, Sequential>;
             let local_config = keyless::Config {
@@ -295,6 +308,9 @@ mod tests {
             assert_ne!(local.root(), source_db.root());
             drop(local);
 
+            // The source answers only one request, with its boundary at start 2. The local
+            // journal already holds the target range 2..3, but its pins rebuild the local root, so
+            // the sync must request this boundary.
             let root = source_db.root();
             let response = source_db
                 .serve(Request::Boundary {
@@ -323,6 +339,8 @@ mod tests {
             })
             .await
             .unwrap();
+
+            // The engine accepts the source's boundary, and the synced root survives a reopen.
             assert_eq!(db.root(), root);
             assert_eq!(observed.take_verdicts().await, vec![true]);
             drop(db);
@@ -338,6 +356,9 @@ mod tests {
     #[test]
     fn local_pinned_nodes_replay_from_the_frontier() {
         deterministic::Runner::default().start(|context| async move {
+            // Build a log of 50 operations ending in a commit with floor 0, then prune it so the
+            // frontier records boundary 28. The root and the pins at 30 are what a local replay
+            // must reproduce.
             type Log =
                 authenticated::Journal<MmrFamily, deterministic::Context, Ops, Sha256, Sequential>;
             let mut log = Log::new(
@@ -362,6 +383,8 @@ mod tests {
             let expected = log.pinned_nodes_at(Location::new(30)).await.unwrap();
             drop(log.sync().await.unwrap());
 
+            // A sync journal pruned to 30 still holds operations from boundary 28, so replay
+            // rebuilds the target root and its pins. A sync journal pruned to 35 lacks them.
             for (start, pins) in [(30, Some(expected)), (35, None)] {
                 let target = Target {
                     root,
