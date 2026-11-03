@@ -362,6 +362,8 @@ pub mod grafting;
 pub mod ordered;
 pub mod proof;
 pub(crate) mod sync;
+#[cfg(any(test, feature = "test-traits"))]
+mod test_trait_impls;
 pub mod unordered;
 
 use self::db::Metrics;
@@ -566,9 +568,6 @@ pub trait BitmapPrunedBits {
 
     /// Returns the value of the bit at the given index.
     fn get_bit(&self, index: u64) -> bool;
-
-    /// Returns the position of the oldest retained bit.
-    fn oldest_retained(&self) -> u64;
 }
 
 #[cfg(test)]
