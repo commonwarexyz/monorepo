@@ -3,6 +3,10 @@
 //! A claim builder runs every structural check of its artifact, so the artifact is valid exactly
 //! when each returned claim's pairing product holds. Individual verifiers check those claims one
 //! by one; batch verification checks many artifacts' claims together.
+//!
+//! Ordinary claims are synchronized aggregate signatures over one period and batch through
+//! [`sas::verify_claims`]. Threshold claims are BLS signatures over one message and batch through
+//! [`batch::verify_claims`].
 
 use super::{Error, Scheme};
 use crate::{
@@ -23,7 +27,7 @@ use commonware_cryptography::{
     bls12381::{
         certificate::threshold as certificate_threshold,
         primitives::{
-            ops::{self, aggregate, batch},
+            ops::{self, aggregate, batch, sas},
             sharing::Sharing,
             variant::{PartialSignature, Variant},
         },
@@ -44,23 +48,23 @@ pub(super) struct TranscriptEntry<'a> {
     pub(super) message: Bytes,
 }
 
-/// One message covered by a claim, owned until the claim is borrowed as a [`batch::Claim`].
-pub(super) struct OwnedTerm<'a, V: Variant> {
-    pub(super) public: V::Public,
+/// One message covered by a claim, owned until the claim is borrowed for batch verification.
+pub(super) struct OwnedTerm<'a, K> {
+    pub(super) public: K,
     pub(super) namespace: &'a [u8],
     pub(super) message: Bytes,
 }
 
-/// The terms a [`Claim`] covers.
-enum Terms<'a, V: Variant> {
-    /// An ordinary signature or threshold material over one message.
-    One(OwnedTerm<'a, V>),
+/// The terms an ordinary [`Claim`] covers.
+pub(super) enum Terms<'a, K> {
+    /// An ordinary signature over one message.
+    One(OwnedTerm<'a, K>),
     /// An aggregate transcript.
-    Many(Vec<OwnedTerm<'a, V>>),
+    Many(Vec<OwnedTerm<'a, K>>),
 }
 
-impl<'a, V: Variant> Terms<'a, V> {
-    fn as_slice(&self) -> &[OwnedTerm<'a, V>] {
+impl<'a, K> Terms<'a, K> {
+    fn as_slice(&self) -> &[OwnedTerm<'a, K>] {
         match self {
             Self::One(term) => core::slice::from_ref(term),
             Self::Many(terms) => terms,
@@ -69,19 +73,30 @@ impl<'a, V: Variant> Terms<'a, V> {
 }
 
 /// One pairing claim extracted from an artifact: `signature` covers every term.
-pub(super) struct Claim<'a, V: Variant> {
-    signature: V::Signature,
-    terms: Terms<'a, V>,
+pub(super) enum Claim<'a, V: Variant> {
+    /// Ordinary synchronized aggregate signatures, all signed in `period`.
+    Ordinary {
+        period: Bytes,
+        signature: V::Signature,
+        terms: Terms<'a, sas::PublicKey<V>>,
+    },
+    /// A threshold share or recovered threshold signature over one message.
+    Threshold {
+        signature: V::Signature,
+        term: OwnedTerm<'a, V::Public>,
+    },
 }
 
 impl<'a, V: Variant> Claim<'a, V> {
-    const fn single(
+    const fn ordinary(
+        period: Bytes,
         signature: V::Signature,
-        public: V::Public,
+        public: sas::PublicKey<V>,
         namespace: &'a [u8],
         message: Bytes,
     ) -> Self {
-        Self {
+        Self::Ordinary {
+            period,
             signature,
             terms: Terms::One(OwnedTerm {
                 public,
@@ -91,9 +106,31 @@ impl<'a, V: Variant> Claim<'a, V> {
         }
     }
 
-    /// Creates the claim that `signature` aggregates signatures over every term.
-    pub(super) const fn aggregate(signature: V::Signature, terms: Vec<OwnedTerm<'a, V>>) -> Self {
-        Self {
+    const fn threshold(
+        signature: V::Signature,
+        public: V::Public,
+        namespace: &'a [u8],
+        message: Bytes,
+    ) -> Self {
+        Self::Threshold {
+            signature,
+            term: OwnedTerm {
+                public,
+                namespace,
+                message,
+            },
+        }
+    }
+
+    /// Creates the claim that `signature` aggregates ordinary signatures over every term, all
+    /// signed in `period`.
+    pub(super) const fn aggregate(
+        period: Bytes,
+        signature: V::Signature,
+        terms: Vec<OwnedTerm<'a, sas::PublicKey<V>>>,
+    ) -> Self {
+        Self::Ordinary {
+            period,
             signature,
             terms: Terms::Many(terms),
         }
@@ -104,39 +141,119 @@ impl<'a, V: Variant> Claim<'a, V> {
     /// Returns false for an aggregate claim, even one left with a single term; aggregates are
     /// checked with [`verify_claims`].
     pub(super) fn verify(&self) -> bool {
-        let Terms::One(term) = &self.terms else {
-            return false;
-        };
-        ops::verify_message::<V>(&term.public, term.namespace, &term.message, &self.signature)
-            .is_ok()
-    }
-
-    /// Borrows this claim as a [`batch::Claim`].
-    pub(super) fn as_batch(&self) -> batch::Claim<'_, V> {
-        batch::Claim {
-            signature: self.signature,
-            terms: self
-                .terms
-                .as_slice()
-                .iter()
-                .map(|term| batch::Term {
-                    public: term.public,
-                    namespace: term.namespace,
-                    message: &term.message,
-                })
-                .collect(),
+        match self {
+            Self::Ordinary {
+                period,
+                signature,
+                terms: Terms::One(term),
+            } => sas::verify_message::<V>(
+                &term.public,
+                period,
+                term.namespace,
+                &term.message,
+                signature,
+            )
+            .is_ok(),
+            Self::Ordinary {
+                terms: Terms::Many(_),
+                ..
+            } => false,
+            Self::Threshold { signature, term } => {
+                ops::verify_message::<V>(&term.public, term.namespace, &term.message, signature)
+                    .is_ok()
+            }
         }
     }
 }
 
-/// Returns whether every claim holds, checked as one randomly scaled batch.
+/// Claims split by scheme, each remembering its position in the caller's list.
+pub(super) struct Batch<'c, V: Variant> {
+    ordinary: Vec<sas::Claim<'c, V>>,
+    ordinary_positions: Vec<usize>,
+    threshold: Vec<batch::Claim<'c, V>>,
+    threshold_positions: Vec<usize>,
+}
+
+impl<V: Variant> Default for Batch<'_, V> {
+    fn default() -> Self {
+        Self {
+            ordinary: Vec::new(),
+            ordinary_positions: Vec::new(),
+            threshold: Vec::new(),
+            threshold_positions: Vec::new(),
+        }
+    }
+}
+
+impl<'c, V: Variant> Batch<'c, V> {
+    /// Adds `claim`, borrowing its terms, as the claim at `position`.
+    pub(super) fn push(&mut self, position: usize, claim: &'c Claim<'_, V>) {
+        match claim {
+            Claim::Ordinary {
+                period,
+                signature,
+                terms,
+            } => {
+                self.ordinary.push(sas::Claim {
+                    period,
+                    signature: *signature,
+                    terms: terms
+                        .as_slice()
+                        .iter()
+                        .map(|term| sas::Term {
+                            public: term.public,
+                            namespace: term.namespace,
+                            message: &term.message,
+                        })
+                        .collect(),
+                });
+                self.ordinary_positions.push(position);
+            }
+            Claim::Threshold { signature, term } => {
+                self.threshold.push(batch::Claim {
+                    signature: *signature,
+                    terms: vec![batch::Term {
+                        public: term.public,
+                        namespace: term.namespace,
+                        message: &term.message,
+                    }],
+                });
+                self.threshold_positions.push(position);
+            }
+        }
+    }
+
+    /// Verifies every claim and returns the positions of the invalid ones, in no particular
+    /// order.
+    pub(super) fn invalid<R: CryptoRng>(
+        &self,
+        rng: &mut R,
+        strategy: &impl Strategy,
+    ) -> Vec<usize> {
+        let mut invalid: Vec<_> = sas::verify_claims(rng, &self.ordinary, strategy)
+            .into_iter()
+            .map(|index| self.ordinary_positions[index])
+            .collect();
+        invalid.extend(
+            batch::verify_claims(rng, &self.threshold, strategy)
+                .into_iter()
+                .map(|index| self.threshold_positions[index]),
+        );
+        invalid
+    }
+}
+
+/// Returns whether every claim holds, checked as randomly scaled batches.
 pub(super) fn verify_claims<R: CryptoRng, V: Variant>(
     rng: &mut R,
     claims: &[Claim<'_, V>],
     strategy: &impl Strategy,
 ) -> bool {
-    let batched = claims.iter().map(Claim::as_batch).collect::<Vec<_>>();
-    batch::verify_claims(rng, &batched, strategy).is_empty()
+    let mut batch = Batch::default();
+    for (position, claim) in claims.iter().enumerate() {
+        batch.push(position, claim);
+    }
+    batch.invalid(rng, strategy).is_empty()
 }
 
 impl<P: PublicKey, V: Variant> Scheme<P, V> {
@@ -338,9 +455,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         attestation: &Attestation<V>,
     ) -> Option<Claim<'_, V>> {
         self.ensure_epoch(subject.epoch()).ok()?;
+        let period = subject.period()?.encode(&self.namespace);
         let public = self.public(attestation.signer())?;
         let signature = decoded(attestation).ok()?;
-        Some(Claim::single(
+        Some(Claim::ordinary(
+            period,
             signature,
             *public,
             subject.namespace(&self.namespace),
@@ -358,7 +477,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         self.ensure_epoch(subject.epoch()).ok()?;
         let partial = partial(share).ok()?;
         let public = sharing.partial_public(partial.index).ok()?;
-        Some(Claim::single(
+        Some(Claim::threshold(
             partial.value,
             public,
             subject.namespace(&self.namespace),
@@ -377,7 +496,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         if signature == &V::Signature::zero() {
             return None;
         }
-        Some(Claim::single(
+        Some(Claim::threshold(
             *signature,
             *identity,
             subject.namespace(&self.namespace),
@@ -385,13 +504,14 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         ))
     }
 
-    /// Builds the atomic claim for one aggregate transcript (a V-QC or L-QC).
+    /// Builds the atomic claim for one aggregate transcript (a V-QC or L-QC) signed in `period`.
     ///
     /// The transcript must be non-empty, every signer must resolve to a distinct public key, and
     /// the signature must be non-zero. These checks run on untrusted certificates before any
     /// pairing.
     pub(super) fn aggregate_claim<'a>(
         &'a self,
+        period: Bytes,
         transcript: &[TranscriptEntry<'a>],
         signature: &aggregate::Signature<V>,
     ) -> Option<Claim<'a, V>> {
@@ -410,7 +530,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
                 })
             })
             .collect::<Option<Vec<_>>>()?;
-        Some(Claim::aggregate(*signature.inner(), terms))
+        Some(Claim::aggregate(period, *signature.inner(), terms))
     }
 }
 
