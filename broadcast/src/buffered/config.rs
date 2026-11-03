@@ -1,19 +1,24 @@
 use commonware_cryptography::PublicKey;
-use commonware_p2p::Provider;
+use commonware_p2p::{Blocker, Provider};
 use commonware_parallel::Strategy;
 use std::num::NonZeroUsize;
 
 /// Configuration for the [super::Engine].
-pub struct Config<P, MCfg, D, T>
+pub struct Config<P, MCfg, D, B, T>
 where
     P: PublicKey,
     D: Provider<PublicKey = P>,
+    B: Blocker<PublicKey = P>,
     T: Strategy,
 {
     /// The public key of the participant.
     pub public_key: P,
 
-    /// The maximum size of the mailbox backlog.
+    /// Capacity of the application inbox.
+    ///
+    /// Requests beyond this capacity wait in order. While in overflow, broadcasts with the same
+    /// digest combine recipients and are handled once at the first broadcast's position, including
+    /// cache updates and subscriber notifications. Canceled overflow requests are discarded.
     pub mailbox_size: NonZeroUsize,
 
     /// The maximum number of cached items per sender.
@@ -29,6 +34,10 @@ where
     /// [`buffered`](super)).
     pub peer_provider: D,
 
-    /// Strategy for computing message digests.
+    /// Blocks peers whose messages fail to decode.
+    pub blocker: B,
+
+    /// Strategy for decoding inbound messages and computing their digests. Messages are cached in
+    /// the order they finish decoding, which may differ from arrival order.
     pub strategy: T,
 }
