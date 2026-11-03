@@ -1722,9 +1722,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             };
             let plan = policy.choose_run(caller, len, work, self.parallelism, pools);
 
-            // Resolve where the body runs, holding a lease on each group it uses until the body
+            // Resolve where the body runs, holding a lease on the groups it uses until the body
             // returns.
-            let mut leases: Vec<topology::Lease> = Vec::new();
+            let mut lease = None;
             let mut nudge = None;
             let placement = match own {
                 Some(placement) => placement,
@@ -1736,19 +1736,19 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     // then falls back to the least loaded full-width group. Only a strategy with
                     // several groups places a body on the whole pool.
                     if plan.placement == policy::Placement::Local {
-                        let lease = self
+                        let local = self
                             .groups
                             .local()
                             .unwrap_or_else(|| self.groups.least_loaded());
-                        nudge = self.groups.nudge(lease.group());
-                        let placement = rayon::Placement::Local(lease.group());
-                        leases.push(lease);
+                        nudge = self.groups.nudge(local.group());
+                        let placement = rayon::Placement::Local(local.group());
+                        lease = Some(local);
                         placement
                     } else {
-                        leases = self.groups.wide();
-                        rayon::Placement::Wide {
-                            near: leases[0].group(),
-                        }
+                        let wide = self.groups.wide();
+                        let placement = rayon::Placement::Wide { near: wide.group() };
+                        lease = Some(wide);
+                        placement
                     }
                 }
             };
@@ -1760,7 +1760,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 let _nudge = nudge;
                 run(plan.execution, placement)
             };
-            drop(leases);
+            drop(lease);
             if let (Some(start), Ok(_)) = (start, &result) {
                 policy.record_run_placed(caller, len, work, self.parallelism, plan, start.elapsed());
             }
@@ -1863,12 +1863,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     //                                       |
                     //           admitted, Local, full width +--> Local(H)
                     //                             otherwise +--> Wide
-                    let (queued, placement, leases) = match own {
+                    let (queued, placement, lease) = match own {
                         Some(placement @ rayon::Placement::Local(group)) => {
-                            (placement, placement, Either::Left(self.groups.lease(group)))
+                            (placement, placement, self.groups.lease(group))
                         }
                         Some(placement @ rayon::Placement::Wide { .. }) => {
-                            (placement, placement, Either::Right(self.groups.wide()))
+                            (placement, placement, self.groups.wide())
                         }
                         None => {
                             let (lease, admitted) = self.groups.for_job();
@@ -1885,7 +1885,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                             } else {
                                 wide
                             };
-                            (wide, placement, Either::Right(lease.into_wide()))
+                            (wide, placement, lease.into_wide())
                         }
                     };
                     let spawn_start = plan.measure.then(Instant::now);
@@ -1944,7 +1944,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         }
                     };
                     self.groups.pool().spawn_in(queued, move || {
-                        let _leases = leases;
+                        let _lease = lease;
                         job();
                     });
                     Either::Right(async move {
@@ -3397,9 +3397,9 @@ mod test {
         } else {
             Placement::Local(0)
         };
-        let wide_leases = wide.then(|| strategy.groups.wide());
+        let wide_lease = wide.then(|| strategy.groups.wide());
         strategy.groups.pool().install_in(placement, child);
-        drop((home, wide_leases));
+        drop((home, wide_lease));
         let placement = started_rx.recv_timeout(Duration::from_secs(10)).ok();
 
         // The parent's install has returned. Only the detached child can keep its group busy.
