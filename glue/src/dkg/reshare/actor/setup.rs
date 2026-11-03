@@ -259,8 +259,6 @@ where
         participants
             .validate(self.max_participants, Some(&info.output), round)
             .expect("boundary epoch participants must be valid");
-        self.metrics
-            .reconcile(&participants.dealers, &participants.players);
 
         // Persist the epoch's share and seed before registering its scheme, and
         // prune only once the epoch is durable.
@@ -364,6 +362,8 @@ where
             seed,
         } = preparation;
 
+        self.metrics
+            .reconcile(&participants.dealers, &participants.players);
         let round = Info::new::<N3f1>(
             self.namespace,
             epoch.get(),

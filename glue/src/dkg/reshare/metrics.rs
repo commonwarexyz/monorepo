@@ -92,8 +92,18 @@ impl<P: PublicKey> Metrics<P> {
     /// Installs an epoch's dealers and players by dropping the gauges of every other peer. A
     /// peer that keeps its role keeps its latest epoch.
     pub(crate) fn reconcile(&self, dealers: &Set<P>, players: &Set<P>) {
-        retain(&self.latest_share, dealers);
-        retain(&self.latest_ack, players);
+        for (family, peers) in [(&self.latest_share, dealers), (&self.latest_ack, players)] {
+            // Read the kept values before clearing. Each lookup holds the family's read lock
+            // and `clear` needs the write lock.
+            let kept: Vec<_> = peers
+                .iter()
+                .filter_map(|peer| family.get_by(peer).map(|gauge| (peer.clone(), gauge.get())))
+                .collect();
+            family.clear();
+            for (peer, value) in kept {
+                family.get_or_create_by(&peer).set(value);
+            }
+        }
     }
 
     /// Records the current epoch and its ceremony round.
@@ -128,20 +138,6 @@ impl<P: PublicKey> Metrics<P> {
         if revealed.position(ours).is_some() {
             self.our_reveals.inc();
         }
-    }
-}
-
-/// Drops every gauge in `family` whose peer is outside `peers`. Kept gauges keep their values.
-fn retain<P: PublicKey>(family: &GaugeFamily<Peer<P>>, peers: &Set<P>) {
-    // Read the kept values before clearing. Each lookup holds the family's read lock and
-    // `clear` needs the write lock.
-    let kept: Vec<_> = peers
-        .iter()
-        .filter_map(|peer| family.get_by(peer).map(|gauge| (peer.clone(), gauge.get())))
-        .collect();
-    family.clear();
-    for (peer, value) in kept {
-        family.get_or_create_by(&peer).set(value);
     }
 }
 
