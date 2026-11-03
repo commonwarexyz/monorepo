@@ -415,12 +415,13 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 .zip(recovered)
                 .filter_map(|(key, value)| value.map(|value| (key, value)))
             {
-                let proof = db
-                    .key_value_proof(key.clone())
+                let (proof, proved_value) = db
+                    .key_value_proof(&key)
                     .await
                     .expect("proof generation failed for a recovered key");
+                assert_eq!(proved_value, value);
                 assert!(
-                    Db::<F>::verify_key_value_proof(key, value, &proof, &root),
+                    Db::<F>::verify_key_value_proof(key, proved_value, &proof, &root),
                     "key value proof failed to verify after crash recovery"
                 );
             }
