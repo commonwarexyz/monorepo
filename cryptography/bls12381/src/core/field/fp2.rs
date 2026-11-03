@@ -201,6 +201,10 @@ impl<F> Fp2<F> {
     /// reducing.
     ///
     /// The bias `K` must cover `c1` as for [`Field::sub`].
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Completes the documented arithmetic, which the tests check.")
+    )]
     #[inline(always)]
     pub fn mul_by_nonresidue<const K: u64, S: Simd>(self, simd: S) -> Self
     where

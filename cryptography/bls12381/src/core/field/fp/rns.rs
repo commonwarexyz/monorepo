@@ -530,6 +530,7 @@ impl<S: Simd> Rns<S> {
     };
 
     /// Returns every lane set to `element`.
+    #[cfg(test)]
     #[inline(always)]
     pub fn splat(simd: S, element: &[u8; BYTES]) -> Self {
         Self::load(simd, &[], element)
@@ -561,7 +562,7 @@ impl<S: Simd> Rns<S> {
     /// Loads residues in this module's representation, the first basis then the second, bounded
     /// by `bound * p`.
     ///
-    /// Each residue must be at most twice its modulus, as returned by [`Self::to_residues`].
+    /// Each residue must be at most twice its modulus.
     #[inline(always)]
     pub const fn from_residues(_simd: S, residues: &[u64; RESIDUES], bound: u64) -> Self {
         Self {
@@ -573,6 +574,7 @@ impl<S: Simd> Rns<S> {
 
     /// Returns the residues in this module's representation, the first basis then the second,
     /// without any conversion, for a value bounded by `bound * p`.
+    #[cfg(test)]
     #[inline(always)]
     pub fn to_residues(self, _simd: S, bound: u64) -> [u64; RESIDUES] {
         self.bound.assert_le(bound);
@@ -768,6 +770,7 @@ impl<S: Simd> Rns<S> {
     }
 
     /// Returns `2 * self`.
+    #[cfg(test)]
     #[inline(always)]
     pub fn double(self, simd: S) -> Self {
         self.add(simd, self)
@@ -846,6 +849,7 @@ impl<S: Simd> Rns<S> {
     }
 
     /// Returns `self * self`.
+    #[cfg(test)]
     #[inline(always)]
     pub fn square(self, simd: S) -> Self {
         self.mul(simd, self)

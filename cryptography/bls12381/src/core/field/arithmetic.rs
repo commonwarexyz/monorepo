@@ -154,6 +154,13 @@ pub trait Field<S: Simd>: Copy {
     /// Most products one [`Self::Product`] may accumulate before [`Self::reduce`].
     ///
     /// Integer and limb bounds also constrain accumulation, including subtraction biases.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Documents the accumulation contract, which the tests check."
+        )
+    )]
     const PRODUCTS: usize;
 
     /// Loads up to [`Self::LANES`] big-endian integers, filling the remaining lanes with `fill`.
