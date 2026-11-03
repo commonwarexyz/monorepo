@@ -176,7 +176,8 @@ impl<B: Blob> Read<B> {
         Ok(out)
     }
 
-    /// Reads after the length check, with the caller guarding the starting position.
+    /// Reads exactly `len` bytes for [Self::read], which restores the cursor if this fails or is
+    /// dropped partway through.
     async fn read_inner(&mut self, len: usize) -> Result<IoBufs, Error> {
         // Read until we have enough bytes
         let mut remaining = len;
