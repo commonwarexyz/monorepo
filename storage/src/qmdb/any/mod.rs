@@ -156,6 +156,8 @@ pub mod value;
 pub use value::{FixedValue, ValueEncoding, VariableValue};
 pub mod ordered;
 pub(crate) mod sync;
+#[cfg(any(test, feature = "test-traits"))]
+mod test_trait_impls;
 pub mod unordered;
 
 /// Compute the authenticated root of a newly initialized database without opening storage.
@@ -751,7 +753,12 @@ pub(crate) mod test {
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.root(), committed_root);
         assert_eq!(db.size(), committed_size);
-        assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
+        assert_eq!(db.get(&key0).await.unwrap(), Some(value0.clone()));
+        let missing = Sha256::hash(&[&1u64.to_be_bytes()]);
+        assert_eq!(
+            db.get_many(&[&key0, &missing]).await.unwrap(),
+            [Some(value0), None]
+        );
 
         db.destroy().await.unwrap();
     }
