@@ -37,7 +37,7 @@ pub struct Committee<V: Variant> {
     pub identities: Vec<ed25519::PublicKey>,
     /// Network private keys in participant order.
     pub network_keys: Vec<ed25519::PrivateKey>,
-    /// The proof-of-possession checked ordinary-key roster.
+    /// The proof-of-knowledge checked ordinary-key roster.
     pub roster: Roster<ed25519::PublicKey, V>,
     /// The public DA sharing, at the epoch's DA quorum.
     pub da: Sharing<V>,

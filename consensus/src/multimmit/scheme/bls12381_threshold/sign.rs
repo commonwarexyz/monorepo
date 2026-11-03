@@ -16,7 +16,7 @@ use commonware_cryptography::{
     Digest, PublicKey,
     bls12381::primitives::{
         group::Share,
-        ops::{self, threshold},
+        ops::{sas, threshold},
         variant::Variant,
     },
     certificate::Subject as _,
@@ -86,11 +86,21 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
+    /// Signs an ordinary-key `subject` in its period.
+    ///
+    /// Callers sign at most one subject per period: the durable view slot and producer signing
+    /// reservations admit one vote or novote per view, one leader block per view, and one header
+    /// per height.
     fn sign_attestation(&self, subject: Subject) -> Result<Attestation<V>, Error> {
         self.ensure_epoch(subject.epoch())?;
         let keys = self.signer_keys()?;
-        let signature = ops::sign_message::<V>(
+        let period = subject
+            .period()
+            .expect("ordinary subjects have a period")
+            .encode(&self.namespace);
+        let signature = sas::sign_message::<V>(
             &keys.ordinary,
+            &period,
             subject.namespace(&self.namespace),
             &subject.message(),
         );

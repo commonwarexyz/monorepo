@@ -83,7 +83,7 @@ fn schemes_bind_their_epoch_for_both_variants() {
 fn signer_keys_must_match_the_roster_and_sharings<V: Variant>() {
     let fixture = Fixture::<V>::new();
     let mut rng = TestRng::new(8_888);
-    let (unlisted, _) = ops::keypair::<_, V>(&mut rng);
+    let (unlisted, _) = sas::keypair::<_, V>(&mut rng);
     let DealtSharing {
         sharing: fresh_da,
         shares: fresh_da_shares,
@@ -114,7 +114,7 @@ fn signer_keys_must_match_the_roster_and_sharings<V: Variant>() {
     );
 
     // The fixture draws participant 0's ordinary key first from its seed.
-    let (ordinary, _) = ops::keypair::<_, V>(&mut TestRng::new(SEED));
+    let (ordinary, _) = sas::keypair::<_, V>(&mut TestRng::new(SEED));
     let misindexed = SignerKeys {
         ordinary: ordinary.clone(),
         da: fresh_da_shares[1].clone(),
@@ -208,8 +208,10 @@ fn threshold_material_must_fit_the_committee<V: Variant>() {
         Error::Participants
     );
     let identity = Ed25519PrivateKey::from_seed(1).public_key();
-    let (ordinary, public) = ops::keypair::<_, V>(&mut rng);
-    let proof = Roster::<Ed25519PublicKey, V>::proof_of_possession(NAMESPACE, &ordinary);
+    let (ordinary, public) = sas::keypair::<_, V>(&mut rng);
+    let proof = Roster::<Ed25519PublicKey, V>::proof_of_knowledge(
+        &mut rng, NAMESPACE, &identity, &ordinary,
+    );
     let roster =
         Roster::verify(NAMESPACE, 1, vec![(identity, public, proof)], &Sequential).unwrap();
     let DealtSharing {

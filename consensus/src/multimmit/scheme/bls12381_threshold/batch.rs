@@ -3,7 +3,7 @@
 use super::{
     Scheme,
     assemble::{Transcript, tally_transcript, vqc_transcript},
-    claims::{Claim, OwnedTerm, TranscriptEntry, decoded},
+    claims::{Batch, Claim, OwnedTerm, TranscriptEntry, decoded},
 };
 use crate::{
     Epochable,
@@ -16,10 +16,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_cryptography::{
     Digest, Hasher, PublicKey,
-    bls12381::primitives::{
-        ops::{aggregate, batch},
-        variant::Variant,
-    },
+    bls12381::primitives::{ops::aggregate, variant::Variant},
     certificate::Subject as _,
 };
 use commonware_math::algebra::Additive;
@@ -72,11 +69,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// the identical DA certificate is known. A forged or mismatched known message can only fail
     /// an artifact, never pass one.
     ///
-    /// Every artifact decomposes into pairing claims, and the whole batch is checked as one
-    /// randomly scaled pairing product costing one pairing per distinct message instead of one
-    /// per signature. On failure, bisection isolates the invalid artifacts; an invalid
-    /// signature is attributable evidence of misbehavior, so the optimistic path is the
-    /// common case.
+    /// Every artifact decomposes into pairing claims. Ordinary claims are checked as one randomly
+    /// scaled pairing product costing one pairing per distinct period, and threshold claims as one
+    /// costing one pairing per distinct message, instead of one per signature. On failure,
+    /// bisection isolates the invalid artifacts; an invalid signature is attributable evidence of
+    /// misbehavior, so the optimistic path is the common case.
     pub fn verify_artifacts<R: CryptoRng, H: Hasher<Digest = D>, D: Digest>(
         &self,
         rng: &mut R,
@@ -109,24 +106,19 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             self.artifact_claims::<H, D>(artifact, known)
         });
 
-        let claim_count = claims
-            .iter()
-            .filter_map(Option::as_ref)
-            .map(|artifact| artifact.claims.len())
-            .sum();
-        let mut owners = Vec::with_capacity(claim_count);
-        let mut batched = Vec::with_capacity(claim_count);
+        let mut batch = Batch::default();
         for (index, set) in claims.iter().enumerate() {
             let Some(set) = set else {
                 continue;
             };
             for claim in &set.claims {
-                owners.push(index);
-                batched.push(claim.as_batch());
+                batch.push(index, claim);
             }
         }
-        for invalid in batch::verify_claims(rng, &batched, strategy) {
-            claims[owners[invalid]] = None;
+        let invalid = batch.invalid(rng, strategy);
+        drop(batch);
+        for index in invalid {
+            claims[index] = None;
         }
         claims
             .into_iter()
@@ -224,7 +216,12 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             return None;
         }
         Some(ArtifactClaims {
-            claims: self.reduced_aggregate_claim(&transcript.entries, signature, known)?,
+            claims: self.reduced_aggregate_claim(
+                transcript.period,
+                &transcript.entries,
+                signature,
+                known,
+            )?,
             votes: Some(transcript.votes),
         })
     }
@@ -232,19 +229,21 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Builds the pairing claims for an aggregate transcript after discharging every term whose
     /// signature is known from a locally verified message.
     ///
-    /// BLS signatures are unique per key and message, so a valid aggregate over the transcript
+    /// Ordinary signatures are unique per key, period, and message, and every term of one
+    /// transcript shares the certificate's view period, so a valid aggregate over the transcript
     /// must contain exactly the known signature for every discharged term. Subtracting those
     /// leaves an aggregate over the remaining terms alone; an empty remainder must then equal the
     /// identity. Returns no claims when everything was discharged and the remainder holds.
     fn reduced_aggregate_claim<'a, D: Digest>(
         &'a self,
+        period: Bytes,
         transcript: &[TranscriptEntry<'a>],
         signature: &aggregate::Signature<V>,
         known: &[Verified<'_, V, D>],
     ) -> Option<Vec<Claim<'a, V>>> {
         if known.is_empty() {
             return self
-                .aggregate_claim(transcript, signature)
+                .aggregate_claim(period, transcript, signature)
                 .map(|claim| vec![claim]);
         }
         if transcript.is_empty() || signature.inner() == &V::Signature::zero() {
@@ -303,6 +302,6 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         if terms.is_empty() {
             return (remainder == V::Signature::zero()).then(Vec::new);
         }
-        Some(vec![Claim::aggregate(remainder, terms)])
+        Some(vec![Claim::aggregate(period, remainder, terms)])
     }
 }
