@@ -5,8 +5,9 @@ use std::{
     sync::{Arc, Weak},
 };
 
-/// Delay reaping dropped children until enough stale weak pointers accumulate to
-/// amortize the cleanup cost for child-heavy parents.
+/// Minimum number of stale weak pointers a parent accumulates before it
+/// compacts its child list, so short lists batch their cleanup. Longer lists
+/// wait until half of their entries are stale (see [`Children::push`]).
 const STALE_CHILD_THRESHOLD: usize = 32;
 
 /// Tracks the relationship between runtime contexts.
@@ -35,9 +36,10 @@ struct Children {
 
 impl Children {
     /// Appends a weak reference to `child`, compacting stale entries first if
-    /// the stale count has reached [`STALE_CHILD_THRESHOLD`].
+    /// the stale count has reached the larger of [`STALE_CHILD_THRESHOLD`] and
+    /// half the list, so compaction stays amortized constant time per push.
     fn push(&mut self, child: &Arc<Tree>) {
-        if self.stale >= STALE_CHILD_THRESHOLD {
+        if self.stale >= STALE_CHILD_THRESHOLD.max(self.links.len() / 2) {
             self.links.retain(|weak| weak.strong_count() > 0);
             self.stale = 0;
         }
@@ -380,6 +382,53 @@ mod tests {
         }
 
         drop(child);
+        drop(root);
+    }
+
+    #[test]
+    fn child_reaping_scales_with_list_length() {
+        let root = Tree::root();
+        let mut children: Vec<_> = (0..1_000)
+            .map(|_| {
+                let (child, aborted) = Tree::child(&root);
+                assert!(!aborted, "child node unexpectedly aborted");
+                child
+            })
+            .collect();
+
+        // Past the fixed threshold but below half the list: no compaction.
+        children.drain(..33);
+        let (first, _) = Tree::child(&root);
+        {
+            let inner = root.inner.lock();
+            assert_eq!(inner.children.links.len(), 1_001);
+            assert_eq!(inner.children.stale, 33);
+        }
+
+        // The bar grows with the list: compaction waits for half to be stale.
+        children.drain(..466);
+        let (second, _) = Tree::child(&root);
+        {
+            let inner = root.inner.lock();
+            assert_eq!(inner.children.links.len(), 1_002);
+            assert_eq!(inner.children.stale, 499);
+        }
+        children.drain(..1);
+        let (third, _) = Tree::child(&root);
+        {
+            let inner = root.inner.lock();
+            assert_eq!(inner.children.links.len(), 1_003);
+            assert_eq!(inner.children.stale, 500);
+        }
+        children.drain(..1);
+        let (fourth, _) = Tree::child(&root);
+        {
+            let inner = root.inner.lock();
+            assert_eq!(inner.children.links.len(), 1_003 - 501 + 1);
+            assert_eq!(inner.children.stale, 0);
+        }
+
+        drop((children, first, second, third, fourth));
         drop(root);
     }
 
