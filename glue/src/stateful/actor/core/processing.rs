@@ -2094,7 +2094,7 @@ mod tests {
             // it, so the report shows the finalization has started waiting.
             let Parked {
                 request: mut acquiring,
-                parked: parked,
+                parked,
                 ..
             } = Parked::verification(&mailbox, context.child("acquiring"));
             assert!(poll!(&mut acquiring).is_pending());
@@ -2238,7 +2238,7 @@ mod tests {
             // which happens once the finalization has started waiting.
             let Parked {
                 request: mut acquiring,
-                parked: parked,
+                parked,
                 ..
             } = Parked::verification(&mailbox, context.child("acquiring"));
             assert!(poll!(&mut acquiring).is_pending());
@@ -2569,7 +2569,7 @@ mod tests {
             // which happens once the finalization has started waiting.
             let Parked {
                 request: mut acquiring,
-                parked: parked,
+                parked,
                 ..
             } = Parked::verification(&mailbox, context.child("acquiring"));
             assert!(poll!(&mut acquiring).is_pending());
@@ -3711,7 +3711,7 @@ mod tests {
             // its acquisition.
             let Parked {
                 request: mut acquiring,
-                parked: parked,
+                parked,
                 ..
             } = Parked::verification(&mailbox, context.child("acquiring"));
             assert!(poll!(&mut acquiring).is_pending());
@@ -3809,7 +3809,7 @@ mod tests {
             // its acquisition.
             let Parked {
                 request: mut acquiring,
-                parked: parked,
+                parked,
                 ..
             } = Parked::verification(&mailbox, context.child("acquiring"));
             assert!(poll!(&mut acquiring).is_pending());
@@ -4096,7 +4096,7 @@ mod tests {
             // its acquisition.
             let Parked {
                 request: mut acquiring,
-                parked: parked,
+                parked,
                 ..
             } = Parked::verification(&mailbox, context.child("acquiring"));
             assert!(poll!(&mut acquiring).is_pending());
@@ -4230,7 +4230,7 @@ mod tests {
             // its acquisition.
             let Parked {
                 request: mut acquiring,
-                parked: parked,
+                parked,
                 ..
             } = Parked::verification(&mailbox, context.child("acquiring"));
             assert!(poll!(&mut acquiring).is_pending());
@@ -5847,7 +5847,7 @@ mod tests {
                 .expect("losing request must execute its block");
             let Parked {
                 request: mut acquiring,
-                parked: parked,
+                parked,
                 ..
             } = Parked::verification(&mailbox, context.child("acquiring"));
             assert!(poll!(&mut acquiring).is_pending());

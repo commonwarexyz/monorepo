@@ -217,24 +217,21 @@ where
     /// Unavailable selected history leaves a verification pending, so it abstains, and makes
     /// recovery return [`PrepareBatchesError::Incomplete`]. Dropping the future releases the
     /// path's acquisitions.
-    pub(in crate::stateful::actor) fn acquire(
+    pub(in crate::stateful::actor) async fn acquire(
         mut prepared: Prepared<A::Block>,
-    ) -> impl Future<Output = Result<Prepared<A::Block>, PrepareBatchesError>> + Send + use<E, A>
-    {
-        async move {
-            let verify = prepared.block.is_some();
-            let path = prepared
-                .replay
-                .as_mut()
-                .expect("acquisition requires a replay path");
-            match path.acquire().await {
-                Ok(()) => Ok(prepared),
-                Err(PrepareBatchesError::Incomplete) if verify => {
-                    debug!("verification waiting on unavailable recovery history");
-                    pending().await
-                }
-                Err(error) => Err(error),
+    ) -> Result<Prepared<A::Block>, PrepareBatchesError> {
+        let verify = prepared.block.is_some();
+        let path = prepared
+            .replay
+            .as_mut()
+            .expect("acquisition requires a replay path");
+        match path.acquire().await {
+            Ok(()) => Ok(prepared),
+            Err(PrepareBatchesError::Incomplete) if verify => {
+                debug!("verification waiting on unavailable recovery history");
+                pending().await
             }
+            Err(error) => Err(error),
         }
     }
 

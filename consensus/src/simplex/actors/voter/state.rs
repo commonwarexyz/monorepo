@@ -2604,7 +2604,7 @@ mod tests {
             for (proposal, parent_payload) in
                 [(&ancestor, test_genesis()), (&parent, ancestor.payload)]
             {
-                assert!(state.set_proposal(proposal.view(), &proposal));
+                assert!(state.set_proposal(proposal.view(), proposal));
                 let Verify::Ready(context, verifying) = state.try_verify() else {
                     panic!("optimistic proposal must be ready");
                 };

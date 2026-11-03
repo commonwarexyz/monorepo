@@ -107,7 +107,7 @@ where
     A: Application<E>,
 {
     /// A finished execution step awaiting the end of pruning.
-    Ready { prepared: Prepared<A::Block> },
+    Ready { prepared: Box<Prepared<A::Block>> },
     /// Finding or acquiring the request's missing blocks. `future` is `None` while maintenance
     /// pauses acquisition.
     Acquiring {
@@ -396,7 +396,7 @@ where
                 } => {
                     self.advance(
                         request.expect("ready request must be retained"),
-                        prepared,
+                        *prepared,
                         actions,
                     );
                     continue;
@@ -447,7 +447,9 @@ where
                     if matches!(self.admission, Admission::Pruning) {
                         self.jobs.push(Work {
                             request: Some(request),
-                            phase: Phase::Ready { prepared },
+                            phase: Phase::Ready {
+                                prepared: Box::new(prepared),
+                            },
                         });
                         return;
                     }
