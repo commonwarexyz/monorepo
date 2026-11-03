@@ -58,7 +58,7 @@ fn main() {
     // map it to `.` to keep the archive identical across checkouts. Code and
     // data are unaffected.
     let mut prefix_map = OsString::from("-fdebug-prefix-map=");
-    prefix_map.push(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is not set"));
+    prefix_map.push(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set"));
     prefix_map.push("=.");
     build.flag_if_supported(prefix_map);
     build.compile("mimalloc");
