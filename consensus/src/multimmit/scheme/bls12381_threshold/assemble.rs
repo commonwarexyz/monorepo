@@ -10,7 +10,7 @@ use super::{
 use crate::{
     Epochable,
     multimmit::{
-        scheme::{Namespace, Subject},
+        scheme::{Namespace, Period, Subject},
         types::{
             CodecConfig, ConflictingVote, DaCertificate, DaVote, DigestedLeader, LeaderBlock, Lqc,
             Nullification, Nullify, Tally, ThresholdShare, ViewMessage, Vote, Vqc,
@@ -18,12 +18,13 @@ use crate::{
     },
     types::Attributable as _,
 };
+use bytes::Bytes;
 use commonware_cryptography::{
     Digest, Hasher, PublicKey,
     bls12381::{
         certificate::threshold as certificate_threshold,
         primitives::{
-            ops::{self, aggregate, threshold},
+            ops::{self, aggregate, sas, threshold},
             sharing::Sharing,
             variant::Variant,
         },
@@ -288,7 +289,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
                 return Err(Error::Quorum);
             }
 
-            let signature = self.aggregate(&transcript, &signatures, verification, strategy)?;
+            let period = Period::View(leader.round()).encode(&self.namespace);
+            let signature =
+                self.aggregate(&period, &transcript, &signatures, verification, strategy)?;
             conflicting.sort_by_key(ConflictingVote::signer);
             novoters.sort_unstable();
             let tally = Tally::from_votes(digested, target, self.codec_config())?;
@@ -349,16 +352,19 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
                 signatures.push(decoded(vote.attestation())?);
             }
 
-            let signature = self.aggregate(&transcript, &signatures, verification, strategy)?;
+            let period = Period::View(leader.round()).encode(&self.namespace);
+            let signature =
+                self.aggregate(&period, &transcript, &signatures, verification, strategy)?;
             let tally = Tally::from_votes(digested, tally_votes, self.codec_config())?;
             Ok(Lqc::new(leader, tally, signature, self.codec_config())?)
         }
     }
 
-    /// Combines `signatures` into the aggregate over `transcript`, verifying each first when
-    /// `verification` is [`SignatureVerification::Checked`].
+    /// Combines `signatures` into the aggregate over `transcript`, all signed in `period`,
+    /// verifying each first when `verification` is [`SignatureVerification::Checked`].
     fn aggregate(
         &self,
+        period: &[u8],
         transcript: &[TranscriptEntry<'_>],
         signatures: &[V::Signature],
         verification: SignatureVerification,
@@ -373,7 +379,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             .zip(signatures)
             .map(|(entry, signature)| {
                 let public = self.public(entry.signer).ok_or(Error::Transcript)?;
-                if public == &V::Public::zero() || !publics.insert(*public) {
+                if !publics.insert(*public) {
                     return Err(Error::Signature);
                 }
                 Ok((public, entry.namespace, entry.message.as_ref(), signature))
@@ -385,7 +391,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         if verification == SignatureVerification::Checked {
             strategy
                 .try_map_collect_vec(&entries, |(public, namespace, message, signature)| {
-                    ops::verify_message::<V>(public, namespace, message, signature)
+                    sas::verify_message::<V>(public, period, namespace, message, signature)
                 })
                 .map_err(|_| Error::Signature)?;
         }
@@ -430,6 +436,8 @@ fn recover<'a, V: Variant>(
 
 /// A certificate's reconstructed signed messages and the vote bodies they carry.
 pub(super) struct Transcript<'a, D: Digest> {
+    /// The view period every message was signed in.
+    pub(super) period: Bytes,
     /// Every signed message, in signer order.
     pub(super) entries: Vec<TranscriptEntry<'a>>,
     /// The expanded vote bodies.
@@ -454,6 +462,7 @@ where
         designated: Vec::with_capacity(tally.signers().count()),
         conflicting: Vec::new(),
     };
+    let period = Period::View(leader.block().round()).encode(namespace);
     let mut entries = Vec::with_capacity(config.view_quorum());
     for signer in tally.signers().iter() {
         let body = tally.vote(leader, signer, config)?;
@@ -465,7 +474,11 @@ where
         });
         votes.designated.push((signer, body));
     }
-    Ok(Transcript { entries, votes })
+    Ok(Transcript {
+        period,
+        entries,
+        votes,
+    })
 }
 
 /// Reconstructs every signed view message of a V-QC, in signer order.
@@ -481,6 +494,7 @@ where
 {
     let leader = certificate.leader();
     let Transcript {
+        period,
         entries: mut transcript,
         mut votes,
     } = tally_transcript::<V, D, H>(leader, certificate.tally(), config, namespace)?;
@@ -515,6 +529,7 @@ where
         return Err(Error::Transcript);
     }
     Ok(Transcript {
+        period,
         entries: transcript,
         votes,
     })
