@@ -612,6 +612,7 @@ pub mod tests {
                     test_any_proportional_one_batch,
                 },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+                value::{FixedEncoding, VariableEncoding},
             },
             chain::Bounds,
             floor::{Bounded, Hold},
@@ -3236,12 +3237,7 @@ pub mod tests {
 
             let (proof, value) = db.key_value_proof(&k).await.unwrap();
             assert_eq!(value, val(60_000 + 199));
-            assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                k,
-                value,
-                &proof,
-                &db.root()
-            ));
+            assert!(proof.verify::<Sha256, VariableEncoding<Digest>, _>(k, value, &db.root()));
 
             let target_root = db.root();
             drop(db);
@@ -3259,10 +3255,9 @@ pub mod tests {
 
             let (proof, value) = reopened.key_value_proof(&k).await.unwrap();
             assert_eq!(value, val(60_000 + 199));
-            assert!(UnorderedVariableMmbDb::verify_key_value_proof(
+            assert!(proof.verify::<Sha256, VariableEncoding<Digest>, _>(
                 k,
                 value,
-                &proof,
                 &reopened.root()
             ));
 
@@ -3497,7 +3492,7 @@ pub mod tests {
                 let (proof, value) = db.key_value_proof(&k).await.unwrap();
                 assert_eq!(Some(value), expected);
                 assert!(
-                    UnorderedVariableMmbDb::verify_key_value_proof(k, value, &proof, &db.root()),
+                    proof.verify::<Sha256, VariableEncoding<Digest>, _>(k, value, &db.root()),
                     "proof verification failed at round {round}"
                 );
 
@@ -3525,7 +3520,7 @@ pub mod tests {
                 let (proof, value) = db.key_value_proof(&k).await.unwrap();
                 assert_eq!(Some(value), expected);
                 assert!(
-                    UnorderedVariableMmbDb::verify_key_value_proof(k, value, &proof, &db.root()),
+                    proof.verify::<Sha256, VariableEncoding<Digest>, _>(k, value, &db.root()),
                     "proof verification failed after reopen at round {round}"
                 );
             }
@@ -5410,7 +5405,7 @@ pub mod tests {
                         let (proof, proved_value) = self.key_value_proof(key).await.unwrap();
                         assert_eq!(proved_value, *value);
                         assert!(
-                            Self::verify_key_value_proof(*key, proved_value, &proof, &root),
+                            proof.verify::<Sha256, FixedEncoding<Digest>, _>(*key, proved_value, &root),
                             "{key} fails to prove its value",
                         );
                     }

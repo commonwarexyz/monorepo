@@ -16,7 +16,10 @@ pub mod variable;
 pub mod tests {
     //! Shared test utilities for unordered Current QMDB variants.
 
-    use super::{db, proof::constant};
+    use super::{
+        db,
+        proof::{KeyValueProof, constant, dynamic},
+    };
     use crate::{
         index::unordered::Index,
         journal::contiguous::{Contiguous as _, Mutable},
@@ -29,12 +32,16 @@ pub mod tests {
                 traits::{DbAny, UnmerkleizedBatch as _},
                 unordered::Operation,
             },
-            current::{BitmapPrunedBits, proof::RangeProof, tests::apply_random_ops},
+            current::{
+                BitmapPrunedBits,
+                proof::{RangeProof, operation},
+                tests::apply_random_ops,
+            },
             store::tests::{TestKey, TestValue},
         },
         translator::TwoCap,
     };
-    use commonware_codec::Codec;
+    use commonware_codec::{Codec, Decode as _, Encode as _};
     use commonware_cryptography::{Digest as _, Hasher as _, Sha256, sha256::Digest};
     use commonware_runtime::{
         Runner as _, Supervisor as _,
@@ -195,18 +202,11 @@ pub mod tests {
 
             // Proof should be verifiable against current root.
             let root = db.root();
-            assert!(TestDb::<F, C, V>::verify_key_value_proof(
-                k,
-                proved_value,
-                &proof,
-                &root
-            ));
+            assert!(proof.verify::<Sha256, V, _>(k, proved_value, &root));
 
             let v2 = Sha256::fill(0xA2);
             // Proof should not verify against a different value.
-            assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                k, v2, &proof, &root,
-            ));
+            assert!(!proof.verify::<Sha256, V, _>(k, v2, &root));
 
             // Update the key to a new value (v2), which inactivates the previous operation.
             let merkleized = db
@@ -219,90 +219,67 @@ pub mod tests {
             let root = db.root();
 
             // New value should not be verifiable against the old proof.
-            assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                k, v2, &proof, &root,
-            ));
+            assert!(!proof.verify::<Sha256, V, _>(k, v2, &root));
 
             // But the new value should verify against a new proof.
             let (proof, proved_value) = db.key_value_proof(&k).await.unwrap();
             assert_eq!(proved_value, v2);
-            assert!(TestDb::<F, C, V>::verify_key_value_proof(
-                k,
-                proved_value,
-                &proof,
-                &root,
-            ));
+            assert!(proof.verify::<Sha256, V, _>(k, proved_value, &root));
 
             // Old value will not verify against new proof.
-            assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                k, v1, &proof, &root,
-            ));
+            assert!(!proof.verify::<Sha256, V, _>(k, v1, &root));
 
             // Create a proof of the now-inactive update operation assigning v1 to k against the
             // current root.
             let (range_proof, _, chunks) = db.range_proof(op_loc, NZU64!(1)).await.unwrap();
             let proof_inactive = constant::KeyValueProof {
-                loc: op_loc,
-                chunk: chunks[0],
-                range_proof,
+                proof: operation::Proof {
+                    loc: op_loc,
+                    chunk: chunks[0],
+                    range_proof,
+                },
             };
-            // This proof should verify using verify_range_proof which does not check activity
+            // This proof should verify using RangeProof::verify, which does not check activity
             // status.
             let op = Operation::Update(UnorderedUpdate(k, v1));
-            assert!(TestDb::<F, C, V>::verify_range_proof(
-                &proof_inactive.range_proof,
-                proof_inactive.loc,
+            assert!(proof_inactive.proof.range_proof.verify::<Sha256, _, _>(
+                proof_inactive.proof.loc,
                 &[op],
-                &[proof_inactive.chunk],
+                &[proof_inactive.proof.chunk],
                 &root,
             ));
 
             // But this proof should *not* verify as a key value proof, since verification will see
             // that the operation is inactive.
-            assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                k,
-                v1,
-                &proof_inactive,
-                &root,
-            ));
+            assert!(!proof_inactive.verify::<Sha256, V, _>(k, v1, &root));
 
             // Attempt #1 to "fool" the verifier:  change the location to that of an active
             // operation. This should not fool the verifier if we're properly validating the
             // inclusion of the operation itself, and not just the chunk.
             let (_, active_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
             // The new location should differ but still be in the same chunk.
-            assert_ne!(active_loc, proof_inactive.loc);
+            assert_ne!(active_loc, proof_inactive.proof.loc);
             assert_eq!(
                 BitMap::<32>::to_chunk_index(*active_loc),
-                BitMap::<32>::to_chunk_index(*proof_inactive.loc)
+                BitMap::<32>::to_chunk_index(*proof_inactive.proof.loc)
             );
             let mut fake_proof = proof_inactive.clone();
-            fake_proof.loc = active_loc;
-            assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                k,
-                v1,
-                &fake_proof,
-                &root,
-            ));
+            fake_proof.proof.loc = active_loc;
+            assert!(!fake_proof.verify::<Sha256, V, _>(k, v1, &root));
 
             // Attempt #2 to "fool" the verifier: Modify the chunk in the proof info to make it
             // look like the operation is active by flipping its corresponding bit to 1. This
             // should not fool the verifier if we are correctly incorporating the partial chunk
             // information into the root computation.
-            let mut modified_chunk = proof_inactive.chunk;
-            let bit_pos = *proof_inactive.loc;
+            let mut modified_chunk = proof_inactive.proof.chunk;
+            let bit_pos = *proof_inactive.proof.loc;
             let byte_idx = bit_pos / 8;
             let bit_idx = bit_pos % 8;
             modified_chunk[byte_idx as usize] |= 1 << bit_idx;
 
             let mut fake_proof = proof_inactive.clone();
-            fake_proof.chunk = modified_chunk;
-            assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                k,
-                v1,
-                &fake_proof,
-                &root,
-            ));
+            fake_proof.proof.chunk = modified_chunk;
+            assert!(!fake_proof.verify::<Sha256, V, _>(k, v1, &root));
 
             db.destroy().await.unwrap();
         });
@@ -336,8 +313,7 @@ pub mod tests {
                 partial_chunk_digest: None,
                 ops_root: Digest::EMPTY,
             };
-            assert!(!TestDb::<F, C, V>::verify_range_proof(
-                &proof,
+            assert!(!proof.verify::<Sha256, Operation<F, Digest, V>, 32>(
                 Location::<F>::new(0),
                 &[],
                 &[],
@@ -361,28 +337,44 @@ pub mod tests {
                 let loc = Location::<F>::new(loc);
                 let (proof, ops, chunks) = db.range_proof(loc, NZU64!(max_ops)).await.unwrap();
                 assert!(
-                    TestDb::<F, C, V>::verify_range_proof(&proof, loc, &ops, &chunks, &root),
+                    proof.verify::<Sha256, _, _>(loc, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",
                 );
                 // Proof should not verify if we include extra chunks.
                 let mut chunks_with_extra = chunks.clone();
                 chunks_with_extra.push(chunks[chunks.len() - 1]);
-                assert!(!TestDb::<F, C, V>::verify_range_proof(
-                    &proof,
-                    loc,
-                    &ops,
-                    &chunks_with_extra,
-                    &root,
-                ));
+                assert!(!proof.verify::<Sha256, _, _>(loc, &ops, &chunks_with_extra, &root,));
             }
 
             db.destroy().await.unwrap();
         });
     }
 
+    fn assert_key_value_proof<F, V>(
+        proof: &KeyValueProof<F, Digest, impl AsRef<[u8]>>,
+        key: Digest,
+        value: Digest,
+        root: &Digest,
+    ) where
+        F: Graftable,
+        V: ValueEncoding<Value = Digest>,
+        Operation<F, Digest, V>: Codec,
+    {
+        assert!(proof.verify::<Sha256, V, _>(key, value, root));
+
+        // Seeded keys and values hash eight-byte seeds. Hash one-byte inputs here
+        // to keep the negative cases distinct.
+        let wrong_value = Sha256::hash(&[&[0xFF]]);
+        let wrong_key = Sha256::hash(&[&[0xEE]]);
+        let wrong_root = Sha256::hash(&[&[0xDD]]);
+        assert!(!proof.verify::<Sha256, V, _>(key, wrong_value, root,));
+        assert!(!proof.verify::<Sha256, V, _>(wrong_key, value, root,));
+        assert!(!proof.verify::<Sha256, V, _>(key, value, &wrong_root,));
+    }
+
     /// Verify key-value proofs for every active operation in a randomly-populated database.
     ///
-    /// Checks that proofs validate against the correct key/value/root and fail against
+    /// Checks both fixed-size and runtime-sized chunks against the correct key/value/root,
     /// wrong keys, wrong values, and wrong roots.
     pub(super) fn test_key_value_proof<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
@@ -427,33 +419,17 @@ pub mod tests {
 
                 let (proof, proved_value) = db.key_value_proof(&key).await.unwrap();
                 assert_eq!(proved_value, value);
-                // Proof should validate against the current value and correct root.
-                assert!(TestDb::<F, C, V>::verify_key_value_proof(
-                    key,
-                    proved_value,
-                    &proof,
-                    &root
-                ));
-                // Proof should fail against the wrong value. Use hash instead of fill to ensure
-                // the value differs from any key/value created by TestKey::from_seed (which uses
-                // fill patterns).
-                let wrong_val = Sha256::hash(&[&[0xFF]]);
-                assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                    key, wrong_val, &proof, &root
-                ));
-                // Proof should fail against the wrong key.
-                let wrong_key = Sha256::hash(&[&[0xEE]]);
-                assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                    wrong_key, value, &proof, &root
-                ));
-                // Proof should fail against the wrong root.
-                let wrong_root = Sha256::hash(&[&[0xDD]]);
-                assert!(!TestDb::<F, C, V>::verify_key_value_proof(
-                    key,
-                    value,
-                    &proof,
-                    &wrong_root,
-                ));
+                assert_key_value_proof::<F, V>(&proof, key, proved_value, &root);
+
+                let max_digests = proof.proof.range_proof.proof.digests.len();
+                let encoded = proof.encode();
+                let dynamic = dynamic::KeyValueProof::<F, Digest>::decode_cfg(
+                    encoded.clone(),
+                    &(proof.proof.chunk.len(), max_digests),
+                )
+                .unwrap();
+                assert_eq!(dynamic.encode(), encoded);
+                assert_key_value_proof::<F, V>(&dynamic, key, proved_value, &root);
             }
 
             db.destroy().await.unwrap();
@@ -498,12 +474,12 @@ pub mod tests {
                 let (proof, proved_value) = db.key_value_proof(&k).await.unwrap();
                 assert_eq!(proved_value, v);
                 assert!(
-                    TestDb::<F, C, V>::verify_key_value_proof(k, proved_value, &proof, &root),
+                    proof.verify::<Sha256, V, _>(k, proved_value, &root),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !TestDb::<F, C, V>::verify_key_value_proof(k, old_val, &proof, &root,),
+                    !proof.verify::<Sha256, V, _>(k, old_val, &root),
                     "proof of update {i} verified when it should not have"
                 );
                 old_val = v;
@@ -511,5 +487,22 @@ pub mod tests {
 
             db.destroy().await.unwrap();
         });
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use crate::{
+            merkle::{mmb, mmr},
+            qmdb::current::unordered::proof::{constant, dynamic},
+        };
+        use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<constant::KeyValueProof<mmr::Family, Sha256Digest, 32>>,
+            CodecConformance<constant::KeyValueProof<mmb::Family, Sha256Digest, 32>>,
+            CodecConformance<dynamic::KeyValueProof<mmr::Family, Sha256Digest>>,
+            CodecConformance<dynamic::KeyValueProof<mmb::Family, Sha256Digest>>,
+        }
     }
 }

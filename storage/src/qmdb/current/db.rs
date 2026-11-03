@@ -340,18 +340,6 @@ where
         self.any.bitmap.as_ref()
     }
 
-    /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
-    /// in the log with the provided `root`, having the activity status described by `chunks`.
-    pub fn verify_range_proof(
-        proof: &RangeProof<F, H::Digest>,
-        start_loc: Location<F>,
-        ops: &[Operation<F, U>],
-        chunks: &[[u8; N]],
-        root: &H::Digest,
-    ) -> bool {
-        proof.verify::<H, _, N>(start_loc, ops, chunks, root)
-    }
-
     /// Returns a virtual [`crate::merkle::storage::Storage`] view over the grafted tree and ops
     /// tree.
     ///
