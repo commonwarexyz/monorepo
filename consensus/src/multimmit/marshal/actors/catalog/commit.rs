@@ -189,7 +189,6 @@ where
         T: Translator,
         E: Context,
         V: Variant,
-        B::Cfg: Clone,
     {
         let timer = metrics.archive_durability_timer(clock);
         let span = info_span!(
@@ -219,7 +218,6 @@ where
         T: Translator,
         E: Context,
         V: Variant,
-        B::Cfg: Clone,
     {
         let timer = metrics.publication_timer(clock);
         let span = info_span!(
@@ -251,7 +249,6 @@ where
     H: Hasher,
     V: Variant,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     /// Accepts a commit into the pipeline, or rejects it.
     pub(super) async fn accept_commit(

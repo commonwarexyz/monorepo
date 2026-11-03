@@ -14,7 +14,7 @@ use commonware_cryptography::{Digest, Hasher, PublicKey, bls12381::primitives::v
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Metrics, Storage,
+    Metrics,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_storage::Context as StorageContext;
@@ -35,7 +35,7 @@ pub(crate) fn blocked_counter(context: &impl Metrics) -> Counter {
 /// Configuration for the voter.
 pub(crate) struct Config<E, H, P, V, A, R, F, T, C, B>
 where
-    E: Storage + Metrics + StorageContext,
+    E: StorageContext,
     H: Hasher,
     P: PublicKey,
     V: Variant,

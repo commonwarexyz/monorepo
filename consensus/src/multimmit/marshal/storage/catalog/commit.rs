@@ -36,7 +36,6 @@ where
     H: Hasher,
     V: Variant,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     /// Computes where `batch` writes and the record it publishes, without changing storage.
     fn plan_commit(&self, batch: &Commit<H, V>) -> Result<CommitPlan<H::Digest>, Error> {

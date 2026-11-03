@@ -37,7 +37,7 @@ use crate::{
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey, bls12381::primitives::variant::Variant};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Supervisor, buffer::paged::CacheRef, telemetry::traces::TracedExt as _};
+use commonware_runtime::{buffer::paged::CacheRef, telemetry::traces::TracedExt as _};
 use commonware_storage::Context as StorageContext;
 use futures::{StreamExt as _, TryStreamExt as _, stream};
 use rand::{SeedableRng as _, rngs::StdRng};
@@ -214,7 +214,7 @@ pub(crate) async fn recover<E, H, P, V, T, A>(
     automaton: &A,
 ) -> Result<Recovered<E, H, V>, OpenError>
 where
-    E: CryptoRng + StorageContext + Supervisor,
+    E: CryptoRng + StorageContext,
     H: Hasher,
     P: PublicKey,
     V: Variant,
@@ -247,7 +247,7 @@ async fn open_stores<E, H, P, V, T>(
     config: RecoveryConfig<'_, H, P, V, T>,
 ) -> Result<Recovered<E, H, V>, OpenError>
 where
-    E: CryptoRng + StorageContext + Supervisor,
+    E: CryptoRng + StorageContext,
     H: Hasher,
     P: PublicKey,
     V: Variant,
@@ -303,7 +303,7 @@ async fn open_journal<E, H, V>(
     covered: Cursor,
 ) -> Result<SuffixReplay<E, V, H::Digest>, JournalError>
 where
-    E: StorageContext + Supervisor,
+    E: StorageContext,
     H: Hasher,
     V: Variant,
 {
@@ -332,7 +332,7 @@ async fn replay_journal<E, H, V>(
     checkpoint: Option<Snapshot<V, H::Digest>>,
 ) -> Result<Restored<H, V>, OpenError>
 where
-    E: StorageContext + Supervisor,
+    E: StorageContext,
     H: Hasher,
     V: Variant,
 {
@@ -519,7 +519,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock as _, Runner as _, Spawner as _,
+        Clock as _, Runner as _, Spawner as _, Supervisor as _,
         buffer::paged,
         deterministic::{Context as DeterministicContext, Runner as DeterministicRunner},
     };

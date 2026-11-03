@@ -181,7 +181,7 @@ async fn wire_marshal<B, F>(
     reporter: F,
 ) -> Node<B>
 where
-    B: Body<Sha256, Cfg = ()> + Clone + Send + Sync + 'static,
+    B: Body<Sha256, Cfg = ()>,
     F: Reporter<Activity = Update<TransactionBlock<Sha256, B>>>,
 {
     let Wiring {
@@ -384,7 +384,7 @@ impl<B: Body<Sha256>> Clone for ApplicationReporter<B> {
     }
 }
 
-impl<B: Body<Sha256> + Clone> ApplicationReporter<B> {
+impl<B: Body<Sha256>> ApplicationReporter<B> {
     fn new(auto_acknowledge: bool) -> Self {
         Self {
             state: Arc::new(Mutex::new(ReporterState {
@@ -437,7 +437,7 @@ impl<B: Body<Sha256> + Clone> ApplicationReporter<B> {
     }
 }
 
-impl<B: Body<Sha256> + Send + Sync + 'static> Reporter for ApplicationReporter<B> {
+impl<B: Body<Sha256>> Reporter for ApplicationReporter<B> {
     type Activity = Update<TransactionBlock<Sha256, B>>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
@@ -459,7 +459,7 @@ impl<B: Body<Sha256> + Send + Sync + 'static> Reporter for ApplicationReporter<B
 }
 
 /// Waits until `reporter` has recorded at least `count` updates and returns them.
-async fn wait_delivered<B: Body<Sha256> + Clone>(
+async fn wait_delivered<B: Body<Sha256>>(
     context: &deterministic::Context,
     reporter: &ApplicationReporter<B>,
     count: usize,

@@ -101,7 +101,6 @@ where
     E: Context,
     H: Hasher,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     /// Opens an immutable value blob without replaying indexes or changing storage.
     pub(crate) async fn open(self) -> Result<BodyReader<E, H, B>, Error> {
