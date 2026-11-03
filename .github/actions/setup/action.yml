@@ -157,12 +157,12 @@ runs:
     # large test binary takes over 5 minutes, so a long download wait pays off. The daemon
     # and every compile read the wait, so it goes in the job environment.
     - name: Setup kache
-      if: inputs.rust-cache-enabled == 'true'
+      if: inputs.rust-cache-enabled == 'true' && inputs.kache-r2-bucket != ''
       shell: bash
       run: echo "KACHE_DEMAND_TIMEOUT_SECS=120" >> "$GITHUB_ENV"
     - name: Setup kache
       id: kache
-      if: inputs.rust-cache-enabled == 'true'
+      if: inputs.rust-cache-enabled == 'true' && inputs.kache-r2-bucket != ''
       uses: kunobi-ninja/kache-action@1a33fb2ff51be23eb9e87abeae6edb65be78f71c
       # A failed setup leaves the job uncached instead of failing it.
       continue-on-error: true
@@ -186,7 +186,7 @@ runs:
     # included, lets pull request and merge queue jobs write the shared prefix too, as
     # sccache did. Fork pull requests get no credentials, so they cannot write.
     - name: Enable kache writes
-      if: inputs.rust-cache-enabled == 'true' && inputs.kache-r2-bucket != '' && steps.kache.outcome == 'success'
+      if: steps.kache.outcome == 'success'
       continue-on-error: true
       shell: bash
       run: |
