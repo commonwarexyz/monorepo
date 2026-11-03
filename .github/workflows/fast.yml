@@ -183,7 +183,7 @@ jobs:
         --partition hash:${{ matrix.shard.partition }}/${{ matrix.shard.partitions }} --verbose
 
   Tests-Subset:
-    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\"${{ matrix.rustflags && format(', rustflags: \"{0}\"', matrix.rustflags) || '' }}, cpu: \"${{ matrix.sde && format('sde -{0}', matrix.sde) || matrix.native-if-supported && format('native, else qemu -cpu {0}', matrix.qemu) || matrix.qemu && format('qemu -cpu {0}', matrix.qemu) || 'native' }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) || '' }}\")"
+    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\"${{ matrix.rustflags && format(', rustflags: \"{0}\"', matrix.rustflags) || '' }}, cpu: \"${{ matrix.sde && format('native, else sde -{0}', matrix.sde) || matrix.qemu && format('native, else qemu -cpu {0}', matrix.qemu) || 'native' }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) || '' }}\")"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -243,13 +243,11 @@ jobs:
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx !sha !avx512f"
             skip-cache-save: true
-          # Neoverse N2 has SHA-3 and SVE2. The arm64 runners have these features, so the N2
-          # rows run natively when the runner has every listed feature, and under QEMU otherwise.
+          # Neoverse N2 has SHA-3 and SVE2.
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: neoverse-n2
-            native-if-supported: true
             simd-backend: arm_v9
             cpu-features: "neon sha2 sha3 sve sve2"
           - os: ubuntu-24.04-arm
@@ -258,7 +256,6 @@ jobs:
             rustflags: "-C target-feature=+sha2,+sve2"
             static-features: "sha2 sve2 !sha3"
             qemu: neoverse-n2
-            native-if-supported: true
             cpu-features: "neon sha2 sha3 sve sve2"
           # Neoverse N1 has SHA-2 without SHA-3 or SVE.
           - os: ubuntu-24.04-arm
@@ -297,7 +294,6 @@ jobs:
             rustflags: "-C target-feature=+neon,+sha2,+sve,+sve2"
             static-features: "neon sha2 sve sve2"
             qemu: neoverse-n2
-            native-if-supported: true
             cpu-features: "neon sha2 sve sve2"
             simd-backend: arm_v9
           - os: ubuntu-24.04-arm
@@ -339,8 +335,21 @@ jobs:
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
+    # A row that names an emulated CPU runs natively when the runner has every CPU feature
+    # the row lists and none of those it excludes, and under the emulator otherwise.
+    - name: Check native CPU features
+      if: ${{ matrix.sde || matrix.qemu }}
+      id: native
+      run: |
+        rustc --edition 2024 -O -o "$RUNNER_TEMP/check_cpu_features" .github/scripts/check_cpu_features.rs
+        if "$RUNNER_TEMP/check_cpu_features" ${{ matrix.cpu-features }}; then
+          echo "supported=true" >> "$GITHUB_OUTPUT"
+          echo "This runner matches the listed CPU features, so the tests run natively."
+        else
+          echo "This runner does not match the listed CPU features, so the tests run under the emulator."
+        fi
     - name: Install Intel SDE
-      if: ${{ matrix.sde }}
+      if: ${{ matrix.sde && steps.native.outputs.supported != 'true' }}
       env:
         SDE_URL: https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
         SDE_SHA256: 94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50
@@ -352,16 +361,6 @@ jobs:
         emulator="$RUNNER_TEMP/sde/sde64 -${{ matrix.sde }} --"
         echo "EMULATOR=$emulator" >> "$GITHUB_ENV"
         echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=$emulator" >> "$GITHUB_ENV"
-    - name: Check native CPU features
-      if: ${{ matrix.native-if-supported }}
-      id: native
-      run: |
-        rustc --edition 2024 -O -o "$RUNNER_TEMP/check_cpu_features" .github/scripts/check_cpu_features.rs
-        if "$RUNNER_TEMP/check_cpu_features" ${{ matrix.cpu-features }}; then
-          echo "supported=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "This runner lacks the listed CPU features, so the tests run under QEMU."
-        fi
     - name: Install QEMU
       if: ${{ matrix.qemu && steps.native.outputs.supported != 'true' }}
       run: |
