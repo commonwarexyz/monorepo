@@ -1011,6 +1011,7 @@ impl EngineDefinition for ReshareEngine {
             priority: false,
             codec_config: (),
             peer_provider: dkg_manager.clone(),
+            blocker: oracle.control(public_key.clone()),
             strategy: Sequential,
         };
         let (broadcast_engine, buffer) =

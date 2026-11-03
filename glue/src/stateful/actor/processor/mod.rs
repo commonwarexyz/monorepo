@@ -36,7 +36,7 @@ use commonware_consensus::{
     },
     types::{Height, Round},
 };
-use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
+use commonware_cryptography::{Digest, Digested, Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -117,7 +117,7 @@ impl<D: Copy + Eq + Hash> FinalizationBoundary<D> {
 }
 
 /// Where forward recovery of a target starts.
-enum ReplayStart<D> {
+enum ReplayStart<D: Digest> {
     /// The target's state is cached or is the branch anchor.
     Known,
     /// Recovery starts above this cached ancestor or the branch anchor.

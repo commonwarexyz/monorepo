@@ -742,8 +742,7 @@ where
                 self.blocker.clone(),
                 self.strategy.clone(),
             );
-        // Keep the handle alive to prevent the background receiver from being aborted.
-        let _receiver_handle = receiver_service.start();
+        receiver_service.start();
         let mut peer_set_subscription = self.peer_provider.subscribe().await;
 
         select_loop! {

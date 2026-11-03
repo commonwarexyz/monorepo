@@ -39,10 +39,10 @@ jobs:
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
         additional-components: llvm-tools-preview
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Remove fuzz
       run: |
         rm -rf broadcast/fuzz
