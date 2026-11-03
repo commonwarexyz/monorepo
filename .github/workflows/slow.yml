@@ -139,11 +139,11 @@ jobs:
           - fuzz_dir: storage/fuzz
             partition: "8/8"
           - fuzz_dir: simd/fuzz
-          # Apple Silicon has SHA-2 without SVE.
+          # Apple Silicon has SHA-2 and SHA-3 without SVE.
           - fuzz_dir: simd/fuzz
             os: macos-15
             simd-backend: neon
-            cpu-features: "neon sha2 !sve !sve2"
+            cpu-features: "neon sha2 sha3"
           - fuzz_dir: stream/fuzz
           - fuzz_dir: utils/fuzz
             partition: "1/2"
