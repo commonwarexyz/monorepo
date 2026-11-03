@@ -1,14 +1,18 @@
 //! Doubling an element, compared with blst.
+//!
+//! One doubling uses one lane, so this measures latency.
 
 use super::utils::{Curve, scalars};
 use commonware_cryptography_bls12381::group::{G1, G2};
-use criterion::{Criterion, criterion_group};
+use criterion::{Criterion, Throughput, criterion_group};
 use std::hint::black_box;
 
 fn bench<C: Curve>(c: &mut Criterion) {
+    let mut group = c.benchmark_group(module_path!());
     let (a, blst_a) = C::multiple(&scalars(1, 4)[0]);
-    c.bench_function(
-        &format!("{}/curve={} impl=commonware", module_path!(), C::NAME),
+    group.throughput(Throughput::Elements(1));
+    group.bench_function(
+        format!("curve={} impl=commonware n=1", C::NAME),
         |bencher| {
             bencher.iter(|| {
                 let mut doubled = black_box(a);
@@ -17,10 +21,10 @@ fn bench<C: Curve>(c: &mut Criterion) {
             })
         },
     );
-    c.bench_function(
-        &format!("{}/curve={} impl=blst", module_path!(), C::NAME),
-        |bencher| bencher.iter(|| black_box(C::blst_double(black_box(&blst_a)))),
-    );
+    group.bench_function(format!("curve={} impl=blst n=1", C::NAME), |bencher| {
+        bencher.iter(|| black_box(C::blst_double(black_box(&blst_a))))
+    });
+    group.finish();
 }
 
 fn bench_double(c: &mut Criterion) {
