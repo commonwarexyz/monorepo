@@ -100,7 +100,7 @@ fn check_chunk<H: Hasher>(
     let digest = digest();
     shard
         .proof
-        .verify_element_inclusion::<H>(&digest, u32::from(index), commitment)
+        .verify_element_inclusion::<H>(u32::from(index), &digest, commitment)
         .map_err(|_| Error::InvalidProof)?;
 
     // Cache the verified digest with the commitment and shard it authenticates.

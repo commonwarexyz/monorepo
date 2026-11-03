@@ -36,7 +36,7 @@ fn bench_verify_multi(c: &mut Criterion) {
                         let positions: Vec<u32> = samples.iter().map(|(pos, _)| *pos).collect();
                         let proof = tree.multi_proof(&positions).unwrap();
                         let elements: Vec<_> =
-                            samples.iter().map(|(pos, elem)| (*elem, *pos)).collect();
+                            samples.iter().map(|(pos, elem)| (*pos, *elem)).collect();
                         (elements, proof)
                     },
                     |(elements, proof)| {

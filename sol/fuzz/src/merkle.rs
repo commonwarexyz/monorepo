@@ -210,7 +210,7 @@ fn generate<F: Family, H: Hasher>(
         .map_err(|error| format!("failed to generate proof: {error}"))?;
     let elements: Vec<_> = (start..end).map(|index| leaf(seed, index)).collect();
 
-    if !proof.verify_range_inclusion(&hasher, &elements, Location::new(start), &root) {
+    if !proof.verify_range_inclusion(&hasher, Location::new(start), &elements, &root) {
         return Err("Commonware rejected its generated proof".to_owned());
     }
 
@@ -261,13 +261,13 @@ fn check_rejections<F: Family, H: Hasher>(
     let mut bytes = root.as_ref().to_vec();
     bytes[0] ^= 1;
     let bad_root = H::Digest::decode(Copying(bytes.as_slice())).unwrap();
-    if proof.verify_range_inclusion(hasher, elements, Location::new(start), &bad_root) {
+    if proof.verify_range_inclusion(hasher, Location::new(start), elements, &bad_root) {
         return Err("proof unexpectedly accepted a mutated root".to_owned());
     }
 
     let mut bad_elements = elements.to_vec();
     bad_elements[0][0] ^= 1;
-    if proof.verify_range_inclusion(hasher, &bad_elements, Location::new(start), &root) {
+    if proof.verify_range_inclusion(hasher, Location::new(start), &bad_elements, &root) {
         return Err("proof unexpectedly accepted a mutated element".to_owned());
     }
 
@@ -276,7 +276,7 @@ fn check_rejections<F: Family, H: Hasher>(
         let mut bytes = bad_proof.digests[0].as_ref().to_vec();
         bytes[0] ^= 1;
         bad_proof.digests[0] = H::Digest::decode(Copying(bytes.as_slice())).unwrap();
-        if bad_proof.verify_range_inclusion(hasher, elements, Location::new(start), &root) {
+        if bad_proof.verify_range_inclusion(hasher, Location::new(start), elements, &root) {
             return Err("proof unexpectedly accepted a mutated proof digest".to_owned());
         }
     }
@@ -307,8 +307,8 @@ fn synthetic<F: Family, H: Hasher>(
     // Reconstruction enforces Commonware's canonical proof length. A contiguous range has
     // at most two boundary paths plus the peaks outside it, each bounded by 64 levels.
     for count in 0..=192 {
-        if let Ok(root) = proof.reconstruct_root(&hasher, &elements, Location::new(start)) {
-            if !proof.verify_range_inclusion(&hasher, &elements, Location::new(start), &root) {
+        if let Ok(root) = proof.reconstruct_root(&hasher, Location::new(start), &elements) {
+            if !proof.verify_range_inclusion(&hasher, Location::new(start), &elements, &root) {
                 return Err("Commonware rejected reconstructed proof".into());
             }
             check_rejections::<F, H>(&hasher, &proof, &elements, start, root)?;
@@ -371,8 +371,8 @@ fn check<F: Family, H: Hasher>(encoded: &[u8], policy: Policy) -> bool {
     };
     proof.verify_range_inclusion(
         &policy.hasher::<H>(),
-        &payload.elements,
         Location::new(start),
+        &payload.elements,
         &H::Digest::decode(Copying(payload.root.as_slice())).unwrap(),
     )
 }

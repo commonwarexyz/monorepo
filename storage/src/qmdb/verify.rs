@@ -87,7 +87,7 @@ impl<F: Family, D: Digest> ProofExt<F, D> for Proof<F, D> {
         ops: &[O],
         root: &D,
     ) -> bool {
-        self.verify_range_inclusion(&qmdb::hasher::<H>(), &encode_ops(ops), start_loc, root)
+        self.verify_range_inclusion(&qmdb::hasher::<H>(), start_loc, &encode_ops(ops), root)
     }
 
     fn verify_with_pinned_nodes<H: Hasher<Digest = D>, O: Encode>(
@@ -99,8 +99,8 @@ impl<F: Family, D: Digest> ProofExt<F, D> for Proof<F, D> {
     ) -> bool {
         self.verify_proof_and_pinned_nodes(
             &qmdb::hasher::<H>(),
-            &encode_ops(ops),
             start_loc,
+            &encode_ops(ops),
             pinned_nodes,
             root,
         )
@@ -114,8 +114,8 @@ impl<F: Family, D: Digest> ProofExt<F, D> for Proof<F, D> {
     ) -> Result<ExtractedDigests<F, H>, Error<F>> {
         self.verify_range_inclusion_and_extract_digests(
             &qmdb::hasher::<H>(),
-            &encode_ops(ops),
             start_loc,
+            &encode_ops(ops),
             root,
         )
     }
@@ -129,8 +129,8 @@ impl<F: Family, D: Digest> ProofExt<F, D> for Proof<F, D> {
         ProofStore::new(
             &qmdb::hasher::<H>(),
             self,
-            &encode_ops(ops),
             start_loc,
+            &encode_ops(ops),
             root,
         )
     }
@@ -142,7 +142,7 @@ impl<F: Family, D: Digest> ProofExt<F, D> for Proof<F, D> {
     ) -> bool {
         let elements = ops
             .iter()
-            .map(|(loc, op)| (op.encode(), *loc))
+            .map(|(loc, op)| (*loc, op.encode()))
             .collect::<Vec<_>>();
         self.verify_multi_inclusion(&qmdb::hasher::<H>(), &elements, root)
     }

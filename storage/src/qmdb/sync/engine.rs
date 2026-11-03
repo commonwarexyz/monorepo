@@ -89,7 +89,7 @@ where
                 false
             } else {
                 let elements = operations.iter().map(Encode::encode).collect::<Vec<_>>();
-                proof.verify_range_inclusion(&hasher, &elements, *start, root)
+                proof.verify_range_inclusion(&hasher, *start, &elements, root)
             }
         }
         (
@@ -100,7 +100,7 @@ where
                 pinned_nodes,
             },
         ) => {
-            proof.verify_proof_and_pinned_nodes(&hasher, &[op.encode()], *start, pinned_nodes, root)
+            proof.verify_proof_and_pinned_nodes(&hasher, *start, &[op.encode()], pinned_nodes, root)
         }
         _ => false,
     }

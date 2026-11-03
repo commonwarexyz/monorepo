@@ -763,7 +763,7 @@ mod tests {
                 .proof(&hasher, Location::new(i), 0)
                 .unwrap_or_else(|e| panic!("loc={i}: {e:?}"));
             assert!(
-                proof.verify_element_inclusion(&hasher, &i.to_be_bytes(), Location::new(i), &root),
+                proof.verify_element_inclusion(&hasher, Location::new(i), &i.to_be_bytes(), &root),
                 "loc={i}: proof should verify"
             );
         }
@@ -784,7 +784,7 @@ mod tests {
                     let elements: Vec<_> = (start..end).map(|i| i.to_be_bytes()).collect();
 
                     assert!(
-                        proof.verify_range_inclusion(&hasher, &elements, range.start, &root),
+                        proof.verify_range_inclusion(&hasher, range.start, &elements, &root),
                         "n={n}, range={start}..{end}: range proof should verify"
                     );
                 }
@@ -847,8 +847,8 @@ mod tests {
             assert!(
                 proof.verify_element_inclusion(
                     &hasher,
-                    &loc.to_be_bytes(),
                     Location::new(loc),
+                    &loc.to_be_bytes(),
                     &root
                 ),
                 "loc={loc}: proof should verify after append on pruned structure"
@@ -881,8 +881,8 @@ mod tests {
         assert!(
             proof.verify_element_inclusion(
                 &hasher,
-                b"updated-5",
                 Location::new(5),
+                b"updated-5",
                 &plain_root(&mem, &hasher)
             ),
             "updated leaf should verify with new data"
@@ -891,8 +891,8 @@ mod tests {
         assert!(
             !proof.verify_element_inclusion(
                 &hasher,
-                &5u64.to_be_bytes(),
                 Location::new(5),
+                &5u64.to_be_bytes(),
                 &plain_root(&mem, &hasher)
             ),
             "old data should not verify"
@@ -903,8 +903,8 @@ mod tests {
             assert!(
                 p.verify_element_inclusion(
                     &hasher,
-                    &i.to_be_bytes(),
                     Location::new(i),
+                    &i.to_be_bytes(),
                     &plain_root(&mem, &hasher)
                 ),
                 "leaf {i} should still verify with original data"
@@ -931,8 +931,8 @@ mod tests {
             assert!(
                 proof.verify_element_inclusion(
                     &hasher,
-                    b"new-value",
                     Location::new(update_loc),
+                    b"new-value",
                     &plain_root(&mem, &hasher)
                 ),
                 "update at {update_loc} should verify"
@@ -984,16 +984,16 @@ mod tests {
         let proof = mem.proof(&hasher, Location::new(3), 0).unwrap();
         assert!(proof.verify_element_inclusion(
             &hasher,
-            b"updated-3",
             Location::new(3),
+            b"updated-3",
             &plain_root(&mem, &hasher)
         ));
 
         let proof = mem.proof(&hasher, Location::new(8), 0).unwrap();
         assert!(proof.verify_element_inclusion(
             &hasher,
-            &100u64.to_be_bytes(),
             Location::new(8),
+            &100u64.to_be_bytes(),
             &plain_root(&mem, &hasher)
         ));
     }
@@ -1038,8 +1038,8 @@ mod tests {
         assert!(
             proof.verify_element_inclusion(
                 &hasher,
-                b"updated-0",
                 Location::new(0),
+                b"updated-0",
                 &plain_root(&mem, &hasher)
             ),
             "updated leaf should verify"
@@ -1073,8 +1073,8 @@ mod tests {
                     assert!(
                         proof.verify_element_inclusion(
                             &hasher,
-                            b"new",
                             Location::new(update_loc),
+                            b"new",
                             &plain_root(&m, &hasher)
                         ),
                         "n={n} prune={prune_to} update={update_loc}: proof should verify"

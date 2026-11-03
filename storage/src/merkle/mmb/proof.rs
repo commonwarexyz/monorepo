@@ -50,8 +50,8 @@ mod tests {
 
         assert!(proof.verify_proof_and_pinned_nodes(
             &hasher,
-            &[start.to_be_bytes()],
             Location::new(start),
+            &[start.to_be_bytes()],
             &pinned,
             &root
         ));
@@ -97,8 +97,8 @@ mod tests {
             assert!(
                 proof.verify_element_inclusion(
                     &hasher,
-                    &loc.to_be_bytes(),
                     Location::new(loc),
+                    &loc.to_be_bytes(),
                     &root
                 ),
                 "n={n}: verification failed"

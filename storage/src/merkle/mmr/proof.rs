@@ -40,7 +40,7 @@ mod tests {
             .range_proof(&hasher, Location::new(0)..mmr.leaves(), 0)
             .unwrap();
         let mut node_digests = proof
-            .verify_range_inclusion_and_extract_digests(&hasher, &elements, Location::new(0), &root)
+            .verify_range_inclusion_and_extract_digests(&hasher, Location::new(0), &elements, &root)
             .unwrap();
         assert_eq!(node_digests.len() as u64, mmr.size());
         node_digests.sort_by_key(|(pos, _)| *pos);
@@ -53,8 +53,8 @@ mod tests {
         assert!(matches!(
             proof.verify_range_inclusion_and_extract_digests(
                 &hasher,
-                &elements,
                 Location::new(0),
+                &elements,
                 &wrong_root
             ),
             Err(Error::RootMismatch)
@@ -67,8 +67,8 @@ mod tests {
         let single_digests = single_proof
             .verify_range_inclusion_and_extract_digests(
                 &hasher,
-                &elements[range.to_usize_range()],
                 range_start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -82,8 +82,8 @@ mod tests {
         let mid_digests = mid_proof
             .verify_range_inclusion_and_extract_digests(
                 &hasher,
-                &elements[range.to_usize_range()],
                 range_start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -97,8 +97,8 @@ mod tests {
         let last_digests = last_proof
             .verify_range_inclusion_and_extract_digests(
                 &hasher,
-                &elements[range.to_usize_range()],
                 range_start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -111,8 +111,8 @@ mod tests {
         let small_digests = small_proof
             .verify_range_inclusion_and_extract_digests(
                 &hasher,
-                &elements[range.to_usize_range()],
                 range_start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -126,8 +126,8 @@ mod tests {
         let mid_range_digests = mid_range_proof
             .verify_range_inclusion_and_extract_digests(
                 &hasher,
-                &elements[range.to_usize_range()],
                 range_start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -315,7 +315,7 @@ mod tests {
 
         // Correct pinned nodes must verify.
         assert!(
-            proof.verify_proof_and_pinned_nodes(&hasher, &elements[1..], start_loc, &pinned, &root),
+            proof.verify_proof_and_pinned_nodes(&hasher, start_loc, &elements[1..], &pinned, &root),
             "valid pinned nodes should verify"
         );
 
@@ -324,8 +324,8 @@ mod tests {
         assert!(
             !proof.verify_proof_and_pinned_nodes(
                 &hasher,
-                &elements[1..],
                 start_loc,
+                &elements[1..],
                 &bad_pinned,
                 &root
             ),
@@ -337,8 +337,8 @@ mod tests {
         assert!(
             !proof.verify_proof_and_pinned_nodes(
                 &hasher,
-                &elements[1..],
                 start_loc,
+                &elements[1..],
                 &extra_pinned,
                 &root
             ),
@@ -347,7 +347,7 @@ mod tests {
 
         // Empty pinned nodes must fail (start_loc > 0 requires at least one).
         assert!(
-            !proof.verify_proof_and_pinned_nodes(&hasher, &elements[1..], start_loc, &[], &root),
+            !proof.verify_proof_and_pinned_nodes(&hasher, start_loc, &elements[1..], &[], &root),
             "missing pinned nodes should fail"
         );
     }
@@ -379,7 +379,7 @@ mod tests {
         assert_eq!(pinned.len(), 1, "should have one fold-prefix peak");
 
         assert!(
-            proof.verify_proof_and_pinned_nodes(&hasher, &elements[8..], start_loc, &pinned, &root),
+            proof.verify_proof_and_pinned_nodes(&hasher, start_loc, &elements[8..], &pinned, &root),
             "valid fold-prefix pinned nodes should verify"
         );
 
@@ -387,8 +387,8 @@ mod tests {
         assert!(
             !proof.verify_proof_and_pinned_nodes(
                 &hasher,
-                &elements[8..],
                 start_loc,
+                &elements[8..],
                 &[test_digest(99)],
                 &root
             ),

@@ -238,7 +238,7 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
 
         let loc = Location::new(bit / Self::CHUNK_SIZE_BITS);
         if bit_len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
-            return mmr_proof.verify_element_inclusion(hasher, chunk, loc, root);
+            return mmr_proof.verify_element_inclusion(hasher, loc, chunk, root);
         }
 
         if proof.digests.is_empty() {
@@ -265,7 +265,7 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
         };
 
         // For a proof over a full chunk, `last_digest` contains the partial chunk's digest.
-        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], loc) {
+        let mmr_root = match mmr_proof.reconstruct_root(hasher, loc, &[chunk]) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
