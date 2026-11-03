@@ -2179,6 +2179,7 @@ mod tests {
                     (TestEntry::new(2, 0, 0), [2; 16]),
                     (TestEntry::new(3, 0, 0), [3; 16]),
                 ];
+                // A singleton batch must behave like a single append.
                 let oversized = Oversized::init(context.child("first"), cfg.clone())
                     .await
                     .unwrap();
@@ -2195,6 +2196,7 @@ mod tests {
                         .unwrap(),
                     [0; 16]
                 );
+                // A larger batch must place adjacent values behind matching index entries.
                 let (oversized, last, locations) = oversized
                     .append_many(
                         5,
@@ -2217,6 +2219,7 @@ mod tests {
                 }
                 drop(oversized.sync(5).await.unwrap());
 
+                // Reopening must recover every synced entry and value.
                 let oversized =
                     Oversized::<_, TestEntry, TestValue>::init(context.child("second"), cfg)
                         .await
@@ -2231,6 +2234,80 @@ mod tests {
                 }
                 oversized.destroy().await.unwrap();
             });
+        }
+    }
+
+    #[test_traced]
+    fn test_oversized_append_many_recovers_index_prefix() {
+        /// Number of entries in the interrupted batch.
+        const ENTRIES: u64 = 4;
+
+        let physical_page = TestEntry::SIZE as u64 + 12;
+        for compression in [None, Some(3)] {
+            for kept in 0..=ENTRIES {
+                deterministic::Runner::default().start(|context| async move {
+                    // Make a whole batch durable with one index entry per physical page.
+                    let mut cfg = entry_cfg();
+                    cfg.compression = compression;
+                    let oversized = Oversized::<_, TestEntry, TestValue>::init(
+                        context.child("first"),
+                        cfg.clone(),
+                    )
+                    .await
+                    .unwrap();
+                    let values = (1..=ENTRIES).map(|id| [id as u8; 16]).collect::<Vec<_>>();
+                    let (oversized, _, locations) = oversized
+                        .append_many(
+                            1,
+                            (1..=ENTRIES)
+                                .zip(&values)
+                                .map(|(id, value)| (TestEntry::new(id, 0, 0), value)),
+                        )
+                        .await
+                        .unwrap();
+                    drop(oversized.sync(1).await.unwrap());
+
+                    // Simulate a crash that kept every value but only a prefix of the index.
+                    let (index, _) = context
+                        .open(&cfg.index_partition, &1u64.to_be_bytes())
+                        .await
+                        .unwrap();
+                    index.resize(kept * physical_page).await.unwrap();
+                    index.sync().await.unwrap();
+                    drop(index);
+
+                    // Recovery must keep the index prefix and its values.
+                    let oversized =
+                        Oversized::<_, TestEntry, TestValue>::init(context.child("second"), cfg)
+                            .await
+                            .unwrap();
+                    for position in 0..kept {
+                        let entry = oversized.get(1, position).await.unwrap();
+                        assert_eq!(entry.id, position + 1);
+                        assert_eq!(entry.value_location(), locations[position as usize]);
+                        let (offset, size) = entry.value_location();
+                        assert_eq!(
+                            oversized.get_value(1, offset, size).await.unwrap(),
+                            values[position as usize]
+                        );
+                    }
+
+                    // Values past the prefix must be removed, so the next append starts at the
+                    // end of the last kept value.
+                    let end = kept.checked_sub(1).map_or(0, |last| {
+                        let (offset, size) = locations[last as usize];
+                        byte_end(offset, size)
+                    });
+                    let id = kept + 1;
+                    let (oversized, position, offset, _) = oversized
+                        .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                        .await
+                        .unwrap();
+                    assert_eq!(position, kept);
+                    assert_eq!(offset, end, "recovery must remove orphan values");
+                    oversized.destroy().await.unwrap();
+                });
+            }
         }
     }
 
