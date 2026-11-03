@@ -286,7 +286,7 @@ jobs:
             rustflags: "-C target-feature=+avx2"
             static-features: "avx2 !avx512f"
             qemu: Broadwell
-            cpu-features: "avx2 !avx512f"
+            cpu-features: "avx2 !sha !avx512f"
             simd-backend: x86_v3
           - os: ubuntu-24.04-arm
             package: commonware-simd
