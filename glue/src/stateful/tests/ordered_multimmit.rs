@@ -780,9 +780,9 @@ fn validators_execute_certify_and_prune_one_chain() {
 ///    checkpoint key and scope, and the block it names is the one the certificate certifies.
 /// 3. The executor offers that block to the application, which fetches the state the block
 ///    commits to from the peers. One fetched response is corrupted. The sync engine checks it
-///    against the certified state root, rejects it, and fetches the range again.
+///    against the certified state root, rejects it, and completes state sync.
 /// 4. The late validator holds the chain only from the checkpoint it synced to, which is not the
-///    first checkpoint. It applies no block at or below it, so it executes no earlier input.
+///    first checkpoint. Its application hook receives no block at or below that checkpoint.
 /// 5. It then executes the inputs after the checkpoint and produces the same blocks, and so the
 ///    same state roots, as the validators that executed the chain from genesis.
 /// 6. Its aggregation engine recovers every checkpoint certificate through the sync base from its
@@ -833,7 +833,7 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
             "the late validator applied height {first}, not after a checkpoint"
         );
 
-        // It executed nothing at or below the checkpoint.
+        // The application hook received no block at or below the checkpoint.
         assert!(
             late.tally
                 .applied
@@ -842,7 +842,7 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
                 .all(|&height| height > base)
         );
 
-        // The sync engine rejected the corrupted response and fetched the range again.
+        // The sync engine rejected the corrupted response before catch-up completed.
         assert!(
             !corruption.armed.load(Ordering::SeqCst),
             "no state sync response was corrupted"
