@@ -506,8 +506,8 @@ where
     /// Prepares a term-start proposal on an uncertified parent.
     ///
     /// Runs the same checks as [`Self::propose`], in the same order, and hands the application the
-    /// fetched ancestry. When the checks find the epoch boundary block, the marshal re-proposes it
-    /// without the application and answers [`Handoff::Stage`].
+    /// parent and selected history. When the checks find the epoch boundary block, the marshal
+    /// re-proposes it without the application and answers [`Handoff::Stage`].
     #[tracing::instrument(name = "marshal.inline.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
     fn prepare(
         &mut self,

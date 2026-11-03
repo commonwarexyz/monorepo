@@ -495,7 +495,7 @@ where
         debug!(
             ?round,
             ?payload,
-            "subscribing to block for certification using embedded context"
+            "waiting for acquired block for certification using embedded context"
         );
         let marshaled = self.clone();
         let shards = self.shards.clone();
@@ -745,6 +745,7 @@ where
         let erasure_encode_duration = self.erasure_encode_duration.clone();
         let clock = self.context.clone();
         let (parent_view, parent_commitment) = consensus_context.parent;
+        // A certified proposal parent can be fetched from peers.
         let checks = self.checks(consensus_context.clone(), ancestry, true);
         let span = info_span!(
             "marshal.coding.propose.task",
@@ -1024,6 +1025,7 @@ where
         let erasure_encode_duration = self.erasure_encode_duration.clone();
         let clock = self.context.clone();
         let (parent_view, parent_commitment) = consensus_context.parent;
+        // An uncertified preparation parent must already be available locally.
         let checks = self.checks(consensus_context.clone(), ancestry, false);
         let span = info_span!(
             "marshal.coding.prepare.task",
