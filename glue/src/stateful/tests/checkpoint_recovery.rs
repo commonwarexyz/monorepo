@@ -204,13 +204,8 @@ mod tests {
                     .iter()
                     .map(|scheme| Ack::sign(scheme, item.clone()).unwrap())
                     .collect();
-                Certificate::from_acks(
-                    &schemes[0],
-                    scope.0,
-                    non_empty![@acks.iter()],
-                    &Sequential,
-                )
-                .unwrap()
+                Certificate::from_acks(&schemes[0], scope.0, non_empty![@acks.iter()], &Sequential)
+                    .unwrap()
             })
             .collect()
     }
@@ -324,7 +319,10 @@ mod tests {
             .await;
             // The first was synced. The second was still queued when the runtime crashed.
             let first = key(scheme, scope.0, &certificates[0]);
-            assert_eq!(served.produce(first).await.unwrap(), certificates[0].encode());
+            assert_eq!(
+                served.produce(first).await.unwrap(),
+                certificates[0].encode()
+            );
             let second = key(scheme, scope.0, &certificates[1]);
             assert!(served.get(&second).is_none());
             // Simulated engine replay reports the full journaled range, including duplicates.
