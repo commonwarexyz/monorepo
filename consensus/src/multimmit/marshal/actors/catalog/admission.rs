@@ -330,7 +330,6 @@ where
     H: Hasher,
     V: Variant,
     B: Body<H>,
-    B::Cfg: Clone,
 {
     /// Runs an admission command until it finishes, parks, or a write owns a journal.
     pub(super) fn admit(

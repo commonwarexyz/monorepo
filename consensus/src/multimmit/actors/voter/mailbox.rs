@@ -18,7 +18,7 @@ use commonware_actor::{
     mailbox::{self, UnreliablePolicy},
 };
 use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::Variant};
-use commonware_runtime::{Metrics, Supervisor};
+use commonware_runtime::Metrics;
 use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, num::NonZeroUsize, time::SystemTime};
 use tracing::Span;
@@ -200,7 +200,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Mailbox<P, V, D> {
     /// Creates the voter's four inbound queues, each bounded by `capacity`.
     ///
     /// `queues` labels the observation and completion queues; `context` labels the others.
-    pub(crate) fn new<E: Supervisor + Metrics>(
+    pub(crate) fn new<E: Metrics>(
         context: &E,
         queues: &E,
         capacity: NonZeroUsize,
@@ -294,7 +294,7 @@ mod tests {
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk, ed25519, sha256::Digest as Sha256Digest,
     };
-    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
     #[test]
     fn observation_and_completion_queues_keep_their_engine_metric_names() {

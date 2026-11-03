@@ -44,7 +44,7 @@ pub(crate) use chains::ChainUpdate;
 use commonware_cryptography::{Hasher, PublicKey, bls12381::primitives::variant::Variant};
 use commonware_p2p::{Blocker, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, Storage};
+use commonware_runtime::{ContextCell, Handle, Spawner};
 use commonware_storage::Context as StorageContext;
 use commonware_utils::channel::oneshot;
 pub(crate) use hooks::{Hooks, RetentionBoundary};
@@ -60,7 +60,7 @@ use tracing::{Span, error, info};
 ///
 /// Implemented for the tuple of a voter's generic parameters.
 pub(crate) trait VoterTypes: 'static {
-    type Context: Clock + Spawner + Storage + RuntimeMetrics + StorageContext;
+    type Context: Spawner + StorageContext;
     type Hasher: Hasher;
     type PublicKey: PublicKey;
     type Variant: Variant;
@@ -101,7 +101,7 @@ pub(crate) type MailboxOf<T> =
 /// A voter's generic parameters, in [`Config`] order, name its [`VoterTypes`].
 impl<E, H, P, V, A, R, F, T, C, B> VoterTypes for (E, H, P, V, A, R, F, T, C, B)
 where
-    E: Clock + Spawner + Storage + RuntimeMetrics + StorageContext,
+    E: Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
     V: Variant,
@@ -128,7 +128,7 @@ where
 /// A voter's generic parameters followed by its hooks name its [`VoterTypes`].
 impl<E, H, P, V, A, R, F, T, C, B, K> VoterTypes for (E, H, P, V, A, R, F, T, C, B, K)
 where
-    E: Clock + Spawner + Storage + RuntimeMetrics + StorageContext,
+    E: Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
     V: Variant,
@@ -270,7 +270,7 @@ pub(crate) struct Actor<T: VoterTypes> {
 
 impl<E, H, P, V, A, R, F, T, C, B> Actor<(E, H, P, V, A, R, F, T, C, B)>
 where
-    E: Clock + Spawner + Storage + RuntimeMetrics + StorageContext,
+    E: Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
     V: Variant,
@@ -295,7 +295,7 @@ where
 
 impl<E, H, P, V, A, R, F, T, C, B, K> Actor<(E, H, P, V, A, R, F, T, C, B, K)>
 where
-    E: Clock + Spawner + Storage + RuntimeMetrics + StorageContext,
+    E: Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
     V: Variant,
