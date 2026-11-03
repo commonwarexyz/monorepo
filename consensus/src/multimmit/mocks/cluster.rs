@@ -306,7 +306,7 @@ impl<V: Variant> LaunchSpec<V> {
     /// Sends the engine's best-effort activity to `reporter`.
     pub fn reporter<S>(mut self, mut reporter: S) -> Self
     where
-        S: Reporter<Activity = Activity<V, Sha256Digest>> + Send + 'static,
+        S: Reporter<Activity = Activity<V, Sha256Digest>>,
     {
         self.reporter =
             ClusterReporter::attached(Box::new(move |activity| reporter.report(activity)));

@@ -359,7 +359,7 @@ impl ScriptedDelivery {
 
 impl<E> PumpStrategy<E> for ScriptedDelivery
 where
-    E: Debug + std::error::Error + Send + Sync + 'static,
+    E: std::error::Error + Send + Sync + 'static,
 {
     type Tag = Option<(DeliveryEvent, DeliveryArtifact)>;
     type Observer = Option<DeliveryScript>;
