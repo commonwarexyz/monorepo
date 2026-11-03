@@ -1,9 +1,26 @@
-//! Cancellation state shared by a spawned task and the handles that abort it.
+//! Aborting a wrapped future from handles held elsewhere.
 //!
-//! The runtime owns the state (the protocol of [futures::stream::Abortable]) so a poll that leaves
-//! a task pending can skip registering a waker that is already registered. Steady-state task polls
-//! then only read the shared state, and the task future grows by one pointer. Wrappers that any
-//! executor may poll, such as those behind completion handles, register on every pending poll.
+//! [AbortHandle::new_pair] creates an [AbortHandle] and an [AbortRegistration] that share one
+//! allocation holding an abort flag and a waker slot. An [Abortable] wraps a future and consumes
+//! the registration. [AbortHandle::abort] sets the flag, then wakes the waker in the slot. From
+//! then on the wrapper resolves to [Aborted] without polling its future again. A future that
+//! already completed keeps its output.
+//!
+//! Each poll of the wrapper checks the flag, polls the future and, if the future is pending,
+//! registers the poll's waker in the slot and checks the flag again. The second check catches an
+//! abort that landed between the first check and the registration, whose wake could not reach the
+//! newly registered waker.
+//!
+//! Executors usually poll a task with the same waker every time, and registering it again would
+//! only repeat atomic read-modify-writes on the shared allocation. The wrapper of a runtime task
+//! ([Abortable::task]) therefore records the data and vtable addresses of the waker it last
+//! registered and skips registration while they match, so its steady-state pending polls only
+//! read the shared state. This relies on the runtime polling the task's future only with wakers
+//! of that task. Other wrappers ([Abortable::new], used by completion handles) cannot rely on
+//! that, because an executor may reuse a dropped waker's addresses for another task, so they
+//! register on every pending poll.
+//!
+//! Either wrapper adds one pointer to the future it wraps.
 
 use std::{
     future::Future,
