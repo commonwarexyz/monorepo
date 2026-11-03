@@ -23,10 +23,10 @@
 //!
 //! # Ingress
 //!
-//! A background receiver decodes inbound messages off the engine's event loop with
-//! [`Config::strategy`] and blocks peers whose messages fail to decode with [`Config::blocker`].
-//! Decoded messages wait in an inbox sized to the network receiver's
-//! [`capacity`](commonware_p2p::Receiver::capacity) and are dropped when it is full.
+//! A background receiver decodes inbound messages with [`Config::strategy`] and blocks peers
+//! whose messages fail to decode with [`Config::blocker`]. Decoded messages wait in an inbox
+//! sized to the network receiver's [`capacity`](commonware_p2p::Receiver::capacity) and are
+//! dropped when it is full.
 //!
 //! # Message Caching
 //!

@@ -48,13 +48,12 @@ enum PendingEntry<P: PublicKey, M: Digestible> {
     Broadcast(Digested<M>),
 }
 
-/// Requests waiting for room in the engine's inbox.
-///
-/// Each pending broadcast digest occurs exactly once in both `queue` and `broadcasts`.
+/// Requests waiting for room in the engine's inbox. Each pending broadcast digest occurs exactly
+/// once in both `queue` and `broadcasts`.
 pub(crate) struct Pending<P: PublicKey, M: Digestible> {
     /// Requests in arrival order, with coalesced broadcasts at their first position.
     queue: VecDeque<PendingEntry<P, M>>,
-    /// Recipients for exactly the broadcasts in `queue`.
+    /// Recipients of each queued broadcast.
     broadcasts: BTreeMap<M::Digest, Recipients<P>>,
 }
 

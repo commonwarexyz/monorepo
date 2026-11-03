@@ -221,8 +221,6 @@ where
     }
 
     /// Start the background receiver.
-    ///
-    /// The task is supervised as described in [`Spawner::spawn`].
     pub fn start(mut self) -> Handle<()> {
         spawn_cell!(self.context, self.run())
     }
