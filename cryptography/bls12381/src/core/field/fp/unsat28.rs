@@ -38,12 +38,15 @@
 //! | `-a` with bias `K` | `L <= 2`, `A < K` | `K` | `3` |
 //! | carry | | `A` | `1` |
 //! | `a * b` | `L, M <= SLACK` | `ceil(A * B / LIMIT) + 1` | `1` |
+//! | tight reduction | | `2` | `1` |
 //!
 //! Every integer bound is at most [`LIMIT`], so values fit carried limbs because `p < 2^381`.
 //! Every limb bound is at most [`LIMB_LIMIT`], so limbs stay below `15 * 2^28` and still fit their
 //! lanes after receiving a carry, which is at most `15`. Multiplication returns below
-//! `a * b / 2^392 + p`, and `p / 2^392 < 1 / LIMIT`. Debug builds check these rules; release
-//! builds do not, and results are unspecified when a formula violates them.
+//! `a * b / 2^392 + p`, and `p / 2^392 < 1 / LIMIT`. A tight reduction subtracts an estimate of
+//! the multiple of `p` that the top limb covers and carries, which returns below `1.03 p`. Debug
+//! builds check these rules; release builds do not, and results are unspecified when a formula
+//! violates them.
 
 use super::{
     super::arithmetic::Field, BYTES, MODULUS, WORDS, bytes_from_words, power_of_two,
@@ -109,11 +112,28 @@ const P_LANES: [[u32; 4]; 4] = {
 /// `-p^(-1) mod 2^28`, the Montgomery reduction constant.
 const INV: u32 = negated_inverse(MODULUS[0]) as u32 & MASK;
 
+/// Bits of the fixed-point reciprocal of [`Unsat28::fold`].
+const FOLD_SHIFT: u32 = 48;
+
+/// `floor(2^48 / (t + 1))` for the top limb `t` of `p`, so that a top limb `h` gives the
+/// multiple `floor(h * FOLD_RECIPROCAL / 2^48)` of `p`, at most `h / (t + 1)` and more than
+/// `h / (t + 1) - 2`.
+const FOLD_RECIPROCAL: u32 = {
+    let reciprocal = (1u64 << FOLD_SHIFT) / (P[LIMBS - 1] as u64 + 1);
+    assert!(reciprocal <= u32::MAX as u64);
+    reciprocal as u32
+};
+
+/// Offset that [`Unsat28::fold`] adds to every limb but the top one and removes, as `2^12` units,
+/// from the limb above, so that no limb difference goes negative.
+const FOLD_OFFSET: u64 = {
+    // A multiple of p below 2^11 times a 28-bit limb of p stays below the offset.
+    assert!((LIMIT as u128 * MASK as u128) < (1 << 40) - (1 << 12));
+    1 << 40
+};
+
 /// `R^2 mod p` for `R = 2^392`. A Montgomery multiplication by it maps `a` to `a * R`.
 const TO_LANES: [u32; LIMBS] = limbs_from_words(power_of_two(2 * LIMBS as u32 * LIMB_BITS));
-
-/// `R mod p`, one in Montgomery form. A Montgomery multiplication by it preserves the value.
-const ONE: [u32; LIMBS] = limbs_from_words(power_of_two(LIMBS as u32 * LIMB_BITS));
 
 /// One. A Montgomery multiplication by it maps `a * R` back to `a`.
 const FROM_LANES: [u32; LIMBS] = {
@@ -468,6 +488,63 @@ impl<S: Simd> Unsat28<S> {
         self.mul(simd, self)
     }
 
+    /// Returns `self - k p` for the multiple `k` of `p` that the top limb covers, carried and
+    /// with integer bound `2`.
+    ///
+    /// Requires integer bound at most [`LIMIT`], so the top limb `h` is below `2^28` and
+    /// `k < LIMIT`, and any valid limbs. With `t` the top limb of `p`, `k` is at most
+    /// `h / (t + 1)` and more than `h / (t + 1) - 2`. Since `t * 2^364 <= p < (t + 1) 2^364` and
+    /// the lower limbs sum below `16 * 2^364`, the result is nonnegative and below
+    /// `2^364 (16 + h / (t + 1)) + p (1 + h / 2^48)`, which is below `1.03 p`.
+    #[inline(always)]
+    fn fold(self, simd: S) -> Self {
+        self.bound.assert_le(LIMIT);
+        self.limb_bound.assert_le(LIMB_LIMIT);
+        let zero = simd.u64_splat(0);
+        let reciprocal = simd.u32_splat(FOLD_RECIPROCAL);
+        let mut estimate = [zero; 2];
+        for (h, estimate) in estimate.iter_mut().enumerate().take(Self::HALVES) {
+            let product = Self::widen(simd, h, self.limbs[LIMBS - 1], reciprocal);
+            *estimate = simd.u64_shr::<FOLD_SHIFT>(product);
+        }
+        let k = simd.u64_narrow_pair(estimate[0], estimate[1]);
+        // Limb j of self - k p, plus the offset for j below the top and less 2^12 units of it
+        // for j above the bottom, so the offsets cancel and every difference stays nonnegative.
+        // Each takes the carry out of the one below, which leaves the top limb of the result.
+        let one = simd.u32_splat(1);
+        let mask = simd.u32_splat(MASK);
+        let mut limbs = self.limbs;
+        let mut previous = [zero; 2];
+        for (j, limb) in limbs.iter_mut().enumerate() {
+            // The top limb's offset is negative and wraps; its difference is the result's limb.
+            let offset = if j + 1 < LIMBS { FOLD_OFFSET } else { 0 };
+            let offset = offset.wrapping_sub(if j > 0 { FOLD_OFFSET >> LIMB_BITS } else { 0 });
+            let offset = simd.u64_splat(offset);
+            let p = simd.u32_splat(P[j]);
+            let mut column = [zero; 2];
+            for (h, (column, previous)) in column
+                .iter_mut()
+                .zip(&mut previous)
+                .enumerate()
+                .take(Self::HALVES)
+            {
+                let value = simd.u64_add(Self::widen(simd, h, *limb, one), offset);
+                let difference = simd.u64_sub(value, Self::widen(simd, h, k, p));
+                *column = simd.u64_add(difference, simd.u64_shr::<LIMB_BITS>(*previous));
+                *previous = *column;
+            }
+            *limb = simd.u64_narrow_pair(column[0], column[1]);
+            if j + 1 < LIMBS {
+                *limb = simd.u32_and(*limb, mask);
+            }
+        }
+        Self {
+            limbs,
+            bound: DebugCounter::new(2),
+            limb_bound: DebugCounter::new(1),
+        }
+    }
+
     /// Returns `self - p` in lanes where `self >= p`, for a carried value below `2p`.
     #[inline(always)]
     fn subtract_modulus(self, simd: S) -> Self {
@@ -656,10 +733,10 @@ impl<S: Simd> Field<S> for Unsat28<S> {
         product.carry(simd)
     }
 
-    /// Carries, then multiplies by one in Montgomery form, which is below `p`.
+    /// Folds the multiple of `p` that the top limb covers, carrying as it goes.
     #[inline(always)]
     fn reduce_tight(simd: S, product: Self::Product) -> Self {
-        product.carry(simd).mul(simd, Self::constant(simd, &ONE, 1))
+        product.fold(simd)
     }
 }
 
@@ -1057,5 +1134,68 @@ mod tests {
             reference::to_bytes(reference::mul(a, b))
         );
         check_consistent(|| Widest);
+    }
+
+    /// Returns the carried limbs whose only nonzero limb is the top one, `top`, and the element
+    /// they represent.
+    fn top_only(top: u32) -> ([u32; LIMBS], Element) {
+        let shift = LIMB_BITS * (LIMBS as u32 - 1);
+        let mut limbs = [0; LIMBS];
+        limbs[LIMBS - 1] = top;
+        let high = reference::mul([u64::from(top), 0, 0, 0, 0, 0], power_of_two(shift));
+        let inverse = reference::invert(power_of_two(LIMBS as u32 * LIMB_BITS));
+        (limbs, reference::mul(high, inverse))
+    }
+
+    /// Returns the largest top limb below `(LIMIT - 1) p`. A multiple estimated from the top limb
+    /// of `p` alone exceeds the value it covers.
+    fn largest_top() -> u32 {
+        multiple(LIMIT - 1)[LIMBS - 1] - 1
+    }
+
+    /// Tightly reduces values at the integer limit, carried with the widest low limbs or summed
+    /// up to the limb limit, and a value just below a multiple of `p` with zero low limbs.
+    /// Checks that every result is carried and below `2p`.
+    struct Fold;
+
+    impl<S: Simd> Operation<S> for Fold {
+        type Output = Vec<[u8; BYTES]>;
+
+        fn portable(self, simd: S) -> Vec<[u8; BYTES]> {
+            let twice = words_from_limbs(multiple(2));
+            let mut outputs = Vec::new();
+            let mut fold = |value: Unsat28<S>| {
+                let folded = <Unsat28<S> as Field<S>>::reduce_tight(simd, value);
+                let rows = folded.store_raw(simd);
+                let lanes = (0..S::U32_LANES).map(|lane| rows.map(|row| row[lane]));
+                for limbs in lanes {
+                    assert!(limbs.iter().all(|limb| *limb <= MASK));
+                    let words = words_from_limbs(limbs);
+                    assert!(words.iter().rev().lt(twice.iter().rev()));
+                }
+                let mut output = [[0; BYTES]];
+                folded.store(simd, &mut output);
+                outputs.push(output[0]);
+            };
+            fold(Unsat28::from_limbs(
+                simd,
+                &[widest(LIMIT).0; MAX_LANES],
+                LIMIT,
+            ));
+            let bound = LIMIT / LIMB_LIMIT;
+            let value = Unsat28::from_limbs(simd, &[widest(bound).0; MAX_LANES], bound);
+            fold((1..LIMB_LIMIT).fold(value, |sum, _| sum.add(simd, value)));
+            let limbs = top_only(largest_top()).0;
+            fold(Unsat28::from_limbs(simd, &[limbs; MAX_LANES], LIMIT - 1));
+            outputs
+        }
+    }
+
+    #[test]
+    fn tight_reductions_fold_below_twice_the_modulus() {
+        let sum = reference::mul(widest(LIMIT / LIMB_LIMIT).1, [LIMB_LIMIT, 0, 0, 0, 0, 0]);
+        let expected = [widest(LIMIT).1, sum, top_only(largest_top()).1].map(reference::to_bytes);
+        assert_eq!(test_dispatch(Fold), expected);
+        check_consistent(|| Fold);
     }
 }

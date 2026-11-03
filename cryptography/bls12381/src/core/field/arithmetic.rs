@@ -82,7 +82,8 @@
 //! [`Field::reduce`] only carries it. Long sums, such as the coefficients of products in the higher
 //! extensions, would then return values whose integer bounds grow with every chained multiplication.
 //! [`Field::reduce_tight`] returns integer bound at most [`TIGHT`] in every representation, whatever
-//! the sum's bound: eager products pay one more product, by one, and wide products reduce as usual.
+//! the sum's bound: [`Unsat49`] pays one more product, by one, [`Unsat28`] subtracts the multiple
+//! of `p` that its top limb covers, and wide products reduce as usual.
 //! Between products of such sums, [`Field::carry_product`] restores the limb bound of eager sums, so
 //! they keep accumulating; wide sums need no carrying and keep their term bounds.
 //!
@@ -281,8 +282,8 @@ pub trait Field<S: Simd>: Copy {
     /// Reduces a sum of products to integer bound at most [`TIGHT`], whatever the sum's integer
     /// bound, and prepares its limbs for reuse.
     ///
-    /// The input must satisfy the limits of [`Self::reduce`]. Eager sums also multiply by one,
-    /// costing one product; wide sums reduce exactly as for [`Self::reduce`].
+    /// The input must satisfy the limits of [`Self::reduce`]. Eager sums take one more step, which
+    /// costs at most one product; wide sums reduce exactly as for [`Self::reduce`].
     fn reduce_tight(simd: S, product: Self::Product) -> Self;
 
     /// Returns `self * rhs`.
