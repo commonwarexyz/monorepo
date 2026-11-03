@@ -951,7 +951,8 @@ mod tests {
 
             // No shard reaches the member, so prompt acceptance shows that verification did not
             // wait for the member's assigned shard.
-            let verify_rx = marshaled.verify(candidate_ctx, commitment).await;
+            let ancestry: Arc<[_]> = Arc::from([candidate_ctx.parent.1]);
+            let verify_rx = marshaled.verify(candidate_ctx, commitment, ancestry.into());
             select! {
                 result = verify_rx => {
                     assert!(
@@ -4000,11 +4001,7 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut config = test_config(
-                &context,
-                PARTITION,
-                ConstantProvider::new(schemes[0].clone()),
-            );
+            let mut config = test_config(PARTITION, ConstantProvider::new(schemes[0].clone()));
             config.max_repair = NZUsize!(1);
             let (finalizations, blocks) =
                 immutable_finalized_stores(&context, PARTITION, &config).await;
@@ -4159,8 +4156,7 @@ mod tests {
 
             // Persist the finalization without its block, as a crash between the two archive
             // puts leaves it.
-            let seed_config_context = context.child("seed_config");
-            let config = test_config(&seed_config_context, partition, provider.clone());
+            let config = test_config(partition, provider.clone());
             let finalization = CodingHarness::make_finalization(
                 Proposal::new(candidate_context.round, View::zero(), commitment),
                 &schemes,

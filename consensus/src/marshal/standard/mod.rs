@@ -6206,8 +6206,11 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
-            let mut config = test_config(&context, PARTITION,
-                ConstantProvider::new(schemes[0].clone()), NZUsize!(1));
+            let mut config = test_config(
+                PARTITION,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+            );
             config.max_repair = NZUsize!(1);
             let (actor, mailbox, _) = Actor::init(
                 context.child("actor"), finalizations, blocks, config,
@@ -6678,7 +6681,9 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
             let mut config = test_config(
-                &context, PARTITION, ConstantProvider::new(schemes[0].clone()), NZUsize!(1),
+                PARTITION,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
             );
             config.max_repair = NZUsize!(1);
             let (actor, mailbox, _) = Actor::init(
@@ -9557,7 +9562,7 @@ mod tests {
                         && archived.is_none()
                         && exact_pending
                         && canonical_pending,
-                    "{case} response must be rejected without publishing data: verdict={verdict}, stored={}, archived={}, exact_pending={exact_pending}, canonical_pending={canonical_pending}",
+                    "{case} response must be rejected without publishing data: verdict={verdict:?}, stored={}, archived={}, exact_pending={exact_pending}, canonical_pending={canonical_pending}",
                     stored.is_some(),
                     archived.is_some(),
                 );
@@ -11759,7 +11764,6 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
             let mut config = test_config(
-                &context,
                 PARTITION,
                 ConstantProvider::new(schemes[0].clone()),
                 NZUsize!(1),
@@ -11848,7 +11852,6 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
             let mut config = test_config(
-                &context,
                 PARTITION,
                 ConstantProvider::new(schemes[0].clone()),
                 NZUsize!(1),
@@ -11943,7 +11946,6 @@ mod tests {
                     let (finalizations, blocks) =
                         prunable_finalized_stores(&context, PARTITION).await;
                     let mut config = test_config(
-                        &context,
                         PARTITION,
                         ConstantProvider::new(schemes[0].clone()),
                         NZUsize!(1),
@@ -12012,7 +12014,6 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
             let mut config = test_config(
-                &context,
                 PARTITION,
                 ConstantProvider::new(schemes[0].clone()),
                 NZUsize!(1),
@@ -12080,7 +12081,6 @@ mod tests {
                 let partition = format!("prefetch-durable-{writer}-{pruned}");
                 let (finalizations, blocks) = prunable_finalized_stores(&context, &partition).await;
                 let mut config = test_config(
-                    &context,
                     &partition,
                     ConstantProvider::new(schemes[0].clone()),
                     NZUsize!(1),
@@ -12221,7 +12221,6 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
             let mut config = test_config(
-                &context,
                 PARTITION,
                 ConstantProvider::new(schemes[0].clone()),
                 NZUsize!(1),
@@ -12415,7 +12414,6 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
             let mut config = test_config(
-                &context,
                 PARTITION,
                 ConstantProvider::new(schemes[0].clone()),
                 NZUsize!(1),
@@ -12549,8 +12547,11 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let partition = format!("independent-acquisition-{speculative}");
             let (finalizations, blocks) = prunable_finalized_stores(&context, &partition).await;
-            let mut config = test_config(&context, &partition,
-                ConstantProvider::new(schemes[0].clone()), NZUsize!(1));
+            let mut config = test_config(
+                &partition,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+            );
             config.max_repair = NZUsize!(1);
             let (actor, mailbox, _) = Actor::init(
                 context.child("actor"), finalizations, blocks, config,
@@ -12614,7 +12615,6 @@ mod tests {
                 let partition = format!("range-window-{max_repair}");
                 let (finalizations, stored) = prunable_finalized_stores(&context, &partition).await;
                 let mut config = test_config(
-                    &context,
                     &partition,
                     ConstantProvider::new(schemes[0].clone()),
                     NZUsize!(1),
@@ -12807,7 +12807,6 @@ mod tests {
             let stored = Recording::new(stored, |block: &Arc<B>| Arc::as_ptr(block).addr());
             let operations = stored.ops();
             let mut config = test_config(
-                &context,
                 PARTITION,
                 ConstantProvider::new(schemes[0].clone()),
                 NZUsize!(1),
@@ -12961,7 +12960,6 @@ mod tests {
                 let partition = format!("forward-repair-batches-{floor}");
                 let (finalizations, blocks) = prunable_finalized_stores(&context, &partition).await;
                 let mut config = test_config(
-                    &context,
                     &partition,
                     ConstantProvider::new(schemes[0].clone()),
                     NZUsize!(1),
@@ -13094,7 +13092,6 @@ mod tests {
                 finalizations_by_height,
                 finalized_blocks,
                 test_config(
-                    &context,
                     PARTITION_PREFIX,
                     ConstantProvider::new(schemes[0].clone()),
                     NZUsize!(1),
@@ -14547,7 +14544,6 @@ mod tests {
                     let (finalizations, blocks) =
                         prunable_finalized_stores(&context, PREFIX).await;
                     let mut config = test_config(
-                        &context,
                         PREFIX,
                         ConstantProvider::new(schemes[0].clone()),
                         NZUsize!(1),

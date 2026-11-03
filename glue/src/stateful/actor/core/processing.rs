@@ -551,7 +551,7 @@ mod tests {
         channel::oneshot,
         sync::Mutex,
     };
-    use futures::{StreamExt as _, poll};
+    use futures::poll;
     use std::{
         collections::{BTreeMap, VecDeque},
         future::Future,
@@ -604,13 +604,14 @@ mod tests {
 
     /// Verifies the first block of candidate-first `ancestry` on the second, selecting the rest
     /// as the parent's history.
-    fn verify_with<'a, A>(
+    fn verify_with<'a, A, I>(
         mailbox: &'a mut Mailbox<deterministic::Context, A>,
         context: (deterministic::Context, A::Context),
-        ancestry: impl IntoIterator<Item = Digested<TestBlock>>,
-    ) -> impl Future<Output = bool> + Send + use<'a, A>
+        ancestry: I,
+    ) -> impl Future<Output = bool> + Send + use<'a, A, I>
     where
         A: Application<deterministic::Context, Block = TestBlock>,
+        I: IntoIterator<Item = Digested<TestBlock>>,
     {
         let mut ancestry = ancestry.into_iter();
         let block = ancestry.next().expect("verification must name its block");
@@ -619,28 +620,30 @@ mod tests {
     }
 
     /// Proposes on the first block of parent-first `ancestry`, selecting it as history.
-    fn propose_with<'a, A>(
+    fn propose_with<'a, A, I>(
         mailbox: &'a mut Mailbox<deterministic::Context, A>,
         context: (deterministic::Context, A::Context),
-        ancestry: impl IntoIterator<Item = Digested<TestBlock>>,
+        ancestry: I,
         input: A::Input,
-    ) -> impl Future<Output = Option<Digested<TestBlock>>> + Send + use<'a, A>
+    ) -> impl Future<Output = Option<Digested<TestBlock>>> + Send + use<'a, A, I>
     where
         A: Application<deterministic::Context, Block = TestBlock>,
+        I: IntoIterator<Item = Digested<TestBlock>>,
     {
         let (parent, blocks) = parent_branch(ancestry);
         mailbox.propose(context, parent, blocks, input)
     }
 
     /// Prepares on the first block of parent-first `ancestry`, selecting it as history.
-    fn prepare_with<'a, A>(
+    fn prepare_with<'a, A, I>(
         mailbox: &'a mut Mailbox<deterministic::Context, A>,
         context: (deterministic::Context, A::Context),
-        ancestry: impl IntoIterator<Item = Digested<TestBlock>>,
+        ancestry: I,
         input: A::Input,
-    ) -> impl Future<Output = Handoff<Digested<TestBlock>>> + Send + use<'a, A>
+    ) -> impl Future<Output = Handoff<Digested<TestBlock>>> + Send + use<'a, A, I>
     where
         A: Application<deterministic::Context, Block = TestBlock>,
+        I: IntoIterator<Item = Digested<TestBlock>>,
     {
         let (parent, blocks) = parent_branch(ancestry);
         mailbox.prepare(context, parent, blocks, input)
@@ -3002,7 +3005,10 @@ mod tests {
             );
             let genesis = TestBlock::new(0, 0);
             let winner = TestBlock::child(&genesis, 1);
-            let proposal = deferred.prepare(winner.context()).await;
+            let proposal = deferred.prepare(
+                winner.context(),
+                History::ready(Arc::from([genesis.digest()])),
+            );
             proposal_started.await.expect("proposal should start");
 
             // The finalization queues behind the held build. A later verification starts
@@ -3198,9 +3204,14 @@ mod tests {
 
             // The handoff build on the uncertified parent processes the parent and is then held,
             // and a finalization report queues behind it ahead of the parent's verification.
-            let mut handoff = deferred
-                .prepare(TestBlock::child(&parent, 3).context())
-                .await;
+            let mut handoff = deferred.prepare(
+                TestBlock::child(&parent, 3).context(),
+                History::ready(Arc::from([
+                    genesis.digest(),
+                    outgoing.digest(),
+                    parent.digest(),
+                ])),
+            );
             parent_started
                 .await
                 .expect("handoff build must process its parent");
@@ -3212,11 +3223,11 @@ mod tests {
             let _ = mailbox.report(Update::Block(digested(outgoing.clone()), acknowledgement));
 
             // The parent verifies and certifies from its processed state while the build is held.
-            let optimistic = deferred.verify(parent.context(), parent.digest()).await;
+            let parent_history = History::ready(Arc::from([genesis.digest(), outgoing.digest()]));
+            let optimistic =
+                deferred.verify(parent.context(), parent.digest(), parent_history.clone());
             assert_eq!(optimistic.await, Ok(true));
-            let certify = deferred
-                .certify(parent.context().round, parent.digest())
-                .await;
+            let certify = deferred.certify(parent.context().round, parent.digest(), parent_history);
             assert_eq!(certify.await, Ok(true));
             assert!(poll!(&mut handoff).is_pending());
             assert!(poll!(&mut waiter).is_pending());

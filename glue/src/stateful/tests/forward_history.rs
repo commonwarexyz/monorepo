@@ -62,8 +62,8 @@ use commonware_runtime::{
 };
 use commonware_storage::archive::prunable;
 use commonware_utils::{
-    NZU64, NZUsize, channel::oneshot, non_empty, non_empty_range, ordered::Set, probability,
-    sync::Mutex,
+    NZDuration, NZU64, NZUsize, channel::oneshot, non_empty, non_empty_range, ordered::Set,
+    probability, sync::Mutex,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -1059,8 +1059,8 @@ fn run(scenario: Scenario) {
                     },
                     mailbox_size: NZUsize!(1024),
                     me: Some(participants[index].clone()),
-                    timeout: Duration::from_secs(10),
-                    fetch_retry_timeout: Duration::from_millis(100),
+                    fetch_timeout: NZDuration!(Duration::from_secs(10)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -1099,7 +1099,7 @@ fn run(scenario: Scenario) {
             .register(BROADCAST, QUOTA)
             .await
             .unwrap();
-        let (leader_engine, leader_buffer) = buffered::Engine::<_, P, Block, _, _>::new(
+        let (leader_engine, leader_buffer) = buffered::Engine::<_, P, Block, _, _, _>::new(
             context.child("leader_broadcast"),
             buffered::Config {
                 public_key: participants[candidate_leader].clone(),
@@ -1108,6 +1108,7 @@ fn run(scenario: Scenario) {
                 priority: false,
                 codec_config: (),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(participants[candidate_leader].clone()),
                 strategy: Sequential,
             },
         );
@@ -1131,8 +1132,8 @@ fn run(scenario: Scenario) {
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(public_key.clone()),
                 mailbox_size: NZUsize!(1024),
-                timeout: Duration::from_secs(10),
-                fetch_retry_timeout: Duration::from_millis(100),
+                fetch_timeout: NZDuration!(Duration::from_secs(10)),
+                fetch_retry_delay: Duration::from_millis(100),
                 priority_requests: false,
                 priority_responses: false,
             },
@@ -1147,6 +1148,7 @@ fn run(scenario: Scenario) {
                 priority: false,
                 codec_config: (),
                 peer_provider: oracle.manager(),
+                blocker: control.clone(),
                 strategy: Sequential,
             },
         );
@@ -1250,7 +1252,8 @@ fn run(scenario: Scenario) {
                 timeout_retry: Duration::from_secs(300),
                 view_retention: ViewDelta::new(1024),
                 skip: SkipPolicy::Disabled,
-                fetch_timeout: Duration::from_secs(10),
+                fetch_timeout: NZDuration!(Duration::from_secs(10)),
+                fetch_retry_delay: Duration::from_millis(100),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             },
