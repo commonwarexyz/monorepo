@@ -1274,9 +1274,8 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
         Ok(self)
     }
 
-    /// Make all accepted entries durable, persist their tracked recovery markers, and close.
-    ///
-    /// A journal opened without tracked recovery has no markers, so closing it only syncs every
+    /// Make all accepted entries durable, persist their tracked recovery markers, and close. A
+    /// journal opened without tracked recovery has no markers, so closing it only syncs every
     /// section.
     #[commonware_macros::stability(ALPHA)]
     pub async fn close(self) -> Result<(), Error> {
@@ -2055,6 +2054,7 @@ mod tests {
         });
     }
 
+    /// Open a tracked journal and drain its replay.
     async fn init_tracked<E: Context>(
         context: &E,
         cfg: Config<()>,
@@ -2225,10 +2225,11 @@ mod tests {
             let reopen = context.child("reopen");
             let journal = init_tracked(&reopen, cfg, metadata_partition).await;
             assert!(
-                journal
-                    .get_value(1, first_offset, first_size)
-                    .await
-                    .is_err()
+                matches!(
+                    journal.get_value(1, first_offset, first_size).await,
+                    Err(Error::ChecksumMismatch(_, _))
+                ),
+                "a value covered by the marker must not be validated on reopen"
             );
             assert_eq!(
                 journal
@@ -2287,6 +2288,8 @@ mod tests {
         });
     }
 
+    /// Check that sections 1 and 2 hold consistent prefixes within the given entry counts,
+    /// returning their counts.
     async fn assert_close_prefixes(
         journal: &Oversized<deterministic::Context, TestEntry, TestValue>,
         minimum: u64,
