@@ -12,7 +12,7 @@
 //! - `precompute`: building a committee's [`sas::KeyTable`].
 
 use commonware_cryptography::bls12381::primitives::{
-    group::{FixedBase, Private},
+    group::Private,
     ops::{self, batch, sas},
     variant::{MinPk, MinSig, Variant},
 };
@@ -60,7 +60,7 @@ impl Spread {
 }
 
 /// Keys for both schemes, the PS table of the whole committee, and a pool of messages and periods.
-struct Committee<V: Variant<Public: FixedBase>> {
+struct Committee<V: Variant> {
     bls: Vec<(Private, V::Public)>,
     ps: Vec<(sas::PrivateKey, sas::PublicKey<V>)>,
     table: sas::KeyTable<V>,
@@ -68,7 +68,7 @@ struct Committee<V: Variant<Public: FixedBase>> {
     periods: Vec<Vec<u8>>,
 }
 
-impl<V: Variant<Public: FixedBase>> Committee<V> {
+impl<V: Variant> Committee<V> {
     /// Creates a committee whose first `quorum` members sign.
     fn new(quorum: usize) -> Self {
         let mut rng = test_rng();
@@ -141,7 +141,7 @@ impl<V: Variant<Public: FixedBase>> Committee<V> {
 }
 
 /// Benchmarks one workload under BLS, PS, and PS with the committee table.
-fn compare<V: Variant<Public: FixedBase>>(
+fn compare<V: Variant>(
     c: &mut Criterion,
     label: &str,
     bls: &[batch::Claim<'_, V>],
@@ -167,7 +167,7 @@ fn compare<V: Variant<Public: FixedBase>>(
     );
 }
 
-fn register<V: Variant<Public: FixedBase>>(c: &mut Criterion, variant: &str) {
+fn register<V: Variant>(c: &mut Criterion, variant: &str) {
     for q in QUORUMS {
         let committee = Committee::<V>::new(q);
         let period: &[u8] = &committee.periods[0];
@@ -249,7 +249,7 @@ fn register<V: Variant<Public: FixedBase>>(c: &mut Criterion, variant: &str) {
 }
 
 /// Benchmarks signing under BLS and PS, with the PS period base hashed or cached.
-fn register_sign<V: Variant<Public: FixedBase>>(c: &mut Criterion, variant: &str) {
+fn register_sign<V: Variant>(c: &mut Criterion, variant: &str) {
     let committee = Committee::<V>::new(1);
     let message: &[u8] = &committee.messages[0];
     let period: &[u8] = &committee.periods[0];
@@ -286,7 +286,7 @@ fn register_sign<V: Variant<Public: FixedBase>>(c: &mut Criterion, variant: &str
 }
 
 /// Benchmarks building a committee's [`sas::KeyTable`].
-fn register_precompute<V: Variant<Public: FixedBase>>(c: &mut Criterion, variant: &str) {
+fn register_precompute<V: Variant>(c: &mut Criterion, variant: &str) {
     for q in QUORUMS {
         let committee = Committee::<V>::new(q);
         let publics: Vec<_> = committee.ps.iter().map(|(_, public)| *public).collect();

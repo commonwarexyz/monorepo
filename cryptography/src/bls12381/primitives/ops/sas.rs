@@ -71,7 +71,7 @@
 use super::{
     super::{
         Error,
-        group::{FixedBase, Private, Scalar, ScalarReadCfg, SmallScalar},
+        group::{Private, Scalar, ScalarReadCfg, SmallScalar},
         variant::Variant,
     },
     batch::{bisect_ranges, random_scalars},
@@ -83,6 +83,7 @@ use commonware_codec::{Buf, Encode, Error as CodecError, FixedSize, Read, ReadEx
 use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, Random, Space};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::union_unique;
+use core::num::NonZeroUsize;
 use hashbrown::{HashMap, HashSet};
 use rand_core::CryptoRng;
 
@@ -102,6 +103,9 @@ const FOLD_MIN: usize = 32;
 /// Window of the precomputed rows in a [`KeyTable`]: `2^(WINDOW - 1)` multiples per key
 /// component.
 const WINDOW: usize = 8;
+
+/// Minimum number of table rows multiplied by one parallel batch.
+const MIN_ROW_BATCH: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 
 /// A PS-SAS private key `(x, y)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -470,19 +474,13 @@ pub struct Claim<'a, V: Variant> {
 /// stores `2^(WINDOW - 1)` affine multiples of `X` and of `Y` (128 of each): 24 KiB per key for
 /// [`MinPk`](super::super::variant::MinPk) and 48 KiB per key for
 /// [`MinSig`](super::super::variant::MinSig), or about 6 MiB and 12 MiB for 251 keys.
-pub struct KeyTable<V: Variant>
-where
-    V::Public: FixedBase,
-{
+pub struct KeyTable<V: Variant> {
     indices: HashMap<PublicKey<V>, usize>,
-    x: <V::Public as FixedBase>::Table,
-    y: <V::Public as FixedBase>::Table,
+    x: V::PublicTable,
+    y: V::PublicTable,
 }
 
-impl<V: Variant> KeyTable<V>
-where
-    V::Public: FixedBase,
-{
+impl<V: Variant> KeyTable<V> {
     /// Precomputes the multiples of every key in `keys`.
     ///
     /// Repeated keys and keys with an identity component are left out. Claims over them are
@@ -501,8 +499,8 @@ where
         }
         Self {
             indices,
-            x: V::Public::precompute(&xs, WINDOW),
-            y: V::Public::precompute(&ys, WINDOW),
+            x: V::precompute_publics(&xs, WINDOW),
+            y: V::precompute_publics(&ys, WINDOW),
         }
     }
 
@@ -546,20 +544,17 @@ impl<V: Variant> Table<V> for NoTable {
     }
 }
 
-impl<V: Variant> Table<V> for KeyTable<V>
-where
-    V::Public: FixedBase,
-{
+impl<V: Variant> Table<V> for KeyTable<V> {
     fn index(&self, key: &PublicKey<V>) -> Option<usize> {
         self.indices.get(key).copied()
     }
 
     fn sum_x(&self, entries: &[(usize, Scalar)]) -> V::Public {
-        V::Public::mul_table(&self.x, entries)
+        V::mul_public_table(&self.x, entries)
     }
 
     fn sum_y(&self, entries: &[(usize, Scalar)]) -> V::Public {
-        V::Public::mul_table(&self.y, entries)
+        V::mul_public_table(&self.y, entries)
     }
 }
 
@@ -600,17 +595,12 @@ pub fn verify_claims<R: CryptoRng, V: Variant>(
 /// # Warning
 ///
 /// The warning on [`verify_claims`] applies.
-pub fn verify_claims_with_table<R, V>(
+pub fn verify_claims_with_table<R: CryptoRng, V: Variant>(
     rng: &mut R,
     claims: &[Claim<'_, V>],
     table: &KeyTable<V>,
     strategy: &impl Strategy,
-) -> Vec<usize>
-where
-    R: CryptoRng,
-    V: Variant,
-    V::Public: FixedBase,
-{
+) -> Vec<usize> {
     verify(rng, claims, table, strategy)
 }
 
@@ -794,7 +784,11 @@ impl<P: Space<Scalar> + Space<SmallScalar>> Terms<P> {
     }
 
     /// Returns the sum of every term, multiplying table rows with `rows`.
-    fn sum(&self, rows: impl FnOnce(&[(usize, Scalar)]) -> P, strategy: &impl Strategy) -> P {
+    fn sum(
+        &self,
+        rows: impl Fn(&[(usize, Scalar)]) -> P + Send + Sync,
+        strategy: &impl Strategy,
+    ) -> P {
         let mut sum = P::zero();
         if !self.weighted.is_empty() {
             sum += &<P as Space<SmallScalar>>::msm(&self.weighted, &self.weights, strategy);
@@ -803,7 +797,14 @@ impl<P: Space<Scalar> + Space<SmallScalar>> Terms<P> {
             sum += &<P as Space<Scalar>>::msm(&self.points, &self.scalars, strategy);
         }
         if !self.rows.is_empty() {
-            sum += &rows(&self.rows);
+            // Each batch repeats the table's doublings, so batches stay long enough to amortize
+            // them.
+            sum += &strategy.run_batches(self.rows.len(), MIN_ROW_BATCH, 1, |batches| {
+                batches
+                    .map_collect_vec(|ranges| ranges, |range| rows(&self.rows[range]))
+                    .into_iter()
+                    .fold(P::zero(), |sum, part| sum + &part)
+            });
         }
         sum
     }
@@ -996,7 +997,7 @@ mod tests {
         (0..count).map(|_| keypair::<_, V>(&mut rng)).collect()
     }
 
-    fn sign_verify<V: Variant<Public: FixedBase>>() {
+    fn sign_verify<V: Variant>() {
         let (private, public) = keypair::<_, V>(&mut test_rng());
         let signature = sign_message::<V>(&private, b"view-1", NAMESPACE, b"message");
         verify_message::<V>(&public, b"view-1", NAMESPACE, b"message", &signature).unwrap();
@@ -1023,7 +1024,7 @@ mod tests {
         sign_verify::<MinSig>();
     }
 
-    fn sign_with_base_matches<V: Variant<Public: FixedBase>>() {
+    fn sign_with_base_matches<V: Variant>() {
         let (private, _) = keypair::<_, V>(&mut test_rng());
         let base = period_base::<V>(b"view-1");
         assert_eq!(
@@ -1071,7 +1072,7 @@ mod tests {
             .collect()
     }
 
-    fn aggregate_verifies<V: Variant<Public: FixedBase>>() {
+    fn aggregate_verifies<V: Variant>() {
         let keys = keys::<V>(7);
         for distinct in [1, 3, 7] {
             let messages = messages(distinct);
@@ -1106,7 +1107,7 @@ mod tests {
         aggregate_verifies::<MinSig>();
     }
 
-    fn structural_rejections<V: Variant<Public: FixedBase>>() {
+    fn structural_rejections<V: Variant>() {
         let keys = keys::<V>(3);
         let messages = messages(3);
         let valid = aggregate(&keys, b"view-1", &messages);
@@ -1137,7 +1138,7 @@ mod tests {
     }
 
     /// Bisection finds exactly the invalid claims when they span several periods.
-    fn bisection_across_periods<V: Variant<Public: FixedBase>>() {
+    fn bisection_across_periods<V: Variant>() {
         let keys = keys::<V>(12);
         let periods: [&[u8]; 3] = [b"height-1", b"height-2", b"height-3"];
         let messages = messages(keys.len());
@@ -1184,7 +1185,7 @@ mod tests {
 
     /// Independent claims over shared messages still isolate bad claims, both for messages
     /// signed often enough to fold and for messages signed by a few claims.
-    fn shared_messages<V: Variant<Public: FixedBase>>() {
+    fn shared_messages<V: Variant>() {
         // Four (period, message) pairs signed FOLD_MIN times each, then one signed twice per period.
         let folded = 4 * FOLD_MIN;
         let keys = keys::<V>(folded + 4);
@@ -1257,11 +1258,7 @@ mod tests {
 
     /// Asserts that `claims` fail exactly at `expected`, without a table and with each of `tables`,
     /// sequentially and in parallel.
-    fn check<V: Variant<Public: FixedBase>>(
-        claims: &[Claim<'_, V>],
-        tables: &[KeyTable<V>],
-        expected: &[usize],
-    ) {
+    fn check<V: Variant>(claims: &[Claim<'_, V>], tables: &[KeyTable<V>], expected: &[usize]) {
         let rayon = Rayon::new(NZUsize!(4)).unwrap();
         assert_eq!(
             verify_claims(&mut test_rng(), claims, &Sequential),
@@ -1281,7 +1278,7 @@ mod tests {
     }
 
     /// Repeated keys and keys with an identity component stay out of a table.
-    fn table_skips_repeated_and_degenerate_keys<V: Variant<Public: FixedBase>>() {
+    fn table_skips_repeated_and_degenerate_keys<V: Variant>() {
         let keys = keys::<V>(2);
         let degenerate = PublicKey::<V>::new(keys[0].1.x, V::Public::zero());
         let table = KeyTable::new(&[keys[0].1, keys[1].1, keys[0].1, degenerate]);
@@ -1298,7 +1295,7 @@ mod tests {
 
     /// A key whose combined public `X + c Y` is the identity for its message cannot make a forged
     /// signature verify, alone or among valid claims in its own and other periods.
-    fn zero_combined_public_is_isolated<V: Variant<Public: FixedBase>>() {
+    fn zero_combined_public_is_isolated<V: Variant>() {
         let period: &[u8] = b"view-1";
         let message: &[u8] = b"cancelling";
         let y = Scalar::map(b"y", b"cancelling key");
@@ -1346,7 +1343,7 @@ mod tests {
     }
 
     /// Verdicts with full, partial, and empty tables match verdicts without one.
-    fn table_matches_untabled<V: Variant<Public: FixedBase>>() {
+    fn table_matches_untabled<V: Variant>() {
         let keys = keys::<V>(FOLD_MIN + 8);
         let publics: Vec<_> = keys.iter().map(|(_, public)| *public).collect();
         let tables = [
@@ -1419,7 +1416,7 @@ mod tests {
 
     /// Two signatures from one key over different messages in one period forge any message in
     /// that period. This is why a key must sign at most once per period.
-    fn double_signing_forges<V: Variant<Public: FixedBase>>() {
+    fn double_signing_forges<V: Variant>() {
         let (private, public) = keypair::<_, V>(&mut test_rng());
         let period: &[u8] = b"view-1";
         let first = sign_message::<V>(&private, period, NAMESPACE, b"first");
@@ -1439,7 +1436,7 @@ mod tests {
     }
 
     /// Signing the same bytes under two namespaces in one period is double signing too.
-    fn double_signing_across_namespaces_forges<V: Variant<Public: FixedBase>>() {
+    fn double_signing_across_namespaces_forges<V: Variant>() {
         let (private, public) = keypair::<_, V>(&mut test_rng());
         let period: &[u8] = b"view-1";
         let first = sign_message::<V>(&private, period, b"first", b"block");
@@ -1467,7 +1464,7 @@ mod tests {
     }
 
     /// Without a proof of knowledge, a rogue key cancels honest keys out of an aggregate.
-    fn rogue_key_needs_proof<V: Variant<Public: FixedBase>>() {
+    fn rogue_key_needs_proof<V: Variant>() {
         let mut rng = test_rng();
         let (_, honest) = keypair::<_, V>(&mut rng);
         let (rogue_private, rogue_public) = keypair::<_, V>(&mut rng);
@@ -1505,7 +1502,7 @@ mod tests {
         rogue_key_needs_proof::<MinSig>();
     }
 
-    fn proof_of_knowledge<V: Variant<Public: FixedBase>>() {
+    fn proof_of_knowledge<V: Variant>() {
         let mut rng = test_rng();
         let (private, public) = keypair::<_, V>(&mut rng);
         let proof = ProofOfKnowledge::prove(&mut rng, NAMESPACE, &private, &public);
@@ -1556,7 +1553,7 @@ mod tests {
         proof_of_knowledge::<MinSig>();
     }
 
-    fn codec<V: Variant<Public: FixedBase>>() {
+    fn codec<V: Variant>() {
         let (private, public) = keypair::<_, V>(&mut test_rng());
         assert_eq!(PublicKey::<V>::decode(public.encode()).unwrap(), public);
         assert_eq!(PrivateKey::decode(private.encode()).unwrap(), private);
