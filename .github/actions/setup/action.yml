@@ -183,8 +183,11 @@ runs:
 
     # kache only writes from pushes to protected branches, and its daemon keeps the write
     # mode it started with. Hiding GITHUB_ACTIONS from every kache process, the daemon
-    # included, lets pull request and merge queue jobs write the shared prefix too, as
-    # sccache did. Fork pull requests get no credentials, so they cannot write.
+    # included, lets pull request and merge queue jobs write the shared prefix too.
+    # Unlike sccache, which cached only libraries, kache also caches test binaries, other
+    # executables and proc macros, so a same-repo pull request can upload binaries that
+    # main and the merge queue then run. Fork pull requests get no credentials, so they
+    # cannot write.
     - name: Enable kache writes
       if: steps.kache.outcome == 'success'
       continue-on-error: true
