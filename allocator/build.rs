@@ -1,7 +1,7 @@
 //! Compiles the vendored mimalloc sources into the crate when the `mimalloc`
 //! feature is enabled.
 
-use std::env;
+use std::{env, ffi::OsString};
 
 fn main() {
     println!("cargo:rerun-if-changed=mimalloc");
@@ -53,5 +53,13 @@ fn main() {
     } else {
         build.flag_if_supported("-ftls-model=initial-exec");
     }
+
+    // Debug info records the working directory, which is this checkout, so
+    // map it to `.` to keep the archive identical across checkouts. Code and
+    // data are unaffected.
+    let mut prefix_map = OsString::from("-fdebug-prefix-map=");
+    prefix_map.push(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is not set"));
+    prefix_map.push("=.");
+    build.flag_if_supported(prefix_map);
     build.compile("mimalloc");
 }
