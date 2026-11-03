@@ -19,7 +19,7 @@ async fn test_construct_proposal_switch_restores_buffered_finalizes() {
         Vote::Notarize(Notarize::sign(&schemes[0], a.clone()).unwrap()),
         false,
     );
-    // Drain the notarize attempt so the next begin takes finalizes.
+    // Run the notarize job first, so the next job takes the finalize votes.
     assert!(
         round
             .try_construct(&mut rng, &Sequential)
@@ -40,7 +40,7 @@ async fn test_construct_proposal_switch_restores_buffered_finalizes() {
     }
     let job = round.begin_construct(&mut rng, &Sequential).unwrap();
 
-    // The local finalize establishes B and replays B votes filtered under A.
+    // Our finalize for B sets the proposal to B. This adds back the B votes that A filtered out.
     round.accept_vote(
         Vote::Finalize(Finalize::sign(&schemes[4], b.clone()).unwrap()),
         true,

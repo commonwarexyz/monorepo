@@ -3,9 +3,8 @@ use crate::simplex::Viewport;
 use commonware_utils::futures::Pool;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// One pass starts a job for every ready kind of every dirty view, and each
-/// completion forwards its certificate and re-dirties its retained round
-/// without starting more work.
+/// One pass starts a job for each ready kind of each dirty view. Each finished job
+/// forwards its certificate and marks its view dirty. It does not start a new job.
 #[test]
 fn dispatch_starts_every_ready_view_and_completions_revisit_rounds() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
@@ -13,7 +12,7 @@ fn dispatch_starts_every_ready_view_and_completions_revisit_rounds() {
             schemes,
             participants,
             ..
-        } = ed25519::fixture(&mut context, b"dispatch_order", 5);
+        } = ed25519::fixture(&mut context, b"dispatch_ready", 5);
         let epoch = Epoch::new(1);
         let (mut actor, _mailbox) = Actor::new(
             context.child("batcher"),
@@ -48,14 +47,14 @@ fn dispatch_starts_every_ready_view_and_completions_revisit_rounds() {
             }
             work.insert(view, round);
         }
-        // The current view also has a notarize quorum, so it has two ready kinds. We
-        // lead it, so no proposal is forwarded to the voter.
+        // View 2 also has a notarize quorum, so it has two ready kinds. We lead view 2, so
+        // dispatch forwards no proposal.
         let current = work.get_mut(&View::new(2)).unwrap();
         current.set_leader(Participant::new(0));
         let proposal = Proposal::new(
             Round::new(epoch, View::new(2)),
             View::new(1),
-            Sha256::hash(&[b"dispatch_order"]),
+            Sha256::hash(&[b"dispatch_ready"]),
         );
         for (index, scheme) in schemes.iter().take(quorum(5) as usize).enumerate() {
             assert!(current.add_network(
@@ -75,7 +74,7 @@ fn dispatch_starts_every_ready_view_and_completions_revisit_rounds() {
         assert_eq!(pool.len(), 4);
         assert!(dirty.is_empty());
 
-        // Re-dirtying a round whose jobs are still running starts nothing.
+        // A dirty view with running jobs starts no new job.
         dirty.insert(View::new(2));
         actor.dispatch_ready(&mut pool, &mut work, &mut dirty, &mut voter, viewport);
         assert_eq!(pool.len(), 4);
@@ -97,14 +96,15 @@ fn dispatch_starts_every_ready_view_and_completions_revisit_rounds() {
         completed.sort();
         assert_eq!(completed, [1, 2, 2, 3].map(View::new));
 
-        // Certified kinds have nothing left to construct.
+        // Each certified kind has no job to start.
         actor.dispatch_ready(&mut pool, &mut work, &mut dirty, &mut voter, viewport);
         assert!(pool.is_empty());
         assert!(dirty.is_empty());
     });
 }
 
-/// Pruning round state cannot discard a completed certificate or its accounting.
+/// A job for a pruned round still forwards its certificate, blocks invalid signers, and
+/// updates metrics.
 #[test]
 fn pruned_completion_forwards_certificate_and_records_fallback() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
@@ -139,7 +139,7 @@ fn pruned_completion_forwards_certificate_and_records_fallback() {
             .iter()
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, id).unwrap())
             .collect();
-        votes[0].attestation.signature = votes.last().unwrap().attestation.signature.clone();
+        votes[1].attestation.signature = votes.last().unwrap().attestation.signature.clone();
         let count = quorum(7) as usize + 1;
         for (index, vote) in votes.into_iter().take(count).enumerate() {
             assert!(round.add_network(
@@ -177,7 +177,7 @@ fn pruned_completion_forwards_certificate_and_records_fallback() {
         };
         assert_eq!(certificate.view(), view);
         assert!(certificate.verify(&mut context, &schemes[0], &Sequential));
-        assert_eq!(*blocked.lock(), vec![participants[0].clone()]);
+        assert_eq!(*blocked.lock(), vec![participants[1].clone()]);
         let metrics = context.encode();
         assert!(
             metrics.contains(&format!("batcher_processed_total {count}")),
@@ -202,8 +202,35 @@ fn pruned_completion_forwards_certificate_and_records_fallback() {
     });
 }
 
-/// A quorum whose crypto never completes must not prevent an update and a
-/// subsequent leader nullify from reaching the voter.
+/// Replaces the strategy of a test [Config].
+fn with_strategy<
+    S: Scheme<Sha256Digest>,
+    B: Blocker,
+    Re: crate::Reporter,
+    Rl: Relay,
+    T: Strategy,
+>(
+    cfg: Config<S, B, Re, Rl, Sequential>,
+    strategy: T,
+) -> Config<S, B, Re, Rl, T> {
+    Config {
+        scheme: cfg.scheme,
+        blocker: cfg.blocker,
+        reporter: cfg.reporter,
+        track_historical_votes: cfg.track_historical_votes,
+        relay: cfg.relay,
+        strategy,
+        view_retention: cfg.view_retention,
+        skip: cfg.skip,
+        epoch: cfg.epoch,
+        mailbox_size: cfg.mailbox_size,
+        lookahead: cfg.lookahead,
+        forward: cfg.forward,
+        floor: cfg.floor,
+    }
+}
+
+/// Crypto that never completes must not block an update or the leader nullify that follows it.
 #[test]
 fn pending_crypto_keeps_mailbox_and_network_responsive() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
@@ -275,8 +302,7 @@ fn pending_crypto_keeps_mailbox_and_network_responsive() {
                 true,
             );
         }
-        // Metrics acknowledge the full quorum before the responsiveness probe.
-        // The runner's deadline bounds this condition-driven polling loop.
+        // Wait until the batcher adds all four votes.
         while !context.encode().contains("batcher_added_total 4") {
             context.sleep(Duration::from_millis(1)).await;
         }

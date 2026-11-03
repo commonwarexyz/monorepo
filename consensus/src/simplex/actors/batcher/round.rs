@@ -384,9 +384,9 @@ impl<
         Some(proposal)
     }
 
-    /// Starts the first ready kind not already in flight (notarizes, nullifies, then
-    /// finalizes), so repeated calls start at most one job per kind.
-    /// The returned job owns its inputs; arrivals remain buffered for the next attempt.
+    /// Starts a job for the first ready kind, in the order notarize, nullify, finalize.
+    /// A kind with a running job is not ready, so repeated calls start at most one job per kind.
+    /// The job owns its votes. Votes that arrive later stay buffered.
     pub fn begin_construct<E: CryptoRng>(
         &mut self,
         rng: &mut E,
@@ -398,9 +398,9 @@ impl<
         Some(job.spawn(strategy))
     }
 
-    /// Reintegrates verified votes and records any completed certificate. A certificate
-    /// of the same kind recorded meanwhile is kept; the constructed certificate is still
-    /// returned for forwarding.
+    /// Merges the job's verified votes back and records its certificate.
+    /// Does not record it again if the round already has a certificate of this kind.
+    /// Returns the job's batch, so the caller can forward the certificate.
     pub fn finish_construct(&mut self, result: Constructed<S, D>) -> Batch<Certificate<S, D>> {
         let batch = self.verifier.finish_construct(result);
         if let Some(certificate) = &batch.certificate
@@ -453,7 +453,7 @@ mod tests {
         R: Reporter<Activity = Activity<S, D>>,
     > Round<S, B, D, R>
     {
-        /// Runs the first ready construction attempt to completion.
+        /// Runs the first ready construction job to completion.
         pub(crate) async fn try_construct<E: CryptoRng>(
             &mut self,
             rng: &mut E,

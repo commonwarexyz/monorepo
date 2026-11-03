@@ -51,9 +51,10 @@ struct Current {
     leader_nullify_hinted: bool,
 }
 
-/// One completed construction attempt, including its submission-to-completion timer.
+/// A finished construction job for one view.
 pub(super) struct Done<S: Scheme<D>, D: Digest> {
     pub view: View,
+    /// Starts when the job is submitted.
     pub timer: histogram::Timer,
     pub constructed: Constructed<S, D>,
 }
@@ -340,11 +341,11 @@ where
         }
     }
 
-    /// Forwards known proposals and starts a construction job for every ready kind of every
-    /// dirty view, submitting the current view first. The strategy bounds how many jobs run
-    /// at once. Finalized, missing, and out-of-window views are dropped. Every completion for
-    /// a retained round re-dirties its view (see [Self::handle_done]), so merged-back and
-    /// buffered votes get another attempt.
+    /// Forwards known proposals and starts a job for each ready kind of each dirty view.
+    /// Visits the current view first. Skips finalized views and views without a round.
+    /// Starts no jobs for views outside the lookahead window.
+    /// A finished job marks its view dirty again if its round still exists (see
+    /// [Self::handle_done]).
     pub(super) fn dispatch_ready(
         &mut self,
         pool: &mut Pool<'static, Done<S, D>>,
@@ -390,7 +391,7 @@ where
 
             let _guard = round.span().clone().entered();
             loop {
-                // Submission may execute inline, so timing must start before begin_construct.
+                // The strategy can run the job during submission, so start the timer first.
                 let timer = self.construct_latency.timer(self.context.as_ref());
                 let Some(job) = round.begin_construct(self.context.as_mut(), &self.strategy) else {
                     break;
@@ -406,10 +407,9 @@ where
         }
     }
 
-    /// Records completed work even if its round was pruned. Certificates remain
-    /// useful to the voter, whose retention policy is independent of the batcher's.
-    /// Returns the view to revisit if its round is retained, so merged-back and
-    /// buffered votes get another attempt.
+    /// Records a finished job, even if its round was pruned. The voter prunes rounds on its
+    /// own schedule, so it still needs the certificate. Returns the view if its round still
+    /// exists, so the next dispatch revisits it.
     pub(super) fn handle_done(
         &mut self,
         voter: &mut voter::Mailbox<S, D>,
@@ -431,7 +431,7 @@ where
         let (batch, revisit) = if let Some(round) = round {
             (round.finish_construct(constructed), Some(view))
         } else {
-            // The monotonic retention floor prevents this round from being recreated.
+            // The retention floor only increases, so this round cannot return.
             (constructed.batch, None)
         };
         let Batch {
@@ -494,11 +494,10 @@ where
         let mut finalized = self.floor;
         let mut work: BTreeMap<View, Round<S, B, D, Re>> = BTreeMap::new();
 
-        // Views whose rounds may have become actionable since the last dispatch.
-        // Completions re-insert their view so merged-back and buffered votes get
-        // another attempt.
+        // Views that can have new work. A finished job adds its view again if its round still
+        // exists.
         let mut dirty_views = BTreeSet::new();
-        let mut crypto_pool = Pool::default();
+        let mut pool = Pool::default();
         select_loop! {
             self.context,
             on_stopped => {
@@ -628,7 +627,7 @@ where
                     }
                 }
             },
-            done = crypto_pool.next_completed() => {
+            done = pool.next_completed() => {
                 if let Some(view) = self.handle_done(&mut voter, &mut work, done) {
                     dirty_views.insert(view);
                 }
@@ -765,7 +764,7 @@ where
 
                 let viewport = self.viewport(finalized, current.view);
                 self.dispatch_ready(
-                    &mut crypto_pool,
+                    &mut pool,
                     &mut work,
                     &mut dirty_views,
                     &mut voter,

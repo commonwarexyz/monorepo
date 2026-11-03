@@ -276,34 +276,6 @@ mod tests {
         }
     }
 
-    /// Replaces the strategy of a test [Config].
-    fn with_strategy<
-        S: Scheme<Sha256Digest>,
-        B: Blocker,
-        Re: crate::Reporter,
-        Rl: Relay,
-        T: Strategy,
-    >(
-        cfg: Config<S, B, Re, Rl, Sequential>,
-        strategy: T,
-    ) -> Config<S, B, Re, Rl, T> {
-        Config {
-            scheme: cfg.scheme,
-            blocker: cfg.blocker,
-            reporter: cfg.reporter,
-            track_historical_votes: cfg.track_historical_votes,
-            relay: cfg.relay,
-            strategy,
-            view_retention: cfg.view_retention,
-            skip: cfg.skip,
-            epoch: cfg.epoch,
-            mailbox_size: cfg.mailbox_size,
-            lookahead: cfg.lookahead,
-            forward: cfg.forward,
-            floor: cfg.floor,
-        }
-    }
-
     async fn expect_timeout<S: Scheme<Sha256Digest>>(
         context: &mut deterministic::Context,
         voter_receiver: &mut mailbox::Receiver<voter::Message<S, Sha256Digest>>,

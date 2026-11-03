@@ -54,19 +54,18 @@ pub struct Batch<C> {
     pub fallback: bool,
 }
 
-/// A completed attempt and any individually verified votes retained for retry.
+/// The result of a construction job.
 pub struct Constructed<S: Scheme<D>, D: Digest> {
-    /// Authenticated certificate and verification accounting for this attempt.
+    /// The certificate, if any, and the vote counts of this job.
     pub batch: Batch<Certificate<S, D>>,
     retained: Retained<S, D>,
 }
 
-/// Verified votes a finished attempt returns for retry (empty after a certificate),
-/// tagged by kind so completion clears that kind's in-flight state.
+/// Verified votes that a job returns, tagged by kind. Empty if the job made a certificate.
 enum Retained<S: Scheme<D>, D: Digest> {
-    Notarize(Vec<(Proposal<D>, Attestation<S>)>),
-    Nullify(Vec<(Rnd, Attestation<S>)>),
-    Finalize(Vec<(Proposal<D>, Attestation<S>)>),
+    Notarize(Votes<Proposal<D>, S>),
+    Nullify(Votes<Rnd, S>),
+    Finalize(Votes<Proposal<D>, S>),
 }
 
 /// Votes with the context they attest to.
@@ -87,7 +86,7 @@ impl<C: Clone + Send + Sync, S: CertificateScheme> Attempt<C, S> {
 
     /// Processes pending votes and assembles any resulting quorum. Pending verification
     /// requires one context, retained with every attestation so proposal changes can
-    /// filter both buffers. `retain` tags the votes returned for retry with their kind.
+    /// filter both buffers. `retain` tags the returned votes with their kind.
     fn run<R, D, P, F, G, H>(
         self,
         scheme: &S,
@@ -106,13 +105,13 @@ impl<C: Clone + Send + Sync, S: CertificateScheme> Attempt<C, S> {
         G: FnOnce(C, S::Certificate) -> Certificate<S, D>,
         H: FnOnce(Votes<C, S>) -> Retained<S, D>,
     {
+        let len = self.len();
         let Self {
             quorum,
             pending,
             mut verified,
         } = self;
         let processed = pending.len();
-        let len = processed + verified.len();
         let context = verified
             .first()
             .or_else(|| pending.first())
@@ -185,7 +184,7 @@ impl<C: Clone + Send + Sync, S: CertificateScheme> Attempt<C, S> {
     }
 }
 
-/// A construction attempt for one vote kind, ready to run on a [Strategy].
+/// A construction job for one vote kind.
 pub struct ConstructJob<S: Scheme<D>, D: Digest> {
     work: Work<S, D>,
     scheme: Arc<S>,
@@ -284,7 +283,7 @@ struct Certification<C, S: CertificateScheme> {
     quorum: usize,
     /// Progress toward a certificate.
     state: State<C, S>,
-    /// Whether an owned attempt still needs reintegration.
+    /// Whether a job for this kind still needs to finish through [Self::finish_construct].
     in_flight: bool,
 }
 
@@ -359,9 +358,9 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         }
     }
 
-    /// Moves buffered votes into an owned attempt. An existing verified quorum skips
-    /// pending votes and can complete before proposal selection. The kind stays in
-    /// flight until [Self::finish_construct].
+    /// Moves the buffered votes into a job. A verified quorum drops the pending votes and can
+    /// complete before the proposal is known. The kind stays in flight until
+    /// [Self::finish_construct].
     fn begin_construct(&mut self) -> Option<Attempt<C, S>> {
         if !self.should_construct() {
             return None;
@@ -380,8 +379,8 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         })
     }
 
-    /// Merges a finished attempt with votes received while it was running. If the kind
-    /// completed meanwhile, the returned votes are discarded.
+    /// Ends the job. Adds the returned votes for which `matches` is true.
+    /// Drops them if the kind is complete.
     fn finish_construct(&mut self, votes: Votes<C, S>, matches: impl Fn(&C) -> bool) {
         assert!(self.in_flight, "construction must be in flight");
         self.in_flight = false;
@@ -469,10 +468,11 @@ impl<D: Digest> ProposalState<D> {
 /// Candidate quorums use [optimistic assembly](CertificateScheme::optimistic_assemble). Verified
 /// votes are retained between attempts, and a verified quorum skips pending vote verification.
 ///
-/// Construction runs as an owned job, at most one per kind; the kind can buffer additional
-/// votes while it runs. If the kind is still incomplete, [Self::finish_construct] merges back
-/// the job's verified votes, dropping notarize and finalize votes for a displaced proposal.
-/// Finish every job unless the verifier is discarded.
+/// Construction runs as an owned job, with at most one job per kind. While the kind is
+/// incomplete, votes that arrive during a job stay buffered. If the kind is still incomplete
+/// when the job ends, [Self::finish_construct] merges the job's verified votes back and drops
+/// notarize and finalize votes for a different proposal. Finish every job unless the verifier
+/// is discarded.
 ///
 /// [ed25519]: crate::simplex::scheme::ed25519
 /// [bls12381_multisig]: crate::simplex::scheme::bls12381_multisig
@@ -671,22 +671,18 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
     }
 
-    /// Moves buffered votes of `kind` into a construction job, if one is warranted.
-    ///
-    /// The job owns its inputs and can outlive the verifier. Votes received while it
-    /// runs remain buffered, and `kind` cannot start another attempt until the job's
-    /// result is passed to [Self::finish_construct].
+    /// Moves the buffered votes of `kind` into a construction job. Returns `None` if `kind` is
+    /// not ready or already has a job. The job owns its votes and can outlive the verifier.
     pub fn begin_construct<R: CryptoRng>(
         &mut self,
         kind: Kind,
         rng: &mut R,
     ) -> Option<ConstructJob<S, D>> {
         let (epoch, view) = (self.round.epoch().traced(), self.round.view().traced());
+        let unknown = matches!(self.proposal, ProposalState::Unknown);
         let (work, span) = match kind {
             Kind::Notarization => {
-                if matches!(self.proposal, ProposalState::Unknown)
-                    && !self.notarize.has_constructable_quorum()
-                {
+                if unknown && !self.notarize.has_constructable_quorum() {
                     return None;
                 }
                 let attempt = self.notarize.begin_construct()?;
@@ -699,9 +695,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 (Work::Nullify(attempt), span)
             }
             Kind::Finalization => {
-                if matches!(self.proposal, ProposalState::Unknown)
-                    && !self.finalize.has_constructable_quorum()
-                {
+                if unknown && !self.finalize.has_constructable_quorum() {
                     return None;
                 }
                 let attempt = self.finalize.begin_construct()?;
@@ -717,9 +711,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         })
     }
 
-    /// Restores partial results against the current proposal. The caller records any
-    /// returned certificate, which remains deliverable even if another certificate of
-    /// the same kind arrived during construction.
+    /// Ends the job. Merges back the verified votes that match the current proposal.
+    /// Returns the job's batch. The caller records any certificate.
     pub fn finish_construct(&mut self, result: Constructed<S, D>) -> Batch<Certificate<S, D>> {
         let proposal = self.proposal.proposal();
         let matches = |context: &Proposal<D>| proposal.is_none_or(|proposal| context == proposal);
@@ -774,7 +767,7 @@ mod tests {
     }
 
     impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
-        /// Runs one construction attempt of `kind` to completion.
+        /// Runs one construction job of `kind` to completion.
         async fn try_construct<R: CryptoRng>(
             &mut self,
             kind: Kind,
@@ -2320,7 +2313,7 @@ mod tests {
             .unwrap()
             .spawn(&Sequential);
 
-        // A constructed vote arriving after begin must survive partial reintegration.
+        // A constructed vote that arrives during the job must stay after the merge.
         verifier.add(Vote::Nullify(create_nullify(&schemes[4], round)), true);
         assert!(
             verifier
