@@ -58,6 +58,22 @@ pub struct Read<B: Blob> {
     buffer_size: usize,
 }
 
+/// Restores the logical cursor unless the read completes successfully.
+struct Rewind<'a, B: Blob> {
+    reader: &'a mut Read<B>,
+    start: u64,
+    armed: bool,
+}
+
+impl<B: Blob> Drop for Rewind<'_, B> {
+    fn drop(&mut self) {
+        if self.armed {
+            // The starting position remains within the reader's fixed blob size.
+            let _ = self.reader.seek_to(self.start);
+        }
+    }
+}
+
 impl<B: Blob> Read<B> {
     /// Creates a new `Read` that reads from the given blob with the specified buffer size.
     pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize) -> Self {
@@ -138,6 +154,8 @@ impl<B: Blob> Read<B> {
     /// allocation on later refills.
     ///
     /// Returns an error if not enough bytes are available.
+    /// On error or cancellation, restores the starting position. A subsequent read may need
+    /// to refill the buffer.
     pub async fn read(&mut self, len: usize) -> Result<IoBufs, Error> {
         if len == 0 {
             return Ok(IoBufs::default());
@@ -148,6 +166,19 @@ impl<B: Blob> Read<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
+        let start = self.position();
+        let mut rewind = Rewind {
+            reader: self,
+            start,
+            armed: true,
+        };
+        let out = rewind.reader.read_inner(len).await?;
+        rewind.armed = false;
+        Ok(out)
+    }
+
+    /// Reads after the length check, with the caller guarding the starting position.
+    async fn read_inner(&mut self, len: usize) -> Result<IoBufs, Error> {
         // Read until we have enough bytes
         let mut remaining = len;
         let mut out = IoBufs::default();
