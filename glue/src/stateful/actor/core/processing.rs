@@ -542,8 +542,8 @@ mod tests {
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        ContextCell, Error as RuntimeError, Handle, Metrics as _, Name, Runner as _, Spawner as _,
-        Supervisor as _, deterministic, telemetry::metrics::count_running_tasks,
+        Clock as _, ContextCell, Error as RuntimeError, Handle, Metrics as _, Name, Runner as _,
+        Spawner as _, Supervisor as _, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
         NZU64, NZUsize,
@@ -551,7 +551,7 @@ mod tests {
         channel::oneshot,
         sync::Mutex,
     };
-    use futures::poll;
+    use futures::{StreamExt as _, poll};
     use std::{
         collections::{BTreeMap, VecDeque},
         future::Future,
@@ -952,11 +952,22 @@ mod tests {
     /// Gates taken, in order, by `process` calls for blocks at each height.
     type ProcessGates = Arc<Mutex<BTreeMap<Height, VecDeque<ApplicationGate>>>>;
 
+    /// A read of one selected block that `process` performs for one block after its gate.
+    struct HistoryRead {
+        /// Height of the block whose processing reads.
+        block: Height,
+        /// Height of the selected block read from the processed block's history.
+        height: Height,
+        /// Receives the digest of the selected block read. Dropped if the read is unavailable.
+        digest: oneshot::Sender<<TestBlock as commonware_cryptography::Digestible>::Digest>,
+    }
+
     #[derive(Clone)]
     struct ReplayGatedApp {
         gates: ProcessGates,
         proposal_gate: Arc<Mutex<Option<ApplicationGate>>>,
         finalized_gate: Arc<Mutex<Option<ApplicationGate>>>,
+        history_read: Arc<Mutex<Option<HistoryRead>>>,
         unexecutable: Option<Height>,
         process_calls: ProcessCalls,
         finalized_calls: ProcessCalls,
@@ -972,6 +983,7 @@ mod tests {
                 gates: Arc::default(),
                 proposal_gate: Arc::default(),
                 finalized_gate: Arc::default(),
+                history_read: Arc::default(),
                 unexecutable: None,
                 process_calls: ProcessCalls::default(),
                 finalized_calls: ProcessCalls::default(),
@@ -1045,7 +1057,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             block: Digested<Self::Block>,
-            _blocks: Blocks<Self::Block>,
+            blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
             finality: Finality,
         ) -> Option<TestMerkleized> {
@@ -1061,6 +1073,23 @@ mod tests {
             if let Some(mut gate) = gate {
                 let _ = gate.started.send(());
                 let _ = (&mut gate.release).await;
+            }
+            let read = self
+                .history_read
+                .lock()
+                .take_if(|read| read.block == block.height());
+            if let Some(read) = read {
+                match blocks.range(read.height..=read.height).next().await {
+                    Some(Ok(selected)) => {
+                        let _ = read.digest.send(selected.digest());
+                    }
+                    // Unavailable history is not a verdict, so processing keeps waiting.
+                    Some(Err(commonware_consensus::marshal::blocks::Error::Unavailable)) => {
+                        drop(read);
+                        return std::future::pending().await;
+                    }
+                    _ => return None,
+                }
             }
             (self.unexecutable != Some(block.height())).then_some(TestMerkleized)
         }
@@ -5772,6 +5801,216 @@ mod tests {
             drop(mailbox);
             actor.await.expect("processing actor must stop");
             drop(marshal);
+        });
+    }
+
+    /// A child's recovery keeps a block's shared processing after the block's own verification
+    /// is dropped, so the processing still reads the block's original selected history. That
+    /// history holds only the parent and resolves its older prefix lazily. Consensus abandons it
+    /// once the block finalizes, and the delayed processing then reads below the parent. The
+    /// read must come from canonical finalized history, so the finalization waiting for the
+    /// processing is acknowledged and the child verifies.
+    #[test]
+    fn abandoned_history_of_joined_finalized_processing_reads_canonical_blocks() {
+        // The runner budget is only a hang guard. Processing that waits on the abandoned
+        // history would hold the finalization forever.
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let mut signing = context.child("signing");
+            let fixture = scheme_mocks::fixture(
+                &mut signing,
+                b"_COMMONWARE_GLUE_PROCESSING_ABANDONED_HISTORY",
+                1,
+            );
+            let genesis = TestBlock::new(0, 0);
+            let grandparent = TestBlock::child(&genesis, 1);
+            let parent = TestBlock::child(&grandparent, 2);
+            let block = TestBlock::child(&parent, 3);
+            let child = TestBlock::child(&block, 4);
+
+            // The block's processing is held by the gate, then reads the grandparent from the
+            // block's selected history.
+            let (gate, started, release) = application_gate();
+            let (read, read_digest) = oneshot::channel();
+            let app = ReplayGatedApp::new(block.height(), [gate]);
+            *app.history_read.lock() = Some(HistoryRead {
+                block: block.height(),
+                height: grandparent.height(),
+                digest: read,
+            });
+            let process_calls = app.process_calls.clone();
+            let finalized_calls = app.finalized_calls.clone();
+
+            // Marshal archives finalized blocks and delivers them to the actor.
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mailbox = Mailbox::<_, ReplayGatedApp>::new(sender);
+            let marshal = fixtures::marshal_fixture_with_reporter(
+                context.child("marshal"),
+                "abandoned-history",
+                fixture.schemes[0].clone(),
+                NZUsize!(1),
+                mailbox.clone(),
+            )
+            .await;
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox.clone(),
+                processor: Processor::new(
+                    app,
+                    test_databases(),
+                    anchor(0, 0),
+                    StatefulMetrics::new(&context),
+                    None,
+                    Sequential,
+                ),
+                deferred_verifications: Vec::new(),
+            };
+            let actor = context.child("loop").spawn(move |_| processing.run());
+            let mut ingress = marshal.mailbox.clone();
+            for candidate in [&grandparent, &parent, &block] {
+                assert!(
+                    ingress
+                        .verified(candidate.context().round, digested(candidate.clone()))
+                        .await
+                );
+            }
+
+            // The grandparent and parent are cached through their verifications.
+            let mut verifier = mailbox.clone();
+            assert!(
+                verifier
+                    .verify(
+                        (context.child("verify_grandparent"), grandparent.context()),
+                        digested(grandparent.clone()),
+                        digested(genesis.clone()),
+                        marshal.mailbox.blocks(
+                            genesis.height(),
+                            History::ready(Arc::from([genesis.digest()]))
+                        ),
+                    )
+                    .await
+            );
+            assert!(
+                verifier
+                    .verify(
+                        (context.child("verify_parent"), parent.context()),
+                        digested(parent.clone()),
+                        digested(grandparent.clone()),
+                        marshal.mailbox.blocks(
+                            grandparent.height(),
+                            History::ready(Arc::from([genesis.digest(), grandparent.digest()])),
+                        ),
+                    )
+                    .await
+            );
+
+            // The block's selected history holds only its parent until consensus repairs the
+            // older prefix. Consensus abandons it below a finalization instead.
+            let (abandon, abandoned) = oneshot::channel::<()>();
+            let history = History::pending(Arc::from([parent.digest()]), async move {
+                let _ = abandoned.await;
+                None
+            });
+            let mut block_verifier = mailbox.clone();
+            let mut verify_block = Box::pin(block_verifier.verify(
+                (context.child("verify_block"), block.context()),
+                digested(block.clone()),
+                digested(parent.clone()),
+                marshal.mailbox.blocks(parent.height(), history),
+            ));
+            assert!(poll!(&mut verify_block).is_pending());
+            started.await.expect("block processing must start");
+
+            // The child's recovery joins the block's processing instead of starting another.
+            let mut child_verifier = mailbox.clone();
+            let mut verify_child = Box::pin(child_verifier.verify(
+                (context.child("verify_child"), child.context()),
+                digested(child.clone()),
+                digested(block.clone()),
+                marshal.mailbox.blocks(
+                    block.height(),
+                    History::ready(Arc::from([
+                        genesis.digest(),
+                        grandparent.digest(),
+                        parent.digest(),
+                        block.digest(),
+                    ])),
+                ),
+            ));
+            assert!(poll!(&mut verify_child).is_pending());
+            await_marshal_replies(&mailbox, &marshal.mailbox).await;
+
+            // Dropping the block's own verification leaves the processing to the child.
+            drop(verify_block);
+            drop(mailbox.subscribe_databases().await);
+            assert!(
+                !release.is_closed(),
+                "the child's recovery must keep the block's processing"
+            );
+
+            // Finalize the grandparent and the parent through marshal.
+            for finalized in [&grandparent, &parent] {
+                ingress.report(Activity::Finalization(fixtures::finalization(
+                    &fixture,
+                    finalized.height().get(),
+                    finalized.digest(),
+                )));
+            }
+            while marshal.mailbox.get_processed().await != Some(Processed::Block(parent.height())) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            // The block's finalization pauses an unrelated acquisition, then waits for the
+            // block's processing.
+            let Parked {
+                request: mut acquiring,
+                acquired,
+                parked,
+            } = Parked::verification(&mailbox, context.child("acquiring"));
+            assert!(poll!(&mut acquiring).is_pending());
+            acquired
+                .await
+                .expect("actor must start acquiring the unrelated verification");
+            ingress.report(Activity::Finalization(fixtures::finalization(
+                &fixture,
+                block.height().get(),
+                block.digest(),
+            )));
+            parked
+                .await
+                .expect("the block's finalization must pause the acquisition");
+            assert_eq!(
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Block(parent.height()))
+            );
+
+            // Consensus abandons the block's history, and the delayed processing then reads
+            // below the parent.
+            drop(abandon);
+            release
+                .send(())
+                .expect("the child must keep the block's processing");
+            assert_eq!(
+                read_digest
+                    .await
+                    .expect("processing must read the grandparent from canonical history"),
+                grandparent.digest()
+            );
+
+            // The finalization reuses the processing, and the child verifies on the block.
+            while marshal.mailbox.get_processed().await != Some(Processed::Block(block.height())) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert!(verify_child.await);
+            assert_eq!(process_calls.at(block.height()), 1);
+            assert_eq!(finalized_calls.at(block.height()), 0);
+            assert_eq!(process_calls.at(child.height()), 1);
+
+            drop(acquiring);
+            actor.abort();
+            let _ = actor.await;
+            marshal.abort().await;
         });
     }
 

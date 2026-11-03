@@ -4,7 +4,11 @@ use super::core::{Mailbox, Variant};
 use crate::{Block, Heightable, History, types::Height};
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_utils::channel::oneshot;
-use futures::{Stream, future::BoxFuture, stream::FuturesOrdered};
+use futures::{
+    FutureExt as _, Stream,
+    future::{BoxFuture, Shared},
+    stream::FuturesOrdered,
+};
 use std::{
     future::Future,
     num::NonZeroUsize,
@@ -138,6 +142,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// finalized storage. Neither this call nor its clones await or poll `history`; the
     /// suffix is consulted by [`Blocks::digest`] when already resident. A polled range or
     /// [`Blocks::resolve_digest`] can resolve a missing prefix.
+    /// Originally resident commitments remain accessible after consensus retires the resolver.
+    /// Older reads then wait for a finalized parent matching the originally selected digest;
+    /// recovery can therefore wait for that parent to finalize.
     ///
     /// A polled range keeps its remaining selected suffix prefetched in forward order, within
     /// the capacity shared by all ranges ([`Config::max_repair`](super::Config)). Each range's
@@ -147,11 +154,31 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         parent_height: Height,
         history: History<V::Commitment>,
     ) -> Blocks<V::ApplicationBlock> {
+        let resident = history.peek().cloned().unwrap_or_default();
+        let parent = suffix_start(parent_height, resident.len())
+            .and_then(|_| resident.last().copied())
+            .map(V::commitment_to_inner);
+        let marshal = self.clone();
+        // A finalized parent proves that its canonical prefix is the selected branch,
+        // even when consensus has retired the request's older history resolver.
+        let parent_canonical = async move {
+            let Some(parent) = parent else {
+                return false;
+            };
+            marshal
+                .finalized(parent_height)
+                .await
+                .is_ok_and(|block| V::into_shared(block).digest() == parent)
+        }
+        .boxed()
+        .shared();
         Blocks {
             tip: parent_height,
             source: Arc::new(SelectedSource {
                 parent_height,
                 history,
+                resident,
+                parent_canonical,
                 marshal: self.clone(),
             }),
             window: self.max_repair.get(),
@@ -163,12 +190,16 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 struct SelectedSource<S: Scheme, V: Variant> {
     parent_height: Height,
     history: History<V::Commitment>,
+    /// Selected metadata remains valid independently of the resolver's lifetime.
+    resident: Arc<[V::Commitment]>,
+    /// Shared proof of canonical ancestry, polled only after terminal history loss.
+    parent_canonical: Shared<BoxFuture<'static, bool>>,
     marshal: Mailbox<S, V>,
 }
 
 impl<S: Scheme, V: Variant> Source<V::ApplicationBlock> for SelectedSource<S, V> {
     fn digest(&self, height: Height) -> Option<<V::ApplicationBlock as Digestible>::Digest> {
-        let commitments = self.history.peek()?;
+        let commitments = self.history.peek().unwrap_or(&self.resident);
         suffix_at(self.parent_height, commitments, height).map(V::commitment_to_inner)
     }
 
@@ -178,23 +209,19 @@ impl<S: Scheme, V: Variant> Source<V::ApplicationBlock> for SelectedSource<S, V>
     ) -> BoxFuture<'static, Result<Digested<V::ApplicationBlock>, Error>> {
         Box::pin(async move {
             // Use a resident commitment without resolving the missing prefix.
-            let resident = self
-                .history
-                .peek()
-                .and_then(|commitments| suffix_at(self.parent_height, commitments, height));
+            let commitments = self.history.peek().unwrap_or(&self.resident);
+            let resident = suffix_at(self.parent_height, commitments, height);
             let commitment = match resident {
                 Some(commitment) => Some(commitment),
-                None => {
-                    let commitments = self
-                        .history
-                        .clone()
-                        .resolve()
-                        .await
-                        .ok_or(Error::Unavailable)?;
-                    suffix_start(self.parent_height, commitments.len())
-                        .ok_or(Error::Unavailable)?;
-                    suffix_at(self.parent_height, &commitments, height)
-                }
+                None => match self.history.clone().resolve().await {
+                    Some(commitments) => {
+                        suffix_start(self.parent_height, commitments.len())
+                            .ok_or(Error::Unavailable)?;
+                        suffix_at(self.parent_height, &commitments, height)
+                    }
+                    None if self.parent_canonical.clone().await => None,
+                    None => return Err(Error::Unavailable),
+                },
             };
             let block = match commitment {
                 Some(commitment) => self.marshal.acquire(commitment).await,
@@ -207,7 +234,10 @@ impl<S: Scheme, V: Variant> Source<V::ApplicationBlock> for SelectedSource<S, V>
 
     fn resolve(&self) -> Option<BoxFuture<'static, bool>> {
         let history = self.history.clone();
-        Some(Box::pin(async move { history.resolve().await.is_some() }))
+        let parent_canonical = self.parent_canonical.clone();
+        Some(Box::pin(async move {
+            history.resolve().await.is_some() || parent_canonical.await
+        }))
     }
 
     fn prefetch(
@@ -288,6 +318,7 @@ impl<B: Block> Blocks<B> {
 
     /// Returns the selected digest when its commitment is resident.
     ///
+    /// Originally resident commitments remain accessible after their resolver retires.
     /// Older finalized history may require storage access and returns `None`.
     /// This lookup does not acquire a block.
     pub fn digest(&self, height: Height) -> Option<B::Digest> {
@@ -301,9 +332,13 @@ impl<B: Block> Blocks<B> {
     ///
     /// Returns `None` for heights above [`Self::tip`] and for older canonical finalized history,
     /// which is not part of the selected suffix. Resident digests return without polling
-    /// history. Returns [`Error::Unavailable`] if history is permanently unavailable. This lookup
-    /// does not acquire a block. Other users and retained `Blocks` clones can keep shared
-    /// resolution alive after this lookup is dropped.
+    /// history, including originally resident commitments after their resolver retires.
+    /// A missing prefix after retirement waits for the originally selected parent to finalize
+    /// and checks its canonical digest before allowing older finalized reads. This may acquire
+    /// the finalized parent and delay recovery until it finalizes. Returns [`Error::Unavailable`]
+    /// if the parent conflicts or neither history nor that proof can be obtained.
+    /// Other users and retained `Blocks` clones can keep shared resolution alive after this
+    /// lookup is dropped.
     pub async fn resolve_digest(&self, height: Height) -> Result<Option<B::Digest>, Error> {
         if let Some(digest) = self.digest(height) {
             return Ok(Some(digest));
@@ -792,12 +827,104 @@ mod tests {
             assert_eq!(*polls.lock(), 1);
 
             // Terminal history unavailability is surfaced.
-            let unavailable = marshal.blocks(
-                Height::new(9),
-                History::pending(Arc::from([blocks[9].digest()]), async { None }),
-            );
+            let unavailable = marshal.blocks(Height::new(9), History::new(async { None }));
             let result = unavailable.resolve_digest(Height::new(5)).await;
             assert_eq!(result, Err(Error::Unavailable));
+        });
+    }
+
+    #[test]
+    fn retired_history_requires_matching_canonical_parent() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestMessage = Message<harness::S, Standard<TestBlock>>;
+            for matches in [true, false] {
+                let (sender, mut receiver) = commonware_actor::mailbox::new::<TestMessage>(
+                    context.child(if matches { "matching" } else { "conflicting" }),
+                    NZUsize!(16),
+                );
+                let marshal = Mailbox::new(sender, NZUsize!(1), NZUsize!(1));
+                let blocks = chain(5);
+                let (retire, retired) = oneshot::channel::<()>();
+                let history = History::pending(Arc::from([blocks[3].digest()]), async move {
+                    retired.await.ok()?;
+                    None
+                });
+                let original = marshal.blocks(Height::new(3), history);
+                let surviving = original.clone();
+                drop(original);
+
+                // A surviving user first resolves the old prefix after its request retires.
+                retire.send(()).unwrap();
+                assert!(receiver.recv().now_or_never().is_none());
+                let mut resolved = Box::pin(surviving.resolve_digest(Height::new(1)));
+                assert!(resolved.as_mut().now_or_never().is_none());
+                let TestMessage::AwaitFinalized {
+                    height, response, ..
+                } = receiver.recv().await.unwrap()
+                else {
+                    panic!("retired history must prove the selected parent is canonical");
+                };
+                assert_eq!(height, Height::new(3));
+                let parent = if matches {
+                    blocks[3].clone()
+                } else {
+                    TestBlock::new(blocks[2].digest(), Height::new(3), 99)
+                };
+                response.send(digested(parent)).unwrap();
+                assert_eq!(
+                    resolved.await,
+                    if matches {
+                        Ok(None)
+                    } else {
+                        Err(Error::Unavailable)
+                    }
+                );
+                assert_eq!(surviving.digest(Height::new(3)), Some(blocks[3].digest()));
+
+                let mut range = surviving.range(Height::new(1)..=Height::new(1));
+                if matches {
+                    assert!(range.next().now_or_never().is_none());
+                    let TestMessage::AwaitFinalized {
+                        height, response, ..
+                    } = receiver.recv().await.unwrap()
+                    else {
+                        panic!("proven canonical prefix must use finalized storage");
+                    };
+                    assert_eq!(height, Height::new(1));
+                    response.send(digested(blocks[1].clone())).unwrap();
+                    assert_eq!(
+                        range.next().await.unwrap().unwrap().digest(),
+                        blocks[1].digest()
+                    );
+                } else {
+                    assert!(matches!(range.next().await, Some(Err(Error::Unavailable))));
+                }
+                assert!(range.next().await.is_none());
+                assert!(receiver.recv().now_or_never().is_none());
+
+                // Retirement preserves exact resident acquisition even on a conflicting branch.
+                assert_eq!(
+                    surviving.resolve_digest(Height::new(3)).await,
+                    Ok(Some(blocks[3].digest()))
+                );
+                let mut resident = surviving.range(Height::new(3)..=Height::new(3));
+                assert!(resident.next().now_or_never().is_none());
+                let TestMessage::Acquire {
+                    commitment,
+                    fetch,
+                    response,
+                    ..
+                } = receiver.recv().await.unwrap()
+                else {
+                    panic!("retired resident history must acquire its original commitment");
+                };
+                assert_eq!(commitment, blocks[3].digest());
+                assert!(fetch);
+                response.send(digested(blocks[3].clone())).unwrap();
+                assert_eq!(resident.next().await.unwrap().unwrap().digest(), commitment);
+                assert!(resident.next().await.is_none());
+                assert!(receiver.recv().now_or_never().is_none());
+            }
         });
     }
 
