@@ -603,9 +603,10 @@ impl Group {
         }
     }
 
-    /// Whether any thread has work registered on the group, for tests of lease accounting.
+    /// Whether any thread, the caller included, has work registered on the group, for tests
+    /// of lease accounting.
     #[cfg(test)]
-    pub(crate) fn busy_with_others_for_test(&self) -> bool {
+    pub(crate) fn has_leases_for_test(&self) -> bool {
         !self.state.lock().submitters.is_empty()
     }
 

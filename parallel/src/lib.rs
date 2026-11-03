@@ -2733,7 +2733,7 @@ mod test {
                 .groups
                 .groups()
                 .iter()
-                .all(|group| !group.busy_with_others_for_test());
+                .all(|group| !group.has_leases_for_test());
             if idle && unregistered {
                 break;
             }
@@ -3032,7 +3032,7 @@ mod test {
                 let _ = drained_tx.send(());
             });
         let child_drained = drained_rx.recv_timeout(Duration::from_secs(10)).is_ok();
-        let root_holds_actual = strategy.groups.groups()[1].busy_with_others_for_test();
+        let root_holds_actual = strategy.groups.groups()[1].has_leases_for_test();
         let report = strategy.groups.describe();
 
         // Release all work, including a root that was still queued at the arrival deadline.
@@ -3045,7 +3045,7 @@ mod test {
             .groups
             .groups()
             .iter()
-            .any(|group| group.busy_with_others_for_test())
+            .any(|group| group.has_leases_for_test())
             && Instant::now() < deadline
         {
             std::thread::yield_now();
@@ -3080,7 +3080,7 @@ mod test {
                 .groups
                 .groups()
                 .iter()
-                .all(|group| !group.busy_with_others_for_test()),
+                .all(|group| !group.has_leases_for_test()),
             "completed jobs must release their claims"
         );
     }
@@ -3341,7 +3341,7 @@ mod test {
                 .groups
                 .groups()
                 .iter()
-                .map(crate::topology::Group::busy_with_others_for_test)
+                .map(crate::topology::Group::has_leases_for_test)
                 .collect::<Vec<_>>()
         };
         let queued = busy();
@@ -3407,7 +3407,7 @@ mod test {
             .groups
             .groups()
             .iter()
-            .map(crate::topology::Group::busy_with_others_for_test)
+            .map(crate::topology::Group::has_leases_for_test)
             .collect();
         let report = strategy.groups.describe();
         drop(release_tx);
@@ -3419,7 +3419,7 @@ mod test {
             .groups
             .groups()
             .iter()
-            .any(|group| group.busy_with_others_for_test())
+            .any(|group| group.has_leases_for_test())
             && Instant::now() < deadline
         {
             std::thread::yield_now();
@@ -3439,7 +3439,7 @@ mod test {
                 .groups
                 .groups()
                 .iter()
-                .all(|group| !group.busy_with_others_for_test())
+                .all(|group| !group.has_leases_for_test())
         );
     }
 
