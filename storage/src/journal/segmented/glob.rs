@@ -844,6 +844,7 @@ mod tests {
                     write_buffer: NZUsize!(8),
                     ..test_cfg()
                 };
+                // A batch larger than the write buffer must reach storage in one write.
                 let values = [[1u8; 64], [2; 64], [3; 64]];
                 let glob = Glob::init(context.child("first"), cfg.clone())
                     .await
@@ -862,6 +863,7 @@ mod tests {
                     assert_eq!(glob.get(7, offset, size).await.unwrap(), *value);
                 }
 
+                // The same values appended one at a time must each take their own write.
                 recordings.clear();
                 let mut glob = glob;
                 let mut single_locations = Vec::new();
@@ -873,9 +875,10 @@ mod tests {
                 assert_eq!(
                     recordings.snapshot().writes.len(),
                     values.len(),
-                    "large single appends should require one physical write each"
+                    "large single appends must require one physical write each"
                 );
 
+                // Both sections must hold identical bytes.
                 let glob = glob.sync_all().await.unwrap();
                 let total_size = locations
                     .last()
@@ -909,6 +912,7 @@ mod tests {
                     assert_eq!(batch_bytes.as_ref(), single_bytes.as_ref());
                 }
 
+                // Reopening must read back the batch.
                 let (glob, removed) = glob.remove_section(8).await.unwrap();
                 assert!(removed);
                 drop(glob.sync(7).await.unwrap());
