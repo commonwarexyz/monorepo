@@ -692,7 +692,6 @@ mod tests {
 
             // Keep the metric registered after the receiver exits.
             let _decode = bg.decode.clone();
-
             let handle = bg.start();
             handle.await.expect("background receiver must complete");
 

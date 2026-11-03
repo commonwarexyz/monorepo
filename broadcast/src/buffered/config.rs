@@ -38,6 +38,6 @@ where
     pub blocker: B,
 
     /// Strategy for decoding inbound messages and computing their digests. Messages are cached in
-    /// the order they finish decoding. This may differ from arrival order.
+    /// the order they finish decoding, which may differ from arrival order.
     pub strategy: T,
 }
