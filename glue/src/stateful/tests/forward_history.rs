@@ -16,7 +16,9 @@
 
 use super::{
     NoopQmdbResolver,
-    common::{EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config},
+    common::{
+        EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, TEST_QUOTA, archive_config,
+    },
     mocks::digested,
     single_db_app::{App, Block, SingleDatabaseSet, qmdb_config},
 };
@@ -57,8 +59,7 @@ use commonware_p2p::{
 use commonware_parallel::Sequential;
 use commonware_resolver::{Consumer, Delivery, p2p as resolver_p2p};
 use commonware_runtime::{
-    Clock as _, Quota, Runner as _, Spawner as _, Supervisor as _, buffer::paged::CacheRef,
-    deterministic,
+    Clock as _, Runner as _, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::archive::prunable;
 use commonware_utils::{
@@ -67,7 +68,6 @@ use commonware_utils::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    num::NonZeroU32,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -78,7 +78,6 @@ type P = ed25519::PublicKey;
 type Ctx = Context<D, P>;
 
 const N: usize = 4;
-const QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_FORWARD_HISTORY_E2E";
 const VOTES: u64 = 0;
 const CERTIFICATES: u64 = 1;
@@ -1030,12 +1029,16 @@ fn run(scenario: Scenario) {
         let mut peer_resolvers = Vec::new();
         for &index in &peers {
             let control = oracle.control(participants[index].clone());
-            let (vote_sender, mut vote_receiver) = control.register(VOTES, QUOTA).await.unwrap();
+            let (vote_sender, mut vote_receiver) =
+                control.register(VOTES, TEST_QUOTA).await.unwrap();
             let (certificate_sender, certificate_receiver) =
-                control.register(CERTIFICATES, QUOTA).await.unwrap();
-            let simplex_resolver = control.register(SIMPLEX_RESOLVER, QUOTA).await.unwrap();
+                control.register(CERTIFICATES, TEST_QUOTA).await.unwrap();
+            let simplex_resolver = control
+                .register(SIMPLEX_RESOLVER, TEST_QUOTA)
+                .await
+                .unwrap();
             peer_channels.push((certificate_receiver, simplex_resolver));
-            let backfill = control.register(BACKFILL, QUOTA).await.unwrap();
+            let backfill = control.register(BACKFILL, TEST_QUOTA).await.unwrap();
             let (engine, peer_mailbox) = resolver_p2p::Engine::new(
                 context
                     .child("peer_resolver")
@@ -1096,7 +1099,7 @@ fn run(scenario: Scenario) {
         // The candidate leader relays bodies through a real buffered broadcast engine.
         let leader_broadcast = oracle
             .control(participants[candidate_leader].clone())
-            .register(BROADCAST, QUOTA)
+            .register(BROADCAST, TEST_QUOTA)
             .await
             .unwrap();
         let (leader_engine, leader_buffer) = buffered::Engine::<_, P, Block, _, _, _>::new(
@@ -1117,11 +1120,14 @@ fn run(scenario: Scenario) {
         // Measured node: production wiring as in the single-database engine.
         let public_key = participants[me].clone();
         let control = oracle.control(public_key.clone());
-        let vote_network = control.register(VOTES, QUOTA).await.unwrap();
-        let certificate_network = control.register(CERTIFICATES, QUOTA).await.unwrap();
-        let resolver_network = control.register(SIMPLEX_RESOLVER, QUOTA).await.unwrap();
-        let backfill_network = control.register(BACKFILL, QUOTA).await.unwrap();
-        let broadcast_network = control.register(BROADCAST, QUOTA).await.unwrap();
+        let vote_network = control.register(VOTES, TEST_QUOTA).await.unwrap();
+        let certificate_network = control.register(CERTIFICATES, TEST_QUOTA).await.unwrap();
+        let resolver_network = control
+            .register(SIMPLEX_RESOLVER, TEST_QUOTA)
+            .await
+            .unwrap();
+        let backfill_network = control.register(BACKFILL, TEST_QUOTA).await.unwrap();
+        let broadcast_network = control.register(BROADCAST, TEST_QUOTA).await.unwrap();
         let node = context.child("node");
         let prefix = "forward-history".to_string();
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
