@@ -856,6 +856,35 @@ mod tests {
         });
     }
 
+    /// Aborting an idle task that was polled more than once with the same waker, so its later
+    /// pending polls skipped registering it, still wakes the task, drops its future and closes
+    /// its handle.
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
+    fn abort_idle_task_after_skipped_registration<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let (held, released) = oneshot::channel::<()>();
+            let (started, polled) = oneshot::channel::<()>();
+            let handle = context.child("pending").spawn(move |_| async move {
+                let _held = held;
+                // The first pending poll registers the task's waker. Its wake re-polls the
+                // task, whose second pending poll finds that waker already registered.
+                reschedule().await;
+                started.send(()).unwrap();
+                future::pending::<()>().await;
+            });
+            polled.await.unwrap();
+            handle.abort();
+            assert!(released.await.is_err());
+            assert!(matches!(handle.await, Err(Error::Closed)));
+        });
+    }
+
     /// Aborts race polls of tasks that keep rescheduling themselves on other workers, every
     /// task still observes its abort, drops its future and closes its handle.
     #[rstest]
