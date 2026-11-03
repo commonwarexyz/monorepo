@@ -1726,7 +1726,7 @@ where
     DB: sync::Database<Context = E>,
     S: sync::SourceFor<DB>,
 {
-    sync::sync(sync::engine::Config {
+    sync::sync(sync::Config {
         context,
         source,
         target,
@@ -1809,7 +1809,7 @@ where
         tx
     });
 
-    let result = sync::sync(sync::engine::Config {
+    let result = sync::sync(sync::Config {
         context,
         source,
         target: initial,

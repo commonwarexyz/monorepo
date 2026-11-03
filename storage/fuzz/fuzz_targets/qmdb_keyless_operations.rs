@@ -27,13 +27,13 @@ type CodecConfig = (commonware_codec::RangeCfg<usize>, ());
 #[derive(Debug, Clone, Copy)]
 enum BadFloorExpect {
     Regression,
-    BeyondSize,
+    BeyondCommit,
 }
 
 fn assert_bad_floor_error<F: Family>(err: &Error<F>, kind: BadFloorExpect) {
     match (err, kind) {
         (Error::FloorRegressed(_, _), BadFloorExpect::Regression) => {}
-        (Error::FloorBeyondSize(_, _), BadFloorExpect::BeyondSize) => {}
+        (Error::FloorBeyondCommit(_, _), BadFloorExpect::BeyondCommit) => {}
         _ => panic!("unexpected error for {kind:?}: {err:?}"),
     }
 }
@@ -48,7 +48,7 @@ enum FloorKind {
     AdvanceToCommit,
     /// Floor one below the current floor. It must be rejected as `FloorRegressed`.
     BadRegression,
-    /// Floor one past the commit location. It must be rejected as `FloorBeyondSize`.
+    /// Floor one past the commit location. It must be rejected as `FloorBeyondCommit`.
     BadBeyondCommit,
 }
 
@@ -76,7 +76,7 @@ enum Operation {
     },
     /// Build a two-level batch chain (parent -> child) with a valid parent and a child floor that
     /// regresses below the parent's floor or passes the child's own commit location. Merkleizing
-    /// the child must return `FloorRegressed` or `FloorBeyondSize`.
+    /// the child must return `FloorRegressed` or `FloorBeyondCommit`.
     BadChainedCommit {
         child_kind: FloorKind,
     },
@@ -285,7 +285,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                         }
                         FloorKind::BadBeyondCommit => {
                             let bad = Location::<F>::new(commit_loc + 1);
-                            (bad, Some(BadFloorExpect::BeyondSize))
+                            (bad, Some(BadFloorExpect::BeyondCommit))
                         }
                     };
 
@@ -329,7 +329,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                         ),
                         FloorKind::BadBeyondCommit => (
                             Location::<F>::new(child_commit_loc + 1),
-                            BadFloorExpect::BeyondSize,
+                            BadFloorExpect::BeyondCommit,
                         ),
                         _ => continue, // only bad kinds are meaningful here
                     };

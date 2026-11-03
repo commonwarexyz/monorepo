@@ -100,7 +100,7 @@ pub mod batch;
 mod compact;
 pub mod fixed;
 mod operation;
-pub mod sync;
+pub(crate) mod sync;
 pub mod variable;
 
 pub use compact::{
@@ -559,13 +559,21 @@ where
     ///     - the last operation performed, or
     ///     - the operation `max_ops` from the start.
     ///  2. the operations corresponding to the leaves in this range.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `start_loc`
+    ///   >= the number of operations.
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
+    ///   with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
+    ///   been pruned.
     pub async fn proof(
         &self,
-        start_index: Location<F>,
+        start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, K, V>>), Error<F>> {
         let op_count = self.bounds().end;
-        self.historical_proof(op_count, start_index, max_ops).await
+        self.historical_proof(op_count, start_loc, max_ops).await
     }
 
     /// Prune operations prior to `loc` without changing the db's root. Keys whose operations
@@ -3802,7 +3810,7 @@ pub(super) mod tests {
 
     /// Verify that merkleizing a batch with a floor beyond its commit location returns an error.
     #[boxed]
-    pub(crate) async fn run_floor_beyond_size<F: Family, V, C>(
+    pub(crate) async fn run_floor_beyond_commit<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3815,7 +3823,7 @@ pub(super) mod tests {
         let db = open_db(context.child("test")).await;
 
         // DB has 1 op (initial commit). A batch with 1 set + 1 commit = total_size 3.
-        // Setting floor=100 exceeds total_size.
+        // Setting floor=100 puts it past the commit at location 2.
         let k1 = Sha256::fill(1u8);
         let v1 = Sha256::fill(2u8);
         let result = db
@@ -3823,8 +3831,10 @@ pub(super) mod tests {
             .set(k1, v1)
             .merkleize(&db, None, Location::new(100))
             .await;
-        assert!(matches!(result, Err(Error::FloorBeyondSize(floor, commit))
-                if floor == Location::new(100) && commit == Location::new(2)));
+        assert!(
+            matches!(result, Err(Error::FloorBeyondCommit(floor, commit))
+                if floor == Location::new(100) && commit == Location::new(2))
+        );
 
         // Boundary: floor == total_size must also be rejected. The commit op is
         // at total_size - 1, so a floor equal to total_size would allow a later
@@ -3836,8 +3846,10 @@ pub(super) mod tests {
             .set(k2, v2)
             .merkleize(&db, None, Location::new(3))
             .await;
-        assert!(matches!(result, Err(Error::FloorBeyondSize(floor, commit))
-                if floor == Location::new(3) && commit == Location::new(2)));
+        assert!(
+            matches!(result, Err(Error::FloorBeyondCommit(floor, commit))
+                if floor == Location::new(3) && commit == Location::new(2))
+        );
 
         // Floor == total_size - 1 (the commit location) is the maximum valid.
         let merkleized = db
@@ -3895,7 +3907,7 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Merkleize returns `FloorBeyondSize` for a chained batch whose floor exceeds its own commit
+    /// Merkleize returns `FloorBeyondCommit` for a chained batch whose floor exceeds its own commit
     /// location. The commit location includes the parent's operations. The floor still satisfies
     /// monotonicity, so only the commit-location bound rejects it.
     #[boxed]
@@ -3930,7 +3942,7 @@ pub(super) mod tests {
             panic!("merkleize must reject the invalid floor");
         };
         assert!(
-            matches!(err, Error::FloorBeyondSize(floor, commit)
+            matches!(err, Error::FloorBeyondCommit(floor, commit)
                 if floor == Location::new(5) && commit == Location::new(4)),
             "unexpected error: {err:?}"
         );

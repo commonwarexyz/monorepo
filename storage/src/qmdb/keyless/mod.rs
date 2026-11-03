@@ -3377,7 +3377,7 @@ pub(crate) mod tests {
             panic!("merkleize must reject the invalid floor");
         };
         assert!(
-            matches!(err, Error::FloorBeyondSize(floor, commit) if *floor == 999 && *commit == 3),
+            matches!(err, Error::FloorBeyondCommit(floor, commit) if *floor == 999 && *commit == 3),
             "unexpected error: {err:?}"
         );
 
@@ -3392,7 +3392,7 @@ pub(crate) mod tests {
             panic!("merkleize must reject the invalid floor");
         };
         assert!(
-            matches!(err, Error::FloorBeyondSize(floor, commit) if *floor == 4 && *commit == 3),
+            matches!(err, Error::FloorBeyondCommit(floor, commit) if *floor == 4 && *commit == 3),
             "unexpected error: {err:?}"
         );
     }
@@ -3622,7 +3622,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Merkleize returns `FloorBeyondSize` for a chained batch whose floor exceeds its own commit
+    /// Merkleize returns `FloorBeyondCommit` for a chained batch whose floor exceeds its own commit
     /// location. The commit location includes the parent's operations.
     #[boxed]
     pub(crate) async fn run_chained_floor_beyond_commit_rejected<F, V, C, H, S: Strategy>(
@@ -3653,7 +3653,7 @@ pub(crate) mod tests {
             panic!("merkleize must reject the invalid floor");
         };
         assert!(
-            matches!(err, Error::FloorBeyondSize(floor, commit) if *floor == 5 && *commit == 4),
+            matches!(err, Error::FloorBeyondCommit(floor, commit) if *floor == 5 && *commit == 4),
             "unexpected error: {err:?}"
         );
     }

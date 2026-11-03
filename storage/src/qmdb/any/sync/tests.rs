@@ -10,8 +10,8 @@ use crate::{
     qmdb::{
         self,
         sync::{
-            self, Engine, Feedback, Target,
-            engine::{Config, NextStep},
+            self, Config, Engine, Feedback, Target,
+            engine::NextStep,
             harness::{DbOf, JournalOf, OpOf, SyncTestHarness},
             source::{self, Request, Response, Source},
         },
@@ -971,7 +971,7 @@ where
             corrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
-        let config = sync::engine::Config {
+        let config = sync::Config {
             db_config,
             fetch_batch_size: NZU64!(100),
             target: Target {

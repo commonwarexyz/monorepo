@@ -130,7 +130,7 @@ where
     let db_config = test_config(test_name);
     let expected_root = target.root;
 
-    let sync_config: sync::engine::Config<FixedDb<F>, R> = sync::engine::Config {
+    let sync_config: sync::Config<FixedDb<F>, R> = sync::Config {
         context: context.child("sync").with_attribute("id", sync_id),
         update_rx: None,
         finish_rx: None,
