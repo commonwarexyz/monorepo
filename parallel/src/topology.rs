@@ -1728,7 +1728,7 @@ mod tests {
             let cases = [
                 (4, 2, 4),
                 (15, 5, 16),
-                (limit + 1, (limit + 1) / 2, limit + 1),
+                (limit + 1, limit.div_ceil(2), limit + 1),
                 (limit, limit / 3, limit + 1),
             ];
             for (count, domain_width, requested) in cases {
