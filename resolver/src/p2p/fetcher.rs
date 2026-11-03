@@ -495,6 +495,10 @@ where
     }
 
     /// Adds a fresh key to the pending queue, ahead of retries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the key is already pending.
     pub fn add_ready(&mut self, key: Key) {
         self.add_pending(key, false, self.context.current());
     }
