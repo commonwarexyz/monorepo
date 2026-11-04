@@ -1588,6 +1588,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             Ok(Self::with_groups(Arc::new(groups)))
         }
 
+        /// Creates a strategy over `groups` that plans with the pool's thread count, decides
+        /// serial or parallel execution adaptively, and places each parallel body as described
+        /// on [`Rayon`].
         fn with_groups(groups: Arc<topology::Groups>) -> Self {
             Self {
                 parallelism: groups.pool().current_num_threads(),
@@ -1628,8 +1631,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         }
 
         /// Copies this strategy to run its parallel bodies under `placement`. A group plans with
-        /// [`Self::group_parallelism`], and the whole pool with the strategy's parallelism. The copy has no
-        /// policy because its caller has already decided how the work should run.
+        /// [`Self::group_parallelism`], and the whole pool with the strategy's parallelism. The
+        /// copy has no policy because its caller has already decided how the work should run.
         fn placed(&self, placement: rayon::Placement) -> Self {
             let parallelism = match placement {
                 rayon::Placement::Local(group) => self.group_parallelism(group),

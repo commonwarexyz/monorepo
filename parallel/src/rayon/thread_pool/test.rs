@@ -244,6 +244,8 @@ fn with_pool<T>(threads: usize, width: usize, run: impl FnOnce(&Arc<ThreadPool>)
     result.unwrap_or_else(|panic| resume_unwind(panic))
 }
 
+/// Blocks the only worker of a pool on a oneshot result until it sleeps, lets `release` act on
+/// the pool and the sender, and returns what the worker observed.
 #[allow(
     clippy::disallowed_types,
     reason = "Exercise the channel used by Strategy::spawn."
@@ -269,18 +271,22 @@ fn sleeping_receiver(
     })
 }
 
+/// A result sent to a sleeping worker wakes it with the value.
 #[commonware_macros::test_group("miri")]
 #[test]
 fn result_wakes_sleeping_worker() {
     assert_eq!(sleeping_receiver(|_, tx| tx.send(42).unwrap()), Ok(42));
 }
 
+/// Dropping the sender wakes the sleeping worker, which observes the cancellation.
 #[commonware_macros::test_group("miri")]
 #[test]
 fn canceled_sender_wakes_sleeping_worker() {
     assert!(sleeping_receiver(|_, tx| drop(tx)).is_err());
 }
 
+/// Work queued on the pool wakes its only worker, which runs the job and then receives the result
+/// it sent.
 #[commonware_macros::test_group("miri")]
 #[test]
 fn queued_work_wakes_sleeping_worker() {
@@ -290,6 +296,8 @@ fn queued_work_wakes_sleeping_worker() {
     );
 }
 
+/// A thread outside the pool, or a worker of another pool, gets `None` without the future being
+/// polled.
 #[commonware_macros::test_group("miri")]
 #[test]
 fn outside_and_foreign_workers_do_not_poll() {
@@ -304,6 +312,7 @@ fn outside_and_foreign_workers_do_not_poll() {
     });
 }
 
+/// Wakes issued during a poll are kept, so a pending future is polled again, and only once.
 #[commonware_macros::test_group("miri")]
 #[test]
 fn duplicate_wakes_during_poll_are_retained() {
@@ -326,6 +335,8 @@ fn duplicate_wakes_during_poll_are_retained() {
     });
 }
 
+/// Wakers retained past a completed poll or a panicking poll remain safe to wake after the pool
+/// is gone.
 #[commonware_macros::test_group("miri")]
 #[test]
 fn retained_wakers_outlive_ready_panic_and_pool() {
@@ -365,6 +376,8 @@ fn retained_wakers_outlive_ready_panic_and_pool() {
     }
 }
 
+/// A worker waiting on one result runs a job that waits on another, and work queued later
+/// resolves both.
 #[commonware_macros::test_group("miri")]
 #[test]
 fn nested_waits_service_later_work() {
@@ -460,6 +473,7 @@ fn release_sleeping_worker(
     })
 }
 
+/// Of two workers blocked on their own results, settling one wakes that worker alone.
 #[commonware_macros::test_group("miri")]
 #[test]
 fn workers_wait_independently() {

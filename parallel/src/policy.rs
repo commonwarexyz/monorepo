@@ -527,6 +527,8 @@ impl Policy {
         })
     }
 
+    /// The serial and parallel estimates, in nanoseconds, of the run entry for this call site, or
+    /// `None` when the entry does not exist.
     #[cfg(test)]
     pub(super) fn run_estimates(
         &self,
@@ -635,6 +637,7 @@ struct Cadence<P> {
 }
 
 impl<P> Cadence<P> {
+    /// A cadence before its first boundary.
     const fn new() -> Self {
         Self {
             since_probe: 0,
@@ -1057,6 +1060,8 @@ mod tests {
         }
     }
 
+    /// A plan that runs `execution` for `spawner` without a learned placement and is timed when
+    /// `measure` holds.
     const fn spawn_plan(execution: SpawnExecution, spawner: Spawner, measure: bool) -> SpawnPlan {
         SpawnPlan {
             execution,
@@ -1891,6 +1896,7 @@ mod tests {
             .collect()
     }
 
+    /// The indices of the runs placed Wide.
     fn wide_roots(runs: &[(Placement, bool)]) -> Vec<usize> {
         runs.iter()
             .enumerate()
@@ -3553,6 +3559,9 @@ mod tests {
         assert_eq!(samples.get(), 11, "every probe must be timed");
     }
 
+    /// Makes one spawn call at `location` from a worker or from outside the pool, records `job` as
+    /// the job time and `job + overhead` as the round trip when the plan measures, and returns the
+    /// plan.
     fn spawn_call(
         policy: &Policy,
         location: &'static Location<'static>,

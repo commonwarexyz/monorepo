@@ -1314,6 +1314,7 @@ thread_local! {
 }
 
 impl WakeGate {
+    /// A gate for `point` that is not yet armed.
     fn new(point: WakePoint) -> Arc<Self> {
         Arc::new(Self {
             point,

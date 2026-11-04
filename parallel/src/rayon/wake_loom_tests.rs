@@ -52,14 +52,17 @@ struct Queue {
 }
 
 impl Queue {
+    /// Publishes one job.
     fn push(&self) {
         self.jobs.fetch_add(1, Ordering::Release);
     }
 
+    /// Whether no published job remains.
     fn is_empty(&self) -> bool {
         self.jobs.load(Ordering::Acquire) == 0
     }
 
+    /// Consumes one published job, if any remains.
     fn take(&self) -> bool {
         // Competing searches may observe one publication, but only one can consume it.
         let mut jobs = self.jobs.load(Ordering::Acquire);
@@ -90,10 +93,12 @@ struct Injector {
 }
 
 impl Injector {
+    /// The index of the Wide queue.
     fn wide(&self) -> usize {
         self.queues.len() - 1
     }
 
+    /// Whether `queue` holds no job.
     fn is_empty(&self, queue: usize) -> bool {
         self.queues[queue].is_empty()
     }
@@ -133,6 +138,7 @@ impl Registry {
         })
     }
 
+    /// Publishes one Wide job offered first to group `near` and routes its wakeup natively.
     fn inject_wide(&self, near: usize) {
         let wide = &self.injector.queues[self.injector.wide()];
         let queue_was_empty = wide.is_empty();
@@ -140,6 +146,7 @@ impl Registry {
         self.new_injected_wide_job(near, queue_was_empty);
     }
 
+    /// Publishes one Local job for `group` and wakes the group natively.
     fn inject_local(&self, group: usize) {
         let queue = &self.injector.queues[group];
         let queue_was_empty = queue.is_empty();
@@ -149,6 +156,8 @@ impl Registry {
             .new_injected_jobs(1, queue_was_empty);
     }
 
+    /// Takes one job for a worker of `group`, from its group's Local queue first and then from
+    /// any Wide queue.
     fn find_work(&self, group: usize) -> Option<Tag> {
         // A worker counted as coverage for Wide work may choose a Local job first.
         if self.injector.queues[group].take() {
@@ -163,6 +172,7 @@ impl Registry {
     }
 }
 
+/// Explores the interleavings of `f` under Loom with a preemption bound of three.
 fn model(f: impl Fn() + Send + Sync + 'static) {
     let mut builder = loom::model::Builder::new();
     builder.preemption_bound = Some(3);

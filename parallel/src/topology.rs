@@ -201,10 +201,12 @@ cfg_if::cfg_if! {
                 unsafe { libc::CPU_ISSET(cpu, &self.0) }
             }
 
+            /// The CPUs in the set, in ascending order.
             fn cpus(&self) -> impl Iterator<Item = usize> + '_ {
                 (0..CPU_SETSIZE).filter(|&cpu| self.contains(cpu))
             }
 
+            /// The CPUs in both sets, with their count.
             fn intersection(&self, other: &Self) -> (Self, usize) {
                 let mut mask = Self::empty();
                 let mut count = 0;
@@ -215,6 +217,7 @@ cfg_if::cfg_if! {
                 (mask, count)
             }
 
+            /// The CPUs in this set but not in `other`, with their count.
             fn difference(&self, other: &Self) -> (Self, usize) {
                 let mut mask = Self::empty();
                 let mut count = 0;
@@ -563,6 +566,7 @@ impl State {
         }
     }
 
+    /// Releases one claim of `submitter`, forgetting the thread once none remain.
     fn release(&mut self, submitter: ThreadId) {
         if let Some(position) = self.submitters.iter().position(|(id, _)| *id == submitter) {
             self.submitters[position].1 -= 1;
@@ -598,6 +602,8 @@ pub(crate) struct Group {
 }
 
 impl Group {
+    /// Creates an idle, unhomed group of `width` workers, where `full` is the width of the first
+    /// group.
     const fn new(width: usize, full: usize) -> Self {
         Self {
             width,
@@ -624,10 +630,12 @@ impl Group {
         self.state.lock().submitters.iter().any(|(id, _)| *id != me)
     }
 
+    /// The number of workers in the group.
     pub(crate) const fn width(&self) -> usize {
         self.width
     }
 
+    /// Whether the group can be homed and is preferred for local work.
     pub(crate) const fn placeable(&self) -> bool {
         self.placeable
     }
@@ -856,6 +864,7 @@ impl Groups {
         FAKE_DOMAIN.with(|cell| cell.set(domain));
     }
 
+    /// All of the pool's workers, partitioned into groups in pool order.
     pub(crate) fn groups(&self) -> &[Group] {
         &self.groups
     }
@@ -1600,6 +1609,7 @@ mod tests {
         use super::*;
         use crate::Strategy as _;
 
+        /// A mask allowing exactly `cpus`.
         fn cpu_set(cpus: impl IntoIterator<Item = usize>) -> CpuSet {
             let mut mask = CpuSet::empty();
             for cpu in cpus {
