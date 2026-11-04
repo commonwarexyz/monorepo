@@ -1058,9 +1058,8 @@ impl Groups {
         self.lease(index)
     }
 
-    /// Whether a claim must be tracked, as described on [`Lease`], where `domain` looks up the
-    /// claiming thread's domain. A strategy with several groups tracks every claim without calling
-    /// it.
+    /// Whether a claim must be tracked. A claim is tracked when the strategy has several groups or
+    /// the claiming thread's domain is known. `domain` is only called when there is one group.
     fn must_track(&self, domain: impl FnOnce() -> Option<u16>) -> bool {
         self.groups.len() > 1 || domain().is_some()
     }
