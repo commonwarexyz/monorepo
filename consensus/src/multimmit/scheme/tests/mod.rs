@@ -36,8 +36,8 @@ mod threshold;
 
 use super::{
     Available, DaCertificateOf, DaRecoveryError, Error, Generic, Namespace,
-    NullifyFaults, OrdinarySignature, OrdinarySubject, Period, Scheme, SignatureVerification,
-    Verified, bls12381, bls12381_sas, ed25519 as ed25519_suite,
+    OrdinarySignature, OrdinarySubject, Period, Scheme, SignatureVerification, Verified, bls12381,
+    bls12381_sas, ed25519 as ed25519_suite,
 };
 use crate::{
     Epochable as _, Viewable as _,
@@ -71,7 +71,9 @@ use commonware_cryptography::{
     sha256::Digest,
 };
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{Faults as _, N5f1, NZUsize, Participant, TestRng, test_rng};
+use commonware_utils::{
+    Faults as _, N5f1, NZUsize, Participant, TestRng, faults::N5f1Nullification, test_rng,
+};
 use fixture::{
     Fixture, NAMESPACE, PARTICIPANTS, SEED, assert_expanded_artifacts, corrupt_tail, malformed,
     other_verifier,

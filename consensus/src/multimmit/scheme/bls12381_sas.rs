@@ -33,7 +33,7 @@ use super::{
         validate_nullification_sharing, validate_share, validate_shares, validate_sharings,
     },
 };
-use crate::multimmit::config::Parameters;
+use crate::multimmit::{checkpoint, config::Parameters};
 use commonware_codec::Read;
 use commonware_cryptography::{
     PublicKey,
@@ -442,6 +442,19 @@ fn deal_roster<P: PublicKey, V: Variant>(
         &Sequential,
     )?;
     Ok((roster, ordinary))
+}
+
+/// Checkpoint certificates from the committee's nullification key.
+impl<P: PublicKey, V: Variant, R: DaRole> Generic<Scheme<P, V, R>> {
+    /// Returns the scheme that certifies [`aggregation`](crate::aggregation) checkpoints with
+    /// this committee's `2f+1` nullification key, under the aggregation namespace `namespace`.
+    ///
+    /// A signer signs checkpoints with its nullification share, a verifier also verifies
+    /// individual shares, and a certificate verifier verifies recovered certificates. See
+    /// [`checkpoint`].
+    pub fn checkpoint(&self, namespace: &[u8]) -> checkpoint::Scheme<P, V> {
+        self.nullify().checkpoint(namespace)
+    }
 }
 
 /// A committee dealt by [`Scheme::deal`] under the [`Threshold`] DA role.
