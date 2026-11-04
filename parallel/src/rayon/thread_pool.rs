@@ -279,8 +279,8 @@ impl ThreadPool {
     /// # Panics
     ///
     /// Panics if `group` is not a group of the pool. If `op` should panic on one or more threads,
-    /// exactly one panic will be propagated, only after all threads have completed (or
-    /// panicked) their own `op`.
+    /// exactly one panic will be propagated, only after all threads have completed (or panicked)
+    /// their own `op`.
     #[cfg(test)]
     pub(crate) fn broadcast_in<OP, R>(&self, group: usize, op: OP) -> Vec<R>
     where
@@ -348,9 +348,9 @@ impl ThreadPool {
 
     /// Spawns an asynchronous task on every worker of `group` and returns at once.
     ///
-    /// Each worker runs it after exhausting its local work and before stealing, in the order
-    /// broadcasts were queued. The other workers receive a broadcast that does nothing. The task
-    /// may outlast the current stack frame, so it cannot capture references to the stack.
+    /// Each worker runs it after draining its own deques and before stealing other work, in the
+    /// order broadcasts were queued. The other workers receive a broadcast that does nothing. The
+    /// task may outlast the current stack frame, so it cannot capture references to the stack.
     ///
     /// # Panics
     ///
@@ -400,8 +400,7 @@ pub(crate) struct Worker {
     /// The running job's placement. Jobs it submits without an explicit placement inherit it.
     pub(crate) placement: Placement,
 
-    /// The number of workers that can run the job: those of the worker's group under
-    /// [`Placement::Local`] and those of the whole pool under [`Placement::Wide`].
+    /// The number of workers eligible to run the job.
     pub(crate) width: usize,
 }
 

@@ -48,8 +48,8 @@ pub(crate) enum Placement {
     Wide { near: usize },
 }
 
-/// The current job's placement, used to select the deque a worker pushes to. A worker's local
-/// placement is always for its own group.
+/// The placement a worker runs its current job under, which selects the deque it pushes to.
+/// `Local` always means the worker's own group.
 ///
 /// Each queue stamps the jobs it receives with its tag, and a worker runs a job it takes under that
 /// tag. Local deques, group injectors, and broadcast deques stamp `Local`. Wide deques and the wide
@@ -134,9 +134,7 @@ pub(super) struct Registry {
     /// The width of each group, in group order.
     group_widths: Box<[usize]>,
 
-    /// Jobs placed by threads that are not workers of their placement, in one admission order:
-    /// a [`Placement::Local`] queue per group that only the group's workers take, and a
-    /// [`Placement::Wide`] queue that any worker takes.
+    /// Jobs placed by threads that are not workers of their placement.
     injector: Injector,
 
     /// The pushing halves of the workers' broadcast deques, indexed by worker.
@@ -306,7 +304,7 @@ impl Registry {
         start..start + self.group_widths[group]
     }
 
-    /// Panics unless `placement` names one of the registry's groups.
+    /// Asserts that `placement` names one of the registry's groups.
     pub(super) fn check_placement(&self, placement: Placement) {
         let (Placement::Local(group) | Placement::Wide { near: group }) = placement;
         assert!(
@@ -590,7 +588,7 @@ pub(super) struct WorkerThread {
     /// This worker's offset in its group.
     offset: usize,
 
-    /// The current job's placement, used to select the deque this worker pushes to.
+    /// The current job's tag. It selects the deque this worker pushes to.
     tag: Cell<Tag>,
 
     /// A weak random number generator.
@@ -716,7 +714,7 @@ impl WorkerThread {
         }
     }
 
-    /// Runs `op` under `tag` and restores the previous tag afterwards, also when `op` unwinds.
+    /// Runs `op` under `tag` and restores the previous tag afterward, even when `op` unwinds.
     ///
     /// Nested jobs and installs restore the suspended job's tag before it resumes. This also
     /// keeps a join's inline second closure under the tag it was pushed with.
@@ -729,7 +727,7 @@ impl WorkerThread {
         op()
     }
 
-    /// Pushes a job onto the deque of the job we run.
+    /// Pushes a job onto the deque for the current tag.
     #[inline]
     pub(super) unsafe fn push(&self, job: JobRef) {
         // SAFETY: the caller keeps the job valid until it executes.
@@ -1038,8 +1036,8 @@ unsafe fn main_loop(thread: ThreadBuilder) {
     mem::forget(abort_guard);
 }
 
-/// Runs `op` on the calling worker and returns its result, propagating its panic. The second
-/// argument to `op` is always `false`, which marks a direct run on the calling worker.
+/// Runs `op` on the calling worker and returns its result or propagates its panic. The second
+/// argument to `op` is always `false` because `op` runs directly.
 ///
 /// # Panics
 ///

@@ -238,6 +238,8 @@ fn with_pool<T>(threads: usize, width: usize, run: impl FnOnce(&Arc<ThreadPool>)
             .unwrap(),
     );
     let registry = Arc::clone(&pool.registry);
+
+    // Wait for the workers to stop even when `run` panics, then propagate its panic.
     let result = catch_unwind(AssertUnwindSafe(|| run(&pool)));
     drop(pool);
     registry.wait_until_stopped();
@@ -264,6 +266,8 @@ fn sleeping_receiver(
                     })
                 })
             });
+
+            // Release only after the worker reports that it sleeps inside its wait.
             asleep_rx.recv().unwrap();
             release(pool, tx);
             waiter.join().unwrap()
@@ -302,8 +306,11 @@ fn queued_work_wakes_sleeping_worker() {
 #[test]
 fn outside_and_foreign_workers_do_not_poll() {
     with_pool(1, 0, |pool| {
+        // The calling thread is outside every pool.
         let mut future = poll_fn(|_| -> Poll<()> { panic!("future must not be polled") });
         assert!(pool.block_on_worker(Pin::new(&mut future)).is_none());
+
+        // A worker of another pool is not a worker of this one.
         with_pool(1, 0, |other| {
             other.install(|| {
                 assert!(pool.block_on_worker(Pin::new(&mut future)).is_none());
@@ -342,6 +349,7 @@ fn duplicate_wakes_during_poll_are_retained() {
 fn retained_wakers_outlive_ready_panic_and_pool() {
     let wakers = with_pool(1, 0, |pool| {
         pool.install(|| {
+            // Retain the wakers of both polls of a future that completes on its second poll.
             let mut ready_wakers = Vec::new();
             let mut ready = poll_fn(|cx| {
                 ready_wakers.push(cx.waker().clone());
@@ -354,6 +362,7 @@ fn retained_wakers_outlive_ready_panic_and_pool() {
             });
             assert_eq!(pool.block_on_worker(Pin::new(&mut ready)), Some(()));
 
+            // Retain the waker of a poll that panics.
             let mut panic_waker = None;
             let mut panicking = poll_fn(|cx| -> Poll<()> {
                 panic_waker = Some(cx.waker().clone());
@@ -369,6 +378,8 @@ fn retained_wakers_outlive_ready_panic_and_pool() {
             ready_wakers
         })
     });
+
+    // Every retained waker can still be woken after the pool has stopped.
     for waker in wakers {
         waker.wake_by_ref();
         waker.wake_by_ref();
@@ -387,6 +398,7 @@ fn nested_waits_service_later_work() {
         let (outer_asleep_tx, outer_asleep_rx) = mpsc::channel();
         let (inner_asleep_tx, inner_asleep_rx) = mpsc::channel();
         thread::scope(|scope| {
+            // The only worker sleeps in its wait for the outer result.
             let waiter = scope.spawn(|| {
                 pool.install(|| {
                     with_sleep_notification(outer_asleep_tx, || {
@@ -395,6 +407,9 @@ fn nested_waits_service_later_work() {
                 })
             });
             outer_asleep_rx.recv().unwrap();
+
+            // Queued work wakes it to run a job that sleeps in a nested wait for the inner result
+            // and then sends that value as the outer result.
             let inner_pool = Arc::clone(pool);
             pool.spawn(move || {
                 let value = with_sleep_notification(inner_asleep_tx, || {
@@ -406,6 +421,8 @@ fn nested_waits_service_later_work() {
                 outer_tx.send(value).unwrap();
             });
             inner_asleep_rx.recv().unwrap();
+
+            // Work queued after both waits settles the inner result and then the outer one.
             pool.spawn(move || inner_tx.send(42).unwrap());
             assert_eq!(waiter.join().unwrap(), Ok(42));
         });
@@ -429,6 +446,7 @@ fn release_sleeping_worker(
     release: impl FnOnce(&Arc<ThreadPool>, oneshot::Sender<u32>),
 ) -> Result<u32, oneshot::Canceled> {
     with_pool(threads, width, |pool| {
+        // Every worker blocks on its own result and reports when it sleeps.
         let (asleep_tx, asleep_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let (mut senders, receivers): (Vec<_>, Vec<_>) = (0..threads)
@@ -457,10 +475,12 @@ fn release_sleeping_worker(
             thread::yield_now();
         }
 
+        // Settle the target's result and check that the target finishes first.
         release(pool, senders[target].take().unwrap());
         let (index, result) = done_rx.recv().unwrap();
         assert_eq!(index, target);
 
+        // Release every other worker with its own index.
         for (index, tx) in senders.into_iter().enumerate() {
             if let Some(tx) = tx {
                 tx.send(u32::try_from(index).unwrap()).unwrap();

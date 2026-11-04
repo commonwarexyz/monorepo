@@ -191,7 +191,6 @@ pub(super) struct Policy {
 
 impl Policy {
     /// Chooses the execution path for this call site and, for a parallel run, the placement.
-    ///
     /// `pools` reports the placements the caller may use.
     pub(super) fn choose_run(
         &self,
@@ -939,7 +938,7 @@ impl Choice {
 /// wall-time estimate fits the budget, so an entry seeded into offload can still sample inline.
 #[derive(Clone, Copy, Debug, Default)]
 struct SpawnEntry {
-    // Only admitted external roots on grouped pools choose and train descendant placement.
+    // Descendant placement, chosen and trained only by admitted external roots on grouped pools.
     placement: Choice,
     // The hand-off overhead: the time from channel setup to observed result of a job offloaded
     // from outside the pool, minus the job's own wall time.
@@ -1062,6 +1061,7 @@ mod tests {
         }
     }
 
+    /// Chooses for `entry` on its preferred placement's cadence at [`PARALLELISM`].
     fn choose(entry: &mut RunEntry) -> (RunExecution, bool) {
         entry.choose(entry.placement.preferred(), PARALLELISM)
     }
@@ -1121,7 +1121,7 @@ mod tests {
     #[test]
     fn never_seeds_serial_when_projection_exceeds_budget() {
         // A serial pass could cost up to parallel * parallelism. When that projection exceeds
-        // the budget, the tuner biases to parallel without ever paying a serial sample.
+        // the budget, the policy biases to parallel without ever paying a serial sample.
         let mut entry = RunEntry::default();
 
         entry.record(RunExecution::Parallel, Duration::from_millis(10));
@@ -1155,7 +1155,7 @@ mod tests {
     #[test]
     fn big_serial_estimate_biases_parallel() {
         // Both estimates exceed the budget and serial nominally wins the comparison, but the
-        // tuner only arbitrates small cases: big work runs parallel outright, and the serial
+        // policy only arbitrates small cases. Big work runs parallel outright, and the serial
         // probe stays suppressed because the projection is over budget too.
         let mut entry = RunEntry::default();
         entry.record(RunExecution::Parallel, Duration::from_millis(30));
@@ -1356,7 +1356,7 @@ mod tests {
         }
         assert_eq!(preferred(&entry), RunExecution::Serial);
 
-        // Keep serial at 1 ms while probes measure parallel at 0.5 ms, until parallel becomes
+        // Keep serial at 1ms while probes measure parallel at 0.5ms, until parallel becomes
         // preferred.
         let mut probes = 0;
         let mut flipped_at = None;
@@ -2954,8 +2954,8 @@ mod tests {
     }
 
     /// The entry prefers the other placement and serial beats the caller's placement, but serial
-    /// projected from that placement's estimate at its parallelism exceeds the budget the tuner
-    /// arbitrates within. A confined caller therefore stays on its placement, where the tuner
+    /// projected from that placement's estimate at its parallelism exceeds the budget the policy
+    /// arbitrates within. A confined caller therefore stays on its placement, where the policy
     /// leaves big work, and never samples serial.
     #[test]
     fn confined_calls_keep_big_work_parallel() {

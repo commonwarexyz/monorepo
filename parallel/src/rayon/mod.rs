@@ -65,7 +65,7 @@
 //! - Workers form fixed groups with separate Local and Wide deques. Local jobs stay within one
 //!   group. Wide jobs can run on any worker. Jobs carry their placement through stealing,
 //!   nested helping, and unwinding. The bridge's splitter sizes its split budget by the width
-//!   of the calling worker's placement in place of `current_num_threads`, which is removed.
+//!   of the calling worker's placement. Removed `current_num_threads`.
 //! - Each group owns its Local injector and sleep states. All groups share a Wide injector.
 //!   Workers search eligible deques before taking the oldest incoming job across their group's
 //!   Local injector and the Wide injector.

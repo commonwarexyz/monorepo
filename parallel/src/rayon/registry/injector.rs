@@ -21,9 +21,7 @@ struct Queues {
     next: u64,
 }
 
-/// A registry's incoming queues: one Local queue per group, then the shared Wide queue, under one
-/// admission order. The empty flags support the scheduler's wake protocol without requiring the
-/// queue lock.
+/// A registry's incoming queues: one Local queue per group, then the shared Wide queue.
 pub(super) struct Injector {
     queues: Mutex<Queues>,
 
@@ -166,7 +164,7 @@ mod tests {
         ];
 
         // The search declined without blocking, both jobs stayed queued, and the worker ran them
-        // in arrival order afterwards.
+        // in arrival order afterward.
         assert_eq!(yielded.unwrap(), Some(Yield::Idle));
         assert!(jobs_remain);
         assert_eq!(completed, [0, 1]);

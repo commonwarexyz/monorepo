@@ -11,9 +11,9 @@ impl Registry {
     /// Signals that a job any worker may take was queued, offering it to the workers of group
     /// `near` first and then to the other groups in cyclic order.
     ///
-    /// Each group runs upstream's sleep protocol on its own counters. The walk marks each visited
-    /// group's jobs event counter active and stops at the first group that covers the job, through
-    /// an awake idle worker when the queue was empty or otherwise by waking a sleeper.
+    /// The walk marks each visited group's jobs event counter active and stops at the first group
+    /// that covers the job, through an awake idle worker when the queue was empty or otherwise by
+    /// waking a sleeper.
     ///
     /// ```text
     /// wide job queued with near = 1 in a pool of three groups

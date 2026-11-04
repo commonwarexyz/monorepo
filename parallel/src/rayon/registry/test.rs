@@ -102,9 +102,11 @@ fn placement(pool: &ThreadPool) -> Option<Placement> {
 }
 
 /// Workers form consecutive groups of the configured width, with a narrower last group when
-/// needed. A pool built without a width, or with a width that is zero or too wide, is one group.
+/// needed. A pool built without a width, or with a width of 0 or at least the thread count, is one
+/// group.
 #[test]
 fn workers_form_consecutive_groups() {
+    // Seven workers in groups of three form groups of 3, 3, and 1, and worker i is in group i / 3.
     let pool = pool(7, 3);
     assert_eq!(pool.group_widths(), [3, 3, 1]);
     let mut seen: Vec<_> = (0..3)
@@ -120,6 +122,7 @@ fn workers_form_consecutive_groups() {
     assert_eq!(seen, expected);
     assert_eq!(pool.current_worker(), None);
 
+    // A width of 0, a width of at least the thread count, and no width each form one group.
     for width in [0, 4, 9] {
         assert_eq!(self::pool(4, width).group_widths(), [4]);
     }
@@ -156,6 +159,8 @@ fn workers_report_placement_width() {
 #[test]
 fn install_restores_previous_placement() {
     let pool = Arc::new(pool(4, 2));
+
+    // A Wide install from outside the pool runs its operation under a Wide placement.
     assert!(matches!(
         pool.install_in(Placement::Wide { near: 0 }, || placement(&pool)),
         Some(Placement::Wide { .. })
@@ -675,6 +680,8 @@ fn random_placements_complete() {
 /// worker can take jobs placed on this thread's group of one.
 #[test]
 fn taken_over_thread_keeps_local_jobs() {
+    // The taken-over thread starts under a Wide placement and runs each install on the group it
+    // names.
     let pool = Arc::new(
         ThreadPoolBuilder::new()
             .num_threads(3)
@@ -760,6 +767,9 @@ fn pool_drop_runs_queued_jobs() {
             }
         }
     }
+
+    // Dropping the pool leaves all 30 jobs queued behind the held workers. Once released, the
+    // workers must run every one before they stop.
     release.store(true, Ordering::SeqCst);
     registry.wait_until_stopped();
     assert_eq!(ran.load(Ordering::SeqCst), 30);
@@ -771,12 +781,16 @@ fn pool_drop_runs_queued_jobs() {
 #[test]
 fn install_propagates_panics_across_placements() {
     let pool = pool(4, 2);
+
+    // An install from outside the pool, under either placement.
     for placement in [Placement::Local(1), Placement::Wide { near: 1 }] {
         let outside = panic::catch_unwind(AssertUnwindSafe(|| {
             pool.install_in(placement, || panic!("placed"))
         }));
         assert_eq!(outside.map_err(message), Err(Some("placed")));
     }
+
+    // Installs from a worker of group 0: two it runs itself and one it sends to group 1.
     let from_worker = pool.install_in(Placement::Local(0), || {
         [
             Placement::Local(0),
@@ -846,6 +860,8 @@ fn install_crosses_pools_and_returns() {
 #[test]
 fn broadcast_reaches_only_selected_group() {
     let pool = Arc::new(pool(5, 2));
+
+    // A blocking broadcast on group 1 runs once on each of its two workers.
     let mut seen = pool.broadcast_in(1, || {
         pool.current_worker()
             .map(|worker| (worker.index, worker.placement))
@@ -859,6 +875,7 @@ fn broadcast_reaches_only_selected_group() {
         ]
     );
 
+    // A detached broadcast on the narrower last group runs on its only worker.
     let ran = Arc::new(Mutex::new(Vec::new()));
     let (runner, record) = (Arc::clone(&pool), Arc::clone(&ran));
     pool.spawn_broadcast_in(2, move || {
@@ -951,6 +968,7 @@ fn spawn_external_jobs_keep_submission_order() {
             }
             release_tx.send(()).unwrap();
 
+            // Once released, the worker runs the jobs in the order they were queued.
             wait_until("every queued job runs", || {
                 order.lock().len() == placements.len()
             });
@@ -964,6 +982,8 @@ fn spawn_external_jobs_keep_submission_order() {
 fn spawn_external_jobs_skip_foreign_groups() {
     within(|| {
         let pool = Arc::new(pool(2, 1));
+
+        // Hold the only worker of each group until its release.
         let mut releases = Vec::new();
         for group in 0..2 {
             let (started_tx, started_rx) = mpsc::channel();
@@ -976,6 +996,7 @@ fn spawn_external_jobs_skip_foreign_groups() {
             releases.push(release_tx);
         }
 
+        // Queue jobs that alternate between the two groups and the whole pool.
         let order = Arc::new(Mutex::new(Vec::new()));
         for (index, placement) in [
             Placement::Local(1),
@@ -1001,6 +1022,8 @@ fn spawn_external_jobs_skip_foreign_groups() {
         releases.remove(0).send(()).unwrap();
         wait_until("group 0's eligible jobs run", || order.lock().len() == 4);
         assert_eq!(*order.lock(), [(1, 0), (2, 0), (4, 0), (5, 0)]);
+
+        // Once released, group 1 runs its own jobs in submission order.
         drop(releases);
         wait_until("group 1's jobs run", || order.lock().len() == 6);
         assert_eq!(order.lock()[4..], [(0, 1), (3, 1)]);
@@ -1070,7 +1093,7 @@ fn spawn_contended_producers_keep_submission_order() {
 /// every job in the order they ran.
 fn wide_deque_order(group_width: usize, injected: usize, wide: bool) -> (usize, Vec<&'static str>) {
     within(move || {
-        // Keep the owner in user code while the managed worker runs queued work.
+        // The taken-over thread stays in test code while the other worker runs queued work.
         let pool = Arc::new(
             ThreadPoolBuilder::new()
                 .num_threads(2)
@@ -1097,6 +1120,8 @@ fn wide_deque_order(group_width: usize, injected: usize, wide: bool) -> (usize, 
             });
         }));
         started_rx.recv().unwrap();
+
+        // Queue the taken-over thread's job on its wide deque, then inject jobs from outside.
         {
             let order = Arc::clone(&order);
             pool.spawn(move || order.lock().push("taken over"));
@@ -1118,6 +1143,7 @@ fn wide_deque_order(group_width: usize, injected: usize, wide: bool) -> (usize, 
         }
         release_tx.send(()).unwrap();
 
+        // Report where the taken-over thread's job ran among all the queued jobs.
         let total = injected * (1 + usize::from(wide)) + 1;
         wait_until("every queued job runs", || order.lock().len() == total);
         let order = order.lock().clone();
@@ -1374,6 +1400,7 @@ enum WideSource {
 /// counts as idle coverage for the wide job, so its exit must wake group 2 to run it before any
 /// busy worker is released. Without a wide job, the exit must not wake group 2.
 fn check_wide_handoff(point: WakePoint, source: WideSource) {
+    // Give group 1's workers a gate for `point` and let the whole pool fall asleep.
     let pool = Arc::new(pool(6, 2));
     let gate = WakeGate::install(&pool, point);
     wait_until_asleep(&pool);
@@ -1497,7 +1524,7 @@ fn check_wide_handoff(point: WakePoint, source: WideSource) {
     // Release the held worker, and check whether group 2 runs the wide job before any busy worker
     // could take it.
     gate.hold.released.store(true, Ordering::SeqCst);
-    wait_until("the fourth local body runs", || {
+    wait_until("the held worker runs its local job", || {
         resumed.load(Ordering::SeqCst)
     });
     let ran_before_release = source != WideSource::None && observe_wide_job(&wide);
@@ -1598,6 +1625,8 @@ fn wide_work_survives_concurrent_local_wakes() {
             started.load(Ordering::SeqCst) == 3
         });
         let ran_before_release = observe_wide_job(&wide);
+
+        // Release every held worker and let the pool settle before checking the outcome.
         gates[1].hold.released.store(true, Ordering::SeqCst);
         wait_until("both woken workers run local jobs", || {
             started.load(Ordering::SeqCst) == 4

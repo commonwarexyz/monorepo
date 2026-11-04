@@ -1466,9 +1466,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// [`Strategy::spawn`] hands to the pool from outside it can start on any idle worker and
     /// prefers waking its submitter's home group.
     ///
-    /// For up to one unfinished job per worker of that group, the policy learns whether descendants
-    /// stay on the starting worker's group or use the whole pool. It times the job itself, not its
-    /// consumer's later work. Other jobs use the whole pool.
+    /// With several groups, the group a job prefers waking admits up to one unfinished job per
+    /// worker. For admitted jobs, the policy learns whether descendants stay on the starting
+    /// worker's group or use the whole pool. It times the job itself, not its consumer's later
+    /// work. Other jobs use the whole pool.
     ///
     /// Requested masks stay within the workers' inherited masks, and the operating system may
     /// reject a request. Other threads can still run on a group's CPUs.
@@ -1507,7 +1508,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     #[derive(Debug, Clone)]
     pub struct Rayon {
         // The parallelism assumed for policy decisions and for planning batches and tiles.
-        // Defaults to the groups' total thread count.
+        // Defaults to the pool's thread count.
         parallelism: usize,
 
         // `Some` enables adaptive serial-vs-parallel decisions. `None` runs the parallel body
@@ -1518,9 +1519,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         // into, with their homes and their load.
         groups: Arc<topology::Groups>,
 
-        // The placement a copy made by `placed` runs its parallel bodies under, or `None` outside
-        // such a copy. `own_dispatch` uses it when the caller is not a worker of the strategy's
-        // pool.
+        // The placement a copy made by `placed` runs its parallel bodies under when the caller is
+        // not a worker of the strategy's pool, or `None` outside such a copy.
         placement: Option<rayon::Placement>,
     }
 
@@ -1559,8 +1559,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         ///
         /// When the pool fills all allowed CPUs across two or more equally sized domains of at
         /// least two CPUs each, groups use the full domain width and get fixed homes at startup. A
-        /// smaller `parallelism` gives one group, and one that is not a multiple of the group width
-        /// leaves a narrower last group that takes only work placed on the whole pool.
+        /// `parallelism` of at most the group width gives one group. Workers past a multiple of the
+        /// group width form a narrower last group that takes only work placed on the whole pool.
         pub fn grouped(
             parallelism: NonZeroUsize,
             stack_size: Option<usize>,
@@ -1584,7 +1584,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         /// Overrides the parallelism assumed for planning decisions.
         ///
         /// This does not resize the backing pool. By default a strategy plans with the pool's
-        /// thread count; override it when the strategy should expose a different parallelism
+        /// thread count. Override it when the strategy should expose a different parallelism
         /// (e.g. a runtime that executes strategy work inline on a single thread). Work placed on
         /// one group of a strategy with several groups plans for at most that group's width.
         pub const fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
@@ -2383,6 +2383,7 @@ mod test {
     /// Local calls from a domain home a group there, and the strategy reports it.
     #[test]
     fn local_calls_home_group() {
+        // Repeated placed calls from domain 1 home a group there.
         let strategy = synthetic(&[2, 2]);
         crate::topology::Groups::fake_domain(Some(1));
         for _ in 0..8 {
@@ -2393,6 +2394,8 @@ mod test {
             assert_eq!(out, (1..=64).collect::<Vec<_>>());
         }
         crate::topology::Groups::fake_domain(None);
+
+        // The report shows the home, with no call left in flight.
         let report = strategy.groups.describe();
         assert!(report.contains("home Some(1)"), "{report}");
         assert!(report.contains("in_flight 0"), "{report}");
@@ -2424,6 +2427,7 @@ mod test {
             (crate::rayon::Placement::Local(1), true),
             (crate::rayon::Placement::Wide { near: 1 }, false),
         ] {
+            // A map nested under `placement` trains only the estimate of that placement.
             let strategy = synthetic(&[2, 2]);
             let (site, _) = strategy
                 .groups
@@ -2510,6 +2514,7 @@ mod test {
     /// same group, which keeps its home.
     #[test]
     fn single_group_places_outside_calls() {
+        // Call from domain 1, then from domain 0.
         let strategy = synthetic(&[2]);
         crate::topology::Groups::fake_domain(Some(1));
         let (_, first) = map_placements(&strategy);
@@ -2518,6 +2523,7 @@ mod test {
         let (_, second) = map_placements(&strategy);
         crate::topology::Groups::fake_domain(None);
 
+        // Both calls ran on the only group, and it kept the first call's home.
         assert!(homed.contains("home Some(1)"), "{homed}");
         for placements in [first, second] {
             assert!(
@@ -2687,6 +2693,7 @@ mod test {
     /// and the groups end idle with no submitter left registered.
     #[test]
     fn grouped_jobs_and_runs_complete() {
+        // Callers in three domains each spawn jobs and run placed maps, checking every result.
         let strategy = synthetic(&[2, 2]);
         std::thread::scope(|scope| {
             for domain in 0..3u16 {
@@ -2797,6 +2804,7 @@ mod test {
         }
 
         for unstable in [false, true] {
+            // Six sorts from domain 0 share one call site.
             let strategy = synthetic(&[2, 2]);
             let policy = strategy.policy.as_ref().unwrap();
             let local = Some(crate::rayon::Placement::Local(0));
@@ -2821,6 +2829,8 @@ mod test {
                     "{placements:?}"
                 );
             }
+
+            // The policy timed the sorts only on the group, and it kept its home in domain 0.
             let (wide, local) = policy
                 .run_placement_estimates(site, 1024, 1024, strategy.parallelism)
                 .unwrap();
@@ -2865,6 +2875,8 @@ mod test {
         crate::topology::Groups::fake_domain(None);
         drop(held);
 
+        // The first join ran on the whole pool. The second ran on group 1 and held it until
+        // it returned.
         let is_wide = |p: Option<crate::rayon::Placement>| {
             matches!(p, Some(crate::rayon::Placement::Wide { .. }))
         };
@@ -2889,6 +2901,7 @@ mod test {
     /// group-mate is held, so the chain completes only if A's worker runs C while it waits.
     #[test]
     fn waiting_worker_runs_queued_dependencies() {
+        // Job B, on group 0, waits for a value.
         let strategy = synthetic(&[2, 2]).without_policy();
         let (value_tx, value_rx) = futures::channel::oneshot::channel();
         let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
@@ -2897,6 +2910,7 @@ mod test {
             strategy.spawn(1, move |_| block_on_nested(value_rx).unwrap())
         });
 
+        // Hold A's group-mate, then start job A on group 1 waiting for B.
         let release = Arc::new(AtomicUsize::new(0));
         let (occupied_tx, occupied_rx) = std::sync::mpsc::channel();
         let (released_tx, released_rx) = std::sync::mpsc::channel();
@@ -2918,6 +2932,7 @@ mod test {
         });
         let waiting = waiting_rx.recv_timeout(Duration::from_secs(10)).is_ok();
 
+        // Job C, queued on A's group, sends the value B waits for.
         strategy
             .groups
             .pool()
@@ -2966,6 +2981,7 @@ mod test {
     #[commonware_macros::test_group("miri")]
     #[test]
     fn root_keeps_claim_on_execution_group() {
+        // Home group 0 in domain 0 and keep its lease, and home group 1 in domain 1.
         let strategy = synthetic(&[2, 2]).without_policy();
         crate::topology::Groups::fake_domain(Some(0));
         let preferred = strategy.groups.local().unwrap();
@@ -2994,6 +3010,7 @@ mod test {
             .map(|_| occupied_rx.recv_timeout(Duration::from_secs(10)))
             .collect();
 
+        // A root from domain 0 records its worker around a nested job, then blocks.
         let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
         let (root_done_tx, root_done_rx) = std::sync::mpsc::channel();
         let root_release = Arc::clone(&release);
@@ -3088,6 +3105,7 @@ mod test {
     fn root_uses_learned_descendant_width() {
         #[track_caller]
         fn check(wide: bool) {
+            // Train the call site to prefer Wide descendants when `wide`, and Local otherwise.
             let strategy = synthetic(&[2, 2]);
             let caller = std::panic::Location::caller();
             for placement in [
@@ -3109,6 +3127,7 @@ mod test {
                 );
             }
 
+            // A root reports its group, then joins once the test signals it.
             let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
             let (join_tx, join_rx) = std::sync::mpsc::channel();
             let job = strategy.spawn(64, move |strategy| {
@@ -3189,6 +3208,7 @@ mod test {
     fn narrow_root_runs_wide_unrecorded() {
         #[track_caller]
         fn check() {
+            // Home group 0, hold every group, and give the call site only a Wide job sample.
             let strategy = synthetic(&[2, 1]);
             crate::topology::Groups::fake_domain(Some(0));
             let home = strategy.groups.local().unwrap();
@@ -3224,6 +3244,8 @@ mod test {
             let occupied: Vec<_> = (0..2)
                 .map(|_| occupied_rx.recv_timeout(Duration::from_secs(10)).is_ok())
                 .collect();
+
+            // A root, able to start only on the narrow group, records its worker and its child's.
             let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
             let job = strategy.spawn(64, move |strategy| {
                 let root = strategy.groups.pool().current_worker().unwrap();
@@ -3375,6 +3397,7 @@ mod test {
     /// After the parent's install returns, the job's claims alone must keep its group busy, or
     /// every group under Wide, until it finishes.
     fn check_detached_claims(wide: bool) {
+        // A worker under `placement` detaches a child job, and the test then drops its own leases.
         let strategy = synthetic(&[2, 2]).without_policy();
         crate::topology::Groups::fake_domain(Some(0));
         let home = strategy.groups.local().unwrap();
@@ -3635,11 +3658,13 @@ mod test {
     #[commonware_macros::test_group("miri")]
     #[test]
     fn spawn_overflow_leaves_placement_untouched() {
+        // Two roots from domain 0 fill the admissions of the group homed there.
         let strategy = synthetic(&[2, 2]);
         crate::topology::Groups::fake_domain(Some(0));
         let roots: Vec<_> = (0..2).map(|_| strategy.groups.root()).collect();
         assert!(roots.iter().all(|(_, admitted)| *admitted));
 
+        // A third root records its job without consulting or training descendant placement.
         let (loc, job) = spawn_flagged(&strategy, false);
         assert_eq!(futures::executor::block_on(job), 7);
         let policy = strategy.policy.as_ref().unwrap();
@@ -4043,6 +4068,7 @@ mod test {
     /// other worker. The job blocks on a value sent by a later job on the same group, so the
     /// moved future must run that job while it waits.
     fn check_moved_future(strategy: Rayon, group: usize) {
+        // Hold every worker outside `group`, so only `group` can start the job.
         let strategy = strategy.without_policy();
         let placement = Placement::Local(group);
         let release = Arc::new(AtomicUsize::new(0));
