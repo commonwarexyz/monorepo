@@ -136,6 +136,7 @@ cfg_if::cfg_if! {
         pub mod marshal;
         #[cfg(any(test, feature = "mocks"))]
         pub mod mocks;
+        pub(crate) mod order;
         pub(crate) mod storage;
         #[cfg(test)]
         mod tests;
