@@ -4,7 +4,7 @@ use crate::config::RunConfig;
 use commonware_consensus::{
     multimmit::{
         config::{Protocol, Tuning},
-        scheme::{Generic, bls12381},
+        scheme::{Generic, bls12381_sas},
         types::{BlockRef, CertificateId, ChainId, CodecConfig, EpochGenesis, PathLimits},
     },
     types::{Epoch, Height, Participant, ViewDelta},
@@ -16,9 +16,9 @@ use commonware_cryptography::{
 use commonware_utils::{TestRng, ordered::Set};
 use std::time::Duration;
 
-/// The signing suite this example runs: the default BLS12-381 suite over Ed25519 identities, with
-/// multisignature votes and threshold DA and nullification certificates.
-pub type Suite = bls12381::Scheme<ed25519::PublicKey, MinSig>;
+/// The signing suite this example runs: the synchronized aggregate suite over Ed25519 identities,
+/// with Pointcheval-Sanders votes and threshold DA and nullification certificates.
+pub type Suite = bls12381_sas::Scheme<ed25519::PublicKey, MinSig>;
 
 /// Signature namespace for this example's consensus deployment.
 const CONSENSUS_NAMESPACE: &[u8] = b"_COMMONWARE_LOG_MULTIMMIT_CONSENSUS";
