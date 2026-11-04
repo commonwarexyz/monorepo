@@ -47,33 +47,6 @@ pub mod ed25519;
 )))] // ALPHA
 pub mod secp256r1;
 
-/// Emits the given items only where ALPHA APIs exist.
-///
-/// Exported macros of stabler modules wrap their implementations of ALPHA traits in this macro,
-/// so the stability cfg is evaluated in this crate rather than in the crate expanding them.
-#[cfg(not(any(
-    commonware_stability_BETA,
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))] // ALPHA
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __alpha {
-    ($($item:item)*) => {
-        $($item)*
-    };
-}
-
-/// Drops the given items at BETA, where ALPHA APIs do not exist.
-#[cfg(commonware_stability_BETA)]
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __alpha {
-    ($($item:item)*) => {};
-}
-
 commonware_macros::stability_scope!(ALPHA {
     #[cfg(feature = "std")]
     pub mod banderwagon;
