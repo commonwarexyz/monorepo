@@ -1032,7 +1032,6 @@ mod tests {
             .new_batch::<Sha256>()
             .set(Sha256::fill(14), value(14))
             .with_metadata(Some(Sha256::fill(15)))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -1161,7 +1160,6 @@ mod tests {
             .new_batch::<Sha256>()
             .set(Sha256::fill(19), value(19))
             .with_metadata(Some(Sha256::fill(20)))
-            .with_inactivity_floor(db.size())
             .merkleize(&db)
             .await
             .unwrap();
@@ -1245,12 +1243,10 @@ mod tests {
 
     /// Apply a single-key batch writing `key -> value` with `metadata`.
     async fn apply_set(db: DelayedDb, key: Digest, value: Digest, metadata: Digest) -> DelayedDb {
-        let floor = db.inactivity_floor_loc();
         let batch = db
             .new_batch()
             .set(key, value)
             .with_metadata(Some(metadata))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -1898,7 +1894,6 @@ mod tests {
             let batch = db
                 .new_batch()
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
-                .with_inactivity_floor(Location::new(1))
                 .merkleize(&db)
                 .await
                 .unwrap();

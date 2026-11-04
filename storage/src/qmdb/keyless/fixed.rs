@@ -898,11 +898,9 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
             let value = commonware_utils::sequence::U64::new(7);
-            let floor = db.inactivity_floor_loc();
             let batch = db
                 .new_batch()
                 .append(value.clone())
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -1023,13 +1021,11 @@ mod tests {
         let v2 = commonware_utils::sequence::U64::new(2);
         let metadata = commonware_utils::sequence::U64::new(99);
 
-        let floor = db.inactivity_floor_loc();
         let retained = db
             .new_batch()
             .append(v1.clone())
             .append(v2.clone())
             .with_metadata(Some(metadata.clone()))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -1038,7 +1034,6 @@ mod tests {
             .append(v1)
             .append(v2)
             .with_metadata(Some(metadata.clone()))
-            .with_inactivity_floor(floor)
             .merkleize(&compact)
             .await
             .unwrap();
@@ -1117,8 +1112,6 @@ mod tests {
             for i in 0..20u64 {
                 batch = batch.append(U64::new(i * 10 + 1));
             }
-            let floor = target_db.inactivity_floor_loc();
-            let batch = batch.with_inactivity_floor(floor);
             let merkleized = batch.merkleize(&target_db).await.unwrap();
             let target_db = target_db.apply_batch(merkleized).await.unwrap();
 

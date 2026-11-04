@@ -1004,7 +1004,6 @@ mod tests {
             .new_batch::<Sha256>()
             .append(U64::new(14))
             .with_metadata(Some(U64::new(15)))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -1132,7 +1131,6 @@ mod tests {
             .new_batch::<Sha256>()
             .append(U64::new(19))
             .with_metadata(Some(U64::new(20)))
-            .with_inactivity_floor(db.size())
             .merkleize(&db)
             .await
             .unwrap();
@@ -1188,12 +1186,10 @@ mod tests {
     fn test_serve_refuses_requests_outside_witness() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-serve-refusal").await;
-            let floor = db.inactivity_floor_loc();
             let batch = db
                 .new_batch()
                 .append(U64::new(1))
                 .with_metadata(Some(U64::new(11)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -1263,12 +1259,10 @@ mod tests {
             // Apply two batches and record the target after each.
             let mut targets = Vec::new();
             for seed in [1, 2] {
-                let floor = db.inactivity_floor_loc();
                 let batch = db
                     .new_batch()
                     .append(U64::new(seed))
                     .with_metadata(Some(U64::new(seed + 10)))
-                    .with_inactivity_floor(floor)
                     .merkleize(&db)
                     .await
                     .unwrap();
@@ -1366,12 +1360,10 @@ mod tests {
 
     /// Apply a single-append batch carrying `seed` as both value and metadata.
     async fn apply_append(db: DelayedDb, seed: u64) -> DelayedDb {
-        let floor = db.inactivity_floor_loc();
         let batch = db
             .new_batch()
             .append(U64::new(seed))
             .with_metadata(Some(U64::new(seed)))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -1842,13 +1834,11 @@ mod tests {
     fn test_compact_stale_batch_rejected() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-stale").await;
-            let floor = db.inactivity_floor_loc();
 
             let batch_a = db
                 .new_batch()
                 .append(U64::new(1))
                 .with_metadata(Some(U64::new(11)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -1856,7 +1846,6 @@ mod tests {
                 .new_batch()
                 .append(U64::new(2))
                 .with_metadata(Some(U64::new(22)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -1869,11 +1858,7 @@ mod tests {
             // After the apply, merkleizing a batch built on the pre-apply state and applying the
             // merkleized sibling both return `StaleBatch`.
             assert!(matches!(
-                stale
-                    .with_metadata(Some(U64::new(33)))
-                    .with_inactivity_floor(floor)
-                    .merkleize(&db)
-                    .await,
+                stale.with_metadata(Some(U64::new(33))).merkleize(&db).await,
                 Err(Error::StaleBatch)
             ));
             assert!(matches!(
@@ -1887,26 +1872,23 @@ mod tests {
     fn test_compact_delayed_merkleize_after_ancestor_apply() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-delayed-child").await;
-            let floor = db.inactivity_floor_loc();
 
             let a = db
                 .new_batch()
                 .append(U64::new(1))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
             let b = a
                 .new_batch::<Sha256>()
                 .append(U64::new(2))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
             let c = b.new_batch::<Sha256>().append(U64::new(3));
 
             let db = db.apply_batch(a).await.unwrap();
-            let c = c.with_inactivity_floor(floor).merkleize(&db).await.unwrap();
+            let c = c.merkleize(&db).await.unwrap();
             let expected_root = c.root();
             let db = db.apply_batch(c).await.unwrap();
 
@@ -1919,7 +1901,6 @@ mod tests {
     fn test_compact_to_batch_reflects_live_state() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-to-batch-live").await;
-            let floor = db.inactivity_floor_loc();
 
             let pre_apply_root = db.root();
             let pre_snapshot = db.to_batch();
@@ -1933,7 +1914,6 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .with_metadata(Some(U64::new(11)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -1961,13 +1941,11 @@ mod tests {
     fn test_compact_stale_batch_chained() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-chained-stale").await;
-            let floor = db.inactivity_floor_loc();
 
             let common_parent = db
                 .new_batch()
                 .append(U64::new(10))
                 .with_metadata(Some(U64::new(110)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -1975,7 +1953,6 @@ mod tests {
                 .new_batch::<Sha256>()
                 .append(U64::new(11))
                 .with_metadata(Some(U64::new(111)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -1983,7 +1960,6 @@ mod tests {
                 .new_batch::<Sha256>()
                 .append(U64::new(12))
                 .with_metadata(Some(U64::new(112)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -1997,7 +1973,6 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .with_metadata(Some(U64::new(11)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -2005,7 +1980,6 @@ mod tests {
                 .new_batch()
                 .append(U64::new(2))
                 .with_metadata(Some(U64::new(22)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -2013,7 +1987,6 @@ mod tests {
                 .new_batch::<Sha256>()
                 .append(U64::new(3))
                 .with_metadata(Some(U64::new(33)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -2032,13 +2005,11 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db =
                 open_db::<mmr::Family>(context.child("db"), "keyless-child-before-parent").await;
-            let floor = db.inactivity_floor_loc();
 
             let parent = db
                 .new_batch()
                 .append(U64::new(1))
                 .with_metadata(Some(U64::new(11)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -2046,7 +2017,6 @@ mod tests {
                 .new_batch::<Sha256>()
                 .append(U64::new(2))
                 .with_metadata(Some(U64::new(22)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -2063,13 +2033,11 @@ mod tests {
     fn test_compact_sequential_commit_parent_then_child() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-parent-child").await;
-            let floor = db.inactivity_floor_loc();
 
             let parent = db
                 .new_batch()
                 .append(U64::new(1))
                 .with_metadata(Some(U64::new(11)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -2077,7 +2045,6 @@ mod tests {
                 .new_batch::<Sha256>()
                 .append(U64::new(2))
                 .with_metadata(Some(U64::new(22)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -2521,7 +2488,6 @@ mod tests {
             let batch = db
                 .new_batch()
                 .append(U64::new(2))
-                .with_inactivity_floor(Location::new(1))
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -2783,7 +2749,6 @@ mod tests {
     fn test_compact_bounded_initialization_between_commits() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-rewind-between").await;
-            let floor = db.inactivity_floor_loc();
             let initial_root = db.root();
 
             // A multi-op commit jumps the committed size from 1 (bootstrap) to 4.
@@ -2792,7 +2757,6 @@ mod tests {
                 .append(U64::new(1))
                 .append(U64::new(2))
                 .with_metadata(Some(U64::new(11)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -2806,7 +2770,6 @@ mod tests {
                 .new_batch()
                 .append(U64::new(3))
                 .with_metadata(Some(U64::new(22)))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();

@@ -428,14 +428,7 @@ mod tests {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
             let key = Sha256::fill(1u8);
             let value = Sha256::fill(2u8);
-            let floor = db.inactivity_floor_loc();
-            let batch = db
-                .new_batch()
-                .set(key, value)
-                .with_inactivity_floor(floor)
-                .merkleize(&db)
-                .await
-                .unwrap();
+            let batch = db.new_batch().set(key, value).merkleize(&db).await.unwrap();
             let db = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             assert_eq!(db.get_many(&[&key]).await.unwrap(), vec![Some(value)]);
@@ -661,13 +654,11 @@ mod tests {
         let v2 = Sha256::fill(22u8);
         let metadata = Sha256::fill(99u8);
 
-        let floor = db.inactivity_floor_loc();
         let retained = db
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
             .with_metadata(Some(metadata))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -676,7 +667,6 @@ mod tests {
             .set(k1, v1)
             .set(k2, v2)
             .with_metadata(Some(metadata))
-            .with_inactivity_floor(floor)
             .merkleize(&compact)
             .await
             .unwrap();

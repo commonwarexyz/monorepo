@@ -1082,7 +1082,6 @@ pub(super) mod tests {
         let collision = db
             .new_batch()
             .set(twin, Sha256::fill(104u8))
-            .with_inactivity_floor(base)
             .merkleize(&db)
             .await
             .unwrap();
@@ -1169,12 +1168,7 @@ pub(super) mod tests {
         let twin = parent
             .new_batch::<Sha256>()
             .set(Sha256::fill(201u8), Sha256::fill(213u8));
-        let expected = twin
-            .with_inactivity_floor(parent_floor)
-            .merkleize(&db)
-            .await
-            .unwrap()
-            .root();
+        let expected = twin.merkleize(&db).await.unwrap().root();
 
         // Apply the parent and prune to its floor.
         let db = db.apply_batch(Arc::clone(&parent)).await.unwrap();
@@ -1184,7 +1178,6 @@ pub(super) mod tests {
         assert!(*db.bounds().start > 0, "the prune must remove history");
 
         // The child built before the apply still merkleizes to the same root.
-        let child = child.with_inactivity_floor(parent_floor);
         let merkleized = child.merkleize(&db).await.unwrap();
         assert_eq!(merkleized.root(), expected);
         db.destroy().await.unwrap();
@@ -1206,18 +1199,15 @@ pub(super) mod tests {
         let db = open_db(context.child("db")).await;
         let k1 = Sha256::fill(1u8);
         let k2 = Sha256::fill(2u8);
-        let floor = db.inactivity_floor_loc();
         let winner = db
             .new_batch()
             .set(k1, Sha256::fill(3u8))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
         let loser = db
             .new_batch()
             .set(k1, Sha256::fill(4u8))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -1253,10 +1243,7 @@ pub(super) mod tests {
             loser.get_many(&no_keys, &db).await,
             Err(Error::StaleRead)
         ));
-        assert!(matches!(
-            child.with_inactivity_floor(floor).merkleize(&db).await,
-            Err(Error::StaleBatch)
-        ));
+        assert!(matches!(child.merkleize(&db).await, Err(Error::StaleBatch)));
         assert!(matches!(db.validate_batch(&loser), Err(Error::StaleBatch)));
         db.destroy().await.unwrap();
     }
@@ -1276,11 +1263,9 @@ pub(super) mod tests {
     {
         let db = open_db(context.child("db")).await;
         let (k1, k2) = (Sha256::fill(1u8), Sha256::fill(2u8));
-        let floor = db.inactivity_floor_loc();
         let parent = db
             .new_batch()
             .set(k1, Sha256::fill(3u8))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -1288,7 +1273,6 @@ pub(super) mod tests {
         let child = parent
             .new_batch::<Sha256>()
             .set(k2, Sha256::fill(4u8))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();

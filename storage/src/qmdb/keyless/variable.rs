@@ -253,13 +253,11 @@ mod tests {
         let v2 = b"world".to_vec();
         let metadata = b"metadata".to_vec();
 
-        let floor = db.inactivity_floor_loc();
         let retained = db
             .new_batch()
             .append(v1.clone())
             .append(v2.clone())
             .with_metadata(Some(metadata.clone()))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -268,7 +266,6 @@ mod tests {
             .append(v1)
             .append(v2)
             .with_metadata(Some(metadata.clone()))
-            .with_inactivity_floor(floor)
             .merkleize(&compact)
             .await
             .unwrap();

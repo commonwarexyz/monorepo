@@ -289,13 +289,11 @@ mod tests {
         let v2 = Sha256::fill(22u8);
         let metadata = Sha256::fill(99u8);
 
-        let floor = db.inactivity_floor_loc();
         let retained = db
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
             .with_metadata(Some(metadata))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -304,7 +302,6 @@ mod tests {
             .set(k1, v1)
             .set(k2, v2)
             .with_metadata(Some(metadata))
-            .with_inactivity_floor(floor)
             .merkleize(&compact)
             .await
             .unwrap();

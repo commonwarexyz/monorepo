@@ -680,7 +680,6 @@ pub(crate) mod tests {
             .unwrap();
         db = db.apply_batch(seed).await.unwrap();
         db = db.commit().await.unwrap();
-        let floor = db.inactivity_floor_loc();
 
         // A three-level unapplied chain, two appends per level. Each level's
         // appends start at its parent's tip.
@@ -689,7 +688,6 @@ pub(crate) mod tests {
             .new_batch()
             .append(V::Value::make(1))
             .append(V::Value::make(2))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -698,7 +696,6 @@ pub(crate) mod tests {
             .new_batch::<Sha256>()
             .append(V::Value::make(3))
             .append(V::Value::make(4))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -706,7 +703,6 @@ pub(crate) mod tests {
         let c = b
             .new_batch::<Sha256>()
             .append(V::Value::make(5))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -725,10 +721,7 @@ pub(crate) mod tests {
         assert_eq!(child.get_many(&locs, &db).await.unwrap(), expected);
 
         // Merkleizing the child returns `StaleBatch`, because its dropped ancestors are unapplied.
-        assert!(matches!(
-            child.with_inactivity_floor(floor).merkleize(&db).await,
-            Err(Error::StaleBatch)
-        ));
+        assert!(matches!(child.merkleize(&db).await, Err(Error::StaleBatch)));
 
         // Applying the chain lands the same values the reads reported.
         let db = db.apply_batch(c).await.unwrap();
@@ -900,12 +893,7 @@ pub(crate) mod tests {
             child
         };
         let child = build(&parent);
-        let expected = build(&parent)
-            .with_inactivity_floor(parent_floor)
-            .merkleize(&db)
-            .await
-            .unwrap()
-            .root();
+        let expected = build(&parent).merkleize(&db).await.unwrap().root();
 
         // Apply the parent and prune to its floor.
         let db = db.apply_batch(parent).await.unwrap();
@@ -915,7 +903,6 @@ pub(crate) mod tests {
         assert!(*db.bounds().start > 0, "the prune must remove history");
 
         // The child built before the apply still merkleizes to the same root.
-        let child = child.with_inactivity_floor(parent_floor);
         let merkleized = child.merkleize(&db).await.unwrap();
         assert_eq!(merkleized.root(), expected);
         db.destroy().await.unwrap();
@@ -941,18 +928,15 @@ pub(crate) mod tests {
         db = db.apply_batch(merkleized).await.unwrap();
         db = db.commit().await.unwrap();
 
-        let floor = db.inactivity_floor_loc();
         let winner = db
             .new_batch()
             .append(V::Value::make(1))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
         let loser = db
             .new_batch()
             .append(V::Value::make(2))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -1012,10 +996,7 @@ pub(crate) mod tests {
                 .await,
             Err(Error::StaleRead)
         ));
-        assert!(matches!(
-            child.with_inactivity_floor(floor).merkleize(&db).await,
-            Err(Error::StaleBatch)
-        ));
+        assert!(matches!(child.merkleize(&db).await, Err(Error::StaleBatch)));
         assert!(matches!(db.validate_batch(&loser), Err(Error::StaleBatch)));
         db.destroy().await.unwrap();
     }
@@ -1035,11 +1016,9 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        let floor = db.inactivity_floor_loc();
         let parent = db
             .new_batch()
             .append(V::Value::make(1))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -1048,7 +1027,6 @@ pub(crate) mod tests {
         let child = parent
             .new_batch::<Sha256>()
             .append(V::Value::make(2))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -2133,25 +2111,22 @@ pub(crate) mod tests {
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
-        let floor = db.inactivity_floor_loc();
         let a = db
             .new_batch()
             .append(V::Value::make(10))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
         let b = a
             .new_batch::<H>()
             .append(V::Value::make(20))
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
         let c = b.new_batch::<H>().append(V::Value::make(30));
 
         let db = db.apply_batch(a).await.unwrap();
-        let c = c.with_inactivity_floor(floor).merkleize(&db).await.unwrap();
+        let c = c.merkleize(&db).await.unwrap();
         let expected_root = c.root();
         let db = db.apply_batch(c).await.unwrap();
 
@@ -2768,11 +2743,9 @@ pub(crate) mod tests {
         Operation<F, V>: EncodeShared,
     {
         let base_val = V::Value::make(10);
-        let floor = db.inactivity_floor_loc();
         let merkleized = db
             .new_batch()
             .append(base_val.clone())
-            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
