@@ -1,3 +1,10 @@
+//! Routes wakeups for wide work between the worker groups of a registry.
+//!
+//! Each group runs the sleep protocol on its own counters. A wide job is offered to one group first
+//! and then to the others in cyclic order. A worker that leaves the idle state can pass the wakeup
+//! on to the next group. Paired fences keep an injected job visible to every worker the walk
+//! counted as idle or sleeping.
+
 use super::{Ordering, Registry, Tag, fence};
 
 impl Registry {

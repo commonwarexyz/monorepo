@@ -1,3 +1,10 @@
+//! The incoming job queues of a pool's worker groups.
+//!
+//! The injector holds one Local queue per group and one shared Wide queue. Every push takes a
+//! number from a single admission order, and a pop takes the oldest job across its group's Local
+//! queue and the Wide queue, so no older arrival is skipped. Each queue has an empty flag that the
+//! wake protocol reads without the lock.
+
 use super::JobRef;
 use crossbeam_utils::CachePadded;
 use std::{
