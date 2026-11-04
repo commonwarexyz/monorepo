@@ -27,7 +27,8 @@
 //!   |     +-- Shared (Arc)
 //!   |     +-- Ready (owner's end of a pool worker's run queue)
 //!   |     +-- TimerShard (Arc, the pool's on a pool worker: sleep
-//!   |     |       registrations and deadlines, with a cached bound)
+//!   |     |       registrations and deadlines, with a cached bound and
+//!   |     |       the IDs of sleeps dropped here, removed in batches)
 //!   |     +-- Driver
 //!   |     |     +-- io_uring ring (SQ/CQ)
 //!   |     |     +-- Waiters (requests and unconsumed results)
@@ -95,8 +96,10 @@
 //! I/O and sleeps register directly with the worker that first polls them.
 //! Polled later on another worker, I/O has the registering worker forward its
 //! result through a channel, while a sleep is polled and dropped directly in
-//! the registering worker's timer shard (see [`super::sleep`]). Mailboxes
-//! carry root wakes and the observation transfers and cancellations of I/O.
+//! the registering worker's timer shard, and a drop on the registering worker
+//! leaves the removal to its next service pass (see [`super::sleep`]).
+//! Mailboxes carry root wakes and the observation transfers and cancellations
+//! of I/O.
 //!
 //! Each turn polls a bounded batch of tasks and checks the root's wake flag,
 //! services I/O and timers, and applies a bounded batch of mailbox messages.
@@ -172,6 +175,7 @@ use super::{
     mailbox::{Cancel, Forward, Mailbox, Message},
     pool::{MAX_WORKERS, Pool, Threads},
     request::{RequestOutput, RetiredResources},
+    slab::Id,
     sleep::{self, RESCUE_INTERVAL, Sleep, TimerShard},
     spinner::{Config as SpinnerConfig, Spinner},
     task::{AfterPoll, Ready, RootWaker, Runnable},
@@ -1075,6 +1079,12 @@ pub struct Local {
     /// `u64::MAX` for none. Never later than that time, since only this
     /// worker registers, so service and parking can skip the shard's lock.
     pub timers_next: u64,
+    /// Registrations in `timers` whose sleeps were dropped on this worker
+    /// while it was not closing, which its next service pass, or its cleanup
+    /// before closing `timers`, removes in one critical section. Only this
+    /// worker pushes and drains it, and it keeps its capacity. While any
+    /// remain, the worker serves again rather than park.
+    pub timers_dropped: Vec<Id>,
     /// Reject new registration and send wakes to the global queue, while
     /// allowing idempotent cancellation.
     pub closing: bool,
@@ -1129,6 +1139,7 @@ impl Local {
             driver: Some(driver),
             timers,
             timers_next: u64::MAX,
+            timers_dropped: Vec::new(),
             closing: false,
             now,
             root_ready: true,
@@ -1787,6 +1798,10 @@ impl Worker {
         }
 
         // Detach local and forwarded observers before running callbacks.
+        // Registrations queued by sleeps dropped here before the worker began
+        // closing leave first, so closure wakes no dropped sleep's waker. A
+        // closing worker removes a dropped sleep's registration at once, so
+        // none queues from now on.
         // Admission is closed, so later I/O handle drops find no registration
         // to detach and sleeps registered here release no waker. Driver service
         // can still produce deferred work, and so can callbacks that drop
@@ -1797,10 +1812,14 @@ impl Worker {
                 driver,
                 timers,
                 timers_next,
+                timers_dropped,
                 deferred,
                 ..
             } = &mut *local;
             driver.as_mut().unwrap().close(deferred);
+            if !timers_dropped.is_empty() {
+                timers.drain(timers_dropped, deferred);
+            }
             timers.close(deferred);
             *timers_next = u64::MAX;
             local.update_pending();
@@ -1897,8 +1916,10 @@ impl Worker {
     }
 
     /// Service the io_uring ring and timers using one time sample, collecting
-    /// callbacks. A running pool worker also expires its peers' overdue
-    /// timers, at most once per [`RESCUE_INTERVAL`].
+    /// callbacks. Timer service first removes the registrations of sleeps
+    /// dropped on this worker since the last pass, then expires due ones. A
+    /// running pool worker also expires its peers' overdue timers, at most
+    /// once per [`RESCUE_INTERVAL`].
     /// Returns whether kernel service was deferred to an idle wait.
     fn service(&mut self, defer_kernel_service: bool) -> bool {
         let mut local = self.local.borrow_mut();
@@ -1909,6 +1930,7 @@ impl Worker {
             driver,
             timers,
             timers_next,
+            timers_dropped,
             closing,
             deferred,
             shared,
@@ -1920,12 +1942,21 @@ impl Worker {
             .service(*now, defer_kernel_service, deferred);
         let outcome = result.expect("io_uring driver service failed");
 
-        // Expiry defers observer notifications until after this borrow ends.
-        // The cached bound skips the shard until a registration may be due,
-        // and a pass that leaves due ones behind keeps it at or below now.
         // Polls on this thread may complete sleeps due by this time.
         let nanos = clock::nanos(*now);
         clock::set_turn(nanos);
+
+        // Registrations of sleeps dropped here leave first, in one critical
+        // section that defers their wakers' destruction, so expiry never
+        // fires them. A batch that leaves the wheel empty leaves no firing
+        // time to cache.
+        if !timers_dropped.is_empty() && timers.drain(timers_dropped, deferred) {
+            *timers_next = u64::MAX;
+        }
+
+        // Expiry defers observer notifications until after this borrow ends.
+        // The cached bound skips the shard until a registration may be due,
+        // and a pass that leaves due ones behind keeps it at or below now.
         if *timers_next <= nanos {
             *timers_next = timers.expire(nanos, deferred);
         }
@@ -2140,10 +2171,12 @@ impl Worker {
 
             // Callbacks and messages can submit I/O or make tasks runnable, so
             // the pre-service idle decision alone is not enough to permit parking.
+            // They can also drop sleeps registered here, whose removal and
+            // released wakers wait for a service pass, which runs first.
             let (ready, needs_kernel, pending_submissions) = {
                 let local = self.local.borrow();
                 (
-                    local.is_ready(),
+                    local.is_ready() || !local.timers_dropped.is_empty(),
                     !local.driver.as_ref().unwrap().is_empty(),
                     local.driver.as_ref().unwrap().has_pending_submissions(),
                 )
