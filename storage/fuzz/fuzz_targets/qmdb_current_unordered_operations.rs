@@ -301,7 +301,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             .expect("Range proof should not fail");
 
                         assert!(
-                            proof.verify::<Sha256, _, _>(start_loc,
+                            proof.verify::<Sha256, _, _>(
+                                start_loc,
                                 &ops,
                                 &chunks,
                                 &current_root
@@ -339,7 +340,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         if range_proof.proof.digests != bad_digests {
                             let mut bad_digest_proof = range_proof.clone();
                             bad_digest_proof.proof.digests = bad_digests;
-                            assert!(!bad_digest_proof.verify::<Sha256, _, _>(start_loc,
+                            assert!(!bad_digest_proof.verify::<Sha256, _, _>(
+                                start_loc,
                                 &ops,
                                 &chunks,
                                 &root
@@ -351,7 +353,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             && range_proof.pending_chunk_digest != bad_pending {
                                 let mut bad_pending_proof = range_proof.clone();
                                 bad_pending_proof.pending_chunk_digest = bad_pending;
-                                assert!(!bad_pending_proof.verify::<Sha256, _, _>(start_loc,
+                                assert!(!bad_pending_proof.verify::<Sha256, _, _>(
+                                    start_loc,
                                     &ops,
                                     &chunks,
                                     &root
@@ -362,7 +365,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         if range_proof.partial_chunk_digest != bad_partial_digest {
                             let mut bad_partial_proof = range_proof.clone();
                             bad_partial_proof.partial_chunk_digest = bad_partial_digest;
-                            assert!(!bad_partial_proof.verify::<Sha256, _, _>(start_loc,
+                            assert!(!bad_partial_proof.verify::<Sha256, _, _>(
+                                start_loc,
                                 &ops,
                                 &chunks,
                                 &root
@@ -378,7 +382,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             corrupted
                         }).collect();
                         if chunks != bad_chunks {
-                            assert!(!range_proof.verify::<Sha256, _, _>(start_loc,
+                            assert!(!range_proof.verify::<Sha256, _, _>(
+                                start_loc,
                                 &ops,
                                 &bad_chunks,
                                 &root
@@ -400,11 +405,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         Ok((proof, value)) => {
                             let expected = committed_state.get(key).copied().flatten().expect("key should exist in committed state");
                             assert_eq!(value, Value::new(expected));
-                            let verification_result = proof.verify::<Sha256, FixedEncoding<Value>, _>(
-                                k,
-                                value,
-                                &current_root,
-                            );
+                            let verification_result = proof
+                                .verify::<Sha256, FixedEncoding<Value>, _>(k, value, &current_root);
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");
                         }
                         Err(commonware_storage::qmdb::Error::KeyNotFound) => {

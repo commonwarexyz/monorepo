@@ -368,7 +368,7 @@ pub mod tests {
                 // Proof should not verify if we include extra chunks.
                 let mut chunks_with_extra = chunks.clone();
                 chunks_with_extra.push(chunks[chunks.len() - 1]);
-                assert!(!proof.verify::<Sha256, _, _>(loc, &ops, &chunks_with_extra, &root,));
+                assert!(!proof.verify::<Sha256, _, _>(loc, &ops, &chunks_with_extra, &root));
             }
 
             db.destroy().await.unwrap();

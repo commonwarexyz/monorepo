@@ -1239,7 +1239,7 @@ mod tests {
         let chunks = (start_chunk_idx..=end_chunk_idx)
             .map(|chunk_idx| <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx))
             .collect::<Vec<_>>();
-        assert!(proof.verify::<Sha256, _, N>(start_loc, &elements, &chunks, &root,));
+        assert!(proof.verify::<Sha256, _, N>(start_loc, &elements, &chunks, &root));
 
         // Flip a byte in the trailing partial chunk while preserving the window shape.
         let mut bad_chunks = chunks;
@@ -1328,10 +1328,10 @@ mod tests {
         // Tamper with the proof by injecting a fake partial chunk digest
         let mut tampered = proof.clone();
         tampered.partial_chunk_digest = Some(hasher.digest(b"fake partial chunk"));
-        assert!(!tampered.verify::<Sha256, _, N>(loc, &[element], &[chunk], &root,));
+        assert!(!tampered.verify::<Sha256, _, N>(loc, &[element], &[chunk], &root));
 
         proof.partial_chunk_digest = Some(hasher.digest(b"fake partial chunk"));
-        assert!(!proof.verify::<Sha256, _, N>(loc, &[element], &[chunk], &root,));
+        assert!(!proof.verify::<Sha256, _, N>(loc, &[element], &[chunk], &root));
     }
 
     async fn current_range_proof_fixture<F: Graftable, const N: usize>(
@@ -2213,7 +2213,7 @@ mod tests {
                 assert_eq!(dynamic.loc, loc);
                 assert_eq!(dynamic.chunk.as_ref(), native.chunk.as_slice());
                 assert!(dynamic.verify::<Sha256, _>(operations[0], &root));
-                assert!(!dynamic.verify::<Sha256, _>(Sha256::hash(&[b"wrong operation"]), &root,));
+                assert!(!dynamic.verify::<Sha256, _>(Sha256::hash(&[b"wrong operation"]), &root));
                 assert!(
                     !dynamic.verify::<Sha256, _>(operations[0], &Sha256::hash(&[b"wrong root"]),)
                 );

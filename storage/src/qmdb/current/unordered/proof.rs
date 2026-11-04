@@ -41,6 +41,34 @@ impl<F: Graftable, D: Digest, C: AsRef<[u8]>> KeyValueProof<F, D, C> {
     /// with the provided `root`.
     ///
     /// `V` selects the fixed or variable value encoding used by the database.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_codec::{Decode, Input};
+    /// use commonware_cryptography::{Sha256, sha256::Digest};
+    /// use commonware_storage::{
+    ///     merkle::mmr,
+    ///     qmdb::{any::value::FixedEncoding, current::unordered::proof::dynamic::KeyValueProof},
+    /// };
+    ///
+    /// fn verify(
+    ///     encoded: impl Input,
+    ///     chunk_size: usize,
+    ///     max_digests: usize,
+    ///     key: Digest,
+    ///     value: Digest,
+    ///     root: &Digest,
+    /// ) -> bool {
+    ///     let Ok(proof) = KeyValueProof::<mmr::Family, Digest>::decode_cfg(
+    ///         encoded,
+    ///         &(chunk_size, max_digests),
+    ///     ) else {
+    ///         return false;
+    ///     };
+    ///     proof.verify::<Sha256, FixedEncoding<Digest>, _>(key, value, root)
+    /// }
+    /// ```
     pub fn verify<H, V, K>(&self, key: K, value: V::Value, root: &D) -> bool
     where
         H: Hasher<Digest = D>,

@@ -343,7 +343,7 @@ pub mod tests {
                 // Proof should not verify if we include extra chunks.
                 let mut chunks_with_extra = chunks.clone();
                 chunks_with_extra.push(chunks[chunks.len() - 1]);
-                assert!(!proof.verify::<Sha256, _, _>(loc, &ops, &chunks_with_extra, &root,));
+                assert!(!proof.verify::<Sha256, _, _>(loc, &ops, &chunks_with_extra, &root));
             }
 
             db.destroy().await.unwrap();
@@ -367,9 +367,9 @@ pub mod tests {
         let wrong_value = Sha256::hash(&[&[0xFF]]);
         let wrong_key = Sha256::hash(&[&[0xEE]]);
         let wrong_root = Sha256::hash(&[&[0xDD]]);
-        assert!(!proof.verify::<Sha256, V, _>(key, wrong_value, root,));
-        assert!(!proof.verify::<Sha256, V, _>(wrong_key, value, root,));
-        assert!(!proof.verify::<Sha256, V, _>(key, value, &wrong_root,));
+        assert!(!proof.verify::<Sha256, V, _>(key, wrong_value, root));
+        assert!(!proof.verify::<Sha256, V, _>(wrong_key, value, root));
+        assert!(!proof.verify::<Sha256, V, _>(key, value, &wrong_root));
     }
 
     /// Verify key-value proofs for every active operation in a randomly-populated database.

@@ -5146,19 +5146,11 @@ pub mod tests {
             let (proof, value) = db.key_value_proof(&keys[0]).await.unwrap();
             assert_eq!(value, val(10));
             assert_eq!(proof.next_key, keys[1]);
-            assert!(
-                proof.verify::<Sha256, crate::qmdb::any::value::FixedEncoding<Digest>>(
-                    keys[0], value, &root
-                )
-            );
+            assert!(proof.verify::<Sha256, FixedEncoding<Digest>>(keys[0], value, &root));
             let (proof, value) = db.key_value_proof(&keys[1]).await.unwrap();
             assert_eq!(value, val(11));
             assert_eq!(proof.next_key, keys[0]);
-            assert!(
-                proof.verify::<Sha256, crate::qmdb::any::value::FixedEncoding<Digest>>(
-                    keys[1], value, &root
-                )
-            );
+            assert!(proof.verify::<Sha256, FixedEncoding<Digest>>(keys[1], value, &root));
             let exclusion = db.exclusion_proof(&keys[2]).await.unwrap();
             assert!(exclusion.verify::<Sha256>(&keys[2], &root));
 
@@ -5405,7 +5397,11 @@ pub mod tests {
                         let (proof, proved_value) = self.key_value_proof(key).await.unwrap();
                         assert_eq!(proved_value, *value);
                         assert!(
-                            proof.verify::<Sha256, FixedEncoding<Digest>, _>(*key, proved_value, &root),
+                            proof.verify::<Sha256, FixedEncoding<Digest>, _>(
+                                *key,
+                                proved_value,
+                                &root,
+                            ),
                             "{key} fails to prove its value",
                         );
                     }
