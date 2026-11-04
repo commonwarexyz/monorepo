@@ -328,11 +328,10 @@ impl ThreadPool {
 
     /// Spawns `op` in this thread pool under `placement`. The task may outlive this call.
     ///
-    /// An eligible worker of this pool pushes the task onto its own deque for the placement. Other
-    /// callers use the placement's injector. Using the running job's placement from
-    /// [`Self::current_placement`] gives the task the same placement as a nested join. A worker of
-    /// this pool that submits [`Placement::Wide`] work uses its own wide deque and offers the task
-    /// to its own group first, regardless of `near`.
+    /// An eligible worker of this pool pushes the task onto its own deque for the placement, and
+    /// other callers use the placement's injector. A worker submitting [`Placement::Wide`] work
+    /// offers it to its own group first, regardless of `near`. Passing [`Self::current_placement`]
+    /// gives the task the same placement as a nested join.
     ///
     /// # Panics
     ///
@@ -347,11 +346,11 @@ impl ThreadPool {
         unsafe { spawn::spawn_in(op, &self.registry, placement) }
     }
 
-    /// Spawns an asynchronous task on every worker of `group` and returns at once. Each worker
-    /// runs it after it has exhausted its local work, before it attempts to steal from other
-    /// workers, and runs broadcasts in the order they were queued. The task may outlast the
-    /// current stack frame, so it cannot capture any references onto the stack. The other
-    /// workers receive a broadcast that does nothing.
+    /// Spawns an asynchronous task on every worker of `group` and returns at once.
+    ///
+    /// Each worker runs it after exhausting its local work and before stealing, in the order
+    /// broadcasts were queued. The other workers receive a broadcast that does nothing. The task
+    /// may outlast the current stack frame, so it cannot capture references to the stack.
     ///
     /// # Panics
     ///

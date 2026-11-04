@@ -1,11 +1,11 @@
 //! Compiles the native wake routing and sleep state machine with Loom synchronization.
 //!
-//! Queues model release publication, acquire observation, and exclusive removal. This is the
-//! boundary assumed by the sleep protocol.
-//! The injection entry points are reimplemented over these queues. Worker deque pushes, queue
-//! allocation, latch setting, and the worker's choice of a Local job or continuation remain
-//! covered by the native tests. A Local idle exit starts after that choice, before the idle count
-//! is decremented. Running job bodies are outside the model.
+//! Queues model release publication, acquire observation, and exclusive removal, the boundary the
+//! sleep protocol assumes. The injection entry points are reimplemented over these queues.
+//!
+//! Worker deque pushes, queue allocation, latch setting, and the worker's choice of a Local job or
+//! continuation remain covered by the native tests. A Local idle exit starts after that choice,
+//! before the idle count is decremented. Running job bodies are outside the model.
 //!
 //! The models use two or three groups, at most four threads, one wide job, and a preemption
 //! bound of three. They check finite wake handoffs under eventual scheduling of runnable workers.

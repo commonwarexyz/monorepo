@@ -1446,49 +1446,32 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// # Cache Affinity
     ///
     /// A strategy built with [`Rayon::new`] or [`Rayon::grouped`] splits its pool's workers into
-    /// groups sized to the host's last-level cache domains. A group's home is the domain it
-    /// requests its workers to run in. A strategy built with [`Rayon::with_pool`] is one group
-    /// that is never homed.
+    /// groups sized to the host's last-level cache domains. A strategy built with
+    /// [`Rayon::with_pool`] is one group that is never homed.
     ///
-    /// Parallel collection work submitted by a thread that is not one of the pool's workers runs
-    /// on one group or across the whole pool, as the policy learns per call site. To run work on
-    /// one group, the strategy first tries to use or establish a home in the caller's domain, then
-    /// falls back to the least loaded full-width group. The caller waits for this work to finish.
-    /// When that group's home is another domain, the calling thread may be moved there for the
-    /// call, within its own affinity mask. The caller's own code in that call, such as a
+    /// A group's home is the domain it requests its workers to run in. An unhomed group can take a
+    /// permanent home in the domain of a caller that finds it idle, when that domain allows a CPU
+    /// for each of its workers.
+    ///
+    /// Parallel work submitted from outside the pool runs on one group or across the whole pool, as
+    /// the policy learns per call site. Work on one group prefers the group homed in the caller's
+    /// domain and otherwise takes the least loaded full-width group. Joins make the same choice or
+    /// run serially on the caller, and parallel sorts use one group.
+    ///
+    /// When the chosen group's home is another domain, the calling thread may be moved there for
+    /// the call, within its own affinity mask. The caller's own code in that call, such as a
     /// [`Strategy::run_batches`] body, runs under that mask, and threads it creates inherit it.
-    /// Joins use the same placement choices or run serially on the caller. Parallel sorts from
-    /// such a thread use one group to limit cross-domain access to the values.
     ///
-    /// A worker's nested strategy calls, joins, and spawned jobs inherit its placement. They
-    /// stay in its group under a local placement and spread over the pool under a wide one.
+    /// A worker's nested calls, joins, and spawned jobs inherit its placement. A job that
+    /// [`Strategy::spawn`] hands to the pool from outside it can start on any idle worker and
+    /// prefers waking its submitter's home group.
     ///
-    /// A job that [`Strategy::spawn`] hands to the pool from a thread that is not one of its
-    /// workers prefers waking its submitter's home group. When another caller has work on that
-    /// group, the job prefers waking the least loaded group. On a pool with multiple groups, that
-    /// preferred group admits at most one unfinished such job per worker to learn descendant
-    /// placement, whichever group's worker starts the job. Any idle worker can start a job.
+    /// For up to one unfinished job per worker of that group, the policy learns whether descendants
+    /// stay on the starting worker's group or use the whole pool. It times the job itself, not its
+    /// consumer's later work. Other jobs use the whole pool.
     ///
-    /// For admitted jobs, the policy learns whether descendants stay on the starting worker's
-    /// group or use the whole pool. Jobs beyond that limit use the whole pool, as do jobs that
-    /// start on a narrower group. This decision measures the job's elapsed time. Work performed by
-    /// a later consumer of the result is outside that measurement.
-    ///
-    /// When the pool fills all allowed CPUs across multiple equal-sized domains with at least
-    /// two allowed CPUs each, every group gets a fixed home and requests its mask before running
-    /// jobs. Otherwise, an idle unhomed group can acquire a permanent home in a caller's domain
-    /// when the pool's initial mask is known and allows enough CPUs there for every worker in the
-    /// group. Its workers apply the request asynchronously.
-    ///
-    /// Homing targets the domain's allowed CPUs. In a pool with multiple groups, unhomed groups
-    /// request the CPUs outside the homes when enough remain for all of their workers. Otherwise
-    /// they request their original masks. Other threads can still run on those CPUs. Requested
-    /// masks stay within the workers' inherited masks, and the operating system may reject a
-    /// request.
-    ///
-    /// A group narrower than the first, left over when the parallelism is not a multiple of the
-    /// group width, is never homed. Its workers take work placed on the whole pool so a call
-    /// placed on one group always has the width the policy planned.
+    /// Requested masks stay within the workers' inherited masks, and the operating system may
+    /// reject a request. Other threads can still run on a group's CPUs.
     ///
     /// # Thread Pool Ownership
     ///
@@ -1567,21 +1550,17 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         }
 
         /// Creates a [`Rayon`] strategy on one pool of `parallelism` threads, with `stack_size` per
-        /// worker when one is given. The workers are split into groups as wide as the largest
-        /// number of CPUs the calling thread may use in any one last-level cache domain, less one
-        /// when that number is at least six. This leaves capacity for the caller and other threads.
+        /// worker when one is given, grouped by last-level cache domain as described on [`Rayon`].
         ///
-        /// If the pool fills all allowed CPUs across multiple equally sized domains with at least
-        /// two allowed CPUs each, groups use the full domain width and receive fixed homes at
-        /// startup.
+        /// A group is as wide as the most CPUs the calling thread may use in any one domain, less
+        /// one when that number is at least six to leave room for the caller and other threads.
+        /// With fewer than two domains, or no domain allowing two CPUs, all workers form one
+        /// unhomed group.
         ///
-        /// A smaller `parallelism` gives one group of that many workers. A larger `parallelism`
-        /// that is not a multiple of the group width leaves a narrower last group, which takes
-        /// only work placed on the whole pool.
-        ///
-        /// Calls, joins, sorts, and spawned jobs are placed among the groups as described on
-        /// [`Rayon`]. If fewer than two domains are detected or the widest allowed domain has fewer
-        /// than two CPUs, all workers form one unhomed group.
+        /// When the pool fills all allowed CPUs across two or more equally sized domains of at
+        /// least two CPUs each, groups use the full domain width and get fixed homes at startup. A
+        /// smaller `parallelism` gives one group, and one that is not a multiple of the group width
+        /// leaves a narrower last group that takes only work placed on the whole pool.
         pub fn grouped(
             parallelism: NonZeroUsize,
             stack_size: Option<usize>,
@@ -1677,21 +1656,14 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         /// Runs `run` on the execution path the policy prefers for this call site's `len` items and
         /// estimated `work`, passing the placement a parallel run uses.
         ///
-        /// `body` says where the parallel body may run. With a policy, a worker of the strategy's
-        /// pool runs placed work under the placement of the job it runs. Any other thread first
-        /// tries to use or establish a home in its domain for a local body, then falls back to the
-        /// least loaded full-width group.
+        /// A worker of the strategy's pool decides every body against the placement of the job it
+        /// runs, since the body's work runs there. A [`Body::Caller`] body, a serial run, and every
+        /// run without a policy use [`Self::resolve_placement`].
         ///
-        /// A [`Body::Group`] body is compared against that local placement alone. On a strategy
-        /// with several groups, a [`Body::Placed`] body chooses between one group and the whole
-        /// pool, offered first to its home group. A strategy with one group places such work on
-        /// that group, whose workers are the whole pool, so a caller that is not one of its
-        /// workers blocks until the pool finishes the body. Every other run of a thread outside the
-        /// pool, and every run of a strategy without a policy, uses [`Self::resolve_placement`].
-        ///
-        /// A [`Body::Caller`] body is the caller's own code and runs on the caller, so the policy
-        /// has nothing to place there. A worker still decides it against its own placement, since
-        /// the body's joins and placed calls run there.
+        /// A thread outside the pool decides a [`Body::Group`] body against one group, and a
+        /// [`Body::Placed`] body also against the whole pool when the strategy has several groups.
+        /// That one group is the group homed in the caller's domain, homing one if it can, or else
+        /// the least loaded full-width group.
         #[track_caller]
         fn try_execute<R, E>(
             &self,
@@ -1857,12 +1829,14 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     // future. The awaiting future records the round trip when it observes the
                     // result.
                     //
-                    // A job submitted by a worker of the pool inherits that worker's placement.
-                    // A job submitted by any other thread is an external root. It can start on any
-                    // worker, and its wakeup prefers its submitter's home group. Admissions limit
-                    // how many roots learn descendant placement. Excess roots execute Wide. Every
-                    // external root leases all groups, so no group gains a new home until it
-                    // finishes. Leases belong to the job, even after its future or parent is gone.
+                    // A job submitted by a worker of the pool inherits that worker's placement. A
+                    // job submitted by any other thread is an external root. It can start on any
+                    // worker, and its wakeup prefers its submitter's home group.
+                    //
+                    // Admissions limit how many roots learn descendant placement, and excess roots
+                    // execute Wide. Every external root leases all groups, so no group gains a new
+                    // home until it finishes. Leases belong to the job, even after its future or
+                    // parent is gone.
                     //
                     // external root -> shared Wide queue -> worker in group H
                     //                                       |
@@ -1967,11 +1941,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         });
                         match result {
                             Ok(value) => {
-                                // The round trip starts after placement and lease acquisition.
-                                // It includes channel setup, queueing, the job, and receiving
-                                // the result. A late poll adds the delay after job completion
-                                // to the sample and biases the choice toward inline, within
-                                // the policy's budget.
+                                // The round trip starts after placement and lease acquisition. It
+                                // includes channel setup, queueing, the job, and receiving the
+                                // result.
+                                //
+                                // A late poll adds the delay after job completion to the sample.
+                                // That biases the choice toward inline, within the policy's budget.
                                 if let (
                                     Some((policy, caller, len, threads)),
                                     Some(job),

@@ -412,11 +412,12 @@ fn nested_waits_service_later_work() {
     });
 }
 
-/// Blocks every worker of a pool of `threads` workers, in groups of `width`, on its own result
-/// and waits until all of them sleep. `release` then settles the result of worker `target`
-/// alone, which only that worker's waker can report, and the outcome the target observes is
-/// returned. Every other worker stays blocked until the target has finished, then receives its
-/// own index.
+/// Blocks every worker of a pool of `threads` workers, in groups of `width`, on its own result and
+/// waits until all of them sleep.
+///
+/// `release` then settles the result of worker `target` alone, which only that worker's waker can
+/// report, and returns the outcome the target observes. Every other worker stays blocked until the
+/// target has finished, then receives its own index.
 #[allow(
     clippy::disallowed_types,
     reason = "Exercise the channel used by Strategy::spawn."

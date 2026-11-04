@@ -456,10 +456,11 @@ fn local_jobs_help_stolen_wide_children() {
 }
 
 /// Joins under `outer` on a pool of two workers in one group. The other worker steals the second
-/// closure and joins again under `inner`, then blocks until its nested second closure starts.
-/// Only the worker waiting under `outer` can take it. Checks that helping executes the closure
-/// once and restores the waiting worker's outer placement. Returns the worker's state during
-/// the nested closure and after the outer join.
+/// closure and joins again under `inner`, then blocks until its nested second closure starts. Only
+/// the worker waiting under `outer` can take it.
+///
+/// Checks that helping executes the closure once and restores the waiting worker's outer placement.
+/// Returns the worker's state during the nested closure and after the outer join.
 fn help_across_placements(outer: Placement, inner: Placement) -> (Option<Worker>, Option<Worker>) {
     // Sharing a group lets the waiting worker help under either Local or Wide placement.
     let pool = Arc::new(pool(2, 2));
@@ -1060,11 +1061,13 @@ fn spawn_contended_producers_keep_submission_order() {
     });
 }
 
-/// Queues a job on the whole pool from a thread taken over with `use_current_thread`, outside
-/// any job, so it stays on that thread's own wide deque while the thread runs its own code. Threads
-/// outside the pool then place `injected` jobs on the group and, when `wide` is set, as many on
-/// the whole pool. Returns the position at which the other worker ran the taken-over thread's job
-/// and the labels of every job in the order they ran.
+/// Queues a job on the whole pool from a thread taken over with `use_current_thread`, outside any
+/// job, so it stays on that thread's own wide deque while the thread runs its own code. Threads
+/// outside the pool then place `injected` jobs on the group and, when `wide` is set, as many on the
+/// whole pool.
+///
+/// Returns the position at which the other worker ran the taken-over thread's job and the labels of
+/// every job in the order they ran.
 fn wide_deque_order(group_width: usize, injected: usize, wide: bool) -> (usize, Vec<&'static str>) {
     within(move || {
         // Keep the owner in user code while the managed worker runs queued work.

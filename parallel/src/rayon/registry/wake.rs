@@ -11,25 +11,34 @@ impl Registry {
     /// Signals that a job any worker may take was queued, offering it to the workers of group
     /// `near` first and then to the other groups in cyclic order.
     ///
-    /// Each group runs upstream's sleep protocol on its own counters. The walk marks each
-    /// visited group's jobs event counter active and stops at the first group that covers the
-    /// job. For an empty queue, an awake idle worker counts as coverage. Otherwise the group must
-    /// wake a sleeper. `Sleep::new_jobs` reports any uncovered work to continue the walk.
+    /// Each group runs upstream's sleep protocol on its own counters. The walk marks each visited
+    /// group's jobs event counter active and stops at the first group that covers the job, through
+    /// an awake idle worker when the queue was empty or otherwise by waking a sleeper.
     ///
-    /// Coverage reserves no worker. A covering worker may take local work or resume a job whose
-    /// latch was set. On either exit from the idle loop, `work_found` wakes local sleepers first.
-    /// If none wake, starting or resuming wide work continues the chain in other groups. Local
-    /// work continues it only while wide work remains queued. A wide transition can wake another
-    /// worker after the last queued job has been taken. A worker that stays idle searches every
-    /// wide queue before sleeping.
+    /// ```text
+    /// wide job queued with near = 1 in a pool of three groups
     ///
-    /// [`Self::new_injected_wide_job`] fences once between queuing the job and this walk, before
-    /// it reads any group's counters. A sleeper fences between registering as asleep and
-    /// checking its broadcast deque, its group's injector, and the wide injector. An idle exit
-    /// similarly fences between decrementing the idle count and checking wide queues for a local
-    /// transition. These paired fences keep a queued injection visible when its publisher counted
-    /// the worker idle. Internal pushes use upstream's lighter protocol, with the publishing
-    /// worker able to pop its own jobs.
+    ///   +---------+  uncovered   +---------+  uncovered   +---------+
+    ///   | group 1 | -----------> | group 2 | -----------> | group 0 |
+    ///   +---------+              +---------+              +---------+
+    ///        |                        |                        |
+    ///     covered                  covered                  covered
+    ///        v                        v                        v
+    ///       stop                     stop                     stop
+    /// ```
+    ///
+    /// Coverage reserves no worker, so a covering worker may take other work. On either exit from
+    /// the idle loop, `work_found` wakes local sleepers first. If none wake, starting or resuming
+    /// wide work continues the chain in other groups, and so does local work while wide work
+    /// remains queued. A worker that stays idle searches every wide queue before sleeping.
+    ///
+    /// [`Self::new_injected_wide_job`] fences once before the walk reads any group's counters. That
+    /// fence pairs with a sleeper's fence between registering as asleep and checking its queues,
+    /// and with an idle exit's fence between decrementing the idle count and checking wide queues.
+    ///
+    /// Together they keep a queued injection visible to every worker its publisher counted idle.
+    /// Internal pushes use upstream's lighter protocol, since the publishing worker can pop its own
+    /// jobs.
     pub(super) fn new_wide_job(&self, near: usize, queue_was_empty: bool) {
         let n_groups = self.groups.len();
         let mut uncovered = 1;

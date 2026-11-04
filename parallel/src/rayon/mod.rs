@@ -1,9 +1,18 @@
 //! A work-stealing pool of worker threads.
 //!
 //! A [`ThreadPool`] owns a fixed set of worker threads arranged in groups. Each worker has Local
-//! and Wide deques. Local jobs stay within their group. Any worker may steal a Wide job. Each
-//! group has a Local injector for jobs placed on it by threads that are not its workers, and all
-//! groups share a Wide injector for Wide jobs from threads that are not workers of the pool.
+//! and Wide deques. Local jobs stay within their group, and any worker may steal a Wide job. Each
+//! group has a Local injector, and all groups share a Wide injector:
+//!
+//! ```text
+//! queue                  filled by                         taken by
+//! -------------------    ------------------------------    -------------------------
+//! w's Local deque        w, under a Local placement        w and its group-mates
+//! w's Wide deque         w, under a Wide placement         any worker
+//! G's Local injector     threads that are not G's workers  G's workers
+//! Wide injector          threads outside the pool          any worker
+//! ```
+//!
 //! A worker with nothing to run searches for work and then sleeps. Publishing a job or setting a
 //! latch wakes sleeping workers as needed. A worker waiting for a job's latch keeps running jobs
 //! its group may take until the latch is set.
@@ -59,9 +68,9 @@
 //!   of the calling worker's placement in place of `current_num_threads`, which is removed.
 //! - Each group owns its Local injector and sleep states. All groups share a Wide injector.
 //!   Workers search eligible deques before taking the oldest incoming job across their group's
-//!   Local injector and the Wide injector. Wide publication and idle exits
-//!   propagate wakeups between groups. Native worker waits wake the owning worker through its
-//!   group and offset.
+//!   Local injector and the Wide injector.
+//! - Wide publication and idle exits propagate wakeups between groups. Native worker waits wake
+//!   the owning worker through its group and offset.
 //! - Internal placement methods run and spawn work within groups. Public pool operations remain
 //!   available.
 //! - Added group eligibility, wake propagation, and placement-restoration tests, plus Loom

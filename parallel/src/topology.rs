@@ -1,44 +1,21 @@
 //! Places a call's work on workers that share a last-level cache with the calling thread.
 //!
 //! Threads in different last-level cache (LLC) domains pay far more to exchange cache lines than
-//! threads in one domain. The scheduler places threads without knowing which of them share data.
+//! threads in one domain, and the scheduler does not know which threads share data.
 //!
-//! A strategy owns one pool and splits its workers into groups sized to the widest domain. Allowed
-//! CPUs are the CPUs the building thread may use, and the widest domain is the one with the most of
-//! them. A call places its work on one group as local work, or on the whole pool as wide work.
+//! A strategy therefore splits its pool's workers into groups sized to the domain with the most
+//! allowed CPUs (the CPUs the building thread may use). A call runs its work on one group as local
+//! work, or on the whole pool as wide work.
 //!
-//! A group's home is the domain its workers request to run in. Homes are fixed when the pool has
-//! one worker for every allowed CPU and those CPUs split evenly across two or more domains, each
-//! allowing at least two CPUs. Every group then takes one of those domains as its home at startup.
+//! # Homes
 //!
-//! Otherwise groups start without a home. A group without a home is a floating group. A full group
-//! then has one fewer worker than the widest domain allows, if that domain allows six CPUs or more,
-//! which leaves room for the caller and other threads. The first local call from a domain can give
-//! an idle group a permanent home there, when that domain allows at least as many CPUs as a full
-//! group has workers.
+//! A group's home is the domain whose allowed CPUs its workers request. Groups without a home float
+//! over the CPUs left outside the homes when enough remain, and otherwise keep their original
+//! masks. Every request stays within the worker's inherited mask, and the operating system may
+//! reject it, so placement is advisory.
 //!
-//! Every mask a worker requests stays within the mask it inherited. Groups with fixed homes request
-//! their masks before running jobs. Groups homed on demand apply their requests asynchronously. The
-//! operating system may reject any request, so placement is advisory.
-//!
-//! Local work first tries to use or establish a home in the caller's domain. If that fails, it
-//! falls back to the least loaded full group. The call leases that group until it returns,
-//! and only that group's workers take its work. Wide work runs on any worker. It is offered first
-//! to the group homed in the caller's domain.
-//!
-//! A local call may temporarily restrict the calling thread to the chosen group's home domain,
-//! within the thread's current mask. Workers of any `ThreadPool` keep their masks. On return or
-//! unwind, the caller requests its original mask back. That request writes the mask explicitly, so
-//! the kernel limits described below apply. These affinity changes are best effort.
-//!
-//! All groups share the pool's fixed worker budget, however many domains have callers. When that
-//! budget is not a multiple of the group width, the last group is narrower. Local work there would
-//! run narrower than the policy planned. That group is therefore never homed or leased for local
-//! work, and it takes only wide work.
-//!
-//! The diagram below shows the mask requests for two homed groups and a narrower floating group.
-//! The host has 24 CPUs, all allowed at first, so the floating group's mask is the eight CPUs
-//! outside the two homes.
+//! When the parallelism is not a multiple of the group width, the last group is narrower. It is
+//! never homed or leased for local work, so local work always has the width the policy planned.
 //!
 //! ```text
 //! host: three eight-CPU LLCs     strategy(16): one pool, groups of 7 + 7 + 2
@@ -57,17 +34,9 @@
 //! Wide: any worker in groups 0, 1, or 2
 //! ```
 //!
-//! A home uses its domain's allowed CPUs. In a pool with multiple groups, floating groups,
-//! including the narrow final group, use the remaining CPUs from the pool's initial mask when
-//! enough remain for all floating workers. Otherwise they request their original masks. Other
-//! threads can still use the same CPUs. An unusable mask or failed write requests the worker's
-//! original mask instead.
-//!
-//! Groups homed on demand start unhomed. A group can take a home in a domain only when the pool's
-//! initial mask is known and allows at least as many CPUs there as a full group has workers.
-//! The first local call from that domain can then home an idle group there. A group keeps that
-//! home after its work drains. Floating masks exclude new homes as they are assigned, subject to
-//! the capacity rule above. In this example, each domain has enough allowed CPUs for a full group:
+//! Without fixed homes (below), groups start unhomed. The first local call from a domain can
+//! permanently home an idle group there, if the pool's initial mask is known and allows a CPU in
+//! that domain for each of the group's workers. Those workers apply the request asynchronously.
 //!
 //! ```text
 //!        group 0          group 1          event
@@ -79,8 +48,9 @@
 //!  t5    home A, idle     home B, busy     C starts a local call on group 1
 //! ```
 //!
-//! A pool that fills equal-sized allowed domains uses fixed homes instead. No workers float,
-//! and an idle group keeps its domain:
+//! When the pool has one worker per allowed CPU and those CPUs split evenly across two or more
+//! domains of at least two CPUs each, every group instead takes a fixed home at startup. Its
+//! workers request their masks before running jobs, and no workers float.
 //!
 //! ```text
 //! host: two eight-CPU LLCs      strategy(16): one pool, groups of 8 + 8
@@ -93,17 +63,26 @@
 //!           fixed                             fixed
 //! ```
 //!
-//! An offloaded job submitted from outside the pool prefers the group homed in the submitting
-//! thread's domain, unless another thread holds a lease on that group. A worker that spawns jobs,
-//! even descendants of the submitter's own jobs, counts as another thread. Every external root
-//! enters the shared Wide queue, so an idle worker can start it even while the preferred group is
-//! busy. Its leases count work on every group until the job finishes.
+//! # Calls
 //!
-//! In a pool with multiple groups, each group admits at most one external root per worker for
-//! learning descendant placement. Admitted roots use the learned Local or Wide placement. Excess
-//! roots run Wide. Local descendants stay on the group of the worker that starts the root. A root
-//! planned Local that lands on the narrower final group runs Wide and contributes no sample for
-//! descendant placement. Jobs submitted by the pool's own workers inherit their current placement.
+//! Local work uses the group homed in the caller's domain, homing one if it can, and otherwise
+//! leases the least loaded full group. Only that group's workers take the work, and the lease lasts
+//! until the call returns. Wide work runs on any worker and is offered first to the group homed in
+//! the caller's domain.
+//!
+//! A caller outside any `ThreadPool` may be restricted to the group's home domain for the call,
+//! within its current mask. It requests its original mask back on return or unwind.
+//!
+//! # Spawned jobs
+//!
+//! A job spawned from outside the pool enters the shared Wide queue, so any idle worker can start
+//! it. It prefers waking the group homed in its submitter's domain unless another thread, including
+//! a worker, holds a lease there. Jobs submitted by the pool's own workers inherit their current
+//! placement.
+//!
+//! In a pool with several groups, each group admits at most one such job per worker to learn
+//! whether its descendants run on the starting worker's group or on the whole pool. Excess jobs,
+//! and jobs that start on the narrower group, run wide.
 //!
 //! ```text
 //! job from thread T in domain D
@@ -128,18 +107,17 @@
 //!                               +-- otherwise ----------------------------> Wide
 //! ```
 //!
-//! Domains come from the kernel's sysfs cache topology, where each CPU's last-level cache is its
-//! highest-level Data or Unified cache leaf. Grouping also needs the building thread's affinity
-//! mask, which cannot be read on machines whose possible-CPU count exceeds `cpu_set_t`'s capacity.
-//! On those machines, on non-Linux platforms, and under miri, a strategy is a single unhomed group
-//! and no mask is ever written.
+//! # Platform limits
 //!
-//! A worker's initial affinity mask limits every later home. Every mask written here, including a
-//! caller's restored mask, comes from a mask read earlier and omits CPUs that were offline at that
-//! read. Linux 6.2 and newer can retain an explicitly written mask across cpuset changes.
-//! Restoring an earlier mask can therefore keep the caller and subsequently created threads from
-//! gaining CPUs later added to the cpuset. Older kernels can replace a written mask with the
-//! cpuset's effective CPUs, so a group may lose confinement.
+//! Domains come from the kernel's sysfs cache topology, where each CPU's last-level cache is its
+//! highest-level Data or Unified cache leaf. On non-Linux platforms, under miri, and on machines
+//! whose possible-CPU count exceeds `cpu_set_t`'s capacity (where the affinity mask cannot be
+//! read), a strategy is one unhomed group and never writes a mask.
+//!
+//! Every written mask, including a restored one, comes from an earlier read and omits CPUs that
+//! were offline then. Linux 6.2 and newer can keep a written mask across cpuset changes, so a
+//! restored caller and its later threads may not gain added CPUs. Older kernels can replace a
+//! written mask with the cpuset's effective CPUs, undoing a group's confinement.
 
 use crate::ThreadPool;
 use commonware_utils::sync::Mutex;
@@ -315,11 +293,10 @@ cfg_if::cfg_if! {
         }
 
         impl Topology {
-            /// Partitions `parallelism` workers across the domains containing `allowed` CPUs.
-            /// All domains containing allowed CPUs must have the same allowed CPU count of at
-            /// least two. Requires at least two such domains, every allowed CPU to belong to a
-            /// domain, and one worker per allowed CPU.
-            /// Returns `None` when these conditions do not hold.
+            /// Partitions `parallelism` workers across the domains containing `allowed` CPUs, or
+            /// returns `None` unless there are at least two such domains with the same allowed CPU
+            /// count of at least two, every allowed CPU belongs to a domain, and there is one
+            /// worker per allowed CPU.
             fn partition(&self, allowed: &CpuSet, parallelism: usize) -> Option<Partition> {
                 let mut width = 0;
                 let mut homes = Vec::new();
@@ -754,10 +731,11 @@ impl Groups {
 
     /// Builds a pool of `parallelism` threads, with `stack_size` per worker when one is given, and
     /// splits its workers into groups sized to the widest domain. A pool filling equal-sized
-    /// allowed domains gets homes at startup. Otherwise each full-width group can take one home on
-    /// demand. A host with fewer than two domains, a thread allowed fewer than two CPUs in every
-    /// domain, and platforms without affinity control get one unhomed group of `parallelism`
-    /// threads.
+    /// allowed domains gets homes at startup, and otherwise each full-width group can take one home
+    /// on demand.
+    ///
+    /// A host with fewer than two domains, a thread allowed fewer than two CPUs in every domain,
+    /// and platforms without affinity control get one unhomed group of `parallelism` threads.
     pub(crate) fn build(
         parallelism: usize,
         stack_size: Option<usize>,
@@ -1061,7 +1039,7 @@ impl Groups {
     ///
     /// Threads created by the caller while the guard is held inherit its current mask and may
     /// remain restricted after the guard drops. The restored mask is written explicitly, so the
-    /// caller keeps the limits the module documentation describes for written masks.
+    /// caller keeps the limits described under Platform limits in the [module docs](self).
     #[cfg(all(target_os = "linux", not(miri)))]
     pub(crate) fn nudge(&self, group: usize) -> Option<Restore> {
         if crate::rayon::current_thread_index().is_some() {

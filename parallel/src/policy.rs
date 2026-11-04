@@ -1,89 +1,73 @@
 //! Adaptive execution policies for collection operations and spawned jobs.
 //!
-//! Entries are keyed by callsite, input-size bucket, work-size bucket, and planning parallelism
-//! so a decision learned for one workload does not leak into another. The policy compares recent
-//! wall-clock estimates of each path and picks whichever is faster, with ties going to serial
-//! (equal wall time for fewer busy workers).
+//! Entries are keyed by callsite, input-size bucket, work-size bucket, and planning parallelism so
+//! a decision learned for one workload does not leak into another. Each entry keeps wall-clock
+//! estimates of its paths and prefers the faster, with ties going to serial (equal wall time for
+//! fewer busy workers).
 //!
-//! The tuner considers serial execution for small cases where it can avoid dispatch overhead.
-//! A large serial run keeps the caller busy without help from the pool, so serial is gated by
-//! a live cost estimate both when sampled and when preferred.
+//! A [`Cadence`] probes the losing path on an interval that grows with how badly it lost. A stale
+//! loser estimate never suppresses its probes, so an estimate skewed by transient conditions, such
+//! as pool contention at startup, can recover.
 //!
-//! Sampling serial (the seed and every probe) requires the projected serial cost to fit under
-//! [`SERIAL_SAMPLE_BUDGET_NS`]. The projection multiplies the chosen placement's estimated wall
-//! time by its planning parallelism. Preferring serial in steady state requires both that
-//! projection and the serial wall-time estimate to fit under the same budget. The current call's
-//! cost is known only after it completes.
+//! # Serial budget
 //!
-//! Parallel samples refresh this projection every [`PREFERRED_SAMPLE_INTERVAL`] calls while
-//! parallel is preferred and at every probe otherwise. Sampling continues while serial is
-//! excluded, so a lower projection can make serial eligible again.
+//! A large serial run keeps the caller busy without help from the pool, so serial is seeded or
+//! probed only while its projected cost fits under [`SERIAL_SAMPLE_BUDGET_NS`]. The projection
+//! multiplies the chosen placement's estimated wall time by its planning parallelism.
 //!
-//! Within the budget, a [`Cadence`] probes the losing path on an interval that grows exponentially
-//! with how badly it lost and with how many consecutive probe slots confirmed the ordering, up to
-//! `RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT` calls.
+//! Preferring serial also requires the serial estimate to fit. Parallel samples keep refreshing the
+//! projection while serial is excluded, so a lower projection can make serial eligible again.
 //!
-//! Probes are never suppressed by the loser's own stale estimate, so an estimate poisoned by
-//! transient conditions, such as pool contention at startup, can recover through later probes.
+//! A parallel sample includes queueing behind other work on a group, since the caller waits through
+//! it. Contention therefore steers callers toward serial. Once it lifts the projection past the
+//! budget, it gates serial out until the queue drains. One sample cannot separate queueing from a
+//! larger input in the same bucket, and the budget exists to catch the larger input.
 //!
-//! [`Placement`] decides where a parallel run's placed work goes. Only threads that are not workers
-//! of the strategy's pool choose a placement. A pool worker keeps every placed call under the
-//! placement of the job it runs, so the timing of the outermost call (a run's wall time or a job's
-//! elapsed time) covers the placed calls nested in its work.
+//! # Placement
 //!
-//! Each run entry learns its placement as a [`Choice`]. The choice seeds Wide and then Local,
-//! prefers the faster, and probes the slower on the intervals above.
+//! Each run entry learns its [`Placement`] as a [`Choice`]. Only threads outside the strategy's
+//! pool choose. A worker keeps every placed call under the placement of the job it runs, so the
+//! timing of the outermost call covers the calls nested in its work.
 //!
-//! Each placement has its own cadence for the serial-versus-parallel decision. A caller compares
-//! serial against the placement it would use, on that placement's cadence. That is the placement
-//! it is confined to, or the preferred placement when it has a choice. Every caller on one cadence
-//! makes the same comparison, so each probe and sample slot lands on a caller that can act on it.
+//! Each placement has its own serial-versus-parallel cadence. A confined caller compares serial
+//! against its own placement, and a caller with a choice compares against the preferred one. Both
+//! share each placement's estimate, so either kind of caller keeps it current for the other.
 //!
-//! For a run, a caller with a choice consults the placement first on every call. The slower
-//! placement's probe interval follows its loss to the faster of the preferred placement and serial,
-//! so it is probed even while serial wins, and no more often than its loss to serial warrants.
-//! Serial counts only while it could be preferred. Once the budget gates it out, the slower
-//! placement races the preferred one alone.
+//! ```text
+//!     caller with a choice                         confined caller
+//!              |                                          |
+//!              v                                          |
+//!    Choice: Wide or Local? --probe--> timed parallel     |
+//!              |                       run on the slower  |
+//!              | preferred P           placement          |
+//!              v                                          |
+//!    cadence of P: serial or P? <-------------------------+
+//!          |                |                  (P is its placement)
+//!          v                v
+//!     serial body     parallel body on P
+//!   (within budget)
+//! ```
 //!
-//! Spawned jobs compare their estimated wall time against the overhead of offloading them,
-//! just as runs compare serial against a placement's wall time. Callers outside the strategy's pool
-//! share one hand-off overhead estimate and one cadence. A worker keeps its job under the placement
-//! of the job it runs. Its round trip is not a hand-off, so workers keep an overhead estimate and
-//! cadence of their own.
+//! # Spawned jobs
 //!
-//! On a pool with multiple groups, an admitted external root also chooses descendant placement.
-//! Every external root may start on any worker. A Local choice confines descendants to that
-//! worker's group when it has the planned width. Otherwise it falls back to Wide without
-//! recording a placement sample.
+//! A spawned job compares its estimated wall time against the overhead of offloading it. Callers
+//! outside the pool share one hand-off overhead estimate and cadence. A worker's round trip is not
+//! a hand-off, so workers keep their own.
 //!
-//! The choice compares worker-measured job times, excluding queueing, late result polling, and
-//! work the consumer performs after receiving the result. Overflow roots run Wide without
-//! consulting or training this choice. Nested jobs inherit placement and do not train it either.
-//! A lower sample of the losing descendant placement replaces its estimate immediately, so an
-//! old delay cannot dominate its infrequent probes. Other samples use the usual estimate update.
+//! On a pool with several groups, an admitted external root also learns whether its descendants run
+//! Local or Wide. That choice compares worker-measured job times, excluding queueing, late result
+//! polling, and the consumer's later work. Overflow roots run Wide without training it, and nested
+//! jobs inherit their placement.
 //!
-//! A confined caller compares serial with its own placement even when callers with a choice prefer
-//! the other placement. Both kinds of caller share each placement's parallel estimate, so a
-//! confined caller's samples keep its placement's estimate current for callers with a choice. Each
-//! placement's wall time projects a serial cost at its planning parallelism. Local runs share one
-//! planning width within an entry, and the key includes the strategy's parallelism override.
+//! # Sampling
 //!
-//! Timing is coarse, with one wall-clock sample per measured call. A parallel sample includes any
-//! queueing behind other work on a group, since the caller waits through it. Contention therefore
-//! pushes the parallel estimate up and steers concurrent callers back toward serial. The serial
-//! projection inherits that queueing even though a serial run never waits on the pool, so once
-//! contention lifts the projection past the budget it gates serial out until the queue drains.
-//! One wall-clock sample cannot separate queueing from a larger input within the bucket, and the
-//! gate exists to catch the larger input (#5548).
+//! Fallible operations record samples only on success. An early error's short wall time would drag
+//! an estimate down and could unlock a serial sample of genuine work. Both paths produce identical
+//! results, so a misjudged call costs only throughput.
 //!
-//! Fallible operations record samples only on success. Error paths often abort early, and recording
-//! their short wall time would let garbage inputs drag an estimate down and unlock a serial sample
-//! of genuine work. Both paths produce identical results, so a misjudged call costs only
-//! throughput, never correctness.
-//!
-//! State updates are serialized per policy entry, but calls do not hold the entry lock while work
-//! executes. Concurrent calls may therefore make decisions from an estimate that another in-flight
-//! call later updates, and measured samples are applied in completion order.
+//! Updates are serialized per entry, but no lock is held while work runs. Concurrent calls may
+//! therefore decide from an estimate that another in-flight call later updates, and samples apply
+//! in completion order.
 
 use dashmap::DashMap;
 use std::{panic::Location, sync::Arc, time::Duration};
@@ -609,11 +593,12 @@ impl Estimate {
 /// Paces measurement and probing for one policy entry.
 ///
 /// Between boundaries the preferred path is measured every [`PREFERRED_SAMPLE_INTERVAL`] calls so
-/// its estimate stays live. The boundary recurs every `RESAMPLE_INTERVAL << shift` calls, where the
-/// shift sums two counts and is capped at [`MAX_RESAMPLE_SHIFT`]. The gap adds one once the loser
-/// takes twice the winner's wall time and one more for each further multiple up to the same cap.
-/// Each confirmation adds one, so repeated probes that preserve the ordering lengthen the interval
-/// even when the paths have similar wall times.
+/// its estimate stays live. The boundary recurs every `RESAMPLE_INTERVAL << shift` calls. The shift
+/// sums two counts and is capped at [`MAX_RESAMPLE_SHIFT`].
+///
+/// The gap adds one once the loser takes twice the winner's wall time and one more for each further
+/// multiple up to the same cap. Each confirmation adds one, so repeated probes that preserve the
+/// ordering lengthen the interval even when the paths have similar wall times.
 ///
 /// A boundary confirms the ordering when the same path is preferred as at the previous boundary and
 /// the gap's count is no smaller. Movement that stays within the same whole multiple of the
@@ -775,9 +760,10 @@ impl RunEntry {
         let cadence = &mut self.cadences[placement as usize];
 
         // Seed this placement's estimate with its first call. Until serial is measured, saturating
-        // the placement's cadence keeps it due for an immediate boundary, so its next call offers
-        // the serial seed as soon as the parallel estimate lands (when the projection allows). Once
-        // serial is measured, the seed leaves the cadence fresh, since the boundary could only
+        // the placement's cadence keeps it due for an immediate boundary. Its next call then offers
+        // the serial seed as soon as the parallel estimate lands (when the projection allows).
+        //
+        // Once serial is measured, the seed leaves the cadence fresh, since the boundary could only
         // probe a path that is already priced.
         let Some((parallel_ns, projected_ns)) = estimates else {
             if serial_ns.get().is_none() {
@@ -885,10 +871,12 @@ impl Choice {
     ///
     /// A placement without an estimate is timed first, Wide before Local. After that the placement
     /// with the lower wall-time estimate is preferred and the other is probed on this choice's
-    /// [`Cadence`]. The probe interval grows with the slower placement's loss to the faster of the
-    /// preferred placement and `rival_ns`. A caller that could still take a path other than the
-    /// placements passes that path's wall-time estimate as `rival_ns`. A caller with no such path
-    /// or no estimate of it passes `None`.
+    /// [`Cadence`].
+    ///
+    /// The probe interval grows with the slower placement's loss to the faster of the preferred
+    /// placement and `rival_ns`. A caller that could still take a path other than the placements
+    /// passes that path's wall-time estimate as `rival_ns`, or `None` when it has no such path or
+    /// no estimate of it.
     fn choose(&mut self, rival_ns: Option<u64>) -> (Placement, bool) {
         let (Some(wide_ns), Some(local_ns)) = (self.wide_ns.get(), self.local_ns.get()) else {
             // Saturating the cadence keeps the choice due for a boundary while it seeds, so the
@@ -1393,10 +1381,11 @@ mod tests {
         }
 
         // The estimate converges 2 -> 1.7 -> 1.46 -> 1.268 -> 1.1144 -> 0.99152ms over five probes.
-        // The first probe comes 200 calls in, since parallel trails by 2x. It brings parallel
-        // within 2x, a whole multiple closer, so the next probe comes 100 calls later and resets
-        // the confirmations. Each later probe confirms that serial still wins, so the intervals run
-        // 100, 200, and 400, and the flip happens at call 1,000.
+        // The first probe comes 200 calls in, since parallel trails by 2x.
+        //
+        // That probe brings parallel within 2x, a whole multiple closer, so the next probe comes
+        // 100 calls later and resets the confirmations. Each later probe confirms that serial still
+        // wins, so the intervals run 100, 200, and 400, and the flip happens at call 1,000.
         assert_eq!(probes, 5);
         assert_eq!(flipped_at, Some(1_000));
     }
@@ -2402,9 +2391,10 @@ mod tests {
 
         // Wide is more than ten times slower than Local, so the placement probes it at the capped
         // interval. Each probe records its slow sample and must leave the local preference
-        // untouched. Serial is probed on its own cadence and never becomes preferred. It is within
-        // 2x of Local, and every probe confirms Local, so its probes back off from the base
-        // interval.
+        // untouched.
+        //
+        // Serial is probed on its own cadence and never becomes preferred. It is within 2x of
+        // Local, and every probe confirms Local, so its probes back off from the base interval.
         let calls = (RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT) * 2 + RESAMPLE_INTERVAL * 3;
         let mut parallel_local = 0;
         let mut wide_probes = 0;
@@ -2434,10 +2424,11 @@ mod tests {
     }
 
     /// A local sample is projected onto a serial run with the local group's parallelism, so a
-    /// narrow group under a wide strategy still lets serial be sampled. A 200 us run on a 2-worker
-    /// group projects to 400 us and fits the budget, while the strategy's 64-way parallelism would
-    /// project 12.8 ms and never sample serial. An affordable, faster serial path must also slow
-    /// the probes of the wide placement.
+    /// narrow group under a wide strategy still lets serial be sampled. An affordable, faster
+    /// serial path must also slow the probes of the wide placement.
+    ///
+    /// A 200 us run on a 2-worker group projects to 400 us and fits the budget, while the
+    /// strategy's 64-way parallelism would project 12.8 ms and never sample serial.
     #[test]
     fn local_projection_uses_group_parallelism() {
         for pools in [EITHER, confined(Placement::Local)] {
@@ -2618,8 +2609,9 @@ mod tests {
     /// than serial but has since become faster, and the cadence backs off to the cap again.
     ///
     /// Each probe closes a fifth of the gap, so the placement overtakes serial at the thirteenth
-    /// probe when it runs at half of serial's wall and at the fourteenth at six tenths. A probe
-    /// that brings the placement a whole multiple of serial's wall closer resets the
+    /// probe when it runs at half of serial's wall and at the fourteenth at six tenths.
+    ///
+    /// A probe that brings the placement a whole multiple of serial's wall closer resets the
     /// confirmations, so the intervals follow the gap. Only probes that leave the gap's count
     /// unchanged back off.
     ///
@@ -2629,10 +2621,11 @@ mod tests {
     /// probes take 11,600 calls.
     ///
     /// The flip restarts the confirmations. The placement keeps gaining on serial afterwards, so
-    /// the gap never shrinks while the count climbs back. With a gap of `g` doublings the intervals
-    /// run `RESAMPLE_INTERVAL << g` twice and then double up to half the cap, so those below the
-    /// cap sum to at most one capped interval. Five capped intervals cover the 15,600 calls this
-    /// takes at six tenths.
+    /// the gap never shrinks while the count climbs back.
+    ///
+    /// With a gap of `g` doublings the intervals run `RESAMPLE_INTERVAL << g` twice and then double
+    /// up to half the cap, so those below the cap sum to at most one capped interval. Five capped
+    /// intervals cover the 15,600 calls this takes at six tenths.
     const DISCOVERY: u32 = 5 * (RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT);
 
     /// Calls in which a cadence at the cap crosses exactly one boundary.
@@ -2827,10 +2820,12 @@ mod tests {
 
     /// Serial beats the preferred placement, so the run cadence keeps a caller with a choice on
     /// serial. The other placement is remembered as nine times slower than serial but is actually
-    /// the fastest path. The placement choice probes it on its own interval over the caller's
-    /// calls, and twelve probes bring it past the preferred placement. One more probe on that
-    /// placement's run cadence then brings it past serial. Both stages fit within the `DISCOVERY`
-    /// calls a confined caller takes to rediscover its placement and back off again.
+    /// the fastest path.
+    ///
+    /// The placement choice probes it on its own interval, and twelve probes bring it past the
+    /// preferred placement. One more probe on that placement's run cadence brings it past serial.
+    /// Both stages fit within the `DISCOVERY` calls a confined caller needs to rediscover its
+    /// placement and back off.
     ///
     /// Once there, it leaves that placement only for the run cadence's probes of serial and the
     /// choice's probes of the placement it preferred before. Both cadences are back at the cap, so
@@ -2912,11 +2907,12 @@ mod tests {
     }
 
     /// Serial is at least sixty times faster than either placement, but serial projected from the
-    /// preferred placement exceeds the budget, so serial never runs and the preferred placement is
-    /// the only path the other placement races. The placements are within a whole multiple of each
-    /// other, so the other placement's first probe comes after one plain resample interval and
-    /// later ones back off only with confirmations. Serial's wall time must not stretch that
-    /// interval to the cap.
+    /// preferred placement exceeds the budget. Serial therefore never runs, and the preferred
+    /// placement is the only path the other placement races.
+    ///
+    /// The placements are within a whole multiple of each other, so the other placement's first
+    /// probe comes after one plain resample interval, and later ones back off only with
+    /// confirmations. Serial's wall time must not stretch that interval to the cap.
     #[test]
     fn choice_ignores_ineligible_serial_when_pacing() {
         for pool in [Placement::Wide, Placement::Local] {
@@ -3351,10 +3347,11 @@ mod tests {
 
             // By the settled half the run cadence prefers Local over serial, and the placement
             // choice prefers it over Wide by more than the capped margin. Both gaps only grow as
-            // the local estimate falls, so neither count resets. After its first boundary in the
-            // window, such a cadence has intervals no shorter than a fresh cadence's from the
-            // second on. It therefore crosses at most one boundary more than a fresh cadence over
-            // as many calls.
+            // the local estimate falls, so neither count resets.
+            //
+            // After its first boundary in the window, such a cadence has intervals no shorter than
+            // a fresh cadence's from the second on. It therefore crosses at most one boundary more
+            // than a fresh cadence over as many calls.
             assert!(
                 local_runs
                     >= with_pool
@@ -3410,11 +3407,12 @@ mod tests {
             steady_probes(calls, 0)
         );
 
-        // Serial then slows to twice Wide's wall. It stays preferred for ten calls, until its
-        // next sample flips the preference to Wide. The confirmations were of serial, and the
-        // call after the flip is long past the base interval, so it probes serial at once. The
-        // intervals then back off from the base again, so serial is probed six times over the next
-        // capped interval of calls, where keeping serial's confirmations would allow one.
+        // Serial then slows to twice Wide's wall. It stays preferred for ten calls, until its next
+        // sample flips the preference to Wide. The confirmations were of serial, and the call after
+        // the flip is long past the base interval, so it probes serial at once.
+        //
+        // The intervals then back off from the base again, so serial is probed six times over the
+        // next capped interval of calls, where keeping serial's confirmations would allow one.
         let serial_runs = runs_of(
             RunExecution::Serial,
             RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT,
@@ -3478,13 +3476,12 @@ mod tests {
 
     /// Wide's established wall-time estimate is nine times serial's, but Wide currently takes half
     /// of serial's wall time. Each probe closes a fifth of the gap, so Wide overtakes serial at the
-    /// thirteenth.
+    /// thirteenth, and the caller settles on Wide the call after, 11,601 calls in.
     ///
     /// While Wide trails by several multiples of serial's wall, most probes bring it a multiple
     /// closer and reset the confirmations, so the intervals follow the gap. Inside the last
-    /// multiple the remaining probes confirm and back off from the base interval. The caller
-    /// settles on Wide the call after the thirteenth probe, 11,601 calls in, where the gap alone
-    /// would take 10,501.
+    /// multiple the remaining probes confirm and back off from the base interval. Following the gap
+    /// alone would settle 10,501 calls in.
     #[test]
     fn confined_noisy_races_rediscover_stale_placement() {
         let pools = confined(Placement::Wide);
@@ -3652,9 +3649,11 @@ mod tests {
 
     /// Workers and outside callers share one entry. Every job takes 20 us wherever it runs, and
     /// each round trip adds the same overhead on every call: 15 us in a worker's own pool and 30 us
-    /// for a hand-off. The estimates therefore never move, and each population must make the same
-    /// decisions, probes and samples included, as when it calls alone. Neither population advances
-    /// the other's cadence.
+    /// for a hand-off.
+    ///
+    /// The estimates therefore never move, and each population must make the same decisions, probes
+    /// and samples included, as when it calls alone. Neither population advances the other's
+    /// cadence.
     #[test]
     fn spawn_populations_keep_independent_cadences() {
         let job = Duration::from_micros(20);

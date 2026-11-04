@@ -51,9 +51,9 @@ pub(crate) enum Placement {
 /// The current job's placement, used to select the deque a worker pushes to. A worker's local
 /// placement is always for its own group.
 ///
-/// Each queue stamps the jobs it receives with its tag: local deques, group injectors, and
-/// broadcast deques with `Local`, and wide deques and the wide injector with `Wide`. A worker
-/// runs a job it takes under the job's tag.
+/// Each queue stamps the jobs it receives with its tag, and a worker runs a job it takes under that
+/// tag. Local deques, group injectors, and broadcast deques stamp `Local`. Wide deques and the wide
+/// injector stamp `Wide`.
 ///
 /// ```text
 ///               external submissions
@@ -68,24 +68,19 @@ pub(crate) enum Placement {
 ///       g's Local deques    every worker's Wide deque
 /// ```
 ///
-/// A job placed [`Placement::Local`] on group `g` runs only on a worker of `g`. Every path that
-/// moves a job between threads preserves this restriction:
+/// A job placed [`Placement::Local`] on group `g` runs only on a worker of `g`, because every path
+/// that moves it between threads keeps it there:
 ///
-/// - From a thread that is not a worker of `g`, the job waits in `g`'s injector, which only the
-///   workers of `g` pop, and the worker that pops it runs it as `Local`. A worker of `g` that
-///   installs or spawns it runs or pushes it itself as `Local`.
-/// - A worker running a `Local` job pushes to its local deque. It pops that deque itself, and
-///   only its group-mates steal from it, so the jobs it holds run as `Local` in `g`, and so do
-///   the jobs they push in turn.
-/// - Join's inline pop runs job b on the worker that pushed it, under the worker's current tag.
-///   That is the tag b was pushed under, since every tag change made after the push is undone
-///   before the pop, also by unwinding.
-/// - A broadcast job runs on the worker whose broadcast deque holds it, as `Local`.
-/// - Wide deques and the wide injector, which any worker takes from, receive only jobs placed
-///   [`Placement::Wide`] and the jobs that `Wide` jobs push.
-/// - An install on `g` from a worker of another group or pool injects the operation into `g`'s
-///   injector and searches for other work while it waits. The waiting thread helps only with
-///   jobs of its own pool that its own group may take, never with jobs local to `g`.
+/// - Only workers of `g` pop `g`'s injector or steal from its workers' local deques, so jobs
+///   injected into `g`, and the jobs their `Local` descendants push, run as `Local` in `g`. A
+///   worker of `g` that installs or spawns such a job runs or pushes it itself.
+/// - Join's inline pop runs job b on the worker that pushed it, under the tag b was pushed under,
+///   since every later tag change is undone before the pop, also by unwinding.
+/// - A broadcast job runs as `Local` on the worker whose broadcast deque holds it.
+/// - Wide deques and the wide injector receive only jobs placed [`Placement::Wide`] and the jobs
+///   that `Wide` jobs push.
+/// - An install on `g` from a thread outside `g` injects into `g`'s injector. While it waits,
+///   that thread helps only with jobs of its own pool that its own group may take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Tag {
     /// Pushes go to the worker's local deque, which only its group-mates steal from.
@@ -158,10 +153,11 @@ pub(super) struct Registry {
 /// The sleep states of one group's workers.
 ///
 /// A job placed [`Placement::Local`] on the group runs only on the group's workers, and its
-/// notification reaches only the group's sleep protocol, which runs upstream's code over exactly
-/// those workers. Upstream's argument that no wakeup is lost therefore holds for such a job with
-/// the pool restricted to the group. Every worker of the group searches its group-mates' local
-/// deques and its group's incoming queue, and a sleeper's final check reads that queue.
+/// notification reaches only the group's sleep protocol. That protocol runs upstream's code over
+/// exactly those workers, so upstream's argument that no wakeup is lost holds for such a job.
+///
+/// Every worker of the group searches its group-mates' local deques and its group's incoming queue,
+/// and a sleeper's final check reads that queue.
 struct Group {
     /// Governs when the group's workers sleep and wake, indexed by their offset in the group.
     sleep: Sleep,
@@ -868,37 +864,41 @@ impl WorkerThread {
 
     /// Finds a job to run.
     ///
-    /// The search covers our own deques and broadcasts, our group-mates' Local deques, and
-    /// every other worker's Wide deque (our group-mates' first), before taking the oldest
-    /// incoming job across our group's Local injector and the shared Wide injector. Incoming
-    /// jobs are ordered by arrival, without reserving a share for either placement. This orders
-    /// admission only: jobs may finish in any order, and deque work keeps priority.
+    /// The search tries each source below in turn, so deque work keeps priority over incoming jobs.
+    /// Arrival order governs only the admission of incoming jobs, without reserving a share for
+    /// either placement.
     ///
-    /// Joins and installs wait on descendant work, so their waits follow the job tree and cannot
+    /// ```text
+    /// our own deques and broadcasts
+    ///   | empty
+    ///   v
+    /// our group-mates' Local deques
+    ///   | empty
+    ///   v
+    /// every other worker's Wide deque, our group-mates' first
+    ///   | empty
+    ///   v
+    /// the oldest job across our group's Local injector and the shared Wide injector
+    /// ```
+    ///
+    /// Joins and installs wait only on descendants, so their waits follow the job tree and cannot
     /// form a cycle. Their liveness follows upstream's argument under its assumptions that jobs
-    /// block only in scheduler waits and workers keep searching. A thread taken over with
-    /// `use_current_thread` does not search while it runs its own code. The search reaches the same
-    /// queues whatever placement the waiting worker runs under, which only orders its own two
-    /// deques. Each descendant must be queued where an eligible searching worker can reach it:
+    /// block only in scheduler waits and workers keep searching.
     ///
-    /// - A descendant pushed under `Local` sits in the local deque of a worker of our group or in
-    ///   our group's injector. Our search and our group-mates' searches reach it, which is
-    ///   upstream's single pool restricted to the group.
-    /// - A descendant pushed under `Wide` sits in a wide deque or the wide injector, which every
-    ///   search reaches, which is upstream's single pool.
-    /// - A descendant placed explicitly on a group `h` sits in `h`'s injector or in the local deque
-    ///   of a worker of `h`, which the searches of `h`'s workers reach. Each worker of `h` is
-    ///   running a job or searching, so the descendant starts, and its own descendants fall under
-    ///   these cases again. Its waiting ancestor keeps searching meanwhile and helps with any of
-    ///   them that its group may take.
-    /// - In particular, a worker running a `Wide` job that waits on a `Local` job of its group
-    ///   reaches that job in its group-mates' local deques and its group's injector, and a worker
-    ///   running a `Local` job that waits on a `Wide` child stolen by a worker of another group
-    ///   reaches every `Wide` job the child pushes, so it helps rather than idles while the thief
-    ///   runs the child.
+    /// A thread taken over with `use_current_thread` does not search while it runs its own code.
+    /// The waiting worker's placement only orders its own two deques, and each descendant is queued
+    /// where an eligible searching worker reaches it:
+    ///
+    /// - A `Local` descendant sits in a local deque or the injector of our group, where our group's
+    ///   searches reach it.
+    /// - A `Wide` descendant sits in a wide deque or the wide injector, where every search reaches
+    ///   it.
+    /// - A descendant placed on another group `h` sits where the searches of `h`'s workers reach
+    ///   it, and each of them is running a job or searching. The waiting ancestor meanwhile helps
+    ///   with any job its own group may take, including the `Wide` jobs a stolen child pushes.
     ///
     /// Native future waits use the same search. Their completion also depends on the future's
-    /// producer making progress, and the producer can depend on work outside the job tree.
+    /// producer, and the producer can depend on work outside the job tree.
     fn find_work(&self) -> Option<JobRef> {
         self.take_own_job()
             .or_else(|| self.steal_local())
