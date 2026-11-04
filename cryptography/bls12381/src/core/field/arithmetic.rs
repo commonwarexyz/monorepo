@@ -117,7 +117,7 @@
 //! [`Wide`]: super::fp::rns::Wide
 
 use super::fp::{BYTES, MODULUS, WORDS};
-use commonware_simd::Simd;
+use commonware_simd::{Operation, Simd};
 
 /// Largest integer bound of a value returned by [`Field::reduce_tight`] in any representation, in
 /// units of `p`.
@@ -175,6 +175,17 @@ pub trait Field<S: Simd>: Copy {
     ///
     /// Requires valid value bounds. Entries beyond [`Self::LANES`] are unchanged.
     fn store(self, simd: S, elements: &mut [[u8; BYTES]]);
+
+    /// Runs an operation of base field or quadratic extension size, such as a reduction or an
+    /// [`Fp2`] product, as its own kernel when the representation's multiplication is large enough
+    /// to be worth outlining, so that formulas call one copy; representations whose operations are
+    /// small run it inline.
+    ///
+    /// [`Fp2`]: super::fp2::Fp2
+    #[inline(always)]
+    fn kernel<O: Operation<S>>(simd: S, operation: O) -> O::Output {
+        simd.execute(operation)
+    }
 
     /// One lane of a value in the representation's own form, as [`Self::store_raw`] stores it.
     type Raw: Copy + Default;
