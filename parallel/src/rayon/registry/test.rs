@@ -1395,11 +1395,12 @@ enum WideSource {
     None,
 }
 
-/// Holds a worker of group 1 at `point` as it leaves the idle loop for Local work, and queues a
-/// Wide job from `source` near group 1 while every other awake worker is busy. The held worker
-/// counts as idle coverage for the Wide job, so its exit must wake group 2 to run it before any
-/// busy worker is released. Without a Wide job, the exit must not wake group 2.
-fn check_wide_handoff(point: WakePoint, source: WideSource) {
+/// Holds a worker of group 1 at `point` as it leaves the idle loop for a job placed `taken`, and
+/// queues a Wide job from `source` near group 1 while every other awake worker is busy. The held
+/// worker counts as idle coverage for the Wide job, so its exit must wake group 2 to run it before
+/// any busy worker is released. Without a Wide job, a Local exit must not wake group 2. A resumed
+/// wait always takes a Local job.
+fn check_wide_handoff(point: WakePoint, source: WideSource, taken: Placement) {
     // Give group 1's workers a gate for `point` and let the whole pool fall asleep.
     let pool = Arc::new(pool(6, 2));
     let gate = WakeGate::install(&pool, point);
@@ -1492,15 +1493,15 @@ fn check_wide_handoff(point: WakePoint, source: WideSource) {
             started.load(Ordering::SeqCst) == 3
         });
     } else {
-        // A sleeping worker of group 1 wakes for a Local job, and the gate holds it after it finds
-        // the job.
+        // A sleeping worker of group 1 wakes for the job, and the gate holds it after it finds the
+        // job.
         gate.armed.store(true, Ordering::SeqCst);
         let (busy, resumed) = (Arc::clone(&busy), Arc::clone(&resumed));
-        pool.spawn_in(Placement::Local(1), move || {
+        pool.spawn_in(taken, move || {
             resumed.store(true, Ordering::SeqCst);
             busy.wait(|| {});
         });
-        wait_until("a worker takes the local job", || {
+        wait_until("a worker takes the job", || {
             gate.entered.load(Ordering::SeqCst)
         });
     }
@@ -1524,7 +1525,7 @@ fn check_wide_handoff(point: WakePoint, source: WideSource) {
     // Release the held worker, and check whether group 2 runs the Wide job before any busy worker
     // could take it.
     gate.hold.released.store(true, Ordering::SeqCst);
-    wait_until("the held worker runs its local job", || {
+    wait_until("the held worker runs its job", || {
         resumed.load(Ordering::SeqCst)
     });
     let ran_before_release = source != WideSource::None && observe_wide_job(&wide);
@@ -1553,8 +1554,19 @@ fn wide_work_survives_local_idle_exit() {
     within(|| {
         for point in [WakePoint::Found, WakePoint::Resumed] {
             for source in [WideSource::Injector, WideSource::Deque, WideSource::None] {
-                check_wide_handoff(point, source);
+                check_wide_handoff(point, source, Placement::Local(1));
             }
+        }
+    });
+}
+
+/// A worker that leaves the idle loop for Wide work passes other queued Wide work on to a sleeping
+/// group, whether that work sits in the injector or in a worker's deque.
+#[test]
+fn wide_work_survives_wide_idle_exit() {
+    within(|| {
+        for source in [WideSource::Injector, WideSource::Deque] {
+            check_wide_handoff(WakePoint::Found, source, Placement::Wide { near: 1 });
         }
     });
 }

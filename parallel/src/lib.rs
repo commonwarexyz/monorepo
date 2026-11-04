@@ -2331,6 +2331,20 @@ mod test {
         true
     }
 
+    /// Waits up to ten seconds until every worker of `pool` is registered as asleep. A worker
+    /// finishes a job, including the samples it records for the job, before it sleeps, so a quiet
+    /// pool has no bookkeeping in flight.
+    fn wait_until_asleep(pool: &rayon::ThreadPool) {
+        let start = Instant::now();
+        while pool.sleeping_workers() < pool.current_num_threads() {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "every worker of the pool must go to sleep within 10 seconds"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     /// Forced parallel work can use an idle group while another group's workers are occupied.
     #[test]
     fn forced_parallel_uses_idle_group() {
@@ -3490,14 +3504,7 @@ mod test {
         let pool = strategy.groups.pool();
 
         // Wait for every worker to sleep, so each wakeup below is the call's.
-        let start = Instant::now();
-        while pool.sleeping_workers() < pool.current_num_threads() {
-            assert!(
-                start.elapsed() < Duration::from_secs(10),
-                "every worker of the pool must go to sleep within 10 seconds"
-            );
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        wait_until_asleep(pool);
         let before = pool.wakeups();
         let me = std::thread::current().id();
         let on_caller = AtomicUsize::new(0);
@@ -3600,6 +3607,9 @@ mod test {
             futures::executor::block_on(job)
         }));
         assert!(result.is_err());
+
+        // The worker sends the result before its bookkeeping, so let it finish the job first.
+        wait_until_asleep(strategy.groups.pool());
         assert!(!spawn_recorded(&strategy, loc));
 
         let (loc, job) = spawn_flagged(&strategy, false);

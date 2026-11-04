@@ -1797,6 +1797,49 @@ mod tests {
             assert!(floating.is_none());
         }
 
+        /// Floating workers get a mask when exactly one CPU remains per floating worker, and none
+        /// when one fewer remains.
+        #[test]
+        fn reservations_float_at_exact_capacity() {
+            let lists: Vec<_> = (0..8).map(|cpu| (cpu, (cpu / 4).to_string())).collect();
+            let topology = Topology::from_lists(&lists).unwrap();
+            let allowed = cpu_set(0..8);
+            let (_, floating) = topology.reservations(&allowed, [(3, Some(0)), (4, None)]);
+            assert_eq!(
+                floating.unwrap().cpus().collect::<Vec<_>>(),
+                (4..8).collect::<Vec<_>>()
+            );
+            let (_, floating) = topology.reservations(&allowed, [(3, Some(0)), (5, None)]);
+            assert!(floating.is_none());
+        }
+
+        /// The group width follows the domain with the most allowed CPUs, minus one worker from
+        /// six allowed CPUs up, and is unavailable when no domain allows two CPUs.
+        #[test]
+        fn group_width_leaves_slack_in_wide_domains() {
+            // Domains of 8, 6, 5, and 1 CPUs.
+            let lists: Vec<_> = (0..20)
+                .map(|cpu| {
+                    let domain = match cpu {
+                        0..8 => 0,
+                        8..14 => 1,
+                        14..19 => 2,
+                        _ => 3,
+                    };
+                    (cpu, domain.to_string())
+                })
+                .collect();
+            let topology = Topology::from_lists(&lists).unwrap();
+            let widths = [
+                cpu_set(0..20),
+                cpu_set(8..20),
+                cpu_set(14..20),
+                cpu_set([0, 8, 14, 19]),
+            ]
+            .map(|allowed| Groups::group_width(&topology, &allowed));
+            assert_eq!(widths, [Some(7), Some(5), Some(5), None]);
+        }
+
         /// Scattered CPU ids listed out of order. Domain 0 holds 9, 2, and 14, domain 1 holds 5,
         /// 11, and 0, domain 2 holds 7, 12, and 3, and domain 3 holds 1 and 4.
         fn scattered_topology() -> Topology {
