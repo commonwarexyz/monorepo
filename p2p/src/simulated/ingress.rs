@@ -30,14 +30,20 @@ pub enum Message<P: PublicKey, E: Clock> {
         priority: bool,
     },
     Track {
+        /// The peer whose own sets to update, or `None` for the network-wide sets.
+        owner: Option<P>,
         id: u64,
         peers: TrackedPeers<P>,
     },
+    /// Switch `owner` to the peer sets tracked through its own managers.
+    OwnPeerSets { owner: P },
     PeerSet {
+        owner: Option<P>,
         id: u64,
         response: oneshot::Sender<Option<TrackedPeers<P>>>,
     },
     Subscribe {
+        owner: Option<P>,
         response: oneshot::Sender<PeerSetSubscription<P>>,
     },
     SubscribePeers {
@@ -95,6 +101,9 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
                 .debug_struct("Track")
                 .field("id", id)
                 .finish_non_exhaustive(),
+            Self::OwnPeerSets { owner } => {
+                f.debug_struct("OwnPeerSets").field("owner", owner).finish()
+            }
             Self::PeerSet { id, .. } => f
                 .debug_struct("PeerSet")
                 .field("id", id)
@@ -197,21 +206,23 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
         }
     }
 
-    /// Create a new [Manager].
+    /// Create a new [Manager] for the network-wide peer sets.
     ///
     /// Useful for mocking [crate::authenticated::discovery].
     pub fn manager(&self) -> Manager<P, E> {
         Manager {
             oracle: self.clone(),
+            owner: None,
         }
     }
 
-    /// Create a new [SocketManager].
+    /// Create a new [SocketManager] for the network-wide peer sets.
     ///
     /// Useful for mocking [crate::authenticated::lookup].
     pub fn socket_manager(&self) -> SocketManager<P, E> {
         SocketManager {
             oracle: self.clone(),
+            owner: None,
         }
     }
 
@@ -300,13 +311,14 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Set the peers for a given id.
-    fn track(&self, id: u64, peers: TrackedPeers<P>) -> Feedback {
-        enqueue(&self.sender, Message::Track { id, peers })
+    fn track(&self, owner: Option<P>, id: u64, peers: TrackedPeers<P>) -> Feedback {
+        enqueue(&self.sender, Message::Track { owner, id, peers })
     }
 
     /// Get the primary and secondary peers for a given ID.
-    async fn peer_set(&self, id: u64) -> Option<TrackedPeers<P>> {
+    async fn peer_set(&self, owner: Option<P>, id: u64) -> Option<TrackedPeers<P>> {
         request(&self.sender, move |response| Message::PeerSet {
+            owner,
             id,
             response,
         })
@@ -315,13 +327,16 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Subscribe to notifications when new peer sets are added.
-    async fn subscribe(&self) -> PeerSetSubscription<P> {
-        request(&self.sender, |response| Message::Subscribe { response })
-            .await
-            .unwrap_or_else(|| {
-                let (_, rx) = mpsc::unbounded_channel();
-                rx
-            })
+    async fn subscribe(&self, owner: Option<P>) -> PeerSetSubscription<P> {
+        request(&self.sender, |response| Message::Subscribe {
+            owner,
+            response,
+        })
+        .await
+        .unwrap_or_else(|| {
+            let (_, rx) = mpsc::unbounded_channel();
+            rx
+        })
     }
 }
 
@@ -331,6 +346,9 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
 pub struct Manager<P: PublicKey, E: Clock> {
     /// The oracle to send messages to.
     oracle: Oracle<P, E>,
+
+    /// The peer whose own sets this manager tracks, or `None` for the network-wide sets.
+    owner: Option<P>,
 }
 
 impl<P: PublicKey, E: Clock> std::fmt::Debug for Manager<P, E> {
@@ -343,6 +361,7 @@ impl<P: PublicKey, E: Clock> Clone for Manager<P, E> {
     fn clone(&self) -> Self {
         Self {
             oracle: self.oracle.clone(),
+            owner: self.owner.clone(),
         }
     }
 }
@@ -351,11 +370,11 @@ impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
     type PublicKey = P;
 
     async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
-        self.oracle.peer_set(id).await
+        self.oracle.peer_set(self.owner.clone(), id).await
     }
 
     async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
-        self.oracle.subscribe().await
+        self.oracle.subscribe(self.owner.clone()).await
     }
 }
 
@@ -364,7 +383,7 @@ impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
     where
         R: Into<TrackedPeers<Self::PublicKey>> + Send,
     {
-        self.oracle.track(id, peers.into())
+        self.oracle.track(self.owner.clone(), id, peers.into())
     }
 }
 
@@ -380,6 +399,9 @@ impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
 pub struct SocketManager<P: PublicKey, E: Clock> {
     /// The oracle to send messages to.
     oracle: Oracle<P, E>,
+
+    /// The peer whose own sets this manager tracks, or `None` for the network-wide sets.
+    owner: Option<P>,
 }
 
 impl<P: PublicKey, E: Clock> std::fmt::Debug for SocketManager<P, E> {
@@ -392,6 +414,7 @@ impl<P: PublicKey, E: Clock> Clone for SocketManager<P, E> {
     fn clone(&self) -> Self {
         Self {
             oracle: self.oracle.clone(),
+            owner: self.owner.clone(),
         }
     }
 }
@@ -400,11 +423,11 @@ impl<P: PublicKey, E: Clock> crate::Provider for SocketManager<P, E> {
     type PublicKey = P;
 
     async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
-        self.oracle.peer_set(id).await
+        self.oracle.peer_set(self.owner.clone(), id).await
     }
 
     async fn subscribe(&mut self) -> PeerSetSubscription<P> {
-        self.oracle.subscribe().await
+        self.oracle.subscribe(self.owner.clone()).await
     }
 }
 
@@ -416,6 +439,7 @@ impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
         // Ignore all addresses (simulated network doesn't use them)
         let peers = peers.into();
         self.oracle.track(
+            self.owner.clone(),
             id,
             TrackedPeers::new(peers.primary.into_keys(), peers.secondary.into_keys()),
         )
@@ -474,6 +498,44 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
         })
         .await
         .ok_or(Error::NetworkClosed)?
+    }
+
+    /// Create a [Manager] that tracks peer sets for this peer alone.
+    ///
+    /// From then on, this peer exchanges messages with another peer only while each tracks the
+    /// other, as an authenticated network keeps a connection only between peers that track each
+    /// other. Peers without their own managers use the network-wide peer sets.
+    ///
+    /// Useful for mocking [crate::authenticated::discovery].
+    pub fn manager(&self) -> Manager<P, E> {
+        self.own_peer_sets();
+        Manager {
+            oracle: Oracle::new(self.sender.clone()),
+            owner: Some(self.me.clone()),
+        }
+    }
+
+    /// Create a [SocketManager] that tracks peer sets for this peer alone.
+    ///
+    /// See [Self::manager] for how this changes which peers this peer can reach.
+    ///
+    /// Useful for mocking [crate::authenticated::lookup].
+    pub fn socket_manager(&self) -> SocketManager<P, E> {
+        self.own_peer_sets();
+        SocketManager {
+            oracle: Oracle::new(self.sender.clone()),
+            owner: Some(self.me.clone()),
+        }
+    }
+
+    /// Switch this peer to the peer sets tracked through its own managers.
+    fn own_peer_sets(&self) {
+        let _ = enqueue(
+            &self.sender,
+            Message::OwnPeerSets {
+                owner: self.me.clone(),
+            },
+        );
     }
 }
 

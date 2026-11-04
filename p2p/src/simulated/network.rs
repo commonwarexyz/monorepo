@@ -35,7 +35,7 @@ use futures::future;
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque, btree_map},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
@@ -120,6 +120,196 @@ struct PeerRefCounts {
     secondary: usize,
 }
 
+/// The most recent peer sets tracked through one manager, either the network-wide manager or
+/// the managers of one peer.
+struct Tracker<P: PublicKey> {
+    // Primary and secondary peer sets indexed by peer set ID.
+    sets: BTreeMap<u64, PeerSetsAtIndex<P>>,
+
+    // Per-peer reference counts across tracked peer sets (entry removed when both are zero).
+    counts: BTreeMap<P, PeerRefCounts>,
+
+    // Subscribers to peer set updates (used by `Provider::subscribe`).
+    subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<P>>>,
+}
+
+impl<P: PublicKey> Tracker<P> {
+    const fn new() -> Self {
+        Self {
+            sets: BTreeMap::new(),
+            counts: BTreeMap::new(),
+            subscribers: Vec::new(),
+        }
+    }
+
+    /// Returns whether any tracked peer set lists `peer`.
+    fn contains(&self, peer: &P) -> bool {
+        self.counts.contains_key(peer)
+    }
+
+    /// Peers listed by any tracked peer set, in key order.
+    fn peers(&self) -> impl Iterator<Item = &P> {
+        self.counts.keys()
+    }
+
+    /// Returns the primary and secondary peers tracked at `id`.
+    fn peer_set(&self, id: u64) -> Option<TrackedPeers<P>> {
+        self.sets
+            .get(&id)
+            .map(|e| TrackedPeers::new(e.primary.clone(), e.secondary.clone()))
+    }
+
+    /// Returns whether `id` is newer than every tracked peer set.
+    fn accepts(&self, id: u64) -> bool {
+        // Check if peer set already exists
+        if self.sets.contains_key(&id) {
+            warn!(id, "peer set already exists");
+            return false;
+        }
+
+        // Ensure that peer set is monotonically increasing
+        if let Some((last, _)) = self.sets.last_key_value()
+            && id <= *last
+        {
+            warn!(
+                new_id = id,
+                old_id = last,
+                "attempted to register peer set with non-monotonically increasing ID"
+            );
+            return false;
+        }
+        true
+    }
+
+    /// Track `primary` and `secondary` at an accepted `id`, evicting the oldest sets beyond
+    /// `limit`.
+    ///
+    /// Returns the secondary peers not also listed as primary.
+    fn track(
+        &mut self,
+        id: u64,
+        primary: Set<P>,
+        secondary: Set<P>,
+        limit: NonZeroUsize,
+    ) -> Set<P> {
+        // Track primary peers.
+        for public_key in primary.iter() {
+            self.counts.entry(public_key.clone()).or_default().primary += 1;
+        }
+
+        // Track secondary peers, treating overlaps as primary.
+        let secondary = Set::from_iter_dedup(
+            secondary
+                .iter()
+                .filter(|s| primary.position(s).is_none())
+                .cloned(),
+        );
+        for public_key in secondary.iter() {
+            self.counts.entry(public_key.clone()).or_default().secondary += 1;
+        }
+        self.sets.insert(
+            id,
+            PeerSetsAtIndex {
+                primary,
+                secondary: secondary.clone(),
+            },
+        );
+
+        // Remove oldest tracked peer sets if we exceed the limit.
+        while self.sets.len() > limit.get() {
+            let (removed_index, sets) = self.sets.pop_first().unwrap();
+            debug!(index = removed_index, "removed oldest tracked peer sets");
+
+            for public_key in sets.primary.iter() {
+                let counts = self
+                    .counts
+                    .get_mut(public_key)
+                    .expect("reference map out of sync with peer sets");
+                counts.primary = counts
+                    .primary
+                    .checked_sub(1)
+                    .expect("reference count underflow");
+                if counts.primary == 0 && counts.secondary == 0 {
+                    self.counts.remove(public_key);
+                    debug!(
+                        ?public_key,
+                        "removed peer no longer in any tracked peer set"
+                    );
+                }
+            }
+
+            for public_key in sets.secondary.iter() {
+                let counts = self
+                    .counts
+                    .get_mut(public_key)
+                    .expect("reference map out of sync with peer sets");
+                counts.secondary = counts
+                    .secondary
+                    .checked_sub(1)
+                    .expect("reference count underflow");
+                if counts.primary == 0 && counts.secondary == 0 {
+                    self.counts.remove(public_key);
+                    debug!(
+                        ?public_key,
+                        "removed peer no longer in any tracked peer set"
+                    );
+                }
+            }
+        }
+        secondary
+    }
+
+    /// Primary and secondary peers across all tracked peer sets (reference-counted union).
+    ///
+    /// Primary wins over secondary for the same public key: `secondary` includes only peers whose
+    /// only role across tracked sets is secondary (same as [`crate::Provider::subscribe`] for [`PeerSetUpdate::all`]).
+    fn aggregate_peer_membership(&self) -> TrackedPeers<P> {
+        let primary = self
+            .counts
+            .iter()
+            .filter(|(_, c)| c.primary > 0)
+            .map(|(k, _)| k.clone())
+            .try_collect()
+            .expect("BTreeMap keys are unique");
+        let secondary = Set::from_iter_dedup(
+            self.counts
+                .iter()
+                .filter(|(_, c)| c.secondary > 0 && c.primary == 0)
+                .map(|(k, _)| k.clone()),
+        );
+        TrackedPeers::new(primary, secondary)
+    }
+
+    /// Returns a [`PeerSetUpdate`] for the latest peer set (by id), if any.
+    fn latest_update(&self) -> Option<PeerSetUpdate<P>> {
+        let (index, entry) = self.sets.last_key_value()?;
+        Some(PeerSetUpdate {
+            index: *index,
+            latest: TrackedPeers::new(entry.primary.clone(), entry.secondary.clone()),
+            all: self.aggregate_peer_membership(),
+        })
+    }
+
+    /// Send the latest peer set to every subscriber, dropping subscribers that have gone away.
+    fn notify(&mut self) {
+        let update = self
+            .latest_update()
+            .expect("latest update missing after successful track");
+        self.subscribers
+            .retain(|subscriber| subscriber.send_lossy(update.clone()));
+    }
+
+    /// Subscribe to peer set updates, starting with the latest peer set.
+    fn subscribe(&mut self) -> mpsc::UnboundedReceiver<PeerSetUpdate<P>> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        if let Some(update) = self.latest_update() {
+            sender.send_lossy(update);
+        }
+        self.subscribers.push(sender);
+        receiver
+    }
+}
+
 /// Configuration for the simulated network.
 pub struct Config {
     /// Maximum size allowed for an application payload provided to a sender.
@@ -144,6 +334,9 @@ pub struct Config {
     /// tracked and this limit is exceeded, the oldest peer set is removed. Peers that are no
     /// longer in any tracked peer set will have their links removed and messages to them will be
     /// dropped.
+    ///
+    /// The limit applies separately to the network-wide peer sets and to each peer's own (see
+    /// [`ingress::Control::manager`]).
     pub tracked_peer_sets: NonZeroUsize,
 }
 
@@ -181,13 +374,13 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // A map from a public key to a peer
     peers: BTreeMap<P, Peer<P>>,
 
-    // Primary and secondary peer sets indexed by peer set ID.
-    peer_sets: BTreeMap<u64, PeerSetsAtIndex<P>>,
+    // Peer sets tracked through the network-wide manager, used by peers without their own.
+    tracker: Tracker<P>,
 
-    // Per-peer reference counts across tracked peer sets (entry removed when both are zero).
-    peer_ref_counts: BTreeMap<P, PeerRefCounts>,
+    // Peer sets tracked through each peer's own managers.
+    own_trackers: BTreeMap<P, Tracker<P>>,
 
-    // Maximum number of peer sets to track.
+    // Maximum number of peer sets each tracker keeps.
     tracked_peer_sets: NonZeroUsize,
 
     // Identities the tracked peer sets may hold at once.
@@ -198,9 +391,6 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
 
     // State of the transmitter
     transmitter: transmitter::State<P>,
-
-    // Subscribers to primary peer set updates (used by `Manager::subscribe`).
-    subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<P>>>,
 
     // Subscribers to the connectable peer list (used by PeerSource for LimitedSender)
     peer_subscribers: Vec<(P, ring::Sender<Vec<P>>)>,
@@ -251,11 +441,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 ingress_sender: oracle_mailbox.clone(),
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
-                peer_sets: BTreeMap::new(),
-                peer_ref_counts: BTreeMap::new(),
+                tracker: Tracker::new(),
+                own_trackers: BTreeMap::new(),
                 blocks: BTreeSet::new(),
                 transmitter: transmitter::State::new(),
-                subscribers: Vec::new(),
                 peer_subscribers: Vec::new(),
                 blocked_subscribers: Vec::new(),
                 received_messages,
@@ -293,6 +482,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         let (mut network, oracle) = Self::new(context, cfg);
         network
             .register_tracked_peer_set(
+                None,
                 0,
                 TrackedPeers::new(
                     Set::from_iter_dedup(primary),
@@ -303,105 +493,51 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         (network, oracle)
     }
 
-    /// Apply a tracked peer set to network state.
-    async fn register_tracked_peer_set(&mut self, id: u64, peers: TrackedPeers<P>) -> bool {
-        // Check if peer set already exists
-        if self.peer_sets.contains_key(&id) {
-            warn!(id, "peer set already exists");
-            return false;
-        }
-
-        // Ensure that peer set is monotonically increasing
-        if let Some((last, _)) = self.peer_sets.last_key_value()
-            && id <= *last
-        {
-            warn!(
-                new_id = id,
-                old_id = last,
-                "attempted to register peer set with non-monotonically increasing ID"
-            );
+    /// Apply a tracked peer set to the network-wide tracker, or to `owner`'s own tracker.
+    async fn register_tracked_peer_set(
+        &mut self,
+        owner: Option<P>,
+        id: u64,
+        peers: TrackedPeers<P>,
+    ) -> bool {
+        if !self.tracker_mut(owner.as_ref()).accepts(id) {
             return false;
         }
 
         // Validate and unpack the peer set.
         self.assert_peer_set_size(&peers);
         let primary = peers.primary;
-        let secondary = peers.secondary;
-        let tracked_peer_sets = self.tracked_peer_sets;
-
-        // Track primary peers.
-        for public_key in primary.iter() {
+        let limit = self.tracked_peer_sets;
+        let secondary =
+            self.tracker_mut(owner.as_ref())
+                .track(id, primary.clone(), peers.secondary, limit);
+        for public_key in primary.iter().chain(secondary.iter()) {
             self.ensure_peer_exists(public_key).await;
-            self.peer_ref_counts
-                .entry(public_key.clone())
-                .or_default()
-                .primary += 1;
-        }
-
-        // Track secondary peers, treating overlaps as primary.
-        let secondary_filtered = Set::from_iter_dedup(
-            secondary
-                .iter()
-                .filter(|s| primary.position(s).is_none())
-                .cloned(),
-        );
-        for public_key in secondary_filtered.iter() {
-            self.ensure_peer_exists(public_key).await;
-            self.peer_ref_counts
-                .entry(public_key.clone())
-                .or_default()
-                .secondary += 1;
-        }
-        self.peer_sets.insert(
-            id,
-            PeerSetsAtIndex {
-                primary: primary.clone(),
-                secondary: secondary_filtered,
-            },
-        );
-
-        // Remove oldest tracked peer sets if we exceed the limit.
-        while self.peer_sets.len() > tracked_peer_sets.get() {
-            let (removed_index, sets) = self.peer_sets.pop_first().unwrap();
-            debug!(index = removed_index, "removed oldest tracked peer sets");
-
-            for public_key in sets.primary.iter() {
-                let counts = self
-                    .peer_ref_counts
-                    .get_mut(public_key)
-                    .expect("reference map out of sync with peer sets");
-                counts.primary = counts
-                    .primary
-                    .checked_sub(1)
-                    .expect("reference count underflow");
-                if counts.primary == 0 && counts.secondary == 0 {
-                    self.peer_ref_counts.remove(public_key);
-                    debug!(
-                        ?public_key,
-                        "removed peer no longer in any tracked peer set"
-                    );
-                }
-            }
-
-            for public_key in sets.secondary.iter() {
-                let counts = self
-                    .peer_ref_counts
-                    .get_mut(public_key)
-                    .expect("reference map out of sync with peer sets");
-                counts.secondary = counts
-                    .secondary
-                    .checked_sub(1)
-                    .expect("reference count underflow");
-                if counts.primary == 0 && counts.secondary == 0 {
-                    self.peer_ref_counts.remove(public_key);
-                    debug!(
-                        ?public_key,
-                        "removed peer no longer in any tracked peer set"
-                    );
-                }
-            }
         }
         true
+    }
+
+    /// The network-wide tracker, or `owner`'s own tracker (created if missing).
+    fn tracker_mut(&mut self, owner: Option<&P>) -> &mut Tracker<P> {
+        match owner {
+            Some(owner) => self
+                .own_trackers
+                .entry(owner.clone())
+                .or_insert_with(Tracker::new),
+            None => &mut self.tracker,
+        }
+    }
+
+    /// The peer sets `peer` connects by: its own if it has a manager from
+    /// [`ingress::Control`], otherwise the network-wide ones.
+    fn view(&self, peer: &P) -> &Tracker<P> {
+        self.own_trackers.get(peer).unwrap_or(&self.tracker)
+    }
+
+    /// Returns whether `origin` and `recipient` each track the other, as an authenticated network
+    /// requires to keep a connection.
+    fn is_connectable(&self, origin: &P, recipient: &P) -> bool {
+        self.view(origin).contains(recipient) && self.view(recipient).contains(origin)
     }
 
     /// Enforces the configured maximum over one peer set.
@@ -467,20 +603,25 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             } => {
                 self.handle_task((channel, origin, recipients, message));
             }
-            ingress::Message::Track { id, peers } => {
-                if !self.register_tracked_peer_set(id, peers).await {
+            ingress::Message::Track { owner, id, peers } => {
+                if !self
+                    .register_tracked_peer_set(owner.clone(), id, peers)
+                    .await
+                {
                     return;
                 }
 
-                // Notify all subscribers about the new peer set.
-                let update = self
-                    .latest_update()
-                    .expect("latest update missing after successful track");
-                self.subscribers
-                    .retain(|subscriber| subscriber.send_lossy(update.clone()));
+                // Notify the tracker's subscribers about the new peer set.
+                self.tracker_mut(owner.as_ref()).notify();
 
                 // Broadcast updated tracked membership to SubscribeConnected subscribers.
                 self.broadcast_peer_list();
+            }
+            ingress::Message::OwnPeerSets { owner } => {
+                if let btree_map::Entry::Vacant(entry) = self.own_trackers.entry(owner) {
+                    entry.insert(Tracker::new());
+                    self.broadcast_peer_list();
+                }
             }
             ingress::Message::Register {
                 channel,
@@ -526,25 +667,15 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 send_result(result, Ok((sender, receiver)))
             }
-            ingress::Message::PeerSet { id, response } => {
-                let _ = response.send(
-                    self.peer_sets
-                        .get(&id)
-                        .map(|e| TrackedPeers::new(e.primary.clone(), e.secondary.clone())),
-                );
+            ingress::Message::PeerSet {
+                owner,
+                id,
+                response,
+            } => {
+                let _ = response.send(self.tracker_mut(owner.as_ref()).peer_set(id));
             }
-            ingress::Message::Subscribe { response } => {
-                // Create a new subscription channel
-                let (sender, receiver) = mpsc::unbounded_channel();
-
-                // Send the latest peer set upon subscription.
-                if let Some(update) = self.latest_update() {
-                    sender.send_lossy(update);
-                }
-                self.subscribers.push(sender);
-
-                // Return the receiver to the caller
-                let _ = response.send(receiver);
+            ingress::Message::Subscribe { owner, response } => {
+                let _ = response.send(self.tracker_mut(owner.as_ref()).subscribe());
             }
             ingress::Message::SubscribePeers { exclude, sender } => {
                 self.subscribe_connected(exclude, sender);
@@ -683,77 +814,27 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Broadcast updated peer list to all connected peer subscribers.
     ///
-    /// This runs when tracked membership changes ([`ingress::Message::Track`]), not when peers
+    /// This runs when tracked membership changes ([`ingress::Message::Track`] or
+    /// [`ingress::Message::OwnPeerSets`]), not when peers
     /// are first discovered via register, links, or bandwidth limits.
     ///
     /// Subscribers whose receivers have been dropped are removed to prevent
     /// memory leaks.
     fn broadcast_peer_list(&mut self) {
-        if self.peer_subscribers.is_empty() {
-            return;
-        }
-
-        let peers: Vec<P> = self.peer_ref_counts.keys().cloned().collect();
-        self.peer_subscribers.retain(|(exclude, subscriber)| {
-            let peer_list = if peers.contains(exclude) {
-                peers
-                    .iter()
-                    .filter(|peer| *peer != exclude)
-                    .cloned()
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            subscriber.send_lossy(peer_list)
+        let mut subscribers = std::mem::take(&mut self.peer_subscribers);
+        subscribers.retain(|(exclude, subscriber)| {
+            subscriber.send_lossy(self.connected_peers_for(exclude))
         });
-    }
-
-    /// Primary and secondary peers across all tracked peer sets (reference-counted union).
-    ///
-    /// Primary wins over secondary for the same public key: `secondary` includes only peers whose
-    /// only role across tracked sets is secondary (same as [`crate::Provider::subscribe`] for [`PeerSetUpdate::all`]).
-    fn aggregate_peer_membership(&self) -> TrackedPeers<P> {
-        let primary = self
-            .peer_ref_counts
-            .iter()
-            .filter(|(_, c)| c.primary > 0)
-            .map(|(k, _)| k.clone())
-            .try_collect()
-            .expect("BTreeMap keys are unique");
-        let secondary = Set::from_iter_dedup(
-            self.peer_ref_counts
-                .iter()
-                .filter(|(_, c)| c.secondary > 0 && c.primary == 0)
-                .map(|(k, _)| k.clone()),
-        );
-        TrackedPeers::new(primary, secondary)
-    }
-
-    /// Returns a [`PeerSetUpdate`] for the latest peer set (by id), if any.
-    fn latest_update(&self) -> Option<PeerSetUpdate<P>> {
-        let (index, entry) = self.peer_sets.last_key_value()?;
-        Some(PeerSetUpdate {
-            index: *index,
-            latest: TrackedPeers::new(entry.primary.clone(), entry.secondary.clone()),
-            all: self.aggregate_peer_membership(),
-        })
+        self.peer_subscribers = subscribers;
     }
 
     /// Peers used when expanding [`Recipients::All`] for a sender.
     fn connected_peers_for(&self, sender: &P) -> Vec<P> {
-        if !self.peer_ref_counts.contains_key(sender) {
-            return Vec::new();
-        }
-        self.peer_ref_counts
-            .keys()
-            .filter(|peer| *peer != sender)
+        self.view(sender)
+            .peers()
+            .filter(|peer| *peer != sender && self.view(peer).contains(sender))
             .cloned()
             .collect()
-    }
-
-    /// Returns whether the peer is currently allowed to use the network.
-    fn is_connectable(&self, peer: &P) -> bool {
-        self.peer_ref_counts.contains_key(peer)
     }
 
     /// Process completions from the transmitter.
@@ -793,8 +874,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     fn handle_task(&mut self, task: Task<P>) {
         let (channel, origin, recipients, message) = task;
 
-        // If tracking peer sets, ensure recipient and sender are in a tracked peer set
-        if !self.is_connectable(&origin) {
+        // A sender without its own peer sets must be in a network-wide one
+        if !self.own_trackers.contains_key(&origin) && !self.tracker.contains(&origin) {
             warn!(
                 ?origin,
                 reason = "not primary or secondary",
@@ -819,11 +900,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 continue;
             }
 
-            if !self.is_connectable(&recipient) {
+            if !self.is_connectable(&origin, &recipient) {
                 trace!(
                     ?origin,
                     ?recipient,
-                    reason = "not primary or secondary",
+                    reason = "not tracked by both peers",
                     "dropping message"
                 );
                 continue;
@@ -1784,6 +1865,7 @@ mod tests {
             assert!(
                 network
                     .register_tracked_peer_set(
+                        None,
                         0,
                         TrackedPeers::new(
                             Set::try_from([peer_1]).unwrap(),
@@ -1795,6 +1877,7 @@ mod tests {
             assert!(
                 network
                     .register_tracked_peer_set(
+                        None,
                         1,
                         TrackedPeers::new(
                             Set::try_from([peer_2]).unwrap(),
@@ -1803,7 +1886,7 @@ mod tests {
                     )
                     .await
             );
-            assert_eq!(network.peer_ref_counts.len(), 3);
+            assert_eq!(network.tracker.counts.len(), 3);
         });
     }
 
@@ -1825,6 +1908,7 @@ mod tests {
 
             network
                 .register_tracked_peer_set(
+                    None,
                     0,
                     TrackedPeers::new(
                         Set::try_from([peer_1, peer_2.clone()]).unwrap(),
@@ -1854,6 +1938,7 @@ mod tests {
             assert!(
                 network
                     .register_tracked_peer_set(
+                        None,
                         0,
                         TrackedPeers::new(
                             Set::try_from([peer_1.clone()]).unwrap(),
@@ -1865,6 +1950,7 @@ mod tests {
             assert!(
                 network
                     .register_tracked_peer_set(
+                        None,
                         1,
                         TrackedPeers::new(
                             Set::try_from([peer_2.clone()]).unwrap(),
@@ -1874,11 +1960,11 @@ mod tests {
                     .await
             );
 
-            assert_eq!(network.peer_ref_counts.len(), 2);
-            let peer_1_counts = network.peer_ref_counts.get(&peer_1).unwrap();
+            assert_eq!(network.tracker.counts.len(), 2);
+            let peer_1_counts = network.tracker.counts.get(&peer_1).unwrap();
             assert_eq!(peer_1_counts.primary, 1);
             assert_eq!(peer_1_counts.secondary, 1);
-            let peer_2_counts = network.peer_ref_counts.get(&peer_2).unwrap();
+            let peer_2_counts = network.tracker.counts.get(&peer_2).unwrap();
             assert_eq!(peer_2_counts.primary, 1);
             assert_eq!(peer_2_counts.secondary, 1);
         });
