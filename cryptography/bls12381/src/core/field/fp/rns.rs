@@ -608,14 +608,22 @@ impl<S: X86V4C> Rns<S> {
     ) -> S::U64 {
         let zero = simd.u64_splat(0);
         let k = quotient(input, &conversion.fraction);
-        let mut wide = (zero, zero);
-        for (residue, row) in input.iter().zip(&conversion.matrix) {
-            wide = madd(simd, wide, simd.u64_splat(*residue), constant(simd, row));
+        // Two accumulators, over the rows in pairs, halve the dependency chain of the ten
+        // multiply-adds.
+        let (mut even, mut odd) = ((zero, zero), (zero, zero));
+        let (residues, rows) = (
+            input.as_chunks::<2>().0,
+            conversion.matrix.as_chunks::<2>().0,
+        );
+        for ([a, b], [row_a, row_b]) in residues.iter().zip(rows) {
+            even = madd(simd, even, simd.u64_splat(*a), constant(simd, row_a));
+            odd = madd(simd, odd, simd.u64_splat(*b), constant(simd, row_b));
         }
         let correction = constant(simd, &conversion.correction);
-        wide = madd(simd, wide, simd.u64_splat(k & MASK), correction);
+        even = madd(simd, even, simd.u64_splat(k & MASK), correction);
         let correction = constant(simd, &conversion.correction_shift);
-        wide = madd(simd, wide, simd.u64_splat(k >> WORD), correction);
+        odd = madd(simd, odd, simd.u64_splat(k >> WORD), correction);
+        let wide = add_wide(simd, even, odd);
         let modulus = constant(simd, &destination.moduli);
         let inverse = constant(simd, &destination.inverse);
         let reduced = reduce(simd, wide, modulus, inverse);
@@ -742,14 +750,19 @@ impl<S: X86V4C> Rns<S> {
     #[inline(always)]
     fn finish(simd: S, quotient: S::U64, mut wide: (S::U64, S::U64), bound: DebugCounter) -> Self {
         bound.assert_le(LIMIT);
-        // Each diagonal is a separate inlined call with a constant rotation.
+        // Each diagonal is a separate inlined call with a constant rotation. The odd diagonals
+        // accumulate separately, which halves the dependency chain.
+        let zero = simd.u64_splat(0);
+        let mut odd = (zero, zero);
         macro_rules! diagonals {
-            ($($d:literal)*) => {$(
-                wide = Self::diagonal::<$d>(simd, quotient, wide);
+            ($($even:literal $odd:literal)*) => {$(
+                wide = Self::diagonal::<$even>(simd, quotient, wide);
+                odd = Self::diagonal::<$odd>(simd, quotient, odd);
             )*};
         }
         const { assert!(MODULI == 8) };
         diagonals!(0 1 2 3 4 5 6 7);
+        let wide = add_wide(simd, wide, odd);
         let modulus = constant(simd, &N.moduli);
         let reduced = reduce(simd, wide, modulus, constant(simd, &N.inverse));
         let n = fold(simd, reduced, constant(simd, &N.complement));
