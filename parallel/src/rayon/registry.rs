@@ -24,13 +24,13 @@ use std::{
     thread,
 };
 
-#[cfg(test)]
-mod group_scheduling_tests;
 mod injector;
+#[cfg(test)]
+mod test;
 mod wake;
 
 #[cfg(test)]
-use group_scheduling_tests::{WakePoint, at_wake_point};
+use test::{WakePoint, at_wake_point};
 
 /// Where a job runs among the groups of a pool's workers.
 ///
