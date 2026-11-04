@@ -612,7 +612,7 @@ impl Key {
     }
 }
 
-/// An empty, seeded, or live wall-clock estimate in nanoseconds.
+/// An empty, seeded, or live time estimate in nanoseconds.
 #[derive(Clone, Copy, Debug, Default)]
 enum Estimate {
     #[default]
@@ -754,9 +754,8 @@ struct RunEntry {
     /// probe of the slower placement never raises the estimate it compares against. A confined
     /// caller compares serial against the placement it is confined to.
     placement: Choice,
-    /// The busy time of parallel runs on each placement, indexed by placement. A caller arbitrates
-    /// serial against the placement it would use, so it reads the busy time of the runs it makes
-    /// there, recorded with that placement's wall time and as fresh.
+    /// The busy-time estimate of parallel runs on each placement, indexed by placement. A caller
+    /// gates serial on the busy time of the placement it would use.
     busy_ns: [Estimate; 2],
     /// The cadences on which serial is arbitrated against each placement, indexed by placement.
     /// Every caller on one cadence compares serial against the same placement, so each probe lands
@@ -1256,10 +1255,12 @@ mod tests {
         }
     }
 
+    /// The serial estimate holds a serial run's busy time as its wall time, so recording a serial
+    /// run must not feed the busy-time estimate that gates serial.
     #[test]
     fn serial_runs_leave_the_busy_estimate_untouched() {
-        // A serial run's busy time is its wall time, which the serial estimate already holds, so
-        // recording one must not feed the busy-time estimate that gates serial.
+        // Record runs at one call site with explicit wall and busy times, and read back the Wide
+        // busy-time estimate.
         let policy = Policy::default();
         let location = Location::caller();
         let plan = |execution| RunPlan {
@@ -1283,8 +1284,12 @@ mod tests {
                 .run_busy_estimates(location, 10, 10, PARALLELISM)
                 .and_then(|(wide, _)| wide)
         };
+
+        // A serial run alone leaves no busy-time estimate.
         record(RunExecution::Serial, 5, 5);
         assert_eq!(busy(), None);
+
+        // A later serial run leaves the parallel run's 3ms busy time in place.
         record(RunExecution::Parallel, 1, 3);
         record(RunExecution::Serial, 50, 50);
         assert_eq!(busy(), Some(3_000_000));
@@ -1295,6 +1300,7 @@ mod tests {
     /// let serial in against Wide.
     #[test]
     fn placements_gate_serial_on_their_own_busy_time() {
+        // Wide runs are busy for 300ms, Local runs for 6ms, and serial beats Local's 8ms wall time.
         let mut entry = RunEntry::default();
         entry.record_parallel(
             Placement::Wide,
@@ -1308,17 +1314,19 @@ mod tests {
         );
         entry.record(RunExecution::Serial, Duration::from_millis(5));
 
+        // Serial rivals and wins against Local, while Wide's busy time keeps it out.
         assert_eq!(entry.serial_rival_ns(Placement::Local), Some(5_000_000));
         assert_eq!(entry.serial_rival_ns(Placement::Wide), None);
         assert_eq!(entry.choose(Placement::Local).0, RunExecution::Serial);
         assert_eq!(entry.choose(Placement::Wide).0, RunExecution::Parallel);
     }
 
+    /// Queueing behind other work on the pool lifts a parallel run's wall time to 25ms, but its
+    /// busy time stays at 2ms. Serial takes 5ms on the caller's own thread, so it is affordable
+    /// and faster, and the policy must seed it at once and then prefer it.
     #[test]
     fn queueing_does_not_gate_serial() {
-        // Queueing behind other work on the pool lifts a parallel run's wall time to 25ms, but its
-        // busy time stays at 2ms. Serial takes 5ms on the caller's own thread, so it is affordable
-        // and faster, and the policy must seed it at once and then prefer it.
+        // Parallel seeds with a queued run, serial seeds on the next call, and serial is preferred.
         let mut entry = RunEntry::default();
         assert_eq!(choose(&mut entry), (RunExecution::Parallel, true));
         entry.record_parallel(

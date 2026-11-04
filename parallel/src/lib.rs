@@ -2264,7 +2264,7 @@ mod test {
     use crate::{
         Grid, MAX_UNITS, Rayon, Sequential, Strategy,
         mocks::Explorer,
-        rayon::{self, Placement, ThreadPoolBuilder, spin},
+        rayon::{self, Placement, ThreadPoolBuilder, spin, timed_spin},
     };
     use commonware_utils::{
         NZUsize, Widen,
@@ -3763,7 +3763,7 @@ mod test {
     }
 
     /// The wall-time and busy-time estimates `strategy` recorded at `caller` for `len` items.
-    /// Panics unless a parallel run there has been measured.
+    /// Panics unless a parallel run at `caller` has been measured.
     fn recorded(
         strategy: &Rayon,
         caller: &'static Location<'static>,
@@ -3782,54 +3782,66 @@ mod test {
         )
     }
 
-    /// Maps `len` items that each spin for `each`, and returns the call site of the run.
+    /// Maps `len` items that each spin for `each`, and returns the call site of the run and the
+    /// wall time the items spent spinning in total.
     #[track_caller]
-    fn spin_map(strategy: &Rayon, len: usize, each: Duration) -> &'static Location<'static> {
-        let _ = strategy.map_collect_vec(0..len, |_| spin(each));
-        Location::caller()
+    fn spin_map(
+        strategy: &Rayon,
+        len: usize,
+        each: Duration,
+    ) -> (&'static Location<'static>, Duration) {
+        let items = strategy.map_collect_vec(0..len, |_| timed_spin(each));
+        (Location::caller(), items.into_iter().sum())
     }
 
-    /// Measures a parallel run of 32 items on four workers, each spinning for 1ms. The caller is
-    /// not charged while it waits for the workers, so the busy time is at least the 32ms the items
-    /// spin and at most the run's wall time on each worker plus the caller's brief share.
+    /// Measures a parallel run of 32 items on four workers, each spinning for 1ms. The busy time
+    /// covers the 32ms the items spin, and the caller and four workers each charge disjoint
+    /// intervals within the run, so it stays within five times the wall time.
     #[test]
     fn measured_run_records_busy_time_of_every_worker() {
+        // Map 32 items that each spin for 1ms.
         let strategy = parallel_strategy();
         let len = 32;
-        let caller = spin_map(&strategy, len, Duration::from_millis(1));
+        let (caller, _) = spin_map(&strategy, len, Duration::from_millis(1));
+
+        // The recorded busy time covers every item and stays within five threads' wall time.
         let (wall, busy) = recorded(&strategy, caller, len);
         assert!(
-            busy >= Duration::from_millis(32) && busy <= wall * 4 + Duration::from_millis(1),
-            "busy time {busy:?} must cover every item and stay within four times the wall {wall:?}"
+            busy >= Duration::from_millis(32) && busy <= wall * 5,
+            "busy time {busy:?} must cover every item and stay within five times the wall {wall:?}"
         );
     }
 
-    /// Measures a join, called from outside the pool, with sides that spin for 5ms and 40ms. A
-    /// worker that finishes the short side and waits for the long one is not charged for the wait,
-    /// so the busy time exceeds the wall time by at most the short side plus scheduling overhead.
+    /// Measures a join, called from outside the pool, with sides that spin for 5ms and 40ms. Each
+    /// side is charged for the time its thread spends in it, and a worker that finishes the short
+    /// side is not charged while it waits for the long one, so the busy time stays within the
+    /// sides' own wall times plus the hand-offs.
     #[test]
     fn measured_join_excludes_idle_waits() {
         #[track_caller]
-        fn spin_join(strategy: &Rayon) -> &'static Location<'static> {
-            strategy.join(
-                || spin(Duration::from_millis(5)),
-                || spin(Duration::from_millis(40)),
+        fn spin_join(strategy: &Rayon) -> (&'static Location<'static>, Duration) {
+            let (short, long) = strategy.join(
+                || timed_spin(Duration::from_millis(5)),
+                || timed_spin(Duration::from_millis(40)),
             );
-            Location::caller()
+            (Location::caller(), short + long)
         }
 
+        // Join a 5ms side with a 40ms side from outside the pool.
         let strategy = parallel_strategy();
-        let caller = spin_join(&strategy);
+        let (caller, sides) = spin_join(&strategy);
+
+        // Both sides are charged, and the wait for the long side is not.
         let (wall, busy) = recorded(&strategy, caller, 1);
         assert!(
-            busy >= Duration::from_millis(45) && busy < wall + Duration::from_millis(15),
-            "busy time {busy:?} must cover both sides and exclude the wait, wall {wall:?}"
+            busy >= Duration::from_millis(45) && busy < sides + Duration::from_millis(15),
+            "busy time {busy:?} must cover both sides {sides:?} and exclude the wait, wall {wall:?}"
         );
     }
 
     /// Measures a run submitted while every worker is occupied. The workers keep spinning for 50ms
-    /// after the run queues, so its wall time includes the queue, but its busy time covers only its
-    /// own items.
+    /// after the run queues, so its wall time includes the queue, but its busy time stays within
+    /// the time its own items spent spinning plus the hand-offs.
     #[test]
     fn measured_run_excludes_queueing() {
         let strategy = parallel_strategy();
@@ -3837,14 +3849,24 @@ mod test {
         // Occupy every worker until the measured run queues behind them, and then for 50ms more.
         let started = Arc::new(std::sync::Barrier::new(5));
         let missed = Arc::new(AtomicBool::new(false));
+        let queued = Arc::new(AtomicBool::new(false));
         {
             let pool = Arc::clone(strategy.groups.pool());
             let started = Arc::clone(&started);
             let missed = Arc::clone(&missed);
+            let queued = Arc::clone(&queued);
             strategy.groups.pool().spawn_broadcast(move |_| {
                 started.wait();
+
+                // The observation stays available after another worker takes the queued job, so
+                // a worker descheduled past that point still releases its thread. Give up after
+                // 10s and flag the miss, so the test fails when the run never queues.
                 let deadline = Instant::now() + Duration::from_secs(10);
-                while !pool.has_injected_job() {
+                while !queued.load(Ordering::Relaxed) {
+                    if pool.has_injected_job() {
+                        queued.store(true, Ordering::Relaxed);
+                        break;
+                    }
                     if Instant::now() >= deadline {
                         missed.store(true, Ordering::Relaxed);
                         return;
@@ -3858,19 +3880,24 @@ mod test {
 
         // The run waits through the queue but executes only its own four 1ms items.
         let len = 4;
-        let caller = spin_map(&strategy, len, Duration::from_millis(1));
+        let (caller, items) = spin_map(&strategy, len, Duration::from_millis(1));
+
+        // Every blocker finishes before its outcome is checked and the pool is released.
+        strategy.groups.pool().broadcast(|_| ());
         assert!(
             !missed.load(Ordering::Relaxed),
             "the measured run must queue behind the occupied workers within 10s"
         );
+
+        // The wall time includes the queue, and the busy time covers only the four items.
         let (wall, busy) = recorded(&strategy, caller, len);
         assert!(
             wall >= Duration::from_millis(40),
             "wall {wall:?} must include the queue"
         );
         assert!(
-            busy >= Duration::from_millis(4) && busy < wall / 2,
-            "busy time {busy:?} must exclude the queue, wall {wall:?}"
+            busy >= Duration::from_millis(4) && busy < items + Duration::from_millis(15),
+            "busy time {busy:?} must exclude the queue, items {items:?}, wall {wall:?}"
         );
     }
 
@@ -3883,13 +3910,17 @@ mod test {
         fn run_body(strategy: &Rayon) -> (&'static Location<'static>, &'static Location<'static>) {
             let body = || {
                 spin(Duration::from_millis(2));
-                spin_map(strategy, 16, Duration::from_millis(1))
+                spin_map(strategy, 16, Duration::from_millis(1)).0
             };
             (Location::caller(), strategy.run(2, body, body))
         }
 
+        // Run a body that spins for 2ms and then maps 16 items that each spin for 1ms.
         let strategy = parallel_strategy();
         let (outer, inner) = run_body(&strategy);
+
+        // The outer busy time adds the body's own time to the inner busy time. The body's own time
+        // is at least the 2ms spin and at most the outer wall time minus the inner, with 2ms slack.
         let (outer_wall, outer) = recorded(&strategy, outer, 2);
         let (inner_wall, inner) = recorded(&strategy, inner, 16);
         let body = outer_wall - inner_wall;

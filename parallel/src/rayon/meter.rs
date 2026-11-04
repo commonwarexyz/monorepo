@@ -28,9 +28,11 @@ mod test;
 /// The busy time of one run.
 #[derive(Debug)]
 pub(crate) struct Meter {
-    /// Charged nanoseconds. Another thread charges this meter before setting the latch the run
-    /// waits on, as [`Context`] describes, so the latch orders those charges before the run
-    /// returns. Relaxed accesses therefore suffice for the caller to read the full sum.
+    /// The nanoseconds charged so far.
+    //
+    // Another thread charges this meter before setting the latch the run waits on, as described
+    // on `Context`, so the latch orders those charges before the run returns. Relaxed accesses
+    // therefore suffice for the caller to read the full sum.
     busy: AtomicU64,
 }
 
@@ -42,15 +44,17 @@ impl Meter {
         }
     }
 
-    /// Runs `op` on the calling thread in this meter's context and returns its result. A meter
-    /// is measured once, since its whole total is charged to the enclosing context afterward.
+    /// Runs `op` in this meter's context and returns its result. The meter is charged for the time
+    /// threads spend executing `op` and the joins, installs, and broadcasts it waits for, but not
+    /// for the waits. Its total is then charged to the calling thread's previous context, so measure
+    /// a meter only once.
     ///
-    /// This meter is charged for the time the calling thread spends executing `op` and for the time
-    /// other threads spend executing the jobs `op` waits for. It is not charged for the waits
-    /// themselves or for unrelated jobs the calling thread runs meanwhile. Once `op` returns or
-    /// unwinds, this meter's busy time is also charged to the calling thread's previous context, so
-    /// an enclosing run's busy time includes its nested runs.
+    /// # Panics
+    ///
+    /// Panics if this meter is already the calling thread's context.
     pub(crate) fn measure<R>(&self, op: impl FnOnce() -> R) -> R {
+        // The guard captures the enclosing context, and it charges that context only after
+        // `enter` restores it, even when `op` unwinds.
         let outer = Context::current();
         assert!(!ptr::eq(outer.0, self), "a meter must not measure itself");
         let _charge_outer = ChargeOuter { inner: self, outer };
@@ -63,6 +67,7 @@ impl Meter {
         Duration::from_nanos(self.busy.load(Ordering::Relaxed))
     }
 
+    /// Adds `nanos` to this meter's busy time.
     fn charge_nanos(&self, nanos: u64) {
         self.busy.fetch_add(nanos, Ordering::Relaxed);
     }
@@ -71,7 +76,9 @@ impl Meter {
 /// Charges a nested meter's busy time to the context it was measured in. It drops after
 /// [`Meter::measure`] restores that context, so the nested meter already holds every charge.
 struct ChargeOuter<'a> {
+    /// The meter whose total is charged.
     inner: &'a Meter,
+    /// The context the nested meter was measured in.
     outer: Context,
 }
 
@@ -147,7 +154,9 @@ impl Drop for Restore {
 /// A thread's context and the instant from which its time is charged to it.
 #[derive(Clone, Copy)]
 struct Current {
+    /// The meter the thread charges, or null for no context.
     meter: *const Meter,
+    /// When the thread entered its context, or `None` before its first switch.
     since: Option<Instant>,
 }
 
@@ -166,10 +175,14 @@ thread_local! {
 #[inline]
 fn switch(to: *const Meter) -> *const Meter {
     CURRENT.with(|current| {
+        // Entering the current context keeps its meter charging from the instant it was entered.
         let previous = current.get();
         if previous.meter == to {
             return to;
         }
+
+        // The previous meter is charged up to the instant `to` starts from, so no time is charged
+        // twice or lost between them.
         let now = Instant::now();
         // SAFETY: a thread's current context points to a live meter or to none, since every
         // context is entered under `Context::enter`'s contract, and `previous` is current until

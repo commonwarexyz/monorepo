@@ -241,7 +241,7 @@ impl ThreadPool {
             .sum()
     }
 
-    /// Whether a submitted job waits in an incoming queue for a worker to take it.
+    /// Whether a submitted job waits in a group's or the Wide injector for a worker to take it.
     #[cfg(test)]
     pub(crate) fn has_injected_job(&self) -> bool {
         self.registry.has_any_injected_job()

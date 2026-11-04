@@ -547,8 +547,7 @@ impl Registry {
         self.groups[group].sleep.sleeping_threads()
     }
 
-    /// Whether a job waits in any group's incoming queue or in the Wide queue, for tests that
-    /// hold the workers until a submission queues behind them.
+    /// Whether a job waits in any group's injector or in the Wide injector.
     #[cfg(test)]
     pub(super) fn has_any_injected_job(&self) -> bool {
         (0..self.groups.len()).any(|group| self.has_injected_job(group))
