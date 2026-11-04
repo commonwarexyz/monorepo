@@ -3,7 +3,7 @@
 use crate::{
     multimmit::{
         scheme::Scheme,
-        types::{Artifact, ArtifactId, BlockRef, FinalityFact, TipRecord},
+        types::{Artifact, ArtifactId, BlockRef, FinalityFact, FinalityId, TipRecord},
     },
     types::{Epoch, Height, View},
 };
@@ -58,6 +58,45 @@ impl<D: Digest> SelectedCommitments<D> {
     }
 }
 
+/// A run of one producer chain's blocks whose positions in the canonical order became fixed: the
+/// ancestors of [`Self::tip`] (the tip included) at heights above [`Self::above`] and at most
+/// [`Self::height`].
+///
+/// The run says nothing about the blocks at or below [`Self::above`]. Those were placed before,
+/// possibly on another branch: an anchor may jump to a rival branch, and the order then reads
+/// the new blocks off the new tip's own path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placement<D: Digest> {
+    tip: BlockRef<D>,
+    above: Height,
+    height: Height,
+}
+
+impl<D: Digest> Placement<D> {
+    /// Creates the run of `tip`'s ancestors at heights in `(above, height]`.
+    ///
+    /// Requires `above < height <= tip.height()`. The constructor does not check this.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const fn new(tip: BlockRef<D>, above: Height, height: Height) -> Self {
+        Self { tip, above, height }
+    }
+
+    /// Returns the block whose ancestors form the run.
+    pub const fn tip(&self) -> BlockRef<D> {
+        self.tip
+    }
+
+    /// Returns the height of the chain's last block placed before the run.
+    pub const fn above(&self) -> Height {
+        self.above
+    }
+
+    /// Returns the height of the run's highest block.
+    pub const fn height(&self) -> Height {
+        self.height
+    }
+}
+
 /// A local proposal, contextually admitted artifact, consensus finality observation, or durable
 /// record.
 ///
@@ -87,6 +126,27 @@ pub enum Activity<S: Scheme, D: Digest> {
     LeaderFinalityUpdated {
         /// Producer-chain tips supported by the updated direct finality pool.
         fact: FinalityFact<D>,
+    },
+    /// Local finality of a leader fixed the canonical order of producer blocks to new heights.
+    ///
+    /// Finality of a leader fixes a prefix of the total order: the order its tip-history record
+    /// carries, extended by the final sweep toward its finalized tips. Placement only advances.
+    /// It precedes the ordered output of marshal, which still delivers only from portable proofs,
+    /// so it never authorizes delivery.
+    ///
+    /// The engine names the blocks of a history opening only when it holds every opening since
+    /// the one it last placed; otherwise it advances past them silently. In particular, a
+    /// restarted engine names no blocks below the history of the first leader it sees finalized.
+    Placed {
+        /// View of the finalized leader.
+        view: View,
+        /// Evidence that finalized the leader.
+        evidence: FinalityId<D>,
+        /// Commitment of the leader's tip-history record that the placed order extends.
+        history: D,
+        /// The newly placed runs: one per chain each history opening advances, oldest opening
+        /// first, then one per chain the final sweep advances, each group in chain order.
+        placed: Vec<Placement<D>>,
     },
     /// An authenticated artifact entered the machine's contextually ready set.
     ProtocolAccepted {
