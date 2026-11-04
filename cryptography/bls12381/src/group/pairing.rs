@@ -8,14 +8,14 @@ use crate::core::{
     curve::{g1, g2},
     field::{
         arithmetic::Field,
-        fp::BYTES as FP_BYTES,
+        fp::{BYTES as FP_BYTES, rns::Rns, unsat49::Unsat49},
         fp2::{BYTES as FP2_BYTES, Fp2},
         fp12::{self, BYTES, Fp12},
     },
     pairing::{G1Affine, G2Affine, Pair, final_exponentiation, miller_loop},
 };
 use commonware_math::algebra::{Multiplicative, Object};
-use commonware_simd::Simd;
+use commonware_simd::{Simd, X86V4C};
 use core::{
     array,
     fmt::{self, Debug, Formatter},
@@ -111,25 +111,15 @@ impl Kernel for Product {
 #[derive(Clone, Copy)]
 struct Pairings<'a>(&'a [(G1, G2)]);
 
-/// Returns a pair that pairs to one and fills unused lanes: its G1 coordinates are zero, which
-/// the final exponentiation maps to one, and its G2 point is the generator, whose lines have
-/// nonzero constant terms.
-fn fill() -> (G1Affine, G2Affine) {
-    let generator = <G2 as commonware_math::algebra::CryptoGroup>::generator();
-    let [x, y, _] = *generator.coordinates();
-    ([[0; FP_BYTES]; 2], [x, y])
-}
-
-impl Kernel for Pairings<'_> {
-    type Output = GT;
-
-    fn batch(&self) -> bool {
-        self.0.len() > SHARED
-    }
-
+impl Pairings<'_> {
+    /// Returns the product of the Miller loops of the pairs without an identity, as its canonical
+    /// encoding, or `None` when there are none.
+    ///
+    /// Up to [`SHARED`] lanes of pairs share their squarings, and the lanes of their product
+    /// multiply into one element.
     // Debug builds keep this a call so that each representation's frame stays separate.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    fn run<S: Simd, F: Field<S>>(self, simd: S) -> GT {
+    fn miller_loops<S: Simd, F: Field<S>>(self, simd: S) -> Option<[u8; BYTES]> {
         const { assert!(F::LANES <= MAX_LANES) };
         // Pairs with an identity contribute one, so only the others are prepared. Unused lanes
         // hold the fill pair.
@@ -158,12 +148,55 @@ impl Kernel for Pairings<'_> {
                 count = 0;
             }
         }
-        let Some(product) = product else {
-            return GT::ONE;
-        };
         let mut output = [fp12::ONE];
-        final_exponentiation(simd, product.product_of_lanes(simd)).store(simd, &mut output);
+        product?.product_of_lanes(simd).store(simd, &mut output);
+        Some(output[0])
+    }
+
+    /// Returns the final exponentiation of the product of Miller loops.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn exponentiate<S: Simd, F: Field<S>>(simd: S, product: &[u8; BYTES]) -> GT {
+        let mut output = [fp12::ONE];
+        final_exponentiation(simd, Fp12::<F>::load(simd, &[], product)).store(simd, &mut output);
         GT(output[0])
+    }
+}
+
+/// Returns a pair that pairs to one and fills unused lanes: its G1 coordinates are zero, which
+/// the final exponentiation maps to one, and its G2 point is the generator, whose lines have
+/// nonzero constant terms.
+fn fill() -> (G1Affine, G2Affine) {
+    let generator = <G2 as commonware_math::algebra::CryptoGroup>::generator();
+    let [x, y, _] = *generator.coordinates();
+    ([[0; FP_BYTES]; 2], [x, y])
+}
+
+impl Kernel for Pairings<'_> {
+    type Output = GT;
+
+    fn batch(&self) -> bool {
+        self.0.len() > SHARED
+    }
+
+    #[inline(always)]
+    fn run<S: Simd, F: Field<S>>(self, simd: S) -> GT {
+        self.miller_loops::<S, F>(simd).map_or(GT::ONE, |product| {
+            Self::exponentiate::<S, F>(simd, &product)
+        })
+    }
+
+    /// Many pairs fill the 64-bit lanes with Miller loops, whose product, a single element, is
+    /// exponentiated in residues.
+    #[inline(always)]
+    fn x86_v4c<S: X86V4C>(self, simd: S) -> GT {
+        if self.batch() {
+            self.miller_loops::<S, Unsat49<S>>(simd)
+                .map_or(GT::ONE, |product| {
+                    Self::exponentiate::<S, Rns<S>>(simd, &product)
+                })
+        } else {
+            self.run::<S, Rns<S>>(simd)
+        }
     }
 }
 

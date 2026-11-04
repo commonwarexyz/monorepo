@@ -3,9 +3,10 @@
 //! Each public operation runs as one kernel through [`dispatch`], which selects the backend at the
 //! boundary. The backend's profile then selects the base field representation: on x86v4c,
 //! residues for a single item, whose latency they shorten, and 64-bit lanes for independent
-//! items; 32-bit lanes elsewhere. Elements cross the boundary as canonical coordinates, so every
-//! kernel loads its inputs and stores its outputs, and loaded coordinates satisfy the bounds of
-//! the curve formulas.
+//! items, which an operation may switch between through canonical encodings, as the product of
+//! pairings does for its final exponentiation; 32-bit lanes elsewhere. Elements cross the
+//! boundary as canonical coordinates, so every kernel loads its inputs and stores its outputs,
+//! and loaded coordinates satisfy the bounds of the curve formulas.
 //!
 //! Operations over slices of elements ([`Sum`], [`MultiplyEach`], and [`Msm`]) hold one element
 //! per lane, so they amortize the boundary and fill every lane; the single-element operations
@@ -69,6 +70,18 @@ pub trait Kernel: Sized {
 
     /// Runs the operation in the representation `F`.
     fn run<S: Simd, F: Field<S>>(self, simd: S) -> Self::Output;
+
+    /// Runs the operation on x86v4c: in residues for a single item and in 64-bit lanes for
+    /// independent items. An operation whose independent items end in a single one may override
+    /// this to switch representations in between.
+    #[inline(always)]
+    fn x86_v4c<S: X86V4C>(self, simd: S) -> Self::Output {
+        if self.batch() {
+            self.run::<S, Unsat49<S>>(simd)
+        } else {
+            self.run::<S, Rns<S>>(simd)
+        }
+    }
 }
 
 /// Runs a kernel in the representation chosen for the backend.
@@ -87,11 +100,7 @@ impl<S: Simd, K: Kernel> Operation<S> for Run<K> {
     where
         S: X86V4C,
     {
-        if self.0.batch() {
-            self.0.run::<S, Unsat49<S>>(simd)
-        } else {
-            self.0.run::<S, Rns<S>>(simd)
-        }
+        self.0.x86_v4c(simd)
     }
 }
 
