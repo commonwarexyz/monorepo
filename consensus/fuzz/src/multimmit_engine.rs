@@ -21,6 +21,7 @@ use commonware_utils::{FuzzRng, probability};
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet},
+    ops::Range,
     time::Duration,
 };
 
@@ -242,15 +243,23 @@ impl<S: Fixture> Harness<S> {
         }
     }
 
-    /// Crashes `node` once no persistence barrier is pending.
+    /// Crashes `node` once the state the harness observed is durable.
     ///
-    /// The cross-restart invariants compare recovered state against every event the engine
-    /// applied before the crash, so each staged barrier must be durable first. A non-urgent
-    /// (reconstructible) barrier syncs only on a later demand, which a partitioned node with
-    /// nothing left to do never makes, so the harness demands it.
+    /// The cross-restart invariants compare recovered state against the events the engine
+    /// applied before the crash, so the harness first waits for an inspection with no
+    /// persistence barrier pending. A non-urgent (reconstructible) barrier syncs only on a later
+    /// demand, which a partitioned node with nothing left to do never makes, so the harness
+    /// demands it. Everything the engine reported before that inspection was requested is then
+    /// durable.
+    ///
+    /// The engine keeps running until the crash, both after it answers the inspection and while
+    /// the harness records committee finality, so the crash can land between staging a record and
+    /// making it durable, such as between assembling a DA certificate and recording it. What the
+    /// engine reports in that tail may not survive, so the cross-restart invariants skip it.
     async fn stop(&mut self, node: usize) {
         assert!(self.running[node], "stop requires a running engine");
-        loop {
+        let durable = loop {
+            let reported = self.reporters[node].len();
             let inspection = self
                 .cluster
                 .inspect(node)
@@ -260,14 +269,21 @@ impl<S: Fixture> Harness<S> {
             self.state
                 .observe_inspection(node, &inspection, self.resources);
             if !persistence_pending {
-                break;
+                break reported;
             }
             assert!(
                 self.cluster.flush(node),
                 "engine {node} accepts flush requests"
             );
-        }
+        };
+        let running = (0..NODES)
+            .filter(|&peer| self.running[peer])
+            .collect::<Vec<_>>();
+        self.cluster.observe_finality(&running).await;
         self.cluster.crash(node).await;
+        self.state.nodes[node]
+            .volatile
+            .push(durable..self.reporters[node].len());
         self.running[node] = false;
     }
 
@@ -348,12 +364,14 @@ impl<S: Fixture> Harness<S> {
     async fn observe(&mut self) {
         let mut activities = Vec::with_capacity(NODES);
         for node in 0..NODES {
-            let batch = self.reporters[node].since(self.state.nodes[node].activities);
-            self.state.nodes[node].activities = self.reporters[node].len();
-            activities.push(batch);
+            let first = self.state.nodes[node].activities;
+            let batch = self.reporters[node].since(first);
+            self.state.nodes[node].activities = first + batch.len();
+            activities.push((first, batch));
         }
 
-        for batch in &activities {
+        // A crash tail's threshold shares were still signed, so the share tallies keep them.
+        for (_, batch) in &activities {
             for activity in batch {
                 let Activity::ProtocolAccepted {
                     artifact_id,
@@ -367,9 +385,15 @@ impl<S: Fixture> Harness<S> {
             }
         }
 
-        for (node, activities) in activities.into_iter().enumerate() {
-            self.state
-                .observe_activities(node, activities, self.resources);
+        for (node, (first, batch)) in activities.into_iter().enumerate() {
+            let state = &mut self.state.nodes[node];
+            let durable = (first..)
+                .zip(batch)
+                .filter(|(index, _)| !state.volatile.iter().any(|tail| tail.contains(index)))
+                .map(|(_, activity)| activity)
+                .collect();
+            state.volatile.retain(|tail| tail.end > state.activities);
+            self.state.observe_activities(node, durable, self.resources);
 
             if !self.running[node] {
                 continue;
@@ -464,6 +488,8 @@ enum SigningSlot {
 
 struct NodeState {
     activities: usize,
+    /// Unobserved reporter positions of crash tails, which may not have survived their crash.
+    volatile: Vec<Range<usize>>,
     signing: BTreeMap<SigningSlot, Sha256Digest>,
     stance: BTreeMap<(u64, u32), bool>,
     generation: u64,
@@ -506,6 +532,7 @@ impl Invariants {
         let nodes = (0..NODES)
             .map(|_| NodeState {
                 activities: 0,
+                volatile: Vec::new(),
                 signing: BTreeMap::new(),
                 stance: BTreeMap::new(),
                 generation: 0,
@@ -816,9 +843,17 @@ mod tests {
     #[test]
     fn healed_cluster_progresses_after_a_producer_loses_its_certificates() {
         // Each input reloads or interrupts the recovery of a producer before every node
-        // restarts, so the producer may lose certificates of its own blocks that finality
-        // already ordered.
-        fuzz::<Bls<MinSig>>(&[110]);
+        // restarts. The first three crash a producer after it accepts a DA certificate for its
+        // own chain but before it records it, so it restarts without a certificate of its own
+        // block that finality may already have ordered:
+        // - [74] reloads producer two; at the reopen, producer zero loses its first certificate.
+        // - [253, 200] reloads producer one; at the reopen, producer zero keeps its first
+        //   certificate and loses its second.
+        // - [35] crashes producer five holding its first certificate, then interrupts its
+        //   recovery at the custody fence.
+        // - [69, 5, 91] interrupts producer three's recovery and reloads producer five.
+        fuzz::<Bls<MinSig>>(&[74]);
+        fuzz::<Bls<MinSig>>(&[253, 200]);
         fuzz::<Bls<MinPk>>(&[35]);
         fuzz::<Bls<MinPk>>(&[69, 5, 91]);
     }
