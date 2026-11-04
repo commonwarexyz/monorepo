@@ -6,8 +6,7 @@
 //! - [`threshold`]: Threshold signature scheme with non-attributable signatures
 //! - [`sas`]: Synchronized aggregate signature scheme with attributable signatures
 
-#[commonware_macros::stability(ALPHA)]
-mod claims;
+commonware_macros::stability_mod!(ALPHA, mod claims);
 pub mod multisig;
 // Modules containing #[macro_export] macros must use verbose cfg.
 #[cfg(not(any(
