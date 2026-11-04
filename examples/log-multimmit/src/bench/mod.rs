@@ -1,7 +1,8 @@
 //! Benchmark tooling: synthetic input and proposal latency measurement.
 //!
 //! None of this is needed to run Multimmit. It paces producers with synthetic input and measures
-//! how long local blocks take to finalize and to reach the total order.
+//! how long local blocks take to finalize, to be placed in the total order, and to be delivered in
+//! it.
 //!
 //! # Input
 //!
@@ -15,10 +16,15 @@
 //! consensus finality covering the block, including queueing, body construction, custody, and
 //! signing. Without offered load, submission happens right before body construction. Finality
 //! resolves retained local ancestry, so a block finalized through a descendant tip still counts
-//! once. `application_proposal_ordering_latency` measures submission to delivery in the total
-//! order, which also waits for marshal to collect ordering proofs and read the block. Finality and
-//! delivery are timestamped when consensus and marshal report them, before the report waits in the
-//! application's mailbox, so the application's own queueing is not part of either sample.
+//! once. `application_proposal_placement_latency` measures submission to the moment consensus
+//! reports that local finality fixed the block's position in the total order
+//! ([`Activity::Placed`](commonware_consensus::multimmit::types::Activity::Placed)): a finalized
+//! block above the point where its leader's final sweep halts is placed only once later evidence
+//! carries the order past it. Placement does not wait for marshal. `application_proposal_ordering_latency` measures submission to delivery in
+//! the total order, which also waits for marshal to collect ordering proofs and read the block.
+//! Finality, placement, and delivery are timestamped when consensus and marshal report the
+//! activity that completes them, before the report waits in the application's mailbox, so the
+//! application's own queueing is not part of any sample.
 //!
 //! The start boundary matches BlueBottle's `latency_s`, which timestamps transactions in its
 //! generator before they enter consensus. Every transaction in a fixed-size batch shares the
