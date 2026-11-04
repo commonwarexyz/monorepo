@@ -120,10 +120,10 @@
 //! written mask with the cpuset's effective CPUs, undoing a group's confinement.
 //!
 //! A pool's workers keep the mask of the thread that creates the pool, and its groups are sized
-//! from that mask. That is how to share a host between pools: create each pool from a thread
-//! pinned to the CPUs meant for it. It also means a pool created from inside a job or a strategy
-//! call gets only the CPUs that thread was kept to: one domain on a homed worker or during a
-//! call that moved its caller, the CPUs outside the homes on a floating worker.
+//! from that mask. To share a host between pools, create each pool from a thread pinned to the
+//! CPUs meant for it. A pool created from inside a job or a strategy call gets only the CPUs that
+//! thread was kept to. On a homed worker, or during a call that moved its caller, that is one
+//! domain, and on a floating worker it is the CPUs outside the homes.
 
 use crate::ThreadPool;
 use commonware_utils::sync::Mutex;
@@ -971,8 +971,8 @@ impl Groups {
             }
         }
 
-        // Homes are set once and only on placeable groups, so once every placeable group is seen
-        // homed, a second lookup sees every home there will be, and its result is final.
+        // Homes are set once and only on placeable groups. Once every placeable group is seen
+        // homed, no home can appear later, so a second lookup is final.
         if !self
             .groups
             .iter()
@@ -1395,8 +1395,8 @@ mod tests {
             drop(groups.local().unwrap());
 
             // The caller pauses after its first home lookup misses, and resumes once the test has
-            // homed the last unhomed group in the caller's domain. The channels live in the scope
-            // so a failed setup releases the paused caller instead of waiting for it.
+            // homed the last unhomed group in the caller's domain. The channels live in the scope,
+            // so a setup failure drops the sender and releases the paused caller.
             let caller = std::thread::scope(|scope| {
                 let (paused_tx, paused_rx) = std::sync::mpsc::channel();
                 let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();

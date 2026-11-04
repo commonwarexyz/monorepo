@@ -649,7 +649,7 @@ impl crate::Strategizer for Context {
                 .num_threads(parallelism.get())
                 .stack_size(self.executor.thread_stack_size),
         )
-        .expect("failed to create Tokio Rayon thread pool")
+        .expect("the Tokio Rayon thread pool must build")
     }
 }
 

@@ -856,7 +856,7 @@ impl crate::Strategizer for Context {
                 .num_threads(parallelism.get())
                 .stack_size(self.shared.cfg.thread_stack_size),
         )
-        .expect("failed to create io_uring Rayon thread pool")
+        .expect("the io_uring Rayon thread pool must build")
     }
 }
 

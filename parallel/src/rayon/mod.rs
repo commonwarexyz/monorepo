@@ -214,7 +214,7 @@ type StartHandler = dyn Fn(WorkerPosition) + Send + Sync;
 /// [`ThreadPoolBuilder::thread_name`] and [`ThreadPoolBuilder::start_handler`].
 ///
 /// A pool's workers form consecutive groups, each of the same width except possibly the last.
-/// A pool built without groups has one group holding every worker.
+/// A pool built directly from a [`ThreadPoolBuilder`] has one group holding every worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkerPosition {
     /// The worker's index in the pool, from zero.
@@ -374,9 +374,8 @@ impl ThreadPoolBuilder {
 
     /// Sets a callback to be invoked on thread start.
     ///
-    /// The closure is passed the position of the worker on which it is invoked.
-    /// Note that this same closure may be invoked multiple times in parallel.
-    /// If this closure panics, the process aborts.
+    /// The closure is passed the position of the worker on which it is invoked, and it may run
+    /// on several workers at once. If this closure panics, the process aborts.
     pub fn start_handler<H>(mut self, start_handler: H) -> Self
     where
         H: Fn(WorkerPosition) + Send + Sync + 'static,

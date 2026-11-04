@@ -1461,9 +1461,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// When the chosen group's home is another domain, the calling thread may be moved there for
     /// the call, within its own affinity mask. The caller's own code in that call, such as a
     /// [`Strategy::run_batches`] body, runs under that mask, and threads it creates inherit it.
+    ///
     /// A pool keeps the CPUs of the thread that creates it. To give several pools their own CPUs,
     /// create each from a thread pinned to its share. A pool created from inside a job or a
-    /// strategy call gets only the CPUs that thread was kept to, which may be just one domain.
+    /// strategy call gets only the CPUs that thread was kept to, so it can end up in one domain.
     ///
     /// A worker's nested calls, joins, and spawned jobs inherit its placement. A job that
     /// [`Strategy::spawn`] hands to the pool from outside it can start on any idle worker and
@@ -1539,10 +1540,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     }
 
     impl Rayon {
-        /// Builds the pool `builder` describes and creates a strategy whose workers are grouped
-        /// by last-level cache domain as described on [`Rayon`]. Workers are named `group<g>-<w>`
-        /// unless the builder names them, and the builder's start handler runs before the
-        /// strategy's own.
+        /// Builds the pool from `builder` and groups its workers by last-level cache domain as
+        /// described on [`Rayon`]. Workers the builder does not name are named `group<g>-<w>`,
+        /// and the builder's start handler runs before the strategy's own.
         ///
         /// A group is as wide as the most CPUs the calling thread may use in any one domain, less
         /// one when that number is at least six to leave room for the caller and other threads.
@@ -1551,8 +1551,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         ///
         /// When the pool fills all allowed CPUs across two or more equally sized domains of at
         /// least two CPUs each, groups use the full domain width and get fixed homes at startup. A
-        /// worker count of at most the group width gives one group, and workers past a multiple
-        /// of it form a narrower last group that takes only whole-pool work.
+        /// worker count of at most the group width gives one group, and workers past a multiple of
+        /// it form a narrower last group that takes only whole-pool work.
         pub fn new(builder: ThreadPoolBuilder) -> Result<Self, ThreadPoolBuildError> {
             let groups = topology::Groups::build(builder)?;
             Ok(Self::with_groups(Arc::new(groups)))
@@ -3600,7 +3600,7 @@ mod test {
         }));
         assert!(result.is_err());
 
-        // The worker sends the result before its bookkeeping, so let it finish the job first.
+        // The worker sends the result before it records the job, so wait for the job to finish.
         wait_until_asleep(strategy.groups.pool());
         assert!(!spawn_recorded(&strategy, loc));
 
