@@ -1,12 +1,12 @@
 use commonware_cryptography::bls12381::primitives::group::{G1, G2, Scalar};
 use commonware_math::algebra::{CryptoGroup, Random, Space};
 use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
-use commonware_utils::test_rng;
+use commonware_utils::{NZUsize, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use std::hint::black_box;
 
 fn bench_msm(c: &mut Criterion) {
-    let par = Rayon::new(ThreadPoolBuilder::new().num_threads(8)).unwrap();
+    let par = Rayon::new(ThreadPoolBuilder::new(NZUsize!(8))).unwrap();
 
     for n in [10, 50, 100, 200, 1000, 5000] {
         // G1 Sequential (conc=1)

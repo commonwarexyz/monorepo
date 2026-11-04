@@ -1519,7 +1519,7 @@ where
 mod tests {
     use super::*;
     use crate::rayon::{ThreadPool, ThreadPoolBuilder, current_thread_index, join};
-    use commonware_utils::{sync::Mutex, test_rng};
+    use commonware_utils::{NZUsize, sync::Mutex, test_rng};
     use rand::{Rng as _, RngExt as _};
     use std::{
         fmt,
@@ -1532,10 +1532,7 @@ mod tests {
     const LENGTHS: [usize; 6] = [0, 1, 2, 7, 1000, 100_000];
 
     fn pool(threads: usize) -> ThreadPool {
-        ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .unwrap()
+        ThreadPoolBuilder::new(NZUsize!(threads)).build().unwrap()
     }
 
     /// Runs `op` on a worker of a new pool of `threads` threads.

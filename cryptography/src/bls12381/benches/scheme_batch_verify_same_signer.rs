@@ -4,7 +4,7 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
-use commonware_utils::{TestRng, test_rng};
+use commonware_utils::{NZUsize, TestRng, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 use std::hint::black_box;
@@ -16,7 +16,7 @@ fn bench_scheme_batch_verify_same_signer(c: &mut Criterion) {
     for n_messages in [1, 10, 100, 1000, 10000].into_iter() {
         for concurrency in [1, 8] {
             let rayon = (concurrency > 1)
-                .then(|| Rayon::new(ThreadPoolBuilder::new().num_threads(concurrency)).unwrap());
+                .then(|| Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap());
             let mut msgs = Vec::with_capacity(n_messages);
             for _ in 0..n_messages {
                 let mut msg = [0u8; 32];

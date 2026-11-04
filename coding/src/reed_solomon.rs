@@ -2052,7 +2052,7 @@ mod tests {
 
     #[test]
     fn test_parallel_recovery_decode() {
-        let strategy = Rayon::new(ThreadPoolBuilder::new().num_threads(4)).unwrap();
+        let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(4))).unwrap();
         let data = vec![42u8; 256 * 1024];
         let total = 24u16;
         let min = 8u16;
@@ -2147,7 +2147,7 @@ mod tests {
     #[test]
     fn test_striped_encode_into_matches_full_width() {
         let strategy =
-            Explorer::parallel(&Rayon::new(ThreadPoolBuilder::new().num_threads(4)).unwrap());
+            Explorer::parallel(&Rayon::new(ThreadPoolBuilder::new(NZUsize!(4))).unwrap());
         let mut tiled = false;
         for (k, m) in [(2usize, 2usize), (32, 64)] {
             for shard_len in [
@@ -2788,7 +2788,7 @@ mod tests {
 
     #[test]
     fn test_parallel_decode_rejects_mismatched_shard_lengths() {
-        let strategy = Rayon::new(ThreadPoolBuilder::new().num_threads(4)).unwrap();
+        let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(4))).unwrap();
         let data = vec![42u8; 256 * 1024];
         let total = 24u16;
         let min = 8u16;

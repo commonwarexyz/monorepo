@@ -1,5 +1,6 @@
 use super::spawn_in;
 use crate::rayon::{ThreadPoolBuilder, registry::WorkerThread};
+use commonware_utils::NZUsize;
 use std::sync::{Arc, mpsc::channel};
 
 /// Spawns `func` into the pool of the calling worker.
@@ -18,7 +19,7 @@ where
 #[test]
 fn spawn_then_join_in_worker() {
     let (tx, rx) = channel();
-    let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(4)).build().unwrap();
     pool.install(move || spawn(move || tx.send(22).unwrap()));
     assert_eq!(22, rx.recv().unwrap());
 }
@@ -26,7 +27,7 @@ fn spawn_then_join_in_worker() {
 #[test]
 fn spawn_then_join_outside_worker() {
     let (tx, rx) = channel();
-    let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(4)).build().unwrap();
     pool.spawn(move || tx.send(22).unwrap());
     assert_eq!(22, rx.recv().unwrap());
 }
@@ -42,7 +43,7 @@ fn termination_while_things_are_executing() {
     // Create a thread pool and spawn some code in it, but then drop
     // our reference to it.
     {
-        let thread_pool = ThreadPoolBuilder::new().build().unwrap();
+        let thread_pool = ThreadPoolBuilder::new(NZUsize!(4)).build().unwrap();
         thread_pool.spawn(move || {
             let data = rx0.recv().unwrap();
 
@@ -62,7 +63,7 @@ fn termination_while_things_are_executing() {
 
 macro_rules! test_order {
     ($outer_spawn:ident, $inner_spawn:ident) => {{
-        let builder = ThreadPoolBuilder::new().num_threads(1);
+        let builder = ThreadPoolBuilder::new(NZUsize!(1));
         let pool = builder.build().unwrap();
         let (tx, rx) = channel();
         pool.install(move || {

@@ -41,6 +41,8 @@
 //! - Removed builder options `spawn_handler`, `build_scoped`, `exit_handler`, `panic_handler`, and
 //!   `breadth_first`. The registry starts threads directly. Uncaught detached-job and start-handler
 //!   panics abort.
+//! - `ThreadPoolBuilder::new` takes the worker count. Removed `num_threads`, `RAYON_NUM_THREADS`,
+//!   `RAYON_RS_NUM_CPUS`, and the logical CPU count default.
 //! - Removed the fallback for targets without threads, `ThreadPoolBuildError::is_unsupported`,
 //!   `web_spin_lock`, `wasm_sync`, the build script, and the `links` key.
 //! - `bridge.rs` directly composes the producer and consumers. Removed iterator traits and
@@ -79,7 +81,7 @@
 //! [rayon-core]: https://crates.io/crates/rayon-core/1.13.0
 //! [rayon]: https://crates.io/crates/rayon/1.12.0
 
-use std::{env, error::Error, fmt, io, str::FromStr, sync, thread};
+use std::{error::Error, fmt, io, num::NonZeroUsize, sync, thread};
 
 mod bridge;
 mod broadcast;
@@ -176,15 +178,15 @@ enum ErrorKind {
 ///
 /// ```
 /// use commonware_parallel::rayon::ThreadPoolBuilder;
+/// use std::num::NonZeroUsize;
 ///
-/// let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+/// let pool = ThreadPoolBuilder::new(NonZeroUsize::new(4).unwrap()).build().unwrap();
 /// assert_eq!(pool.current_num_threads(), 4);
 /// assert_eq!(pool.install(|| 1 + 1), 2);
 /// ```
 pub struct ThreadPoolBuilder {
     /// The number of threads in the thread pool.
-    /// If zero, use the environment or the number of logical CPUs.
-    num_threads: usize,
+    num_threads: NonZeroUsize,
 
     /// The width of each worker group, or zero for one group.
     group_width: usize,
@@ -225,10 +227,11 @@ pub struct WorkerPosition {
     pub offset: usize,
 }
 
-impl Default for ThreadPoolBuilder {
-    fn default() -> Self {
+impl ThreadPoolBuilder {
+    /// Creates a builder for a pool of `num_threads` workers.
+    pub const fn new(num_threads: NonZeroUsize) -> Self {
         Self {
-            num_threads: 0,
+            num_threads,
             group_width: 0,
             use_current_thread: false,
             get_thread_name: None,
@@ -237,49 +240,15 @@ impl Default for ThreadPoolBuilder {
             start_threads: true,
         }
     }
-}
-
-impl ThreadPoolBuilder {
-    /// Creates and returns a valid thread pool builder, but does not initialize it.
-    pub fn new() -> Self {
-        Self::default()
-    }
 
     /// Creates a new `ThreadPool` initialized using this configuration.
     pub fn build(self) -> Result<ThreadPool, ThreadPoolBuildError> {
         ThreadPool::build(self)
     }
 
-    /// Get the number of threads that will be used for the thread
-    /// pool. See `num_threads()` for more information.
-    pub(crate) fn get_num_threads(&self) -> usize {
-        if self.num_threads > 0 {
-            self.num_threads
-        } else {
-            let default = || {
-                thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(1)
-            };
-
-            match env::var("RAYON_NUM_THREADS")
-                .ok()
-                .and_then(|s| usize::from_str(&s).ok())
-            {
-                Some(x @ 1..) => return x,
-                Some(0) => return default(),
-                _ => {}
-            }
-
-            // Support for deprecated `RAYON_RS_NUM_CPUS`.
-            match env::var("RAYON_RS_NUM_CPUS")
-                .ok()
-                .and_then(|s| usize::from_str(&s).ok())
-            {
-                Some(x @ 1..) => x,
-                _ => default(),
-            }
-        }
+    /// The number of threads the pool will have.
+    pub(crate) const fn get_num_threads(&self) -> usize {
+        self.num_threads.get()
     }
 
     /// Get the width of the groups a pool of `n_threads` threads is split into.
@@ -320,21 +289,6 @@ impl ThreadPoolBuilder {
         F: FnMut(WorkerPosition) -> String + 'static,
     {
         self.get_thread_name = Some(Box::new(closure));
-        self
-    }
-
-    /// Sets the number of threads to be used in the thread pool.
-    ///
-    /// If you specify a non-zero number of threads using this
-    /// function, then the resulting thread pools are guaranteed to
-    /// start at most this number of threads.
-    ///
-    /// If `num_threads` is 0, or you do not call this function, then
-    /// the pool uses `RAYON_NUM_THREADS`, then the deprecated `RAYON_RS_NUM_CPUS`, and
-    /// otherwise the number of logical CPUs reported by [`std::thread::available_parallelism`].
-    /// A zero `RAYON_NUM_THREADS` selects the logical CPU count.
-    pub const fn num_threads(mut self, num_threads: usize) -> Self {
-        self.num_threads = num_threads;
         self
     }
 

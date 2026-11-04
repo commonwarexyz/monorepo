@@ -6446,7 +6446,7 @@ mod tests {
                 blocker: control,
                 block_codec_config: (),
                 strategy: Explorer::parallel(
-                    &Rayon::new(ThreadPoolBuilder::new().num_threads(2)).unwrap(),
+                    &Rayon::new(ThreadPoolBuilder::new(NZUsize!(2))).unwrap(),
                 ),
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
@@ -6627,7 +6627,7 @@ mod tests {
 
             // Every job hands off to the pool.
             let strategy =
-                Explorer::parallel(&Rayon::new(ThreadPoolBuilder::new().num_threads(2)).unwrap());
+                Explorer::parallel(&Rayon::new(ThreadPoolBuilder::new(NZUsize!(2))).unwrap());
             let (mut engine, mut sender) =
                 unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16), strategy).await;
             let coding_config = coding_config_for_participants(peer_keys.len() as u16);

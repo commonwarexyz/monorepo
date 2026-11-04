@@ -760,7 +760,7 @@ mod tests {
 
         // One seed per signature makes RNG consumption expose the size of the
         // verification batch, even when the single worker executes it serially.
-        let strategy = Rayon::new(ThreadPoolBuilder::new().num_threads(1))
+        let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(1)))
             .unwrap()
             .with_parallelism(NZUsize!(quorum));
         for pending_len in [quorum, 1, 0] {

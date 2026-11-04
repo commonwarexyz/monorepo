@@ -1,6 +1,6 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
-use commonware_utils::{TestRng, non_empty, test_rng};
+use commonware_utils::{NZUsize, TestRng, non_empty, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 
@@ -16,7 +16,7 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
             msgs.push(msg);
         }
         for concurrency in [1, 8] {
-            let strategy = Rayon::new(ThreadPoolBuilder::new().num_threads(concurrency)).unwrap();
+            let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap();
             c.bench_function(
                 &format!("{}/conc={} msgs={}", module_path!(), concurrency, n),
                 |b| {

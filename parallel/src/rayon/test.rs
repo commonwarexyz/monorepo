@@ -1,4 +1,5 @@
 use super::{ThreadPoolBuildError, ThreadPoolBuilder, join, placement_width};
+use commonware_utils::NZUsize;
 use std::{
     panic,
     sync::{
@@ -11,7 +12,7 @@ use std::{
 
 #[test]
 fn worker_thread_index() {
-    let pool = ThreadPoolBuilder::new().num_threads(22).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(22)).build().unwrap();
     assert_eq!(pool.current_num_threads(), 22);
     assert_eq!(pool.current_thread_index(), None);
     let index = pool.install(|| pool.current_thread_index().unwrap());
@@ -32,9 +33,7 @@ fn start_callback_called() {
         b.wait();
     };
 
-    let conf = ThreadPoolBuilder::new()
-        .num_threads(n_threads)
-        .start_handler(start_handler);
+    let conf = ThreadPoolBuilder::new(NZUsize!(n_threads)).start_handler(start_handler);
     let _ = conf.build().unwrap();
 
     // Wait for all the threads to have been scheduled to run.
@@ -46,7 +45,7 @@ fn start_callback_called() {
 
 #[test]
 fn check_config_build() {
-    let pool = ThreadPoolBuilder::new().num_threads(22).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(22)).build().unwrap();
     assert_eq!(pool.current_num_threads(), 22);
 }
 
@@ -56,11 +55,6 @@ const fn _send_sync<T: Send + Sync>() {}
 #[test]
 fn check_error_send_sync() {
     _send_sync::<ThreadPoolBuildError>();
-}
-
-#[test]
-fn default_pool() {
-    ThreadPoolBuilder::default().build().unwrap();
 }
 
 /// Without a global pool to fall back on, the operations that run on the caller's pool refuse a
@@ -91,14 +85,12 @@ fn pool_operations_require_a_worker() {
 /// A thread that is a worker of one pool cannot be taken over by another.
 #[test]
 fn use_current_thread_rejects_a_worker() {
-    let first = ThreadPoolBuilder::new()
-        .num_threads(1)
+    let first = ThreadPoolBuilder::new(NZUsize!(1))
         .use_current_thread()
         .build()
         .unwrap();
     assert_eq!(first.current_thread_index(), Some(0));
-    let second = ThreadPoolBuilder::new()
-        .num_threads(1)
+    let second = ThreadPoolBuilder::new(NZUsize!(1))
         .use_current_thread()
         .build();
     assert!(second.is_err());
@@ -107,8 +99,7 @@ fn use_current_thread_rejects_a_worker() {
 /// A pool whose workers never started holds queued jobs until a taken-over thread yields to it.
 #[test]
 fn unstarted_workers_run_nothing_until_the_current_thread_yields() {
-    let pool = ThreadPoolBuilder::new()
-        .num_threads(2)
+    let pool = ThreadPoolBuilder::new(NZUsize!(2))
         .use_current_thread()
         .unstarted_workers()
         .build()

@@ -740,7 +740,7 @@ mod tests {
         mocks::{Explorer, explore},
         rayon::ThreadPoolBuilder,
     };
-    use commonware_utils::FuzzRng;
+    use commonware_utils::{FuzzRng, NZUsize};
     use core::slice::from_ref;
     use ed25519_consensus::SigningKey as RefSigningKey;
 
@@ -1031,7 +1031,7 @@ mod tests {
     #[test]
     fn verify_batch_bytes_accepts_valid_batch_under_real_parallelism() {
         let strategy =
-            Explorer::parallel(&Rayon::new(ThreadPoolBuilder::new().num_threads(4)).unwrap());
+            Explorer::parallel(&Rayon::new(ThreadPoolBuilder::new(NZUsize!(4))).unwrap());
         Builder::default()
             .with_seed(0)
             .with_search_limit(4)

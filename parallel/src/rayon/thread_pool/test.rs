@@ -3,7 +3,7 @@ use crate::rayon::{
     ThreadPoolBuilder, WorkerPosition, join, registry::Placement, sleep::with_sleep_notification,
     unwind, yield_now,
 };
-use commonware_utils::sync::Mutex;
+use commonware_utils::{NZUsize, sync::Mutex};
 use futures::{channel::oneshot, future::poll_fn};
 use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
@@ -20,7 +20,7 @@ use std::{
 #[test]
 #[should_panic(expected = "Hello, world!")]
 fn panic_propagate() {
-    let thread_pool = ThreadPoolBuilder::new().build().unwrap();
+    let thread_pool = ThreadPoolBuilder::new(NZUsize!(4)).build().unwrap();
     thread_pool.install(|| {
         panic!("Hello, world!");
     });
@@ -32,7 +32,7 @@ fn workers_stop() {
 
     {
         // once we exit this block, thread pool will be dropped
-        let thread_pool = ThreadPoolBuilder::new().num_threads(22).build().unwrap();
+        let thread_pool = ThreadPoolBuilder::new(NZUsize!(22)).build().unwrap();
         registry = thread_pool.install(|| {
             // do some work on these threads
             join_a_lot(22);
@@ -59,7 +59,7 @@ fn sleeper_stop() {
 
     {
         // once we exit this block, thread pool will be dropped
-        let thread_pool = ThreadPoolBuilder::new().num_threads(22).build().unwrap();
+        let thread_pool = ThreadPoolBuilder::new(NZUsize!(22)).build().unwrap();
         registry = Arc::clone(&thread_pool.registry);
 
         // Give time for at least some of the thread pool to fall asleep.
@@ -105,8 +105,7 @@ fn failed_thread_stack() {
     let stack_size = isize::MAX as usize;
 
     let (start_count, start_handler) = count_handler();
-    let builder = ThreadPoolBuilder::new()
-        .num_threads(10)
+    let builder = ThreadPoolBuilder::new(NZUsize!(10))
         .stack_size(stack_size)
         .start_handler(start_handler);
 
@@ -122,8 +121,7 @@ fn failed_thread_stack() {
 #[test]
 fn panic_thread_name() {
     let (start_count, start_handler) = count_handler();
-    let builder = ThreadPoolBuilder::new()
-        .num_threads(10)
+    let builder = ThreadPoolBuilder::new(NZUsize!(10))
         .start_handler(start_handler)
         .thread_name(|worker| {
             if worker.index >= 5 {
@@ -142,7 +140,7 @@ fn panic_thread_name() {
 
 #[test]
 fn self_install() {
-    let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(1)).build().unwrap();
 
     // If the inner `install` blocks, then nothing will actually run it!
     assert!(pool.install(|| pool.install(|| true)));
@@ -150,8 +148,8 @@ fn self_install() {
 
 #[test]
 fn mutual_install() {
-    let pool1 = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-    let pool2 = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let pool1 = ThreadPoolBuilder::new(NZUsize!(1)).build().unwrap();
+    let pool2 = ThreadPoolBuilder::new(NZUsize!(1)).build().unwrap();
 
     let ok = pool1.install(|| {
         // This creates a dependency from `pool1` -> `pool2`
@@ -169,8 +167,8 @@ fn mutual_install() {
 
 #[test]
 fn mutual_install_sleepy() {
-    let pool1 = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-    let pool2 = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let pool1 = ThreadPoolBuilder::new(NZUsize!(1)).build().unwrap();
+    let pool2 = ThreadPoolBuilder::new(NZUsize!(1)).build().unwrap();
 
     let ok = pool1.install(|| {
         // This creates a dependency from `pool1` -> `pool2`
@@ -194,7 +192,7 @@ fn mutual_install_sleepy() {
 
 #[test]
 fn spawn_lifo_order() {
-    let builder = ThreadPoolBuilder::new().num_threads(1);
+    let builder = ThreadPoolBuilder::new(NZUsize!(1));
     let pool = &builder.build().unwrap();
     let (tx, rx) = mpsc::channel();
     pool.install(move || {
@@ -213,7 +211,7 @@ fn spawn_lifo_order() {
 #[test]
 fn yield_now_to_spawn() {
     let (tx, rx) = mpsc::channel();
-    let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(4)).build().unwrap();
 
     // Queue a regular spawn.
     pool.spawn(move || tx.send(22).unwrap());
@@ -232,8 +230,7 @@ fn yield_now_to_spawn() {
 /// group, then waits for the workers to stop.
 fn with_pool<T>(threads: usize, width: usize, run: impl FnOnce(&Arc<ThreadPool>) -> T) -> T {
     let pool = Arc::new(
-        ThreadPoolBuilder::new()
-            .num_threads(threads)
+        ThreadPoolBuilder::new(NZUsize!(threads))
             .group_width(width)
             .build()
             .unwrap(),

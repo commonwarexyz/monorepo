@@ -5,7 +5,7 @@ use crate::rayon::{
     ThreadPool, ThreadPoolBuilder, WorkerPosition, Yield, join, placement_width,
     sleep::with_sleep_notification, thread_pool::Worker, yield_now,
 };
-use commonware_utils::{TestRng, Widen, sync::Mutex};
+use commonware_utils::{NZUsize, TestRng, Widen, sync::Mutex};
 use rand::RngExt as _;
 use std::{
     any::Any,
@@ -24,8 +24,7 @@ use std::{
 
 /// A pool of `threads` workers in groups of `width`.
 fn pool(threads: usize, width: usize) -> ThreadPool {
-    ThreadPoolBuilder::new()
-        .num_threads(threads)
+    ThreadPoolBuilder::new(NZUsize!(threads))
         .group_width(width)
         .build()
         .unwrap()
@@ -126,7 +125,7 @@ fn workers_form_consecutive_groups() {
     for width in [0, 4, 9] {
         assert_eq!(self::pool(4, width).group_widths(), [4]);
     }
-    let default = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+    let default = ThreadPoolBuilder::new(NZUsize!(4)).build().unwrap();
     assert_eq!(default.group_widths(), [4]);
 }
 
@@ -137,8 +136,7 @@ fn thread_names_see_worker_positions() {
     let named = Arc::new(Mutex::new(Vec::new()));
     let started = Arc::new(Mutex::new(Vec::new()));
     let (name_seen, start_seen) = (Arc::clone(&named), Arc::clone(&started));
-    let pool = ThreadPoolBuilder::new()
-        .num_threads(5)
+    let pool = ThreadPoolBuilder::new(NZUsize!(5))
         .group_width(2)
         .thread_name(move |worker| {
             name_seen.lock().push(worker);
@@ -719,8 +717,7 @@ fn taken_over_thread_keeps_local_jobs() {
     // The taken-over thread starts under a Wide placement and runs each install on the group it
     // names.
     let pool = Arc::new(
-        ThreadPoolBuilder::new()
-            .num_threads(3)
+        ThreadPoolBuilder::new(NZUsize!(3))
             .group_width(1)
             .use_current_thread()
             .build()
@@ -1131,8 +1128,7 @@ fn wide_deque_order(group_width: usize, injected: usize, wide: bool) -> (usize, 
     within(move || {
         // The taken-over thread stays in test code while the other worker runs queued work.
         let pool = Arc::new(
-            ThreadPoolBuilder::new()
-                .num_threads(2)
+            ThreadPoolBuilder::new(NZUsize!(2))
                 .group_width(group_width)
                 .use_current_thread()
                 .build()

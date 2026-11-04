@@ -104,6 +104,7 @@ impl Injector {
 #[cfg(test)]
 mod tests {
     use crate::rayon::{ThreadPoolBuilder, Yield, registry::Placement};
+    use commonware_utils::NZUsize;
     use std::{
         sync::{Arc, mpsc},
         time::Duration,
@@ -116,8 +117,7 @@ mod tests {
     fn contended_admission_keeps_worker_available() {
         // One worker in one group, so every queued job waits for this worker's search.
         let pool = Arc::new(
-            ThreadPoolBuilder::new()
-                .num_threads(1)
+            ThreadPoolBuilder::new(NZUsize!(1))
                 .group_width(1)
                 .build()
                 .unwrap(),

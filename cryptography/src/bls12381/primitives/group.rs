@@ -1899,7 +1899,7 @@ mod tests {
         mocks::{Explorer, explore, pooled},
         rayon::ThreadPoolBuilder,
     };
-    use commonware_utils::{sync::Mutex, test_rng};
+    use commonware_utils::{NZUsize, sync::Mutex, test_rng};
     use rand_core::{TryCryptoRng, TryRng, utils::fill_bytes_via_next_word};
     use std::{
         collections::{BTreeSet, HashMap},
@@ -2593,7 +2593,7 @@ mod tests {
         G: Space<Scalar> + Copy,
         for<'a> G: Mul<&'a Scalar, Output = G>,
     {
-        let par = Rayon::new(ThreadPoolBuilder::new().num_threads(8)).unwrap();
+        let par = Rayon::new(ThreadPoolBuilder::new(NZUsize!(8))).unwrap();
         let n = points.len();
 
         // All zero scalars

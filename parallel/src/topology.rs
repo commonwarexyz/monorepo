@@ -938,6 +938,11 @@ impl Groups {
     /// thread's domain is unknown or no group can serve it.
     pub(crate) fn local(self: &Arc<Self>) -> Option<Lease> {
         let domain = self.current_domain()?;
+        self.local_in(domain)
+    }
+
+    /// [`Self::local`] for a caller in `domain`.
+    fn local_in(self: &Arc<Self>, domain: u16) -> Option<Lease> {
         let submitter = std::thread::current().id();
 
         // A home never changes once set, so the scans read homes without a lock and only a claim
@@ -1152,7 +1157,7 @@ impl Groups {
                 if home.is_some_and(|index| self.groups[index].busy_with_others()) {
                     None
                 } else {
-                    self.local()
+                    self.local_in(domain)
                 }
             })
             .unwrap_or_else(|| self.least_loaded());
@@ -1201,12 +1206,12 @@ impl Groups {
 mod tests {
     use super::*;
     use crate::rayon::ThreadPoolBuilder;
+    use commonware_utils::NZUsize;
 
     /// Groups of `widths` workers in one pool that tests can home through fake domains. Every
     /// width but the last must equal the first.
     fn synthetic(widths: &[usize]) -> Arc<Groups> {
-        let pool = crate::rayon::ThreadPoolBuilder::new()
-            .num_threads(widths.iter().sum())
+        let pool = crate::rayon::ThreadPoolBuilder::new(NZUsize!(widths.iter().sum()))
             .group_width(widths[0])
             .build()
             .unwrap();
@@ -1223,7 +1228,7 @@ mod tests {
     /// workers belong to one group.
     #[test]
     fn build_accounts_for_all_workers() {
-        let groups = Groups::build(ThreadPoolBuilder::new().num_threads(5)).unwrap();
+        let groups = Groups::build(ThreadPoolBuilder::new(NZUsize!(5))).unwrap();
         assert_eq!(groups.pool().current_num_threads(), 5);
         let widths: Vec<usize> = groups.groups().iter().map(Group::width).collect();
         assert_eq!(widths.iter().sum::<usize>(), 5);
@@ -2021,7 +2026,7 @@ mod tests {
             };
             let groups = Groups::build_in(
                 Some(topology),
-                ThreadPoolBuilder::new().num_threads(2 * width + 1),
+                ThreadPoolBuilder::new(NZUsize!(2 * width + 1)),
             )
             .unwrap();
             let widths: Vec<usize> = groups.groups().iter().map(Group::width).collect();
@@ -2061,10 +2066,10 @@ mod tests {
             let inherited = thread_affinity().expect("affinity mask must be readable");
             restrict_to(&cpus[..2]);
             let narrowed =
-                Groups::build_in(Some(topology), ThreadPoolBuilder::new().num_threads(5)).unwrap();
+                Groups::build_in(Some(topology), ThreadPoolBuilder::new(NZUsize!(5))).unwrap();
             restrict_to(&[cpus[0], cpus[3]]);
             let scattered =
-                Groups::build_in(Some(topology), ThreadPoolBuilder::new().num_threads(5)).unwrap();
+                Groups::build_in(Some(topology), ThreadPoolBuilder::new(NZUsize!(5))).unwrap();
             assert!(set_thread_affinity(&inherited), "the mask must be restored");
 
             // The first build sizes groups of two, and the second gets one unhomed group.
@@ -2103,10 +2108,8 @@ mod tests {
                 let topology = Box::leak(Box::new(Topology::from_lists(&lists).unwrap()));
                 let inherited = thread_affinity().expect("affinity mask must be readable");
                 restrict_to(cpus);
-                let built = Groups::build_in(
-                    Some(topology),
-                    ThreadPoolBuilder::new().num_threads(requested),
-                );
+                let built =
+                    Groups::build_in(Some(topology), ThreadPoolBuilder::new(NZUsize!(requested)));
                 assert!(set_thread_affinity(&inherited), "the mask must be restored");
                 let groups = Arc::new(built.unwrap());
 
@@ -2151,7 +2154,7 @@ mod tests {
             restrict_to(&[a.as_slice(), b.as_slice()].concat());
             let groups = Groups::build_in(
                 Some(topology),
-                ThreadPoolBuilder::new().num_threads(a.len() + b.len()),
+                ThreadPoolBuilder::new(NZUsize!(a.len() + b.len())),
             )
             .unwrap();
             assert!(set_thread_affinity(&inherited), "the mask must be restored");
@@ -2183,11 +2186,8 @@ mod tests {
             let inherited = allowed_cpus();
             let width = a.len();
             let groups = Arc::new(
-                Groups::build_in(
-                    Some(topology),
-                    ThreadPoolBuilder::new().num_threads(width + 1),
-                )
-                .unwrap(),
+                Groups::build_in(Some(topology), ThreadPoolBuilder::new(NZUsize!(width + 1)))
+                    .unwrap(),
             );
             assert_eq!(groups.pool().group_widths(), vec![width, 1]);
 
@@ -2226,7 +2226,7 @@ mod tests {
                 return;
             };
             let groups =
-                Groups::build_in(Some(topology), ThreadPoolBuilder::new().num_threads(2)).unwrap();
+                Groups::build_in(Some(topology), ThreadPoolBuilder::new(NZUsize!(2))).unwrap();
             let requested = cpu_set(b.iter().copied());
 
             // On a worker, request a narrowing mask and then an empty one.
@@ -2251,11 +2251,8 @@ mod tests {
 
             // A call from domain b homes the single group there.
             let groups = Arc::new(
-                Groups::build_in(
-                    Some(topology),
-                    ThreadPoolBuilder::new().num_threads(a.len()),
-                )
-                .unwrap(),
+                Groups::build_in(Some(topology), ThreadPoolBuilder::new(NZUsize!(a.len())))
+                    .unwrap(),
             );
             let domain_b = topology.domain_of(b[0]).unwrap();
             let domain_a = topology.domain_of(a[0]).unwrap();
@@ -2314,7 +2311,7 @@ mod tests {
                     let groups = Arc::new(
                         Groups::build_in(
                             Some(topology),
-                            ThreadPoolBuilder::new().num_threads(parallelism),
+                            ThreadPoolBuilder::new(NZUsize!(parallelism)),
                         )
                         .unwrap(),
                     );
@@ -2355,11 +2352,8 @@ mod tests {
         fn homed() -> Option<Homed> {
             let (topology, a, b) = split_topology()?;
             let groups = Arc::new(
-                Groups::build_in(
-                    Some(topology),
-                    ThreadPoolBuilder::new().num_threads(a.len()),
-                )
-                .unwrap(),
+                Groups::build_in(Some(topology), ThreadPoolBuilder::new(NZUsize!(a.len())))
+                    .unwrap(),
             );
             Groups::fake_domain(topology.domain_of(b[0]));
             let lease = groups.local().unwrap();
@@ -2411,7 +2405,7 @@ mod tests {
 
             // A group without a home leaves the caller in place.
             let unhomed =
-                Groups::build_in(Some(topology), ThreadPoolBuilder::new().num_threads(2)).unwrap();
+                Groups::build_in(Some(topology), ThreadPoolBuilder::new(NZUsize!(2))).unwrap();
             Groups::fake_domain(topology.domain_of(a[0]));
             assert!(unhomed.nudge(0).is_none());
             Groups::fake_domain(None);
@@ -2424,7 +2418,7 @@ mod tests {
             let Some((groups, lease, a, _)) = homed() else {
                 return;
             };
-            let other = Groups::build_in(None, ThreadPoolBuilder::new().num_threads(1)).unwrap();
+            let other = Groups::build_in(None, ThreadPoolBuilder::new(NZUsize!(1))).unwrap();
             let group = lease.group();
             let caller = Arc::clone(&groups);
             let (moved, before, after) = other.pool().install(move || {

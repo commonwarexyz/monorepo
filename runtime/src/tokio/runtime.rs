@@ -644,12 +644,8 @@ impl crate::Spawner for Context {
 #[stability(BETA)]
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
-        Rayon::new(
-            ThreadPoolBuilder::new()
-                .num_threads(parallelism.get())
-                .stack_size(self.executor.thread_stack_size),
-        )
-        .expect("the Tokio Rayon thread pool must build")
+        Rayon::new(ThreadPoolBuilder::new(parallelism).stack_size(self.executor.thread_stack_size))
+            .expect("the Tokio Rayon thread pool must build")
     }
 }
 

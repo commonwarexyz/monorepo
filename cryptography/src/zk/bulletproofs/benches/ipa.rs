@@ -5,7 +5,7 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::{CryptoGroup, Random};
 use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
-use commonware_utils::test_rng;
+use commonware_utils::{NZUsize, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand_core::CryptoRng;
 use std::hint::black_box;
@@ -45,7 +45,7 @@ fn make_proof(setup: &Setup<G1>, len: usize) -> (ipa::Claim<Scalar, G1>, Proof<S
 }
 
 fn bench_prove(c: &mut Criterion) {
-    let par = Rayon::new(ThreadPoolBuilder::new().num_threads(8)).unwrap();
+    let par = Rayon::new(ThreadPoolBuilder::new(NZUsize!(8))).unwrap();
 
     for len in [8usize, 16, 32, 64, 128] {
         let setup = make_setup(len);
@@ -96,7 +96,7 @@ fn bench_prove(c: &mut Criterion) {
 }
 
 fn bench_verify(c: &mut Criterion) {
-    let par = Rayon::new(ThreadPoolBuilder::new().num_threads(8)).unwrap();
+    let par = Rayon::new(ThreadPoolBuilder::new(NZUsize!(8))).unwrap();
 
     for len in [8usize, 16, 32, 64, 128] {
         let setup = make_setup(len);
