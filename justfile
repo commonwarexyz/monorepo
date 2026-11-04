@@ -214,7 +214,11 @@ udeps:
 
 # Run the tests in the `miri` test group under Miri (optionally filtered: just miri -p commonware-runtime iobuf::)
 miri *args='':
-    MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --profile miri --lib {{ args }}
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --profile miri --lib --no-tests=warn {{ args }}
+
+# Like `miri`, under Tree Borrows with the leak check off, for crates whose dependencies fail `miri` (crossbeam-epoch)
+miri-lenient *args='':
+    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-tree-borrows -Zmiri-ignore-leaks" cargo miri nextest run --profile miri --lib --no-tests=warn {{ args }}
 
 # Run zepter feature checks
 check-features:
