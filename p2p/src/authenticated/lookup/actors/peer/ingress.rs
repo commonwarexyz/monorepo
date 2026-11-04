@@ -36,8 +36,7 @@ impl fmt::Debug for Mailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::NZUsize;
-    use futures::{FutureExt, StreamExt};
+    use commonware_utils::{NZUsize, channel::ring::TryRecvError};
 
     #[test]
     fn kill_retained_on_overflow() {
@@ -45,10 +44,7 @@ mod tests {
         mailbox.kill();
         mailbox.kill();
 
-        assert!(matches!(
-            receiver.next().now_or_never(),
-            Some(Some(Message::Kill))
-        ));
-        assert!(receiver.next().now_or_never().is_none());
+        assert!(matches!(receiver.try_recv(), Ok(Message::Kill)));
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
     }
 }

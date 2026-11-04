@@ -1265,6 +1265,16 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 }
 
 impl<P: PublicKey> Receiver<P> {
+    /// Receive a message if one is queued right now, without waiting and
+    /// whatever the cooperative budget (see [`commonware_utils::coop`]).
+    ///
+    /// Use this to check synchronously whether a message arrived: polling
+    /// [crate::Receiver::recv] once inside a poll that has spent its budget
+    /// reports a queued message as absent.
+    pub fn try_recv(&mut self) -> Result<NetworkMessage<P>, mpsc::error::TryRecvError> {
+        self.receiver.try_recv()
+    }
+
     /// Split this [Receiver] into a [SplitTarget::Primary] and [SplitTarget::Secondary] receiver.
     pub fn split_with<E: Spawner, R: SplitRouter<P>>(
         mut self,
@@ -1547,7 +1557,6 @@ mod tests {
     use commonware_cryptography::{Signer as _, ed25519};
     use commonware_runtime::{Quota, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, ordered::Set, probability};
-    use futures::FutureExt;
     use std::num::NonZeroU32;
 
     const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
@@ -2132,8 +2141,14 @@ mod tests {
 
             // Verify both receivers get the message
             context.sleep(Duration::from_millis(100)).await;
-            assert!(twin_primary_recv.recv().now_or_never().is_none());
-            assert!(twin_secondary_recv.recv().now_or_never().is_none());
+            assert!(matches!(
+                twin_primary_recv.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                twin_secondary_recv.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
 
             // Send a message from twin to peer_c
             let sent = twin_primary_sender.send(Recipients::One(peer_c.clone()), b"to_both", false);
@@ -2560,7 +2575,10 @@ mod tests {
             let (from3, data3) = recv3.recv().await.unwrap();
             assert_eq!(from3, pk1);
             assert_eq!(data3, msg.as_slice());
-            assert!(recv2.recv().now_or_never().is_none());
+            assert!(matches!(
+                recv2.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
         });
     }
 
@@ -2736,7 +2754,10 @@ mod tests {
                 ]))
                 .unwrap()
                 .send(msg_2.clone(), true);
-            assert!(receiver_0.recv().now_or_never().is_none());
+            assert!(matches!(
+                receiver_0.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
             assert_eq!(receiver_1.recv().await.unwrap().1, msg_2.as_slice());
         });
     }

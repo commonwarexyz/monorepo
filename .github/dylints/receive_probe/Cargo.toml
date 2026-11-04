@@ -1,0 +1,18 @@
+[package]
+name = "receive_probe"
+version = "0.0.1"
+description = "Reject now_or_never probes of budgeted channel receive futures."
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dylint_linting = "6.3.0"
+
+[dev-dependencies]
+dylint_testing = "6.3.0"
+
+[package.metadata.rust-analyzer]
+rustc_private = true
