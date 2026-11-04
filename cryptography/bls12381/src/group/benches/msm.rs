@@ -7,7 +7,7 @@ use criterion::{Criterion, Throughput, criterion_group};
 use std::hint::black_box;
 
 /// Element counts, as for threshold reconstruction and batch verification.
-const SIZES: [usize; 6] = [1, 2, 8, 32, 128, 512];
+const SIZES: [usize; 7] = [1, 2, 8, 32, 128, 512, 2048];
 
 fn bench<C: Curve>(c: &mut Criterion) {
     let mut group = c.benchmark_group(module_path!());
