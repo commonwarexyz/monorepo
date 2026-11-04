@@ -953,6 +953,22 @@ impl<S: Simd> Field<S> for Rns<S> {
         Self::store(self, simd, elements);
     }
 
+    type Raw = [u64; RESIDUES];
+
+    #[inline(always)]
+    fn store_raw<const A: u64>(self, _simd: S, lanes: &mut [[u64; RESIDUES]]) {
+        self.bound.assert_le(A);
+        if let Some(lane) = lanes.first_mut() {
+            *lane = self.residues;
+        }
+    }
+
+    #[inline(always)]
+    fn load_raw<const A: u64>(simd: S, lanes: &[&[u64; RESIDUES]]) -> Self {
+        const { assert!(A <= LIMIT) };
+        Self::from_residues(simd, lanes[0], A)
+    }
+
     #[inline(always)]
     fn add(self, simd: S, rhs: Self) -> Self {
         Self::add(self, simd, rhs)

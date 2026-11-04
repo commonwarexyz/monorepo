@@ -10,6 +10,10 @@
 //! Loaded coordinates and every formula's outputs satisfy this, so points chain through any number
 //! of operations without carrying or canonicalizing between them.
 //!
+//! Raw coordinates hold each lane of a point in the representation's own form, through
+//! [`Field::store_raw`] with bound [`BOUND`], so storing and loading them costs no conversion and
+//! loaded raw coordinates satisfy the coordinate bounds.
+//!
 //! Multiplications by `3b = 12 (1 + i)` scale a factor by `12` before a product and multiply the
 //! product by `1 + i`, which only rearranges its [signed sums](crate::core::field::arithmetic::Signed).
 //! Scaling before the product keeps positional bounds small, since a positional product divides
@@ -23,6 +27,7 @@
 
 use crate::core::field::{
     arithmetic::Field,
+    fp::MINUS_ONE,
     fp2::{BYTES, Fp2, Product},
 };
 use commonware_simd::Simd;
@@ -157,6 +162,78 @@ impl<F> Point<F> {
             x: self.x.select(simd, rhs.x, lanes),
             y: self.y.select(simd, rhs.y, lanes),
             z: self.z.select(simd, rhs.z, lanes),
+        }
+    }
+
+    /// Stores each lane's raw coordinates, dropping lanes beyond `points`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Used by multi-scalar multiplication.")
+    )]
+    #[inline(always)]
+    pub fn store_raw<S: Simd>(self, simd: S, points: &mut [[[F::Raw; 2]; 3]])
+    where
+        F: Field<S>,
+    {
+        const { assert!(F::LANES <= MAX_LANES) };
+        let mut coordinates = [[[F::Raw::default(); 2]; MAX_LANES]; 3];
+        let lanes = points.len().min(F::LANES);
+        self.x
+            .store_raw::<BOUND, S>(simd, &mut coordinates[0][..lanes]);
+        self.y
+            .store_raw::<BOUND, S>(simd, &mut coordinates[1][..lanes]);
+        self.z
+            .store_raw::<BOUND, S>(simd, &mut coordinates[2][..lanes]);
+        for (lane, point) in points[..lanes].iter_mut().enumerate() {
+            *point = [
+                coordinates[0][lane],
+                coordinates[1][lane],
+                coordinates[2][lane],
+            ];
+        }
+    }
+
+    /// Loads lane `i` from the raw coordinates `points[i]`, for at least `F::LANES` entries.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Used by multi-scalar multiplication.")
+    )]
+    #[inline(always)]
+    pub fn load_raw<S: Simd>(simd: S, points: &[&[[F::Raw; 2]; 3]]) -> Self
+    where
+        F: Field<S>,
+    {
+        const { assert!(F::LANES <= MAX_LANES) };
+        let coordinate = |i: usize| {
+            let mut lanes = [&points[0][i]; MAX_LANES];
+            for (lane, point) in lanes.iter_mut().zip(points).take(F::LANES) {
+                *lane = &point[i];
+            }
+            Fp2::load_raw::<BOUND, S>(simd, &lanes)
+        };
+        Self {
+            x: coordinate(0),
+            y: coordinate(1),
+            z: coordinate(2),
+        }
+    }
+
+    /// Returns `-self`.
+    ///
+    /// Multiplies `Y` by `-1` rather than subtracting it, so the coordinates keep their bounds.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Used by multi-scalar multiplication.")
+    )]
+    #[inline(always)]
+    pub fn neg<S: Simd>(self, simd: S) -> Self
+    where
+        F: Field<S>,
+    {
+        let minus_one = F::load(simd, &[], &MINUS_ONE);
+        Self {
+            y: self.y.ready::<1, S>(simd).mul_base(simd, minus_one),
+            ..self
         }
     }
 
@@ -469,7 +546,8 @@ mod tests {
                 check_bound(simd, addend.add(simd, addend));
                 check_bound(simd, addend.double(simd));
                 sum = check_bound(simd, sum.add(simd, addend));
-                // Chain some sums through doublings and round-trip others through bytes.
+                // Chain some sums through doublings and round-trip others through bytes or raw
+                // coordinates.
                 match round % 3 {
                     0 => {
                         let double = check_bound(simd, sum.double(simd));
@@ -481,7 +559,15 @@ mod tests {
                         sum.store(simd, &mut stored);
                         sum = widen(simd, Point::load(simd, &stored, &IDENTITY));
                     }
-                    _ => {}
+                    // Negate through -s + 2s, and round-trip through raw coordinates.
+                    _ => {
+                        let negated = check_bound(simd, sum.neg(simd));
+                        sum = check_bound(simd, negated.add(simd, sum.double(simd)));
+                        let mut raw = [[[F::Raw::default(); 2]; 3]; MAX_LANES];
+                        sum.store_raw(simd, &mut raw);
+                        let lanes: Vec<_> = raw.iter().collect();
+                        sum = Point::load_raw(simd, &lanes);
+                    }
                 }
             }
             sum.store(simd, &mut output[start..lanes]);
