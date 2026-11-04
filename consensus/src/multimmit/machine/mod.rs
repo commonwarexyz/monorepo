@@ -75,6 +75,7 @@ mod eligibility;
 mod finality;
 mod input;
 mod job;
+mod placement;
 mod producer;
 mod publication;
 mod reducer;

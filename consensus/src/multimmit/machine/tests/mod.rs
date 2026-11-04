@@ -14,6 +14,7 @@ pub(super) mod fixtures;
 mod floors;
 mod forwarding;
 mod history;
+mod placement;
 mod producer;
 mod properties;
 mod proposal;
