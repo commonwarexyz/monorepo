@@ -10,7 +10,6 @@ use crate::multimmit::{
     marshal::{
         OutputIndex,
         actors::delivery,
-        protocol::order::{Reconciliation, Slot},
         storage::{
             catalog::StoredRef,
             catalog_state::{Checkpoint, CheckpointParts},
@@ -19,6 +18,7 @@ use crate::multimmit::{
         },
         types::LqcVerifier,
     },
+    order::{Reconciliation, Slot},
     scheme::Scheme,
     types::{Body, TransactionBlock},
 };

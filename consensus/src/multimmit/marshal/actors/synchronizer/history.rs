@@ -13,16 +13,14 @@ use crate::{
     multimmit::{
         marshal::{
             actors::metrics::FetchReason,
-            protocol::{
-                order::{FinalSweep, HistoryState, Slot, SlotStream},
-                paths::Branch,
-            },
+            protocol::paths::Branch,
             storage::{
                 commit::{HistoryOpening, SelectedLqc},
                 scratch::{BlockStack, HistoryLink, HistoryStack},
             },
             types::LqcVerifier,
         },
+        order::{FinalSweep, HistoryState, Slot, SlotStream},
         scheme::Scheme,
         types::{BlockRef, Body},
     },

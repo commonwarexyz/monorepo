@@ -1,9 +1,5 @@
-//! Pure synchronization and ordering mechanisms.
+//! Pure synchronization mechanisms.
 
 pub(super) mod ancestry;
 pub(super) mod floor;
-pub(super) mod order;
 pub(super) mod paths;
-
-#[cfg(any(test, feature = "mocks"))]
-pub(crate) mod fuzz;

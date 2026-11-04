@@ -52,7 +52,7 @@ pub fn fuzz_algebra(input: &[u8]) {
 
 /// Checks ordered history openings, partial delivery, and replay against an explicit sequence.
 pub fn fuzz_marshal(input: &[u8]) {
-    super::marshal::fuzz::exercise(input);
+    super::order::fuzz::exercise(input);
 }
 
 /// Runs one bounded adversarial Twins schedule followed by a fair recovery suffix.

@@ -6,10 +6,11 @@ use crate::{
         actors::util::ask,
         marshal::{
             actors::{backfill, catalog},
-            protocol::{ancestry, floor, order},
+            protocol::{ancestry, floor},
             storage,
             types::{self, Floor},
         },
+        order,
         scheme::Scheme,
         types::{CertificateId, FinalityFact, Lqc, SelectedCommitments, TransactionBlockHeader},
     },

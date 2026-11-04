@@ -10,13 +10,14 @@ use crate::{
     Epochable as _, Viewable as _,
     multimmit::{
         marshal::{
-            protocol::{floor, order::HistoryState},
+            protocol::floor,
             storage::{
                 catalog_state::{Checkpoint, CheckpointParts, PendingFloors, frontier_index},
                 scratch::{BlockStack, HistoryStack},
             },
             types::{Floor, LqcVerifier},
         },
+        order::HistoryState,
         scheme::Scheme,
         types::{Body, Lqc, TipRecord},
     },
