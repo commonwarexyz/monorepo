@@ -291,6 +291,12 @@ fn fuzz(input: FuzzInput) {
                         .verify_element_inclusion::<Sha256>(digest, idx as u32, &root)
                         .is_ok()
                 );
+                assert_eq!(
+                    original_proof
+                        .reconstruct_element_root::<Sha256>(digest, idx as u32)
+                        .unwrap(),
+                    root
+                );
 
                 for mutation in &input.mutations {
                     let mut mutated_proof = original_proof.clone();
@@ -300,6 +306,11 @@ fn fuzz(input: FuzzInput) {
                             mutated_proof
                                 .verify_element_inclusion::<Sha256>(digest, idx as u32, &root)
                                 .is_err()
+                        );
+                        assert!(
+                            !mutated_proof
+                                .reconstruct_element_root::<Sha256>(digest, idx as u32)
+                                .is_ok_and(|reconstructed| reconstructed == root)
                         );
                     }
                 }
@@ -336,6 +347,12 @@ fn fuzz(input: FuzzInput) {
                     .verify_multi_inclusion::<Sha256>(&elements, &root)
                     .is_ok()
             );
+            assert_eq!(
+                original_proof
+                    .reconstruct_multi_root::<Sha256>(&elements)
+                    .unwrap(),
+                root
+            );
 
             for mutation in &input.mutations {
                 let mut mutated_proof = original_proof.clone();
@@ -345,6 +362,11 @@ fn fuzz(input: FuzzInput) {
                         mutated_proof
                             .verify_multi_inclusion::<Sha256>(&elements, &root)
                             .is_err()
+                    );
+                    assert!(
+                        !mutated_proof
+                            .reconstruct_multi_root::<Sha256>(&elements)
+                            .is_ok_and(|reconstructed| reconstructed == root)
                     );
                 }
             }
