@@ -1,8 +1,9 @@
-//! Scheme tests over a six-participant committee with real key material.
+//! Scheme tests over a six-participant committee.
 //!
 //! Suite-independent properties are generic over [`Suite`] and run for every suite (see
-//! [`for_each_suite`]). Registration, threshold-sharing, and certificate-verifier tests are
-//! specific to the BLS12-381 suites.
+//! [`for_each_suite`]), including the ledger-backed [`Mock`], which protocol tests rely on to
+//! honor the same contract as the real suites. Registration, threshold-sharing, and
+//! certificate-verifier tests are specific to the BLS12-381 suites.
 
 /// Runs a generic test body once for every suite the mocks can deal.
 macro_rules! for_each_suite {
@@ -12,6 +13,7 @@ macro_rules! for_each_suite {
         $test::<Sas<MinPk>>();
         $test::<Sas<MinSig>>();
         $test::<Ed25519>();
+        $test::<Mock>();
     }};
 }
 
@@ -44,7 +46,7 @@ use crate::{
         },
         config::{Parameters, Protocol},
         mocks::{
-            Bls, Committee, Ed25519, Fixture as Suite, Sas,
+            Bls, Committee, Ed25519, Fixture as Suite, Mock, Sas,
             keys::{self, digest},
         },
         types::{
