@@ -42,6 +42,7 @@ use crate::{
     },
     types::Epoch,
 };
+#[cfg(any(test, feature = "mocks", not(target_arch = "wasm32")))]
 pub use assemble::SignatureVerification;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use batch::CertificateVotes;
