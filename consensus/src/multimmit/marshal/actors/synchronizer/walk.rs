@@ -18,11 +18,12 @@ use crate::{
             types::LqcVerifier,
             wire::MAX_SEGMENT_ITEMS,
         },
+        scheme::Scheme,
         types::{BlockRef, Body, TransactionBlockHeader},
     },
     types::Height,
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select;
 use commonware_utils::futures::{AbortablePool, Aborter, OptionFuture};
 use std::{cmp::Ordering, collections::VecDeque, future::Future, iter, mem};
@@ -280,18 +281,18 @@ impl<D: Digest> AncestryWalker<D> {
     }
 }
 
-impl<I, C, F, S, K, Q, H, V, B> Core<I, C, F, S, K, Q, H, V, B>
+impl<I, C, F, Hs, K, Q, H, S, B> Core<I, C, F, Hs, K, Q, H, S, B>
 where
-    I: Absorb<V, H::Digest>,
-    C: CatalogPort<H, V, B>,
-    F: Fetcher<H, V, B>,
-    S: HistoryStack<H>,
+    I: Absorb<S, H::Digest>,
+    C: CatalogPort<H, S, B>,
+    F: Fetcher<H, S, B>,
+    Hs: HistoryStack<H>,
     K: BlockStack<H::Digest>,
-    Q: LqcVerifier<H, V>,
+    Q: LqcVerifier<H, S>,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
-    Error: From<C::Error> + From<F::Error> + From<S::Error> + From<K::Error>,
+    Error: From<C::Error> + From<F::Error> + From<Hs::Error> + From<K::Error>,
 {
     /// Walks producer ancestry from `targets` to their common frontiers with `emitted`, staging
     /// the references at or below `stage_max` in the block stack.

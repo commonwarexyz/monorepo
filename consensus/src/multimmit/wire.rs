@@ -7,15 +7,18 @@
 //! or byte bound above the epoch codec profile.
 
 use crate::{
-    multimmit::types::{
-        Artifact, ChainId, CodecConfig, DaCertificate, DaVote, Lqc, NoVote, Nullification, Nullify,
-        SignedLeaderBlock, SignedTransactionBlock, Vote, Vqc,
+    multimmit::{
+        scheme::Scheme,
+        types::{
+            Artifact, ChainId, CodecConfig, DaCertificate, DaVote, Lqc, NoVote, Nullification,
+            Nullify, SignedLeaderBlock, SignedTransactionBlock, Vote, Vqc,
+        },
     },
     types::Epoch,
 };
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, Encode as _, EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::telemetry::metrics::EncodeLabelValue;
 #[cfg(any(test, feature = "mocks"))]
 use std::iter::once;
@@ -167,21 +170,21 @@ impl<M: Read> Read for Envelope<M> {
 ///
 /// Decoding rejects a message addressed to a producer chain outside the epoch codec profile.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DataMessage<V: Variant, D: Digest> {
+pub enum DataMessage<S: Scheme, D: Digest> {
     /// See [`Artifact::TransactionBlock`].
-    Block(SignedTransactionBlock<V, D>),
+    Block(SignedTransactionBlock<S, D>),
     /// See [`Artifact::DaVote`].
-    DaVote(DaVote<V, D>),
+    DaVote(DaVote<S, D>),
     /// See [`Artifact::DaCertificate`].
-    DaCertificate(DaCertificate<V, D>),
+    DaCertificate(DaCertificate<S, D>),
 }
 
 #[cfg(feature = "arbitrary")]
-impl<'a, V: Variant, D: Digest> arbitrary::Arbitrary<'a> for DataMessage<V, D>
+impl<'a, S: Scheme, D: Digest> arbitrary::Arbitrary<'a> for DataMessage<S, D>
 where
-    SignedTransactionBlock<V, D>: arbitrary::Arbitrary<'a>,
-    DaVote<V, D>: arbitrary::Arbitrary<'a>,
-    DaCertificate<V, D>: arbitrary::Arbitrary<'a>,
+    SignedTransactionBlock<S, D>: arbitrary::Arbitrary<'a>,
+    DaVote<S, D>: arbitrary::Arbitrary<'a>,
+    DaCertificate<S, D>: arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         match u.int_in_range(0..=2)? {
@@ -193,7 +196,7 @@ where
     }
 }
 
-impl<V: Variant, D: Digest> DataMessage<V, D> {
+impl<S: Scheme, D: Digest> DataMessage<S, D> {
     /// Returns the producer chain addressed by this message.
     pub const fn chain(&self) -> ChainId {
         match self {
@@ -204,7 +207,7 @@ impl<V: Variant, D: Digest> DataMessage<V, D> {
     }
 
     /// Returns this message's untrusted artifact.
-    pub fn into_artifact(self) -> Artifact<V, D> {
+    pub fn into_artifact(self) -> Artifact<S, D> {
         match self {
             Self::Block(block) => Artifact::TransactionBlock(block),
             Self::DaVote(vote) => Artifact::DaVote(vote),
@@ -213,7 +216,7 @@ impl<V: Variant, D: Digest> DataMessage<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Write for DataMessage<V, D> {
+impl<S: Scheme, D: Digest> Write for DataMessage<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::Block(block) => {
@@ -232,7 +235,7 @@ impl<V: Variant, D: Digest> Write for DataMessage<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for DataMessage<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for DataMessage<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Block(block) => block.encode_size(),
@@ -242,14 +245,14 @@ impl<V: Variant, D: Digest> EncodeSize for DataMessage<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for DataMessage<V, D> {
+impl<S: Scheme, D: Digest> Read for DataMessage<S, D> {
     type Cfg = CodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, codec: &Self::Cfg) -> Result<Self, CodecError> {
         let message = match u8::read(buf)? {
             DATA_BLOCK => Self::Block(SignedTransactionBlock::read(buf)?),
             DATA_DA_VOTE => Self::DaVote(DaVote::read(buf)?),
-            DATA_DA_CERTIFICATE => Self::DaCertificate(DaCertificate::read(buf)?),
+            DATA_DA_CERTIFICATE => Self::DaCertificate(DaCertificate::read_cfg(buf, codec)?),
             tag => return Err(CodecError::InvalidEnum(tag)),
         };
         if message.chain().get() as usize >= codec.chains() {
@@ -264,30 +267,30 @@ impl<V: Variant, D: Digest> Read for DataMessage<V, D> {
 
 /// A consensus-plane message: proposals, votes, abstentions, and nullify shares.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ConsensusMessage<V: Variant, D: Digest> {
+pub enum ConsensusMessage<S: Scheme, D: Digest> {
     /// A signed leader proposal, optionally carrying the parent V-QC it references.
     Proposal {
         /// The parent certificate, unless it was already broadcast or is synthetic genesis.
-        parent: Option<Box<Vqc<V, D>>>,
+        parent: Option<Box<Vqc<S, D>>>,
         /// See [`Artifact::LeaderBlock`].
-        block: Box<SignedLeaderBlock<V, D>>,
+        block: Box<SignedLeaderBlock<S, D>>,
     },
     /// See [`Artifact::Vote`].
-    Vote(Vote<V, D>),
+    Vote(Vote<S, D>),
     /// See [`Artifact::NoVote`].
-    NoVote(NoVote<V>),
+    NoVote(NoVote<S>),
     /// See [`Artifact::Nullify`].
-    Nullify(Nullify<V>),
+    Nullify(Nullify<S>),
 }
 
 #[cfg(feature = "arbitrary")]
-impl<'a, V: Variant, D: Digest> arbitrary::Arbitrary<'a> for ConsensusMessage<V, D>
+impl<'a, S: Scheme, D: Digest> arbitrary::Arbitrary<'a> for ConsensusMessage<S, D>
 where
-    Vqc<V, D>: arbitrary::Arbitrary<'a>,
-    SignedLeaderBlock<V, D>: arbitrary::Arbitrary<'a>,
-    Vote<V, D>: arbitrary::Arbitrary<'a>,
-    NoVote<V>: arbitrary::Arbitrary<'a>,
-    Nullify<V>: arbitrary::Arbitrary<'a>,
+    Vqc<S, D>: arbitrary::Arbitrary<'a>,
+    SignedLeaderBlock<S, D>: arbitrary::Arbitrary<'a>,
+    Vote<S, D>: arbitrary::Arbitrary<'a>,
+    NoVote<S>: arbitrary::Arbitrary<'a>,
+    Nullify<S>: arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         match u.int_in_range(0..=4)? {
@@ -307,12 +310,12 @@ where
     }
 }
 
-impl<V: Variant, D: Digest> ConsensusMessage<V, D> {
+impl<S: Scheme, D: Digest> ConsensusMessage<S, D> {
     /// Returns this message's untrusted artifacts in observation order.
     ///
     /// An attached proposal parent precedes its leader block so the dependency is observed first.
     #[cfg(any(test, feature = "mocks"))]
-    pub fn into_artifacts(self) -> impl Iterator<Item = Artifact<V, D>> {
+    pub fn into_artifacts(self) -> impl Iterator<Item = Artifact<S, D>> {
         let (parent, artifact) = match self {
             Self::Proposal { parent, block } => {
                 let parent = parent.map(|parent| Artifact::Vqc(*parent));
@@ -326,7 +329,7 @@ impl<V: Variant, D: Digest> ConsensusMessage<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Write for ConsensusMessage<V, D> {
+impl<S: Scheme, D: Digest> Write for ConsensusMessage<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::Proposal { parent, block } => {
@@ -356,7 +359,7 @@ impl<V: Variant, D: Digest> Write for ConsensusMessage<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for ConsensusMessage<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for ConsensusMessage<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Proposal { parent, block } => {
@@ -370,7 +373,7 @@ impl<V: Variant, D: Digest> EncodeSize for ConsensusMessage<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for ConsensusMessage<V, D> {
+impl<S: Scheme, D: Digest> Read for ConsensusMessage<S, D> {
     type Cfg = CodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, codec: &Self::Cfg) -> Result<Self, CodecError> {
@@ -396,21 +399,21 @@ impl<V: Variant, D: Digest> Read for ConsensusMessage<V, D> {
 
 /// A certificate-plane message: recovered or aggregated exit and finality proofs.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CertificateMessage<V: Variant, D: Digest> {
+pub enum CertificateMessage<S: Scheme, D: Digest> {
     /// See [`Artifact::Nullification`].
-    Nullification(Nullification<V>),
+    Nullification(Nullification<S>),
     /// See [`Artifact::Vqc`].
-    Vqc(Vqc<V, D>),
+    Vqc(Vqc<S, D>),
     /// See [`Artifact::Lqc`].
-    Lqc(Lqc<V, D>),
+    Lqc(Lqc<S, D>),
 }
 
 #[cfg(feature = "arbitrary")]
-impl<'a, V: Variant, D: Digest> arbitrary::Arbitrary<'a> for CertificateMessage<V, D>
+impl<'a, S: Scheme, D: Digest> arbitrary::Arbitrary<'a> for CertificateMessage<S, D>
 where
-    Nullification<V>: arbitrary::Arbitrary<'a>,
-    Vqc<V, D>: arbitrary::Arbitrary<'a>,
-    Lqc<V, D>: arbitrary::Arbitrary<'a>,
+    Nullification<S>: arbitrary::Arbitrary<'a>,
+    Vqc<S, D>: arbitrary::Arbitrary<'a>,
+    Lqc<S, D>: arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         match u.int_in_range(0..=2)? {
@@ -422,9 +425,9 @@ where
     }
 }
 
-impl<V: Variant, D: Digest> CertificateMessage<V, D> {
+impl<S: Scheme, D: Digest> CertificateMessage<S, D> {
     /// Returns this message's untrusted artifact.
-    pub fn into_artifact(self) -> Artifact<V, D> {
+    pub fn into_artifact(self) -> Artifact<S, D> {
         match self {
             Self::Nullification(nullification) => Artifact::Nullification(nullification),
             Self::Vqc(certificate) => Artifact::Vqc(certificate),
@@ -433,7 +436,7 @@ impl<V: Variant, D: Digest> CertificateMessage<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Write for CertificateMessage<V, D> {
+impl<S: Scheme, D: Digest> Write for CertificateMessage<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::Nullification(nullification) => {
@@ -452,7 +455,7 @@ impl<V: Variant, D: Digest> Write for CertificateMessage<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for CertificateMessage<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for CertificateMessage<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Nullification(nullification) => nullification.encode_size(),
@@ -462,12 +465,14 @@ impl<V: Variant, D: Digest> EncodeSize for CertificateMessage<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for CertificateMessage<V, D> {
+impl<S: Scheme, D: Digest> Read for CertificateMessage<S, D> {
     type Cfg = CodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, codec: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            CERTIFICATE_NULLIFICATION => Ok(Self::Nullification(Nullification::read(buf)?)),
+            CERTIFICATE_NULLIFICATION => {
+                Ok(Self::Nullification(Nullification::read_cfg(buf, codec)?))
+            }
             CERTIFICATE_VQC => Ok(Self::Vqc(Vqc::read_cfg(buf, codec)?)),
             CERTIFICATE_LQC => Ok(Self::Lqc(Lqc::read_cfg(buf, codec)?)),
             tag => Err(CodecError::InvalidEnum(tag)),
@@ -490,9 +495,9 @@ impl<D: Digest> Frame<D> {
     ///
     /// Leader blocks return `None` because they travel only as a [`ConsensusMessage::Proposal`]
     /// with their parent.
-    pub(crate) fn artifact<H: Hasher<Digest = D>, V: Variant>(
+    pub(crate) fn artifact<H: Hasher<Digest = D>, S: Scheme>(
         epoch: Epoch,
-        artifact: &Artifact<V, D>,
+        artifact: &Artifact<S, D>,
     ) -> Option<Self> {
         let (plane, bytes, relay) = match artifact {
             Artifact::TransactionBlock(block) => (
@@ -518,19 +523,19 @@ impl<D: Digest> Frame<D> {
             ),
             Artifact::NoVote(vote) => (
                 Plane::Consensus,
-                Envelope::new(epoch, ConsensusMessage::<V, D>::NoVote(vote.clone())).encode(),
+                Envelope::new(epoch, ConsensusMessage::<S, D>::NoVote(vote.clone())).encode(),
                 None,
             ),
             Artifact::Nullify(nullify) => (
                 Plane::Consensus,
-                Envelope::new(epoch, ConsensusMessage::<V, D>::Nullify(nullify.clone())).encode(),
+                Envelope::new(epoch, ConsensusMessage::<S, D>::Nullify(nullify.clone())).encode(),
                 None,
             ),
             Artifact::Nullification(nullification) => (
                 Plane::Certificate,
                 Envelope::new(
                     epoch,
-                    CertificateMessage::<V, D>::Nullification(nullification.clone()),
+                    CertificateMessage::<S, D>::Nullification(nullification.clone()),
                 )
                 .encode(),
                 None,
@@ -554,10 +559,10 @@ impl<D: Digest> Frame<D> {
     }
 
     /// Frames one leader proposal, carrying `parent` ahead of the block when present.
-    pub(crate) fn proposal<V: Variant>(
+    pub(crate) fn proposal<S: Scheme>(
         epoch: Epoch,
-        block: &SignedLeaderBlock<V, D>,
-        parent: Option<&Vqc<V, D>>,
+        block: &SignedLeaderBlock<S, D>,
+        parent: Option<&Vqc<S, D>>,
     ) -> Self {
         let message = ConsensusMessage::Proposal {
             block: Box::new(block.clone()),
@@ -576,7 +581,10 @@ impl<D: Digest> Frame<D> {
 pub(crate) mod fuzz {
     use super::{CertificateMessage, ConsensusMessage, DataMessage, Envelope, EnvelopeConfig};
     use crate::{
-        multimmit::types::{CodecConfig, PathLimits},
+        multimmit::{
+            mocks::Bls,
+            types::{CodecConfig, PathLimits},
+        },
         types::Epoch,
     };
     use commonware_codec::{Codec, Copying, Decode as _, Encode as _};
@@ -595,9 +603,9 @@ pub(crate) mod fuzz {
             epoch: Epoch::new(7),
             payload: CodecConfig::new(6, 2, PathLimits::new(2, 1)).unwrap(),
         };
-        roundtrip::<DataMessage<MinPk, Sha256Digest>>(input, &config);
-        roundtrip::<ConsensusMessage<MinPk, Sha256Digest>>(input, &config);
-        roundtrip::<CertificateMessage<MinPk, Sha256Digest>>(input, &config);
+        roundtrip::<DataMessage<Bls<MinPk>, Sha256Digest>>(input, &config);
+        roundtrip::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>(input, &config);
+        roundtrip::<CertificateMessage<Bls<MinPk>, Sha256Digest>>(input, &config);
     }
 
     fn roundtrip<M>(input: &[u8], config: &EnvelopeConfig<CodecConfig>)
@@ -630,7 +638,7 @@ mod tests {
     use crate::{
         Epochable as _,
         multimmit::{
-            mocks::Committee,
+            mocks::{Bls, Committee, Fixture},
             types::{
                 Anchor, CertificateId, ChainId, ChainProposal, LeaderBlock, PathLimits,
                 TransactionBlockHeader, ViewMessage,
@@ -646,20 +654,21 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
+    use commonware_utils::test_rng;
     use core::fmt::Debug;
 
-    fn committee() -> Committee<MinPk> {
+    fn committee() -> Committee<Bls<MinPk>> {
         Committee::builder(11, 6).build()
     }
 
-    fn maximal_committee<V: Variant>() -> Committee<V> {
+    fn maximal_committee<S: Fixture>() -> Committee<S> {
         Committee::builder(u64::MAX, 1)
             .limits(PathLimits::new(1, 0))
             .build()
     }
 
-    fn transaction_header<V: Variant>(
-        committee: &Committee<V>,
+    fn transaction_header<S: Fixture>(
+        committee: &Committee<S>,
         height: u64,
     ) -> TransactionBlockHeader<Sha256Digest> {
         TransactionBlockHeader::new(
@@ -672,29 +681,29 @@ mod tests {
         .unwrap()
     }
 
-    fn da_certificate<V: Variant>(
-        committee: &Committee<V>,
+    fn da_certificate<S: Fixture>(
+        committee: &Committee<S>,
         header: TransactionBlockHeader<Sha256Digest>,
-    ) -> DaCertificate<V, Sha256Digest> {
+    ) -> DaCertificate<S, Sha256Digest> {
         let votes = (0..committee.codec().da_quorum())
             .map(|signer| committee.da_vote(Participant::from_usize(signer), header.clone()))
             .collect::<Vec<_>>();
         committee
             .verifier
-            .assemble_da_certificate(&votes, &Sequential)
+            .assemble_da_certificate(&mut test_rng(), &votes, &Sequential)
             .unwrap()
     }
 
-    fn maximal_leader_block<V: Variant>(
-        committee: &Committee<V>,
-    ) -> SignedLeaderBlock<V, Sha256Digest> {
+    fn maximal_leader_block<S: Fixture>(
+        committee: &Committee<S>,
+    ) -> SignedLeaderBlock<S, Sha256Digest> {
         maximal_leader_block_with_history(committee, Sha256::hash(&[b"history"]))
     }
 
-    fn maximal_leader_block_with_history<V: Variant>(
-        committee: &Committee<V>,
+    fn maximal_leader_block_with_history<S: Fixture>(
+        committee: &Committee<S>,
         history: Sha256Digest,
-    ) -> SignedLeaderBlock<V, Sha256Digest> {
+    ) -> SignedLeaderBlock<S, Sha256Digest> {
         let anchor = Anchor::Certificate(da_certificate(
             committee,
             transaction_header(committee, u64::MAX - 1),
@@ -717,12 +726,13 @@ mod tests {
         committee.signers[0].sign_leader_block(block).unwrap()
     }
 
-    fn maximal_vqc<V: Variant>(committee: &Committee<V>) -> Vqc<V, Sha256Digest> {
+    fn maximal_vqc<S: Fixture>(committee: &Committee<S>) -> Vqc<S, Sha256Digest> {
         let leader = maximal_leader_block(committee);
         let vote = committee.vote(Participant::new(0), &leader);
         committee
             .verifier
-            .assemble_vqc::<Sha256, _>(
+            .assemble_vqc::<_, Sha256, _>(
+                &mut test_rng(),
                 leader.block().clone(),
                 &[ViewMessage::Vote(vote)],
                 &Sequential,
@@ -730,7 +740,7 @@ mod tests {
             .unwrap()
     }
 
-    fn config<V: Variant, C>(committee: &Committee<V>, payload: C) -> EnvelopeConfig<C> {
+    fn config<S: Fixture, C>(committee: &Committee<S>, payload: C) -> EnvelopeConfig<C> {
         EnvelopeConfig {
             max_frame_bytes: usize::MAX,
             epoch: committee.config.epoch(),
@@ -738,11 +748,11 @@ mod tests {
         }
     }
 
-    fn envelope<V: Variant, M>(committee: &Committee<V>, payload: M) -> Envelope<M> {
+    fn envelope<S: Fixture, M>(committee: &Committee<S>, payload: M) -> Envelope<M> {
         Envelope::new(committee.config.epoch(), payload)
     }
 
-    fn envelope_prefix<V: Variant>(committee: &Committee<V>) -> BytesMut {
+    fn envelope_prefix<S: Fixture>(committee: &Committee<S>) -> BytesMut {
         let mut encoded = BytesMut::new();
         WIRE_VERSION.write(&mut encoded);
         committee.config.epoch().write(&mut encoded);
@@ -762,7 +772,7 @@ mod tests {
         ];
         for message in data {
             let encoded = envelope(&committee, message.clone()).encode();
-            let decoded = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let decoded = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 encoded,
                 &config(&committee, committee.codec()),
             )
@@ -776,7 +786,7 @@ mod tests {
         ];
         for message in consensus {
             let encoded = envelope(&committee, message.clone()).encode();
-            let decoded = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let decoded = Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 encoded,
                 &config(&committee, committee.codec()),
             )
@@ -786,7 +796,7 @@ mod tests {
 
         let message = CertificateMessage::Nullification(committee.nullification(View::new(1)));
         let encoded = envelope(&committee, message.clone()).encode();
-        let decoded = Envelope::<CertificateMessage<MinPk, Sha256Digest>>::decode_cfg(
+        let decoded = Envelope::<CertificateMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
             encoded,
             &config(&committee, committee.codec()),
         )
@@ -794,8 +804,8 @@ mod tests {
         assert_eq!(decoded.into_payload(), message);
     }
 
-    fn assert_accepted_under_bound<V: Variant, M>(
-        committee: &Committee<V>,
+    fn assert_accepted_under_bound<S: Fixture, M>(
+        committee: &Committee<S>,
         message: M,
         payload: M::Cfg,
         max_frame_bytes: usize,
@@ -817,13 +827,13 @@ mod tests {
         assert_eq!(decoded.into_payload(), message);
     }
 
-    fn assert_derived_plane_bounds_accept_every_message_variant<V: Variant>() {
-        let committee = Committee::<V>::builder(11, 6)
+    fn assert_derived_plane_bounds_accept_every_message_variant<S: Fixture>() {
+        let committee = Committee::<S>::builder(11, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_WIRE_BOUNDS_TEST")
             .producers(vec![Participant::new(4), Participant::new(1)])
             .build();
         let codec = committee.codec();
-        let bounds = codec.encoded_bounds::<V, Sha256Digest>().unwrap();
+        let bounds = codec.encoded_bounds::<S, Sha256Digest>().unwrap();
 
         let block =
             committee.signed_block(ChainId::new(0), Sha256::hash(&[b"transaction commitment"]));
@@ -879,14 +889,14 @@ mod tests {
 
     #[test]
     fn derived_plane_bounds_accept_every_message_variant() {
-        assert_derived_plane_bounds_accept_every_message_variant::<MinPk>();
-        assert_derived_plane_bounds_accept_every_message_variant::<MinSig>();
+        assert_derived_plane_bounds_accept_every_message_variant::<Bls<MinPk>>();
+        assert_derived_plane_bounds_accept_every_message_variant::<Bls<MinSig>>();
     }
 
     #[test]
     fn wire_version_is_zero_and_rejects_one() {
         let committee = committee();
-        let message = ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+        let message = ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(
             committee.novote(Participant::new(1), View::new(1)),
         );
         let mut v1 = BytesMut::from(envelope(&committee, message).encode().as_ref());
@@ -894,7 +904,7 @@ mod tests {
 
         assert_eq!(WIRE_VERSION, 0);
         assert!(
-            Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+            Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 v1.freeze(),
                 &config(&committee, committee.codec()),
             )
@@ -919,7 +929,7 @@ mod tests {
         block.write(&mut expected);
         assert_eq!(encoded, expected.freeze());
 
-        let decoded = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+        let decoded = Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
             encoded,
             &config(&committee, committee.codec()),
         )
@@ -949,7 +959,7 @@ mod tests {
         block.write(&mut expected);
         assert_eq!(encoded, expected.freeze());
 
-        let decoded = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+        let decoded = Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
             encoded,
             &config(&committee, committee.codec()),
         )
@@ -963,7 +973,7 @@ mod tests {
 
         let certificate = CertificateMessage::Vqc(parent);
         let encoded = envelope(&committee, certificate.clone()).encode();
-        let decoded = Envelope::<CertificateMessage<MinPk, Sha256Digest>>::decode_cfg(
+        let decoded = Envelope::<CertificateMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
             encoded,
             &config(&committee, committee.codec()),
         )
@@ -971,8 +981,8 @@ mod tests {
         assert_eq!(decoded.into_payload(), certificate);
     }
 
-    fn assert_exact_frame_cap<V: Variant, M>(
-        committee: &Committee<V>,
+    fn assert_exact_frame_cap<S: Fixture, M>(
+        committee: &Committee<S>,
         message: M,
         payload: M::Cfg,
         max_frame_bytes: usize,
@@ -998,10 +1008,10 @@ mod tests {
         assert!(matches!(error, CodecError::InvalidLength(len) if len == oversized_len));
     }
 
-    fn assert_exact_derived_frame_caps_reject_before_parsing<V: Variant>() {
-        let committee = maximal_committee::<V>();
+    fn assert_exact_derived_frame_caps_reject_before_parsing<S: Fixture>() {
+        let committee = maximal_committee::<S>();
         let codec = committee.codec();
-        let bounds = codec.encoded_bounds::<V, Sha256Digest>().unwrap();
+        let bounds = codec.encoded_bounds::<S, Sha256Digest>().unwrap();
 
         let header = transaction_header(&committee, u64::MAX);
         let block = committee.signers[0].sign_transaction_block(header).unwrap();
@@ -1035,8 +1045,8 @@ mod tests {
 
     #[test]
     fn exact_derived_frame_caps_reject_before_parsing() {
-        assert_exact_derived_frame_caps_reject_before_parsing::<MinPk>();
-        assert_exact_derived_frame_caps_reject_before_parsing::<MinSig>();
+        assert_exact_derived_frame_caps_reject_before_parsing::<Bls<MinPk>>();
+        assert_exact_derived_frame_caps_reject_before_parsing::<Bls<MinSig>>();
     }
 
     #[test]
@@ -1047,7 +1057,7 @@ mod tests {
         9u8.write(&mut encoded);
         committee.leader_block(View::new(1)).write(&mut encoded);
 
-        let error = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+        let error = Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
             encoded.freeze(),
             &config(&committee, committee.codec()),
         )
@@ -1058,30 +1068,30 @@ mod tests {
     #[test]
     fn rejects_wrong_version_epoch_and_trailing_bytes() {
         let committee = committee();
-        let message = ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+        let message = ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(
             committee.novote(Participant::new(1), View::new(1)),
         );
         let cfg = config(&committee, committee.codec());
 
         let valid = envelope(&committee, message).encode();
         assert!(
-            Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(valid.clone(), &cfg,)
+            Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(valid.clone(), &cfg,)
                 .is_ok()
         );
 
         let mut wrong_version = BytesMut::from(valid.as_ref());
         wrong_version[0] ^= 1;
         assert!(
-            Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+            Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 wrong_version.freeze(),
                 &cfg,
             )
             .is_err()
         );
 
-        let other = Committee::<MinPk>::builder(12, 6).build();
+        let other = Committee::<Bls<MinPk>>::builder(12, 6).build();
         assert!(
-            Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+            Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 valid.clone(),
                 &config(&other, other.codec()),
             )
@@ -1091,8 +1101,11 @@ mod tests {
         let mut trailing = BytesMut::from(valid.as_ref());
         trailing.put_u8(0);
         assert!(
-            Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(trailing.freeze(), &cfg,)
-                .is_err()
+            Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
+                trailing.freeze(),
+                &cfg,
+            )
+            .is_err()
         );
     }
 
@@ -1114,11 +1127,11 @@ mod tests {
                 Participant::new(1),
                 committee.transaction_header(ChainId::new(0), Sha256::hash(&[b"commitment"])),
             )
-            .share()
+            .attestation()
             .clone();
-        let message = DataMessage::DaVote(DaVote::new(header, share));
+        let message = DataMessage::DaVote(DaVote::<Bls<MinPk>, _>::new(header, share));
         let encoded = envelope(&committee, message).encode();
-        let error = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+        let error = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
             encoded,
             &config(&committee, codec),
         )
@@ -1187,7 +1200,7 @@ mod tests {
         let mut encoded = envelope_prefix(&committee);
         9u8.write(&mut encoded);
         assert!(
-            Envelope::<CertificateMessage<MinPk, Sha256Digest>>::decode_cfg(
+            Envelope::<CertificateMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 encoded.freeze(),
                 &config(&committee, committee.codec()),
             )
@@ -1206,14 +1219,14 @@ mod tests {
             let mut consensus = 0u8;
             let mut certificates = 0u8;
             for seed in 0..128 {
-                match generate_value::<Envelope<DataMessage<MinPk, Sha256Digest>>>(seed)
+                match generate_value::<Envelope<DataMessage<Bls<MinPk>, Sha256Digest>>>(seed)
                     .into_payload()
                 {
                     DataMessage::Block(_) => data |= 1 << 0,
                     DataMessage::DaVote(_) => data |= 1 << 1,
                     DataMessage::DaCertificate(_) => data |= 1 << 2,
                 }
-                match generate_value::<Envelope<ConsensusMessage<MinPk, Sha256Digest>>>(seed)
+                match generate_value::<Envelope<ConsensusMessage<Bls<MinPk>, Sha256Digest>>>(seed)
                     .into_payload()
                 {
                     ConsensusMessage::Proposal { parent: None, .. } => consensus |= 1 << 0,
@@ -1224,7 +1237,7 @@ mod tests {
                     ConsensusMessage::NoVote(_) => consensus |= 1 << 3,
                     ConsensusMessage::Nullify(_) => consensus |= 1 << 4,
                 }
-                match generate_value::<Envelope<CertificateMessage<MinPk, Sha256Digest>>>(seed)
+                match generate_value::<Envelope<CertificateMessage<Bls<MinPk>, Sha256Digest>>>(seed)
                     .into_payload()
                 {
                     CertificateMessage::Nullification(_) => certificates |= 1 << 0,
@@ -1238,12 +1251,12 @@ mod tests {
         }
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Envelope<DataMessage<MinPk, Sha256Digest>>> => 128,
-            CodecConformance<Envelope<DataMessage<MinSig, Sha256Digest>>> => 128,
-            CodecConformance<Envelope<ConsensusMessage<MinPk, Sha256Digest>>> => 128,
-            CodecConformance<Envelope<ConsensusMessage<MinSig, Sha256Digest>>> => 128,
-            CodecConformance<Envelope<CertificateMessage<MinPk, Sha256Digest>>> => 128,
-            CodecConformance<Envelope<CertificateMessage<MinSig, Sha256Digest>>> => 128,
+            CodecConformance<Envelope<DataMessage<Bls<MinPk>, Sha256Digest>>> => 128,
+            CodecConformance<Envelope<DataMessage<Bls<MinSig>, Sha256Digest>>> => 128,
+            CodecConformance<Envelope<ConsensusMessage<Bls<MinPk>, Sha256Digest>>> => 128,
+            CodecConformance<Envelope<ConsensusMessage<Bls<MinSig>, Sha256Digest>>> => 128,
+            CodecConformance<Envelope<CertificateMessage<Bls<MinPk>, Sha256Digest>>> => 128,
+            CodecConformance<Envelope<CertificateMessage<Bls<MinSig>, Sha256Digest>>> => 128,
         }
     }
 }

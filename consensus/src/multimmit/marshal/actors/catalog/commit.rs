@@ -24,10 +24,11 @@ use crate::multimmit::{
         },
         types::Reply,
     },
+    scheme::Scheme,
     types::Body,
 };
 use commonware_actor::Feedback;
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
 use commonware_storage::{Context, translator::Translator};
 use commonware_utils::{
@@ -178,9 +179,9 @@ where
     B: Body<H>,
 {
     /// Starts syncing the finalized archives this commit wrote.
-    async fn start_archives<T, E, V>(
+    async fn start_archives<T, E, S>(
         &self,
-        stores: &mut CatalogStore<T, E, H, V, B>,
+        stores: &mut CatalogStore<T, E, H, S, B>,
         durability: &mut Pool<'static, DurabilityCompletion<H::Digest>>,
         metrics: &Metrics,
         clock: &impl Clock,
@@ -188,7 +189,7 @@ where
     where
         T: Translator,
         E: Context,
-        V: Variant,
+        S: Scheme,
     {
         let timer = metrics.archive_durability_timer(clock);
         let span = info_span!(
@@ -207,9 +208,9 @@ where
     }
 
     /// Starts publishing this commit's checkpoint once its archives are durable.
-    async fn start_checkpoint<T, E, V>(
+    async fn start_checkpoint<T, E, S>(
         &self,
-        stores: &mut CatalogStore<T, E, H, V, B>,
+        stores: &mut CatalogStore<T, E, H, S, B>,
         durability: &mut Pool<'static, DurabilityCompletion<H::Digest>>,
         metrics: &Metrics,
         clock: &impl Clock,
@@ -217,7 +218,7 @@ where
     where
         T: Translator,
         E: Context,
-        V: Variant,
+        S: Scheme,
     {
         let timer = metrics.publication_timer(clock);
         let span = info_span!(
@@ -241,19 +242,19 @@ where
     }
 }
 
-impl<R, T, E, H, V, B> Catalog<R, T, E, H, V, B>
+impl<R, T, E, H, S, B> Catalog<R, T, E, H, S, B>
 where
     R: Clock + Spawner + RuntimeMetrics,
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Accepts a commit into the pipeline, or rejects it.
     pub(super) async fn accept_commit(
         &mut self,
-        batch: Commit<H, V>,
+        batch: Commit<H, S>,
         handoff: Vec<delivery::HotOutput<H, B>>,
         reply: Reply<Completion<Error>, Error>,
     ) -> Result<(), Fatal> {

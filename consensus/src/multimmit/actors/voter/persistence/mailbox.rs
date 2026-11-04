@@ -4,11 +4,12 @@ use crate::{
     multimmit::{
         actors::util::reliable_policy,
         machine::{BarrierAck, Cursor, PersistJob, Snapshot},
+        scheme::Scheme,
         storage::{JournalError, SnapshotError},
     },
     types::{Epoch, View},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::Error as RuntimeError;
 use commonware_utils::channel::mpsc;
 use tracing::Span;
@@ -17,15 +18,15 @@ use tracing::Span;
 const FLUSH_REQUESTS: usize = 1;
 
 /// Commands accepted by the persistence actor, applied in the order they were admitted.
-pub(crate) enum Message<H: Hasher, V: Variant> {
+pub(crate) enum Message<H: Hasher, S: Scheme> {
     /// Appends one barrier; its [`Output::Durable`] follows once a covering sync completes.
-    Append(Append<V, H::Digest>),
+    Append(Append<S, H::Digest>),
     /// Rolls the journal, then stores `cut` as the newest snapshot.
     ///
     /// Admitted only while no append is pending.
     Checkpoint {
         /// The acknowledged state to snapshot, boxed so appends stay small in the queue.
-        cut: Box<Snapshot<V, H::Digest>>,
+        cut: Box<Snapshot<S, H::Digest>>,
         /// Where the checkpoint was cut, recorded on its spans.
         origin: CheckpointOrigin,
         /// The span that owns the roll.
@@ -35,13 +36,13 @@ pub(crate) enum Message<H: Hasher, V: Variant> {
 
 /// One barrier to append, returned untouched when admission fails.
 #[derive(Debug)]
-pub(crate) struct Append<V: Variant, D: Digest> {
+pub(crate) struct Append<S: Scheme, D: Digest> {
     /// The root span that owns terminal failures from this barrier.
     pub(crate) root: Span,
     /// The barrier's tracing span.
     pub(crate) span: Span,
     /// The machine-issued barrier.
-    pub(crate) job: PersistJob<V, D>,
+    pub(crate) job: PersistJob<S, D>,
 }
 
 /// Where one checkpoint was cut, recorded on its roll, store, and prune spans.
@@ -63,9 +64,9 @@ pub(crate) enum Admission<T> {
 }
 
 /// One result of the persistence actor, reported in the order it was produced.
-pub(crate) enum Output<V: Variant, D: Digest> {
+pub(crate) enum Output<S: Scheme, D: Digest> {
     /// One appended barrier is durable. Barriers become durable in append order.
-    Durable(Durable<V, D>),
+    Durable(Durable<S, D>),
     /// The checkpoint snapshot is durable; the journal prunes once no append is pending.
     Stored,
     /// The journal sections covered by the stored snapshot were pruned.
@@ -81,16 +82,16 @@ pub(crate) enum Output<V: Variant, D: Digest> {
 
 // The voter bounds the unconsumed outputs: one durability per append it has outstanding, plus at
 // most one of each other kind.
-reliable_policy!(impl<V: Variant, D: Digest> for Output<V, D>);
+reliable_policy!(impl<S: Scheme, D: Digest> for Output<S, D>);
 
 /// One durable barrier with its tracing context.
-pub(crate) struct Durable<V: Variant, D: Digest> {
+pub(crate) struct Durable<S: Scheme, D: Digest> {
     /// The root span that owns terminal failures from this barrier.
     pub(crate) root: Span,
     /// The barrier's tracing span.
     pub(crate) span: Span,
     /// The barrier as appended.
-    pub(crate) job: PersistJob<V, D>,
+    pub(crate) job: PersistJob<S, D>,
     /// The acknowledgement to admit to the core.
     pub(crate) ack: BarrierAck,
 }
@@ -167,12 +168,12 @@ impl Flushes {
 }
 
 /// Nonblocking handle to the persistence actor.
-pub(crate) struct Mailbox<H: Hasher, V: Variant> {
-    commands: mpsc::Sender<Message<H, V>>,
+pub(crate) struct Mailbox<H: Hasher, S: Scheme> {
+    commands: mpsc::Sender<Message<H, S>>,
     flusher: Flusher,
 }
 
-impl<H: Hasher, V: Variant> Clone for Mailbox<H, V> {
+impl<H: Hasher, S: Scheme> Clone for Mailbox<H, S> {
     fn clone(&self) -> Self {
         Self {
             commands: self.commands.clone(),
@@ -181,8 +182,8 @@ impl<H: Hasher, V: Variant> Clone for Mailbox<H, V> {
     }
 }
 
-impl<H: Hasher, V: Variant> Mailbox<H, V> {
-    pub(super) const fn new(commands: mpsc::Sender<Message<H, V>>, flusher: Flusher) -> Self {
+impl<H: Hasher, S: Scheme> Mailbox<H, S> {
+    pub(super) const fn new(commands: mpsc::Sender<Message<H, S>>, flusher: Flusher) -> Self {
         Self { commands, flusher }
     }
 
@@ -194,8 +195,8 @@ impl<H: Hasher, V: Variant> Mailbox<H, V> {
         &self,
         root: Span,
         span: Span,
-        job: PersistJob<V, H::Digest>,
-    ) -> Result<(), Admission<Append<V, H::Digest>>> {
+        job: PersistJob<S, H::Digest>,
+    ) -> Result<(), Admission<Append<S, H::Digest>>> {
         let append = Append { root, span, job };
         match self.commands.try_send(Message::Append(append)) {
             Ok(()) => Ok(()),
@@ -212,7 +213,7 @@ impl<H: Hasher, V: Variant> Mailbox<H, V> {
     /// Admits one checkpoint without waiting for command capacity.
     pub(crate) fn checkpoint(
         &self,
-        cut: Snapshot<V, H::Digest>,
+        cut: Snapshot<S, H::Digest>,
         origin: CheckpointOrigin,
         span: Span,
     ) -> Result<(), Admission<()>> {

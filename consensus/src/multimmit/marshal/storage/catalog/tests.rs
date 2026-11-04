@@ -14,7 +14,7 @@ use crate::{
                 record::blob_size,
             },
         },
-        mocks::Committee,
+        mocks::{Bls, Committee},
         testing::TestBody,
         types::{BlockRef, ChainId, Frontier, PathLimits},
     },
@@ -31,13 +31,13 @@ use commonware_runtime::{
     deterministic::{self, Context as DeterministicContext},
 };
 use commonware_storage::translator::TwoCap;
-use commonware_utils::{NZU16, NZU64, NZUsize, futures::try_join_all};
+use commonware_utils::{NZU16, NZU64, NZUsize, futures::try_join_all, test_rng};
 use rstest::rstest;
 use std::num::NonZeroUsize;
-type TestStore = CatalogStore<TwoCap, DeterministicContext, Sha256, MinPk, TestBody>;
-type TestConfig = Config<TwoCap, MinPk, TestBody>;
+type TestStore = CatalogStore<TwoCap, DeterministicContext, Sha256, Bls<MinPk>, TestBody>;
+type TestConfig = Config<TwoCap, Bls<MinPk>, TestBody>;
 
-fn committee(namespace: &[u8]) -> Committee<MinPk> {
+fn committee(namespace: &[u8]) -> Committee<Bls<MinPk>> {
     Committee::builder(7, 6)
         .namespace(namespace)
         .producers((0..4).map(Participant::new).collect())
@@ -45,7 +45,7 @@ fn committee(namespace: &[u8]) -> Committee<MinPk> {
         .build()
 }
 
-fn config(committee: &Committee<MinPk>, prefix: &str) -> TestConfig {
+fn config(committee: &Committee<Bls<MinPk>>, prefix: &str) -> TestConfig {
     let mut archive = ArchiveConfig::new(TwoCap, CacheRef::new(NZU16!(1024), NZUsize!(10)));
     archive.items_per_section = NZU64!(1);
     Config::new(
@@ -78,7 +78,7 @@ async fn open(
 }
 
 /// Admits one pending L-QC and waits until its admission cut is durable.
-async fn admit_lqc(store: &mut TestStore, proof: &Arc<Lqc<MinPk, Sha256Digest>>) {
+async fn admit_lqc(store: &mut TestStore, proof: &Arc<Lqc<Bls<MinPk>, Sha256Digest>>) {
     let admission = Admission::Lqc(proof.view(), proof.id::<Sha256>(), Arc::clone(proof));
     let footprint = store
         .admission_footprint(&[StagedAdmission {
@@ -96,7 +96,7 @@ async fn admit_lqc(store: &mut TestStore, proof: &Arc<Lqc<MinPk, Sha256Digest>>)
         .unwrap();
 }
 
-fn genesis_checkpoint(committee: &Committee<MinPk>) -> Checkpoint<Sha256Digest> {
+fn genesis_checkpoint(committee: &Committee<Bls<MinPk>>) -> Checkpoint<Sha256Digest> {
     let genesis = committee.config.genesis();
     Checkpoint::try_from(CheckpointParts {
         epoch: committee.config.epoch(),
@@ -133,8 +133,8 @@ fn parts(checkpoint: &Checkpoint<Sha256Digest>) -> CheckpointParts<Sha256Digest>
 
 /// The artifacts of the commit that the commit crash-cut test interrupts.
 struct CommitFixture {
-    proof: Arc<Lqc<MinPk, Sha256Digest>>,
-    stale: Arc<Lqc<MinPk, Sha256Digest>>,
+    proof: Arc<Lqc<Bls<MinPk>, Sha256Digest>>,
+    stale: Arc<Lqc<Bls<MinPk>, Sha256Digest>>,
     record: Arc<TipRecord<Sha256Digest>>,
     initial: Checkpoint<Sha256Digest>,
     committed: Checkpoint<Sha256Digest>,
@@ -296,13 +296,13 @@ fn commit_crash_cuts_recover_the_last_published_checkpoint(
 
 /// The artifacts of the floor installation that the install crash-cut test interrupts.
 struct InstallFixture {
-    proof: Arc<Lqc<MinPk, Sha256Digest>>,
+    proof: Arc<Lqc<Bls<MinPk>, Sha256Digest>>,
     record: Arc<TipRecord<Sha256Digest>>,
     target: Checkpoint<Sha256Digest>,
 }
 
 impl InstallFixture {
-    fn new(committee: &Committee<MinPk>) -> Self {
+    fn new(committee: &Committee<Bls<MinPk>>) -> Self {
         let genesis = committee.config.genesis();
         let base = TipRecord::at_tips(genesis_history::<Sha256>(genesis), genesis.tips().to_vec())
             .unwrap();
@@ -317,7 +317,12 @@ impl InstallFixture {
         let proof = Arc::new(
             committee
                 .verifier
-                .assemble_lqc::<Sha256, _>(leader.block().clone(), &votes, &Sequential)
+                .assemble_lqc::<_, Sha256, _>(
+                    &mut test_rng(),
+                    leader.block().clone(),
+                    &votes,
+                    &Sequential,
+                )
                 .unwrap(),
         );
         assert_eq!(proof.leader().history(), record.commitment::<Sha256>());
@@ -598,7 +603,12 @@ fn restart_with_a_pending_install_seeds_the_delivery_cursor_at_the_install(
         let proof = Arc::new(
             committee
                 .verifier
-                .assemble_lqc::<Sha256, _>(leader.block().clone(), &votes, &Sequential)
+                .assemble_lqc::<_, Sha256, _>(
+                    &mut test_rng(),
+                    leader.block().clone(),
+                    &votes,
+                    &Sequential,
+                )
                 .unwrap(),
         );
         assert_eq!(proof.leader().history(), history);

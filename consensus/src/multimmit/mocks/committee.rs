@@ -2,71 +2,59 @@
 
 use super::{
     NAMESPACE,
-    keys::{keys, test_config},
+    keys::{Fixture, test_config},
 };
 use crate::{
     Epochable as _,
     multimmit::{
         algebra::VqcExtraction,
         config::{LeaderSchedule, Protocol},
-        scheme::bls12381_threshold::{Roster, Scheme},
+        scheme::{DaFaults as _, Generic},
         types::{
-            Anchor, CertificateId, ChainId, ChainProposal, CodecConfig, DaQuorum, DaVote,
-            DigestedLeader, Extension, LeaderBlock, Lqc, NoVote, Nullification, Nullify,
-            PathLimits, Position, SignedLeaderBlock, SignedTransactionBlock, TipRecord,
-            TransactionBlockHeader, ViewMessage, Vote, VoteBody, Vqc, genesis_tip_commitment,
+            Anchor, CertificateId, ChainId, ChainProposal, CodecConfig, DaVote, DigestedLeader,
+            Extension, LeaderBlock, Lqc, NoVote, Nullification, Nullify, PathLimits, Position,
+            SignedLeaderBlock, SignedTransactionBlock, TipRecord, TransactionBlockHeader,
+            ViewMessage, Vote, VoteBody, Vqc, genesis_tip_commitment,
         },
     },
     types::{Height, Round, View},
 };
-use commonware_cryptography::{
-    Sha256, Signer as _,
-    bls12381::primitives::{sharing::Sharing, variant::Variant},
-    ed25519,
-    sha256::Digest as Sha256Digest,
-};
+use commonware_cryptography::{Sha256, Signer as _, ed25519, sha256::Digest as Sha256Digest};
 use commonware_parallel::Sequential;
-use commonware_utils::{Participant, TestRng, ordered::Set};
+use commonware_utils::{Participant, TestRng, test_rng};
 use std::{marker::PhantomData, sync::Arc};
 
 /// One complete epoch committee with real cryptographic material.
-pub struct Committee<V: Variant> {
+pub struct Committee<S: Fixture> {
     /// The validated immutable epoch configuration.
     pub config: Protocol<Sha256Digest>,
     /// Authenticated network identities in participant order.
     pub identities: Vec<ed25519::PublicKey>,
     /// Network private keys in participant order.
     pub network_keys: Vec<ed25519::PrivateKey>,
-    /// The proof-of-knowledge checked ordinary-key roster.
-    pub roster: Roster<ed25519::PublicKey, V>,
-    /// The public DA sharing, at the epoch's DA quorum.
-    pub da: Sharing<V>,
-    /// The public `2f+1` nullification sharing.
-    pub nullification: Sharing<V>,
     /// One signing scheme per participant, in participant order.
-    pub signers: Vec<Scheme<ed25519::PublicKey, V>>,
+    pub signers: Vec<Generic<S>>,
     /// A keyless verification scheme for observers.
-    pub verifier: Scheme<ed25519::PublicKey, V>,
+    pub verifier: Generic<S>,
 }
 
 /// Builds a [`Committee`] with deterministic keys derived from a seed.
 ///
 /// Unless set otherwise, the committee signs under the mock namespace, every participant produces
 /// the chain at its own index, pipelines every chain at depth two with extension bound one,
-/// certifies with `n - 2f` DA shares, and elects leaders round-robin.
-pub struct CommitteeBuilder<V: Variant> {
+/// certifies with the DA quorum the suite `S` fixes, and elects leaders round-robin.
+pub struct CommitteeBuilder<S: Fixture> {
     seed: u64,
     participants: u32,
     namespace: Vec<u8>,
     producers: Option<Vec<Participant>>,
     limits: PathLimits,
     chain_limits: Option<Vec<PathLimits>>,
-    da_quorum: DaQuorum,
     leaders: Option<LeaderSchedule>,
-    _variant: PhantomData<V>,
+    _variant: PhantomData<S>,
 }
 
-impl<V: Variant> CommitteeBuilder<V> {
+impl<S: Fixture> CommitteeBuilder<S> {
     /// Signs under `namespace`.
     pub fn namespace(mut self, namespace: &[u8]) -> Self {
         self.namespace = namespace.to_vec();
@@ -91,12 +79,6 @@ impl<V: Variant> CommitteeBuilder<V> {
         self
     }
 
-    /// Recovers DA certificates from `quorum` shares and deals the DA sharing for it.
-    pub const fn da_quorum(mut self, quorum: DaQuorum) -> Self {
-        self.da_quorum = quorum;
-        self
-    }
-
     /// Elects leaders by `leaders`.
     pub fn leaders(mut self, leaders: LeaderSchedule) -> Self {
         self.leaders = Some(leaders);
@@ -108,7 +90,7 @@ impl<V: Variant> CommitteeBuilder<V> {
     /// # Panics
     ///
     /// Panics if the settings do not describe a valid epoch configuration.
-    pub fn build(self) -> Committee<V> {
+    pub fn build(self) -> Committee<S> {
         let producers = self
             .producers
             .unwrap_or_else(|| (0..self.participants).map(Participant::new).collect());
@@ -119,8 +101,8 @@ impl<V: Variant> CommitteeBuilder<V> {
             producers,
             self.limits,
         );
-        let mut parameters =
-            Arc::unwrap_or_clone(Arc::clone(config.parameters())).with_da_quorum(self.da_quorum);
+        let mut parameters = Arc::unwrap_or_clone(Arc::clone(config.parameters()))
+            .with_da_quorum(S::DaFaults::QUORUM);
         if let Some(limits) = self.chain_limits {
             parameters = parameters
                 .with_chain_limits(limits)
@@ -136,18 +118,18 @@ impl<V: Variant> CommitteeBuilder<V> {
             .iter()
             .map(|key| key.public_key())
             .collect::<Vec<_>>();
-        let identity_set = Set::try_from(identities.clone()).expect("identities are unique");
-        let keys = keys::<V>(&mut TestRng::new(self.seed), &config, &identity_set);
+        let (signers, verifier) = S::committee(
+            &mut TestRng::new(self.seed),
+            config.parameters(),
+            &network_keys,
+        );
 
         let committee = Committee {
             config,
             identities,
             network_keys,
-            roster: keys.roster,
-            da: keys.da,
-            nullification: keys.nullification,
-            signers: keys.signers,
-            verifier: keys.verifier,
+            signers,
+            verifier,
         };
         match self.leaders {
             Some(leaders) => committee.with_leaders(leaders),
@@ -156,9 +138,9 @@ impl<V: Variant> CommitteeBuilder<V> {
     }
 }
 
-impl<V: Variant> Committee<V> {
+impl<S: Fixture> Committee<S> {
     /// Starts building a committee of `participants` with deterministic keys derived from `seed`.
-    pub fn builder(seed: u64, participants: u32) -> CommitteeBuilder<V> {
+    pub fn builder(seed: u64, participants: u32) -> CommitteeBuilder<S> {
         CommitteeBuilder {
             seed,
             participants,
@@ -166,7 +148,6 @@ impl<V: Variant> Committee<V> {
             producers: None,
             limits: PathLimits::new(2, 1),
             chain_limits: None,
-            da_quorum: DaQuorum::Available,
             leaders: None,
             _variant: PhantomData,
         }
@@ -222,7 +203,7 @@ impl<V: Variant> Committee<V> {
         &self,
         chain: ChainId,
         commitment: Sha256Digest,
-    ) -> SignedTransactionBlock<V, Sha256Digest> {
+    ) -> SignedTransactionBlock<S, Sha256Digest> {
         let producer = self
             .config
             .producer(chain)
@@ -237,33 +218,33 @@ impl<V: Variant> Committee<V> {
         &self,
         signer: Participant,
         header: TransactionBlockHeader<Sha256Digest>,
-    ) -> DaVote<V, Sha256Digest> {
+    ) -> DaVote<S, Sha256Digest> {
         self.signers[signer.get() as usize]
             .sign_da_vote(header)
             .expect("signer holds a DA share")
     }
 
     /// Returns `signer`'s abstention for `view`.
-    pub fn novote(&self, signer: Participant, view: View) -> NoVote<V> {
+    pub fn novote(&self, signer: Participant, view: View) -> NoVote<S> {
         self.signers[signer.get() as usize]
             .sign_novote(Round::new(self.config.epoch(), view))
             .expect("signer holds an ordinary key")
     }
 
     /// Returns `signer`'s nullification share for `view`.
-    pub fn nullify(&self, signer: Participant, view: View) -> Nullify<V> {
+    pub fn nullify(&self, signer: Participant, view: View) -> Nullify<S> {
         self.signers[signer.get() as usize]
             .sign_nullify(Round::new(self.config.epoch(), view))
             .expect("signer holds a nullification share")
     }
 
     /// Recovers a complete nullification for `view` from the first `2f+1` signers.
-    pub fn nullification(&self, view: View) -> Nullification<V> {
+    pub fn nullification(&self, view: View) -> Nullification<S> {
         let shares = (0..self.codec().nullification_quorum())
             .map(|signer| self.nullify(Participant::from_usize(signer), view))
             .collect::<Vec<_>>();
         self.verifier
-            .assemble_nullification(&shares, &Sequential)
+            .assemble_nullification(&mut test_rng(), &shares, &Sequential)
             .expect("quorum of valid shares recovers")
     }
 
@@ -271,9 +252,9 @@ impl<V: Variant> Committee<V> {
     pub fn leader_block_with_parent(
         &self,
         view: View,
-        parent: &Vqc<V, Sha256Digest>,
-    ) -> SignedLeaderBlock<V, Sha256Digest> {
-        let (tips, _) = VqcExtraction::new::<Sha256, V>(parent, self.codec())
+        parent: &Vqc<S, Sha256Digest>,
+    ) -> SignedLeaderBlock<S, Sha256Digest> {
+        let (tips, _) = VqcExtraction::new::<Sha256, S>(parent, self.codec())
             .expect("fixture parent V-QC extracts")
             .into_parts();
         let history = TipRecord::new(
@@ -287,7 +268,7 @@ impl<V: Variant> Committee<V> {
     }
 
     /// Returns the scheduled leader's signed empty proposal for `view`, anchored at genesis.
-    pub fn leader_block(&self, view: View) -> SignedLeaderBlock<V, Sha256Digest> {
+    pub fn leader_block(&self, view: View) -> SignedLeaderBlock<S, Sha256Digest> {
         let genesis = self.config.genesis();
         let history = genesis_tip_commitment::<Sha256>(genesis);
         self.empty_leader_block(view, genesis.vqc(), history)
@@ -299,7 +280,7 @@ impl<V: Variant> Committee<V> {
         view: View,
         parent: CertificateId<Sha256Digest>,
         history: Sha256Digest,
-    ) -> SignedLeaderBlock<V, Sha256Digest> {
+    ) -> SignedLeaderBlock<S, Sha256Digest> {
         let codec = self.codec();
         let proposals = self
             .config
@@ -335,8 +316,8 @@ impl<V: Variant> Committee<V> {
     pub fn vote(
         &self,
         signer: Participant,
-        block: &SignedLeaderBlock<V, Sha256Digest>,
-    ) -> Vote<V, Sha256Digest> {
+        block: &SignedLeaderBlock<S, Sha256Digest>,
+    ) -> Vote<S, Sha256Digest> {
         let codec = self.codec();
         let body = VoteBody::for_leader(
             DigestedLeader::new::<Sha256>(block.block()),
@@ -351,24 +332,34 @@ impl<V: Variant> Committee<V> {
     }
 
     /// Assembles a real V-QC for `view` from the first `n-f` signers' votes.
-    pub fn vqc(&self, view: View) -> Vqc<V, Sha256Digest> {
+    pub fn vqc(&self, view: View) -> Vqc<S, Sha256Digest> {
         let block = self.leader_block(view);
         let messages = (0..self.codec().view_quorum())
             .map(|signer| ViewMessage::Vote(self.vote(Participant::from_usize(signer), &block)))
             .collect::<Vec<_>>();
         self.verifier
-            .assemble_vqc::<Sha256, _>(block.block().clone(), &messages, &Sequential)
+            .assemble_vqc::<_, Sha256, _>(
+                &mut test_rng(),
+                block.block().clone(),
+                &messages,
+                &Sequential,
+            )
             .expect("quorum of valid votes aggregates")
     }
 
     /// Assembles a real L-QC for `view` from the first `n-f` signers' votes.
-    pub fn lqc(&self, view: View) -> Lqc<V, Sha256Digest> {
+    pub fn lqc(&self, view: View) -> Lqc<S, Sha256Digest> {
         let block = self.leader_block(view);
         let votes = (0..self.codec().view_quorum())
             .map(|signer| self.vote(Participant::from_usize(signer), &block))
             .collect::<Vec<_>>();
         self.verifier
-            .assemble_lqc::<Sha256, _>(block.block().clone(), &votes, &Sequential)
+            .assemble_lqc::<_, Sha256, _>(
+                &mut test_rng(),
+                block.block().clone(),
+                &votes,
+                &Sequential,
+            )
             .expect("quorum of valid votes aggregates")
     }
 }
@@ -377,7 +368,7 @@ impl<V: Variant> Committee<V> {
 mod tests {
     use super::Committee;
     use crate::{
-        multimmit::config::LeaderSchedule,
+        multimmit::{config::LeaderSchedule, mocks::Bls},
         types::{Attributable as _, Participant, View},
     };
     use commonware_cryptography::bls12381::primitives::variant::MinPk;
@@ -390,7 +381,7 @@ mod tests {
             participants as usize,
         )
         .unwrap();
-        let committee = Committee::<MinPk>::builder(78, participants)
+        let committee = Committee::<Bls<MinPk>>::builder(78, participants)
             .leaders(reversed)
             .build();
         for view in (1..=u64::from(participants)).map(View::new) {

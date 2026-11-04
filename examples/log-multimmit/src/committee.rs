@@ -4,7 +4,7 @@ use crate::config::RunConfig;
 use commonware_consensus::{
     multimmit::{
         config::{Protocol, Tuning},
-        scheme::bls12381_threshold::{Scheme, deal},
+        scheme::{Generic, bls12381},
         types::{BlockRef, CertificateId, ChainId, CodecConfig, EpochGenesis, PathLimits},
     },
     types::{Epoch, Height, Participant, ViewDelta},
@@ -15,6 +15,10 @@ use commonware_cryptography::{
 };
 use commonware_utils::{TestRng, ordered::Set};
 use std::time::Duration;
+
+/// The signing suite this example runs: the default BLS12-381 suite over Ed25519 identities, with
+/// multisignature votes and threshold DA and nullification certificates.
+pub type Suite = bls12381::Scheme<ed25519::PublicKey, MinSig>;
 
 /// Signature namespace for this example's consensus deployment.
 const CONSENSUS_NAMESPACE: &[u8] = b"_COMMONWARE_LOG_MULTIMMIT_CONSENSUS";
@@ -45,9 +49,9 @@ pub struct Committee {
     /// Network private keys in participant order.
     pub network_keys: Vec<ed25519::PrivateKey>,
     /// One signing scheme per participant, in participant order.
-    pub signers: Vec<Scheme<ed25519::PublicKey, MinSig>>,
+    pub signers: Vec<Generic<Suite>>,
     /// A keyless verification scheme.
-    pub verifier: Scheme<ed25519::PublicKey, MinSig>,
+    pub verifier: Generic<Suite>,
 }
 
 impl Committee {
@@ -72,7 +76,7 @@ impl Committee {
         )
         .expect("validated committee configuration");
         // A deterministic generator is what lets every node derive the same keys from the seed.
-        let dealt = deal::<_, MinSig>(
+        let dealt = Suite::deal(
             &mut TestRng::new(seed),
             config.parameters(),
             &Set::try_from(identities.clone()).expect("identities are unique"),
@@ -172,6 +176,7 @@ mod tests {
     use crate::config::{EXTENSION_BOUND, PIPELINE_DEPTH};
     use commonware_consensus::{Epochable as _, multimmit::types::TransactionBlockHeader};
     use commonware_parallel::Sequential;
+    use commonware_utils::test_rng;
 
     #[test]
     fn tuning_is_valid_for_the_shipped_committee() {
@@ -186,7 +191,7 @@ mod tests {
             );
             assert!(
                 tuning()
-                    .validate::<Sha256, MinSig>(&committee.config)
+                    .validate::<Sha256, Suite>(&committee.config)
                     .is_ok()
             );
         }
@@ -224,7 +229,7 @@ mod tests {
         assert!(
             second
                 .verifier
-                .assemble_da_certificate(&votes, &Sequential)
+                .assemble_da_certificate(&mut test_rng(), &votes, &Sequential)
                 .is_ok()
         );
     }

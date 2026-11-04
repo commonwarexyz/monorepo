@@ -21,6 +21,7 @@ pub use attached::{
 pub use body::MockBody;
 pub use committee::{Committee, CommitteeBuilder};
 pub use finality::finality_fact;
+pub use keys::{Bls, Ed25519, Fixture, Sas};
 pub use recording::{RecordingRelay, RecordingReporter};
 
 /// Namespace for committees built without an explicit one.

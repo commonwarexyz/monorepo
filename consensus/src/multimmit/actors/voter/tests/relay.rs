@@ -10,7 +10,7 @@ use crate::{
         config::Role,
         engine::{Config as EngineConfig, Engine, Planes},
         mocks::{
-            Committee, MockApplication,
+            Bls, Committee, MockApplication,
             cluster::{QUOTA, start_network},
         },
         testing::{expect_before, expect_within},
@@ -33,13 +33,13 @@ use commonware_runtime::{
     deterministic::{FaultConfig, Runner as DeterministicRunner},
     telemetry::metrics::count_running_tasks,
 };
-use commonware_utils::{NZUsize, probability};
+use commonware_utils::{NZUsize, probability, test_rng};
 use std::{collections::BTreeSet, num::NonZeroUsize, sync::Arc, time::Duration};
 #[test_traced]
 fn mutable_journal_sync_failure_stops_production_engine() {
     let seed = 82;
     DeterministicRunner::timed(Duration::from_secs(10)).start(move |context| async move {
-        let committee = Committee::<MinPk>::builder(seed, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(seed, 6).build();
         let me = committee.identities[0].clone();
         let oracle = start_network(&context, committee.identities.clone(), 1024 * 1024).await;
         let control = oracle.control(me);
@@ -246,13 +246,17 @@ fn closed_relay_does_not_withhold_consensus_transmissions() {
             )
             .await
             .expect("network stays up");
-            let envelope = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 bytes,
                 &node.envelope_cfg(node.committee.codec()),
             )
             .expect("canonical envelope");
             if let ConsensusMessage::Vote(vote) = envelope.into_payload() {
-                assert!(node.committee.verifier.verify_vote(&vote));
+                assert!(
+                    node.committee
+                        .verifier
+                        .verify_vote(&mut test_rng(), &vote, &Sequential)
+                );
                 break;
             }
         }
@@ -339,7 +343,7 @@ fn publication_retries_until_semantic_supersession() {
         let certificate = da_certificate(&node.committee, &header);
         data_tx.send(
             Recipients::One(node.me.clone()),
-            node.envelope(DataMessage::<MinPk, Sha256Digest>::DaCertificate(
+            node.envelope(DataMessage::<Bls<MinPk>, Sha256Digest>::DaCertificate(
                 certificate,
             ))
             .encode(),
@@ -357,7 +361,7 @@ fn publication_retries_until_semantic_supersession() {
                 result = settled_rx.recv() => {
                     let (_, bytes) = result.expect("network stays up");
                     let envelope =
-                        Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+                        Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                             bytes,
                             &node.envelope_cfg(node.committee.codec()),
                         )
@@ -491,7 +495,7 @@ fn reporter_feedback_does_not_block_remote_block_admission() {
         // The producer receives an attributed DA share from participant zero.
         loop {
             let (_, bytes) = peer_data_rx.recv().await.expect("network stays up");
-            let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 bytes,
                 &node.envelope_cfg(node.committee.codec()),
             )
@@ -499,7 +503,11 @@ fn reporter_feedback_does_not_block_remote_block_admission() {
             if let DataMessage::DaVote(vote) = envelope.into_payload() {
                 assert_eq!(vote.signer().get(), 0);
                 assert_eq!(vote.header().body_digest(), commitment);
-                assert!(node.committee.verifier.verify_da_vote(&vote));
+                assert!(node.committee.verifier.verify_da_vote(
+                    &mut test_rng(),
+                    &vote,
+                    &Sequential
+                ));
                 break;
             }
         }

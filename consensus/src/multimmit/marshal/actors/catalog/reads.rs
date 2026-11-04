@@ -23,12 +23,13 @@ use crate::{
             },
             types::{BodyValues, Reply},
         },
+        scheme::Scheme,
         types::{BlockRef, Body, ChainId, TransactionBlock},
     },
     types::Height,
 };
 use commonware_codec::EncodeSize;
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use commonware_runtime::Spawner;
 use commonware_storage::{Context, translator::Translator};
 use commonware_utils::{channel::fallible::OneshotExt as _, futures::Pool};
@@ -178,14 +179,14 @@ where
 
     /// Returns whether a request for `references` would wait for a waiter slot: some body is in
     /// no cache and its read cannot start now.
-    pub(super) fn must_wait<T, V>(
+    pub(super) fn must_wait<T, S>(
         &self,
-        stores: &CatalogStore<T, E, H, V, B>,
+        stores: &CatalogStore<T, E, H, S, B>,
         references: &[BlockRef<H::Digest>],
     ) -> Result<bool, Fatal>
     where
         T: Translator,
-        V: Variant,
+        S: Scheme,
     {
         let missing = references
             .iter()
@@ -216,16 +217,16 @@ where
     /// Serves `references` from the caches and plans reads of the rest.
     ///
     /// The caller has checked [`Self::has_waiter_room`] or [`Self::must_wait`].
-    pub(super) fn request<T, V>(
+    pub(super) fn request<T, S>(
         &mut self,
-        stores: &CatalogStore<T, E, H, V, B>,
+        stores: &CatalogStore<T, E, H, S, B>,
         metrics: &Metrics,
         references: Vec<BlockRef<H::Digest>>,
         reply: Reply<BodyValues<H, B>, Error>,
     ) -> Result<(), Fatal>
     where
         T: Translator,
-        V: Variant,
+        S: Scheme,
     {
         let mut values = vec![None; references.len()];
         let missing = self.fill_cached(metrics, &references, &mut values);
@@ -361,14 +362,14 @@ where
     /// Each retired segment's final marker bounds later recovery. Retirement has no ordering
     /// needs, so it never gates barriers; the store keeps retiring segments readable and
     /// unreclaimed until [`Self::finish_retirement`].
-    pub(super) fn start_retirement<T, V>(
+    pub(super) fn start_retirement<T, S>(
         &mut self,
-        stores: &mut CatalogStore<T, E, H, V, B>,
+        stores: &mut CatalogStore<T, E, H, S, B>,
         cut: &Span,
     ) -> Result<(), Fatal>
     where
         T: Translator,
-        V: Variant,
+        S: Scheme,
     {
         let span = debug_span!(
             parent: cut,
@@ -390,14 +391,14 @@ where
     }
 
     /// Reclaims retired segments that no read pins and releases their readers.
-    pub(super) async fn finish_retirement<T, V>(
+    pub(super) async fn finish_retirement<T, S>(
         &mut self,
-        stores: &mut CatalogStore<T, E, H, V, B>,
+        stores: &mut CatalogStore<T, E, H, S, B>,
         (retired, result): Retired,
     ) -> Result<(), Fatal>
     where
         T: Translator,
-        V: Variant,
+        S: Scheme,
     {
         result?;
         let pinned = self.pinned_segments();
@@ -462,8 +463,8 @@ impl SegmentBudget {
 }
 
 /// Walks up to `max_items` history openings back from `commitment`, encoding within `max_bytes`.
-pub(super) async fn read_history_segment<T, E, H, V, B>(
-    stores: &CatalogStore<T, E, H, V, B>,
+pub(super) async fn read_history_segment<T, E, H, S, B>(
+    stores: &CatalogStore<T, E, H, S, B>,
     mut commitment: H::Digest,
     max_items: NonZeroUsize,
     max_bytes: NonZeroUsize,
@@ -473,7 +474,7 @@ where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     let mut records = Vec::new();
@@ -502,8 +503,8 @@ where
 
 /// Walks header ancestry back from each `(start, max_items)` request, encoding each segment
 /// within `max_bytes`.
-pub(super) async fn read_header_segments<T, E, H, V, B>(
-    stores: &CatalogStore<T, E, H, V, B>,
+pub(super) async fn read_header_segments<T, E, H, S, B>(
+    stores: &CatalogStore<T, E, H, S, B>,
     requests: Vec<(BlockRef<H::Digest>, NonZeroUsize)>,
     max_bytes: NonZeroUsize,
     reply: Reply<HeaderSegments<H>, Error>,
@@ -512,7 +513,7 @@ where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     let mut segments = Vec::with_capacity(requests.len());
@@ -550,8 +551,8 @@ where
 
 /// Returns committed output rows from `start` through `committed`, up to `max_items` rows encoding
 /// within `max_bytes` (one larger row is returned alone).
-pub(super) async fn read_output_refs<T, E, H, V, B>(
-    stores: &CatalogStore<T, E, H, V, B>,
+pub(super) async fn read_output_refs<T, E, H, S, B>(
+    stores: &CatalogStore<T, E, H, S, B>,
     durable: &Checkpoint<H::Digest>,
     start: OutputIndex,
     max_items: NonZeroUsize,
@@ -562,7 +563,7 @@ where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     // Pruning always keeps the row at its bound when rows above the floor index exist, so an

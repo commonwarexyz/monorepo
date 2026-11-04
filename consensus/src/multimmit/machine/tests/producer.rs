@@ -22,6 +22,7 @@ use crate::{
                 Until,
             },
         },
+        mocks::Bls,
         types::{
             Artifact, ChainId, Context, DaVote, SignedTransactionBlock, TransactionBlockHeader,
         },
@@ -254,7 +255,7 @@ fn prepared_suffix_is_discarded_across_restart_without_authority() {
     }));
 
     let mut restored =
-        Machine::<Sha256, MinPk>::restore(Harness::builder(role).profile(), snapshot).unwrap();
+        Machine::<Sha256, Bls<MinPk>>::restore(Harness::builder(role).profile(), snapshot).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     restored.persist(&recovery.persist_job(), Until::CursorAdvance);
     let stale = restored
@@ -305,7 +306,7 @@ fn producer_builds_after_an_external_own_chain_certificate() {
     assert!(matches!(artifact.as_ref(), Artifact::DaCertificate(actual)
         if actual == &certificate));
 
-    let mut replayed = Machine::<Sha256, MinPk>::restore(profile, before_certificate).unwrap();
+    let mut replayed = Machine::<Sha256, Bls<MinPk>>::restore(profile, before_certificate).unwrap();
     for event in advanced_job.events() {
         replayed.replay(event.clone()).unwrap();
     }
@@ -656,7 +657,7 @@ fn certified_chain_state_plateaus_without_ordering() {
 
     let profile = machine.profile().clone();
     let mut restored =
-        Machine::<Sha256, MinPk>::restore(profile, machine.live_snapshot_for_test()).unwrap();
+        Machine::<Sha256, Bls<MinPk>>::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     restored.persist(&recovery.persist_job(), Until::CursorAdvance);
     assert_eq!(restored.chain.tip_heights()[0].certified, Height::new(100));
@@ -770,7 +771,7 @@ fn recovery_reissues_the_exact_durable_producer_choice() {
         })
         .expect("producer choice must be durable");
 
-    let mut restored = Machine::<Sha256, MinPk>::restore(
+    let mut restored = Machine::<Sha256, Bls<MinPk>>::restore(
         Harness::validator(0).profile(),
         machine.live_snapshot_for_test(),
     )
@@ -889,7 +890,7 @@ fn recovered_payloads_are_the_exact_local_producer_and_da_union() {
     let verified = machine.verify(&observed, true, Until::CursorAdvance);
     machine.persist(&verified.persist_job(), Until::CursorAdvance);
 
-    let restored = Machine::<Sha256, MinPk>::restore(
+    let restored = Machine::<Sha256, Bls<MinPk>>::restore(
         recovery_profile.clone(),
         machine.live_snapshot_for_test(),
     )
@@ -910,7 +911,7 @@ fn recovered_payloads_are_the_exact_local_producer_and_da_union() {
     let verified = machine.verify(&observed, true, Until::CursorAdvance);
     machine.persist(&verified.persist_job(), Until::CursorAdvance);
     let restored =
-        Machine::<Sha256, MinPk>::restore(recovery_profile, machine.live_snapshot_for_test())
+        Machine::<Sha256, Bls<MinPk>>::restore(recovery_profile, machine.live_snapshot_for_test())
             .unwrap();
     assert_eq!(
         restored.recovered_payloads(),
@@ -919,9 +920,9 @@ fn recovered_payloads_are_the_exact_local_producer_and_da_union() {
     );
 
     let observer_profile = Harness::observer().participants(6).profile();
-    let observer = Machine::<Sha256, MinPk>::restore(
+    let observer = Machine::<Sha256, Bls<MinPk>>::restore(
         observer_profile.clone(),
-        Machine::<Sha256, MinPk>::new(observer_profile).live_snapshot_for_test(),
+        Machine::<Sha256, Bls<MinPk>>::new(observer_profile).live_snapshot_for_test(),
     )
     .unwrap();
     assert!(observer.recovered_payloads().is_empty());

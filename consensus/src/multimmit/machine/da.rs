@@ -11,13 +11,16 @@ use super::{
     verification::Observation,
 };
 use crate::{
-    multimmit::types::{
-        ArtifactId, BlockRef, ChainId, DaCertificate, SignedTransactionBlock,
-        TransactionBlockHeader,
+    multimmit::{
+        scheme::Scheme,
+        types::{
+            ArtifactId, BlockRef, ChainId, DaCertificate, SignedTransactionBlock,
+            TransactionBlockHeader,
+        },
     },
     types::Height,
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use core::ops::Bound;
 use std::{
     collections::{BTreeMap, VecDeque, btree_map::Entry},
@@ -64,27 +67,27 @@ impl<D: Digest> DaChoice<D> {
 
 /// A certified block and, once held, its certificate.
 #[derive(Clone, Debug)]
-pub(super) struct Certified<V: Variant, D: Digest> {
+pub(super) struct Certified<S: Scheme, D: Digest> {
     pub(super) block: BlockRef<D>,
-    pub(super) certificate: Option<DaCertificate<V, D>>,
+    pub(super) certificate: Option<DaCertificate<S, D>>,
 }
 
 /// One certificate offered for a block, and whether its verification completed.
 #[derive(Clone, Debug)]
-struct CertificateCandidate<V: Variant, D: Digest> {
-    certificate: DaCertificate<V, D>,
+struct CertificateCandidate<S: Scheme, D: Digest> {
+    certificate: DaCertificate<S, D>,
     ready: bool,
 }
 
 /// Certificates offered for one block by artifact, earliest first.
-type CertificateCandidates<V, D> = ObservedList<ArtifactId<D>, CertificateCandidate<V, D>>;
+type CertificateCandidates<S, D> = ObservedList<ArtifactId<D>, CertificateCandidate<S, D>>;
 
 /// Data-availability state for one producer chain.
 ///
 /// `local_da_votes` mirrors the durable DA choices. Every other field is derived from admitted
 /// artifacts and durable anchors, so it can be dropped and rebuilt without changing normalized
 /// protocol state.
-pub(super) struct PerChainDa<V: Variant, D: Digest> {
+pub(super) struct PerChainDa<S: Scheme, D: Digest> {
     /// This node's DA choices by height, mirroring durable state.
     pub(super) local_da_votes: BTreeMap<Height, DaChoice<D>>,
     /// A height through which every integer height above `data_retired_through` is already a local
@@ -101,22 +104,22 @@ pub(super) struct PerChainDa<V: Variant, D: Digest> {
     /// A chain reserves at most one run at a time; completions consume the queue front in
     /// order, so the queue is also the expected application sequence.
     pub(super) pending_da_votes: VecDeque<TransactionBlockHeader<D>>,
-    pub(super) certified: BTreeMap<Height, Certified<V, D>>,
+    pub(super) certified: BTreeMap<Height, Certified<S, D>>,
     /// Certificates offered for blocks not yet certified, by height and then block, so blocks
     /// that equivocate at one height keep separate candidates.
-    candidates: BTreeMap<Height, BTreeMap<BlockRef<D>, CertificateCandidates<V, D>>>,
+    candidates: BTreeMap<Height, BTreeMap<BlockRef<D>, CertificateCandidates<S, D>>>,
     /// The parent each observed header names, by height and then block.
     ancestry: BTreeMap<Height, BTreeMap<BlockRef<D>, BlockRef<D>>>,
     /// The contiguous eligible DA-vote run this chain's chain plane last offered, lowest height
     /// first. The machine drains it in its reservation loop and reads it synchronously at vote and
     /// proposal time as its copy of the plane's eligible frontier.
-    offered: Vec<Arc<SignedTransactionBlock<V, D>>>,
+    offered: Vec<Arc<SignedTransactionBlock<S, D>>>,
     /// The greatest height `offered` reaches, or the certified anchor when empty. A safe lower bound
     /// on the plane's true frontier, since the machine mints every durable choice.
     pub(super) ready_through: Height,
 }
 
-impl<V: Variant, D: Digest> PerChainDa<V, D> {
+impl<S: Scheme, D: Digest> PerChainDa<S, D> {
     fn new(genesis: BlockRef<D>) -> Self {
         Self {
             local_da_votes: BTreeMap::new(),
@@ -148,7 +151,7 @@ impl<V: Variant, D: Digest> PerChainDa<V, D> {
     }
 
     /// Returns the certificates offered for `block`.
-    fn candidates_mut(&mut self, block: BlockRef<D>) -> &mut CertificateCandidates<V, D> {
+    fn candidates_mut(&mut self, block: BlockRef<D>) -> &mut CertificateCandidates<S, D> {
         self.candidates
             .entry(block.height())
             .or_default()
@@ -157,7 +160,7 @@ impl<V: Variant, D: Digest> PerChainDa<V, D> {
     }
 
     /// Removes and returns the certificates offered for `block`.
-    fn take_candidates(&mut self, block: BlockRef<D>) -> Option<CertificateCandidates<V, D>> {
+    fn take_candidates(&mut self, block: BlockRef<D>) -> Option<CertificateCandidates<S, D>> {
         let at_height = self.candidates.get_mut(&block.height())?;
         let candidates = at_height.remove(&block);
         if at_height.is_empty() {
@@ -168,17 +171,17 @@ impl<V: Variant, D: Digest> PerChainDa<V, D> {
 }
 
 /// Data-availability state for every producer chain, indexed by [`ChainId`].
-pub(crate) struct DaState<V: Variant, D: Digest> {
+pub(crate) struct DaState<S: Scheme, D: Digest> {
     /// Each chain's genesis tip, below which nothing is retained.
     pub(super) genesis: Vec<BlockRef<D>>,
-    pub(super) chains: Vec<PerChainDa<V, D>>,
+    pub(super) chains: Vec<PerChainDa<S, D>>,
     /// The chain after the last DA-vote reservation, where round-robin selection resumes.
     next_da_chain: usize,
     /// Certificates dropped when another candidate for their block was installed.
     discarded_certificates: Vec<ArtifactId<D>>,
 }
 
-impl<V: Variant, D: Digest> DaState<V, D> {
+impl<S: Scheme, D: Digest> DaState<S, D> {
     /// Creates DA state with each chain certified at its genesis tip.
     pub(super) fn new(genesis: Vec<BlockRef<D>>) -> Self {
         let chains = genesis.iter().copied().map(PerChainDa::new).collect();
@@ -193,7 +196,7 @@ impl<V: Variant, D: Digest> DaState<V, D> {
     /// Installs producer-chain certificates carried by an admitted leader block.
     pub(crate) fn install_anchors<H: Hasher<Digest = D>>(
         &mut self,
-        anchors: impl IntoIterator<Item = DaCertificate<V, D>>,
+        anchors: impl IntoIterator<Item = DaCertificate<S, D>>,
     ) -> Result<(), ChainError> {
         for certificate in anchors {
             let block = certificate.block_ref::<H>();
@@ -291,7 +294,7 @@ impl<V: Variant, D: Digest> DaState<V, D> {
     }
 
     /// Returns the data-availability certificate this node holds for `block`, if any.
-    pub(crate) fn held_certificate(&self, block: BlockRef<D>) -> Option<&DaCertificate<V, D>> {
+    pub(crate) fn held_certificate(&self, block: BlockRef<D>) -> Option<&DaCertificate<S, D>> {
         let certified = self
             .chains
             .get(block.chain().index())?
@@ -313,7 +316,7 @@ impl<V: Variant, D: Digest> DaState<V, D> {
         &self,
         floors: &[BlockRef<D>],
         preferred: Option<ChainId>,
-    ) -> Option<DaCertificate<V, D>> {
+    ) -> Option<DaCertificate<S, D>> {
         let preferred = preferred.map(ChainId::index);
         preferred
             .into_iter()
@@ -327,7 +330,7 @@ impl<V: Variant, D: Digest> DaState<V, D> {
         &self,
         floors: &[BlockRef<D>],
         chain: usize,
-    ) -> Option<&DaCertificate<V, D>> {
+    ) -> Option<&DaCertificate<S, D>> {
         let certificates = &self.chains.get(chain)?.certified;
         let floor = floors.get(chain)?;
         certificates
@@ -342,7 +345,7 @@ impl<V: Variant, D: Digest> DaState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        certificate: &DaCertificate<V, D>,
+        certificate: &DaCertificate<S, D>,
     ) -> Result<bool, ChainError> {
         let block = certificate.block_ref::<H>();
         if block.chain().index() >= self.chains.len() {
@@ -364,7 +367,7 @@ impl<V: Variant, D: Digest> DaState<V, D> {
     pub(super) fn reject_certificate<H: Hasher<Digest = D>>(
         &mut self,
         id: ArtifactId<D>,
-        certificate: &DaCertificate<V, D>,
+        certificate: &DaCertificate<S, D>,
     ) -> Result<(), ChainError> {
         let block = certificate.block_ref::<H>();
         if let Some(chain) = self.chains.get_mut(block.chain().index())
@@ -384,7 +387,7 @@ impl<V: Variant, D: Digest> DaState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        certificate: &DaCertificate<V, D>,
+        certificate: &DaCertificate<S, D>,
     ) -> Result<(), ChainError> {
         let block = certificate.block_ref::<H>();
         if self.certificate_settled(block) {
@@ -448,7 +451,7 @@ impl<V: Variant, D: Digest> DaState<V, D> {
     pub(super) fn install_certificate(
         &mut self,
         block: BlockRef<D>,
-        certificate: DaCertificate<V, D>,
+        certificate: DaCertificate<S, D>,
     ) -> Result<(), ChainError> {
         let chain = &mut self
             .chains
@@ -614,7 +617,7 @@ impl<V: Variant, D: Digest> DaState<V, D> {
     pub(crate) fn note_da_vote_ready(
         &mut self,
         chain: ChainId,
-        candidates: Vec<Arc<SignedTransactionBlock<V, D>>>,
+        candidates: Vec<Arc<SignedTransactionBlock<S, D>>>,
         ready_through: Height,
     ) {
         if let Some(state) = self.chains.get_mut(chain.index()) {
@@ -654,7 +657,7 @@ impl<V: Variant, D: Digest> DaState<V, D> {
         &self,
         limit: usize,
         run_limit: usize,
-    ) -> Vec<Arc<SignedTransactionBlock<V, D>>> {
+    ) -> Vec<Arc<SignedTransactionBlock<S, D>>> {
         if limit == 0 || run_limit == 0 {
             return Vec::new();
         }
@@ -691,7 +694,7 @@ impl<V: Variant, D: Digest> DaState<V, D> {
         &self,
         chain: usize,
         cap: usize,
-    ) -> impl Iterator<Item = &Arc<SignedTransactionBlock<V, D>>> {
+    ) -> impl Iterator<Item = &Arc<SignedTransactionBlock<S, D>>> {
         let voted = self.chains[chain].da_voted_run;
         self.chains[chain]
             .offered
@@ -727,7 +730,7 @@ impl<V: Variant, D: Digest> DaState<V, D> {
 }
 
 #[cfg(test)]
-impl<V: Variant, D: Digest> DaState<V, D> {
+impl<S: Scheme, D: Digest> DaState<S, D> {
     /// Returns the number of retained header-parent records.
     pub(crate) fn retained_ancestry(&self) -> usize {
         self.chains

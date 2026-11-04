@@ -6,11 +6,12 @@ use crate::{
         machine::{
             BarrierAck, BatchId, DurableEffect, EffectId, Generation, InputTicket, ServicedInput,
         },
+        scheme::Scheme,
         types::ViewProof,
     },
     types::View,
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use tracing::Span;
 
 /// Causal boundary at which a resolver proof entered process-local serving custody.
@@ -29,7 +30,7 @@ pub(crate) enum RetentionBoundary {
 /// Points at the voter's typed boundaries where a test can observe what it executed.
 ///
 /// The persistence actor's points come with it through [`persistence::Hooks`].
-pub(crate) trait Hooks<V: Variant, D: Digest>: persistence::Hooks {
+pub(crate) trait Hooks<S: Scheme, D: Digest>: persistence::Hooks {
     /// Runs when one core cycle starts.
     fn cycle_started(&self) {}
 
@@ -37,7 +38,7 @@ pub(crate) trait Hooks<V: Variant, D: Digest>: persistence::Hooks {
     fn resumed(&self) {}
 
     /// Runs when the core services `input`, before its step is applied.
-    fn serviced(&self, _input: &ServicedInput<V, D>) {}
+    fn serviced(&self, _input: &ServicedInput<S, D>) {}
 
     /// Runs inside an input's span before its step is applied, with the root that owns its
     /// terminal errors and the current round's view.
@@ -53,10 +54,10 @@ pub(crate) trait Hooks<V: Variant, D: Digest>: persistence::Hooks {
     fn acknowledged(&self, _ticket: InputTicket, _ack: BarrierAck) {}
 
     /// Runs when durable effect `id` is issued for execution in `generation`.
-    fn issued(&self, _id: EffectId, _generation: Generation, _effect: &DurableEffect<V, D>) {}
+    fn issued(&self, _id: EffectId, _generation: Generation, _effect: &DurableEffect<S, D>) {}
 
     /// Runs when `proof` enters serving custody at `boundary`.
-    fn retained(&self, _proof: &ViewProof<V, D>, _boundary: RetentionBoundary) {}
+    fn retained(&self, _proof: &ViewProof<S, D>, _boundary: RetentionBoundary) {}
 
     /// Runs when publication `id` of `generation` is installed.
     fn installed(&self, _id: EffectId, _generation: Generation) {}
@@ -65,4 +66,4 @@ pub(crate) trait Hooks<V: Variant, D: Digest>: persistence::Hooks {
     fn retired(&self, _ids: &[EffectId]) {}
 }
 
-impl<V: Variant, D: Digest> Hooks<V, D> for persistence::NoHooks {}
+impl<S: Scheme, D: Digest> Hooks<S, D> for persistence::NoHooks {}

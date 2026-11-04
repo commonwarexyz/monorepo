@@ -38,9 +38,10 @@ use super::{
 use crate::multimmit::{
     config::{Profile, ResourceLimits},
     machine::{artifact::IdentifiedArtifact, durability::EffectResult},
+    scheme::Scheme,
 };
 use commonware_codec::EncodeSize as _;
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::{collections::VecDeque, mem::size_of_val, num::NonZeroUsize};
 
 /// Persistence acknowledgements queued at once. The voter delivers one journal response at a time
@@ -127,9 +128,7 @@ pub(crate) struct CoreLimits {
 
 impl CoreLimits {
     /// Derives queue limits from the reducer's already-validated resource profile.
-    pub(super) fn derive<H: Hasher, V: Variant>(
-        machine: &Machine<H, V>,
-    ) -> Result<Self, CoreError> {
+    pub(super) fn derive<H: Hasher, S: Scheme>(machine: &Machine<H, S>) -> Result<Self, CoreError> {
         let resources = machine.profile().resources();
         let max_batch = resources.max_verification_batch();
         let artifact_bytes = resources.max_artifact_bytes();
@@ -187,9 +186,9 @@ struct LaneUsage {
     bytes: usize,
 }
 
-struct QueuedInput<V: Variant, D: Digest> {
+struct QueuedInput<S: Scheme, D: Digest> {
     ticket: InputTicket,
-    pass: InputPass<V, D>,
+    pass: InputPass<S, D>,
     bytes: usize,
 }
 
@@ -198,7 +197,7 @@ struct QueuedInput<V: Variant, D: Digest> {
 pub(crate) struct InputTicket(u64);
 
 /// One serviced reducer input.
-pub(crate) struct ServicedInput<V: Variant, D: Digest> {
+pub(crate) struct ServicedInput<S: Scheme, D: Digest> {
     pub(crate) ticket: InputTicket,
     #[cfg(test)]
     pub(crate) lane: Lane,
@@ -206,22 +205,22 @@ pub(crate) struct ServicedInput<V: Variant, D: Digest> {
     pub(crate) observed_items: usize,
     /// Whether this ticket has no resumable suffix.
     pub(crate) final_chunk: bool,
-    pub(crate) transition: Step<V, D>,
+    pub(crate) transition: Step<S, D>,
 }
 
 /// One bounded action selected by the synchronous core.
-pub(crate) enum CoreTurn<V: Variant, D: Digest> {
+pub(crate) enum CoreTurn<S: Scheme, D: Digest> {
     Idle,
     YieldRequired,
-    Input(ServicedInput<V, D>),
-    Work(PollResult<V, D>),
+    Input(ServicedInput<S, D>),
+    Work(PollResult<S, D>),
 }
 
 /// The serial production scheduler around the deterministic reducer.
-pub(crate) struct CoreState<H: Hasher, V: Variant> {
-    machine: Machine<H, V>,
+pub(crate) struct CoreState<H: Hasher, S: Scheme> {
+    machine: Machine<H, S>,
     limits: CoreLimits,
-    queues: [VecDeque<QueuedInput<V, H::Digest>>; Lane::COUNT],
+    queues: [VecDeque<QueuedInput<S, H::Digest>>; Lane::COUNT],
     usage: [LaneUsage; Lane::COUNT],
     cursor: FairCursor,
     service: ServiceCycle,
@@ -230,7 +229,7 @@ pub(crate) struct CoreState<H: Hasher, V: Variant> {
     drive: DriveCursor,
 }
 
-impl<H: Hasher, V: Variant> CoreState<H, V> {
+impl<H: Hasher, S: Scheme> CoreState<H, S> {
     /// Constructs the complete protocol owner for a never-started epoch.
     pub(crate) fn fresh(profile: Profile<H::Digest>) -> Result<Self, CoreBootstrapError> {
         Ok(Self::new(Machine::new(profile))?)
@@ -239,17 +238,17 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
     /// Restores the complete protocol owner at one acknowledged snapshot cut.
     pub(crate) fn restore(
         profile: Profile<H::Digest>,
-        snapshot: Snapshot<V, H::Digest>,
+        snapshot: Snapshot<S, H::Digest>,
     ) -> Result<Self, CoreBootstrapError> {
         Ok(Self::new(Machine::restore(profile, snapshot)?)?)
     }
 
-    pub(super) fn new(machine: Machine<H, V>) -> Result<Self, CoreError> {
+    pub(super) fn new(machine: Machine<H, S>) -> Result<Self, CoreError> {
         let limits = CoreLimits::derive(&machine)?;
         Ok(Self::with_limits(machine, limits))
     }
 
-    fn with_limits(machine: Machine<H, V>, limits: CoreLimits) -> Self {
+    fn with_limits(machine: Machine<H, S>, limits: CoreLimits) -> Self {
         Self {
             machine,
             limits,
@@ -264,14 +263,14 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
     }
 
     /// Replays one durable event while the restored core remains externally silent.
-    pub(crate) fn replay(&mut self, event: DomainEvent<V, H::Digest>) -> Result<(), ReplayError> {
+    pub(crate) fn replay(&mut self, event: DomainEvent<S, H::Digest>) -> Result<(), ReplayError> {
         self.machine.replay(event)
     }
 
     /// Queues one decoded observation cohort retaining `resident_bytes`.
     pub(crate) fn observe(
         &mut self,
-        artifacts: Vec<IdentifiedArtifact<V, H::Digest>>,
+        artifacts: Vec<IdentifiedArtifact<S, H::Digest>>,
         resident_bytes: usize,
     ) -> Result<InputTicket, CoreError> {
         self.admit(Input::Observe(artifacts), resident_bytes)
@@ -281,7 +280,7 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
     ///
     /// An observation carries peer-chosen bytes, so it enters only through [`Self::observe`],
     /// which charges its resident size against the peer lane's byte ceiling.
-    pub(crate) fn enqueue(&mut self, input: Input<V, H::Digest>) -> Result<InputTicket, CoreError> {
+    pub(crate) fn enqueue(&mut self, input: Input<S, H::Digest>) -> Result<InputTicket, CoreError> {
         if matches!(input, Input::Observe(_)) {
             return Err(CoreError::UnsizedObservation);
         }
@@ -292,14 +291,14 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
     ///
     /// An offer takes no lane turn and spends no core credit, so offers do not reorder the
     /// work around them. The machine still checks the offer's generation and reports a stale one.
-    pub(crate) fn offer(&mut self, offer: DaVotesOffer<V, H::Digest>) -> StepStatus<H::Digest> {
+    pub(crate) fn offer(&mut self, offer: DaVotesOffer<S, H::Digest>) -> StepStatus<H::Digest> {
         self.machine.offer_da_votes(offer)
     }
 
     /// Reserves lane capacity for `input` and queues it.
     fn admit(
         &mut self,
-        input: Input<V, H::Digest>,
+        input: Input<S, H::Digest>,
         resident_bytes: usize,
     ) -> Result<InputTicket, CoreError> {
         let lane = input_lane(&input);
@@ -345,8 +344,8 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
     /// immediately before that work runs.
     pub(crate) fn next_action(
         &mut self,
-        before_poll: impl FnOnce(&Machine<H, V>),
-    ) -> Result<CoreTurn<V, H::Digest>, CoreError> {
+        before_poll: impl FnOnce(&Machine<H, S>),
+    ) -> Result<CoreTurn<S, H::Digest>, CoreError> {
         if self.yield_required {
             return Ok(CoreTurn::YieldRequired);
         }
@@ -374,7 +373,7 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
         }
     }
 
-    fn poll_machine(&mut self) -> Result<CoreTurn<V, H::Digest>, CoreError> {
+    fn poll_machine(&mut self) -> Result<CoreTurn<S, H::Digest>, CoreError> {
         let result = self.machine.poll(NonZeroUsize::MIN)?;
         self.drive.record(DriveSource::Machine);
         Ok(CoreTurn::Work(result))
@@ -383,7 +382,7 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
     fn service_input(
         &mut self,
         persistence_only: bool,
-    ) -> Result<CoreTurn<V, H::Digest>, CoreError> {
+    ) -> Result<CoreTurn<S, H::Digest>, CoreError> {
         if self.yield_required {
             return Ok(CoreTurn::YieldRequired);
         }
@@ -450,7 +449,7 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
     }
 
     /// Requires a yield to the runtime before the next input.
-    const fn yield_turn(&mut self) -> CoreTurn<V, H::Digest> {
+    const fn yield_turn(&mut self) -> CoreTurn<S, H::Digest> {
         self.yield_required = true;
         CoreTurn::YieldRequired
     }
@@ -481,7 +480,7 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
     }
 
     /// Returns the machine this core schedules.
-    pub(crate) const fn machine(&self) -> &Machine<H, V> {
+    pub(crate) const fn machine(&self) -> &Machine<H, S> {
         &self.machine
     }
 
@@ -497,7 +496,7 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
     }
 }
 
-const fn input_lane<V: Variant, D: Digest>(input: &Input<V, D>) -> Lane {
+const fn input_lane<S: Scheme, D: Digest>(input: &Input<S, D>) -> Lane {
     match input {
         Input::Persisted(_) => Lane::PersistenceCompletion,
         Input::TimerFired(_) | Input::ProducerWake | Input::ProductionTimerFired(_) => Lane::Timer,
@@ -514,8 +513,8 @@ const fn input_lane<V: Variant, D: Digest>(input: &Input<V, D>) -> Lane {
     }
 }
 
-fn input_bytes<V: Variant, D: Digest>(
-    input: &Input<V, D>,
+fn input_bytes<S: Scheme, D: Digest>(
+    input: &Input<S, D>,
     supplied: usize,
     lane_limit: LaneLimit,
 ) -> Result<usize, CoreError> {
@@ -593,7 +592,7 @@ mod tests {
                 verification::{JobId, VerificationCompletion},
                 view::ViewTimer,
             },
-            mocks::Committee,
+            mocks::{Bls, Committee},
             types::{ChainId, DaCertificate, Nullification, TransactionBlockHeader, ViewProof},
         },
         types::{Epoch, Height, Round, View},
@@ -608,9 +607,9 @@ mod tests {
     use commonware_math::algebra::Additive as _;
     use std::{collections::BTreeMap, time::Duration};
 
-    fn observer_core(seed: u64) -> CoreState<Sha256, MinPk> {
-        let committee = Committee::<MinPk>::builder(seed, 6).build();
-        let profile = Profile::new::<MinPk>(
+    fn observer_core(seed: u64) -> CoreState<Sha256, Bls<MinPk>> {
+        let committee = Committee::<Bls<MinPk>>::builder(seed, 6).build();
+        let profile = Profile::new::<Bls<MinPk>>(
             committee.config,
             Role::Observer,
             Tuning {
@@ -625,10 +624,10 @@ mod tests {
 
     /// Returns the queued pass of `ticket` in `lane`, if it is queued there.
     fn queued_in(
-        core: &CoreState<Sha256, MinPk>,
+        core: &CoreState<Sha256, Bls<MinPk>>,
         lane: Lane,
         ticket: InputTicket,
-    ) -> Option<&InputPass<MinPk, <Sha256 as Hasher>::Digest>> {
+    ) -> Option<&InputPass<Bls<MinPk>, <Sha256 as Hasher>::Digest>> {
         core.queues[lane.index()]
             .iter()
             .find(|queued| queued.ticket == ticket)
@@ -708,7 +707,7 @@ mod tests {
     fn da_vote_offers_apply_at_once_outside_the_lanes() {
         let mut core = observer_core(77);
         let chain = ChainId::new(0);
-        let offer = |core: &CoreState<Sha256, MinPk>, generation| DaVotesOffer {
+        let offer = |core: &CoreState<Sha256, Bls<MinPk>>, generation| DaVotesOffer {
             generation,
             chain,
             candidates: Vec::new(),
@@ -730,8 +729,8 @@ mod tests {
 
     #[test]
     fn core_alternates_reducer_work_with_inputs_across_yield() {
-        let committee = Committee::<MinPk>::builder(73, 6).build();
-        let profile = Profile::new::<MinPk>(
+        let committee = Committee::<Bls<MinPk>>::builder(73, 6).build();
+        let profile = Profile::new::<Bls<MinPk>>(
             committee.config,
             Role::Observer,
             Tuning {
@@ -741,7 +740,7 @@ mod tests {
             },
         )
         .unwrap();
-        let mut machine = Machine::<Sha256, MinPk>::new(profile);
+        let mut machine = Machine::<Sha256, Bls<MinPk>>::new(profile);
         let started = machine.step(Input::Start).unwrap();
         let persist = started
             .capabilities()
@@ -813,7 +812,7 @@ mod tests {
         lane: Lane,
         ordinal: u64,
         start_ack: BarrierAck,
-    ) -> Input<MinPk, <Sha256 as Hasher>::Digest> {
+    ) -> Input<Bls<MinPk>, <Sha256 as Hasher>::Digest> {
         match lane {
             Lane::PersistenceCompletion => Input::Persisted(start_ack),
             Lane::LocalCompletion => Input::Verified(VerificationCompletion::new(
@@ -848,9 +847,9 @@ mod tests {
 
     #[test]
     fn core_services_simultaneous_five_source_flood_with_exact_weights() {
-        let committee = Committee::<MinPk>::builder(73, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(73, 6).build();
         let epoch = committee.config.epoch();
-        let profile = Profile::new::<MinPk>(
+        let profile = Profile::new::<Bls<MinPk>>(
             committee.config,
             Role::Observer,
             Tuning {
@@ -860,7 +859,7 @@ mod tests {
             },
         )
         .unwrap();
-        let mut machine = Machine::<Sha256, MinPk>::new(profile);
+        let mut machine = Machine::<Sha256, Bls<MinPk>>::new(profile);
         let started = machine.step(Input::Start).unwrap();
         let persist = started
             .capabilities()

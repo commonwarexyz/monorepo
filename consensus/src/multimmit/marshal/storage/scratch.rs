@@ -16,12 +16,12 @@ use std::{fmt::Display, future::Future, mem, sync::Arc};
 const HISTORY_MEMORY_LIMIT: usize = 0;
 
 /// A journal node linking a value to the next newer value in its section.
-struct ReverseNode<V: CodecShared> {
+struct ReverseNode<S: CodecShared> {
     newer: Option<u64>,
-    value: V,
+    value: S,
 }
 
-impl<V: CodecShared> ReverseNode<V> {
+impl<S: CodecShared> ReverseNode<S> {
     /// Largest encoded size of the link stored with each value.
     const LINK_SIZE: usize = bool::SIZE + u64::SIZE;
 }
@@ -34,35 +34,35 @@ enum Mode {
 }
 
 /// Where a stack's values currently live.
-enum Tier<V> {
+enum Tier<S> {
     /// Values per section, newest last, with their encoded bytes plus link overhead.
-    Memory { sections: Vec<Vec<V>>, bytes: usize },
+    Memory { sections: Vec<Vec<S>>, bytes: usize },
     /// Values spilled to the journal, with the newest node of each section.
     Disk { heads: Vec<Option<u64>> },
 }
 
 /// A stack per section whose values are pushed newest-first and read oldest-first.
-pub(crate) struct SpillStack<E, V>
+pub(crate) struct SpillStack<E, S>
 where
     E: Context,
-    V: CodecShared,
+    S: CodecShared,
 {
-    journal: Option<variable::Journal<E, ReverseNode<V>>>,
-    tier: Tier<V>,
+    journal: Option<variable::Journal<E, ReverseNode<S>>>,
+    tier: Tier<S>,
     mode: Mode,
     /// Encoded bytes, including link overhead, held in memory before the stack spills.
     memory_limit: usize,
 }
 
-impl<E, V> SpillStack<E, V>
+impl<E, S> SpillStack<E, S>
 where
     E: Context,
-    V: CodecShared,
+    S: CodecShared,
 {
     /// Opens an empty stack after discarding any recovered residue.
     pub(crate) async fn init(
         context: E,
-        config: variable::Config<V::Cfg>,
+        config: variable::Config<S::Cfg>,
         memory_limit: usize,
     ) -> Result<Self, Error> {
         let journal = variable::Journal::init(context, config)
@@ -98,7 +98,7 @@ where
     }
 
     /// Pushes the next newer value of `section`.
-    pub(crate) async fn push(&mut self, section: usize, value: V) -> Result<(), Error> {
+    pub(crate) async fn push(&mut self, section: usize, value: S) -> Result<(), Error> {
         if self.mode == Mode::Reading {
             return Err(Error::Invalid(
                 "scratch values cannot be pushed after reading begins",
@@ -107,7 +107,7 @@ where
         if let Tier::Memory { sections, bytes } = &mut self.tier {
             let encoded = value
                 .encode_size()
-                .saturating_add(ReverseNode::<V>::LINK_SIZE);
+                .saturating_add(ReverseNode::<S>::LINK_SIZE);
             if let Some(total) = bytes.checked_add(encoded)
                 && total <= self.memory_limit
             {
@@ -124,7 +124,7 @@ where
     }
 
     /// Reads the oldest unread value of `section`, ending the writing phase.
-    pub(crate) async fn read_oldest(&mut self, section: usize) -> Result<Option<V>, Error> {
+    pub(crate) async fn read_oldest(&mut self, section: usize) -> Result<Option<S>, Error> {
         self.mode = Mode::Reading;
         let heads = match &mut self.tier {
             Tier::Memory { sections, .. } => {
@@ -160,7 +160,7 @@ where
         Ok(())
     }
 
-    async fn push_disk(&mut self, section: usize, value: V) -> Result<(), Error> {
+    async fn push_disk(&mut self, section: usize, value: S) -> Result<(), Error> {
         let Tier::Disk { heads } = &mut self.tier else {
             unreachable!("only a spilled stack appends to its journal");
         };
@@ -313,25 +313,25 @@ where
     }
 }
 
-impl<V: CodecShared> Write for ReverseNode<V> {
+impl<S: CodecShared> Write for ReverseNode<S> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.newer.write(buf);
         self.value.write(buf);
     }
 }
 
-impl<V: CodecShared> Read for ReverseNode<V> {
-    type Cfg = V::Cfg;
+impl<S: CodecShared> Read for ReverseNode<S> {
+    type Cfg = S::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             newer: Option::<u64>::read_cfg(buf, &())?,
-            value: V::read_cfg(buf, cfg)?,
+            value: S::read_cfg(buf, cfg)?,
         })
     }
 }
 
-impl<V: CodecShared> EncodeSize for ReverseNode<V> {
+impl<S: CodecShared> EncodeSize for ReverseNode<S> {
     fn encode_size(&self) -> usize {
         self.newer.encode_size() + self.value.encode_size()
     }
@@ -403,7 +403,7 @@ mod tests {
         )
     }
 
-    const fn spilled<E: Context, V: CodecShared>(stack: &SpillStack<E, V>) -> bool {
+    const fn spilled<E: Context, S: CodecShared>(stack: &SpillStack<E, S>) -> bool {
         matches!(stack.tier, Tier::Disk { .. })
     }
 

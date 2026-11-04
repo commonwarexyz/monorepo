@@ -13,7 +13,7 @@ use crate::{
     types::{Attributable as _, Height},
 };
 use commonware_actor::Feedback;
-use commonware_utils::TestRng;
+use commonware_utils::{TestRng, test_rng};
 use std::{
     collections::{BTreeSet, VecDeque},
     time::SystemTime,
@@ -95,7 +95,7 @@ impl DeliveredEvidence {
         &self,
         observer: usize,
         target: Participant,
-        verifier: Scheme<ed25519::PublicKey, MinPk>,
+        verifier: Generic<Bls<MinPk>>,
         codec: CodecConfig,
         seed: u64,
         targets: BTreeSet<Participant>,
@@ -260,7 +260,11 @@ impl ObserverClaims {
         self.producers.insert(slot, (signer, header.clone()));
     }
 
-    fn record_leader(&mut self, signer: Participant, leader: &LeaderBlock<MinPk, Sha256Digest>) {
+    fn record_leader(
+        &mut self,
+        signer: Participant,
+        leader: &LeaderBlock<Bls<MinPk>, Sha256Digest>,
+    ) {
         let digest = leader.digest::<Sha256>();
         let claims = self.views.entry((leader.view(), signer)).or_default();
         if claims.leader.is_some_and(|previous| previous != digest) {
@@ -309,7 +313,7 @@ impl ObserverClaims {
 
 /// Independently indexes only claims whose signatures it verifies for each observer.
 struct AccountabilityOracle {
-    verifier: Scheme<ed25519::PublicKey, MinPk>,
+    verifier: Generic<Bls<MinPk>>,
     rng: TestRng,
     codec: CodecConfig,
     targets: BTreeSet<Participant>,
@@ -318,7 +322,7 @@ struct AccountabilityOracle {
 
 impl AccountabilityOracle {
     fn new(
-        verifier: Scheme<ed25519::PublicKey, MinPk>,
+        verifier: Generic<Bls<MinPk>>,
         codec: CodecConfig,
         seed: u64,
         targets: BTreeSet<Participant>,
@@ -342,37 +346,51 @@ impl AccountabilityOracle {
         self.observers.entry(observer).or_default()
     }
 
-    fn record_artifact(&mut self, observer: usize, artifact: &Artifact<MinPk, Sha256Digest>) {
+    fn record_artifact(&mut self, observer: usize, artifact: &Artifact<Bls<MinPk>, Sha256Digest>) {
         match artifact {
             Artifact::TransactionBlock(block)
                 if self.targets.contains(&block.signer())
-                    && self.verifier.verify_transaction_block(block) =>
+                    && self.verifier.verify_transaction_block(
+                        &mut test_rng(),
+                        block,
+                        &Sequential,
+                    ) =>
             {
                 self.claims(observer)
                     .record_producer(block.signer(), block.header());
             }
             Artifact::LeaderBlock(block)
                 if self.targets.contains(&block.signer())
-                    && self.verifier.verify_leader_block(block, &Sequential) =>
+                    && self
+                        .verifier
+                        .verify_leader_block(&mut test_rng(), block, &Sequential) =>
             {
                 self.claims(observer)
                     .record_leader(block.signer(), block.block());
             }
             Artifact::Vote(vote)
-                if self.targets.contains(&vote.signer()) && self.verifier.verify_vote(vote) =>
+                if self.targets.contains(&vote.signer())
+                    && self
+                        .verifier
+                        .verify_vote(&mut test_rng(), vote, &Sequential) =>
             {
                 self.claims(observer)
                     .record_vote(vote.signer(), vote.body());
             }
             Artifact::NoVote(novote)
                 if self.targets.contains(&novote.signer())
-                    && self.verifier.verify_novote(novote) =>
+                    && self
+                        .verifier
+                        .verify_novote(&mut test_rng(), novote, &Sequential) =>
             {
                 self.claims(observer)
                     .record_novote(novote.signer(), novote.view());
             }
             Artifact::DaVote(vote)
-                if self.targets.contains(&vote.signer()) && self.verifier.verify_da_vote(vote) =>
+                if self.targets.contains(&vote.signer())
+                    && self
+                        .verifier
+                        .verify_da_vote(&mut test_rng(), vote, &Sequential) =>
             {
                 self.claims(observer)
                     .record_da_vote(vote.signer(), vote.header());
@@ -390,7 +408,7 @@ impl AccountabilityOracle {
         }
     }
 
-    fn record_vqc(&mut self, observer: usize, certificate: &Vqc<MinPk, Sha256Digest>) {
+    fn record_vqc(&mut self, observer: usize, certificate: &Vqc<Bls<MinPk>, Sha256Digest>) {
         if self
             .verifier
             .verify_vqc::<_, Sha256, _>(&mut self.rng, certificate, &Sequential)
@@ -429,7 +447,7 @@ impl AccountabilityOracle {
         }
     }
 
-    fn record_lqc(&mut self, observer: usize, certificate: &Lqc<MinPk, Sha256Digest>) {
+    fn record_lqc(&mut self, observer: usize, certificate: &Lqc<Bls<MinPk>, Sha256Digest>) {
         if self
             .verifier
             .verify_lqc::<_, Sha256, _>(&mut self.rng, certificate, &Sequential)
@@ -451,7 +469,7 @@ impl AccountabilityOracle {
     }
 
     fn record_wire(&mut self, observer: usize, plane: u64, bytes: &[u8]) {
-        let Some(bounds) = self.codec.encoded_bounds::<MinPk, Sha256Digest>() else {
+        let Some(bounds) = self.codec.encoded_bounds::<Bls<MinPk>, Sha256Digest>() else {
             return;
         };
         match plane {
@@ -461,7 +479,7 @@ impl AccountabilityOracle {
                     epoch: self.verifier.epoch(),
                     payload: self.codec,
                 };
-                let Ok(message) = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+                let Ok(message) = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                     Copying(bytes),
                     &config,
                 ) else {
@@ -475,10 +493,12 @@ impl AccountabilityOracle {
                     epoch: self.verifier.epoch(),
                     payload: self.codec,
                 };
-                let Ok(message) = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
-                    Copying(bytes),
-                    &config,
-                ) else {
+                let Ok(message) =
+                    Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
+                        Copying(bytes),
+                        &config,
+                    )
+                else {
                     return;
                 };
                 for artifact in message.into_payload().into_artifacts() {
@@ -491,10 +511,12 @@ impl AccountabilityOracle {
                     epoch: self.verifier.epoch(),
                     payload: self.codec,
                 };
-                let Ok(message) = Envelope::<CertificateMessage<MinPk, Sha256Digest>>::decode_cfg(
-                    Copying(bytes),
-                    &config,
-                ) else {
+                let Ok(message) =
+                    Envelope::<CertificateMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
+                        Copying(bytes),
+                        &config,
+                    )
+                else {
                     return;
                 };
                 self.record_artifact(observer, &message.into_payload().into_artifact());
@@ -513,7 +535,7 @@ struct Agreement {
     certificates: BTreeMap<CertificateId<Sha256Digest>, Sha256Digest>,
     producer_parents: BTreeMap<BlockRef<Sha256Digest>, BlockRef<Sha256Digest>>,
     blocks: BTreeMap<u32, BTreeMap<u64, BlockRef<Sha256Digest>>>,
-    leader_blocks: BTreeMap<Sha256Digest, LeaderBlock<MinPk, Sha256Digest>>,
+    leader_blocks: BTreeMap<Sha256Digest, LeaderBlock<Bls<MinPk>, Sha256Digest>>,
     pending_votes: BTreeMap<Sha256Digest, Vec<VoteBody<Sha256Digest>>>,
 }
 
@@ -650,7 +672,7 @@ impl Agreement {
         }
     }
 
-    fn record_leader_block(&mut self, node: usize, leader: &LeaderBlock<MinPk, Sha256Digest>) {
+    fn record_leader_block(&mut self, node: usize, leader: &LeaderBlock<Bls<MinPk>, Sha256Digest>) {
         let digest = leader.digest::<Sha256>();
         self.record_leader(leader.view(), digest, leader.parent());
         if let Some(previous) = self.leader_blocks.insert(digest, leader.clone()) {
@@ -680,7 +702,7 @@ impl Agreement {
     fn record_vqc(
         &mut self,
         node: usize,
-        certificate: &Vqc<MinPk, Sha256Digest>,
+        certificate: &Vqc<Bls<MinPk>, Sha256Digest>,
         codec: CodecConfig,
     ) {
         let digested = DigestedLeader::new::<Sha256>(certificate.leader());
@@ -710,7 +732,7 @@ impl Agreement {
         epoch: Epoch,
         codec: CodecConfig,
     ) {
-        let Some(bounds) = codec.encoded_bounds::<MinPk, Sha256Digest>() else {
+        let Some(bounds) = codec.encoded_bounds::<Bls<MinPk>, Sha256Digest>() else {
             return;
         };
         // Structurally decoded paths are digest-addressed hints. Agreement checks traverse them
@@ -722,7 +744,7 @@ impl Agreement {
                     epoch,
                     payload: codec,
                 };
-                let Ok(message) = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+                let Ok(message) = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                     Copying(bytes),
                     &config,
                 ) else {
@@ -742,10 +764,12 @@ impl Agreement {
                     epoch,
                     payload: codec,
                 };
-                let Ok(message) = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
-                    Copying(bytes),
-                    &config,
-                ) else {
+                let Ok(message) =
+                    Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
+                        Copying(bytes),
+                        &config,
+                    )
+                else {
                     return;
                 };
                 match message.into_payload() {
@@ -765,10 +789,12 @@ impl Agreement {
                     epoch,
                     payload: codec,
                 };
-                let Ok(message) = Envelope::<CertificateMessage<MinPk, Sha256Digest>>::decode_cfg(
-                    Copying(bytes),
-                    &config,
-                ) else {
+                let Ok(message) =
+                    Envelope::<CertificateMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
+                        Copying(bytes),
+                        &config,
+                    )
+                else {
                     return;
                 };
                 match message.into_payload() {
@@ -895,7 +921,7 @@ struct ActivityReporter {
 }
 
 impl crate::Reporter for ActivityReporter {
-    type Activity = Activity<MinPk, Sha256Digest>;
+    type Activity = Activity<Bls<MinPk>, Sha256Digest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match activity {
@@ -940,7 +966,7 @@ struct Safety {
     agreement: Arc<Mutex<Agreement>>,
     block_snapshots: Arc<Mutex<Vec<BlockSnapshot>>>,
     delivered: BTreeMap<usize, Arc<Mutex<DeliveredEvidence>>>,
-    verifier: Scheme<ed25519::PublicKey, MinPk>,
+    verifier: Generic<Bls<MinPk>>,
     targets: BTreeSet<Participant>,
     seed: u64,
     codec: CodecConfig,
@@ -954,7 +980,7 @@ struct BlockSnapshot {
 
 impl Safety {
     fn new(
-        verifier: Scheme<ed25519::PublicKey, MinPk>,
+        verifier: Generic<Bls<MinPk>>,
         codec: CodecConfig,
         seed: u64,
         targets: BTreeSet<Participant>,
@@ -986,7 +1012,7 @@ impl Safety {
         }
     }
 
-    async fn observe(&mut self, cluster: &mut Cluster<MinPk>, honest: &[usize]) -> bool {
+    async fn observe(&mut self, cluster: &mut Cluster<Bls<MinPk>>, honest: &[usize]) -> bool {
         cluster.observe_finality(honest).await;
         let mut complete = true;
         for &node in honest {
@@ -1087,7 +1113,7 @@ pub(crate) fn exercise(input: &[u8]) -> BTreeSet<(usize, usize)> {
     executor.start(move |context| async move {
         let coverage = Arc::new(Mutex::new(Coverage::default()));
         let deadline = context.current() + deadline_offset;
-        let mut cluster = Cluster::<MinPk>::new(
+        let mut cluster = Cluster::<Bls<MinPk>>::new(
             &context,
             ClusterOptions {
                 leaders: Some(leaders),
@@ -1292,7 +1318,7 @@ pub(crate) fn exercise(input: &[u8]) -> BTreeSet<(usize, usize)> {
 }
 
 #[cfg(test)]
-fn oracle(fixture: &Committee<MinPk>) -> AccountabilityOracle {
+fn oracle(fixture: &Committee<Bls<MinPk>>) -> AccountabilityOracle {
     AccountabilityOracle::new(
         fixture.verifier.clone(),
         fixture.codec(),
@@ -1304,9 +1330,9 @@ fn oracle(fixture: &Committee<MinPk>) -> AccountabilityOracle {
 #[cfg(test)]
 fn deliver_data(
     oracle: &mut AccountabilityOracle,
-    fixture: &Committee<MinPk>,
+    fixture: &Committee<Bls<MinPk>>,
     observer: usize,
-    message: DataMessage<MinPk, Sha256Digest>,
+    message: DataMessage<Bls<MinPk>, Sha256Digest>,
 ) {
     let frame = Envelope::new(fixture.config.epoch(), message).encode();
     oracle.record_wire(observer, 0, frame.as_ref());
@@ -1315,9 +1341,9 @@ fn deliver_data(
 #[cfg(test)]
 fn deliver_consensus(
     oracle: &mut AccountabilityOracle,
-    fixture: &Committee<MinPk>,
+    fixture: &Committee<Bls<MinPk>>,
     observer: usize,
-    message: ConsensusMessage<MinPk, Sha256Digest>,
+    message: ConsensusMessage<Bls<MinPk>, Sha256Digest>,
 ) {
     let frame = Envelope::new(fixture.config.epoch(), message).encode();
     oracle.record_wire(observer, 1, frame.as_ref());
@@ -1326,9 +1352,9 @@ fn deliver_consensus(
 #[cfg(test)]
 fn deliver_certificate(
     oracle: &mut AccountabilityOracle,
-    fixture: &Committee<MinPk>,
+    fixture: &Committee<Bls<MinPk>>,
     observer: usize,
-    message: CertificateMessage<MinPk, Sha256Digest>,
+    message: CertificateMessage<Bls<MinPk>, Sha256Digest>,
 ) {
     let frame = Envelope::new(fixture.config.epoch(), message).encode();
     oracle.record_wire(observer, 2, frame.as_ref());
@@ -1336,7 +1362,7 @@ fn deliver_certificate(
 
 #[test]
 fn accountability_oracle_requires_delivered_verified_evidence() {
-    let fixture = Committee::<MinPk>::builder(7, PARTICIPANTS).build();
+    let fixture = Committee::<Bls<MinPk>>::builder(7, PARTICIPANTS).build();
     let mut oracle = oracle(&fixture);
     let first = fixture.signed_block(ChainId::new(0), Sha256::hash(&[b"first"]));
     let second = fixture.signed_block(ChainId::new(0), Sha256::hash(&[b"second"]));
@@ -1360,7 +1386,7 @@ fn accountability_oracle_requires_delivered_verified_evidence() {
 
 #[test]
 fn accountability_oracle_covers_wire_equivocation_families() {
-    let fixture = Committee::<MinPk>::builder(11, PARTICIPANTS).build();
+    let fixture = Committee::<Bls<MinPk>>::builder(11, PARTICIPANTS).build();
     let mut oracle = oracle(&fixture);
 
     let first = fixture.signed_block(ChainId::new(0), Sha256::hash(&[b"parent"]));
@@ -1436,7 +1462,7 @@ fn accountability_oracle_covers_wire_equivocation_families() {
 
 #[test]
 fn accountability_oracle_expands_authenticated_certificate_transcripts() {
-    let fixture = Committee::<MinPk>::builder(13, PARTICIPANTS).build();
+    let fixture = Committee::<Bls<MinPk>>::builder(13, PARTICIPANTS).build();
     let mut oracle = oracle(&fixture);
     let leader = fixture.leader_block(View::new(1));
     let messages =
@@ -1449,7 +1475,12 @@ fn accountability_oracle_expands_authenticated_certificate_transcripts() {
         .collect::<Vec<_>>();
     let vqc = fixture
         .verifier
-        .assemble_vqc::<Sha256, _>(leader.block().clone(), &messages, &Sequential)
+        .assemble_vqc::<_, Sha256, _>(
+            &mut test_rng(),
+            leader.block().clone(),
+            &messages,
+            &Sequential,
+        )
         .unwrap();
 
     deliver_certificate(

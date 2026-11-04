@@ -26,6 +26,7 @@ use crate::{
             verification::Observation,
             view::{ViewState, VqcAggregateCompletion},
         },
+        mocks::Bls,
         types::{
             Artifact, ChainId, ChainProposal, DaVote, DigestedLeader, Extension, LeaderBlock,
             Position, SignedLeaderBlock, SignedTransactionBlock, TransactionBlockHeader,
@@ -119,13 +120,13 @@ fn verified_lqc_reuses_its_exact_parent_projection() {
         DerivedVqc::from_lqc::<CountingHasher>(&certificate, source.profile.codec()).unwrap();
     let expected = Arc::clone(projection.artifact.arc());
     let proof = Arc::new(Artifact::Lqc(certificate));
-    let profile = Profile::new::<MinPk>(
+    let profile = Profile::new::<Bls<MinPk>>(
         TestConfig::new(6).depth(4).build(),
         Role::Observer,
         Tuning::default(),
     )
     .unwrap();
-    let mut machine = Machine::<CountingHasher, MinPk>::new(profile);
+    let mut machine = Machine::<CountingHasher, Bls<MinPk>>::new(profile);
 
     CountingHasher::reset();
     machine
@@ -159,7 +160,7 @@ fn verified_vqc_reuses_validation_derivations() {
         unreachable!();
     };
     let validated =
-        validate_vqc::<CountingHasher, MinPk, Digest>(certificate, profile.codec()).unwrap();
+        validate_vqc::<CountingHasher, Bls<MinPk>, Digest>(certificate, profile.codec()).unwrap();
     let artifact_id = parent.id::<CountingHasher>();
 
     CountingHasher::reset();
@@ -186,7 +187,7 @@ fn verified_vqc_reuses_validation_derivations() {
 
 /// Counts the hashes one signed data-availability batch transition performs.
 fn signed_batch_hash_calls(batch_items: usize) -> usize {
-    let profile: Profile<Digest> = Profile::new::<MinPk>(
+    let profile: Profile<Digest> = Profile::new::<Bls<MinPk>>(
         TestConfig::new(scheduler::CORE_BUDGET as usize)
             .depth(1)
             .build(),
@@ -197,7 +198,7 @@ fn signed_batch_hash_calls(batch_items: usize) -> usize {
         },
     )
     .unwrap();
-    let mut machine = Machine::<CountingHasher, MinPk>::new(profile);
+    let mut machine = Machine::<CountingHasher, Bls<MinPk>>::new(profile);
     let mut step = machine.step(Input::Start).unwrap();
     loop {
         let jobs = step
@@ -317,7 +318,7 @@ fn local_vqc_completion_hashes(participants: usize, payloads: u32, extensions: u
         view_retention: retention_for(resources, participants),
         ..Tuning::default()
     };
-    let source = Machine::<Sha256, MinPk>::new(
+    let source = Machine::<Sha256, Bls<MinPk>>::new(
         Profile::with_limits(protocol.clone(), Role::Observer, tuning, resources).unwrap(),
     );
     let codec = protocol.codec_config();
@@ -369,7 +370,7 @@ fn local_vqc_completion_hashes(participants: usize, payloads: u32, extensions: u
     )
     .unwrap();
     let profile = Profile::with_limits(protocol, Role::Observer, tuning, resources).unwrap();
-    let mut runner = Driver::<CountingHasher, MinPk>::new(profile);
+    let mut runner = Driver::<CountingHasher, Bls<MinPk>>::new(profile);
     let start = runner.submit(Input::Start).unwrap();
     runner.drain(
         &mut SymbolicPersistence,
@@ -452,7 +453,8 @@ fn vqc_finality_hash_calls(with_derivations: bool) -> usize {
         .unwrap();
     let derivations = with_derivations.then(|| {
         let mut validated =
-            validate_vqc::<CountingHasher, MinPk, Digest>(&certificate, profile.codec()).unwrap();
+            validate_vqc::<CountingHasher, Bls<MinPk>, Digest>(&certificate, profile.codec())
+                .unwrap();
         CertificateDerivations::Vqc {
             leader: validated.leader(),
             votes: validated.take_votes(),

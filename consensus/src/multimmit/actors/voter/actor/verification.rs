@@ -30,7 +30,7 @@ pub(crate) struct PendingVerification<T: VoterTypes> {
     pub(crate) span: Span,
     pub(crate) root: Span,
     pub(crate) round: Round,
-    pub(crate) job: VerifyJob<T::Variant, DigestOf<T>>,
+    pub(crate) job: VerifyJob<T::Scheme, DigestOf<T>>,
     pub(crate) queued_at: SystemTime,
 }
 

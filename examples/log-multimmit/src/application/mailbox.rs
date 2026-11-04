@@ -1,5 +1,6 @@
 //! Ingress for the application actor.
 
+use crate::committee::Suite;
 use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
@@ -11,9 +12,7 @@ use commonware_consensus::{
         types::{Activity, BlockRef, ChainId, Context},
     },
 };
-use commonware_cryptography::{
-    bls12381::primitives::variant::MinSig, sha256::Digest as Sha256Digest,
-};
+use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_runtime::Clock;
 use commonware_utils::channel::oneshot;
 use std::{
@@ -174,7 +173,7 @@ impl<C: Clock> Automaton for Mailbox<C> {
 }
 
 impl<C: Clock> Reporter for Mailbox<C> {
-    type Activity = Activity<MinSig, Sha256Digest>;
+    type Activity = Activity<Suite, Sha256Digest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let message = match activity {

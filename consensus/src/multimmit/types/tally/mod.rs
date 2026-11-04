@@ -20,14 +20,15 @@ use super::{
     },
 };
 use crate::{
-    multimmit::types::{CodecConfig, LeaderBlock},
+    multimmit::{
+        scheme::Scheme,
+        types::{CodecConfig, LeaderBlock},
+    },
     types::{Attributable, Round},
 };
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
-use commonware_cryptography::{
-    Digest, bls12381::primitives::variant::Variant, certificate::Signers,
-};
+use commonware_cryptography::{Digest, certificate::Signers};
 use commonware_utils::Participant;
 use core::num::NonZeroUsize;
 
@@ -258,9 +259,9 @@ impl<D: Digest> Tally<D> {
     }
 
     /// Decodes a tally and checks that it is the canonical transcript for `leader`.
-    pub(crate) fn decode_for_leader<V: Variant>(
+    pub(crate) fn decode_for_leader<S: Scheme>(
         reader: &mut impl Buf,
-        leader: &LeaderBlock<V, D>,
+        leader: &LeaderBlock<S, D>,
         config: CodecConfig,
     ) -> Result<Self, CodecError> {
         let reference_extensions = Vec::<Extension<D>>::read_cfg(

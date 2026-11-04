@@ -17,7 +17,7 @@ use crate::{
             voter::Resolutions,
         },
         machine::{ResolutionCompletion, ResolutionJob},
-        scheme::bls12381_threshold::Scheme,
+        scheme::{Generic, Scheme},
         types::{CodecConfig, ViewProof},
     },
     types::{Epoch, Round, View},
@@ -25,7 +25,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_actor::{Feedback, mailbox};
 use commonware_codec::{Decode as _, Encode as _};
-use commonware_cryptography::{Digest, Hasher, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Sender, utils::StaticProvider};
 use commonware_parallel::Strategy;
@@ -83,15 +83,15 @@ impl<B: Blocker> Blocker for NonBlocking<B> {
 type HandlerMessage = util::HandlerMessage<U64, ResolutionJob, bool>;
 
 /// The result of one proof encode or decode on the codec pool.
-pub(super) enum CodecCompletion<V: Variant, D: Digest> {
+pub(super) enum CodecCompletion<S: Scheme, D: Digest> {
     /// A peer response decoded for each subscribed job, or `None` if it is unusable.
     Decoded {
-        proofs: Option<Vec<(ResolutionJob, ViewProof<V, D>)>>,
+        proofs: Option<Vec<(ResolutionJob, ViewProof<S, D>)>>,
         response: oneshot::Sender<bool>,
     },
     /// A retained proof encoded to serve one peer request.
     Encoded {
-        proof: Arc<ViewProof<V, D>>,
+        proof: Arc<ViewProof<S, D>>,
         value: Bytes,
         response: oneshot::Sender<Bytes>,
     },
@@ -102,26 +102,26 @@ pub(super) enum CodecCompletion<V: Variant, D: Digest> {
     /// runs on the codec pool instead of the actor loop.
     Materialized {
         job: ResolutionJob,
-        proof: ViewProof<V, D>,
+        proof: ViewProof<S, D>,
     },
 }
 
-type CodecResult<V, D> = (Span, CodecCompletion<V, D>);
-type CodecResults<V, D> = Pool<'static, CodecResult<V, D>>;
+type CodecResult<S, D> = (Span, CodecCompletion<S, D>);
+type CodecResults<S, D> = Pool<'static, CodecResult<S, D>>;
 /// Jobs a retained proof completes, awaiting submission of its copy, with their issuing span.
-type PendingLocal<V, D> = BTreeMap<ResolutionJob, (Arc<ViewProof<V, D>>, Span)>;
+type PendingLocal<S, D> = BTreeMap<ResolutionJob, (Arc<ViewProof<S, D>>, Span)>;
 
 /// Decodes an untrusted delivery on `strategy`, counting a worker panic as an invalid response so
 /// a codec defect cannot stop the actor.
-pub(super) async fn decode_delivery<S, V, D>(
-    strategy: S,
+pub(super) async fn decode_delivery<St, S, D>(
+    strategy: St,
     span: Span,
     response: oneshot::Sender<bool>,
-    decode: impl FnOnce() -> Option<Vec<(ResolutionJob, ViewProof<V, D>)>> + Send + 'static,
-) -> CodecResult<V, D>
+    decode: impl FnOnce() -> Option<Vec<(ResolutionJob, ViewProof<S, D>)>> + Send + 'static,
+) -> CodecResult<S, D>
 where
-    S: Strategy,
-    V: Variant,
+    St: Strategy,
+    S: Scheme,
     D: Digest,
 {
     let (span, proofs) = offload(strategy, 1, span, move |_| decode()).await;
@@ -134,14 +134,14 @@ where
 
 /// Runs codec work over locally held proofs on `strategy`. A worker panic is a local defect and
 /// propagates.
-async fn encode_local<S, V, D>(
-    strategy: S,
+async fn encode_local<St, S, D>(
+    strategy: St,
     span: Span,
-    operation: impl FnOnce() -> CodecCompletion<V, D> + Send + 'static,
-) -> CodecResult<V, D>
+    operation: impl FnOnce() -> CodecCompletion<S, D> + Send + 'static,
+) -> CodecResult<S, D>
 where
-    S: Strategy,
-    V: Variant,
+    St: Strategy,
+    S: Scheme,
     D: Digest,
 {
     let (span, completion) = offload(strategy, 1, span, move |_| operation()).await;
@@ -164,13 +164,13 @@ enum Outcome {
 }
 
 /// A retained view proof and its canonical encoding, cached once a peer requests it.
-pub(super) struct StoredProof<V: Variant, D: Digest> {
-    proof: Arc<ViewProof<V, D>>,
+pub(super) struct StoredProof<S: Scheme, D: Digest> {
+    proof: Arc<ViewProof<S, D>>,
     canonical: Option<Bytes>,
 }
 
-impl<V: Variant, D: Digest> From<ViewProof<V, D>> for StoredProof<V, D> {
-    fn from(proof: ViewProof<V, D>) -> Self {
+impl<S: Scheme, D: Digest> From<ViewProof<S, D>> for StoredProof<S, D> {
+    fn from(proof: ViewProof<S, D>) -> Self {
         Self {
             proof: Arc::new(proof),
             canonical: None,
@@ -178,16 +178,16 @@ impl<V: Variant, D: Digest> From<ViewProof<V, D>> for StoredProof<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Borrow<ViewProof<V, D>> for StoredProof<V, D> {
-    fn borrow(&self) -> &ViewProof<V, D> {
+impl<S: Scheme, D: Digest> Borrow<ViewProof<S, D>> for StoredProof<S, D> {
+    fn borrow(&self) -> &ViewProof<S, D> {
         &self.proof
     }
 }
 
 /// In-memory view proofs this node serves to peers.
-pub(super) type State<V, D> = Custody<V, D, StoredProof<V, D>>;
+pub(super) type State<S, D> = Custody<S, D, StoredProof<S, D>>;
 
-impl<V: Variant, D: Digest> State<V, D> {
+impl<S: Scheme, D: Digest> State<S, D> {
     /// Returns an empty state that refuses exits at the genesis view.
     pub(super) fn new() -> Self {
         let mut state = Self::empty();
@@ -196,7 +196,7 @@ impl<V: Variant, D: Digest> State<V, D> {
     }
 
     /// Returns the retained proof that resolves `view`.
-    pub(super) fn proof(&self, view: View) -> Option<Arc<ViewProof<V, D>>> {
+    pub(super) fn proof(&self, view: View) -> Option<Arc<ViewProof<S, D>>> {
         self.get(view).map(|stored| Arc::clone(&stored.proof))
     }
 
@@ -207,7 +207,7 @@ impl<V: Variant, D: Digest> State<V, D> {
     }
 
     /// Caches `canonical` as the encoding of `proof`, if `proof` is still retained.
-    fn cache(&mut self, proof: &Arc<ViewProof<V, D>>, canonical: Bytes) {
+    fn cache(&mut self, proof: &Arc<ViewProof<S, D>>, canonical: Bytes) {
         if let Some(stored) = self.get_mut(proof.view())
             && Arc::ptr_eq(&stored.proof, proof)
         {
@@ -223,10 +223,7 @@ fn key_view(key: U64) -> View {
 
 /// Returns `proof` if it can resolve `view`: an exit proof for exactly `view`, or an L-QC at or
 /// above it.
-fn usable_for<V: Variant, D: Digest>(
-    view: View,
-    proof: ViewProof<V, D>,
-) -> Option<ViewProof<V, D>> {
+fn usable_for<S: Scheme, D: Digest>(view: View, proof: ViewProof<S, D>) -> Option<ViewProof<S, D>> {
     let useful = match &proof {
         ViewProof::Nullification(proof) => proof.view() == view,
         ViewProof::Vqc(proof) => proof.view() == view,
@@ -236,38 +233,38 @@ fn usable_for<V: Variant, D: Digest>(
 }
 
 /// Fetches and serves view proofs for one fixed epoch.
-pub(crate) struct Actor<E, H, P, V, B, T>
+pub(crate) struct Actor<E, H, P, S, B, T>
 where
     E: Clock + Spawner + Metrics + Rng,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     T: Strategy,
 {
     context: ContextCell<E>,
-    scheme: Scheme<P, V>,
+    scheme: Generic<S>,
     blocker: B,
     strategy: T,
     fetch_timeout: NonZeroDuration,
     mailbox_size: NonZeroUsize,
-    mailbox: mailbox::Receiver<Message<V, H::Digest>>,
-    queries: mailbox::UnreliableReceiver<Serve<V, H::Digest>>,
+    mailbox: mailbox::Receiver<Message<S, H::Digest>>,
+    queries: mailbox::UnreliableReceiver<Serve<S, H::Digest>>,
     metrics: ActorMetrics,
     _hasher: PhantomData<H>,
 }
 
-impl<E, H, P, V, B, T> Actor<E, H, P, V, B, T>
+impl<E, H, P, S, B, T> Actor<E, H, P, S, B, T>
 where
     E: Clock + Spawner + Metrics + Rng,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     T: Strategy,
 {
     /// Creates the resolver and its voter-facing control and query mailboxes.
-    pub(crate) fn new(context: E, config: Config<P, V, B, T>) -> (Self, Mailbox<V, H::Digest>) {
+    pub(crate) fn new(context: E, config: Config<S, B, T>) -> (Self, Mailbox<S, H::Digest>) {
         let (sender, receiver) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let (query_sender, query_receiver) =
             mailbox::new_unreliable(context.child("queries"), config.mailbox_size);
@@ -291,7 +288,7 @@ where
     /// Starts the resolver over the epoch's registered resolver plane.
     pub(crate) fn start(
         mut self,
-        voter: Resolutions<V, H::Digest>,
+        voter: Resolutions<S, H::Digest>,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(voter, network))
@@ -300,7 +297,7 @@ where
     /// Starts the p2p engine over the committee and serves until shutdown.
     async fn run(
         self,
-        voter: Resolutions<V, H::Digest>,
+        voter: Resolutions<S, H::Digest>,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
         let Self {
@@ -367,39 +364,39 @@ where
 }
 
 /// The running resolver: its inputs, the p2p fetcher, retained proofs, and in-flight work.
-struct Service<E, H, P, V, T>
+struct Service<E, H, P, S, T>
 where
     E: Clock + Spawner + Metrics,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     T: Strategy,
 {
     context: ContextCell<E>,
     epoch: Epoch,
     codec: CodecConfig,
     strategy: T,
-    mailbox: mailbox::Receiver<Message<V, H::Digest>>,
-    queries: mailbox::UnreliableReceiver<Serve<V, H::Digest>>,
+    mailbox: mailbox::Receiver<Message<S, H::Digest>>,
+    queries: mailbox::UnreliableReceiver<Serve<S, H::Digest>>,
     handler: mailbox::Receiver<HandlerMessage>,
     fetcher: p2p::Mailbox<U64, P, ResolutionJob>,
     engine: Handle<()>,
-    voter: Resolutions<V, H::Digest>,
-    state: State<V, H::Digest>,
+    voter: Resolutions<S, H::Digest>,
+    state: State<S, H::Digest>,
     outstanding: BTreeMap<ResolutionJob, Origin>,
-    pending_local: PendingLocal<V, H::Digest>,
+    pending_local: PendingLocal<S, H::Digest>,
     verdicts: Vec<Verdict>,
-    codecs: CodecResults<V, H::Digest>,
+    codecs: CodecResults<S, H::Digest>,
     metrics: ActorMetrics,
     _hasher: PhantomData<H>,
 }
 
-impl<E, H, P, V, T> Service<E, H, P, V, T>
+impl<E, H, P, S, T> Service<E, H, P, S, T>
 where
     E: Clock + Spawner + Metrics,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     T: Strategy,
 {
     async fn run(mut self) {
@@ -456,7 +453,7 @@ where
     }
 
     /// Applies one finished codec job.
-    fn on_codec(&mut self, completion: CodecCompletion<V, H::Digest>) {
+    fn on_codec(&mut self, completion: CodecCompletion<S, H::Digest>) {
         match completion {
             CodecCompletion::Decoded {
                 proofs: None,
@@ -501,7 +498,7 @@ where
     }
 
     /// Applies one control message from the voter.
-    fn on_control(&mut self, message: Message<V, H::Digest>) {
+    fn on_control(&mut self, message: Message<S, H::Digest>) {
         match message {
             Message::Resolve(request) => self.on_resolve(request),
             Message::Cancel { job } => self.retire(job, Outcome::Cancelled),
@@ -599,7 +596,7 @@ where
         }
         let codec = self.codec;
         let decode = move || {
-            let proof = ViewProof::<V, H::Digest>::decode_cfg(value, &codec)
+            let proof = ViewProof::<S, H::Digest>::decode_cfg(value, &codec)
                 .ok()
                 .and_then(|proof| usable_for(requested, proof))?;
             let proofs = repeat_n(proof, delivery.subscribers.len().get())
@@ -617,7 +614,7 @@ where
     }
 
     /// Hands one resolved proof to the voter.
-    fn complete(&self, job: ResolutionJob, origin: &Origin, proof: ViewProof<V, H::Digest>) {
+    fn complete(&self, job: ResolutionJob, origin: &Origin, proof: ViewProof<S, H::Digest>) {
         self.metrics.resolved.inc();
         self.metrics
             .resolved_latency

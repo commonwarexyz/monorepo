@@ -13,6 +13,7 @@ use super::{
 use crate::{
     multimmit::{
         config::ProposalPolicy,
+        scheme::Scheme,
         types::{
             Anchor, BlockRef, ChainProposal, DigestedLeader, Extension, LeaderBlock, Position,
             VoteBody,
@@ -20,12 +21,12 @@ use crate::{
     },
     types::{Height, Round},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::collections::BTreeMap;
 
 /// A resumable vote-body construction for one leader block.
-pub(crate) struct VoteBodyPass<V: Variant, D: Digest> {
-    leader: LeaderBlock<V, D>,
+pub(crate) struct VoteBodyPass<S: Scheme, D: Digest> {
+    leader: LeaderBlock<S, D>,
     // A vote decision uses one immutable DA frontier even if later validations complete while
     // its budgeted body construction is still in progress.
     da_frontiers: Vec<Height>,
@@ -36,7 +37,7 @@ pub(crate) struct VoteBodyPass<V: Variant, D: Digest> {
     extension_bound: usize,
 }
 
-impl<V: Variant, D: Digest> VoteBodyPass<V, D> {
+impl<S: Scheme, D: Digest> VoteBodyPass<S, D> {
     /// Returns the event that reports this pass beginning.
     pub(crate) const fn started(&self) -> VoteBuild {
         VoteBuild::Started {
@@ -115,13 +116,13 @@ pub(crate) enum VoteBodyProgress<D: Digest> {
     },
 }
 
-impl<V: Variant, D: Digest> ChainState<V, D> {
+impl<S: Scheme, D: Digest> ChainState<S, D> {
     /// Builds a proposal from the highest held certificate and the policy's suffix, bounded by the
     /// chain's pipeline depth.
     pub(crate) fn propose_chain(
         &self,
         tip: BlockRef<D>,
-    ) -> Result<ChainProposal<V, D>, ChainError> {
+    ) -> Result<ChainProposal<S, D>, ChainError> {
         let chain = tip.chain().index();
         let state = self.da.chains.get(chain).ok_or(ChainError::Context)?;
         let certified = state
@@ -163,7 +164,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     }
 
     /// Starts a resumable vote-body pass for `leader` against the current DA frontiers.
-    pub(crate) fn begin_vote_body_pass(&self, leader: LeaderBlock<V, D>) -> VoteBodyPass<V, D> {
+    pub(crate) fn begin_vote_body_pass(&self, leader: LeaderBlock<S, D>) -> VoteBodyPass<S, D> {
         VoteBodyPass {
             leader,
             da_frontiers: self
@@ -192,7 +193,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     /// within a single drive rather than trickling out one payload entry per credit.
     pub(crate) fn resume_vote_body_pass<H: Hasher<Digest = D>>(
         &self,
-        pass: &mut VoteBodyPass<V, D>,
+        pass: &mut VoteBodyPass<S, D>,
     ) -> Result<VoteBodyProgress<D>, ChainError> {
         if pass.chain == pass.leader.proposals().len() {
             let body = VoteBody::for_leader(
@@ -220,7 +221,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     }
 
     /// Summarizes the body a completed `pass` chose.
-    fn vote_build_stats(&self, pass: &VoteBodyPass<V, D>) -> VoteBuildStats {
+    fn vote_build_stats(&self, pass: &VoteBodyPass<S, D>) -> VoteBuildStats {
         let mut stats = VoteBuildStats::default();
         for (((proposal, position), extension), limits) in pass
             .leader
@@ -259,7 +260,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     /// one is given. The extension holds at most the chain's own extension bound.
     fn chain_vote_body<H: Hasher<Digest = D>>(
         &self,
-        proposal: &ChainProposal<V, D>,
+        proposal: &ChainProposal<S, D>,
         chain: usize,
         frontier: Option<Height>,
     ) -> Result<(Position, Extension<D>), ChainError> {
@@ -318,7 +319,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     /// Builds the full vote body for `leader` in one call.
     pub(crate) fn vote_body<H: Hasher<Digest = D>>(
         &self,
-        leader: &LeaderBlock<V, D>,
+        leader: &LeaderBlock<S, D>,
     ) -> Result<VoteBody<D>, ChainError> {
         let config = self.config;
         let mut positions = Vec::with_capacity(config.chains());

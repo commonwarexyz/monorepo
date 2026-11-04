@@ -58,6 +58,7 @@ use crate::{
             config::{ArchiveConfig, ArchiveMode, Config, Retention, Start},
             types::Families,
         },
+        scheme::Scheme,
         types::{
             BlockRef, Body, CertificateId, CodecConfig, Lqc, TipRecord, TransactionBlock,
             genesis_history,
@@ -67,7 +68,7 @@ use crate::{
 };
 pub(crate) use admission::{AdmissionFuture, AdmissionWrite};
 use commonware_codec::{CodecShared, EncodeSize as _};
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::Handle;
 use commonware_storage::{Context, archive::prunable, translator::Translator};
 use commonware_utils::Array;
@@ -113,14 +114,14 @@ impl<D: Digest> StoredRef<D> {
 }
 
 /// One unfinalized artifact admitted into pending storage.
-pub(crate) enum Admission<H, V, B>
+pub(crate) enum Admission<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// An L-QC for `view` with certificate identity `id`.
-    Lqc(View, CertificateId<H::Digest>, Arc<Lqc<V, H::Digest>>),
+    Lqc(View, CertificateId<H::Digest>, Arc<Lqc<S, H::Digest>>),
     /// A tip-history opening committed by the leader of `view`, keyed by its commitment.
     History(View, H::Digest, Arc<TipRecord<H::Digest>>),
     /// A complete producer block.
@@ -128,14 +129,14 @@ where
 }
 
 /// An admission and whether its caller waits for it to become durable.
-pub(crate) struct StagedAdmission<H, V, B>
+pub(crate) struct StagedAdmission<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// The admitted artifact.
-    pub(crate) admission: Admission<H, V, B>,
+    pub(crate) admission: Admission<H, S, B>,
     /// Whether the admission belongs in the next durability cut. Blocks always do.
     pub(crate) durable: bool,
 }
@@ -185,24 +186,24 @@ trait StartSync: Sized + Send {
     fn start_sync(self) -> impl Future<Output = Result<(Self, Handle<()>), Error>> + Send;
 }
 
-impl<T, E, K, V> StartSync for prunable::Archive<T, E, K, V>
+impl<T, E, K, S> StartSync for prunable::Archive<T, E, K, S>
 where
     T: Translator,
     E: Context,
     K: Array,
-    V: CodecShared,
+    S: CodecShared,
 {
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
         Ok(commonware_storage::archive::Archive::start_sync(self).await?)
     }
 }
 
-impl<T, E, K, V> StartSync for FinalizedArchive<T, E, K, V>
+impl<T, E, K, S> StartSync for FinalizedArchive<T, E, K, S>
 where
     T: Translator,
     E: Context,
     K: Array,
-    V: CodecShared,
+    S: CodecShared,
 {
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
         Self::start_sync(self).await
@@ -210,7 +211,10 @@ where
 }
 
 /// Starts durability for `store` when `on`, returning it with any sync handle.
-async fn start_sync_if<S: StartSync>(store: S, on: bool) -> Result<(S, Option<Handle<()>>), Error> {
+async fn start_sync_if<Ss: StartSync>(
+    store: Ss,
+    on: bool,
+) -> Result<(Ss, Option<Handle<()>>), Error> {
     if !on {
         return Ok((store, None));
     }
@@ -219,18 +223,18 @@ async fn start_sync_if<S: StartSync>(store: S, on: bool) -> Result<(S, Option<Ha
 }
 
 /// Opens one finalized archive with the backend `mode` selects.
-async fn open_finalized<T, E, K, V>(
+async fn open_finalized<T, E, K, S>(
     context: E,
     mode: ArchiveMode,
     archive: &ArchiveConfig<T>,
     prefix: String,
-    codec: V::Cfg,
-) -> Result<FinalizedArchive<T, E, K, V>, Error>
+    codec: S::Cfg,
+) -> Result<FinalizedArchive<T, E, K, S>, Error>
 where
     T: Translator,
     E: Context,
     K: Array,
-    V: CodecShared,
+    S: CodecShared,
 {
     match mode {
         ArchiveMode::Prunable => {
@@ -243,20 +247,20 @@ where
 }
 
 /// Exclusive mutable archive state owned by the catalog actor.
-pub(crate) struct CatalogStore<T, E, H, V, B>
+pub(crate) struct CatalogStore<T, E, H, S, B>
 where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
-    final_lqc: Owned<FinalLqc<T, E, H, V>>,
+    final_lqc: Owned<FinalLqc<T, E, H, S>>,
     /// Floors established by finalized L-QCs, at the same ordinals and with the same retention.
     final_floors: Owned<FinalFloors<T, E, H>>,
     final_history: Owned<FinalHistory<T, E, H>>,
     final_blocks: Owned<FinalBlockRows<T, E, H>>,
-    pending_lqc: Owned<PendingLqc<T, E, H, V>>,
+    pending_lqc: Owned<PendingLqc<T, E, H, S>>,
     pending_history: Owned<PendingHistory<T, E, H>>,
     pending_blocks: PendingBlocks<E, H, B>,
     record: DurableRecord<E, CatalogState<H::Digest>>,
@@ -280,12 +284,12 @@ where
     codec_config: CodecConfig,
 }
 
-impl<T, E, H, V, B> CatalogStore<T, E, H, V, B>
+impl<T, E, H, S, B> CatalogStore<T, E, H, S, B>
 where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Opens every catalog-owned store under `context` and seeds a fresh namespace from
@@ -294,7 +298,7 @@ where
     /// A fresh floor start runs the installation protocol, so a crash during seeding recovers
     /// like any other interrupted installation. An interrupted installation or commit cleanup is
     /// left for [`Self::recover_install`] and [`Self::recover_commit`].
-    pub(crate) async fn open(context: &E, config: &Config<T, V, B>) -> Result<Self, Error> {
+    pub(crate) async fn open(context: &E, config: &Config<T, S, B>) -> Result<Self, Error> {
         let name = |suffix: &str| format!("{}_{suffix}", config.partition_prefix);
         let chains = config.chains();
         let layout = config.retention;
@@ -427,7 +431,7 @@ where
 
     /// Returns the checkpoint a fresh namespace starts from: genesis, or the parent of a floor.
     fn start_checkpoint(
-        config: &Config<T, V, B>,
+        config: &Config<T, S, B>,
         archive_layout: Retention,
     ) -> Result<Checkpoint<H::Digest>, Error> {
         let parts = match &config.start {
@@ -468,7 +472,7 @@ where
     }
 
     /// Makes a fresh namespace's first record durable.
-    async fn seed(&mut self, config: &Config<T, V, B>) -> Result<(), Error> {
+    async fn seed(&mut self, config: &Config<T, S, B>) -> Result<(), Error> {
         let (floor_generation, floor) = match &config.start {
             Start::Genesis(_) => return self.sync_state(self.state.clone()).await,
             Start::Floor {

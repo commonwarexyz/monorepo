@@ -20,14 +20,14 @@ use std::sync::Arc;
 type Digest<H> = <H as Hasher>::Digest;
 
 /// Pending L-QCs, indexed by view and keyed by certificate digest.
-pub(crate) type PendingLqc<T, E, H, V> = prunable::Archive<T, E, Digest<H>, Arc<Lqc<V, Digest<H>>>>;
+pub(crate) type PendingLqc<T, E, H, S> = prunable::Archive<T, E, Digest<H>, Arc<Lqc<S, Digest<H>>>>;
 
 /// Pending tip-history openings, indexed by view and keyed by commitment.
 pub(crate) type PendingHistory<T, E, H> =
     prunable::Archive<T, E, Digest<H>, Arc<TipRecord<Digest<H>>>>;
 
 /// Finalized L-QCs, indexed by L-QC ordinal and keyed by certificate digest.
-pub(crate) type FinalLqc<T, E, H, V> = FinalizedArchive<T, E, Digest<H>, Arc<Lqc<V, Digest<H>>>>;
+pub(crate) type FinalLqc<T, E, H, S> = FinalizedArchive<T, E, Digest<H>, Arc<Lqc<S, Digest<H>>>>;
 
 /// Finalized tip-history openings, indexed by history ordinal and keyed by commitment.
 pub(crate) type FinalHistory<T, E, H> =
@@ -50,17 +50,17 @@ pub(crate) type FinalBody<T, E, H, B> =
 ///
 /// The presence check does not decode stored values. Consumes the archive and returns it only on
 /// success, so a failed or canceled put loses the handle.
-pub(crate) async fn put_once<T, E, K, V>(
-    archive: prunable::Archive<T, E, K, V>,
+pub(crate) async fn put_once<T, E, K, S>(
+    archive: prunable::Archive<T, E, K, S>,
     index: u64,
     key: K,
-    value: V,
-) -> Result<prunable::Archive<T, E, K, V>, Error>
+    value: S,
+) -> Result<prunable::Archive<T, E, K, S>, Error>
 where
     T: Translator,
     E: Context,
     K: Array,
-    V: CodecShared,
+    S: CodecShared,
 {
     if archive.has_at(index, &key).await? {
         return Ok(archive);
@@ -74,23 +74,23 @@ where
 /// the value lets both backends verify the exact `(index, key)` identity before returning data or
 /// accepting an idempotent put.
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-struct Entry<K, V> {
+struct Entry<K, S> {
     key: K,
-    value: V,
+    value: S,
 }
 
-impl<K: Array, V: CodecShared> Read for Entry<K, V> {
-    type Cfg = V::Cfg;
+impl<K: Array, S: CodecShared> Read for Entry<K, S> {
+    type Cfg = S::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             key: K::read_cfg(buf, &())?,
-            value: V::read_cfg(buf, cfg)?,
+            value: S::read_cfg(buf, cfg)?,
         })
     }
 }
 
-impl<K: Array, V: CodecShared> Write for Entry<K, V> {
+impl<K: Array, S: CodecShared> Write for Entry<K, S> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.key.write(buf);
         self.value.write(buf);
@@ -102,7 +102,7 @@ impl<K: Array, V: CodecShared> Write for Entry<K, V> {
     }
 }
 
-impl<K: Array, V: CodecShared> EncodeSize for Entry<K, V> {
+impl<K: Array, S: CodecShared> EncodeSize for Entry<K, S> {
     fn encode_size(&self) -> usize {
         self.key.encode_size() + self.value.encode_size()
     }
@@ -116,22 +116,22 @@ impl<K: Array, V: CodecShared> EncodeSize for Entry<K, V> {
 ///
 /// Mutating methods consume the archive and return it only on success. A mutation error or a
 /// canceled mutation future therefore destroys the sole handle, matching the storage contract.
-pub(crate) struct FinalizedArchive<T, E, K, V>(Backend<T, E, K, V>)
+pub(crate) struct FinalizedArchive<T, E, K, S>(Backend<T, E, K, S>)
 where
     T: Translator,
     E: Context,
     K: Array,
-    V: CodecShared;
+    S: CodecShared;
 
-enum Backend<T, E, K, V>
+enum Backend<T, E, K, S>
 where
     T: Translator,
     E: Context,
     K: Array,
-    V: CodecShared,
+    S: CodecShared,
 {
-    Prunable(prunable::Archive<T, E, K, Entry<K, V>>),
-    Immutable(immutable::Archive<E, K, Entry<K, V>>),
+    Prunable(prunable::Archive<T, E, K, Entry<K, S>>),
+    Immutable(immutable::Archive<E, K, Entry<K, S>>),
 }
 
 /// Evaluates `$body` with `$archive` bound to whichever backend `$backend` holds.
@@ -154,17 +154,17 @@ macro_rules! consume {
     };
 }
 
-impl<T, E, K, V> FinalizedArchive<T, E, K, V>
+impl<T, E, K, S> FinalizedArchive<T, E, K, S>
 where
     T: Translator,
     E: Context,
     K: Array,
-    V: CodecShared,
+    S: CodecShared,
 {
     /// Opens a prunable finalized archive.
     pub(crate) async fn init_prunable(
         context: E,
-        config: prunable::Config<T, V::Cfg>,
+        config: prunable::Config<T, S::Cfg>,
     ) -> Result<Self, Error> {
         let archive = prunable::Archive::init(context, config).await?;
         Ok(Self(Backend::Prunable(archive)))
@@ -173,20 +173,20 @@ where
     /// Opens an immutable finalized archive.
     pub(crate) async fn init_immutable(
         context: E,
-        config: immutable::Config<V::Cfg>,
+        config: immutable::Config<S::Cfg>,
     ) -> Result<Self, Error> {
         let archive = immutable::Archive::init(context, config).await?;
         Ok(Self(Backend::Immutable(archive)))
     }
 
     /// Gets the exact key and value stored at an index.
-    pub(crate) async fn get_at(&self, index: u64) -> Result<Option<(K, V)>, Error> {
+    pub(crate) async fn get_at(&self, index: u64) -> Result<Option<(K, S)>, Error> {
         let entry = dispatch!(&self.0, archive => archive.get(Identifier::Index(index)).await?);
         Ok(entry.map(|entry| (entry.key, entry.value)))
     }
 
     /// Gets a value by key after verifying the value carries the requested key.
-    pub(crate) async fn get_by_key(&self, key: &K) -> Result<Option<V>, Error> {
+    pub(crate) async fn get_by_key(&self, key: &K) -> Result<Option<S>, Error> {
         let entry = dispatch!(&self.0, archive => archive.get(Identifier::Key(key)).await?);
         match entry {
             Some(entry) if entry.key == *key => Ok(Some(entry.value)),
@@ -219,7 +219,7 @@ where
     ///
     /// Repeating the same identity is idempotent. Reusing an occupied index with another key is
     /// an error and consumes the archive handle.
-    pub(crate) async fn put(self, index: u64, key: K, value: V) -> Result<Self, Error> {
+    pub(crate) async fn put(self, index: u64, key: K, value: S) -> Result<Self, Error> {
         let existing = dispatch!(&self.0, archive => archive.get(Identifier::Index(index)).await?);
         if let Some(existing) = existing {
             return if existing.key == key {

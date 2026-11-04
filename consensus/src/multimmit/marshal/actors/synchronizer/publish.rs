@@ -19,9 +19,10 @@ use crate::multimmit::{
         },
         types::LqcVerifier,
     },
+    scheme::Scheme,
     types::{Body, TransactionBlock},
 };
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use commonware_macros::select;
 use std::{mem, sync::Arc};
 
@@ -37,15 +38,15 @@ pub(super) struct PlannedOutput<H: Hasher, B: Body<H>> {
 }
 
 /// One bounded checkpoint-last publication assembled from compact ordering metadata.
-pub(super) struct PublicationBatch<H: Hasher, V: Variant, B: Body<H>> {
-    pub selected: Vec<SelectedLqc<V, H>>,
+pub(super) struct PublicationBatch<H: Hasher, S: Scheme, B: Body<H>> {
+    pub selected: Vec<SelectedLqc<S, H>>,
     pub history: Vec<HistoryOpening<H>>,
     pub outputs: Vec<PlannedOutput<H, B>>,
     /// Encoded block bytes of `outputs`.
     pub output_bytes: u64,
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> PublicationBatch<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> PublicationBatch<H, S, B> {
     pub(super) fn new(max_outputs: usize, selected: usize) -> Self {
         Self {
             selected: Vec::with_capacity(selected.min(max_outputs)),
@@ -60,7 +61,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> PublicationBatch<H, V, B> {
     }
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> Default for PublicationBatch<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> Default for PublicationBatch<H, S, B> {
     fn default() -> Self {
         Self {
             selected: Vec::new(),
@@ -71,18 +72,18 @@ impl<H: Hasher, V: Variant, B: Body<H>> Default for PublicationBatch<H, V, B> {
     }
 }
 
-impl<I, C, F, S, K, Q, H, V, B> Core<I, C, F, S, K, Q, H, V, B>
+impl<I, C, F, Hs, K, Q, H, S, B> Core<I, C, F, Hs, K, Q, H, S, B>
 where
-    I: Absorb<V, H::Digest>,
-    C: CatalogPort<H, V, B>,
-    F: Fetcher<H, V, B>,
-    S: HistoryStack<H>,
+    I: Absorb<S, H::Digest>,
+    C: CatalogPort<H, S, B>,
+    F: Fetcher<H, S, B>,
+    Hs: HistoryStack<H>,
     K: BlockStack<H::Digest>,
-    Q: LqcVerifier<H, V>,
+    Q: LqcVerifier<H, S>,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
-    Error: From<C::Error> + From<F::Error> + From<S::Error> + From<K::Error>,
+    Error: From<C::Error> + From<F::Error> + From<Hs::Error> + From<K::Error>,
 {
     /// Reconciles the output filling `slot` and adds it to `batch`, committing the batch first
     /// when the output would overflow its byte bound.
@@ -91,7 +92,7 @@ where
         slot: Slot<H::Digest>,
         custody: CustodyRef<H::Digest>,
         block: Option<Arc<TransactionBlock<H, B>>>,
-        batch: &mut PublicationBatch<H, V, B>,
+        batch: &mut PublicationBatch<H, S, B>,
     ) -> Result<(), Error> {
         let reference = custody.reference();
         let encoded_len = custody.meta().encoded_len();
@@ -130,7 +131,7 @@ where
     /// emitted frontier.
     pub(super) async fn commit_pending(
         &mut self,
-        batch: &mut PublicationBatch<H, V, B>,
+        batch: &mut PublicationBatch<H, S, B>,
     ) -> Result<(), Error> {
         if batch.is_empty() {
             return Ok(());
@@ -164,7 +165,7 @@ where
             bytes = batch.output_bytes,
         )
     )]
-    pub(super) async fn commit(&mut self, batch: PublicationBatch<H, V, B>) -> Result<(), Error> {
+    pub(super) async fn commit(&mut self, batch: PublicationBatch<H, S, B>) -> Result<(), Error> {
         if batch.is_empty() {
             return Ok(());
         }

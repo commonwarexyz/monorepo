@@ -26,9 +26,10 @@ use crate::multimmit::{
         },
         types::{CustodyValues, Reply},
     },
+    scheme::Scheme,
     types::{BlockRef, Body, TransactionBlock},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{
     Clock, Handle, Metrics as RuntimeMetrics, Spawner, telemetry::metrics::histogram,
 };
@@ -85,26 +86,26 @@ pub(super) type CustodyWaiter<H> = (
 );
 
 /// Admissions of a validated batch not yet written.
-type Remaining<H, V, B> = Peekable<Unwritten<H, V, B>>;
+type Remaining<H, S, B> = Peekable<Unwritten<H, S, B>>;
 
 /// Admitted blocks and their references.
 pub(super) type AdmittedBlocks<H, B> =
     Vec<(BlockRef<<H as Hasher>::Digest>, Arc<TransactionBlock<H, B>>)>;
 
 /// Yields the admissions of staged writes in order.
-struct Unwritten<H, V, B>(vec::IntoIter<StagedAdmission<H, V, B>>)
+struct Unwritten<H, S, B>(vec::IntoIter<StagedAdmission<H, S, B>>)
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>;
 
-impl<H, V, B> Iterator for Unwritten<H, V, B>
+impl<H, S, B> Iterator for Unwritten<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
-    type Item = Admission<H, V, B>;
+    type Item = Admission<H, S, B>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next().map(|write| write.admission)
@@ -144,13 +145,13 @@ impl<D: Digest> CustodyLookup<D> {
 }
 
 /// One admission request taken from the command lane.
-pub(super) struct AdmitRequest<H, V, B>
+pub(super) struct AdmitRequest<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
-    pub(super) admissions: Vec<Admission<H, V, B>>,
+    pub(super) admissions: Vec<Admission<H, S, B>>,
     pub(super) reply: AdmissionReply,
     /// The caller's span.
     pub(super) span: Span,
@@ -187,52 +188,52 @@ where
 }
 
 /// An admission command whose write owns a pending journal.
-pub(super) struct Writing<T, E, H, V, B>
+pub(super) struct Writing<T, E, H, S, B>
 where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// The started write.
-    write: Instrumented<AdmissionFuture<T, E, H, V, B>>,
-    remaining: Remaining<H, V, B>,
+    write: Instrumented<AdmissionFuture<T, E, H, S, B>>,
+    remaining: Remaining<H, S, B>,
     batch: Batch<H, B>,
     turn: Turn,
 }
 
 /// Where an admission command continues.
-enum Resume<H, V, B>
+enum Resume<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Start a batch with this request.
-    Start(AdmitRequest<H, V, B>),
+    Start(AdmitRequest<H, S, B>),
     /// Write the rest of a validated batch.
-    Write(Batch<H, B>, Remaining<H, V, B>),
+    Write(Batch<H, B>, Remaining<H, S, B>),
     /// Continue with the next queued admission.
     Next,
 }
 
 /// The outcome of one step of an admission command.
-enum Step<T, E, H, V, B>
+enum Step<T, E, H, S, B>
 where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Write this validated batch.
-    Write(Batch<H, B>, Remaining<H, V, B>),
+    Write(Batch<H, B>, Remaining<H, S, B>),
     /// A write owns a journal until it finishes.
     Writing(
-        Instrumented<AdmissionFuture<T, E, H, V, B>>,
+        Instrumented<AdmissionFuture<T, E, H, S, B>>,
         Batch<H, B>,
-        Remaining<H, V, B>,
+        Remaining<H, S, B>,
     ),
     /// The request is parked until the waiting cut has room.
     Parked,
@@ -241,12 +242,12 @@ where
 }
 
 /// Buffered admissions and the durability cuts that make them custody.
-pub(super) struct AdmissionState<T, E, H, V, B>
+pub(super) struct AdmissionState<T, E, H, S, B>
 where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// The cut accumulating buffered admissions.
@@ -260,15 +261,15 @@ where
     /// Most admissions one cut holds.
     capacity: usize,
     /// The admission command whose write owns a journal.
-    writing: Option<Writing<T, E, H, V, B>>,
+    writing: Option<Writing<T, E, H, S, B>>,
 }
 
-impl<T, E, H, V, B> AdmissionState<T, E, H, V, B>
+impl<T, E, H, S, B> AdmissionState<T, E, H, S, B>
 where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     pub(super) fn new(capacity: usize, custody_waiter_capacity: usize) -> Self {
@@ -314,7 +315,7 @@ where
     }
 
     /// Resolves once the in-flight write finishes, and never while no write is in flight.
-    pub(super) async fn written(&mut self) -> Result<AdmissionWrite<T, E, H, V, B>, StorageError> {
+    pub(super) async fn written(&mut self) -> Result<AdmissionWrite<T, E, H, S, B>, StorageError> {
         match &mut self.writing {
             Some(writing) => (&mut writing.write).await,
             None => std::future::pending().await,
@@ -322,19 +323,19 @@ where
     }
 }
 
-impl<R, T, E, H, V, B> Catalog<R, T, E, H, V, B>
+impl<R, T, E, H, S, B> Catalog<R, T, E, H, S, B>
 where
     R: Clock + Spawner + RuntimeMetrics,
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Runs an admission command until it finishes, parks, or a write owns a journal.
     pub(super) fn admit(
         &mut self,
-        request: AdmitRequest<H, V, B>,
+        request: AdmitRequest<H, S, B>,
         turn: Turn,
     ) -> Result<(), Fatal> {
         let instrument = turn.current().clone();
@@ -344,7 +345,7 @@ where
     /// Resumes the admission command whose write returned its journal.
     pub(super) fn finish_write(
         &mut self,
-        result: Result<AdmissionWrite<T, E, H, V, B>, StorageError>,
+        result: Result<AdmissionWrite<T, E, H, S, B>, StorageError>,
     ) -> Result<(), Fatal> {
         let Writing {
             remaining,
@@ -372,7 +373,7 @@ where
 
     /// Runs admission batches until one parks, a write owns a journal, or no queued admission
     /// can continue the command.
-    fn drive_admission(&mut self, mut resume: Resume<H, V, B>, turn: Turn) -> Result<(), Fatal> {
+    fn drive_admission(&mut self, mut resume: Resume<H, S, B>, turn: Turn) -> Result<(), Fatal> {
         loop {
             let step = match resume {
                 Resume::Start(request) => self.start_batch(request)?,
@@ -407,7 +408,7 @@ where
 
     /// Takes the next queued admission to continue the command, unless a request is parked or
     /// the waiting cut is full.
-    fn next_admission(&mut self) -> Option<AdmitRequest<H, V, B>> {
+    fn next_admission(&mut self) -> Option<AdmitRequest<H, S, B>> {
         if self.intake.commands.parked().is_some() || self.admission.is_full() {
             return None;
         }
@@ -416,7 +417,7 @@ where
 
     /// Takes the next queued command if it is an admission of at most `room` items, parking any
     /// other command.
-    fn try_next_admission(&mut self, room: usize) -> Option<AdmitRequest<H, V, B>> {
+    fn try_next_admission(&mut self, room: usize) -> Option<AdmitRequest<H, S, B>> {
         let mut command = self.intake.commands.try_recv()?;
         self.note_intake(&mut command);
         match command.message {
@@ -442,8 +443,8 @@ where
     /// Answers, parks, or validates a batch starting with `request`.
     fn start_batch(
         &mut self,
-        request: AdmitRequest<H, V, B>,
-    ) -> Result<Step<T, E, H, V, B>, Fatal> {
+        request: AdmitRequest<H, S, B>,
+    ) -> Result<Step<T, E, H, S, B>, Fatal> {
         let AdmitRequest {
             admissions,
             reply,
@@ -486,8 +487,8 @@ where
     /// Validates each request of a batch and reserves its durability footprint.
     fn validate_batch(
         &mut self,
-        requests: Vec<AdmitRequest<H, V, B>>,
-    ) -> Result<Step<T, E, H, V, B>, Fatal> {
+        requests: Vec<AdmitRequest<H, S, B>>,
+    ) -> Result<Step<T, E, H, S, B>, Fatal> {
         let capacity = requests
             .iter()
             .map(|request| request.admissions.len())
@@ -557,8 +558,8 @@ where
     fn write_batch(
         &mut self,
         batch: Batch<H, B>,
-        mut remaining: Remaining<H, V, B>,
-    ) -> Result<Step<T, E, H, V, B>, Fatal> {
+        mut remaining: Remaining<H, S, B>,
+    ) -> Result<Step<T, E, H, S, B>, Fatal> {
         while remaining.peek().is_some() {
             match outcome(self.stores.start_admission(&mut remaining))? {
                 Ok(Some(write)) => {

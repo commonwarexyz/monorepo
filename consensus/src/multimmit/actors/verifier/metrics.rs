@@ -3,9 +3,10 @@
 use crate::multimmit::{
     actors::metrics::{COUNT_POW2_FROM_ONE, COUNT_POW2_FROM_ZERO},
     machine::VerifyJob,
+    scheme::Scheme,
     types::Artifact,
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use commonware_runtime::{
     Metrics as MetricsTrait,
     telemetry::metrics::{Histogram, MetricsExt as _, histogram},
@@ -42,7 +43,7 @@ impl VerificationKind {
     ];
 
     /// Classifies `job` by the kinds of its items.
-    pub(super) fn of<V: Variant, D: Digest>(job: &VerifyJob<V, D>) -> Self {
+    pub(super) fn of<S: Scheme, D: Digest>(job: &VerifyJob<S, D>) -> Self {
         job.items()
             .iter()
             .map(|item| match item.artifact() {
