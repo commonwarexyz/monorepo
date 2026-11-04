@@ -1745,9 +1745,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
             // Record only successful runs. An error can skip work and bias the estimates down.
             if let (Some(start), Ok(_)) = (start, &result) {
-                let elapsed = start.elapsed();
-                let busy = meter.map_or(elapsed, |meter| meter.busy());
-                policy.record_run(caller, len, work, self.parallelism, plan, elapsed, busy);
+                let wall = start.elapsed();
+                let busy = meter.map_or(wall, |meter| meter.busy());
+                let sample = policy::RunSample { wall, busy };
+                policy.record_run(caller, len, work, self.parallelism, plan, sample);
             }
             result
         }
@@ -3999,8 +4000,10 @@ mod test {
                 placement: crate::policy::Placement::Local,
                 measure: true,
             },
-            std::time::Duration::from_micros(100),
-            std::time::Duration::from_micros(400),
+            crate::policy::RunSample {
+                wall: std::time::Duration::from_micros(100),
+                busy: std::time::Duration::from_micros(400),
+            },
         );
         policy.record_execution(
             caller,

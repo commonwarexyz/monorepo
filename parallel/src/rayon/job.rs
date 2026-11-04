@@ -119,8 +119,11 @@ where
     }
 
     pub(super) unsafe fn run_inline(self, stolen: bool) -> R {
-        // Only the creator runs a job inline, already in the context the job captured.
-        debug_assert_eq!(Context::current(), self.context);
+        assert_eq!(
+            Context::current(),
+            self.context,
+            "a job must run inline in the context it captured"
+        );
         self.func.into_inner().unwrap()(stolen)
     }
 

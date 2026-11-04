@@ -74,7 +74,12 @@
 //! in completion order.
 
 use dashmap::DashMap;
-use std::{panic::Location, sync::Arc, time::Duration};
+use std::{
+    ops::{Index, IndexMut},
+    panic::Location,
+    sync::Arc,
+    time::Duration,
+};
 
 /// Calls between samples of the preferred path, so its estimate does not go stale.
 const PREFERRED_SAMPLE_INTERVAL: u32 = 10;
@@ -139,6 +144,21 @@ pub(super) enum Placement {
     /// or a worker's own group under a Local placement. An operation that runs on one group takes
     /// the least loaded group when its caller cannot get one in its domain.
     Local,
+}
+
+// Per-placement arrays, such as the estimates and cadences, index by placement.
+impl<T> Index<Placement> for [T; 2] {
+    type Output = T;
+
+    fn index(&self, placement: Placement) -> &T {
+        &self[placement as usize]
+    }
+}
+
+impl<T> IndexMut<Placement> for [T; 2] {
+    fn index_mut(&mut self, placement: Placement) -> &mut T {
+        &mut self[placement as usize]
+    }
 }
 
 /// The placements a run's caller may use.
@@ -250,7 +270,7 @@ impl Policy {
             // Until serial is measured, a placement's first sample leaves its serial
             // comparison due.
             if serial_ns.is_none() && entry.placement.estimate(placement).is_none() {
-                entry.cadences[placement as usize].saturate();
+                entry.cadences[placement].saturate();
             }
             (plan.execution, plan.measure) = (RunExecution::Parallel, true);
         }
@@ -258,12 +278,7 @@ impl Policy {
         plan
     }
 
-    /// Records the wall time of a run that followed `plan` and, for a parallel run, its busy time.
-    /// A serial run's busy time is its wall time, so `busy` is ignored for it.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "a parallel run reports both its wall and busy time"
-    )]
+    /// Records a run that followed `plan`. A serial run records only its wall time.
     pub(super) fn record_run(
         &self,
         caller: &'static Location<'static>,
@@ -271,8 +286,7 @@ impl Policy {
         work: usize,
         parallelism: usize,
         plan: RunPlan,
-        elapsed: Duration,
-        busy: Duration,
+        sample: RunSample,
     ) {
         if parallelism <= 1 {
             return;
@@ -280,10 +294,10 @@ impl Policy {
         let key = Key::new(caller, len, work, parallelism);
         let mut entry = self.run_entries.entry(key).or_default();
         match plan.execution {
-            RunExecution::Serial => entry.serial_ns.record(nanos(elapsed)),
+            RunExecution::Serial => entry.serial_ns.record(nanos(sample.wall)),
             RunExecution::Parallel => {
-                entry.placement.record(plan.placement, nanos(elapsed));
-                entry.busy_ns[plan.placement as usize].record(nanos(busy));
+                entry.placement.record(plan.placement, nanos(sample.wall));
+                entry.busy_ns[plan.placement].record(nanos(sample.busy));
             }
         }
     }
@@ -539,29 +553,6 @@ impl Policy {
             .map(|e| (e.serial_ns.get(), e.parallel_ns()))
     }
 
-    /// Records a run that followed `plan` with wall time `wall`, taking a parallel run's busy time
-    /// from [`perfect_busy`].
-    #[cfg(test)]
-    pub(super) fn record_perfect_run(
-        &self,
-        caller: &'static Location<'static>,
-        len: usize,
-        work: usize,
-        parallelism: usize,
-        plan: RunPlan,
-        wall: Duration,
-    ) {
-        self.record_run(
-            caller,
-            len,
-            work,
-            parallelism,
-            plan,
-            wall,
-            perfect_busy(wall),
-        );
-    }
-
     /// The Wide and Local busy-time estimates, in nanoseconds, of the run entry for this call
     /// site, or `None` when the entry does not exist. A placement's estimate is `None` until a
     /// parallel run is recorded there.
@@ -576,8 +567,8 @@ impl Policy {
         let key = Key::new(caller, len, work, parallelism);
         self.run_entries.get(&key).map(|entry| {
             (
-                entry.busy_ns[Placement::Wide as usize].get(),
-                entry.busy_ns[Placement::Local as usize].get(),
+                entry.busy_ns[Placement::Wide].get(),
+                entry.busy_ns[Placement::Local].get(),
             )
         })
     }
@@ -772,10 +763,10 @@ impl RunEntry {
     }
 
     /// The wall-time and busy-time estimates of `placement`, or `None` until both are measured.
-    const fn estimates(&self, placement: Placement) -> Option<(u64, u64)> {
+    fn estimates(&self, placement: Placement) -> Option<(u64, u64)> {
         match (
             self.placement.estimate(placement),
-            self.busy_ns[placement as usize].get(),
+            self.busy_ns[placement].get(),
         ) {
             (Some(parallel_ns), Some(busy_ns)) => Some((parallel_ns, busy_ns)),
             _ => None,
@@ -810,7 +801,7 @@ impl RunEntry {
     fn choose(&mut self, placement: Placement) -> (RunExecution, bool) {
         let serial_ns = self.serial_ns;
         let estimates = self.estimates(placement);
-        let cadence = &mut self.cadences[placement as usize];
+        let cadence = &mut self.cadences[placement];
 
         // Seed this placement's estimate with its first call. Until serial is measured, saturating
         // the placement's cadence keeps it due for an immediate boundary. Its next call then offers
@@ -862,35 +853,6 @@ impl RunEntry {
         let probe_allowed = preferred == RunExecution::Serial || can_sample_serial;
         cadence.arbitrate(preferred, loser, winner_ns, loser_ns, probe_allowed)
     }
-
-    /// Records a serial run, or a Wide parallel run with its busy time from [`perfect_busy`].
-    #[cfg(test)]
-    fn record(&mut self, execution: RunExecution, elapsed: Duration) {
-        match execution {
-            RunExecution::Serial => self.serial_ns.record(nanos(elapsed)),
-            RunExecution::Parallel => {
-                self.record_parallel(Placement::Wide, elapsed, perfect_busy(elapsed))
-            }
-        }
-    }
-
-    /// Records a parallel run on `placement` with wall time `elapsed` and busy time `busy`.
-    #[cfg(test)]
-    fn record_parallel(&mut self, placement: Placement, elapsed: Duration, busy: Duration) {
-        self.placement.record(placement, nanos(elapsed));
-        self.busy_ns[placement as usize].record(nanos(busy));
-    }
-}
-
-/// The strategy parallelism the tests plan with.
-#[cfg(test)]
-const PARALLELISM: usize = 4;
-
-/// The busy time of a parallel run with wall time `wall` and perfect speedup on [`PARALLELISM`]
-/// workers.
-#[cfg(test)]
-fn perfect_busy(wall: Duration) -> Duration {
-    wall * PARALLELISM as u32
 }
 
 /// The decisions for one run and whether the caller should time it.
@@ -902,6 +864,15 @@ pub(super) struct RunPlan {
     pub(super) placement: Placement,
     /// Whether the run is timed and recorded with [`Policy::record_run`].
     pub(super) measure: bool,
+}
+
+/// The timing of a measured run.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RunSample {
+    /// The wall time of the run.
+    pub(super) wall: Duration,
+    /// The time the run's threads spent executing it. A serial run's busy time is its wall time.
+    pub(super) busy: Duration,
 }
 
 /// A duration as a nanosecond sample, saturating at `u64::MAX`.
@@ -1095,12 +1066,59 @@ const fn len_bucket(len: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cadence, Choice, MAX_RESAMPLE_SHIFT, PARALLELISM, PREFERRED_SAMPLE_INTERVAL, Placement,
-        Policy, Pools, RESAMPLE_INTERVAL, RunEntry, RunExecution, RunPlan, SPAWN_INLINE_BUDGET_NS,
-        SpawnEntry, SpawnExecution, SpawnPlan, Spawner,
+        Cadence, Choice, MAX_RESAMPLE_SHIFT, PREFERRED_SAMPLE_INTERVAL, Placement, Policy, Pools,
+        RESAMPLE_INTERVAL, RunEntry, RunExecution, RunPlan, RunSample, SPAWN_INLINE_BUDGET_NS,
+        SpawnEntry, SpawnExecution, SpawnPlan, Spawner, nanos,
     };
     use commonware_utils::Widen;
     use std::{cell::Cell, panic::Location, time::Duration};
+
+    /// The strategy parallelism the tests plan with.
+    const PARALLELISM: usize = 4;
+
+    /// The busy time of a parallel run with wall time `wall` and perfect speedup on
+    /// [`PARALLELISM`] workers.
+    fn perfect_busy(wall: Duration) -> Duration {
+        wall * PARALLELISM as u32
+    }
+
+    impl Policy {
+        /// Records a run that followed `plan` with wall time `wall`, taking a parallel run's busy
+        /// time from [`perfect_busy`].
+        fn record_perfect_run(
+            &self,
+            caller: &'static Location<'static>,
+            len: usize,
+            work: usize,
+            parallelism: usize,
+            plan: RunPlan,
+            wall: Duration,
+        ) {
+            let sample = RunSample {
+                wall,
+                busy: perfect_busy(wall),
+            };
+            self.record_run(caller, len, work, parallelism, plan, sample);
+        }
+    }
+
+    impl RunEntry {
+        /// Records a serial run, or a Wide parallel run with its busy time from [`perfect_busy`].
+        pub(super) fn record(&mut self, execution: RunExecution, elapsed: Duration) {
+            match execution {
+                RunExecution::Serial => self.serial_ns.record(nanos(elapsed)),
+                RunExecution::Parallel => {
+                    self.record_parallel(Placement::Wide, elapsed, perfect_busy(elapsed))
+                }
+            }
+        }
+
+        /// Records a parallel run on `placement` with wall time `elapsed` and busy time `busy`.
+        fn record_parallel(&mut self, placement: Placement, elapsed: Duration, busy: Duration) {
+            self.placement.record(placement, nanos(elapsed));
+            self.busy_ns[placement].record(nanos(busy));
+        }
+    }
 
     /// The placements of a caller outside the strategy's pool.
     const EITHER: Pools = Pools::Either;
@@ -1139,9 +1157,7 @@ mod tests {
         RunEntry::preferred(
             entry.serial_ns.get().unwrap(),
             entry.parallel_ns().unwrap(),
-            entry.busy_ns[entry.placement.preferred() as usize]
-                .get()
-                .unwrap(),
+            entry.busy_ns[entry.placement.preferred()].get().unwrap(),
         )
     }
 
@@ -1269,15 +1285,11 @@ mod tests {
             measure: true,
         };
         let record = |execution, wall: u64, busy: u64| {
-            policy.record_run(
-                location,
-                10,
-                10,
-                PARALLELISM,
-                plan(execution),
-                Duration::from_millis(wall),
-                Duration::from_millis(busy),
-            );
+            let sample = RunSample {
+                wall: Duration::from_millis(wall),
+                busy: Duration::from_millis(busy),
+            };
+            policy.record_run(location, 10, 10, PARALLELISM, plan(execution), sample);
         };
         let busy = || {
             policy
@@ -1388,10 +1400,7 @@ mod tests {
         entry.record(RunExecution::Parallel, Duration::from_millis(20));
 
         assert_eq!(entry.parallel_ns(), Some(12_000_000));
-        assert_eq!(
-            entry.busy_ns[Placement::Wide as usize].get(),
-            Some(48_000_000)
-        );
+        assert_eq!(entry.busy_ns[Placement::Wide].get(), Some(48_000_000));
     }
 
     #[test]
