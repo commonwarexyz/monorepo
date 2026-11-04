@@ -651,14 +651,12 @@ impl std::fmt::Debug for Groups {
 /// Counts one call or job against a group, or against every group for a Wide claim, until the
 /// lease is dropped. An unhomed group with counted work in flight cannot acquire a home.
 ///
-/// A claim on a strategy's only group counts nowhere when the calling thread's domain is unknown,
-/// as on every thread when homing is disabled. Such a thread can neither use nor create a home,
-/// and with one group the count cannot change which group a claim takes. Uncounted claims leave
-/// the group idle, so a thread with a known domain can still home it.
+/// With only one group, a claim from a thread with no known domain is not counted, since there is
+/// no other group to pick and that thread cannot home this one.
 #[derive(Debug)]
 pub(crate) struct Lease {
-    /// The strategy's groups and the thread that made the claim, or `None` when the claim counts
-    /// nowhere.
+    /// The strategy's groups and the thread that made the claim, or `None` when the claim is not
+    /// counted.
     claim: Option<(Arc<Groups>, ThreadId)>,
 
     /// The leased group, or for a Wide claim the group its work is offered to first.
@@ -682,7 +680,7 @@ impl Lease {
         }
     }
 
-    /// A lease for a claim that counts nowhere.
+    /// A lease for a claim that is not counted.
     const fn uncounted(index: usize, wide: bool) -> Self {
         Self {
             claim: None,
@@ -1013,7 +1011,7 @@ impl Groups {
     /// Claims every group for a call that may run on any of them. The lease names the group homed
     /// in the calling thread's domain, or the first group, so the caller can offer its work there
     /// first. Any worker may take the call's work. The lease counts it on every group until the
-    /// call finishes, unless the claim counts nowhere as [`Lease`] describes.
+    /// call finishes, except in the uncounted case described on [`Lease`].
     pub(crate) fn wide(self: &Arc<Self>) -> Lease {
         let domain = self.current_domain();
         if !self.must_count(|| domain) {
