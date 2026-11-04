@@ -1300,11 +1300,9 @@ impl<E: Context, I: Record, V: CodecShared> Replay<E, I, V> {
     /// An index error ends the section that produced it, and iteration continues with
     /// the next section. A value-verification error is returned without ending its
     /// section and dooms the tracked replay: finishing it fails with
-    /// [Error::ReplayFailed]. Errors while mutating storage to repair a section, and
-    /// [Error::ReplayInterrupted], end the replay.
-    ///
-    /// Dropping a pending call ends the replay. The next call returns
-    /// [Error::ReplayInterrupted], and both finishing methods fail.
+    /// [Error::ReplayFailed]. Errors while mutating storage to repair a section end the
+    /// replay. Dropping a pending call also ends it. The next call returns
+    /// [Error::ReplayInterrupted] and both finishing methods fail.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, I), Error>> {
         if self.interrupted {
             return None;

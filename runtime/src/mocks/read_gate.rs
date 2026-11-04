@@ -9,12 +9,6 @@ pub struct ReadGate {
     state: Arc<Mutex<ReadGateState>>,
 }
 
-struct ReadGateState {
-    partition: String,
-    armed: bool,
-    blocked: usize,
-}
-
 impl ReadGate {
     /// Park subsequent reads and reset the number of blocked reads.
     pub fn arm(&self) {
@@ -47,6 +41,12 @@ impl ReadGate {
             pending::<()>().await;
         }
     }
+}
+
+struct ReadGateState {
+    partition: String,
+    armed: bool,
+    blocked: usize,
 }
 
 /// Context wrapper that gates reads of a selected partition.

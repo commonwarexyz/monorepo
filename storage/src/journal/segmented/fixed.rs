@@ -1084,11 +1084,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     /// exhausted.
     ///
     /// An error ends the section that produced it, and iteration continues with the
-    /// next section. Errors while mutating storage to repair a section, and
-    /// [Error::ReplayInterrupted], end the replay.
-    ///
-    /// Dropping a pending call ends the replay. The next call returns
-    /// [Error::ReplayInterrupted], and [Self::finish] fails.
+    /// next section. Errors while mutating storage to repair a section end the replay.
+    /// Dropping a pending call also ends it. The next call returns
+    /// [Error::ReplayInterrupted] and [Self::finish] fails.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, A), Error>> {
         if self.in_progress {
             self.in_progress = false;
