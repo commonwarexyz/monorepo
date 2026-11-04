@@ -516,7 +516,6 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
             .new_batch()
             .append(vec![1, 2, 3])
             .append(vec![4, 5, 6])
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&source)
             .await
             .unwrap();

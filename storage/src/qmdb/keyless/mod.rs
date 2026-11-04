@@ -1075,7 +1075,6 @@ pub(crate) mod tests {
         let batch = db
             .new_batch()
             .append(V::Value::make(11))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
@@ -1083,7 +1082,6 @@ pub(crate) mod tests {
         let batch = foreign
             .new_batch()
             .append(V::Value::make(99))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&foreign)
             .await
             .unwrap();
@@ -1093,10 +1091,7 @@ pub(crate) mod tests {
 
         let batch = db.new_batch().append(V::Value::make(22));
         assert!(matches!(
-            batch
-                .with_inactivity_floor(Location::new(0))
-                .merkleize(&foreign)
-                .await,
+            batch.merkleize(&foreign).await,
             Err(Error::StaleBatch)
         ));
 
@@ -1104,16 +1099,12 @@ pub(crate) mod tests {
         let parent = db
             .new_batch()
             .append(V::Value::make(33))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
         let child = parent.new_batch::<Sha256>().append(V::Value::make(44));
         assert!(matches!(
-            child
-                .with_inactivity_floor(Location::new(0))
-                .merkleize(&foreign)
-                .await,
+            child.merkleize(&foreign).await,
             Err(Error::StaleBatch)
         ));
         db.destroy().await.unwrap();
@@ -1132,20 +1123,15 @@ pub(crate) mod tests {
         let sibling = db
             .new_batch()
             .append(V::Value::make(22))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(sibling).await.unwrap();
-        let direct_result = direct
-            .with_inactivity_floor(Location::new(0))
-            .merkleize(&db)
-            .await;
+        let direct_result = direct.merkleize(&db).await;
 
         let parent = db
             .new_batch()
             .append(V::Value::make(33))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
@@ -1153,15 +1139,11 @@ pub(crate) mod tests {
         let sibling = db
             .new_batch()
             .append(V::Value::make(55))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(sibling).await.unwrap();
-        let child_result = child
-            .with_inactivity_floor(Location::new(0))
-            .merkleize(&db)
-            .await;
+        let child_result = child.merkleize(&db).await;
 
         db.destroy().await.unwrap();
         assert!(matches!(direct_result, Err(Error::StaleBatch)));
@@ -1179,21 +1161,18 @@ pub(crate) mod tests {
         let grandparent = db
             .new_batch()
             .append(V::Value::make(1))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
         let parent = grandparent
             .new_batch::<Sha256>()
             .append(V::Value::make(2))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
         let pending = parent
             .new_batch::<Sha256>()
             .append(V::Value::make(3))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
@@ -1203,7 +1182,6 @@ pub(crate) mod tests {
         let applied = parent
             .new_batch::<Sha256>()
             .append(V::Value::make(3))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
@@ -1214,7 +1192,6 @@ pub(crate) mod tests {
         let retired = parent
             .new_batch::<Sha256>()
             .append(V::Value::make(3))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
@@ -1225,7 +1202,6 @@ pub(crate) mod tests {
         // afterward.
         let child = parent.new_batch::<Sha256>().append(V::Value::make(3));
         let db = db.apply_batch(parent).await.unwrap();
-        let child = child.with_inactivity_floor(Location::new(0));
         let child = child.merkleize(&db).await.unwrap();
         assert_eq!(pending.root(), child.root());
         let db = db.apply_batch(child).await.unwrap();
@@ -1338,7 +1314,6 @@ pub(crate) mod tests {
         let child = parent
             .new_batch::<H>()
             .append(V::Value::make(4))
-            .with_inactivity_floor(db.inactivity_floor_loc())
             .merkleize(&db)
             .await
             .unwrap();
@@ -2049,11 +2024,7 @@ pub(crate) mod tests {
         let child = child.append(v2.clone());
         let loc3 = child.size();
         let child = child.append(v3.clone());
-        let child_m = child
-            .with_inactivity_floor(db.inactivity_floor_loc())
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let child_m = child.merkleize(&db).await.unwrap();
         let child_root = child_m.root();
 
         let db = db.apply_batch(child_m).await.unwrap();
@@ -2125,14 +2096,12 @@ pub(crate) mod tests {
         let b = a
             .new_batch::<H>()
             .append(V::Value::make(20))
-            .with_inactivity_floor(db.inactivity_floor_loc())
             .merkleize(&db)
             .await
             .unwrap();
         let c = b
             .new_batch::<H>()
             .append(V::Value::make(30))
-            .with_inactivity_floor(db.inactivity_floor_loc())
             .merkleize(&db)
             .await
             .unwrap();
@@ -2210,11 +2179,7 @@ pub(crate) mod tests {
         let child_batch = snapshot.new_batch::<Sha256>();
         let loc2 = child_batch.size();
         let child_batch = child_batch.append(V::Value::make(20));
-        let merkleized = child_batch
-            .with_inactivity_floor(db.inactivity_floor_loc())
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let merkleized = child_batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
 
         assert_eq!(db.get(loc1).await.unwrap(), Some(V::Value::make(10)));
@@ -2821,12 +2786,7 @@ pub(crate) mod tests {
         let v2 = V::Value::make(2);
         let child = parent_m.new_batch::<Sha256>();
         let loc2 = child.size();
-        let child_m = child
-            .append(v2.clone())
-            .with_inactivity_floor(db.inactivity_floor_loc())
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let child_m = child.append(v2.clone()).merkleize(&db).await.unwrap();
 
         assert_eq!(
             child_m.get(Location::new(1), &db).await.unwrap(),
@@ -2915,14 +2875,12 @@ pub(crate) mod tests {
         let sibling_a = common_parent
             .new_batch::<Sha256>()
             .append(V::Value::make(11))
-            .with_inactivity_floor(db.inactivity_floor_loc())
             .merkleize(&db)
             .await
             .unwrap();
         let sibling_b = common_parent
             .new_batch::<Sha256>()
             .append(V::Value::make(12))
-            .with_inactivity_floor(db.inactivity_floor_loc())
             .merkleize(&db)
             .await
             .unwrap();
@@ -2947,7 +2905,6 @@ pub(crate) mod tests {
         let child_b = parent_b
             .new_batch::<Sha256>()
             .append(V::Value::make(3))
-            .with_inactivity_floor(db.inactivity_floor_loc())
             .merkleize(&db)
             .await
             .unwrap();
@@ -2977,7 +2934,6 @@ pub(crate) mod tests {
         let child = parent
             .new_batch::<Sha256>()
             .append(V::Value::make(2))
-            .with_inactivity_floor(db.inactivity_floor_loc())
             .merkleize(&db)
             .await
             .unwrap();
@@ -3005,7 +2961,6 @@ pub(crate) mod tests {
         let child = parent
             .new_batch::<Sha256>()
             .append(V::Value::make(2))
-            .with_inactivity_floor(db.inactivity_floor_loc())
             .merkleize(&db)
             .await
             .unwrap();
@@ -3035,7 +2990,6 @@ pub(crate) mod tests {
         let pending_child = parent
             .new_batch::<Sha256>()
             .append(V::Value::make(2))
-            .with_inactivity_floor(db.inactivity_floor_loc())
             .merkleize(&db)
             .await
             .unwrap();
@@ -3470,11 +3424,7 @@ pub(crate) mod tests {
         for v in appends.iter() {
             batch_a = batch_a.append(v.clone());
         }
-        let merkleized = batch_a
-            .with_inactivity_floor(Location::new(0))
-            .merkleize(&db_a)
-            .await
-            .unwrap();
+        let merkleized = batch_a.merkleize(&db_a).await.unwrap();
         let db_a = db_a.apply_batch(merkleized).await.unwrap();
 
         // db_b commits the same appends but with floor=3 (= commit location).

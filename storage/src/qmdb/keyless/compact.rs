@@ -736,7 +736,6 @@ mod tests {
         let batch = db
             .new_batch()
             .append(U64::new(11))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
@@ -744,7 +743,6 @@ mod tests {
         let batch = foreign
             .new_batch()
             .append(U64::new(99))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&foreign)
             .await
             .unwrap();
@@ -754,26 +752,19 @@ mod tests {
 
         let batch = db.new_batch().append(U64::new(22));
         assert!(matches!(
-            batch
-                .with_inactivity_floor(Location::new(0))
-                .merkleize(&foreign)
-                .await,
+            batch.merkleize(&foreign).await,
             Err(Error::StaleBatch)
         ));
 
         let parent = db
             .new_batch()
             .append(U64::new(33))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
         let child = parent.new_batch::<Sha256>().append(U64::new(44));
         assert!(matches!(
-            child
-                .with_inactivity_floor(Location::new(0))
-                .merkleize(&foreign)
-                .await,
+            child.merkleize(&foreign).await,
             Err(Error::StaleBatch)
         ));
         db.destroy().await.unwrap();
@@ -787,23 +778,18 @@ mod tests {
         let sibling = db
             .new_batch()
             .append(U64::new(22))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(sibling).await.unwrap();
         assert!(matches!(
-            direct
-                .with_inactivity_floor(Location::new(0))
-                .merkleize(&db)
-                .await,
+            direct.merkleize(&db).await,
             Err(Error::StaleBatch)
         ));
 
         let parent = db
             .new_batch()
             .append(U64::new(33))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
@@ -811,18 +797,11 @@ mod tests {
         let sibling = db
             .new_batch()
             .append(U64::new(55))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(sibling).await.unwrap();
-        assert!(matches!(
-            child
-                .with_inactivity_floor(Location::new(0))
-                .merkleize(&db)
-                .await,
-            Err(Error::StaleBatch)
-        ));
+        assert!(matches!(child.merkleize(&db).await, Err(Error::StaleBatch)));
 
         db.destroy().await.unwrap();
     }
@@ -833,21 +812,18 @@ mod tests {
         let grandparent = db
             .new_batch()
             .append(U64::new(1))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
         let parent = grandparent
             .new_batch::<Sha256>()
             .append(U64::new(2))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
         let pending = parent
             .new_batch::<Sha256>()
             .append(U64::new(3))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
@@ -856,7 +832,6 @@ mod tests {
         let applied = parent
             .new_batch::<Sha256>()
             .append(U64::new(3))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
@@ -866,7 +841,6 @@ mod tests {
         let retired = parent
             .new_batch::<Sha256>()
             .append(U64::new(3))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
@@ -875,7 +849,6 @@ mod tests {
 
         let child = parent.new_batch::<Sha256>().append(U64::new(3));
         let db = db.apply_batch(parent).await.unwrap();
-        let child = child.with_inactivity_floor(Location::new(0));
         let child = child.merkleize(&db).await.unwrap();
         assert_eq!(pending.root(), child.root());
         let expected_root = child.root();
@@ -926,14 +899,12 @@ mod tests {
         for value in 1..=6 {
             seed = seed.append(U64::new(value));
         }
-        let seed = seed.with_inactivity_floor(Location::new(0));
         let seed = seed.merkleize(&db).await.unwrap();
         let db = db.apply_batch(seed).await.unwrap();
         let db = db.sync().await.unwrap();
         let batch = db
             .new_batch()
             .append(U64::new(100))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
@@ -961,16 +932,11 @@ mod tests {
         for value in 11..=16 {
             other = other.append(U64::new(value));
         }
-        let other = other.with_inactivity_floor(Location::new(0));
         let other = other.merkleize(&db).await.unwrap();
         let db = db.apply_batch(other).await.unwrap();
         assert_eq!(db.size(), start);
         assert!(matches!(
-            batch
-                .new_batch::<Sha256>()
-                .with_inactivity_floor(Location::new(0))
-                .merkleize(&db)
-                .await,
+            batch.new_batch::<Sha256>().merkleize(&db).await,
             Err(Error::StaleBatch)
         ));
 
@@ -1009,7 +975,6 @@ mod tests {
         }
         let seed = seed
             .with_metadata(Some(U64::new(7)))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
@@ -1819,7 +1784,6 @@ mod tests {
                     .new_batch()
                     .append(U64::new(2))
                     .with_metadata(Some(meta_b.clone()))
-                    .with_inactivity_floor(Location::new(0))
                     .merkleize(&source)
                     .await
                     .unwrap();
@@ -1840,7 +1804,6 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .with_metadata(Some(meta_a))
-                    .with_inactivity_floor(Location::new(0))
                     .merkleize(&seeded)
                     .await
                     .unwrap();
@@ -2313,7 +2276,6 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .with_metadata(Some(meta1))
-                    .with_inactivity_floor(Location::new(0))
                     .merkleize(&db)
                     .await
                     .unwrap();
@@ -2353,7 +2315,6 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .with_metadata(Some(meta1.clone()))
-                    .with_inactivity_floor(Location::new(0))
                     .merkleize(&db)
                     .await
                     .unwrap();
@@ -2400,7 +2361,6 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .with_metadata(Some(meta.clone()))
-                    .with_inactivity_floor(Location::new(0))
                     .merkleize(&db)
                     .await
                     .unwrap();
@@ -2450,7 +2410,6 @@ mod tests {
                     .new_batch()
                     .append(U64::new(2))
                     .with_metadata(Some(meta_b.clone()))
-                    .with_inactivity_floor(Location::new(0))
                     .merkleize(&source)
                     .await
                     .unwrap();
@@ -2478,7 +2437,6 @@ mod tests {
                     .new_batch()
                     .append(U64::new(1))
                     .with_metadata(Some(meta_a))
-                    .with_inactivity_floor(Location::new(0))
                     .merkleize(&seeded)
                     .await
                     .unwrap();
@@ -2744,7 +2702,6 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .with_metadata(Some(U64::new(11)))
-                .with_inactivity_floor(Location::new(0))
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -2777,7 +2734,6 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .with_metadata(Some(U64::new(11)))
-                .with_inactivity_floor(Location::new(0))
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -2922,7 +2878,6 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .with_metadata(Some(U64::new(11)))
-                .with_inactivity_floor(Location::new(0))
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -2937,7 +2892,6 @@ mod tests {
                     .new_batch()
                     .append(U64::new(i))
                     .with_metadata(Some(U64::new(i * 11)))
-                    .with_inactivity_floor(Location::new(0))
                     .merkleize(&db)
                     .await
                     .unwrap();
@@ -2988,7 +2942,6 @@ mod tests {
                     .new_batch()
                     .append(U64::new(i))
                     .with_metadata(Some(U64::new(i * 11)))
-                    .with_inactivity_floor(Location::new(0))
                     .merkleize(&db)
                     .await
                     .unwrap();
@@ -3027,7 +2980,6 @@ mod tests {
             let batch = db
                 .new_batch()
                 .append(U64::new(1))
-                .with_inactivity_floor(Location::new(0))
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -3038,7 +2990,6 @@ mod tests {
             let held = db
                 .new_batch()
                 .append(U64::new(2))
-                .with_inactivity_floor(Location::new(0))
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -3047,7 +2998,6 @@ mod tests {
             let batch = db
                 .new_batch()
                 .append(U64::new(3))
-                .with_inactivity_floor(Location::new(0))
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -3081,7 +3031,6 @@ mod tests {
                 .append(U64::new(1))
                 .append(U64::new(2))
                 .with_metadata(Some(U64::new(11)))
-                .with_inactivity_floor(Location::new(0))
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -3109,7 +3058,6 @@ mod tests {
                     .append(U64::new(1))
                     .append(U64::new(2))
                     .with_metadata(Some(U64::new(11)))
-                    .with_inactivity_floor(Location::new(0))
                     .merkleize(&db)
                     .await
                     .unwrap();
@@ -3141,7 +3089,6 @@ mod tests {
                 .append(U64::new(1))
                 .append(U64::new(2))
                 .with_metadata(Some(U64::new(11)))
-                .with_inactivity_floor(Location::new(0))
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -3188,7 +3135,6 @@ mod tests {
             let batch = db
                 .new_batch()
                 .append(U64::new(1))
-                .with_inactivity_floor(Location::new(0))
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -3198,7 +3144,6 @@ mod tests {
             let batch = db
                 .new_batch()
                 .append(U64::new(2))
-                .with_inactivity_floor(Location::new(0))
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -3208,7 +3153,6 @@ mod tests {
             let held = db
                 .new_batch()
                 .append(U64::new(3))
-                .with_inactivity_floor(Location::new(0))
                 .merkleize(&db)
                 .await
                 .unwrap();

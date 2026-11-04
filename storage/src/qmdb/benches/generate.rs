@@ -264,11 +264,7 @@ fn bench_keyless_generate(c: &mut Criterion) {
                                         batch = db.new_batch();
                                     }
                                 }
-                                let merkleized = batch
-                                    .with_inactivity_floor(db.inactivity_floor_loc())
-                                    .merkleize(&db)
-                                    .await
-                                    .unwrap();
+                                let merkleized = batch.merkleize(&db).await.unwrap();
                                 let db = db.apply_batch(merkleized).await.unwrap();
                                 let db = db.sync().await.unwrap();
 

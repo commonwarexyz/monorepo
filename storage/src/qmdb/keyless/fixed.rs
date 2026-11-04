@@ -184,14 +184,12 @@ mod tests {
         for value in 1..=6 {
             seed = seed.append(U64::new(value));
         }
-        let seed = seed.with_inactivity_floor(Location::new(0));
         let seed = seed.merkleize(&db).await.unwrap();
         let db = db.apply_batch(seed).await.unwrap();
         let db = db.sync().await.unwrap();
         let batch = db
             .new_batch()
             .append(U64::new(100))
-            .with_inactivity_floor(Location::new(0))
             .merkleize(&db)
             .await
             .unwrap();
@@ -215,16 +213,11 @@ mod tests {
         for value in 11..=16 {
             other = other.append(U64::new(value));
         }
-        let other = other.with_inactivity_floor(Location::new(0));
         let other = other.merkleize(&db).await.unwrap();
         let db = db.apply_batch(other).await.unwrap();
         assert_eq!(db.bounds().end, start);
         assert!(matches!(
-            batch
-                .new_batch::<Sha256>()
-                .with_inactivity_floor(Location::new(0))
-                .merkleize(&db)
-                .await,
+            batch.new_batch::<Sha256>().merkleize(&db).await,
             Err(Error::StaleBatch)
         ));
 
@@ -262,7 +255,6 @@ mod tests {
                 for value in 0..count {
                     batch = batch.append(U64::new(value));
                 }
-                let batch = batch.with_inactivity_floor(Location::new(0));
                 let batch = batch.merkleize(&db).await.unwrap();
                 db = db.apply_batch(batch).await.unwrap();
                 commits.push((db.bounds().end, db.root()));
@@ -296,7 +288,6 @@ mod tests {
             let batch = db
                 .new_batch()
                 .append(U64::new(999))
-                .with_inactivity_floor(Location::new(0))
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -344,7 +335,6 @@ mod tests {
                 for value in 0..count {
                     batch = batch.append(U64::new(value));
                 }
-                let batch = batch.with_inactivity_floor(Location::new(0));
                 let batch = batch.merkleize(&db).await.unwrap();
                 db = db.apply_batch(batch).await.unwrap();
                 commits.push((db.size(), db.root()));
@@ -381,7 +371,6 @@ mod tests {
             let batch = db
                 .new_batch()
                 .append(U64::new(999))
-                .with_inactivity_floor(Location::new(0))
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -436,7 +425,6 @@ mod tests {
                             batch = batch.append(value);
                         }
                         expected.push((batch.size(), None));
-                        let batch = batch.with_inactivity_floor(Location::new(0));
                         held.push(batch.merkleize(&db).await.unwrap());
                     }
 
@@ -452,8 +440,7 @@ mod tests {
                     };
                     let batch = held.last().unwrap().new_batch::<Sha256>();
                     expected.push((batch.size(), None));
-                    let leaf = batch.with_inactivity_floor(Location::new(0));
-                    let leaf = leaf.merkleize(&db).await.unwrap();
+                    let leaf = batch.merkleize(&db).await.unwrap();
                     if detach_oldest {
                         assert!(
                             leaf.journal_batch.ancestor_items.len() > leaf.bounds.ancestors.len(),
@@ -497,16 +484,11 @@ mod tests {
             for value in 0..10 {
                 batch = batch.append(U64::new(value));
             }
-            let batch = batch
-                .with_inactivity_floor(Location::new(0))
-                .merkleize(&source)
-                .await
-                .unwrap();
+            let batch = batch.merkleize(&source).await.unwrap();
 
             // The descendant must serve omitted operations after its parent is dropped.
             let retained = batch
                 .new_batch::<Sha256>()
-                .with_inactivity_floor(Location::new(0))
                 .merkleize(&source)
                 .await
                 .unwrap();

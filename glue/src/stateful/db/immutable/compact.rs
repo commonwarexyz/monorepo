@@ -515,6 +515,32 @@ mod tests {
     }
 
     #[test]
+    fn unset_inactivity_floor_inherits_parent_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("inherit-parent-floor");
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            let parent = db
+                .new_batch_for_test::<_>()
+                .await
+                .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
+                .with_inactivity_floor(mmr::Location::new(1));
+            let parent = crate::stateful::db::Unmerkleized::merkleize(parent)
+                .await
+                .unwrap();
+            let child = MerkleizedTrait::new_batch(&parent)
+                .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]));
+            let child = crate::stateful::db::Unmerkleized::merkleize(child)
+                .await
+                .unwrap();
+            assert_eq!(child.bounds().inactivity_floor, mmr::Location::new(1));
+        });
+    }
+
+    #[test]
     fn unset_inactivity_floor_inherits_applied_floor() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("inherit-applied-floor");
@@ -715,12 +741,10 @@ mod tests {
                 .await
                 .unwrap();
             let metadata = Sha256::hash(&[&[3]]);
-            let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_metadata(Some(metadata))
-                .with_inactivity_floor(floor)
                 .merkleize(&source)
                 .await
                 .unwrap();
@@ -755,12 +779,10 @@ mod tests {
             let source = FullFixedDb::init(source_context, source_config, None)
                 .await
                 .unwrap();
-            let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_metadata(Some(Sha256::hash(&[&[3]])))
-                .with_inactivity_floor(floor)
                 .merkleize(&source)
                 .await
                 .unwrap();
@@ -847,12 +869,10 @@ mod tests {
                     .await
                     .unwrap();
 
-            let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_metadata(Some(Sha256::hash(&[&[9]])))
-                .with_inactivity_floor(floor)
                 .merkleize(&source)
                 .await
                 .unwrap();
@@ -863,12 +883,10 @@ mod tests {
                 size: source.bounds().end,
             };
 
-            let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
                 .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]))
                 .with_metadata(Some(Sha256::hash(&[&[10]])))
-                .with_inactivity_floor(floor)
                 .merkleize(&source)
                 .await
                 .unwrap();
@@ -929,12 +947,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            let floor = db.inactivity_floor_loc();
             let batch = db
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_metadata(Some(Sha256::hash(&[&[11]])))
-                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -943,12 +959,10 @@ mod tests {
 
             // Add two ranges so reopening at the first target spans multiple commits.
             for i in [3u8, 5] {
-                let floor = db.inactivity_floor_loc();
                 let batch = db
                     .new_batch()
                     .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
                     .with_metadata(Some(Sha256::hash(&[&[i * 11]])))
-                    .with_inactivity_floor(floor)
                     .merkleize(&db)
                     .await
                     .unwrap();
@@ -985,12 +999,10 @@ mod tests {
             // Commit three ranges, recording each target.
             let mut targets = Vec::new();
             for i in [1u8, 3, 5] {
-                let floor = db.inactivity_floor_loc();
                 let batch = db
                     .new_batch()
                     .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
                     .with_metadata(Some(Sha256::hash(&[&[i * 11]])))
-                    .with_inactivity_floor(floor)
                     .merkleize(&db)
                     .await
                     .unwrap();
