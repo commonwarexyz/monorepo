@@ -1443,6 +1443,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// Nested calls at the same callsite share estimates across parent paths, so use distinct
     /// callsites (propagating `#[track_caller]` through helpers as needed) to tune them separately.
     ///
+    /// # Cache Affinity
+    ///
     /// A strategy built with [`Rayon::new`] or [`Rayon::grouped`] splits its pool's workers into
     /// groups sized to the host's last-level cache domains. A group's home is the domain it
     /// requests its workers to run in. A strategy built with [`Rayon::with_pool`] is one group
