@@ -227,10 +227,21 @@ where
         .map(|leader| pool_key::<H, S, D>(leader, cached))
 }
 
-/// A change to a leader's local finality fact, with the producer commitments its tips select.
+/// A leader's local finality fact: a change to its direct pool's fact, with the producer
+/// commitments its tips select, or the fact of a verified L-QC.
 pub(super) enum FinalityUpdate<D: Digest> {
     Finalized(FinalityFact<D>, SelectedCommitments<D>),
     Advanced(FinalityFact<D>, SelectedCommitments<D>),
+    Certified(FinalityFact<D>),
+}
+
+impl<D: Digest> FinalityUpdate<D> {
+    /// Returns the finality fact of the update.
+    const fn fact(&self) -> &FinalityFact<D> {
+        match self {
+            Self::Finalized(fact, _) | Self::Advanced(fact, _) | Self::Certified(fact) => fact,
+        }
+    }
 }
 
 /// Everything retained for one leader's finality pool.
@@ -1412,7 +1423,10 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
         if matches!(artifact.as_ref(), Artifact::Lqc(_)) && self.is_retired(artifact) {
             // Diagnostic retention may discard an L-QC claim before verification completes.
             // The verified certificate remains portable consensus evidence and must still reach
-            // the durable signing-floor transition.
+            // the durable signing-floor transition, and its fact may still advance placement.
+            if let Some(fact) = self.lqc_fact::<H>(id, artifact, derivations.as_ref()) {
+                self.updates.push(FinalityUpdate::Certified(fact));
+            }
             return Ok(vec![FinalityOutput::lqc(
                 observation,
                 artifact,
@@ -1427,6 +1441,44 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
             profile,
             derivations,
         )
+    }
+
+    /// Returns the finality fact of a verified L-QC, reusing its validation's derivations.
+    ///
+    /// Without derivations (recovery), the fact is derived from the certificate's votes.
+    fn lqc_fact<H: Hasher<Digest = D>>(
+        &self,
+        id: ArtifactId<D>,
+        artifact: &Artifact<S, D>,
+        derivations: Option<&CertificateDerivations<S, D>>,
+    ) -> Option<FinalityFact<D>> {
+        let Artifact::Lqc(certificate) = artifact else {
+            return None;
+        };
+        let block = certificate.leader();
+        if let Some(CertificateDerivations::Lqc {
+            leader,
+            tips,
+            votes,
+            ..
+        }) = derivations
+        {
+            let leader = DigestedLeader::with_digest(block, *leader);
+            return tips
+                .fact(FinalityId::Lqc(id), leader, votes.len(), self.config)
+                .ok();
+        }
+        let digest = block.digest::<H>();
+        let expanded = certificate.expand_votes(digest, self.config).ok()?;
+        let tips = FinalTips::from_pool::<H, S, _>(
+            block,
+            expanded.iter().map(|(signer, body)| (*signer, body)),
+            self.config,
+        )
+        .ok()?;
+        let leader = DigestedLeader::with_digest(block, digest);
+        tips.fact(FinalityId::Lqc(id), leader, expanded.len(), self.config)
+            .ok()
     }
 
     fn resolve_finality_claim<H: Hasher<Digest = D>>(
@@ -2303,7 +2355,10 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
             .as_ref()
             .is_none_or(|record| observation < record.observation)
         {
-            entry.certified = Some(Box::new(CertifiedRecord { observation, fact }));
+            entry.certified = Some(Box::new(CertifiedRecord {
+                observation,
+                fact: fact.clone(),
+            }));
         }
 
         // The observed certificate supersedes any local aggregation.
@@ -2320,6 +2375,9 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
             }
             Some(LqcProgress::AwaitingWitnesses(_) | LqcProgress::Complete) | None => {}
         }
+        // Each L-QC's votes can settle chains that the pool's first vote per signer leaves
+        // unsettled, so every verified certificate reports its own fact.
+        self.updates.push(FinalityUpdate::Certified(fact));
 
         for vote in votes {
             self.observe_aggregate_vote::<H>(
@@ -2404,9 +2462,7 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
                 Inserted::Quorum => {
                     capacity.pin(key);
                     if let Some(update) = pool.finalize::<H>(key.leader, *config)? {
-                        let (FinalityUpdate::Finalized(fact, _)
-                        | FinalityUpdate::Advanced(fact, _)) = &update;
-                        for block in fact.blocks() {
+                        for block in update.fact().blocks() {
                             let index = block.chain().index();
                             if finalized.len() <= index {
                                 finalized.resize(index + 1, Height::zero());

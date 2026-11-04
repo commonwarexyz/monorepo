@@ -231,6 +231,29 @@ impl<D: Digest> FinalSweep<D> {
         })
     }
 
+    /// Returns, per chain, the highest height the sweep [`Self::new`] builds for the same inputs
+    /// places: its highest planned slot, or the base height when it plans none on that chain.
+    ///
+    /// Computes only the cutoffs, without copying the target or building the slot stream.
+    pub(crate) fn placed(
+        base: &[BlockRef<D>],
+        target: &[BlockRef<D>],
+        proposed: &[Height],
+        settled: &[bool],
+    ) -> Result<Vec<Height>, Error> {
+        let mut passes = Passes::new(base, target, proposed)?;
+        if settled.len() != target.len() {
+            return Err(Error::Frontier);
+        }
+        passes.halt(proposed, settled);
+        Ok(passes
+            .maxima()
+            .into_iter()
+            .zip(&passes.base)
+            .map(|(maximum, base)| maximum.unwrap_or(Height::new(*base)))
+            .collect())
+    }
+
     pub(super) fn from_lqc<H, S>(
         base: &[BlockRef<D>],
         certificate: &Lqc<S, D>,
@@ -552,6 +575,50 @@ mod tests {
         stream.passes.extension.offset = u64::MAX;
         stream.passes.extension.position = 0;
         assert_remaining_maxima(stream, 2, &[(0, u64::MAX), (1, u64::MAX)]);
+    }
+
+    #[test]
+    fn final_sweep_places_up_to_its_highest_planned_slot_per_chain() {
+        // Base, target, and proposed heights, and settledness, per chain.
+        type Case = (
+            &'static [u64],
+            &'static [u64],
+            &'static [u64],
+            &'static [bool],
+        );
+        let cases: [Case; 7] = [
+            (&[0, 0], &[1, 2], &[0, 0], &[true, true]),
+            (&[0, 0], &[1, 2], &[0, 0], &[false, true]),
+            (&[1, 0], &[1, 2], &[1, 0], &[false, true]),
+            (&[0, 0], &[0, 4], &[0, 3], &[false, true]),
+            (&[0, 0], &[2, 3], &[1, 3], &[true, true]),
+            (&[0, 0], &[1, 3], &[2, 2], &[false, true]),
+            (&[2, 5, 1], &[6, 9, 1], &[4, 7, 3], &[true, false, true]),
+        ];
+        for (base, target, proposed, settled) in cases {
+            let placed = FinalSweep::placed(
+                &frontier(base),
+                &frontier(target),
+                &heights(proposed),
+                settled,
+            )
+            .unwrap();
+            let sweep = FinalSweep::new(
+                &frontier(base),
+                frontier(target),
+                &heights(proposed),
+                settled.to_vec(),
+            )
+            .unwrap();
+            let mut expected = heights(base);
+            for (chain, height) in coordinates(sweep.into_stream()) {
+                expected[chain] = expected[chain].max(Height::new(height));
+            }
+            assert_eq!(
+                placed, expected,
+                "placed heights for {base:?} -> {target:?}"
+            );
+        }
     }
 
     #[test]

@@ -9,6 +9,7 @@
 //! - [`Completions`]: issued verification and signing work awaiting completion.
 //! - Protocol partitions: [`ChainState`], [`ViewState`], [`FinalityState`],
 //!   [`ResolutionState`], and accountability.
+//! - [`PlacementState`]: how far local finality fixed the canonical order.
 //! - [`Scheduler`]: which components have work ready.
 
 #[cfg(any(test, feature = "mocks"))]
@@ -36,6 +37,7 @@ use crate::{
             finality::FinalityState,
             input::{DaVotesOffer, StepStatus},
             job::{Generation, Issued},
+            placement::PlacementState,
             producer::ProducerProgress,
             reducer::MAX_STAGED_BARRIERS,
             resolution::ResolutionState,
@@ -46,6 +48,7 @@ use crate::{
         scheme::Scheme,
         types::{
             Artifact, ArtifactId, BlockRef, ChainId, Context, FinalityFact, PoolSummary, ViewProof,
+            genesis_history,
         },
     },
     types::{Epoch, Height, Participant, Round, View},
@@ -336,6 +339,8 @@ pub(crate) struct Machine<H: Hasher, S: Scheme> {
     pub(in crate::multimmit::machine) chain: ChainState<S, H::Digest>,
     pub(in crate::multimmit::machine) views: ViewState<S, H::Digest>,
     pub(in crate::multimmit::machine) finality: FinalityState<S, H::Digest>,
+    /// Placement of producer blocks that local finality fixed, reported but never persisted.
+    pub(in crate::multimmit::machine) placement: PlacementState<H::Digest>,
     pub(in crate::multimmit::machine) resolution: ResolutionState<S, H::Digest>,
     pub(in crate::multimmit::machine) scheduler: Scheduler,
 }
@@ -372,6 +377,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
             Role::Observer => Height::zero(),
         };
         let genesis_tips = genesis.tips().to_vec();
+        let placement = PlacementState::new(genesis_history::<H>(genesis), &genesis_tips);
         Self {
             profile,
             lifecycle: Lifecycle::Fresh,
@@ -387,6 +393,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
             chain,
             views,
             finality,
+            placement,
             resolution,
             scheduler: Scheduler::new(resources.max_outbox_effects()),
         }

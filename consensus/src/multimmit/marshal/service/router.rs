@@ -228,8 +228,11 @@ where
     /// the supervisor, so enqueue results are ignored.
     fn on_hint(&mut self, activity: Activity<S, H::Digest>) {
         match activity {
-            // The public mailbox hands certificate records to the catalog directly.
-            Activity::TransactionProposed { .. } | Activity::CertificateRecorded { .. } => {}
+            // The public mailbox hands certificate records to the catalog directly and drops
+            // placement.
+            Activity::TransactionProposed { .. }
+            | Activity::CertificateRecorded { .. }
+            | Activity::Placed { .. } => {}
             Activity::CommitmentsAccepted { commitments } => {
                 let _ = self.synchronizer.commitments(commitments);
             }
