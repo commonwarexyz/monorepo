@@ -944,14 +944,9 @@ impl Groups {
             return Some(lease);
         }
 
-        // A concurrent creator may assign this domain before the lock is acquired.
-        let _homing = self.homing.lock();
-        if let Some(lease) = claim_home() {
-            return Some(lease);
-        }
-        let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
-
-        // A new home needs room in the pool's mask for every worker in a full group.
+        // Homes are permanent and the pool's mask never changes, so a domain without room for a
+        // full group, or a pool whose placeable groups are all homed elsewhere, can be turned away
+        // without the homing lock.
         #[cfg(all(target_os = "linux", not(miri)))]
         if let Some((topology, allowed)) = &self.affinity {
             let (_, count) = topology.domains[usize::from(domain)].within(allowed);
@@ -959,6 +954,20 @@ impl Groups {
                 return None;
             }
         }
+        if !self
+            .groups
+            .iter()
+            .any(|group| group.placeable() && group.home.get().is_none())
+        {
+            return None;
+        }
+
+        // A concurrent creator may assign this domain before the lock is acquired.
+        let _homing = self.homing.lock();
+        if let Some(lease) = claim_home() {
+            return Some(lease);
+        }
+        let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
 
         // Home the first idle, unhomed placeable group and queue its mask requests before releasing
         // the homing lock. Each worker applies them after its own deques drain, so a worker that is
