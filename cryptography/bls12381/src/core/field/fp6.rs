@@ -329,11 +329,13 @@ impl<F> Fp6<F> {
     where
         F: Field<S>,
     {
-        Self {
-            c0: Fp2::<F>::reduce_tight::<K, S>(simd, product.c0),
-            c1: Fp2::<F>::reduce_tight::<K, S>(simd, product.c1),
-            c2: Fp2::<F>::reduce_tight::<K, S>(simd, product.c2),
-        }
+        let products = [product.c0, product.c1, product.c2];
+        let [c0, c1, c2] = Fp2::<F>::reduce_each_tight::<3, 6, K, S>(
+            simd,
+            #[inline(always)]
+            |k| products[k],
+        );
+        Self { c0, c1, c2 }
     }
 
     /// Returns the inverse, or zero for zero.
@@ -368,9 +370,12 @@ impl<F> Fp6<F> {
                     c1.square_product::<K, S>(simd),
                     c0.product(simd, c2),
                 );
-                let a0 = Fp2::<F>::reduce_tight::<BIAS, S>(simd, a0);
-                let a1 = Fp2::<F>::reduce_tight::<BIAS, S>(simd, a1);
-                let a2 = Fp2::<F>::reduce_tight::<BIAS, S>(simd, a2);
+                let products = [a0, a1, a2];
+                let [a0, a1, a2] = Fp2::<F>::reduce_each_tight::<3, 6, BIAS, S>(
+                    simd,
+                    #[inline(always)]
+                    |k| products[k],
+                );
                 // d = c0 a0 + (1 + i) (c2 a1 + c1 a2).
                 let d = Fp2::<F>::accumulate(
                     simd,
@@ -381,11 +386,13 @@ impl<F> Fp6<F> {
                     ),
                 );
                 let inverse = Fp2::<F>::reduce_tight::<BIAS, S>(simd, d).invert(simd);
-                Self {
-                    c0: Fp2::<F>::reduce_tight::<BIAS, S>(simd, a0.product(simd, inverse)),
-                    c1: Fp2::<F>::reduce_tight::<BIAS, S>(simd, a1.product(simd, inverse)),
-                    c2: Fp2::<F>::reduce_tight::<BIAS, S>(simd, a2.product(simd, inverse)),
-                }
+                let adjugate = [a0, a1, a2];
+                let [c0, c1, c2] = Fp2::<F>::reduce_each_tight::<3, 6, BIAS, S>(
+                    simd,
+                    #[inline(always)]
+                    |k| adjugate[k].product(simd, inverse),
+                );
+                Self { c0, c1, c2 }
             },
         )
     }

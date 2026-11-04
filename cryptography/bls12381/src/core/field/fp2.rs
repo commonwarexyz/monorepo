@@ -53,7 +53,7 @@
 //! frame.
 
 use super::{
-    arithmetic::{Field, Signed, TIGHT},
+    arithmetic::{Field, Signed, TIGHT, unroll},
     fp::BYTES as FP_BYTES,
 };
 use commonware_simd::Simd;
@@ -241,7 +241,10 @@ impl<F> Fp2<F> {
     /// The bias `K` must cover `c1` as for [`Field::sub`].
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "Completes the documented arithmetic, which the tests check.")
+        expect(
+            dead_code,
+            reason = "Completes the documented arithmetic, which the tests check."
+        )
     )]
     #[inline(always)]
     pub fn mul_by_nonresidue<const K: u64, S: Simd>(self, simd: S) -> Self
@@ -521,10 +524,13 @@ impl<F> Fp2<F> {
     where
         F: Field<S>,
     {
-        Self {
-            c0: F::reduce_signed::<K>(simd, product.c0),
-            c1: F::reduce_signed::<K>(simd, product.c1),
-        }
+        let sums = [product.c0, product.c1];
+        let [c0, c1] = F::reduce_each_signed::<2, K>(
+            simd,
+            #[inline(always)]
+            |i| sums[i],
+        );
+        Self { c0, c1 }
     }
 
     /// Reduces both components of a product without negative sums.
@@ -534,10 +540,13 @@ impl<F> Fp2<F> {
         F: Field<S>,
     {
         debug_assert!(product.c0.neg.is_none() && product.c1.neg.is_none());
-        Self {
-            c0: F::reduce(simd, product.c0.pos),
-            c1: F::reduce(simd, product.c1.pos),
-        }
+        let sums = [product.c0.pos, product.c1.pos];
+        let [c0, c1] = F::reduce_each::<2>(
+            simd,
+            #[inline(always)]
+            |i| sums[i],
+        );
+        Self { c0, c1 }
     }
 
     /// Carries every sum of a product, as for [`Field::carry_product`].
@@ -563,11 +572,75 @@ impl<F> Fp2<F> {
         F::kernel(
             simd,
             #[inline(always)]
-            move |simd: S| Self {
-                c0: F::reduce_signed_tight::<K>(simd, product.c0),
-                c1: F::reduce_signed_tight::<K>(simd, product.c1),
+            move |simd: S| {
+                let sums = [product.c0, product.c1];
+                let [c0, c1] = F::reduce_each_signed_tight::<2, K>(
+                    simd,
+                    #[inline(always)]
+                    |i| sums[i],
+                );
+                Self { c0, c1 }
             },
         )
+    }
+
+    /// Returns `product(0)`, ..., `product(N - 1)`, each reduced as [`Self::reduce_tight`] does
+    /// with the bias `K`, for their `C = 2 * N` components.
+    ///
+    /// Forms each product once, in order. When [`Field::INTERLEAVE`] covers the `C` components,
+    /// they reduce in one call of [`Field::reduce_each_signed_tight`]; otherwise each product
+    /// reduces right after it is formed.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub(super) fn reduce_each_tight<const N: usize, const C: usize, const K: u64, S: Simd>(
+        simd: S,
+        mut product: impl FnMut(usize) -> Product<F, S>,
+    ) -> [Self; N]
+    where
+        F: Field<S>,
+    {
+        const { assert!(N > 0 && C == 2 * N) };
+        if C > F::INTERLEAVE {
+            let mut reduced = [Self::reduce_tight::<K, S>(simd, product(0)); N];
+            unroll::<N>(
+                #[inline(always)]
+                |k| {
+                    if k > 0 {
+                        reduced[k] = Self::reduce_tight::<K, S>(simd, product(k));
+                    }
+                },
+            );
+            return reduced;
+        }
+        // Components are requested in order, so each product forms with its real component and
+        // holds its imaginary component for the next request.
+        let mut imaginary = None;
+        let components = F::reduce_each_signed_tight::<C, K>(
+            simd,
+            #[inline(always)]
+            |i| {
+                if i % 2 == 0 {
+                    let Fp2 { c0, c1 } = product(i / 2);
+                    imaginary = Some(c1);
+                    c0
+                } else {
+                    imaginary.take().expect("the real component comes first")
+                }
+            },
+        );
+        let mut reduced = [Self {
+            c0: components[0],
+            c1: components[1],
+        }; N];
+        unroll::<N>(
+            #[inline(always)]
+            |k| {
+                reduced[k] = Self {
+                    c0: components[2 * k],
+                    c1: components[2 * k + 1],
+                };
+            },
+        );
+        reduced
     }
 
     /// Returns the inverse `(c0 - c1 i) / (c0^2 + c1^2)`, or zero for zero.
@@ -592,7 +665,11 @@ impl<F> Fp2<F> {
 
 /// Returns the sum of two optional products.
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn join<S: Simd, F: Field<S>>(simd: S, a: Option<F::Product>, b: Option<F::Product>) -> Option<F::Product> {
+fn join<S: Simd, F: Field<S>>(
+    simd: S,
+    a: Option<F::Product>,
+    b: Option<F::Product>,
+) -> Option<F::Product> {
     match (a, b) {
         (Some(a), Some(b)) => Some(F::accumulate(simd, a, b)),
         (a, None) => a,
@@ -602,7 +679,11 @@ fn join<S: Simd, F: Field<S>>(simd: S, a: Option<F::Product>, b: Option<F::Produ
 
 /// Returns `a + b` for signed sums.
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn add<S: Simd, F: Field<S>>(simd: S, a: Signed<F::Product>, b: Signed<F::Product>) -> Signed<F::Product> {
+fn add<S: Simd, F: Field<S>>(
+    simd: S,
+    a: Signed<F::Product>,
+    b: Signed<F::Product>,
+) -> Signed<F::Product> {
     Signed {
         pos: F::accumulate(simd, a.pos, b.pos),
         neg: join::<S, F>(simd, a.neg, b.neg),
@@ -611,7 +692,11 @@ fn add<S: Simd, F: Field<S>>(simd: S, a: Signed<F::Product>, b: Signed<F::Produc
 
 /// Returns `a - b` for signed sums, swapping the parts of `b`.
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn sub<S: Simd, F: Field<S>>(simd: S, a: Signed<F::Product>, b: Signed<F::Product>) -> Signed<F::Product> {
+fn sub<S: Simd, F: Field<S>>(
+    simd: S,
+    a: Signed<F::Product>,
+    b: Signed<F::Product>,
+) -> Signed<F::Product> {
     let mut pos = a.pos;
     if let Some(neg) = b.neg {
         pos = F::accumulate(simd, pos, neg);
@@ -634,7 +719,9 @@ fn carry<S: Simd, F: Field<S>>(simd: S, sum: Signed<F::Product>) -> Signed<F::Pr
 /// Splits an element's encoding into its `c1` and `c0` encodings.
 #[inline(always)]
 fn split(element: &[u8; BYTES]) -> (&[u8; FP_BYTES], &[u8; FP_BYTES]) {
-    let (c1, c0) = element.split_first_chunk::<FP_BYTES>().expect("two components");
+    let (c1, c0) = element
+        .split_first_chunk::<FP_BYTES>()
+        .expect("two components");
     (c1, c0.try_into().expect("two components"))
 }
 
@@ -797,7 +884,9 @@ mod tests {
             value = value.mul::<BIAS, S>(simd, b);
             expected = mul(expected, rb);
             // Components below BOUND + 1 and 2 * BOUND, carried to limb bound 1.
-            value = value.mul_by_nonresidue::<{ BOUND + 1 }, S>(simd).carry(simd);
+            value = value
+                .mul_by_nonresidue::<{ BOUND + 1 }, S>(simd)
+                .carry(simd);
             expected = mul(expected, (one, one));
             value = value.square::<{ 2 * BOUND + 1 }, S>(simd);
             expected = mul(expected, expected);
