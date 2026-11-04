@@ -237,7 +237,11 @@ impl<V: Variant> Material<V> {
 /// `V` may be either [`commonware_cryptography::bls12381::primitives::variant::MinPk`] or
 /// [`commonware_cryptography::bls12381::primitives::variant::MinSig`].
 ///
-/// The ordinary signing roster is proof-of-knowledge checked by [`Roster`]. The DA and
+/// The ordinary signing roster is proof-of-knowledge checked by [`Roster`]. Every scheme
+/// precomputes a [`sas::KeyTable`] of the roster's ordinary keys, which costs 24 KiB per participant
+/// for [`MinPk`](commonware_cryptography::bls12381::primitives::variant::MinPk) and 48 KiB for
+/// [`MinSig`](commonware_cryptography::bls12381::primitives::variant::MinSig), and is shared by every
+/// clone. The DA and
 /// nullification sharings must be generated independently. The constructor checks their public
 /// structure, thresholds, and distinct group identities, but cannot prove how key material was
 /// generated.
@@ -246,6 +250,8 @@ pub struct Scheme<P: PublicKey, V: Variant> {
     parameters: Arc<Parameters>,
     namespace: Namespace,
     participants: BiMap<P, sas::PublicKey<V>>,
+    /// Precomputed multiples of the ordinary keys, for batch verification.
+    table: Arc<sas::KeyTable<V>>,
     material: Material<V>,
 }
 
@@ -367,6 +373,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         Self {
             parameters: Arc::clone(parameters),
             namespace: Namespace::new(parameters.namespace()),
+            table: Arc::new(sas::KeyTable::new(roster.participants.values())),
             participants: roster.participants,
             material,
         }

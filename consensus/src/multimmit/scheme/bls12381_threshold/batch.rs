@@ -115,7 +115,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
                 batch.push(index, claim);
             }
         }
-        let invalid = batch.invalid(rng, strategy);
+        let invalid = batch.invalid(rng, &self.table, strategy);
         drop(batch);
         for index in invalid {
             claims[index] = None;
