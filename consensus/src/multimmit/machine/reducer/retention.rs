@@ -53,6 +53,8 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         // parent alive, so it runs before the views retire parents.
         self.retire_finality_through(self.retention_floor())
             .map_err(|_| ReplayError::Transition(TransitionReason::FinalityState))?;
+        // Leaders finalized so far report their history while their parents are still retained.
+        self.report_finality_histories();
         self.retract_unneeded_resolutions();
         self.dependencies.available.retain(|dependency| {
             !matches!(dependency, Dependency::Leader { round, .. }
@@ -62,6 +64,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
             transitions: transition_floor,
             parents: finality_floor.max(anchor_view),
             anchor,
+            reports: self.retention_floor(),
         });
         self.finality.retire_proofs_through(finality_floor);
         for id in retired_parents {

@@ -774,6 +774,7 @@ impl Certified {
         assert_eq!(
             reporter.report(Activity::HistoryAccepted {
                 view: self.proof.view(),
+                leader: self.proof.leader().digest::<Sha256>(),
                 commitment: self.history.commitment::<Sha256>(),
                 record: Arc::clone(&self.history),
             }),
@@ -2078,6 +2079,7 @@ fn late_local_history_completes_active_finality_resolution() {
                 assert_eq!(
                     reporter.report(Activity::HistoryAccepted {
                         view: batch.proof.view(),
+                        leader: batch.proof.leader().digest::<Sha256>(),
                         commitment: batch.history.commitment::<Sha256>(),
                         record: Arc::clone(&batch.history),
                     }),
@@ -2107,6 +2109,7 @@ fn malformed_reports_do_not_stop_the_service() {
         assert_eq!(
             reporter.report(Activity::HistoryAccepted {
                 view: View::new(1),
+                leader: digest(b"unknown leader", 1),
                 commitment: digest(b"wrong history commitment", 0),
                 record: Arc::clone(&history),
             }),
@@ -2620,6 +2623,7 @@ fn sustained_history_catchup_remains_dense_and_memory_only() {
             assert_eq!(
                 reporter.report(Activity::HistoryAccepted {
                     view: batch.proof.view(),
+                    leader: batch.proof.leader().digest::<Sha256>(),
                     commitment: batch.history.commitment::<Sha256>(),
                     record: Arc::clone(&batch.history),
                 }),
@@ -3325,6 +3329,7 @@ async fn run_floor_case(
     assert_eq!(
         reporter.report(Activity::HistoryAccepted {
             view: View::new(2),
+            leader: digest(b"unknown leader", 2),
             commitment: intermediate_commitment,
             record: intermediate_history,
         }),

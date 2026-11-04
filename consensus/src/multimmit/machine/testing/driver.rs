@@ -15,6 +15,8 @@ use super::{
     executors::{Execution, Executor, SymbolicPersistence},
     extensions::{MachineExt as _, StepExt},
 };
+#[cfg(test)]
+use crate::multimmit::types::Activity;
 use crate::multimmit::{
     config::Profile,
     scheme::Scheme,
@@ -258,6 +260,23 @@ pub(in crate::multimmit::machine) trait Drive<S: Scheme, D: Digest> {
         effects: impl IntoIterator<Item = Capability<S, D>>,
         until: Until,
     ) -> Capabilities<S, D> {
+        self.drain_reporting(executor, effects, until, &mut Vec::new())
+    }
+
+    /// Drains like [`Self::drain`], appending every activity the machine reports to `activities`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an execution fails or the machine does not quiesce within [`MAX_DRAIN_TURNS`]
+    /// turns.
+    #[cfg(test)]
+    fn drain_reporting(
+        &mut self,
+        executor: &mut impl Executor<S, D>,
+        effects: impl IntoIterator<Item = Capability<S, D>>,
+        until: Until,
+        activities: &mut Vec<Activity<S, D>>,
+    ) -> Capabilities<S, D> {
         let mut pending = VecDeque::from_iter(effects);
         let mut unhandled = Capabilities::new();
         for _ in 0..MAX_DRAIN_TURNS {
@@ -277,13 +296,17 @@ pub(in crate::multimmit::machine) trait Drive<S: Scheme, D: Digest> {
                             .map(Capability::Released),
                     );
                 }
-                pending.extend(self.settle(step, until).into_capabilities());
+                let (effects, reported) = self.settle(step, until).into_parts();
+                pending.extend(effects);
+                activities.extend(reported);
             }
             let result = self
                 .poll_with(NonZeroUsize::MIN)
                 .unwrap_or_else(|error| panic!("machine poll failed: {error}"));
             let work_remaining = self.work_remaining();
-            pending.extend(result.into_capabilities());
+            let (effects, reported) = result.into_parts();
+            pending.extend(effects);
+            activities.extend(reported);
             if pending.is_empty() && !work_remaining {
                 return unhandled;
             }

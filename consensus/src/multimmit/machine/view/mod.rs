@@ -36,6 +36,12 @@
 //! in which this validator can still vote, the exit carries the V-QC's leader so the node votes
 //! for it before leaving (the rescue vote).
 //!
+//! # History records
+//!
+//! Every leader the machine admits or finalizes is offered to the view state, which reports the
+//! safe-tip opening the leader commits to once, from the leader's retained parent, waiting for a
+//! parent that is not retained yet.
+//!
 //! # Proposal and vote passes
 //!
 //! A proposal or vote body covers every producer chain, so it is built by a resumable pass that
@@ -46,6 +52,7 @@
 mod certificate;
 mod claims;
 mod forward;
+mod history;
 mod proposal;
 mod slot;
 mod state;
@@ -56,6 +63,7 @@ pub(crate) use self::{
         NullificationRecoveryCompletion, NullificationRecoveryJob, VqcAggregateCompletion,
         VqcAggregateJob,
     },
+    history::{HistoryRecord, LeaderHistory},
     proposal::TimeoutCutoff,
     slot::{ViewSlotSnapshot, ViewStance, ViewTransition},
     state::{RetireFloors, ViewError, ViewState, ViewTimer},

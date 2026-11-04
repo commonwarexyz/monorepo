@@ -8,11 +8,11 @@ use super::{
     store::ArtifactState,
 };
 use crate::{
-    Epochable as _, Viewable,
+    Epochable as _,
     multimmit::{
         config::Role,
         machine::{
-            artifact::IdentifiedArtifact,
+            artifact::{Dependency, IdentifiedArtifact},
             capability::{Capabilities, Capability, ResolverCommand},
             durability::{
                 Change, DomainEvent, DurableEffect, EffectCompletion, EffectId, EffectResult,
@@ -24,10 +24,10 @@ use crate::{
             scheduler::{Budget, ProtocolComponent, WorkKey},
             util::Drive,
             verification::VerificationCompletion,
-            view::ViewError,
+            view::{HistoryRecord, LeaderHistory},
         },
         scheme::Scheme,
-        types::{Activity, Artifact, ArtifactId, ChainId, SignedLeaderBlock},
+        types::{Activity, Artifact, ArtifactId, ChainId},
     },
     types::{Height, Participant, View},
 };
@@ -38,6 +38,18 @@ use std::{
     num::NonZeroUsize,
     sync::Arc,
 };
+
+/// Reports one reconstructed leader history record.
+pub(super) fn history_accepted<S: Scheme, D: Digest>(
+    (source, record): HistoryRecord<D>,
+) -> Activity<S, D> {
+    Activity::HistoryAccepted {
+        view: source.view,
+        leader: source.leader,
+        commitment: source.history,
+        record,
+    }
+}
 
 /// Where a verification pass is, with the verdict it resumes at.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -572,14 +584,19 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         })
     }
 
-    /// Reports direct-finality updates and every artifact promoted to ready since the last drain.
+    /// Reports direct-finality updates, every artifact promoted to ready, and every leader
+    /// history record reconstructed since the last drain.
     ///
     /// A promotion that the same drain window also discarded is not an admission: the artifact
     /// is no longer retained, so it is filtered out exactly as a before-and-after comparison of
-    /// the retained map would have.
+    /// the retained map would have. A history record is reported regardless: it was
+    /// reconstructed when its leader was offered, and a leader whose view retires in the same
+    /// window (an L-QC raises the retired view to its own) remains authenticated.
     fn drain_activities(&mut self) -> Vec<Activity<S, H::Digest>> {
         let finalized = self.finality.drain_updates();
-        if self.store.newly_ready.is_empty() && finalized.is_empty() {
+        self.report_finality_histories();
+        let histories = self.views.take_histories();
+        if self.store.newly_ready.is_empty() && finalized.is_empty() && histories.is_empty() {
             return Vec::new();
         }
         let mut accepted = take(&mut self.store.newly_ready);
@@ -590,7 +607,8 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
                 .is_some_and(|entry| matches!(entry.state, ArtifactState::Ready))
         });
         accepted.sort_unstable_by_key(|(observation, id, _)| (*observation, *id));
-        let mut activities = Vec::with_capacity(accepted.len() + finalized.len());
+        let mut activities =
+            Vec::with_capacity(accepted.len() + 2 * finalized.len() + histories.len());
         activities.extend(finalized.into_iter().flat_map(|update| match update {
             FinalityUpdate::Finalized(fact, commitments) => [
                 Activity::CommitmentsAccepted { commitments },
@@ -604,11 +622,70 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         for (_, artifact_id, artifact) in accepted {
             self.push_acceptance(artifact_id, artifact, &mut activities);
         }
+        activities.extend(histories.into_iter().map(history_accepted));
         activities
     }
 
-    /// Appends the activities reporting one accepted artifact: its selected commitments, the
-    /// acceptance itself, and a leader block's history record.
+    /// Offers `source` for history reporting while the machine is live.
+    ///
+    /// Replay and recovery never report, so they record nothing either.
+    pub(super) fn report_history(&mut self, source: LeaderHistory<H::Digest>) {
+        if self.lifecycle == Lifecycle::Live {
+            self.views.report_history(source);
+        }
+    }
+
+    /// Offers the leader of every pool whose finality fact changed for history reporting.
+    pub(super) fn report_finality_histories(&mut self) {
+        let live = self.lifecycle == Lifecycle::Live;
+        let views = &mut self.views;
+        self.finality.drain_histories(|source| {
+            if live {
+                views.report_history(source);
+            }
+        });
+    }
+
+    /// Offers an admitted leader block for history reporting, reusing the digest its
+    /// provisions carry.
+    pub(super) fn report_leader_history(
+        &mut self,
+        artifact: &Artifact<S, H::Digest>,
+        provisions: &[Dependency<H::Digest>],
+    ) {
+        let Artifact::LeaderBlock(block) = artifact else {
+            return;
+        };
+        let leader = provisions.iter().find_map(|provision| match provision {
+            Dependency::Leader { digest, .. } => Some(*digest),
+            Dependency::Vqc(_) => None,
+        });
+        if let Some(leader) = leader {
+            self.report_history(LeaderHistory::new(block.block(), leader));
+        }
+    }
+
+    /// Offers the leader of a verified L-QC for history reporting.
+    ///
+    /// `leader` is the leader digest when verification already derived it.
+    pub(super) fn report_certificate_history(
+        &mut self,
+        certificate: &Artifact<S, H::Digest>,
+        leader: Option<H::Digest>,
+    ) {
+        let Artifact::Lqc(certificate) = certificate else {
+            return;
+        };
+        if self.lifecycle != Lifecycle::Live {
+            return;
+        }
+        let block = certificate.leader();
+        let leader = leader.unwrap_or_else(|| block.digest::<H>());
+        self.views.report_history(LeaderHistory::new(block, leader));
+    }
+
+    /// Appends the activities reporting one accepted artifact: its selected commitments and the
+    /// acceptance itself.
     pub(super) fn push_acceptance(
         &self,
         artifact_id: ArtifactId<H::Digest>,
@@ -624,34 +701,16 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
                 commitments: commitments.clone(),
             });
         }
-        let history = match artifact.as_ref() {
-            Artifact::LeaderBlock(block) => self.history_acceptance(block).ok(),
-            _ => None,
-        };
         activities.push(Activity::ProtocolAccepted {
             artifact_id,
             artifact,
         });
-        if let Some(history) = history {
-            activities.push(history);
-        }
     }
 
     fn discard_activities(&mut self) {
         self.store.newly_ready.clear();
         self.finality.clear_updates();
-    }
-
-    fn history_acceptance(
-        &self,
-        block: &SignedLeaderBlock<S, H::Digest>,
-    ) -> Result<Activity<S, H::Digest>, ViewError> {
-        let record = self.views.leader_history::<H>(block.block())?;
-        Ok(Activity::HistoryAccepted {
-            view: block.view(),
-            commitment: block.block().history(),
-            record,
-        })
+        self.views.discard_histories();
     }
 
     /// Replays one contiguous durable event without emitting live capabilities.

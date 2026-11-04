@@ -96,9 +96,17 @@ pub enum Activity<S: Scheme, D: Digest> {
         artifact: Arc<Artifact<S, D>>,
     },
     /// An authenticated leader exposed its safe-tip history opening for peer seeding.
+    ///
+    /// The engine reports the opening of every leader block it admits or finalizes, including a
+    /// leader known only from its votes or certificates, as soon as the opening is
+    /// reconstructible from the leader's retained parent. Each leader is reported once per engine
+    /// lifetime; a restarted engine may report it once more. A leader whose parent the engine
+    /// does not retain before the leader falls out of the retained view window is not reported.
     HistoryAccepted {
         /// View of the leader that committed the opening.
         view: View,
+        /// Unsigned digest of the leader block that committed the opening.
+        leader: D,
         /// Commitment carried by the leader.
         commitment: D,
         /// Opening reconstructed from the retained parent state.
