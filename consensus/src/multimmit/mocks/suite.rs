@@ -60,10 +60,11 @@ pub mod da {
 
 /// Mock nullifications at `2f+1`.
 pub mod nullify {
-    use crate::multimmit::scheme::{Namespace, NullifyFaults, NullifySubject};
+    use crate::multimmit::scheme::{Namespace, NullifySubject};
     use commonware_cryptography::impl_certificate_mock;
+    use commonware_utils::faults::N5f1Nullification;
 
-    impl_certificate_mock!(NullifySubject, Namespace, NullifyFaults);
+    impl_certificate_mock!(NullifySubject, Namespace, N5f1Nullification);
 }
 
 /// The signatures and certificates one committee has issued.
