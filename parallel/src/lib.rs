@@ -1436,9 +1436,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// A parallel execution strategy backed by a work-stealing [`rayon::ThreadPool`].
     ///
     /// This strategy adaptively executes collection operations serially or through its backing
-    /// pool. It records wall-clock estimates by callsite, input-size and work-size buckets, and
-    /// planning parallelism so small inputs can avoid thread-pool scheduling overhead without
-    /// disabling parallel execution for larger inputs.
+    /// pool. It keeps wall-clock and busy-time estimates for each callsite, input-size bucket,
+    /// work-size bucket, and planning parallelism, so small inputs can avoid thread-pool scheduling
+    /// overhead without disabling parallel execution for larger inputs.
     ///
     /// Nested calls at the same callsite share estimates across parent paths, so use distinct
     /// callsites (propagating `#[track_caller]` through helpers as needed) to tune them separately.
@@ -1682,17 +1682,17 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let caller = Location::caller();
             let own = self.current_placement();
             let pools = match (own, body) {
-                (Some(rayon::Placement::Local(group)), _) => {
-                    policy::Pools::Fixed(policy::Placement::Local, self.group_parallelism(group))
+                (Some(rayon::Placement::Local(_)), _) => {
+                    policy::Pools::Fixed(policy::Placement::Local)
                 }
                 (Some(rayon::Placement::Wide { .. }), _) | (None, Body::Caller) => {
-                    policy::Pools::Fixed(policy::Placement::Wide, self.parallelism)
+                    policy::Pools::Fixed(policy::Placement::Wide)
                 }
                 (None, Body::Placed) if self.groups.groups().len() > 1 => {
-                    policy::Pools::Either(self.group_parallelism(0))
+                    policy::Pools::Either
                 }
                 (None, Body::Group | Body::Placed) => {
-                    policy::Pools::Fixed(policy::Placement::Local, self.group_parallelism(0))
+                    policy::Pools::Fixed(policy::Placement::Local)
                 }
             };
             let plan = policy.choose_run(caller, len, work, self.parallelism, pools);
@@ -1728,16 +1728,26 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 }
             };
 
-            // Record only successful runs. An error can skip work and bias the estimate down.
+            // A measured run is timed, and a measured parallel run also meters the busy time of the
+            // threads that execute it. A serial run's busy time is its wall time.
             let start = plan.measure.then(Instant::now);
+            let meter = (plan.measure && plan.execution == policy::RunExecution::Parallel)
+                .then(rayon::Meter::new);
             let result = {
                 // The guard requests the caller's original mask when the body returns or unwinds.
                 let _nudge = nudge;
-                run(plan.execution, placement)
+                match &meter {
+                    Some(meter) => meter.measure(|| run(plan.execution, placement)),
+                    None => run(plan.execution, placement),
+                }
             };
             drop(lease);
+
+            // Record only successful runs. An error can skip work and bias the estimates down.
             if let (Some(start), Ok(_)) = (start, &result) {
-                policy.record_run(caller, len, work, self.parallelism, plan, start.elapsed());
+                let elapsed = start.elapsed();
+                let busy = meter.map_or(elapsed, |meter| meter.busy());
+                policy.record_run(caller, len, work, self.parallelism, plan, elapsed, busy);
             }
             result
         }
@@ -2254,7 +2264,7 @@ mod test {
     use crate::{
         Grid, MAX_UNITS, Rayon, Sequential, Strategy,
         mocks::Explorer,
-        rayon::{self, Placement, ThreadPoolBuilder},
+        rayon::{self, Placement, ThreadPoolBuilder, spin},
     };
     use commonware_utils::{
         NZUsize, Widen,
@@ -2264,10 +2274,11 @@ mod test {
     use futures::FutureExt;
     use proptest::prelude::*;
     use std::{
+        panic::Location,
         rc::Rc,
         sync::{
             Arc,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::{Duration, Instant},
     };
@@ -3751,6 +3762,148 @@ mod test {
         strategy.policy.as_ref().map_or(0, |policy| policy.len())
     }
 
+    /// The wall-time and busy-time estimates `strategy` recorded at `caller` for `len` items.
+    /// Panics unless a parallel run there has been measured.
+    fn recorded(
+        strategy: &Rayon,
+        caller: &'static Location<'static>,
+        len: usize,
+    ) -> (Duration, Duration) {
+        let policy = strategy.policy.as_ref().unwrap();
+        let (wide, local) = policy
+            .run_placement_estimates(caller, len, len, strategy.parallelism)
+            .unwrap();
+        let (wide_busy, local_busy) = policy
+            .run_busy_estimates(caller, len, len, strategy.parallelism)
+            .unwrap();
+        (
+            Duration::from_nanos(wide.or(local).unwrap()),
+            Duration::from_nanos(wide_busy.or(local_busy).unwrap()),
+        )
+    }
+
+    /// Maps `len` items that each spin for `each`, and returns the call site of the run.
+    #[track_caller]
+    fn spin_map(strategy: &Rayon, len: usize, each: Duration) -> &'static Location<'static> {
+        let _ = strategy.map_collect_vec(0..len, |_| spin(each));
+        Location::caller()
+    }
+
+    /// Measures a parallel run of 32 items on four workers, each spinning for 1ms. The caller is
+    /// not charged while it waits for the workers, so the busy time is at least the 32ms the items
+    /// spin and at most the run's wall time on each worker plus the caller's brief share.
+    #[test]
+    fn measured_run_records_busy_time_of_every_worker() {
+        let strategy = parallel_strategy();
+        let len = 32;
+        let caller = spin_map(&strategy, len, Duration::from_millis(1));
+        let (wall, busy) = recorded(&strategy, caller, len);
+        assert!(
+            busy >= Duration::from_millis(32) && busy <= wall * 4 + Duration::from_millis(1),
+            "busy time {busy:?} must cover every item and stay within four times the wall {wall:?}"
+        );
+    }
+
+    /// Measures a join, called from outside the pool, with sides that spin for 5ms and 40ms. A
+    /// worker that finishes the short side and waits for the long one is not charged for the wait,
+    /// so the busy time exceeds the wall time by at most the short side plus scheduling overhead.
+    #[test]
+    fn measured_join_excludes_idle_waits() {
+        #[track_caller]
+        fn spin_join(strategy: &Rayon) -> &'static Location<'static> {
+            strategy.join(
+                || spin(Duration::from_millis(5)),
+                || spin(Duration::from_millis(40)),
+            );
+            Location::caller()
+        }
+
+        let strategy = parallel_strategy();
+        let caller = spin_join(&strategy);
+        let (wall, busy) = recorded(&strategy, caller, 1);
+        assert!(
+            busy >= Duration::from_millis(45) && busy < wall + Duration::from_millis(15),
+            "busy time {busy:?} must cover both sides and exclude the wait, wall {wall:?}"
+        );
+    }
+
+    /// Measures a run submitted while every worker is occupied. The workers keep spinning for 50ms
+    /// after the run queues, so its wall time includes the queue, but its busy time covers only its
+    /// own items.
+    #[test]
+    fn measured_run_excludes_queueing() {
+        let strategy = parallel_strategy();
+
+        // Occupy every worker until the measured run queues behind them, and then for 50ms more.
+        let started = Arc::new(std::sync::Barrier::new(5));
+        let missed = Arc::new(AtomicBool::new(false));
+        {
+            let pool = Arc::clone(strategy.groups.pool());
+            let started = Arc::clone(&started);
+            let missed = Arc::clone(&missed);
+            strategy.groups.pool().spawn_broadcast(move |_| {
+                started.wait();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !pool.has_injected_job() {
+                    if Instant::now() >= deadline {
+                        missed.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                    core::hint::spin_loop();
+                }
+                spin(Duration::from_millis(50));
+            });
+        }
+        started.wait();
+
+        // The run waits through the queue but executes only its own four 1ms items.
+        let len = 4;
+        let caller = spin_map(&strategy, len, Duration::from_millis(1));
+        assert!(
+            !missed.load(Ordering::Relaxed),
+            "the measured run must queue behind the occupied workers within 10s"
+        );
+        let (wall, busy) = recorded(&strategy, caller, len);
+        assert!(
+            wall >= Duration::from_millis(40),
+            "wall {wall:?} must include the queue"
+        );
+        assert!(
+            busy >= Duration::from_millis(4) && busy < wall / 2,
+            "busy time {busy:?} must exclude the queue, wall {wall:?}"
+        );
+    }
+
+    /// Measures a `Strategy::run` whose body spins for 2ms on the caller and then maps 16 items
+    /// that each spin for 1ms. The run's busy time includes the nested run's busy time once, plus
+    /// the time the caller spends in the body outside the nested run.
+    #[test]
+    fn measured_run_includes_nested_runs() {
+        #[track_caller]
+        fn run_body(strategy: &Rayon) -> (&'static Location<'static>, &'static Location<'static>) {
+            let body = || {
+                spin(Duration::from_millis(2));
+                spin_map(strategy, 16, Duration::from_millis(1))
+            };
+            (Location::caller(), strategy.run(2, body, body))
+        }
+
+        let strategy = parallel_strategy();
+        let (outer, inner) = run_body(&strategy);
+        let (outer_wall, outer) = recorded(&strategy, outer, 2);
+        let (inner_wall, inner) = recorded(&strategy, inner, 16);
+        let body = outer_wall - inner_wall;
+        assert!(
+            inner >= Duration::from_millis(16),
+            "inner busy time {inner:?} must cover every item"
+        );
+        assert!(
+            outer >= inner + Duration::from_millis(2)
+                && outer < inner + body + Duration::from_millis(2),
+            "outer busy time {outer:?} must add the body's {body:?} to the inner {inner:?}"
+        );
+    }
+
     /// A strategy that does not split runs the whole input once as the single range `0..len` on
     /// the calling thread.
     #[test]
@@ -3816,6 +3969,7 @@ mod test {
                 measure: true,
             },
             std::time::Duration::from_micros(100),
+            std::time::Duration::from_micros(400),
         );
         policy.record_execution(
             caller,

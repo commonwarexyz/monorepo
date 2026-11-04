@@ -1,4 +1,4 @@
-use super::{latch::Latch, registry::Tag, unwind};
+use super::{latch::Latch, meter::Context, registry::Tag, unwind};
 use std::{any::Any, cell::UnsafeCell, mem, sync::Arc};
 
 pub(super) enum JobResult<T> {
@@ -83,6 +83,9 @@ impl JobRef {
 /// executes it need not free any heap data, the cleanup occurs when
 /// the stack frame is later popped.  The function parameter indicates
 /// `true` if the job was stolen and executed on a different thread.
+///
+/// The job executes in the context of the thread that created it, so the run that waits for it is
+/// charged for its time.
 pub(super) struct StackJob<L, F, R>
 where
     L: Latch + Sync,
@@ -90,6 +93,7 @@ where
     R: Send,
 {
     pub(super) latch: L,
+    context: Context,
     func: UnsafeCell<Option<F>>,
     result: UnsafeCell<JobResult<R>>,
 }
@@ -100,9 +104,10 @@ where
     F: FnOnce(bool) -> R + Send,
     R: Send,
 {
-    pub(super) const fn new(func: F, latch: L) -> Self {
+    pub(super) fn new(func: F, latch: L) -> Self {
         Self {
             latch,
+            context: Context::current(),
             func: UnsafeCell::new(Some(func)),
             result: UnsafeCell::new(JobResult::None),
         }
@@ -114,6 +119,8 @@ where
     }
 
     pub(super) unsafe fn run_inline(self, stolen: bool) -> R {
+        // Only the creator runs a job inline, already in the context the job captured.
+        debug_assert_eq!(Context::current(), self.context);
         self.func.into_inner().unwrap()(stolen)
     }
 
@@ -129,13 +136,16 @@ where
     R: Send,
 {
     unsafe fn execute(this: *const ()) {
-        // SAFETY: `this` came from `as_job_ref` on a job its owner keeps in place until the
-        // latch is set, and a job reference executes once, so nothing else touches the cells.
+        // SAFETY: `this` came from `as_job_ref` on a job its owner keeps in place until the latch
+        // is set, and a job reference executes once, so nothing else touches the cells. The job
+        // runs in the context it captured from its owner and leaves that context before setting
+        // the latch. The owner waits on the latch, so the meter outlives every charge the job
+        // makes.
         unsafe {
             let this = &*(this as *const Self);
             let abort = unwind::AbortIfPanic;
             let func = (*this.func.get()).take().unwrap();
-            (*this.result.get()) = JobResult::call(func);
+            (*this.result.get()) = this.context.enter(|| JobResult::call(func));
             Latch::set(&this.latch);
             mem::forget(abort);
         }
@@ -148,6 +158,8 @@ where
 /// signal that the job executed.
 ///
 /// (Probably `StackJob` should be refactored in a similar fashion.)
+///
+/// The job may outlive the run that spawned it, so it executes without a context.
 pub(super) struct HeapJob<BODY>
 where
     BODY: FnOnce() + Send,
@@ -189,12 +201,14 @@ where
     unsafe fn execute(this: *const ()) {
         // SAFETY: `this` is the box leaked by `into_job_ref`, and a job reference executes once.
         let this = unsafe { Box::from_raw(this as *mut Self) };
-        (this.job)();
+        Context::suspend(this.job);
     }
 }
 
 /// Represents a job stored in an `Arc`. Like `HeapJob`, but may be
 /// turned into multiple `JobRef`s and called multiple times.
+///
+/// The job may outlive the run that spawned it, so it executes without a context.
 pub(super) struct ArcJob<BODY>
 where
     BODY: Fn() + Send + Sync,
@@ -236,7 +250,7 @@ where
     unsafe fn execute(this: *const ()) {
         // SAFETY: `this` holds the count taken by `as_job_ref`, and a job reference executes once.
         let this = unsafe { Arc::from_raw(this as *mut Self) };
-        (this.job)();
+        Context::suspend(move || (this.job)());
     }
 }
 

@@ -2,7 +2,10 @@
     clippy::disallowed_types,
     reason = "Preserve upstream synchronization semantics."
 )]
-use super::registry::{Registry, WorkerThread};
+use super::{
+    meter::Context,
+    registry::{Registry, WorkerThread},
+};
 use std::{
     marker::PhantomData,
     ops::Deref,
@@ -401,7 +404,7 @@ impl CountLatch {
                 // `self`, which the caller keeps alive while it waits.
                 unsafe { owner.wait_until(latch) };
             }
-            CountLatchKind::Blocking { latch } => latch.wait(),
+            CountLatchKind::Blocking { latch } => Context::suspend(|| latch.wait()),
         }
     }
 }

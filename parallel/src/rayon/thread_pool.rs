@@ -241,6 +241,12 @@ impl ThreadPool {
             .sum()
     }
 
+    /// Whether a submitted job waits in an incoming queue for a worker to take it.
+    #[cfg(test)]
+    pub(crate) fn has_injected_job(&self) -> bool {
+        self.registry.has_any_injected_job()
+    }
+
     /// The number of times each worker was woken from sleep, in worker order, for tests of who
     /// wakes.
     #[cfg(test)]
