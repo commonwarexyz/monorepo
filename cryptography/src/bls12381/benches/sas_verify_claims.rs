@@ -53,7 +53,7 @@ impl Spread {
     const fn label(self) -> &'static str {
         match self {
             Self::Same => "same",
-            Self::Mostly => "mostly_distinct",
+            Self::Mostly => "mixed",
             Self::Distinct => "distinct",
         }
     }
@@ -190,7 +190,7 @@ fn register<V: Variant>(c: &mut Criterion, variant: &str) {
             compare(
                 c,
                 &format!(
-                    "workload=certificate variant={variant} q={q} messages={}",
+                    "workload=cert variant={variant} q={q} messages={}",
                     spread.label()
                 ),
                 &[batch::Claim {
