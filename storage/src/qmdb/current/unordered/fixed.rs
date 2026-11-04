@@ -8,9 +8,12 @@
 
 use crate::{
     index::unordered::Index,
-    journal::contiguous::fixed::Journal,
+    journal::contiguous::fixed::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::any::{unordered::fixed::Operation, value::FixedEncoding},
+    qmdb::{
+        any::{unordered::fixed::Operation, value::FixedEncoding},
+        current,
+    },
 };
 
 /// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
@@ -26,6 +29,9 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     S,
 >;
 
+/// Configuration for a [Db].
+pub type Config<T, S> = current::Config<T, JournalConfig, S>;
+
 pub mod partitioned {
     //! A partitioned variant of [super] that uses a partitioned index for the snapshot.
     //!
@@ -34,6 +40,7 @@ pub mod partitioned {
 
     use super::*;
     use crate::index::partitioned::unordered::Index;
+    use core::num::NonZeroUsize;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -53,6 +60,9 @@ pub mod partitioned {
             N,
             S,
         >;
+
+    /// Configuration for a [Db].
+    pub type Config<T, S> = current::Config<T, JournalConfig, S, NonZeroUsize>;
 }
 
 #[cfg(test)]
@@ -65,7 +75,6 @@ pub mod test {
         qmdb::{
             any::batch::Slot,
             current::{
-                FixedConfig,
                 tests::{fixed_config, fixed_config_partitioned},
                 unordered::tests as shared,
             },
@@ -578,12 +587,12 @@ pub mod test {
         }
         // One operation per page makes the initialization truncation page aligned and one blob
         // keeps both branches' writes overlapping.
-        fn db_config() -> FixedConfig<TwoCap, Sequential> {
+        fn db_config() -> Config<TwoCap, Sequential> {
             let page_size = std::num::NonZeroU16::new(
                 <Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16,
             )
             .unwrap();
-            FixedConfig {
+            Config {
                 merkle: MerkleConfig {
                     journal_partition: "rebranch-merkle-journal".into(),
                     metadata_partition: "rebranch-merkle-metadata".into(),

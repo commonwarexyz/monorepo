@@ -378,10 +378,7 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
         mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
-        qmdb::{
-            any::{FixedConfig, unordered::fixed},
-            sync,
-        },
+        qmdb::{any::unordered::fixed, sync},
         translator::TwoCap,
     };
     use commonware_utils::{
@@ -574,9 +571,9 @@ mod tests {
         }
     }
 
-    fn db_config(suffix: &str) -> FixedConfig<TwoCap, Sequential> {
+    fn db_config(suffix: &str) -> fixed::Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
-        FixedConfig {
+        fixed::Config {
             merkle: MmrJournalConfig {
                 journal_partition: format!("{suffix}-mmr-journal"),
                 metadata_partition: format!("{suffix}-mmr-metadata"),

@@ -43,8 +43,15 @@ use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{full, mmb},
     qmdb::{
-        any::{FixedConfig, batch::Slot},
-        current::FixedConfig as CurrentFixedConfig,
+        any::{
+            batch::Slot,
+            ordered::fixed::Config as AnyOrderedConfig,
+            unordered::{fixed::Config as AnyConfig, variable::Config as AnyVarConfig},
+        },
+        current::{
+            ordered::fixed::Config as CurrentOrderedConfig,
+            unordered::fixed::Config as CurrentConfig,
+        },
         floor::Bounded,
     },
     translator::EightCap,
@@ -442,7 +449,7 @@ fn main() {
         };
         match db_kind.as_str() {
             "current::unordered::fixed::mmb" => {
-                let cfg = CurrentFixedConfig {
+                let cfg = CurrentConfig {
                     merkle: merkle_config,
                     log: journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
@@ -460,7 +467,7 @@ fn main() {
                 )
             }
             "current::ordered::fixed::mmb" => {
-                let cfg = CurrentFixedConfig {
+                let cfg = CurrentOrderedConfig {
                     merkle: merkle_config,
                     log: journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
@@ -480,7 +487,7 @@ fn main() {
                 )
             }
             "any::ordered::fixed::mmb" => {
-                let cfg = FixedConfig {
+                let cfg = AnyOrderedConfig {
                     merkle: merkle_config,
                     log: journal_config,
                     translator: EightCap,
@@ -494,7 +501,7 @@ fn main() {
                 run_pipeline!(db, args, "any::ordered::fixed::mmb", AnyOrderedMerkleized)
             }
             "any::unordered::variable::mmb" => {
-                let cfg = commonware_storage::qmdb::any::VariableConfig {
+                let cfg = AnyVarConfig {
                     merkle: merkle_config,
                     log: VConfig {
                         partition: "constantinople-var-log".into(),
@@ -514,7 +521,7 @@ fn main() {
                 run_pipeline!(db, args, "any::unordered::variable::mmb", AnyVarMerkleized)
             }
             _ => {
-                let cfg = FixedConfig {
+                let cfg = AnyConfig {
                     merkle: merkle_config,
                     log: journal_config,
                     translator: EightCap,

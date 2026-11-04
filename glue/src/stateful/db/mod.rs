@@ -2186,7 +2186,9 @@ mod tests {
             }
         }
 
-        fn any_fixed_config(suffix: &str) -> storage_any::FixedConfig<TwoCap, Sequential> {
+        fn any_fixed_config(
+            suffix: &str,
+        ) -> storage_any::Config<TwoCap, FixedJournalConfig, Sequential> {
             storage_any::Config {
                 merkle: merkle_config(suffix),
                 log: fixed_journal_config(suffix),
@@ -2199,7 +2201,7 @@ mod tests {
 
         fn any_variable_config(
             suffix: &str,
-        ) -> storage_any::VariableConfig<TwoCap, ((), ()), Sequential> {
+        ) -> storage_any::Config<TwoCap, VariableJournalConfig<((), ())>, Sequential> {
             storage_any::Config {
                 merkle: merkle_config(suffix),
                 log: variable_journal_config(suffix, ((), ())),
@@ -2210,7 +2212,9 @@ mod tests {
             }
         }
 
-        fn current_fixed_config(suffix: &str) -> storage_current::FixedConfig<TwoCap, Sequential> {
+        fn current_fixed_config(
+            suffix: &str,
+        ) -> storage_current::Config<TwoCap, FixedJournalConfig, Sequential> {
             storage_current::Config {
                 merkle: merkle_config(suffix),
                 log: fixed_journal_config(suffix),
@@ -2224,7 +2228,7 @@ mod tests {
 
         fn current_variable_config(
             suffix: &str,
-        ) -> storage_current::VariableConfig<TwoCap, ((), ()), Sequential> {
+        ) -> storage_current::Config<TwoCap, VariableJournalConfig<((), ())>, Sequential> {
             storage_current::Config {
                 merkle: merkle_config(suffix),
                 log: variable_journal_config(suffix, ((), ())),

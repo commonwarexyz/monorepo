@@ -31,9 +31,14 @@ use commonware_storage::{
             value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
         },
         current::{
-            FixedConfig, VariableConfig,
             batch::{MerkleizedBatch, Slot, Staged, UnmerkleizedBatch},
             db::Db,
+            ordered::{
+                fixed::Config as OrderedFixedConfig, variable::Config as OrderedVariableConfig,
+            },
+            unordered::{
+                fixed::Config as UnorderedFixedConfig, variable::Config as UnorderedVariableConfig,
+            },
         },
         operation::Key,
         sync::{self, Target as CurrentSyncTarget},
@@ -483,7 +488,7 @@ where
         S,
     >;
     type Error = Error<F>;
-    type Config = FixedConfig<T, S>;
+    type Config = UnorderedFixedConfig<T, S>;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
 
     async fn init(
@@ -584,7 +589,7 @@ where
         S,
     >;
     type Error = Error<F>;
-    type Config = FixedConfig<T, S>;
+    type Config = OrderedFixedConfig<T, S>;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
 
     async fn init(
@@ -664,17 +669,15 @@ mod open {
                 value::{VariableEncoding, VariableValue},
             },
             current::{
-                VariableConfig, ordered::variable::Db as OrderedVariableDb, unordered::variable::Db,
+                ordered::variable::{Config as OrderedConfig, Db as OrderedVariableDb},
+                unordered::variable::{Config, Db},
             },
         },
     };
-    type VConfig<T, F, K, V, S> = VariableConfig<
-        T,
-        <Operation<F, unordered::Update<K, VariableEncoding<V>>> as Read>::Cfg,
-        S,
-    >;
+    type VConfig<T, F, K, V, S> =
+        Config<T, <Operation<F, unordered::Update<K, VariableEncoding<V>>> as Read>::Cfg, S>;
     type OrderedVConfig<T, F, K, V, S> =
-        VariableConfig<T, <Operation<F, ordered::Update<K, VariableEncoding<V>>> as Read>::Cfg, S>;
+        OrderedConfig<T, <Operation<F, ordered::Update<K, VariableEncoding<V>>> as Read>::Cfg, S>;
 
     pub(super) async fn variable<F, E, K, V, H, T, const N: usize, S>(
         context: E,
@@ -752,7 +755,7 @@ where
         S,
     >;
     type Error = Error<F>;
-    type Config = VariableConfig<
+    type Config = UnorderedVariableConfig<
         T,
         <Operation<F, unordered::Update<K, VariableEncoding<V>>> as CodecRead>::Cfg,
         S,
@@ -857,7 +860,7 @@ where
         S,
     >;
     type Error = Error<F>;
-    type Config = VariableConfig<
+    type Config = OrderedVariableConfig<
         T,
         <Operation<F, ordered::Update<K, VariableEncoding<V>>> as CodecRead>::Cfg,
         S,
@@ -1132,6 +1135,7 @@ mod tests {
         qmdb::{
             any::unordered::fixed::Operation as FixedOperation,
             current::{
+                Config as CurrentConfig,
                 ordered::{fixed as ordered_fixed, variable as ordered_variable},
                 unordered::{fixed, variable},
             },
@@ -1199,9 +1203,9 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn fixed_config(suffix: &str) -> FixedConfig<TwoCap, Sequential> {
+    fn fixed_config(suffix: &str) -> CurrentConfig<TwoCap, FixedJournalConfig, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        FixedConfig {
+        CurrentConfig {
             merkle: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
@@ -1226,9 +1230,11 @@ mod tests {
         }
     }
 
-    fn variable_config(suffix: &str) -> VariableConfig<TwoCap, ((), ()), Sequential> {
+    fn variable_config(
+        suffix: &str,
+    ) -> CurrentConfig<TwoCap, VariableJournalConfig<((), ())>, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        VariableConfig {
+        CurrentConfig {
             merkle: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
@@ -1679,7 +1685,7 @@ mod tests {
         // append of at most `CAPACITY` operations in memory, and a larger append bypasses it and
         // writes every page to the blob at once. One blob keeps the applied batch over the
         // discarded second target's bytes.
-        fn config() -> FixedConfig<TwoCap, Sequential> {
+        fn config() -> fixed::Config<TwoCap, Sequential> {
             let size = <FixedOp as FixedSize>::SIZE;
             let page_size = NonZeroU16::new(size as u16).unwrap();
             let mut config = fixed_config("bounded-init-crash");

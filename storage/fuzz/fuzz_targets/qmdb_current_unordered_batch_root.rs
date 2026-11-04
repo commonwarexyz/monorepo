@@ -10,9 +10,8 @@ use commonware_storage::{
     qmdb::{
         any::{traits::DbAny as _, unordered::fixed::Update},
         current::{
-            FixedConfig as Config,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
-            unordered::fixed::Db as CurrentDb,
+            unordered::fixed::{Config, Db as CurrentDb},
         },
     },
     translator::OneCap,

@@ -9,7 +9,7 @@ use commonware_storage::{
     merkle::{Family as MerkleFamily, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
         ProofExt as _,
-        any::{VariableConfig as Config, unordered::variable::Db},
+        any::unordered::variable::{Config, Db},
     },
     translator::TwoCap,
 };

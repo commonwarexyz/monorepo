@@ -1417,7 +1417,7 @@ mod test {
                 Sequential,
             >;
             let config = current::tests::variable_config_partitioned::<OneCap>("neighbors");
-            let config = current::VariableConfig {
+            let config = current::ordered::variable::partitioned::Config {
                 log: crate::journal::contiguous::variable::Config {
                     codec_config: (((..=3).into(), ()), ((..=4096).into(), ())),
                     partition: config.log.partition,
@@ -1787,7 +1787,7 @@ mod test {
                 Sequential,
             >;
             let base = any::test::variable_db_config::<OneCap>("scan-variable-keys");
-            let config = any::VariableConfig {
+            let config = any::ordered::variable::Config {
                 log: crate::journal::contiguous::variable::Config {
                     codec_config: (((0..=32).into(), ()), ()),
                     partition: base.log.partition,

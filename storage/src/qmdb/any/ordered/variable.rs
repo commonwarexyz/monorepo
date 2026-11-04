@@ -7,9 +7,9 @@
 
 use crate::{
     index::ordered::Index,
-    journal::contiguous::variable::Journal,
+    journal::contiguous::variable::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::any::{ordered, value::VariableEncoding},
+    qmdb::any::{self, ordered, value::VariableEncoding},
 };
 
 pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
@@ -28,6 +28,9 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
+/// Configuration for a [Db].
+pub type Config<T, C, S> = any::Config<T, JournalConfig<C>, S>;
+
 /// Partitioned index variants that divide the key space into `2^(P*8)` partitions.
 ///
 /// See [partitioned::Db] for the generic type, or use the convenience aliases:
@@ -38,11 +41,13 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
 /// than 130,816 entries (see [`crate::index::partitioned::ordered`]); prefer `p64k` to keep ordered
 /// access mostly inline at larger scale.
 pub mod partitioned {
+    use super::{JournalConfig, any};
     pub use super::{Operation, Update};
     use crate::{
         index::partitioned::ordered::Index, journal::contiguous::variable::Journal,
         merkle::Location,
     };
+    use core::num::NonZeroUsize;
 
     /// An ordered key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -64,16 +69,21 @@ pub mod partitioned {
         S,
     >;
 
+    /// Configuration for a [Db].
+    pub type Config<T, C, S> = any::Config<T, JournalConfig<C>, S, NonZeroUsize>;
+
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Variable-value DB with 256 partitions.
         pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 1, S>;
+        pub use super::Config;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
         /// Variable-value DB with 65,536 partitions.
         pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 2, S>;
+        pub use super::Config;
     }
 }
 
@@ -85,7 +95,6 @@ pub(crate) mod test {
         qmdb::{
             Error,
             any::{
-                VariableConfig,
                 batch::{DiffEntry, Slot, StagedLoc, lookup_sorted},
                 ordered::test::{
                     test_ordered_any_db_basic, test_ordered_any_db_empty,
@@ -112,8 +121,12 @@ pub(crate) mod test {
     const PAGE_SIZE: u16 = 103;
     const PAGE_CACHE_SIZE: usize = 13;
 
-    pub(crate) type VarConfig<B = ()> =
-        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential, B>;
+    pub(crate) type VarConfig<B = ()> = any::Config<
+        TwoCap,
+        JournalConfig<((), (commonware_codec::RangeCfg<usize>, ()))>,
+        Sequential,
+        B,
+    >;
 
     /// Type alias for the concrete [Db] type used in these unit tests.
     pub(crate) type AnyTest =
@@ -121,7 +134,7 @@ pub(crate) mod test {
 
     pub(crate) fn create_test_config<B>(seed: u64, init_concurrency: B) -> VarConfig<B> {
         let page_cache = CacheRef::new(NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
-        VariableConfig {
+        any::Config {
             merkle: crate::mmr::full::Config {
                 journal_partition: format!("mmr-journal-{seed}"),
                 metadata_partition: format!("mmr-metadata-{seed}"),

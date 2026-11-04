@@ -155,7 +155,7 @@ fn variable_log_config<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -
     }
 }
 
-fn any_fixed_config(suffix: &str) -> any::FixedConfig<OneCap, Sequential> {
+fn any_fixed_config(suffix: &str) -> any::Config<OneCap, FConfig, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
         merkle: merkle_config(suffix, &pc),
@@ -167,7 +167,7 @@ fn any_fixed_config(suffix: &str) -> any::FixedConfig<OneCap, Sequential> {
     }
 }
 
-fn any_variable_config(suffix: &str) -> any::VariableConfig<OneCap, ((), ()), Sequential> {
+fn any_variable_config(suffix: &str) -> any::Config<OneCap, VConfig<((), ())>, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
         merkle: merkle_config(suffix, &pc),
@@ -179,7 +179,7 @@ fn any_variable_config(suffix: &str) -> any::VariableConfig<OneCap, ((), ()), Se
     }
 }
 
-fn current_fixed_config(suffix: &str) -> current::FixedConfig<OneCap, Sequential> {
+fn current_fixed_config(suffix: &str) -> current::Config<OneCap, FConfig, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
         merkle: merkle_config(suffix, &pc),
@@ -192,7 +192,7 @@ fn current_fixed_config(suffix: &str) -> current::FixedConfig<OneCap, Sequential
     }
 }
 
-fn current_variable_config(suffix: &str) -> current::VariableConfig<OneCap, ((), ()), Sequential> {
+fn current_variable_config(suffix: &str) -> current::Config<OneCap, VConfig<((), ())>, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
         merkle: merkle_config(suffix, &pc),

@@ -8,9 +8,11 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Family as MerkleFamily, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::any::{
-        FixedConfig as Config,
         batch::{MerkleizedBatch, UnmerkleizedBatch},
-        ordered::{Update, fixed::Db as AnyDb},
+        ordered::{
+            Update,
+            fixed::{Config, Db as AnyDb},
+        },
         traits::DbAny as _,
         value::FixedEncoding as FixedEncodingGeneric,
     },

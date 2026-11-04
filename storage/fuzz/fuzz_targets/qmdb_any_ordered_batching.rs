@@ -10,9 +10,8 @@ use commonware_storage::{
     merkle::{Family as MerkleFamily, Location, mmb, mmr},
     mmr::full::Config as MerkleConfig,
     qmdb::any::{
-        FixedConfig as Config,
         db::Db as AnyDb,
-        ordered::{Operation, Update},
+        ordered::{Operation, Update, fixed::Config},
         value::FixedEncoding,
     },
     translator::EightCap,
