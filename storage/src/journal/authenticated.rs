@@ -1004,6 +1004,14 @@ where
         self.journal.try_read_many_sync(positions)
     }
 
+    #[commonware_macros::stability(ALPHA)]
+    fn prefetch(
+        &self,
+        positions: &[u64],
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, H, S> {
+        self.journal.prefetch(positions)
+    }
+
     async fn replay(
         &self,
         range: Range<u64>,
