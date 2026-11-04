@@ -27,6 +27,11 @@
 - [`bls12381_threshold`]: Non-attributable threshold signatures. Produces succinct
   certificates that are constant-size regardless of committee size. Requires a trusted
   setup (distributed key generation) and cannot attribute signatures to individual signers.
+
+- [`bls12381_sas`]: Attributable synchronized aggregate signatures. Attestations by distinct
+  signers over different subjects in one period aggregate into one signature that verifies with a
+  constant number of pairings. Subjects must implement [`Synchronized`], and callers must verify a
+  proof of knowledge for every signing key before constructing the scheme.
 "
 )]
 //! # Attributable Schemes and Fault Evidence
@@ -47,6 +52,13 @@
 //! The [`Scheme::is_attributable()`] associated function signals whether evidence can be safely
 //! exposed to third parties.
 //!
+//! # Aggregating Different Subjects
+//!
+//! Schemes implementing [`Aggregator`] also combine attestations by distinct signers over different
+//! subjects into one aggregate, and batch-verify attestations and aggregates over many subjects
+//! together. Attestations the caller already verified can be discharged from an aggregate instead
+//! of verified again.
+//!
 //! # Identity Keys vs Signing Keys
 //!
 //! A participant may supply both an identity key and a signing key. The identity key
@@ -61,6 +73,9 @@
 //! Refer to [ed25519] for an example of a scheme that uses the same key for both purposes.
 
 #[cfg(feature = "bls12381")]
+#[commonware_macros::stability(ALPHA)]
+pub use crate::bls12381::certificate::sas as bls12381_sas;
+#[cfg(feature = "bls12381")]
 pub use crate::bls12381::certificate::{
     multisig as bls12381_multisig, threshold as bls12381_threshold,
 };
@@ -71,6 +86,8 @@ use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 use bytes::{BufMut, Bytes};
+#[commonware_macros::stability(ALPHA)]
+use commonware_codec::RangeCfg;
 use commonware_codec::{
     Buf, Codec, CodecFixed, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read,
     ReadExt, Write, types::lazy::Lazy, util::max_items_size,
@@ -237,6 +254,28 @@ pub trait Subject: Clone + Debug + Send + Sync {
 
     /// Get the message bytes for this subject instance.
     fn message(&self) -> Bytes;
+}
+
+/// A [`Subject`] signed in a period that every signer shares.
+///
+/// Synchronized aggregate signature schemes derive every signature in a period from one common
+/// base, so signatures from distinct signers over different subjects in one period aggregate into
+/// a signature that verifies with a constant number of pairings.
+///
+/// # Security
+///
+/// A signer must sign at most one subject per period. Two signatures by one signer over different
+/// subjects in one period let anyone forge that signer's signature on any subject in that period.
+/// Schemes do not track periods: a protocol must assign periods so that an honest signer never
+/// signs two different subjects in one, for example by giving every kind of message signed in a
+/// round its own period.
+///
+/// Periods must be unique across protocols and across the periods of one protocol: derive them from
+/// the protocol namespace in `derived` and encode them unambiguously.
+#[commonware_macros::stability(ALPHA)]
+pub trait Synchronized: Subject {
+    /// Returns the encoded period this subject is signed in.
+    fn period(&self, derived: &Self::Namespace) -> Bytes;
 }
 
 /// Cryptographic surface for recovered certificate verification.
@@ -606,6 +645,342 @@ where
     Err(result)
 }
 
+/// One term of an aggregate: a signer and the subject it attested to.
+///
+/// `known` may carry an attestation by `signer` for `subject` that the caller already verified.
+/// Schemes use it only to skip work (see [`Aggregator`]).
+#[commonware_macros::stability(ALPHA)]
+pub struct Term<'a, S: Scheme, D: Digest> {
+    /// Index of the signer inside the participant set.
+    pub signer: Participant,
+    /// Subject the signer attested to.
+    pub subject: S::Subject<'a, D>,
+    /// An attestation by `signer` for `subject` that the caller already verified.
+    pub known: Option<&'a Attestation<S>>,
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<S: Scheme, D: Digest> Clone for Term<'_, S, D> {
+    fn clone(&self) -> Self {
+        Self {
+            signer: self.signer,
+            subject: self.subject.clone(),
+            known: self.known,
+        }
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<S: Scheme, D: Digest> Debug for Term<'_, S, D> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Term")
+            .field("signer", &self.signer)
+            .field("subject", &self.subject)
+            .field("known", &self.known)
+            .finish()
+    }
+}
+
+/// An input to [`Aggregator::verify_aggregates`].
+#[commonware_macros::stability(ALPHA)]
+pub enum Item<'i, 'a, S: Aggregator, D: Digest> {
+    /// An attestation over one subject.
+    Attestation {
+        /// Subject the attestation is for.
+        subject: S::Subject<'a, D>,
+        /// Attestation to verify.
+        attestation: &'i Attestation<S>,
+    },
+    /// An aggregate over one or more terms.
+    Aggregate {
+        /// Terms of the aggregate, in the order it was built.
+        terms: &'i [Term<'a, S, D>],
+        /// Aggregate to verify.
+        aggregate: &'i S::Aggregate,
+    },
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<S: Aggregator, D: Digest> Clone for Item<'_, '_, S, D> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Attestation {
+                subject,
+                attestation,
+            } => Self::Attestation {
+                subject: subject.clone(),
+                attestation,
+            },
+            Self::Aggregate { terms, aggregate } => Self::Aggregate { terms, aggregate },
+        }
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<S: Aggregator, D: Digest> Debug for Item<'_, '_, S, D> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Attestation {
+                subject,
+                attestation,
+            } => f
+                .debug_struct("Attestation")
+                .field("subject", subject)
+                .field("attestation", attestation)
+                .finish(),
+            Self::Aggregate { terms, aggregate } => f
+                .debug_struct("Aggregate")
+                .field("terms", terms)
+                .field("aggregate", aggregate)
+                .finish(),
+        }
+    }
+}
+
+/// A [`Scheme`] that aggregates attestations over different subjects.
+///
+/// A certificate aggregates a quorum of attestations over one subject. Some protocols instead
+/// combine attestations by distinct signers over different subjects, such as votes for different
+/// proposals, into one aggregate. Like [`Verifier`] and [`Provider`], the trait is named for the
+/// role it adds to a scheme.
+///
+/// An aggregate does not encode its terms: callers transmit or reconstruct the signer and subject
+/// of every term, and present the terms in the order the aggregate was built. Schemes with additive
+/// signatures combine the signatures into one group element, while other schemes list them in term
+/// order.
+///
+/// Aggregates carry no quorum. Callers must check that the terms have the structure their protocol
+/// requires.
+///
+/// # Known Attestations
+///
+/// A [`Term`] may carry an attestation the caller already verified for that term's signer and
+/// subject. Schemes with unique, additive signatures subtract it from the aggregate, and an
+/// aggregate whose terms are all known must reduce to the identity. Schemes that list signatures
+/// skip verifying a listed signature equal to the known one and verify any other. An item whose
+/// known attestation names another signer or carries a malformed signature is invalid.
+///
+/// Schemes trust known attestations, so callers must attach only attestations they verified for
+/// that exact signer and subject. Under that condition a verdict does not depend on which terms
+/// carry one: a known attestation saves work but never makes an invalid item valid.
+///
+/// # Example
+///
+/// ```rust
+/// use bytes::Bytes;
+/// use commonware_cryptography::{
+///     Signer as _,
+///     certificate::{Aggregator as _, Scheme as _, Subject, Term},
+///     ed25519, impl_certificate_ed25519,
+///     sha256::Digest,
+/// };
+/// use commonware_math::algebra::Random;
+/// use commonware_parallel::Sequential;
+/// use commonware_utils::{N3f1, TryCollect as _, non_empty, ordered::Set, test_rng};
+///
+/// /// A vote for a numbered proposal.
+/// #[derive(Clone, Debug)]
+/// pub struct Vote(u64);
+///
+/// impl Subject for Vote {
+///     type Namespace = Vec<u8>;
+///
+///     fn namespace<'a>(&self, derived: &'a Vec<u8>) -> &'a [u8] {
+///         derived
+///     }
+///
+///     fn message(&self) -> Bytes {
+///         Bytes::copy_from_slice(&self.0.to_be_bytes())
+///     }
+/// }
+///
+/// impl_certificate_ed25519!(Vote, Vec<u8>, N3f1);
+///
+/// let mut rng = test_rng();
+/// let keys: Vec<_> = (0..3).map(|_| ed25519::PrivateKey::random(&mut rng)).collect();
+/// let participants: Set<_> = keys.iter().map(|key| key.public_key()).try_collect().unwrap();
+/// let schemes: Vec<_> = keys
+///     .into_iter()
+///     .map(|key| Scheme::signer(b"votes", participants.clone(), key).unwrap())
+///     .collect();
+///
+/// // Each signer votes for a different proposal, and one aggregate carries every vote.
+/// let votes: Vec<_> = schemes
+///     .iter()
+///     .zip(0..)
+///     .map(|(scheme, proposal)| scheme.sign::<Digest>(Vote(proposal)).unwrap())
+///     .collect();
+/// let aggregate = schemes[0].aggregate(non_empty![@&votes]).unwrap();
+///
+/// // A verifier rebuilds the terms, discharging a vote it already verified.
+/// let terms: Vec<Term<'_, Scheme, Digest>> = votes
+///     .iter()
+///     .zip(0..)
+///     .map(|(vote, proposal)| Term {
+///         signer: vote.signer,
+///         subject: Vote(proposal),
+///         known: (proposal == 0).then_some(vote),
+///     })
+///     .collect();
+/// let verifier = Scheme::verifier(b"votes", participants);
+/// assert!(verifier.verify_aggregate(&mut rng, &terms, &aggregate, &Sequential));
+/// ```
+#[commonware_macros::stability(ALPHA)]
+pub trait Aggregator: Scheme {
+    /// Aggregate of attestations over one or more terms.
+    type Aggregate: Clone + Debug + Eq + Hash + Send + Sync + Codec;
+
+    /// Combines a non-empty stream of attestations, in term order, into an aggregate.
+    ///
+    /// Inputs may be unverified: `Ok` authenticates neither them nor the aggregate. Returns
+    /// [`AssemblyError::UnknownSigner`], [`AssemblyError::DuplicateSigner`], or
+    /// [`AssemblyError::MalformedSignature`] for the first attestation that violates the
+    /// corresponding requirement.
+    fn aggregate<'a, I>(&self, attestations: NonEmpty<I>) -> Result<Self::Aggregate, AssemblyError>
+    where
+        I: Iterator<Item = &'a Attestation<Self>>;
+
+    /// Verifies attestations and aggregates, possibly over many subjects, and returns one verdict
+    /// per item in input order.
+    ///
+    /// An attestation item is valid if its signature is valid for its signer and subject. An
+    /// aggregate item is valid if it has at least one term, its terms name distinct participants,
+    /// and its aggregate combines a valid signature for every term (see the [trait
+    /// documentation](Aggregator) for known attestations). Items are independent: an invalid item
+    /// never fails a valid one. Empty input returns an empty result.
+    ///
+    /// Batchable schemes check every item with one randomly weighted batch and bisect on failure.
+    /// Other schemes verify each item individually.
+    fn verify_aggregates<R, D>(
+        &self,
+        rng: &mut R,
+        items: &[Item<'_, '_, Self, D>],
+        strategy: &impl Strategy,
+    ) -> Vec<bool>
+    where
+        R: CryptoRng,
+        D: Digest;
+
+    /// Verifies one aggregate over `terms`, as [`Self::verify_aggregates`] would.
+    fn verify_aggregate<R, D>(
+        &self,
+        rng: &mut R,
+        terms: &[Term<'_, Self, D>],
+        aggregate: &Self::Aggregate,
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        R: CryptoRng,
+        D: Digest,
+    {
+        self.verify_aggregates(rng, &[Item::Aggregate { terms, aggregate }], strategy)[0]
+    }
+
+    /// Returns an upper bound on the encoded size of an aggregate over at most `terms` terms that
+    /// decodes under [`Self::aggregate_codec_config`].
+    fn max_aggregate_size(terms: u32) -> usize;
+
+    /// Encoding configuration for decoding an aggregate over at most `terms` terms.
+    fn aggregate_codec_config(terms: u32) -> <Self::Aggregate as Read>::Cfg;
+}
+
+/// Returns whether `terms` is non-empty and names distinct members of a set of `participants`.
+#[commonware_macros::stability(ALPHA)]
+pub(crate) fn distinct_terms<S: Scheme, D: Digest>(
+    participants: usize,
+    terms: &[Term<'_, S, D>],
+) -> bool {
+    !terms.is_empty()
+        && u32::try_from(participants).is_ok_and(|participants| {
+            Signers::new(participants, terms.iter().map(|term| term.signer)).is_ok()
+        })
+}
+
+/// Combines attestations into a list of their signatures in input order.
+#[commonware_macros::stability(ALPHA)]
+pub(crate) fn list_signatures<'a, S, I>(
+    participants: usize,
+    attestations: NonEmpty<I>,
+) -> Result<Vec<Lazy<S::Signature>>, AssemblyError>
+where
+    S: Scheme,
+    I: Iterator<Item = &'a Attestation<S>>,
+{
+    let participants = u32::try_from(participants).expect("participant count exceeds u32::MAX");
+    let mut signers = Signers::new(participants, core::iter::empty())?;
+    let attestations = attestations.into_iter();
+    let mut signatures = Vec::with_capacity(attestations.size_hint().0);
+    for attestation in attestations {
+        signers.insert(attestation.signer)?;
+        let signature = attestation
+            .signature
+            .get()
+            .ok_or(AssemblyError::MalformedSignature(attestation.signer))?;
+        signatures.push(Lazy::from(signature.clone()));
+    }
+    Ok(signatures)
+}
+
+/// Stages every signature of an item whose aggregate lists signatures in term order, skipping
+/// listed signatures equal to their term's known attestation.
+///
+/// `stage` receives the signer, subject, and signature of each signature left to verify, and
+/// returns `false` if the signer is unknown. Returns `false`, possibly after staging some
+/// signatures, if the item is structurally invalid.
+#[commonware_macros::stability(ALPHA)]
+pub(crate) fn stage_listed<'r, 'a, S, D>(
+    participants: usize,
+    item: &'r Item<'_, 'a, S, D>,
+    mut stage: impl FnMut(Participant, &'r S::Subject<'a, D>, &'r S::Signature) -> bool,
+) -> bool
+where
+    S: Aggregator<Aggregate = Vec<Lazy<<S as Scheme>::Signature>>>,
+    D: Digest,
+{
+    match item {
+        Item::Attestation {
+            subject,
+            attestation,
+        } => attestation
+            .signature
+            .get()
+            .is_some_and(|signature| stage(attestation.signer, subject, signature)),
+        Item::Aggregate { terms, aggregate } => {
+            if terms.len() != aggregate.len() || !distinct_terms(participants, terms) {
+                return false;
+            }
+            terms.iter().zip(aggregate.iter()).all(|(term, listed)| {
+                let Some(listed) = listed.get() else {
+                    return false;
+                };
+                let Some(known) = term.known else {
+                    return stage(term.signer, &term.subject, listed);
+                };
+                if known.signer != term.signer {
+                    return false;
+                }
+                let Some(known) = known.signature.get() else {
+                    return false;
+                };
+                known == listed || stage(term.signer, &term.subject, listed)
+            })
+        }
+    }
+}
+
+/// Returns the upper bound on the encoded size of a list of at most `terms` signatures of
+/// `signature_size` bytes.
+#[commonware_macros::stability(ALPHA)]
+pub(crate) fn max_listed_size(terms: u32, signature_size: usize) -> usize {
+    max_items_size(Widen::widen(terms), signature_size)
+}
+
+/// Returns the configuration that decodes a list of at most `terms` signatures.
+#[commonware_macros::stability(ALPHA)]
+pub(crate) fn listed_codec_config(terms: u32) -> (RangeCfg<usize>, ()) {
+    ((..=Widen::widen(terms)).into(), ())
+}
+
 /// A scheme handle returned by a [`Provider`] for one scope.
 ///
 /// Always usable as a [`Verifier`] for certificate verification. The full signing scheme is
@@ -743,19 +1118,27 @@ impl Signers {
         participants: u32,
         signers: impl IntoIterator<Item = Participant>,
     ) -> Result<Self, AssemblyError> {
-        let mut bitmap = BitMap::zeroes(u64::from(participants));
+        let mut result = Self {
+            bitmap: BitMap::zeroes(u64::from(participants)),
+        };
         for signer in signers.into_iter() {
-            let index = u64::from(signer.get());
-            if index >= bitmap.len() {
-                return Err(AssemblyError::UnknownSigner(signer));
-            }
-            if bitmap.get(index) {
-                return Err(AssemblyError::DuplicateSigner(signer));
-            }
-            bitmap.set(index, true);
+            result.insert(signer)?;
         }
 
-        Ok(Self { bitmap })
+        Ok(result)
+    }
+
+    /// Marks `signer`, rejecting an index outside the participant set or already marked.
+    pub(crate) fn insert(&mut self, signer: Participant) -> Result<(), AssemblyError> {
+        let index = u64::from(signer.get());
+        if index >= self.bitmap.len() {
+            return Err(AssemblyError::UnknownSigner(signer));
+        }
+        if self.bitmap.get(index) {
+            return Err(AssemblyError::DuplicateSigner(signer));
+        }
+        self.bitmap.set(index, true);
+        Ok(())
     }
 
     /// Requires at least `required` signers in an already validated set.
@@ -879,6 +1262,8 @@ impl<S: Scheme, Sc: Clone + Send + Sync + 'static> crate::certificate::Provider
     }
 }
 
+#[cfg(test)]
+pub(crate) mod aggregator_tests;
 #[cfg(feature = "mocks")]
 pub mod mocks;
 
