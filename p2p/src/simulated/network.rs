@@ -7,8 +7,8 @@ use super::{
     transmitter::{self, Completion},
 };
 use crate::{
-    Channel, Message as NetworkMessage, PeerSetUpdate, Recipients, TrackedPeers,
-    UnlimitedSender as _,
+    Channel, Message as NetworkMessage, PeerSetSubscription, PeerSetUpdate, Recipients,
+    TrackedPeers, UnlimitedSender as _,
     sizing::{max_retained_peers, peer_set_size},
     utils::{
         PeerSetsAtIndex as PeerSetsAtIndexBase,
@@ -285,7 +285,7 @@ impl<P: PublicKey> Tracker<P> {
     }
 
     /// Subscribe to peer set updates, starting with the latest peer set.
-    fn subscribe(&mut self) -> mpsc::UnboundedReceiver<PeerSetUpdate<P>> {
+    fn subscribe(&mut self) -> PeerSetSubscription<P> {
         let (sender, receiver) = mpsc::unbounded_channel();
         if let Some(update) = self.latest_update() {
             sender.send_lossy(update);
