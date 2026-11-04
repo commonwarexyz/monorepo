@@ -840,13 +840,12 @@ mod tests {
     #[test]
     fn healed_cluster_progresses_after_a_producer_crashes_while_certifying() {
         // Each input reloads or interrupts the recovery of a producer before every node
-        // restarts. The first three crash a producer between assembling a DA certificate for its
-        // own chain and recording it:
-        // - [74] reloads producer two; at the reopen, producer zero loses its first certificate.
-        // - [253, 200] reloads producer one; at the reopen, producer zero keeps its first
-        //   certificate and loses its second.
-        // - [35] crashes producer five holding its first certificate, then interrupts its
-        //   recovery at the custody fence.
+        // restarts, which can crash the producer between assembling a DA certificate and
+        // recording it:
+        // - [74] reloads producer two; at the reopen, producer one crashes after it assembles
+        //   the certificate of its second block but before it reports the record.
+        // - [253, 200] reloads producer one, then ticks after the reopen.
+        // - [35] interrupts producer five's recovery at the custody fence.
         // - [69, 5, 91] interrupts producer three's recovery and reloads producer five.
         fuzz::<Bls<MinSig>>(&[74]);
         fuzz::<Bls<MinSig>>(&[253, 200]);
