@@ -27,7 +27,7 @@ use crate::{
             view::{HistoryRecord, LeaderHistory},
         },
         scheme::Scheme,
-        types::{Activity, Artifact, ArtifactId, ChainId},
+        types::{Activity, Artifact, ArtifactId, ChainId, FinalityFact},
     },
     types::{Height, Participant, View},
 };
@@ -584,8 +584,8 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         })
     }
 
-    /// Reports direct-finality updates, every artifact promoted to ready, and every leader
-    /// history record reconstructed since the last drain.
+    /// Reports direct-finality updates, every artifact promoted to ready, every leader history
+    /// record reconstructed since the last drain, and the placement they advance.
     ///
     /// A promotion that the same drain window also discarded is not an admission: the artifact
     /// is no longer retained, so it is filtered out exactly as a before-and-after comparison of
@@ -593,10 +593,10 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
     /// reconstructed when its leader was offered, and a leader whose view retires in the same
     /// window (an L-QC raises the retired view to its own) remains authenticated.
     fn drain_activities(&mut self) -> Vec<Activity<S, H::Digest>> {
-        let finalized = self.finality.drain_updates();
+        let updates = self.finality.drain_updates();
         self.report_finality_histories();
         let histories = self.views.take_histories();
-        if self.store.newly_ready.is_empty() && finalized.is_empty() && histories.is_empty() {
+        if self.store.newly_ready.is_empty() && updates.is_empty() && histories.is_empty() {
             return Vec::new();
         }
         let mut accepted = take(&mut self.store.newly_ready);
@@ -608,21 +608,26 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         });
         accepted.sort_unstable_by_key(|(observation, id, _)| (*observation, *id));
         let mut activities =
-            Vec::with_capacity(accepted.len() + 2 * finalized.len() + histories.len());
-        activities.extend(finalized.into_iter().flat_map(|update| match update {
-            FinalityUpdate::Finalized(fact, commitments) => [
-                Activity::CommitmentsAccepted { commitments },
-                Activity::LeaderFinalized { fact },
-            ],
-            FinalityUpdate::Advanced(fact, commitments) => [
-                Activity::CommitmentsAccepted { commitments },
-                Activity::LeaderFinalityUpdated { fact },
-            ],
-        }));
+            Vec::with_capacity(accepted.len() + 2 * updates.len() + histories.len());
+        let mut certified = Vec::new();
+        for update in updates {
+            match update {
+                FinalityUpdate::Finalized(fact, commitments) => {
+                    activities.push(Activity::CommitmentsAccepted { commitments });
+                    activities.push(Activity::LeaderFinalized { fact });
+                }
+                FinalityUpdate::Advanced(fact, commitments) => {
+                    activities.push(Activity::CommitmentsAccepted { commitments });
+                    activities.push(Activity::LeaderFinalityUpdated { fact });
+                }
+                FinalityUpdate::Certified(fact) => certified.push(fact),
+            }
+        }
         for (_, artifact_id, artifact) in accepted {
             self.push_acceptance(artifact_id, artifact, &mut activities);
         }
         activities.extend(histories.into_iter().map(history_accepted));
+        self.report_placement(&certified, &mut activities);
         activities
     }
 
@@ -682,6 +687,36 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         let block = certificate.leader();
         let leader = leader.unwrap_or_else(|| block.digest::<H>());
         self.views.report_history(LeaderHistory::new(block, leader));
+    }
+
+    /// Appends the placement that the reported history records and finality facts, and the
+    /// facts of `certified` L-QCs, advance.
+    pub(super) fn report_placement(
+        &mut self,
+        certified: &[FinalityFact<H::Digest>],
+        activities: &mut Vec<Activity<S, H::Digest>>,
+    ) {
+        let mut placed = Vec::new();
+        for activity in activities.iter() {
+            match activity {
+                Activity::HistoryAccepted {
+                    view,
+                    leader,
+                    commitment,
+                    record,
+                } => self
+                    .placement
+                    .history(*view, *leader, *commitment, record, &mut placed),
+                Activity::LeaderFinalized { fact } | Activity::LeaderFinalityUpdated { fact } => {
+                    self.placement.finality(fact, &mut placed);
+                }
+                _ => {}
+            }
+        }
+        for fact in certified {
+            self.placement.finality(fact, &mut placed);
+        }
+        activities.append(&mut placed);
     }
 
     /// Appends the activities reporting one accepted artifact: its selected commitments and the
