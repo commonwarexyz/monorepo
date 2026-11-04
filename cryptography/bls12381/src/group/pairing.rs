@@ -360,13 +360,24 @@ mod tests {
         type Output = GT;
 
         fn portable(self, simd: S) -> GT {
-            use crate::core::field::fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49};
+            use crate::core::field::fp::{unsat28::Unsat28, unsat49::Unsat49};
             simd.execute(|simd: S| {
                 let expected = self.0.run::<S, Unsat49<S>>(simd);
                 assert_eq!(self.0.run::<S, Unsat28<S>>(simd), expected);
-                assert_eq!(self.0.run::<S, Rns<S>>(simd), expected);
                 expected
             })
+        }
+
+        // Residues require x86v4c.
+        fn x86_v4c(self, simd: S) -> GT
+        where
+            S: commonware_simd::X86V4C,
+        {
+            use crate::core::field::fp::rns::Rns;
+            let kernel = self.0;
+            let expected = self.portable(simd);
+            simd.execute(|simd: S| assert_eq!(kernel.run::<S, Rns<S>>(simd), expected));
+            expected
         }
     }
 
@@ -388,17 +399,31 @@ mod tests {
         type Output = Vec<GT>;
 
         fn portable(self, simd: S) -> Vec<GT> {
-            use crate::core::field::fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49};
+            use crate::core::field::fp::{unsat28::Unsat28, unsat49::Unsat49};
             simd.execute(|simd: S| {
                 let mut expected = vec![GT::ONE; self.0.len()];
                 Each(self.0, &mut expected).run::<S, Unsat49<S>>(simd);
                 let mut outputs = vec![GT::ONE; self.0.len()];
                 Each(self.0, &mut outputs).run::<S, Unsat28<S>>(simd);
                 assert_eq!(outputs, expected);
-                Each(self.0, &mut outputs).run::<S, Rns<S>>(simd);
-                assert_eq!(outputs, expected);
                 expected
             })
+        }
+
+        // Residues require x86v4c.
+        fn x86_v4c(self, simd: S) -> Vec<GT>
+        where
+            S: commonware_simd::X86V4C,
+        {
+            use crate::core::field::fp::rns::Rns;
+            let pairs = self.0;
+            let expected = self.portable(simd);
+            simd.execute(|simd: S| {
+                let mut outputs = vec![GT::ONE; pairs.len()];
+                Each(pairs, &mut outputs).run::<S, Rns<S>>(simd);
+                assert_eq!(outputs, expected);
+            });
+            expected
         }
     }
 }

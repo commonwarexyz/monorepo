@@ -246,7 +246,7 @@ mod tests {
         Sequential,
         mocks::{Explorer, pooled},
     };
-    use commonware_simd::{Operation, Simd, check_consistent};
+    use commonware_simd::{Operation, Simd, X86V4C, check_consistent};
     use commonware_utils::NZUsize;
     use std::{fmt::Debug, vec, vec::Vec};
 
@@ -494,9 +494,19 @@ mod tests {
             simd.execute(|simd: S| {
                 let expected = self.0.run::<S, Unsat49<S>>(simd);
                 assert_eq!(self.0.run::<S, Unsat28<S>>(simd), expected);
-                assert_eq!(self.0.run::<S, Rns<S>>(simd), expected);
                 expected
             })
+        }
+
+        // Residues require x86v4c.
+        fn x86_v4c(self, simd: S) -> G
+        where
+            S: X86V4C,
+        {
+            let kernel = self.0;
+            let expected = self.portable(simd);
+            simd.execute(|simd: S| assert_eq!(kernel.run::<S, Rns<S>>(simd), expected));
+            expected
         }
     }
 
@@ -530,9 +540,9 @@ mod tests {
     struct EachRepresentations<'a, G>(&'a [G], &'a [Scalar]);
 
     impl<S: Simd, G: Group + PartialEq + Debug> Operation<S> for EachRepresentations<'_, G> {
-        type Output = ();
+        type Output = Vec<G>;
 
-        fn portable(self, simd: S) {
+        fn portable(self, simd: S) -> Vec<G> {
             simd.execute(|simd: S| {
                 let mut expected = self.0.to_vec();
                 MultiplyEach {
@@ -547,14 +557,27 @@ mod tests {
                 }
                 .run::<S, Unsat28<S>>(simd);
                 assert_eq!(unsat28, expected);
-                let mut rns = self.0.to_vec();
+                expected
+            })
+        }
+
+        // Residues require x86v4c.
+        fn x86_v4c(self, simd: S) -> Vec<G>
+        where
+            S: X86V4C,
+        {
+            let (elements, scalars) = (self.0, self.1);
+            let expected = self.portable(simd);
+            simd.execute(|simd: S| {
+                let mut rns = elements.to_vec();
                 MultiplyEach {
                     elements: &mut rns,
-                    scalars: self.1,
+                    scalars,
                 }
                 .run::<S, Rns<S>>(simd);
                 assert_eq!(rns, expected);
             });
+            expected
         }
     }
 }

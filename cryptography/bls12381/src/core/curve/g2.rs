@@ -380,7 +380,7 @@ mod tests {
         unsat49::Unsat49,
     };
     use commonware_simd::{
-        Operation, check_consistent,
+        Operation, X86V4C, check_consistent,
         emulated::{EmulatedNeon, EmulatedScalar, EmulatedX86V4C},
         test_dispatch,
     };
@@ -564,23 +564,37 @@ mod tests {
         output
     }
 
-    /// Runs [`sum_and_double`] in every representation.
+    /// Runs [`sum_and_double`] in every representation, returning the positional ones' outputs.
     struct Evaluate<'a>(&'a [Coordinates]);
 
     impl<S: Simd> Operation<S> for Evaluate<'_> {
-        type Output = [Vec<Coordinates>; 3];
+        type Output = [Vec<Coordinates>; 2];
 
-        fn portable(self, simd: S) -> [Vec<Coordinates>; 3] {
+        fn portable(self, simd: S) -> [Vec<Coordinates>; 2] {
             simd.execute(
                 #[inline(always)]
                 |simd: S| {
                     [
                         sum_and_double::<S, Unsat49<S>>(simd, self.0),
                         sum_and_double::<S, Unsat28<S>>(simd, self.0),
-                        sum_and_double::<S, Rns<S>>(simd, self.0),
                     ]
                 },
             )
+        }
+
+        // Residues require x86v4c and must match the other representations.
+        fn x86_v4c(self, simd: S) -> [Vec<Coordinates>; 2]
+        where
+            S: X86V4C,
+        {
+            let points = self.0;
+            let outputs = self.portable(simd);
+            let residues = simd.execute(
+                #[inline(always)]
+                |simd: S| sum_and_double::<S, Rns<S>>(simd, points),
+            );
+            assert!(residues == outputs[0], "residues differ");
+            outputs
         }
     }
 
@@ -624,7 +638,7 @@ mod tests {
             }
             expected.push(sum);
         }
-        let check = |outputs: [Vec<Coordinates>; 3]| {
+        let check = |outputs: [Vec<Coordinates>; 2]| {
             for (representation, output) in outputs.iter().enumerate() {
                 for lane in 0..MAX_LANES {
                     assert_eq!(
@@ -645,6 +659,6 @@ mod tests {
         // Run every representation and vector width even on hosts without native SIMD.
         check(Evaluate(&inputs).portable(EmulatedScalar));
         check(Evaluate(&inputs).portable(EmulatedNeon));
-        check(Evaluate(&inputs).portable(EmulatedX86V4C));
+        check(EmulatedX86V4C.execute(Evaluate(&inputs)));
     }
 }
