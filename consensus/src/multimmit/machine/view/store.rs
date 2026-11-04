@@ -16,6 +16,7 @@ use crate::{
             util::{Observed, ObservedList},
             verification::Observation,
         },
+        scheme::Scheme,
         types::{
             Artifact, ArtifactId, CertificateId, DigestedLeader, LeaderBlock, NoVote,
             SelectedCommitments, TipRecord, Vote, VoteBody,
@@ -24,56 +25,56 @@ use crate::{
     types::{Attributable, Height, Participant, View},
 };
 use bytes::Bytes;
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::{
     collections::{BTreeSet, btree_map::Entry},
     sync::Arc,
 };
 
 /// The earliest proposal or certificate that designated one leader block.
-pub(super) type LeaderRecord<V, D> = Observed<Held<DesignatingKind, V, D>>;
+pub(super) type LeaderRecord<S, D> = Observed<Held<DesignatingKind, S, D>>;
 
 /// A view's verified proposals by artifact.
-pub(super) type ProposalRecords<V, D> = ObservedList<ArtifactId<D>, Held<LeaderBlockKind, V, D>>;
+pub(super) type ProposalRecords<S, D> = ObservedList<ArtifactId<D>, Held<LeaderBlockKind, S, D>>;
 
 /// A verified vote or novote at its earliest observation.
-type MessageRecord<V, D> = Observed<Held<ViewMessageKind, V, D>>;
+type MessageRecord<S, D> = Observed<Held<ViewMessageKind, S, D>>;
 
 /// One signer's verified votes and novotes for a view, by artifact.
-pub(super) type MessageRecords<V, D> = ObservedList<ArtifactId<D>, Held<ViewMessageKind, V, D>>;
+pub(super) type MessageRecords<S, D> = ObservedList<ArtifactId<D>, Held<ViewMessageKind, S, D>>;
 
 /// The view message settled for one signer, with its artifact id.
-pub(super) type StickyMessage<V, D> = (ArtifactId<D>, MessageRecord<V, D>);
+pub(super) type StickyMessage<S, D> = (ArtifactId<D>, MessageRecord<S, D>);
 
 /// A verified nullify share at its earliest observation.
-pub(super) type NullifyRecord<V, D> = Observed<Held<NullifyKind, V, D>>;
+pub(super) type NullifyRecord<S, D> = Observed<Held<NullifyKind, S, D>>;
 
 /// A view's verified nullifications by artifact.
-pub(super) type NullificationRecords<V, D> =
-    ObservedList<ArtifactId<D>, Held<NullificationKind, V, D>>;
+pub(super) type NullificationRecords<S, D> =
+    ObservedList<ArtifactId<D>, Held<NullificationKind, S, D>>;
 
 /// A view's verified V-QCs by certificate and artifact, so equal observations order by
 /// certificate.
-pub(super) type VqcRecords<V, D> =
-    ObservedList<(CertificateId<D>, ArtifactId<D>), Held<VqcKind, V, D>>;
+pub(super) type VqcRecords<S, D> =
+    ObservedList<(CertificateId<D>, ArtifactId<D>), Held<VqcKind, S, D>>;
 
 /// What proves a proposal parent.
 #[derive(Clone, Debug)]
-pub(super) enum ParentProof<V: Variant, D: Digest> {
+pub(super) enum ParentProof<S: Scheme, D: Digest> {
     /// The epoch's genesis anchor, which no certificate proves.
     Genesis,
     /// The V-QC that certified the parent.
-    Vqc(Held<VqcKind, V, D>),
+    Vqc(Held<VqcKind, S, D>),
 }
 
 /// A certified block later proposals may build on, with the tips and commitments it fixes.
 #[derive(Clone, Debug)]
-pub(super) struct ParentRecord<V: Variant, D: Digest> {
+pub(super) struct ParentRecord<S: Scheme, D: Digest> {
     pub(super) id: CertificateId<D>,
     pub(super) view: View,
     pub(super) history: D,
     pub(super) canonical: Bytes,
-    pub(super) proof: ParentProof<V, D>,
+    pub(super) proof: ParentProof<S, D>,
     pub(super) tips: Arc<Tips<D>>,
     pub(super) commitments: SelectedCommitments<D>,
     /// Each chain's proposed tip height in the view this record's V-QC certified.
@@ -85,7 +86,7 @@ pub(super) struct ParentRecord<V: Variant, D: Digest> {
     pub(super) messages: usize,
 }
 
-impl<V: Variant, D: Digest> ParentRecord<V, D> {
+impl<S: Scheme, D: Digest> ParentRecord<S, D> {
     /// Returns the safe-tip opening a child leader block commits to as its history.
     pub(super) fn tip_record(&self) -> Result<TipRecord<D>, ViewError> {
         TipRecord::new(
@@ -103,18 +104,18 @@ impl<V: Variant, D: Digest> ParentRecord<V, D> {
 }
 
 /// A borrowed view message.
-pub(super) enum MessageRef<'a, V: Variant, D: Digest> {
-    Vote(&'a Vote<V, D>),
-    NoVote(&'a NoVote<V>),
+pub(super) enum MessageRef<'a, S: Scheme, D: Digest> {
+    Vote(&'a Vote<S, D>),
+    NoVote(&'a NoVote<S>),
 }
 
 /// A complete vote or signed abstention.
 pub(super) enum ViewMessageKind {}
 
-impl<V: Variant, D: Digest> ArtifactKind<V, D> for ViewMessageKind {
-    type Target<'a> = MessageRef<'a, V, D>;
+impl<S: Scheme, D: Digest> ArtifactKind<S, D> for ViewMessageKind {
+    type Target<'a> = MessageRef<'a, S, D>;
 
-    fn project(artifact: &Artifact<V, D>) -> Option<Self::Target<'_>> {
+    fn project(artifact: &Artifact<S, D>) -> Option<Self::Target<'_>> {
         match artifact {
             Artifact::Vote(vote) => Some(MessageRef::Vote(vote)),
             Artifact::NoVote(novote) => Some(MessageRef::NoVote(novote)),
@@ -130,7 +131,7 @@ pub(super) enum VqcEligibility {
     Other,
 }
 
-impl<V: Variant, D: Digest> Held<ViewMessageKind, V, D> {
+impl<S: Scheme, D: Digest> Held<ViewMessageKind, S, D> {
     /// Returns the message's view and signer.
     pub(super) fn author(&self) -> (View, Participant) {
         match self.get() {
@@ -144,7 +145,7 @@ impl<V: Variant, D: Digest> Held<ViewMessageKind, V, D> {
     pub(super) fn vqc_eligibility(
         &self,
         target: D,
-        leader: &LeaderBlock<V, D>,
+        leader: &LeaderBlock<S, D>,
     ) -> Option<VqcEligibility> {
         match self.get() {
             MessageRef::Vote(vote) if vote.body().leader() == target => vote
@@ -156,8 +157,8 @@ impl<V: Variant, D: Digest> Held<ViewMessageKind, V, D> {
     }
 }
 
-fn message_opposes<V: Variant, D: Digest>(
-    message: MessageRef<'_, V, D>,
+fn message_opposes<S: Scheme, D: Digest>(
+    message: MessageRef<'_, S, D>,
     voted: &VoteBody<D>,
 ) -> bool {
     match message {
@@ -166,9 +167,9 @@ fn message_opposes<V: Variant, D: Digest>(
     }
 }
 
-impl<V: Variant, D: Digest> ViewState<V, D> {
+impl<S: Scheme, D: Digest> ViewState<S, D> {
     /// Returns every verified vote and novote retained for `view`, in participant order.
-    pub(crate) fn verified_messages(&self, view: View) -> Vec<Arc<Artifact<V, D>>> {
+    pub(crate) fn verified_messages(&self, view: View) -> Vec<Arc<Artifact<S, D>>> {
         self.entry(view).map_or_else(Vec::new, |entry| {
             entry
                 .messages
@@ -184,7 +185,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        block: Held<LeaderBlockKind, V, D>,
+        block: Held<LeaderBlockKind, S, D>,
     ) {
         let leader = block.get().block();
         let key = (leader.view(), leader.digest::<H>());
@@ -198,7 +199,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     fn record_leader(
         &mut self,
         observation: Observation,
-        source: Held<DesignatingKind, V, D>,
+        source: Held<DesignatingKind, S, D>,
         (view, digest): (View, D),
     ) {
         match self.entry_mut(view).leaders.entry(digest) {
@@ -224,7 +225,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        message: Held<ViewMessageKind, V, D>,
+        message: Held<ViewMessageKind, S, D>,
     ) {
         let (view, signer) = message.author();
         if let Some(location) = self.message_locations.get(&id).copied() {
@@ -313,7 +314,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     pub(super) fn observe_nullify(
         &mut self,
         observation: Observation,
-        share: Held<NullifyKind, V, D>,
+        share: Held<NullifyKind, S, D>,
     ) {
         let view = share.get().view();
         let signer = share.get().signer();
@@ -341,7 +342,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        certificate: Held<NullificationKind, V, D>,
+        certificate: Held<NullificationKind, S, D>,
     ) {
         self.entry_mut(certificate.get().view())
             .nullification
@@ -354,12 +355,12 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         &mut self,
         artifact_id: ArtifactId<D>,
         observation: Observation,
-        certificate: Held<VqcKind, V, D>,
+        certificate: Held<VqcKind, S, D>,
         validated: Option<ValidatedVqc<D>>,
     ) -> Result<(), ViewError> {
         let validated = match validated {
             Some(validated) => validated,
-            None => validate_vqc::<H, V, D>(certificate.get(), self.config)
+            None => validate_vqc::<H, S, D>(certificate.get(), self.config)
                 .map_err(|_| ViewError::Certificate)?,
         };
         let leader = validated.leader();
@@ -379,9 +380,9 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     /// Retains a V-QC as a proposal parent without scheduling standalone forwarding.
     pub(crate) fn retain_vqc_parent<H: Hasher<Digest = D>>(
         &mut self,
-        artifact: &Arc<Artifact<V, D>>,
+        artifact: &Arc<Artifact<S, D>>,
     ) -> Result<CertificateId<D>, ViewError> {
-        let Some(certificate) = Held::<VqcKind, V, D>::try_new(artifact) else {
+        let Some(certificate) = Held::<VqcKind, S, D>::try_new(artifact) else {
             return Err(ViewError::Certificate);
         };
         // A retained Arc owns the validation of this immutable certificate. Other
@@ -396,7 +397,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                 }
             }
         }
-        let validated = validate_vqc::<H, V, D>(certificate.get(), self.config)
+        let validated = validate_vqc::<H, S, D>(certificate.get(), self.config)
             .map_err(|_| ViewError::Certificate)?;
         self.retain_parent(&certificate, validated)
     }
@@ -404,16 +405,16 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     /// Retains the block a validated V-QC certifies as a proposal parent.
     pub(crate) fn retain_validated_vqc_parent(
         &mut self,
-        artifact: &Arc<Artifact<V, D>>,
+        artifact: &Arc<Artifact<S, D>>,
         validated: ValidatedVqc<D>,
     ) -> Result<CertificateId<D>, ViewError> {
-        let certificate = Held::<VqcKind, V, D>::try_new(artifact).ok_or(ViewError::Certificate)?;
+        let certificate = Held::<VqcKind, S, D>::try_new(artifact).ok_or(ViewError::Certificate)?;
         self.retain_parent(&certificate, validated)
     }
 
     fn retain_parent(
         &mut self,
-        held: &Held<VqcKind, V, D>,
+        held: &Held<VqcKind, S, D>,
         validated: ValidatedVqc<D>,
     ) -> Result<CertificateId<D>, ViewError> {
         let certificate = held.get();

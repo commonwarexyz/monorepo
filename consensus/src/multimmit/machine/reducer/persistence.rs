@@ -16,12 +16,13 @@ use crate::{
             job::{Generation, Issued},
             view::ViewTimer,
         },
+        scheme::Scheme,
         types::{Activity, Artifact, ArtifactId, BlockRef},
     },
     types::{Round, View},
 };
 use commonware_codec::EncodeSize as _;
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::{collections::VecDeque, sync::Arc};
 
 /// Emitted-but-unacknowledged barriers allowed before ordinary batches stop entering the
@@ -42,9 +43,9 @@ pub(crate) const MAX_STAGED_BARRIERS: usize = MAX_INFLIGHT_BARRIERS + 2;
 
 /// Process-local publication released once its own-signature exposure floor is durable.
 #[derive(Clone, Debug)]
-pub(crate) enum DeferredRelease<V: Variant, D: Digest> {
+pub(crate) enum DeferredRelease<S: Scheme, D: Digest> {
     Outbox(EffectId),
-    Retain(Arc<Artifact<V, D>>),
+    Retain(Arc<Artifact<S, D>>),
 }
 
 /// Acknowledgement work frozen when a batch enters the journal pipeline.
@@ -53,8 +54,8 @@ pub(crate) enum DeferredRelease<V: Variant, D: Digest> {
 /// runs once the batch is durable: resolver retention to install, publication attempts to retire,
 /// and forwarded nullifications to count.
 #[derive(Clone, Debug)]
-pub(crate) struct FrozenAcknowledgement<V: Variant, D: Digest> {
-    pub(crate) retention: Vec<Arc<Artifact<V, D>>>,
+pub(crate) struct FrozenAcknowledgement<S: Scheme, D: Digest> {
+    pub(crate) retention: Vec<Arc<Artifact<S, D>>>,
     pub(crate) retirements: Vec<EffectId>,
     pub(crate) forwarded_nullifications: usize,
     /// Blocks whose DA certificates the batch records, reported once they are durable.
@@ -68,19 +69,19 @@ pub(crate) struct FrozenAcknowledgement<V: Variant, D: Digest> {
 /// barrier is in flight, new events absorb into the open batch at the back of the staging
 /// queue, so batch sizes scale with storage latency instead of forcing one sync per event.
 #[derive(Clone, Debug)]
-pub(crate) struct PendingPersistence<V: Variant, D: Digest> {
-    pub(crate) job: PersistJob<V, D>,
+pub(crate) struct PendingPersistence<S: Scheme, D: Digest> {
+    pub(crate) job: PersistJob<S, D>,
     /// Independently verifiable publications released only after this batch enters the journal.
-    pub(crate) release_after_enqueue: Vec<DurableJob<V, D>>,
+    pub(crate) release_after_enqueue: Vec<DurableJob<S, D>>,
     /// Whether the batch has been handed to the driver as a [`Capability::Journal`].
     pub(crate) emitted: bool,
     /// Acknowledgement work derived before later transitions can retire referenced outbox entries.
-    pub(crate) acknowledgement: Option<FrozenAcknowledgement<V, D>>,
+    pub(crate) acknowledgement: Option<FrozenAcknowledgement<S, D>>,
     /// Encoded bytes accumulated by the batch, for the journal's record-size bound.
     pub(crate) bytes: usize,
 }
 
-impl<V: Variant, D: Digest> PendingPersistence<V, D> {
+impl<S: Scheme, D: Digest> PendingPersistence<S, D> {
     pub(crate) fn starts_generation(&self) -> bool {
         self.job
             .events()
@@ -90,10 +91,10 @@ impl<V: Variant, D: Digest> PendingPersistence<V, D> {
 }
 
 /// The journal pipeline: staged batches, acknowledgement, and release ordering.
-pub(crate) struct Pipeline<V: Variant, D: Digest> {
+pub(crate) struct Pipeline<S: Scheme, D: Digest> {
     /// Group-commit batches of staged, already-applied events awaiting durability, in cursor
     /// order. The back batch stays open for absorption until it fills or the pipeline drains.
-    pub(in crate::multimmit::machine) staged: VecDeque<PendingPersistence<V, D>>,
+    pub(in crate::multimmit::machine) staged: VecDeque<PendingPersistence<S, D>>,
     /// Cursor of the last acknowledged (synced) journal event; the durable state's cursor leads
     /// it by the staged pipeline, since application happens at staging.
     pub(in crate::multimmit::machine) acked: Cursor,
@@ -110,7 +111,7 @@ pub(crate) struct Pipeline<V: Variant, D: Digest> {
     /// its record is durable. Capabilities free of such references release at staging.
     pub(in crate::multimmit::machine) own_exposure: Cursor,
     /// Publications awaiting their exposure floor, in cursor order.
-    pub(in crate::multimmit::machine) deferred_releases: VecDeque<(Cursor, DeferredRelease<V, D>)>,
+    pub(in crate::multimmit::machine) deferred_releases: VecDeque<(Cursor, DeferredRelease<S, D>)>,
     /// The identifier of the next batch.
     pub(in crate::multimmit::machine) next_barrier: u64,
     /// Cursor of the newest staged data-availability vote reservation.
@@ -122,7 +123,7 @@ pub(crate) struct Pipeline<V: Variant, D: Digest> {
     pub(in crate::multimmit::machine) da_vote_reserved_through: Cursor,
 }
 
-impl<V: Variant, D: Digest> Pipeline<V, D> {
+impl<S: Scheme, D: Digest> Pipeline<S, D> {
     pub(super) const fn new() -> Self {
         Self {
             staged: VecDeque::new(),
@@ -146,14 +147,14 @@ enum BatchTarget {
 }
 
 /// How the batch that stages one event releases its work.
-struct StagedRelease<V: Variant, D: Digest> {
+struct StagedRelease<S: Scheme, D: Digest> {
     /// Whether the batch must reach the journal without waiting for more events.
     urgent: bool,
     /// A publication released once the batch enters the journal.
-    release_after_enqueue: Option<DurableJob<V, D>>,
+    release_after_enqueue: Option<DurableJob<S, D>>,
 }
 
-impl<H: Hasher, V: Variant> Machine<H, V> {
+impl<H: Hasher, S: Scheme> Machine<H, S> {
     /// Stages one durable change: applies it immediately and queues it for group commit.
     ///
     /// Staging is application. Every event mutates machine state through [`Self::apply_event`],
@@ -168,8 +169,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// A crash that forgets either publication is indistinguishable from network reordering.
     pub(super) fn reserve_change(
         &mut self,
-        change: Change<V, H::Digest>,
-    ) -> Result<Capabilities<V, H::Digest>, StepError> {
+        change: Change<S, H::Digest>,
+    ) -> Result<Capabilities<S, H::Digest>, StepError> {
         let cursor = self
             .durable
             .state
@@ -222,10 +223,10 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// deferred behind the own-signature exposure floor.
     fn release_policy(
         &mut self,
-        event: &DomainEvent<V, H::Digest>,
+        event: &DomainEvent<S, H::Digest>,
         cursor: Cursor,
-        capabilities: &mut Capabilities<V, H::Digest>,
-    ) -> StagedRelease<V, H::Digest> {
+        capabilities: &mut Capabilities<S, H::Digest>,
+    ) -> StagedRelease<S, H::Digest> {
         // The recovered outbox re-releases at the generation barrier's acknowledgement, when
         // every recovered record is durable again under the new generation.
         let urgent = matches!(event.change(), Change::GenerationAdvanced(_));
@@ -273,8 +274,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// own-signature exposure floor.
     fn retain_or_defer_aggregate(
         &mut self,
-        event: &DomainEvent<V, H::Digest>,
-        capabilities: &mut Capabilities<V, H::Digest>,
+        event: &DomainEvent<S, H::Digest>,
+        capabilities: &mut Capabilities<S, H::Digest>,
     ) {
         let (Change::ViewCertificateCreated { artifact }
         | Change::FinalityFloorAdvanced {
@@ -298,9 +299,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// Arms the view timer for the view an applied event entered.
     fn rearm_view_timer(
         &self,
-        event: &DomainEvent<V, H::Digest>,
+        event: &DomainEvent<S, H::Digest>,
         view_before: View,
-        capabilities: &mut Capabilities<V, H::Digest>,
+        capabilities: &mut Capabilities<S, H::Digest>,
     ) {
         // A late finality floor leaves the view where the ordinary exit put it; re-arming the
         // timer for it would push out the deadline the running view already earned.
@@ -321,8 +322,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// Appends an applied event to the open batch, or opens a new batch for it.
     fn stage_event(
         &mut self,
-        event: DomainEvent<V, H::Digest>,
-        release: StagedRelease<V, H::Digest>,
+        event: DomainEvent<S, H::Digest>,
+        release: StagedRelease<S, H::Digest>,
         bytes: usize,
         target: BatchTarget,
         generation: Generation,
@@ -409,11 +410,11 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn freeze_persistence(
         &self,
-        job: PersistJob<V, H::Digest>,
-        release_after_enqueue: Vec<DurableJob<V, H::Digest>>,
+        job: PersistJob<S, H::Digest>,
+        release_after_enqueue: Vec<DurableJob<S, H::Digest>>,
     ) -> (
-        PersistDirective<V, H::Digest>,
-        FrozenAcknowledgement<V, H::Digest>,
+        PersistDirective<S, H::Digest>,
+        FrozenAcknowledgement<S, H::Digest>,
     ) {
         let mut staged_retention = Vec::new();
         let mut retention = Vec::new();
@@ -489,13 +490,13 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     ///
     /// A proposal's block and parent are not staged.
     fn extend_publication(
-        publication: &Publication<V, H::Digest>,
-        retention: &mut Vec<Arc<Artifact<V, H::Digest>>>,
+        publication: &Publication<S, H::Digest>,
+        retention: &mut Vec<Arc<Artifact<S, H::Digest>>>,
     ) {
         retention.extend(publication.artifacts().cloned());
     }
 
-    pub(crate) fn emit_staged(&mut self) -> Capabilities<V, H::Digest> {
+    pub(crate) fn emit_staged(&mut self) -> Capabilities<S, H::Digest> {
         let Some(index) = self.next_staged_index() else {
             return Capabilities::new();
         };
@@ -517,7 +518,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(super) fn complete_persistence(
         &mut self,
         completion: BarrierAck,
-    ) -> Result<Step<V, H::Digest>, StepError> {
+    ) -> Result<Step<S, H::Digest>, StepError> {
         if self.pipeline.last_barrier == Some(completion) {
             return Ok(Step::stale());
         }
@@ -620,7 +621,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(super) fn certificate_recorded(
         &self,
         certified: BlockRef<H::Digest>,
-    ) -> Activity<V, H::Digest> {
+    ) -> Activity<S, H::Digest> {
         Activity::CertificateRecorded {
             certified,
             released: released(
@@ -632,7 +633,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     pub(super) fn restore_ready_artifacts(
         &mut self,
-    ) -> Result<Vec<Activity<V, H::Digest>>, StepError> {
+    ) -> Result<Vec<Activity<S, H::Digest>>, StepError> {
         let mut ready = self
             .store
             .artifacts
@@ -689,7 +690,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     /// Returns the artifact identifiers an effect carries, hashing each artifact once.
     pub(crate) fn effect_artifact_ids(
-        effect: &DurableEffect<V, H::Digest>,
+        effect: &DurableEffect<S, H::Digest>,
     ) -> Vec<ArtifactId<H::Digest>> {
         let mut ids = Vec::new();
         effect.visit_references::<H>(|id| ids.push(id));
@@ -723,7 +724,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(crate) fn release_durable_effect(
         &mut self,
         id: EffectId,
-        effect: &DurableEffect<V, H::Digest>,
+        effect: &DurableEffect<S, H::Digest>,
     ) -> Result<(), ReplayError> {
         let ids = self
             .durable
@@ -744,7 +745,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn release_outbox(
         &mut self,
         ids: impl IntoIterator<Item = EffectId>,
-        capabilities: &mut Capabilities<V, H::Digest>,
+        capabilities: &mut Capabilities<S, H::Digest>,
     ) {
         for id in ids {
             if let Some(job) = self.release_outbox_job(id) {
@@ -753,7 +754,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         }
     }
 
-    fn release_outbox_job(&mut self, id: EffectId) -> Option<DurableJob<V, H::Digest>> {
+    fn release_outbox_job(&mut self, id: EffectId) -> Option<DurableJob<S, H::Digest>> {
         let effect = self.durable_effect(id)?;
         if !effect.authorized::<H>(&self.profile) {
             return None;
@@ -771,8 +772,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     pub(crate) fn reserve_effect(
         &mut self,
-        effect: DurableEffect<V, H::Digest>,
-    ) -> Result<Capabilities<V, H::Digest>, StepError> {
+        effect: DurableEffect<S, H::Digest>,
+    ) -> Result<Capabilities<S, H::Digest>, StepError> {
         self.check_effect_capacity(&effect, 0, &[])?;
         self.reserve_effect_prechecked(effect)
     }
@@ -784,8 +785,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// at staging and expects the consumed slot to exist.
     pub(super) fn reserve_effect_prechecked(
         &mut self,
-        effect: DurableEffect<V, H::Digest>,
-    ) -> Result<Capabilities<V, H::Digest>, StepError> {
+        effect: DurableEffect<S, H::Digest>,
+    ) -> Result<Capabilities<S, H::Digest>, StepError> {
         let id = self.next_effect_id()?;
         self.reserve_change(Change::OutboxQueued {
             id,

@@ -25,8 +25,11 @@ use crate::{
     multimmit::{
         Planes,
         config::LeaderSchedule,
-        mocks::cluster::{Cluster, ClusterOptions, LaunchSpec},
-        scheme::bls12381_threshold::Scheme,
+        mocks::{
+            Bls,
+            cluster::{Cluster, ClusterOptions, LaunchSpec},
+        },
+        scheme::Generic,
         types::{Artifact, ArtifactId, ArtifactKind, ChainId, CodecConfig, TransactionBlockHeader},
         wire::{CertificateMessage, ConsensusMessage, DataMessage, Envelope, EnvelopeConfig},
     },
@@ -46,7 +49,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock as _, Runner as _, Spawner as _, Supervisor as _, deterministic, iobuf::IoBuf,
 };
-use commonware_utils::{Faults as _, N5f1, channel::mpsc, sync::Mutex};
+use commonware_utils::{Faults as _, N5f1, channel::mpsc, sync::Mutex, test_rng};
 use std::{
     collections::BTreeMap, fmt::Debug, future::Future, num::NonZeroUsize, sync::Arc, time::Duration,
 };
@@ -184,10 +187,10 @@ fn identify_consensus(
     bytes: &[u8],
     epoch: Epoch,
     codec: CodecConfig,
-    verifier: &Scheme<ed25519::PublicKey, MinPk>,
+    verifier: &Generic<Bls<MinPk>>,
 ) -> Option<DeliveryArtifact> {
-    let bounds = codec.encoded_bounds::<MinPk, Sha256Digest>()?;
-    let payload = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+    let bounds = codec.encoded_bounds::<Bls<MinPk>, Sha256Digest>()?;
+    let payload = Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
         Copying(bytes),
         &EnvelopeConfig {
             max_frame_bytes: bounds.max_consensus_frame_bytes(),
@@ -200,20 +203,26 @@ fn identify_consensus(
     let artifact = match payload {
         ConsensusMessage::Proposal { block, .. } => {
             verifier
-                .verify_leader_block(&block, &Sequential)
+                .verify_leader_block(&mut test_rng(), &block, &Sequential)
                 .then_some(())?;
             Artifact::LeaderBlock(*block)
         }
         ConsensusMessage::Vote(vote) => {
-            verifier.verify_vote(&vote).then_some(())?;
+            verifier
+                .verify_vote(&mut test_rng(), &vote, &Sequential)
+                .then_some(())?;
             Artifact::Vote(vote)
         }
         ConsensusMessage::NoVote(vote) => {
-            verifier.verify_novote(&vote).then_some(())?;
+            verifier
+                .verify_novote(&mut test_rng(), &vote, &Sequential)
+                .then_some(())?;
             Artifact::NoVote(vote)
         }
         ConsensusMessage::Nullify(nullify) => {
-            verifier.verify_nullify(&nullify).then_some(())?;
+            verifier
+                .verify_nullify(&mut test_rng(), &nullify, &Sequential)
+                .then_some(())?;
             Artifact::Nullify(nullify)
         }
     };
@@ -230,10 +239,10 @@ fn identify_producer(
     bytes: &[u8],
     epoch: Epoch,
     codec: CodecConfig,
-    verifier: &Scheme<ed25519::PublicKey, MinPk>,
+    verifier: &Generic<Bls<MinPk>>,
 ) -> Option<ProducerArtifact> {
-    let bounds = codec.encoded_bounds::<MinPk, Sha256Digest>()?;
-    let payload = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+    let bounds = codec.encoded_bounds::<Bls<MinPk>, Sha256Digest>()?;
+    let payload = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
         Copying(bytes),
         &EnvelopeConfig {
             max_frame_bytes: bounds.max_data_frame_bytes(),
@@ -246,7 +255,9 @@ fn identify_producer(
     let DataMessage::Block(block) = payload else {
         return None;
     };
-    verifier.verify_transaction_block(&block).then_some(())?;
+    verifier
+        .verify_transaction_block(&mut test_rng(), &block, &Sequential)
+        .then_some(())?;
 
     let header = block.header().clone();
     let chain = header.chain().get();
@@ -265,10 +276,10 @@ fn identify_producer_consequence(
     bytes: &[u8],
     epoch: Epoch,
     codec: CodecConfig,
-    verifier: &Scheme<ed25519::PublicKey, MinPk>,
+    verifier: &Generic<Bls<MinPk>>,
 ) -> Option<TransactionBlockHeader<Sha256Digest>> {
-    let bounds = codec.encoded_bounds::<MinPk, Sha256Digest>()?;
-    let payload = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+    let bounds = codec.encoded_bounds::<Bls<MinPk>, Sha256Digest>()?;
+    let payload = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
         Copying(bytes),
         &EnvelopeConfig {
             max_frame_bytes: bounds.max_data_frame_bytes(),
@@ -279,8 +290,14 @@ fn identify_producer_consequence(
     .ok()?
     .into_payload();
     match payload {
-        DataMessage::DaVote(vote) if verifier.verify_da_vote(&vote) => Some(vote.header().clone()),
-        DataMessage::DaCertificate(certificate) if verifier.verify_da_certificate(&certificate) => {
+        DataMessage::DaVote(vote)
+            if verifier.verify_da_vote(&mut test_rng(), &vote, &Sequential) =>
+        {
+            Some(vote.header().clone())
+        }
+        DataMessage::DaCertificate(certificate)
+            if verifier.verify_da_certificate(&mut test_rng(), &certificate, &Sequential) =>
+        {
             Some(certificate.header().clone())
         }
         _ => None,
@@ -356,7 +373,7 @@ struct TwinSlots {
 }
 
 impl TwinSlots {
-    fn has_producer_equivocation(&self, cluster: &Cluster<MinPk>, byzantine: usize) -> bool {
+    fn has_producer_equivocation(&self, cluster: &Cluster<Bls<MinPk>>, byzantine: usize) -> bool {
         let blocks = self.producer_blocks.lock();
         let transmitted = blocks.iter().any(|(left_origin, left)| {
             *left_origin == SplitOrigin::Primary
@@ -455,10 +472,10 @@ impl TwinSlots {
 ///
 /// Data-plane traffic is chain-scoped, so it carries no view and is never split by round.
 fn message_view(plane: u64, bytes: &[u8], epoch: Epoch, codec: CodecConfig) -> Option<View> {
-    let bounds = codec.encoded_bounds::<MinPk, Sha256Digest>()?;
+    let bounds = codec.encoded_bounds::<Bls<MinPk>, Sha256Digest>()?;
     match plane {
         1 => {
-            let envelope = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 Copying(bytes),
                 &EnvelopeConfig {
                     max_frame_bytes: bounds.max_consensus_frame_bytes(),
@@ -475,7 +492,7 @@ fn message_view(plane: u64, bytes: &[u8], epoch: Epoch, codec: CodecConfig) -> O
             })
         }
         2 => {
-            let envelope = Envelope::<CertificateMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<CertificateMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 Copying(bytes),
                 &EnvelopeConfig {
                     max_frame_bytes: bounds.max_certificate_frame_bytes(),
@@ -493,7 +510,7 @@ fn message_view(plane: u64, bytes: &[u8], epoch: Epoch, codec: CodecConfig) -> O
         _ => {
             // Reject malformed data-plane bytes the same way the ingress actor would, without
             // attributing them to a view.
-            let _ = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let _ = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 Copying(bytes),
                 &EnvelopeConfig {
                     max_frame_bytes: bounds.max_data_frame_bytes(),
@@ -532,7 +549,7 @@ fn restrict_recipients(
 }
 
 async fn launch_halves<S, R>(
-    cluster: &mut Cluster<MinPk>,
+    cluster: &mut Cluster<Bls<MinPk>>,
     byzantine: usize,
     primary: Vec<(S, R)>,
     secondary: Vec<(S, R)>,
@@ -568,7 +585,7 @@ where
 
 async fn launch_scenario_twins(
     context: &deterministic::Context,
-    cluster: &mut Cluster<MinPk>,
+    cluster: &mut Cluster<Bls<MinPk>>,
     byzantine: usize,
     scenario: &Scenario,
     labels: [&'static str; 2],

@@ -19,6 +19,7 @@ use crate::{
             },
             types::{BodyValues, CustodyValues, MaybeFloor, MaybeLqc, Reply},
         },
+        scheme::Scheme,
         types::{
             BlockRef, Body, CertificateId, ChainId, Lqc, TipRecord, TransactionBlock,
             TransactionBlockHeader,
@@ -30,7 +31,7 @@ use commonware_actor::{
     Feedback,
     mailbox::{self, Policy},
 };
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use commonware_utils::{channel::fallible::OneshotExt as _, futures::try_join_all};
 use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc, time::SystemTime};
 use tracing::Span;
@@ -120,25 +121,25 @@ impl AdmissionReply {
 }
 
 /// A request on the command lane, which keeps mailbox order.
-pub(super) enum Message<H, V, B>
+pub(super) enum Message<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Buffers pending artifacts and replies as `reply` specifies.
     Admit {
-        admissions: Vec<Admission<H, V, B>>,
+        admissions: Vec<Admission<H, S, B>>,
         reply: AdmissionReply,
     },
     /// Any other ordered request.
-    Command(Command<H, V, B>),
+    Command(Command<H, S, B>),
 }
 
-impl<H, V, B> Message<H, V, B>
+impl<H, S, B> Message<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Returns the stable metric and span label of this request.
@@ -151,16 +152,16 @@ where
 }
 
 /// An ordered request other than an admission.
-pub(super) enum Command<H, V, B>
+pub(super) enum Command<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Returns the L-QC with `id`, finalized or pending.
     Lqc {
         id: CertificateId<H::Digest>,
-        reply: Reply<MaybeLqc<V, H::Digest>, Error>,
+        reply: Reply<MaybeLqc<S, H::Digest>, Error>,
     },
     /// Returns whether the L-QC with `id` is finalized.
     FinalLqc {
@@ -169,7 +170,7 @@ where
     },
     /// Returns the first pending L-QC at the highest pending view.
     LatestLqc {
-        reply: Reply<MaybeLqc<V, H::Digest>, Error>,
+        reply: Reply<MaybeLqc<S, H::Digest>, Error>,
     },
     /// Returns the history opening with `commitment`, finalized or pending.
     History {
@@ -179,7 +180,7 @@ where
     /// Returns the retained floor with the highest index at or below `at` and the durable commit.
     FloorAt {
         at: OutputIndex,
-        reply: Reply<MaybeFloor<V, H::Digest>, Error>,
+        reply: Reply<MaybeFloor<S, H::Digest>, Error>,
     },
     /// Walks history openings back from `commitment` within the item and byte bounds.
     HistorySegment {
@@ -200,13 +201,13 @@ where
     },
     /// Accepts one bounded commit with the bodies its caller holds.
     Commit {
-        batch: Commit<H, V>,
+        batch: Commit<H, S>,
         handoff: Vec<delivery::HotOutput<H, B>>,
         reply: Reply<Completion<Error>, Error>,
     },
     /// Installs a verified state-sync floor.
     Install {
-        request: InstallRequest<V, H::Digest>,
+        request: InstallRequest<S, H::Digest>,
         reply: Reply<delivery::ResetWaiter, Error>,
     },
     /// Prunes what the newest floor at or below `below` and delivery's cursor makes obsolete.
@@ -229,10 +230,10 @@ where
     },
 }
 
-impl<H, V, B> Command<H, V, B>
+impl<H, S, B> Command<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Returns the stable metric and span label of this request.
@@ -411,13 +412,13 @@ impl Policy for CursorMessage {
 pub(super) type EnqueueClock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 
 /// Cloneable client for the catalog's lanes.
-pub(crate) struct Mailbox<H, V, B>
+pub(crate) struct Mailbox<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
-    pub(super) commands: mailbox::Sender<Traced<Message<H, V, B>>>,
+    pub(super) commands: mailbox::Sender<Traced<Message<H, S, B>>>,
     pub(super) cursors: mailbox::Sender<CursorMessage>,
     pub(super) reads: mailbox::Sender<Traced<Read<H, B>>>,
     /// Most admissions one request may carry.
@@ -426,10 +427,10 @@ where
     pub(super) now: EnqueueClock,
 }
 
-impl<H, V, B> Clone for Mailbox<H, V, B>
+impl<H, S, B> Clone for Mailbox<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     fn clone(&self) -> Self {
@@ -443,16 +444,16 @@ where
     }
 }
 
-impl<H, V, B> Mailbox<H, V, B>
+impl<H, S, B> Mailbox<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Sends an ordered request and awaits its reply.
     pub(super) async fn request<T>(
         &self,
-        make: impl FnOnce(Reply<T, Error>) -> Message<H, V, B>,
+        make: impl FnOnce(Reply<T, Error>) -> Message<H, S, B>,
     ) -> Result<T, Error> {
         ask(
             |message| {
@@ -471,7 +472,7 @@ where
     /// Sends an ordered request other than an admission and awaits its reply.
     async fn command<T>(
         &self,
-        make: impl FnOnce(Reply<T, Error>) -> Command<H, V, B>,
+        make: impl FnOnce(Reply<T, Error>) -> Command<H, S, B>,
     ) -> Result<T, Error> {
         self.request(|reply| Message::Command(make(reply))).await
     }
@@ -506,7 +507,7 @@ where
         &self,
         view: View,
         id: CertificateId<H::Digest>,
-        proof: Arc<Lqc<V, H::Digest>>,
+        proof: Arc<Lqc<S, H::Digest>>,
     ) -> Result<(), Error> {
         self.request(|reply| Message::Admit {
             admissions: vec![Admission::Lqc(view, id, proof)],
@@ -526,7 +527,7 @@ where
         &self,
         view: View,
         id: CertificateId<H::Digest>,
-        proof: Arc<Lqc<V, H::Digest>>,
+        proof: Arc<Lqc<S, H::Digest>>,
     ) -> Result<(), Error> {
         self.request(|reply| Message::Admit {
             admissions: vec![Admission::Lqc(view, id, proof)],
@@ -584,7 +585,7 @@ where
     pub(crate) async fn lqc(
         &self,
         id: CertificateId<H::Digest>,
-    ) -> Result<MaybeLqc<V, H::Digest>, Error> {
+    ) -> Result<MaybeLqc<S, H::Digest>, Error> {
         self.command(|reply| Command::Lqc { id, reply }).await
     }
 
@@ -606,7 +607,7 @@ where
         skip_all,
         fields(operation = "latest_lqc")
     )]
-    pub(crate) async fn latest_lqc(&self) -> Result<MaybeLqc<V, H::Digest>, Error> {
+    pub(crate) async fn latest_lqc(&self) -> Result<MaybeLqc<S, H::Digest>, Error> {
         self.command(|reply| Command::LatestLqc { reply }).await
     }
 
@@ -636,7 +637,7 @@ where
     pub(crate) async fn floor_at(
         &self,
         at: OutputIndex,
-    ) -> Result<MaybeFloor<V, H::Digest>, Error> {
+    ) -> Result<MaybeFloor<S, H::Digest>, Error> {
         self.command(|reply| Command::FloorAt { at, reply }).await
     }
 
@@ -905,7 +906,7 @@ where
 
     /// Installs a verified floor and waits until delivery has crossed its generation reset.
     #[tracing::instrument(name = "multimmit.marshal.catalog.install", level = "info", skip_all)]
-    pub(crate) async fn install(&self, request: InstallRequest<V, H::Digest>) -> Result<(), Error> {
+    pub(crate) async fn install(&self, request: InstallRequest<S, H::Digest>) -> Result<(), Error> {
         let reset = self
             .command(|reply| Command::Install { request, reply })
             .await?;
@@ -952,7 +953,7 @@ where
     )]
     pub(crate) async fn start_commit(
         &self,
-        batch: Commit<H, V>,
+        batch: Commit<H, S>,
         handoff: Vec<delivery::HotOutput<H, B>>,
     ) -> Result<Completion<Error>, Error> {
         self.command(|reply| Command::Commit {
@@ -967,7 +968,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::multimmit::testing::TestBody;
+    use crate::multimmit::{mocks::Bls, testing::TestBody};
     use commonware_cryptography::{Sha256, bls12381::primitives::variant::MinPk};
     use commonware_utils::channel::oneshot;
 
@@ -979,7 +980,7 @@ mod tests {
     fn request_kind_labels_are_stable() {
         let requests = [
             (
-                Message::<Sha256, MinPk, TestBody>::Admit {
+                Message::<Sha256, Bls<MinPk>, TestBody>::Admit {
                     admissions: Vec::new(),
                     reply: AdmissionReply::Buffered(reply()),
                 },

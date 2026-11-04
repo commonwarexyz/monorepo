@@ -19,7 +19,7 @@ use crate::{
             types::LqcVerifier,
             wire::BackfillKey,
         },
-        mocks::Committee,
+        mocks::{Bls, Committee},
         testing::{TestBody, expect_within},
         types::{
             BlockRef, CertificateId, ChainId, Lqc, PathLimits, TipRecord, TransactionBlock,
@@ -64,7 +64,7 @@ use tracing_subscriber::{
     Layer, filter::filter_fn, layer::Context as LayerContext, prelude::*, registry::LookupSpan,
 };
 type TestBlock = TransactionBlock<Sha256, TestBody>;
-type TestMailbox = Mailbox<Sha256, MinPk, TestBody>;
+type TestMailbox = Mailbox<Sha256, Bls<MinPk>, TestBody>;
 type Key = BackfillKey<Sha256Digest>;
 
 #[derive(Default)]
@@ -236,10 +236,10 @@ impl Resolver for RecordingResolver {
 #[derive(Clone)]
 struct AcceptVerifier;
 
-impl LqcVerifier<Sha256, MinPk> for AcceptVerifier {
+impl LqcVerifier<Sha256, Bls<MinPk>> for AcceptVerifier {
     type Error = Infallible;
 
-    async fn verify(&mut self, _: &Lqc<MinPk, Sha256Digest>) -> Result<(), Self::Error> {
+    async fn verify(&mut self, _: &Lqc<Bls<MinPk>, Sha256Digest>) -> Result<(), Self::Error> {
         Ok(())
     }
 }
@@ -271,10 +271,10 @@ impl GatedVerifier {
 #[error("verification gate closed")]
 struct GateClosed;
 
-impl LqcVerifier<Sha256, MinPk> for GatedVerifier {
+impl LqcVerifier<Sha256, Bls<MinPk>> for GatedVerifier {
     type Error = GateClosed;
 
-    async fn verify(&mut self, _: &Lqc<MinPk, Sha256Digest>) -> Result<(), Self::Error> {
+    async fn verify(&mut self, _: &Lqc<Bls<MinPk>, Sha256Digest>) -> Result<(), Self::Error> {
         *self.calls.lock() += 1;
         let started = self.started.lock().take();
         let release = self.release.lock().take();
@@ -303,7 +303,7 @@ fn block_key(reference: BlockRef<Sha256Digest>) -> Key {
 fn request<T>(
     mailbox: &TestMailbox,
     target: Target<Sha256Digest>,
-    reply: impl FnOnce(oneshot::Sender<Result<T, Error>>) -> Reply<Sha256, MinPk, TestBody>,
+    reply: impl FnOnce(oneshot::Sender<Result<T, Error>>) -> Reply<Sha256, Bls<MinPk>, TestBody>,
     reason: FetchReason,
 ) -> oneshot::Receiver<Result<T, Error>> {
     let (sender, receiver) = oneshot::channel();
@@ -380,7 +380,7 @@ async fn settle(context: &deterministic::Context) {
     context.sleep(Duration::from_millis(50)).await;
 }
 
-fn producer_chain(committee: &Committee<MinPk>, count: usize) -> Vec<Arc<TestBlock>> {
+fn producer_chain(committee: &Committee<Bls<MinPk>>, count: usize) -> Vec<Arc<TestBlock>> {
     let mut parent = committee.config.genesis().tips()[0].digest();
     (1..=count)
         .map(|height| {
@@ -406,7 +406,7 @@ fn producer_chain(committee: &Committee<MinPk>, count: usize) -> Vec<Arc<TestBlo
 }
 
 /// A single block at height one on `chain`, distinguished by `salt`.
-fn first_block(committee: &Committee<MinPk>, chain: u32, salt: u64) -> Arc<TestBlock> {
+fn first_block(committee: &Committee<Bls<MinPk>>, chain: u32, salt: u64) -> Arc<TestBlock> {
     let body = TestBody::new(Sha256::hash(&[b"application parent"]), Height::new(1), salt);
     Arc::new(
         TransactionBlock::<Sha256, _>::new(
@@ -418,9 +418,9 @@ fn first_block(committee: &Committee<MinPk>, chain: u32, salt: u64) -> Arc<TestB
 }
 
 fn catalog_config(
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     partition: &str,
-) -> MarshalConfig<TwoCap, MinPk, TestBody> {
+) -> MarshalConfig<TwoCap, Bls<MinPk>, TestBody> {
     let archive = ArchiveConfig::new(TwoCap, CacheRef::new(NZU16!(1024), NZUsize!(8)));
     let mut catalog_config = MarshalConfig::new(
         Start::Genesis(committee.config.genesis().clone()),
@@ -456,9 +456,9 @@ impl Default for Options {
 
 /// A started backfill actor, its serving actor and catalog.
 struct Harness {
-    bridge: BackfillBridge<Sha256, MinPk, TestBody>,
+    bridge: BackfillBridge<Sha256, Bls<MinPk>, TestBody>,
     mailbox: TestMailbox,
-    catalog: catalog::Mailbox<Sha256, MinPk, TestBody>,
+    catalog: catalog::Mailbox<Sha256, Bls<MinPk>, TestBody>,
     _delivery: delivery::Receiver<Sha256, TestBody>,
     backfill: Handle<Result<(), Error>>,
     serve: Handle<Result<(), super::serve::Error>>,
@@ -467,18 +467,18 @@ struct Harness {
 
 /// An opened catalog with the configuration of a backfill actor that has not been created.
 struct Parts {
-    catalog: catalog::Mailbox<Sha256, MinPk, TestBody>,
+    catalog: catalog::Mailbox<Sha256, Bls<MinPk>, TestBody>,
     delivery: delivery::Receiver<Sha256, TestBody>,
     catalog_handle: Handle<Result<(), catalog::Fatal>>,
-    serve: super::serve::Actor<deterministic::Context, Sha256, MinPk, TestBody>,
-    config: Config<Sha256, MinPk, TestBody>,
+    serve: super::serve::Actor<deterministic::Context, Sha256, Bls<MinPk>, TestBody>,
+    config: Config<Sha256, Bls<MinPk>, TestBody>,
 }
 
 impl Parts {
     async fn open<E>(
         context: &deterministic::Context,
         catalog_context: E,
-        committee: &Committee<MinPk>,
+        committee: &Committee<Bls<MinPk>>,
         partition: &str,
         label: &'static str,
         options: &Options,
@@ -548,7 +548,7 @@ impl Parts {
 impl Harness {
     async fn open<R>(
         context: &deterministic::Context,
-        committee: &Committee<MinPk>,
+        committee: &Committee<Bls<MinPk>>,
         partition: &str,
         resolver: R,
     ) -> Self
@@ -572,7 +572,7 @@ impl Harness {
     async fn open_with<E, R, Q>(
         context: &deterministic::Context,
         catalog_context: E,
-        committee: &Committee<MinPk>,
+        committee: &Committee<Bls<MinPk>>,
         partition: &str,
         label: &'static str,
         options: Options,
@@ -582,7 +582,7 @@ impl Harness {
     where
         E: StorageContext + Spawner,
         R: Resolver<Key = Key, Subscriber = BackfillSubscriber>,
-        Q: LqcVerifier<Sha256, MinPk> + Clone,
+        Q: LqcVerifier<Sha256, Bls<MinPk>> + Clone,
     {
         let parts = Parts::open(
             context,
@@ -638,7 +638,7 @@ impl Harness {
 
 #[test]
 fn compact_segments_require_exact_linked_ancestry() {
-    let committee = Committee::<MinPk>::builder(41, 6)
+    let committee = Committee::<Bls<MinPk>>::builder(41, 6)
         .limits(PathLimits::new(1, 0))
         .build();
     let tips = committee.config.genesis().tips().to_vec();
@@ -687,7 +687,7 @@ fn block_modes_follow_the_documented_transitions() {
 
 /// A registered waiter for `commitment` whose reply the test keeps.
 fn history_waiter(
-    registry: &mut Registry<Sha256, MinPk, TestBody>,
+    registry: &mut Registry<Sha256, Bls<MinPk>, TestBody>,
     commitment: &[u8],
     reason: FetchReason,
 ) -> (
@@ -711,7 +711,7 @@ fn history_waiter(
 
 #[test]
 fn registry_makes_room_by_closed_then_marker_then_oldest() {
-    let mut registry = Registry::<Sha256, MinPk, TestBody>::new(3);
+    let mut registry = Registry::<Sha256, Bls<MinPk>, TestBody>::new(3);
     let (closed, closed_receiver) = history_waiter(&mut registry, b"closed", FetchReason::Explicit);
     let (oldest, _oldest_receiver) =
         history_waiter(&mut registry, b"oldest", FetchReason::Explicit);
@@ -764,7 +764,7 @@ fn registry_makes_room_by_closed_then_marker_then_oldest() {
 
 #[test]
 fn rechecks_run_one_per_key_and_cancel_queued_or_active() {
-    let mut rechecks = Rechecks::<Sha256, MinPk, TestBody>::new(1);
+    let mut rechecks = Rechecks::<Sha256, Bls<MinPk>, TestBody>::new(1);
     let first = BackfillKey::tip_record(Sha256::hash(&[b"first"]));
     let second = BackfillKey::tip_record(Sha256::hash(&[b"second"]));
     assert!(rechecks.queue(first));
@@ -786,7 +786,7 @@ fn rechecks_run_one_per_key_and_cancel_queued_or_active() {
 #[test]
 fn oversized_peer_blocks_are_invalid_without_stopping_the_actor() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(55, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(55, 6).build();
         let height = Height::new(u64::MAX);
         let body = TestBody::new(
             Sha256::hash(&[b"oversized application parent"]),
@@ -859,7 +859,7 @@ fn oversized_peer_blocks_are_invalid_without_stopping_the_actor() {
 #[test]
 fn body_range_rechecks_local_custody_and_accepts_late_admission() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(56, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(56, 6).build();
         let blocks = producer_chain(&committee, 2);
         let harness = Harness::open(
             &context,
@@ -910,7 +910,7 @@ fn body_range_rechecks_local_custody_and_accepts_late_admission() {
 #[test]
 fn admitted_block_notice_rejects_a_mismatched_reference() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-        let committee = Committee::<MinPk>::builder(58, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(58, 6).build();
         let blocks = producer_chain(&committee, 2);
         let harness = Harness::open(
             &context,
@@ -936,7 +936,7 @@ fn admitted_block_notice_rejects_a_mismatched_reference() {
 #[test]
 fn header_fetch_accepts_late_durable_body_admission() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-        let committee = Committee::<MinPk>::builder(57, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(57, 6).build();
         let blocks = producer_chain(&committee, 2);
         let head = blocks[1].reference();
         let resolver = RecordingResolver::new(Feedback::Ok);
@@ -998,7 +998,7 @@ fn header_fetch_accepts_late_durable_body_admission() {
 fn peer_bodies_complete_only_exact_header_fetches() {
     for range in [false, true] {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let committee = Committee::<MinPk>::builder(58, 6).build();
+            let committee = Committee::<Bls<MinPk>>::builder(58, 6).build();
             let blocks = producer_chain(&committee, 3);
             let expected = blocks
                 .iter()
@@ -1095,7 +1095,7 @@ fn peer_bodies_complete_only_exact_header_fetches() {
 #[test]
 fn body_range_delivery_requires_an_exact_prefix_and_stages_once() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(53, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(53, 6).build();
         let blocks = producer_chain(&committee, 3);
         let references = blocks
             .iter()
@@ -1164,7 +1164,7 @@ fn body_range_delivery_requires_an_exact_prefix_and_stages_once() {
 #[test]
 fn blocked_range_staging_does_not_stall_resolver_commands() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(54, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(54, 6).build();
         let blocks = producer_chain(&committee, 5);
         let syncs = PendingSyncs::default();
         let delayed = DelayedSyncContext {
@@ -1312,7 +1312,7 @@ fn blocked_range_staging_does_not_stall_resolver_commands() {
 #[test]
 fn consumer_overflow_is_unresolved_and_closure_is_ignored() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(7, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
         let mut parts = Parts::open(
             &context,
             context.child("catalog"),
@@ -1352,7 +1352,7 @@ fn consumer_overflow_is_unresolved_and_closure_is_ignored() {
 fn overflow_discards_canceled_exact_fetches() {
     let fetch = |label: &[u8]| {
         let (reply, receiver) = oneshot::channel();
-        let message: Message<Sha256, MinPk, TestBody> = Message::Fetch {
+        let message: Message<Sha256, Bls<MinPk>, TestBody> = Message::Fetch {
             span: Span::none(),
             target: Target::Lqc(CertificateId::new(Sha256::hash(&[label]))),
             reply: Reply::Lqc(reply),
@@ -1362,13 +1362,13 @@ fn overflow_discards_canceled_exact_fetches() {
     };
     let mut overflow = VecDeque::new();
     let (first, first_receiver) = fetch(b"canceled overflow fetch");
-    <Message<Sha256, MinPk, TestBody> as Policy>::handle(&mut overflow, first);
+    <Message<Sha256, Bls<MinPk>, TestBody> as Policy>::handle(&mut overflow, first);
     assert_eq!(overflow.len(), 1);
     drop(first_receiver);
 
     let (second, second_receiver) = fetch(b"already canceled overflow fetch");
     drop(second_receiver);
-    <Message<Sha256, MinPk, TestBody> as Policy>::handle(&mut overflow, second);
+    <Message<Sha256, Bls<MinPk>, TestBody> as Policy>::handle(&mut overflow, second);
 
     assert!(overflow.is_empty());
 }
@@ -1386,8 +1386,11 @@ fn overflowing_deliveries_are_unresolved_and_certified_hints_dropped() {
         value: Bytes::new(),
         response: mailbox::DeliveryReply::new(reply),
     };
-    <Message<Sha256, MinPk, TestBody> as Policy>::handle(&mut overflow, Message::Deliver(incoming));
-    <Message<Sha256, MinPk, TestBody> as Policy>::handle(
+    <Message<Sha256, Bls<MinPk>, TestBody> as Policy>::handle(
+        &mut overflow,
+        Message::Deliver(incoming),
+    );
+    <Message<Sha256, Bls<MinPk>, TestBody> as Policy>::handle(
         &mut overflow,
         Message::CertifiedBlock {
             reference: BlockRef::new(ChainId::new(0), Height::new(1), Sha256::hash(&[b"hint"])),
@@ -1403,7 +1406,7 @@ fn overflowing_deliveries_are_unresolved_and_certified_hints_dropped() {
 #[test]
 fn waiters_joining_a_fetching_key_fetch_under_their_own_subscriber() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(7, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
         let resolver = RecordingResolver::new(Feedback::Ok);
         let mut harness = Harness::open(
             &context,
@@ -1458,7 +1461,7 @@ fn waiters_joining_a_fetching_key_fetch_under_their_own_subscriber() {
 fn coalesced_waiters_fetch_as_one_batch() {
     for feedback in [Feedback::Ok, Feedback::Closed] {
         deterministic::Runner::default().start(|context| async move {
-            let committee = Committee::<MinPk>::builder(7, 6).build();
+            let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
             let resolver = RecordingResolver::new(feedback);
             let harness = Harness::open(
                 &context,
@@ -1498,7 +1501,7 @@ fn coalesced_waiters_fetch_as_one_batch() {
 #[test]
 fn stale_subscriber_delivery_completes_live_waiters() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(7, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
         let resolver = RecordingResolver::new(Feedback::Ok);
         let mut harness = Harness::open(
             &context,
@@ -1543,7 +1546,7 @@ fn stale_subscriber_delivery_completes_live_waiters() {
 #[test]
 fn canceled_waiters_are_reclaimed_at_capacity() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(7, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
         let harness = Harness::open_with(
             &context,
             context.child("catalog"),
@@ -1590,7 +1593,7 @@ fn canceled_waiters_are_reclaimed_at_capacity() {
 #[test]
 fn finality_fetch_has_capacity_under_explicit_pressure() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(7, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
         let harness = Harness::open_with(
             &context,
             context.child("catalog"),
@@ -1631,7 +1634,7 @@ fn finality_fetch_has_capacity_under_explicit_pressure() {
 #[test]
 fn local_custody_completes_before_peer_fetch() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(7, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
         let resolver = RecordingResolver::new(Feedback::Closed);
         let harness = Harness::open_with(
             &context,
@@ -1705,7 +1708,7 @@ fn local_custody_completes_before_peer_fetch() {
 #[test]
 fn certified_blocks_fetch_only_for_live_authorized_waiters() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(7, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
         let resolver = RecordingResolver::new(Feedback::Ok);
         let harness = Harness::open_with(
             &context,
@@ -1796,7 +1799,7 @@ fn certified_blocks_fetch_only_for_live_authorized_waiters() {
 #[test]
 fn deliver_enforces_the_exact_value_byte_bound() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(7, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
         let record = Arc::new(
             TipRecord::at_tips(
                 genesis_history::<Sha256>(committee.config.genesis()),
@@ -1857,7 +1860,7 @@ fn deliver_enforces_the_exact_value_byte_bound() {
 #[test]
 fn deliver_rejects_malformed_and_wrong_identity_values() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(7, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
         let proof = Arc::new(committee.lqc(View::new(3)));
         let wrong_proof = committee.lqc(View::new(4));
         let id = proof.id::<Sha256>();
@@ -2034,7 +2037,7 @@ fn deliver_rejects_malformed_and_wrong_identity_values() {
 #[test]
 fn lqc_verification_does_not_block_other_deliveries() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(7, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
         let proof = Arc::new(committee.lqc(View::new(3)));
         let id = proof.id::<Sha256>();
         let record = Arc::new(
@@ -2107,7 +2110,7 @@ fn lqc_verification_does_not_block_other_deliveries() {
 /// Opens a harness whose L-QC verifications go through `verifier`.
 async fn verifying_harness(
     context: &deterministic::Context,
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     partition: &str,
     options: Options,
     resolver: &RecordingResolver,
@@ -2129,7 +2132,7 @@ async fn verifying_harness(
 #[test]
 fn rejected_lqc_is_invalid_and_keeps_its_waiter() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(7, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
         let proof = Arc::new(committee.lqc(View::new(3)));
         let id = proof.id::<Sha256>();
         let (verifier, started, release) = GatedVerifier::new();
@@ -2194,7 +2197,7 @@ fn rejected_lqc_is_invalid_and_keeps_its_waiter() {
 #[test]
 fn rerequested_lqc_reuses_the_running_verification() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(7, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
         let proof = Arc::new(committee.lqc(View::new(3)));
         let id = proof.id::<Sha256>();
         let (verifier, started, release) = GatedVerifier::new();
@@ -2259,7 +2262,7 @@ fn rerequested_lqc_reuses_the_running_verification() {
 #[test]
 fn saturated_lqc_verifications_are_unresolved() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(7, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
         let held = Arc::new(committee.lqc(View::new(3)));
         let other = Arc::new(committee.lqc(View::new(4)));
         let (verifier, started, release) = GatedVerifier::new();
@@ -2334,7 +2337,7 @@ fn saturated_lqc_verifications_are_unresolved() {
 #[test]
 fn subscribed_fetch_defers_custody_to_the_service() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(9, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(9, 6).build();
         let block = first_block(&committee, 0, 12);
         let reference = block.reference();
         let resolver = RecordingResolver::new(Feedback::Ok);
@@ -2378,7 +2381,7 @@ fn blocked_local_recheck_does_not_stall_independent_fetch(
     #[case] cancel_locally: bool,
 ) {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(49, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(49, 6).build();
         let blocks: [Arc<TestBlock>; 3] =
             std::array::from_fn(|index| first_block(&committee, index as u32, 49 + index as u64));
         let partition = "resolver_concurrent_recheck_test";
@@ -2515,7 +2518,7 @@ fn blocked_local_recheck_does_not_stall_independent_fetch(
 #[test]
 fn late_custody_waiter_stages_shared_delivery() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(10, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(10, 6).build();
         let block = first_block(&committee, 0, 13);
         let reference = block.reference();
         let resolver = RecordingResolver::new(Feedback::Ok);
@@ -2563,7 +2566,7 @@ fn late_custody_waiter_stages_shared_delivery() {
 #[test]
 fn fetched_block_deliveries_share_one_catalog_admission_cut() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(43, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(43, 6).build();
         let blocks = [0, 1].map(|chain| first_block(&committee, chain, u64::from(chain)));
         let syncs = PendingSyncs::default();
         let delayed = DelayedSyncContext {
@@ -2638,14 +2641,14 @@ fn fetched_block_deliveries_share_one_catalog_admission_cut() {
 
 #[test]
 fn exact_identity_and_ambiguity_are_distinct() {
-    let committee = Committee::<MinPk>::builder(7, 6).build();
+    let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
     let proof = committee.lqc(View::new(3));
     let received = proof.id::<Sha256>();
     let other = committee.lqc(View::new(4)).id::<Sha256>();
     assert_ne!(received, other);
     assert_eq!(proof.epoch(), committee.config.epoch());
     assert_eq!(
-        Lqc::<MinPk, Sha256Digest>::decode_cfg(proof.encode(), &committee.codec())
+        Lqc::<Bls<MinPk>, Sha256Digest>::decode_cfg(proof.encode(), &committee.codec())
             .unwrap()
             .id::<Sha256>(),
         received
@@ -2658,7 +2661,7 @@ mod serve {
     #[test]
     fn producer_caps_consecutive_body_ranges_to_response_budget() {
         deterministic::Runner::default().start(|context| async move {
-            let committee = Committee::<MinPk>::builder(52, 6).build();
+            let committee = Committee::<Bls<MinPk>>::builder(52, 6).build();
             let blocks = producer_chain(&committee, 4);
             assert!(blocks.iter().all(|block| block.encode_size() <= 112));
             let mut harness = Harness::open_with(
@@ -2713,7 +2716,7 @@ mod serve {
     #[test]
     fn blocked_producer_key_does_not_stall_independent_serves() {
         deterministic::Runner::default().start(|context| async move {
-            let committee = Committee::<MinPk>::builder(47, 6).build();
+            let committee = Committee::<Bls<MinPk>>::builder(47, 6).build();
             let blocks: [Arc<TestBlock>; 3] = std::array::from_fn(|index| {
                 first_block(&committee, [0, 1, 0][index], 47 + index as u64)
             });
@@ -2830,7 +2833,7 @@ mod serve {
     #[test]
     fn admitted_producer_request_waits_for_actor_capacity() {
         deterministic::Runner::default().start(|context| async move {
-            let committee = Committee::<MinPk>::builder(51, 6).build();
+            let committee = Committee::<Bls<MinPk>>::builder(51, 6).build();
             let blocks: [Arc<TestBlock>; 3] =
                 std::array::from_fn(|index| first_block(&committee, index as u32, 51 + index as u64));
             let block = &blocks[0];

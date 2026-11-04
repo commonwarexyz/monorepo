@@ -24,10 +24,11 @@ use crate::multimmit::{
         },
         types::Reply,
     },
+    scheme::Scheme,
     types::{BlockRef, Body},
 };
 use commonware_actor::{Feedback, mailbox};
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select_loop;
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell,
@@ -60,18 +61,18 @@ pub(crate) struct CacheBounds {
 }
 
 /// Catalog configuration.
-pub(crate) struct Config<R, T, E, H, V, B>
+pub(crate) struct Config<R, T, E, H, S, B>
 where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Runtime context of the catalog task.
     pub(crate) context: R,
     /// Opened stores whose interrupted installation and commit cleanup are already replayed.
-    pub(crate) stores: CatalogStore<T, E, H, V, B>,
+    pub(crate) stores: CatalogStore<T, E, H, S, B>,
     /// Capacity of the command and read mailboxes.
     pub(crate) mailbox_size: NonZeroUsize,
     /// Most admissions one durability cut holds, and so one admission request may carry.
@@ -182,19 +183,19 @@ impl Turn {
 ///
 /// Storage mutations run one at a time on this task, while their durability syncs, body reads,
 /// and retirement markers complete in bounded background pools.
-pub(crate) struct Catalog<R, T, E, H, V, B>
+pub(crate) struct Catalog<R, T, E, H, S, B>
 where
     R: Clock + Spawner + RuntimeMetrics,
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     pub(super) context: ContextCell<R>,
-    pub(super) stores: CatalogStore<T, E, H, V, B>,
-    pub(super) intake: Intake<H, V, B>,
-    pub(super) admission: AdmissionState<T, E, H, V, B>,
+    pub(super) stores: CatalogStore<T, E, H, S, B>,
+    pub(super) intake: Intake<H, S, B>,
+    pub(super) admission: AdmissionState<T, E, H, S, B>,
     pub(super) commits: CommitPipeline<H, B>,
     pub(super) reads: BodyReads<R, E, H, B>,
     pub(super) cursor: CursorMirror,
@@ -207,20 +208,20 @@ where
     pub(super) metrics: Metrics,
 }
 
-impl<R, T, E, H, V, B> Catalog<R, T, E, H, V, B>
+impl<R, T, E, H, S, B> Catalog<R, T, E, H, S, B>
 where
     R: Clock + Spawner + RuntimeMetrics,
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Creates the catalog and its mailbox.
     ///
     /// The caller has opened the stores, replayed any interrupted installation and commit
     /// cleanup, and checked delivery's cursor against the recovered checkpoint.
-    pub(crate) fn new(config: Config<R, T, E, H, V, B>) -> (Self, Mailbox<H, V, B>) {
+    pub(crate) fn new(config: Config<R, T, E, H, S, B>) -> (Self, Mailbox<H, S, B>) {
         let Config {
             context,
             stores,
@@ -487,7 +488,7 @@ where
     /// Records a command's mailbox dwell at its first intake.
     ///
     /// The enqueue time is consumed, so a parked command is never observed twice.
-    pub(super) fn note_intake(&self, command: &mut Traced<Message<H, V, B>>) {
+    pub(super) fn note_intake(&self, command: &mut Traced<Message<H, S, B>>) {
         let Some(enqueued) = command.enqueued.take() else {
             return;
         };
@@ -501,7 +502,7 @@ where
     /// A body request runs whenever it can be answered from the caches or started at once, and
     /// waits only when it would need a waiter slot and none is free, so a cache hit never stalls
     /// the command lane.
-    fn command_ready(&self, message: &Message<H, V, B>) -> Result<bool, Fatal> {
+    fn command_ready(&self, message: &Message<H, S, B>) -> Result<bool, Fatal> {
         if let Message::Command(Command::Bodies { references, .. }) = message
             && !self.reads.has_waiter_room()
         {
@@ -511,7 +512,7 @@ where
     }
 
     /// Runs `command`, or parks it until catalog state lets it run.
-    async fn intake_command(&mut self, command: Traced<Message<H, V, B>>) -> Result<(), Fatal> {
+    async fn intake_command(&mut self, command: Traced<Message<H, S, B>>) -> Result<(), Fatal> {
         if !self.command_ready(&command.message)? {
             self.intake.commands.park(command);
             return Ok(());
@@ -520,7 +521,7 @@ where
     }
 
     /// Runs a ready command in its processing span.
-    async fn dispatch_command(&mut self, command: Traced<Message<H, V, B>>) -> Result<(), Fatal> {
+    async fn dispatch_command(&mut self, command: Traced<Message<H, S, B>>) -> Result<(), Fatal> {
         let Traced { message, span, .. } = command;
         let turn = self.turn(&span, message.kind());
         match message {
@@ -581,7 +582,7 @@ where
     }
 
     /// Serves an ordered request other than an admission.
-    async fn process(&mut self, command: Command<H, V, B>) -> Result<(), Fatal> {
+    async fn process(&mut self, command: Command<H, S, B>) -> Result<(), Fatal> {
         match command {
             Command::Lqc { id, reply } => {
                 reply.send_lossy(outcome(self.stores.lqc(id).await)?);
@@ -740,12 +741,12 @@ where
     /// Installs a verified floor, then resets delivery and the promoter to its generation.
     async fn install(
         &mut self,
-        request: InstallRequest<V, H::Digest>,
+        request: InstallRequest<S, H::Digest>,
         reply: Reply<delivery::ResetWaiter, Error>,
     ) -> Result<(), Fatal> {
         self.cleanup().await?;
         let chains = self.stores.pending().chain_count();
-        if let Err(error) = validate::install::<H, V>(self.stores.checkpoint(), chains, &request) {
+        if let Err(error) = validate::install::<H, S>(self.stores.checkpoint(), chains, &request) {
             reply.send_lossy(Err(error));
             return Ok(());
         }
@@ -849,12 +850,12 @@ mod tests {
     #[derive(Clone, Default)]
     struct SpanRecords(Arc<Mutex<Vec<tracing::span::Id>>>);
 
-    impl<S: tracing::Subscriber> Layer<S> for SpanRecords {
+    impl<Sb: tracing::Subscriber> Layer<Sb> for SpanRecords {
         fn on_record(
             &self,
             id: &tracing::span::Id,
             _: &tracing::span::Record<'_>,
-            _: LayerContext<'_, S>,
+            _: LayerContext<'_, Sb>,
         ) {
             self.0.lock().push(id.clone());
         }

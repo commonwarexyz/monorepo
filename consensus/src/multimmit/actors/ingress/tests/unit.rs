@@ -12,7 +12,7 @@ use crate::{
             },
             voter::{self, Inbox},
         },
-        mocks::Committee,
+        mocks::{Bls, Committee},
         types::{Artifact, ChainId},
         wire::{ConsensusMessage, Envelope, EnvelopeConfig, Plane},
     },
@@ -28,13 +28,13 @@ use futures::FutureExt as _;
 use std::{collections::VecDeque, future::pending, num::NonZeroUsize, sync::Arc};
 
 type IngressActor<H = Sha256, T = Sequential> =
-    Actor<deterministic::Context, H, ed25519::PublicKey, MinPk, T, Sequential>;
+    Actor<deterministic::Context, H, ed25519::PublicKey, Bls<MinPk>, T, Sequential>;
 
 type TestIngress = Ingress<
     deterministic::Context,
     Sha256,
     ed25519::PublicKey,
-    MinPk,
+    Bls<MinPk>,
     Sequential,
     Sequential,
     RawReceiver,
@@ -44,7 +44,7 @@ type TestIngress = Ingress<
 
 fn ingress_actor<H: Hasher<Digest = <Sha256 as Hasher>::Digest>, T: Strategy>(
     context: deterministic::Context,
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     strategy: T,
 ) -> IngressActor<H, T> {
     Actor::new(
@@ -57,7 +57,7 @@ fn ingress_actor<H: Hasher<Digest = <Sha256 as Hasher>::Digest>, T: Strategy>(
             codec: committee.codec(),
             bounds: committee
                 .codec()
-                .encoded_bounds::<MinPk, <Sha256 as Hasher>::Digest>()
+                .encoded_bounds::<Bls<MinPk>, <Sha256 as Hasher>::Digest>()
                 .unwrap(),
             limits: IngressLimits {
                 cohort_items: NonZeroUsize::new(2).unwrap(),
@@ -82,9 +82,9 @@ fn idle_ingress(actor: &IngressActor) -> TestIngress {
 fn ready(
     peer: &ed25519::PublicKey,
     lane: LaneId,
-    artifact: Artifact<MinPk, <Sha256 as Hasher>::Digest>,
+    artifact: Artifact<Bls<MinPk>, <Sha256 as Hasher>::Digest>,
     received_at: std::time::SystemTime,
-) -> IngressOutcome<ed25519::PublicKey, MinPk, <Sha256 as Hasher>::Digest> {
+) -> IngressOutcome<ed25519::PublicKey, Bls<MinPk>, <Sha256 as Hasher>::Digest> {
     IngressOutcome::Ready {
         peer: peer.clone(),
         lane,
@@ -98,7 +98,7 @@ fn ready_ingress_batches_before_flush_without_waiting() {
         [(1, 1, false), (4, 4, false), (4, 2, true), (4, 5, false)]
     {
         deterministic::Runner::default().start(move |context| async move {
-            let committee = Committee::<MinPk>::builder(40, 6).build();
+            let committee = Committee::<Bls<MinPk>>::builder(40, 6).build();
             let actor =
                 ingress_actor::<Sha256, _>(context.child("batcher"), &committee, Sequential);
             let mut ingress = idle_ingress(&actor);
@@ -187,7 +187,7 @@ fn ready_ingress_batches_before_flush_without_waiting() {
 #[test]
 fn ready_ingress_rotates_after_invalid_results_and_stops_at_budget() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(40, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(40, 6).build();
         let actor = ingress_actor::<Sha256, _>(context.child("batcher"), &committee, Sequential);
         let mut ingress = idle_ingress(&actor);
         let now = context.current();
@@ -280,7 +280,7 @@ fn ready_ingress_rotates_after_invalid_results_and_stops_at_budget() {
 #[test]
 fn ready_ingress_propagates_worker_panics() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(40, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(40, 6).build();
         let actor = ingress_actor::<Sha256, _>(context.child("batcher"), &committee, Sequential);
         let mut ingress = idle_ingress(&actor);
         assert!(
@@ -365,7 +365,7 @@ fn ingress_envelope_shares_payload_buffer() {
 #[test]
 fn ingress_reports_one_outcome_per_frame() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(40, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(40, 6).build();
         let actor = ingress_actor::<Sha256, _>(context.child("batcher"), &committee, Sequential);
         let parent = committee.vqc(View::new(1));
         let block = committee.leader_block_with_parent(View::new(2), &parent);
@@ -407,7 +407,7 @@ fn ingress_reports_one_outcome_per_frame() {
 #[test]
 fn leader_ingress_progresses_while_data_workers_are_occupied() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(40, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(40, 6).build();
         let pool = mocks::Explorer::parallel(&rayon());
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let blockers = (0..2)
@@ -460,7 +460,7 @@ fn leader_ingress_progresses_while_data_workers_are_occupied() {
 #[test]
 fn pending_decodes_do_not_stall_ingress_receives() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(40, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(40, 6).build();
         let pool = mocks::Explorer::parallel(&rayon());
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let blockers = (0..2)
@@ -509,7 +509,7 @@ fn pending_decodes_do_not_stall_ingress_receives() {
 #[test]
 fn closed_ingress_drains_owned_completion_after_cancellation() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(40, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(40, 6).build();
         let actor = ingress_actor::<Sha256, _>(
             context.child("batcher"),
             &committee,
@@ -567,7 +567,7 @@ impl Hasher for PanickingHasher {
 fn ingress_catches_inline_and_offloaded_identification_panics() {
     for (strategy, pooled) in [(mocks::inline(NonZeroUsize::MIN), false), (rayon(), true)] {
         deterministic::Runner::default().start(move |context| async move {
-            let committee = Committee::<MinPk>::builder(40, 6).build();
+            let committee = Committee::<Bls<MinPk>>::builder(40, 6).build();
             let actor = ingress_actor::<PanickingHasher, _>(
                 context.child("batcher"),
                 &committee,
@@ -575,7 +575,7 @@ fn ingress_catches_inline_and_offloaded_identification_panics() {
             );
             let frame = Envelope::new(
                 committee.config.epoch(),
-                ConsensusMessage::<MinPk, <Sha256 as Hasher>::Digest>::NoVote(
+                ConsensusMessage::<Bls<MinPk>, <Sha256 as Hasher>::Digest>::NoVote(
                     committee.novote(Participant::new(1), View::new(1)),
                 ),
             )

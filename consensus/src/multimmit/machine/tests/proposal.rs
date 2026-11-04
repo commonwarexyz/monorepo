@@ -31,6 +31,7 @@ use crate::{
             view::ViewState,
             vote_body::{VoteBodyProgress, VoteBuild, VoteBuildStats, VoteBuilds},
         },
+        mocks::Bls,
         types::{
             Activity, Anchor, Artifact, BlockRef, CertificateId, ChainId, ChainProposal,
             ConflictingVote, DaVote, DigestedLeader, Extension, LeaderBlock, Position,
@@ -40,6 +41,7 @@ use crate::{
     },
     types::{Attributable, Height, Participant, Round, View, ViewDelta},
 };
+use commonware_codec::types::lazy::Lazy;
 use commonware_cryptography::{
     Sha256,
     bls12381::primitives::{ops::aggregate, variant::MinPk},
@@ -83,7 +85,7 @@ fn a_skipped_view_must_be_nullified_even_after_retirement() {
     // its live records, so the rule must still reject a gap over a view that exited with a V-QC.
     let profile = Harness::validator(3).participants(6).profile();
     let (machine, _) = start_profile(profile.clone());
-    let mut views = ViewState::<MinPk, Digest>::new::<Sha256>(&profile);
+    let mut views = ViewState::<Bls<MinPk>, Digest>::new::<Sha256>(&profile);
 
     // Adjacent views leave no gap.
     assert!(views.gap_is_nullified(View::new(1), View::new(2)));
@@ -179,7 +181,7 @@ fn proposal_anchor_prefers_more_accounted_messages() {
         )
         .unwrap(),
         Vec::new(),
-        aggregate::Signature::<MinPk>::zero(),
+        Lazy::from(aggregate::Signature::<MinPk>::zero()),
         config,
     )
     .unwrap();
@@ -214,7 +216,7 @@ fn proposal_anchor_prefers_more_accounted_messages() {
         tally,
         Signers::new(u32::try_from(config.participants()).unwrap(), []).unwrap(),
         conflicting,
-        aggregate::Signature::<MinPk>::zero(),
+        Lazy::from(aggregate::Signature::<MinPk>::zero()),
         config,
     )
     .unwrap();
@@ -302,7 +304,7 @@ fn proposal_frontier_survives_retention_and_restart() {
     );
 
     let mut restored =
-        Machine::<Sha256, MinPk>::restore(profile, machine.live_snapshot_for_test()).unwrap();
+        Machine::<Sha256, Bls<MinPk>>::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     let recovered = restored.persist(&recovery.persist_job(), Until::CursorAdvance);
     assert!(recovered.has(|effect| {
@@ -504,7 +506,7 @@ fn oversized_proposal_pass_resumes_at_item_boundaries() {
     let signer = LeaderSchedule::round_robin(participants)
         .unwrap()
         .leader(view);
-    let profile: Profile<Digest> = Profile::new::<MinPk>(
+    let profile: Profile<Digest> = Profile::new::<Bls<MinPk>>(
         TestConfig::new(participants).depth(2).build(),
         Role::Validator(signer),
         Tuning {
@@ -513,7 +515,7 @@ fn oversized_proposal_pass_resumes_at_item_boundaries() {
         },
     )
     .unwrap();
-    let mut machine = Machine::<Sha256, MinPk>::new(profile.clone());
+    let mut machine = Machine::<Sha256, Bls<MinPk>>::new(profile.clone());
     machine.step(Input::Start).unwrap();
 
     let quantum = 16;
@@ -634,7 +636,7 @@ fn maximum_verified_batch_resumes_at_real_item_boundaries() {
 #[test]
 fn maximum_signed_batch_preempts_without_partial_exposure() {
     let batch_items = scheduler::CORE_BUDGET as usize;
-    let profile: Profile<Digest> = Profile::new::<MinPk>(
+    let profile: Profile<Digest> = Profile::new::<Bls<MinPk>>(
         TestConfig::new(batch_items).depth(1).build(),
         Role::Validator(Participant::new(0)),
         Tuning {
@@ -777,7 +779,7 @@ fn maximum_signed_batch_preempts_without_partial_exposure() {
 
 #[test]
 fn signed_valid_proposal_durably_selects_direct_vote() {
-    let mut machine = Machine::<Sha256, MinPk>::new(Harness::validator(0).profile());
+    let mut machine = Machine::<Sha256, Bls<MinPk>>::new(Harness::validator(0).profile());
     let start = machine.step(Input::Start).unwrap();
     let started = machine.persist(&start.persist_job(), Until::CursorAdvance);
     // The signing request releases with the step that stages the choice; its barrier still has
@@ -1014,7 +1016,7 @@ fn voting_machine() -> TestMachine {
 fn drive_view_one_vote(
     machine: &mut TestMachine,
     budget: usize,
-) -> Option<SignRequest<MinPk, Digest>> {
+) -> Option<SignRequest<Bls<MinPk>, Digest>> {
     let profile = machine.profile().clone();
     machine
         .views
@@ -1190,7 +1192,7 @@ fn proposal_accepts_exact_lower_parent_with_complete_gap() {
     let parent = view_one_vqc(&machine);
     let parent_id = parent.id::<Sha256>();
     let extraction =
-        VqcExtraction::new::<Sha256, MinPk>(&parent, machine.profile().codec()).unwrap();
+        VqcExtraction::new::<Sha256, Bls<MinPk>>(&parent, machine.profile().codec()).unwrap();
     let (tips, _) = extraction.into_parts();
     let history = TipRecord::new(
         parent.leader().history(),

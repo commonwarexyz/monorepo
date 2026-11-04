@@ -8,9 +8,10 @@ use crate::multimmit::{
         self, CheckpointOrigin, Durable, Mailbox, Output, checkpoint_span,
     },
     machine::{BarrierAck, CoreError, Input, Lane, PersistDirective, PersistJob, Snapshot},
+    scheme::Scheme,
 };
 use commonware_actor::mailbox;
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use commonware_p2p::Sender;
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use std::num::NonZeroU64;
@@ -132,17 +133,17 @@ impl Ledger {
 }
 
 /// The persistence actor as the voter tracks it.
-pub(crate) struct Persistence<H: Hasher, V: Variant> {
-    mailbox: Mailbox<H, V>,
-    output: mailbox::Receiver<Output<V, H::Digest>>,
+pub(crate) struct Persistence<H: Hasher, S: Scheme> {
+    mailbox: Mailbox<H, S>,
+    output: mailbox::Receiver<Output<S, H::Digest>>,
     ledger: Ledger,
 }
 
-impl<H: Hasher, V: Variant> Persistence<H, V> {
+impl<H: Hasher, S: Scheme> Persistence<H, S> {
     /// Tracks the actor behind `mailbox`, whose results arrive on `output`.
     pub(crate) const fn new(
-        mailbox: Mailbox<H, V>,
-        output: mailbox::Receiver<Output<V, H::Digest>>,
+        mailbox: Mailbox<H, S>,
+        output: mailbox::Receiver<Output<S, H::Digest>>,
         ledger: Ledger,
     ) -> Self {
         Self {
@@ -153,12 +154,12 @@ impl<H: Hasher, V: Variant> Persistence<H, V> {
     }
 
     /// Returns the actor's command mailbox.
-    pub(crate) const fn mailbox(&self) -> &Mailbox<H, V> {
+    pub(crate) const fn mailbox(&self) -> &Mailbox<H, S> {
         &self.mailbox
     }
 
     /// Returns the receiver of the actor's results.
-    pub(crate) const fn output(&mut self) -> &mut mailbox::Receiver<Output<V, H::Digest>> {
+    pub(crate) const fn output(&mut self) -> &mut mailbox::Receiver<Output<S, H::Digest>> {
         &mut self.output
     }
 
@@ -177,7 +178,7 @@ impl<H: Hasher, V: Variant> Persistence<H, V> {
         &mut self,
         root: Span,
         span: Span,
-        job: PersistJob<V, H::Digest>,
+        job: PersistJob<S, H::Digest>,
     ) -> Result<(), Fatal> {
         self.mailbox.append(root, span, job)?;
         self.ledger.admitted();
@@ -192,7 +193,7 @@ impl<H: Hasher, V: Variant> Persistence<H, V> {
     /// Admits one checkpoint of `cut`.
     fn checkpoint(
         &mut self,
-        cut: Snapshot<V, H::Digest>,
+        cut: Snapshot<S, H::Digest>,
         origin: CheckpointOrigin,
         span: Span,
     ) -> Result<(), Fatal> {
@@ -202,10 +203,10 @@ impl<H: Hasher, V: Variant> Persistence<H, V> {
     }
 }
 
-impl<T, S> Live<T, S>
+impl<T, Sn> Live<T, Sn>
 where
     T: VoterTypes,
-    S: Sender<PublicKey = T::PublicKey>,
+    Sn: Sender<PublicKey = T::PublicKey>,
 {
     /// Appends one barrier and releases the work it authorizes on admission.
     ///
@@ -213,7 +214,7 @@ where
     /// arrive strictly in cursor order.
     pub(crate) fn persist(
         &mut self,
-        directive: PersistDirective<T::Variant, DigestOf<T>>,
+        directive: PersistDirective<T::Scheme, DigestOf<T>>,
         root: &Span,
     ) -> Result<(), Fatal> {
         let PersistDirective {
@@ -246,7 +247,7 @@ where
     /// Admits one result of the persistence actor.
     pub(crate) fn persisted(
         &mut self,
-        output: Output<T::Variant, DigestOf<T>>,
+        output: Output<T::Scheme, DigestOf<T>>,
     ) -> Result<(), Failure> {
         match output {
             Output::Durable(Durable {
@@ -272,7 +273,7 @@ where
     }
 
     /// Returns the failure a closed output stands for: the actor stopped without reporting why.
-    pub(crate) fn persistence_closed(&self) -> Output<T::Variant, DigestOf<T>> {
+    pub(crate) fn persistence_closed(&self) -> Output<T::Scheme, DigestOf<T>> {
         Output::Failed {
             root: self.round_span(),
             error: persistence::Error::Closed,

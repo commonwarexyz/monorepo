@@ -16,7 +16,7 @@ use crate::{
             util::Drive,
             verification::Observation,
         },
-        scheme::bls12381_threshold::{CertificateVotes, Error as SchemeError},
+        scheme::{CertificateVotes, Error as SchemeError, Scheme},
         types::{
             Artifact, ArtifactId, CodecConfig, LeaderBlock, Nullification, Nullify, ViewMessage,
             VoteBody, Vqc,
@@ -24,7 +24,7 @@ use crate::{
     },
     types::{Attributable, Participant, View},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::{
     collections::{BTreeMap, BinaryHeap},
     ops::Bound::{Excluded, Unbounded},
@@ -50,36 +50,36 @@ impl SequenceId for ViewCertificateId {
 
 /// Verified shares selected for one nullification.
 #[derive(Clone, Debug)]
-pub(crate) struct NullificationRecoveryJob<V: Variant> {
+pub(crate) struct NullificationRecoveryJob<S: Scheme> {
     issued: Issued<ViewCertificateId>,
     pub(super) view: View,
-    shares: Arc<[Nullify<V>]>,
+    shares: Arc<[Nullify<S>]>,
 }
 
-impl<V: Variant> NullificationRecoveryJob<V> {
+impl<S: Scheme> NullificationRecoveryJob<S> {
     /// Returns the job's identity and issuing generation.
     pub(crate) const fn issued(&self) -> Issued<ViewCertificateId> {
         self.issued
     }
 
     /// Returns the canonical signer subset in participant order.
-    pub(crate) fn shares(&self) -> &[Nullify<V>] {
+    pub(crate) fn shares(&self) -> &[Nullify<S>] {
         &self.shares
     }
 }
 
 /// Completion of one nullification recovery request.
 #[derive(Clone, Debug)]
-pub(crate) struct NullificationRecoveryCompletion<V: Variant> {
+pub(crate) struct NullificationRecoveryCompletion<S: Scheme> {
     issued: Issued<ViewCertificateId>,
-    certificate: Nullification<V>,
+    certificate: Nullification<S>,
 }
 
-impl<V: Variant> NullificationRecoveryCompletion<V> {
+impl<S: Scheme> NullificationRecoveryCompletion<S> {
     /// Creates a matched recovery completion.
     pub(crate) const fn new(
         issued: Issued<ViewCertificateId>,
-        certificate: Nullification<V>,
+        certificate: Nullification<S>,
     ) -> Self {
         Self {
             issued,
@@ -95,21 +95,21 @@ impl<V: Variant> NullificationRecoveryCompletion<V> {
 
 /// Verified view messages selected for one V-QC.
 #[derive(Clone, Debug)]
-pub(crate) struct VqcAggregateJob<V: Variant, D: Digest> {
+pub(crate) struct VqcAggregateJob<S: Scheme, D: Digest> {
     issued: Issued<ViewCertificateId>,
-    leader: LeaderBlock<V, D>,
-    messages: Arc<[Held<ViewMessageKind, V, D>]>,
+    leader: LeaderBlock<S, D>,
+    messages: Arc<[Held<ViewMessageKind, S, D>]>,
     transcript: VqcTranscript<D>,
 }
 
-impl<V: Variant, D: Digest> VqcAggregateJob<V, D> {
+impl<S: Scheme, D: Digest> VqcAggregateJob<S, D> {
     /// Returns the job's identity and issuing generation.
     pub(crate) const fn issued(&self) -> Issued<ViewCertificateId> {
         self.issued
     }
 
     /// Returns the designated unsigned leader block.
-    pub(crate) const fn leader(&self) -> &LeaderBlock<V, D> {
+    pub(crate) const fn leader(&self) -> &LeaderBlock<S, D> {
         &self.leader
     }
 
@@ -117,7 +117,7 @@ impl<V: Variant, D: Digest> VqcAggregateJob<V, D> {
     ///
     /// The job retains shared canonical artifacts. Consumers materialize owned protocol messages
     /// only while executing the aggregation.
-    pub(crate) fn messages(&self) -> impl ExactSizeIterator<Item = ViewMessage<V, D>> + '_ {
+    pub(crate) fn messages(&self) -> impl ExactSizeIterator<Item = ViewMessage<S, D>> + '_ {
         self.messages.iter().map(|message| match message.get() {
             MessageRef::Vote(vote) => ViewMessage::Vote(vote.clone()),
             MessageRef::NoVote(vote) => ViewMessage::NoVote(vote.clone()),
@@ -125,27 +125,27 @@ impl<V: Variant, D: Digest> VqcAggregateJob<V, D> {
     }
 
     /// Returns whether `certificate` aggregates exactly this job's leader and messages.
-    fn matches<H: Hasher<Digest = D>>(&self, certificate: &Vqc<V, D>, config: CodecConfig) -> bool {
-        vqc_transcript_matches::<H, V, D>(certificate, &self.leader, &self.messages, config)
+    fn matches<H: Hasher<Digest = D>>(&self, certificate: &Vqc<S, D>, config: CodecConfig) -> bool {
+        vqc_transcript_matches::<H, S, D>(certificate, &self.leader, &self.messages, config)
     }
 }
 
 /// Completion of one V-QC aggregation request.
 #[derive(Clone, Debug)]
-pub(crate) struct VqcAggregateCompletion<V: Variant, D: Digest> {
+pub(crate) struct VqcAggregateCompletion<S: Scheme, D: Digest> {
     issued: Issued<ViewCertificateId>,
     // Only the view owner constructs job transcripts. Clones retain this allocation, so its
     // identity binds the worker's checked certificate to the still-pending request.
-    messages: Arc<[Held<ViewMessageKind, V, D>]>,
+    messages: Arc<[Held<ViewMessageKind, S, D>]>,
     /// Taken once the certificate is admitted, so admission moves the validation it carries.
-    derived: Option<DerivedVqc<V, D>>,
+    derived: Option<DerivedVqc<S, D>>,
 }
 
-impl<V: Variant, D: Digest> VqcAggregateCompletion<V, D> {
+impl<S: Scheme, D: Digest> VqcAggregateCompletion<S, D> {
     /// Checks the selected transcript and derives certificate projections in the worker.
     pub(crate) fn prepare<H: Hasher<Digest = D>>(
-        job: &VqcAggregateJob<V, D>,
-        certificate: Vqc<V, D>,
+        job: &VqcAggregateJob<S, D>,
+        certificate: Vqc<S, D>,
         config: CodecConfig,
     ) -> Result<Self, SchemeError> {
         if !job.matches::<H>(&certificate, config) {
@@ -167,7 +167,7 @@ impl<V: Variant, D: Digest> VqcAggregateCompletion<V, D> {
                 target.push((vote.signer(), vote.body().clone()));
             }
         }
-        let validated = validate_vqc_with_votes::<H, V, D>(&certificate, config, votes)
+        let validated = validate_vqc_with_votes::<H, S, D>(&certificate, config, votes)
             .map_err(|_| SchemeError::Transcript)?;
         let derived =
             DerivedVqc::new::<H>(certificate, validated).map_err(|_| SchemeError::Transcript)?;
@@ -179,7 +179,7 @@ impl<V: Variant, D: Digest> VqcAggregateCompletion<V, D> {
     }
 
     /// Returns the certificate and the projections the worker derived from it.
-    pub(crate) const fn derived(&self) -> &DerivedVqc<V, D> {
+    pub(crate) const fn derived(&self) -> &DerivedVqc<S, D> {
         self.derived
             .as_ref()
             .expect("the derivation is taken only when the certificate is admitted")
@@ -199,7 +199,7 @@ impl<V: Variant, D: Digest> VqcAggregateCompletion<V, D> {
     }
 
     /// Returns the aggregated certificate.
-    pub(crate) fn certificate(&self) -> &Vqc<V, D> {
+    pub(crate) fn certificate(&self) -> &Vqc<S, D> {
         self.derived().artifact.get()
     }
 }
@@ -209,18 +209,18 @@ pub(crate) type CertificateDrive = Drive<()>;
 
 /// An issued certificate job with the observation its certificate is admitted at.
 #[derive(Clone, Debug)]
-pub(super) enum ViewCertificateJob<V: Variant, D: Digest> {
+pub(super) enum ViewCertificateJob<S: Scheme, D: Digest> {
     Nullification {
-        job: NullificationRecoveryJob<V>,
+        job: NullificationRecoveryJob<S>,
         observation: Observation,
     },
     Vqc {
-        job: VqcAggregateJob<V, D>,
+        job: VqcAggregateJob<S, D>,
         observation: Observation,
     },
 }
 
-impl<V: Variant, D: Digest> ViewCertificateJob<V, D> {
+impl<S: Scheme, D: Digest> ViewCertificateJob<S, D> {
     /// Returns the view the job exits.
     pub(super) fn view(&self) -> View {
         match self {
@@ -238,8 +238,8 @@ impl<V: Variant, D: Digest> ViewCertificateJob<V, D> {
 }
 
 /// A locally assembled certificate ready for admission at its job's observation.
-pub(crate) struct PreparedArtifact<V: Variant, D: Digest> {
-    pub(crate) artifact: Arc<Artifact<V, D>>,
+pub(crate) struct PreparedArtifact<S: Scheme, D: Digest> {
+    pub(crate) artifact: Arc<Artifact<S, D>>,
     pub(crate) observation: Observation,
 }
 
@@ -260,37 +260,37 @@ pub(super) struct VqcCandidate<D: Digest> {
 
 /// A V-QC candidate with the messages it aggregates.
 #[derive(Clone, Debug)]
-pub(super) struct PreparedVqc<V: Variant, D: Digest> {
+pub(super) struct PreparedVqc<S: Scheme, D: Digest> {
     pub(super) candidate: VqcCandidate<D>,
-    messages: Arc<[Held<ViewMessageKind, V, D>]>,
+    messages: Arc<[Held<ViewMessageKind, S, D>]>,
 }
 
 /// A nullification share set with the observation at which its last share arrived.
 #[derive(Clone, Debug)]
-pub(super) struct PreparedNullification<V: Variant> {
+pub(super) struct PreparedNullification<S: Scheme> {
     pub(super) observation: Observation,
-    shares: Arc<[Nullify<V>]>,
+    shares: Arc<[Nullify<S>]>,
 }
 
-enum PreparedCertificate<V: Variant, D: Digest> {
-    Vqc(PreparedVqc<V, D>),
-    Nullification(PreparedNullification<V>),
+enum PreparedCertificate<S: Scheme, D: Digest> {
+    Vqc(PreparedVqc<S, D>),
+    Nullification(PreparedNullification<S>),
 }
 
 /// A resumable scan of one view's settled messages and nullify shares for the best V-QC
 /// candidate and a nullification share set.
 #[derive(Clone, Debug)]
-pub(super) struct CertificateScan<V: Variant, D: Digest> {
+pub(super) struct CertificateScan<S: Scheme, D: Digest> {
     pub(super) view: View,
     pending_messages: Option<u64>,
     pending_nullifies: Option<u64>,
     support: BTreeMap<D, usize>,
-    pub(super) best_vqc: Option<PreparedVqc<V, D>>,
-    pub(super) nullification: Option<PreparedNullification<V>>,
-    phase: CertificateScanPhase<V, D>,
+    pub(super) best_vqc: Option<PreparedVqc<S, D>>,
+    pub(super) nullification: Option<PreparedNullification<S>>,
+    phase: CertificateScanPhase<S, D>,
 }
 
-impl<V: Variant, D: Digest> CertificateScan<V, D> {
+impl<S: Scheme, D: Digest> CertificateScan<S, D> {
     const fn complete(&self) -> bool {
         matches!(self.phase, CertificateScanPhase::Complete)
     }
@@ -311,21 +311,21 @@ impl<V: Variant, D: Digest> CertificateScan<V, D> {
 
 /// What one scan step did, with the phase the scan continues in.
 #[derive(Debug)]
-enum ScanStep<V: Variant, D: Digest> {
+enum ScanStep<S: Scheme, D: Digest> {
     /// The step visited one retained participant or target, which costs one unit of budget.
-    Advanced(CertificateScanPhase<V, D>),
+    Advanced(CertificateScanPhase<S, D>),
     /// The step only moved to the next phase.
-    Moved(CertificateScanPhase<V, D>),
+    Moved(CertificateScanPhase<S, D>),
 }
 
 #[derive(Clone, Debug)]
-enum CertificateScanPhase<V: Variant, D: Digest> {
+enum CertificateScanPhase<S: Scheme, D: Digest> {
     CountSupport(CountSupport),
     FindTarget(FindTarget<D>),
     EvaluateTarget(EvaluateTarget<D>),
-    SelectTarget(SelectTarget<V, D>),
+    SelectTarget(SelectTarget<S, D>),
     CountNullifications(CountNullifications),
-    SelectNullifications(SelectNullifications<V>),
+    SelectNullifications(SelectNullifications<S>),
     Complete,
 }
 
@@ -354,7 +354,7 @@ struct EvaluateTarget<D: Digest> {
 
 /// Selects the earliest messages that still complete a V-QC on `target`.
 #[derive(Clone, Debug)]
-struct SelectTarget<V: Variant, D: Digest> {
+struct SelectTarget<S: Scheme, D: Digest> {
     target: D,
     cohort: u64,
     limit: usize,
@@ -364,11 +364,11 @@ struct SelectTarget<V: Variant, D: Digest> {
     visited: usize,
     target_count: usize,
     observation: Observation,
-    messages: Vec<Held<ViewMessageKind, V, D>>,
+    messages: Vec<Held<ViewMessageKind, S, D>>,
     ids: Vec<ArtifactId<D>>,
 }
 
-impl<V: Variant, D: Digest> SelectTarget<V, D> {
+impl<S: Scheme, D: Digest> SelectTarget<S, D> {
     /// Returns whether the next eligible message can join the selection while enough eligible
     /// messages and designated votes remain to fill it to a quorum.
     ///
@@ -392,11 +392,11 @@ struct CountNullifications {
 
 /// Selects the earliest nullify shares for a nullification.
 #[derive(Clone, Debug)]
-struct SelectNullifications<V: Variant> {
+struct SelectNullifications<S: Scheme> {
     cohort: u64,
     cursor: Option<Participant>,
     observation: Option<Observation>,
-    shares: Vec<Nullify<V>>,
+    shares: Vec<Nullify<S>>,
 }
 
 /// Returns the first entry after `cursor`, or the first entry without one.
@@ -417,21 +417,18 @@ fn retain_smallest(values: &mut BinaryHeap<u64>, value: u64, limit: usize) {
 }
 
 /// Returns whether `certificate` aggregates exactly `messages` for `leader`.
-fn vqc_transcript_matches<H, V, D>(
-    certificate: &Vqc<V, D>,
-    leader: &LeaderBlock<V, D>,
-    messages: &[Held<ViewMessageKind, V, D>],
+fn vqc_transcript_matches<H, S, D>(
+    certificate: &Vqc<S, D>,
+    leader: &LeaderBlock<S, D>,
+    messages: &[Held<ViewMessageKind, S, D>],
     config: CodecConfig,
 ) -> bool
 where
     H: Hasher<Digest = D>,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
-    if certificate.leader() != leader
-        || certificate.signature().is_none()
-        || certificate.validate(config).is_err()
-    {
+    if certificate.leader() != leader || certificate.validate(config).is_err() {
         return false;
     }
     enum MessageBody<D: Digest> {
@@ -467,9 +464,9 @@ where
     })
 }
 
-impl<V: Variant, D: Digest> ViewState<V, D> {
+impl<S: Scheme, D: Digest> ViewState<S, D> {
     /// Returns the leader record a certificate scan selected as `target` in `view`.
-    fn scanned_leader(&self, view: View, target: D) -> &LeaderRecord<V, D> {
+    fn scanned_leader(&self, view: View, target: D) -> &LeaderRecord<S, D> {
         self.entry(view)
             .and_then(|entry| entry.leaders.get(&target))
             .expect("a scanned target's leader is retained")
@@ -535,7 +532,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         Ok(Drive::done(processed, ()))
     }
 
-    fn start_certificate_scan(&self, view: View) -> CertificateScan<V, D> {
+    fn start_certificate_scan(&self, view: View) -> CertificateScan<S, D> {
         CertificateScan {
             view,
             pending_messages: self.claims.first_message_cohort(view),
@@ -548,7 +545,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     }
 
     /// Runs a full certificate scan of `view` without a budget.
-    pub(super) fn complete_certificate_scan(&self, view: View) -> CertificateScan<V, D> {
+    pub(super) fn complete_certificate_scan(&self, view: View) -> CertificateScan<S, D> {
         let mut scan = self.start_certificate_scan(view);
         let mut processed = 0;
         self.run_scan(&mut scan, &mut processed, usize::MAX);
@@ -559,7 +556,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     /// it completed.
     fn run_scan(
         &self,
-        scan: &mut CertificateScan<V, D>,
+        scan: &mut CertificateScan<S, D>,
         processed: &mut usize,
         budget: usize,
     ) -> bool {
@@ -573,7 +570,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     /// Advances exactly one retained participant or target boundary and returns whether the
     /// step cost one unit of budget.
-    fn advance_certificate_scan(&self, scan: &mut CertificateScan<V, D>) -> bool {
+    fn advance_certificate_scan(&self, scan: &mut CertificateScan<S, D>) -> bool {
         let step = match core::mem::replace(&mut scan.phase, CertificateScanPhase::Complete) {
             CertificateScanPhase::CountSupport(phase) => self.count_support(scan, phase),
             CertificateScanPhase::FindTarget(phase) => self.find_target(scan, phase),
@@ -597,9 +594,9 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     fn count_support(
         &self,
-        scan: &mut CertificateScan<V, D>,
+        scan: &mut CertificateScan<S, D>,
         CountSupport { cursor }: CountSupport,
-    ) -> ScanStep<V, D> {
+    ) -> ScanStep<S, D> {
         let Some((participant, (_, record))) = self
             .entry(scan.view)
             .and_then(|entry| next_after(&entry.sticky, cursor))
@@ -620,9 +617,9 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     fn find_target(
         &self,
-        scan: &CertificateScan<V, D>,
+        scan: &CertificateScan<S, D>,
         FindTarget { cursor }: FindTarget<D>,
-    ) -> ScanStep<V, D> {
+    ) -> ScanStep<S, D> {
         let Some((target, support)) = next_after(&scan.support, cursor) else {
             return ScanStep::Moved(CertificateScanPhase::CountNullifications(
                 CountNullifications {
@@ -654,9 +651,9 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     fn evaluate_target(
         &self,
-        scan: &CertificateScan<V, D>,
+        scan: &CertificateScan<S, D>,
         mut phase: EvaluateTarget<D>,
-    ) -> ScanStep<V, D> {
+    ) -> ScanStep<S, D> {
         let Some((participant, (_, record))) = self
             .entry(scan.view)
             .and_then(|entry| next_after(&entry.sticky, phase.cursor))
@@ -737,9 +734,9 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     fn select_target(
         &self,
-        scan: &mut CertificateScan<V, D>,
-        mut phase: SelectTarget<V, D>,
-    ) -> ScanStep<V, D> {
+        scan: &mut CertificateScan<S, D>,
+        mut phase: SelectTarget<S, D>,
+    ) -> ScanStep<S, D> {
         let next = (phase.messages.len() < phase.limit)
             .then(|| {
                 self.entry(scan.view)
@@ -802,9 +799,9 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     fn count_nullifications(
         &self,
-        scan: &CertificateScan<V, D>,
+        scan: &CertificateScan<S, D>,
         mut phase: CountNullifications,
-    ) -> ScanStep<V, D> {
+    ) -> ScanStep<S, D> {
         let Some((participant, record)) = self
             .entry(scan.view)
             .and_then(|entry| next_after(&entry.nullifies, phase.cursor))
@@ -836,9 +833,9 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     fn select_nullifications(
         &self,
-        scan: &mut CertificateScan<V, D>,
-        mut phase: SelectNullifications<V>,
-    ) -> ScanStep<V, D> {
+        scan: &mut CertificateScan<S, D>,
+        mut phase: SelectNullifications<S>,
+    ) -> ScanStep<S, D> {
         let Some((participant, record)) = self
             .entry(scan.view)
             .and_then(|entry| next_after(&entry.nullifies, phase.cursor))
@@ -870,7 +867,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     fn finish_certificate_scan<H: Hasher<Digest = D>>(
         &mut self,
         generation: Generation,
-        scan: CertificateScan<V, D>,
+        scan: CertificateScan<S, D>,
     ) -> Result<(), ViewError> {
         let view = scan.view;
         let mut rescan = false;
@@ -883,7 +880,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                     .get()
                     .clone();
                 let exit_covered = self.vqc_forwarded(view) || self.nullification_forwarded(view);
-                let valid = validate_vqc_votes::<H, V, D>(
+                let valid = validate_vqc_votes::<H, S, D>(
                     &leader,
                     prepared.messages.iter().filter_map(|message| {
                         let MessageRef::Vote(vote) = message.get() else {
@@ -938,7 +935,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     /// Returns the certificate a completed scan may assemble next: the earliest candidate exit
     /// that no unresolved or held exit precedes and that is not already pending or assembled.
-    fn select_prepared(&self, scan: CertificateScan<V, D>) -> Option<PreparedCertificate<V, D>> {
+    fn select_prepared(&self, scan: CertificateScan<S, D>) -> Option<PreparedCertificate<S, D>> {
         let view = scan.view;
         let vqc_forwarded = self.vqc_forwarded(view);
         let nullification_forwarded = self.nullification_forwarded(view);
@@ -986,7 +983,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     }
 
     /// Records an issued certificate job, marks its view pending, and releases its effect.
-    fn issue(&mut self, job: ViewCertificateJob<V, D>) {
+    fn issue(&mut self, job: ViewCertificateJob<S, D>) {
         let observation = job.observation();
         let issued = match &job {
             ViewCertificateJob::Nullification { job, .. } => {
@@ -1039,7 +1036,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     }
 
     /// Takes the certificate work issued since the last call.
-    pub(crate) fn take_capabilities(&mut self) -> Capabilities<V, D> {
+    pub(crate) fn take_capabilities(&mut self) -> Capabilities<S, D> {
         std::mem::take(&mut self.capabilities)
     }
 
@@ -1055,9 +1052,9 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     /// the view behind a pending marker.
     pub(crate) fn prepare_nullification(
         &mut self,
-        completion: &NullificationRecoveryCompletion<V>,
+        completion: &NullificationRecoveryCompletion<S>,
         generation: Generation,
-    ) -> Result<Option<PreparedArtifact<V, D>>, ViewError> {
+    ) -> Result<Option<PreparedArtifact<S, D>>, ViewError> {
         let (job, observation) = match self.certificate_jobs.admit(completion.issued, generation) {
             Admit::Current(ViewCertificateJob::Nullification { job, observation }) => {
                 (job, *observation)
@@ -1072,7 +1069,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         let Some(first) = job.shares.first() else {
             return Err(ViewError::CompletionMismatch);
         };
-        if certificate.round() != first.round() || certificate.certificate().get().is_none() {
+        if certificate.round() != first.round() {
             return Err(ViewError::CompletionMismatch);
         }
         Ok(Some(PreparedArtifact {
@@ -1100,9 +1097,9 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     /// the view behind a pending marker.
     pub(crate) fn prepare_vqc(
         &mut self,
-        completion: &VqcAggregateCompletion<V, D>,
+        completion: &VqcAggregateCompletion<S, D>,
         generation: Generation,
-    ) -> Result<Option<PreparedArtifact<V, D>>, ViewError> {
+    ) -> Result<Option<PreparedArtifact<S, D>>, ViewError> {
         let (job, observation) = match self.certificate_jobs.admit(completion.issued, generation) {
             Admit::Current(ViewCertificateJob::Vqc { job, observation }) => (job, *observation),
             Admit::Current(ViewCertificateJob::Nullification { .. }) | Admit::Stale => {
@@ -1143,7 +1140,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     /// The retained shares survive the job, so the view re-enters the ready set on the same
     /// call when its quorum still holds, instead of waiting behind a pending marker whose
     /// completion was consumed.
-    fn release_certificate_job(&mut self, job: ViewCertificateJob<V, D>) {
+    fn release_certificate_job(&mut self, job: ViewCertificateJob<S, D>) {
         match job {
             ViewCertificateJob::Nullification { job, .. } => {
                 if let Some(entry) = self.views.get_mut(&job.view) {
@@ -1176,8 +1173,8 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     fn vqc_transcript_materialized<H: Hasher<Digest = D>>(
         &self,
-        leader: &LeaderBlock<V, D>,
-        messages: &[Held<ViewMessageKind, V, D>],
+        leader: &LeaderBlock<S, D>,
+        messages: &[Held<ViewMessageKind, S, D>],
         config: CodecConfig,
     ) -> bool {
         self.parents_by_view
@@ -1189,7 +1186,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                 ParentProof::Vqc(certificate) => Some(certificate),
             })
             .any(|certificate| {
-                vqc_transcript_matches::<H, V, D>(certificate.get(), leader, messages, config)
+                vqc_transcript_matches::<H, S, D>(certificate.get(), leader, messages, config)
             })
     }
 

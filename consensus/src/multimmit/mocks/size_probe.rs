@@ -7,6 +7,7 @@ use crate::{
         actors::testing::CoreDriver,
         config::{Profile, Role, Tuning},
         machine::{CoreState, Input, Snapshot, SnapshotCodecConfig},
+        mocks::Bls,
         types::{Artifact, ChainId},
     },
     types::{Participant, View},
@@ -38,8 +39,8 @@ fn check(label: &str, value: &(impl Write + EncodeSize)) {
 #[test]
 fn snapshot_writes_exactly_encode_size_with_forwarded_vqc() {
     for n in [6u32, 7, 11] {
-        let committee = Committee::<MinPk>::builder(2000 + u64::from(n), n).build();
-        let profile: Profile<Sha256Digest> = Profile::new::<MinPk>(
+        let committee = Committee::<Bls<MinPk>>::builder(2000 + u64::from(n), n).build();
+        let profile: Profile<Sha256Digest> = Profile::new::<Bls<MinPk>>(
             committee.config.clone(),
             Role::Observer,
             Tuning {
@@ -87,8 +88,8 @@ fn snapshot_writes_exactly_encode_size_with_forwarded_vqc() {
         // The written bytes decode back to an identical snapshot.
         let cfg = SnapshotCodecConfig::from_profile(core.machine().profile());
         let mut buf = bytes::Bytes::from(written.clone());
-        let decoded =
-            Snapshot::<MinPk, Sha256Digest>::read_cfg(&mut buf, &cfg).expect("snapshot decodes");
+        let decoded = Snapshot::<Bls<MinPk>, Sha256Digest>::read_cfg(&mut buf, &cfg)
+            .expect("snapshot decodes");
         assert_eq!(buf.len(), 0, "snapshot decode consumed every byte");
         let mut rewritten = Vec::new();
         decoded.write(&mut rewritten);
@@ -99,7 +100,7 @@ fn snapshot_writes_exactly_encode_size_with_forwarded_vqc() {
 #[test]
 fn every_artifact_writes_exactly_encode_size() {
     for n in [6u32, 7, 11, 16] {
-        let committee = Committee::<MinPk>::builder(1000 + u64::from(n), n).build();
+        let committee = Committee::<Bls<MinPk>>::builder(1000 + u64::from(n), n).build();
         let block = committee.leader_block(View::new(1));
         check("leader", &block);
         let vote = committee.vote(Participant::new(0), &block);

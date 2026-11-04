@@ -8,11 +8,12 @@ use crate::{
             BarrierAck, DurableEffect, EffectId, Generation, InputTicket, Lane, PersistJob,
             ServicedInput,
         },
+        scheme::Scheme,
         types::ViewProof,
     },
     types::View,
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use commonware_runtime::Clock;
 use commonware_utils::sync::Mutex;
 use std::{
@@ -25,20 +26,20 @@ use tracing::{Span, debug};
 
 /// One execution attempt for a stable durable-effect identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TestDurableAttempt<V: Variant, D: Digest> {
+pub(crate) struct TestDurableAttempt<S: Scheme, D: Digest> {
     pub(crate) generation: Generation,
-    pub(crate) effect: DurableEffect<V, D>,
+    pub(crate) effect: DurableEffect<S, D>,
 }
 
 /// Ordered observations around resolver retention and egress mutation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TestEvent<V: Variant, D: Digest> {
+pub(crate) enum TestEvent<S: Scheme, D: Digest> {
     /// Core serviced a barrier acknowledgement; the events it caused follow.
     Acknowledged {
         ack: BarrierAck,
     },
     Retained {
-        object: ViewProof<V, D>,
+        object: ViewProof<S, D>,
         boundary: RetentionBoundary,
     },
     Installed {
@@ -49,16 +50,16 @@ pub(crate) enum TestEvent<V: Variant, D: Digest> {
 }
 
 /// Every recorded issue attempt for one durable effect, in issue order.
-type DurableAttemptLedger<V, D> = BTreeMap<EffectId, Vec<TestDurableAttempt<V, D>>>;
+type DurableAttemptLedger<S, D> = BTreeMap<EffectId, Vec<TestDurableAttempt<S, D>>>;
 
 /// Records what the voter executed and pauses its persistence actor at armed gates.
 ///
 /// Debug events named `test ...` carry the tracing context of the point that emitted them.
 #[derive(Clone)]
-pub(crate) struct TestHooks<V: Variant, D: Digest> {
-    durable: Arc<Mutex<DurableAttemptLedger<V, D>>>,
+pub(crate) struct TestHooks<S: Scheme, D: Digest> {
+    durable: Arc<Mutex<DurableAttemptLedger<S, D>>>,
     acknowledgements: Arc<Mutex<BTreeMap<InputTicket, BarrierAck>>>,
-    events: Arc<Mutex<Vec<TestEvent<V, D>>>>,
+    events: Arc<Mutex<Vec<TestEvent<S, D>>>>,
     services: Arc<Mutex<Vec<(u64, Lane)>>>,
     /// Core service cycles completed, counted at each resume after a yield.
     cycles: Arc<Mutex<u64>>,
@@ -66,7 +67,7 @@ pub(crate) struct TestHooks<V: Variant, D: Digest> {
     gates: TestGates,
 }
 
-impl<V: Variant, D: Digest> Default for TestHooks<V, D> {
+impl<S: Scheme, D: Digest> Default for TestHooks<S, D> {
     fn default() -> Self {
         Self {
             durable: Arc::new(Mutex::new(BTreeMap::new())),
@@ -80,17 +81,17 @@ impl<V: Variant, D: Digest> Default for TestHooks<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> TestHooks<V, D> {
+impl<S: Scheme, D: Digest> TestHooks<S, D> {
     /// Returns these hooks pausing the persistence actor at `gates`.
     pub(crate) fn with_gates(self, gates: TestGates) -> Self {
         Self { gates, ..self }
     }
 
-    pub(crate) fn durable_effects(&self) -> BTreeMap<EffectId, Vec<TestDurableAttempt<V, D>>> {
+    pub(crate) fn durable_effects(&self) -> BTreeMap<EffectId, Vec<TestDurableAttempt<S, D>>> {
         self.durable.lock().clone()
     }
 
-    pub(crate) fn events(&self) -> Vec<TestEvent<V, D>> {
+    pub(crate) fn events(&self) -> Vec<TestEvent<S, D>> {
         self.events.lock().clone()
     }
 
@@ -116,12 +117,12 @@ impl<V: Variant, D: Digest> TestHooks<V, D> {
         live
     }
 
-    fn record(&self, event: TestEvent<V, D>) {
+    fn record(&self, event: TestEvent<S, D>) {
         self.events.lock().push(event);
     }
 }
 
-impl<V: Variant, D: Digest> Hooks<V, D> for TestHooks<V, D> {
+impl<S: Scheme, D: Digest> Hooks<S, D> for TestHooks<S, D> {
     fn cycle_started(&self) {
         debug!("test core cycle started");
     }
@@ -130,7 +131,7 @@ impl<V: Variant, D: Digest> Hooks<V, D> for TestHooks<V, D> {
         *self.cycles.lock() += 1;
     }
 
-    fn serviced(&self, input: &ServicedInput<V, D>) {
+    fn serviced(&self, input: &ServicedInput<S, D>) {
         let cycle = *self.cycles.lock();
         self.services.lock().push((cycle, input.lane));
         let ack = self.acknowledgements.lock().remove(&input.ticket);
@@ -167,7 +168,7 @@ impl<V: Variant, D: Digest> Hooks<V, D> for TestHooks<V, D> {
         self.acknowledgements.lock().insert(ticket, ack);
     }
 
-    fn issued(&self, id: EffectId, generation: Generation, effect: &DurableEffect<V, D>) {
+    fn issued(&self, id: EffectId, generation: Generation, effect: &DurableEffect<S, D>) {
         self.durable
             .lock()
             .entry(id)
@@ -178,7 +179,7 @@ impl<V: Variant, D: Digest> Hooks<V, D> for TestHooks<V, D> {
             });
     }
 
-    fn retained(&self, proof: &ViewProof<V, D>, boundary: RetentionBoundary) {
+    fn retained(&self, proof: &ViewProof<S, D>, boundary: RetentionBoundary) {
         self.record(TestEvent::Retained {
             object: proof.clone(),
             boundary,
@@ -196,10 +197,10 @@ impl<V: Variant, D: Digest> Hooks<V, D> for TestHooks<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> PersistenceHooks for TestHooks<V, D> {
+impl<S: Scheme, D: Digest> PersistenceHooks for TestHooks<S, D> {
     type Point = JournalPoint;
 
-    fn appending<W: Variant, E: Digest>(&self, job: &PersistJob<W, E>) -> JournalPoint {
+    fn appending<W: Scheme, E: Digest>(&self, job: &PersistJob<W, E>) -> JournalPoint {
         self.gates.appending(job)
     }
 

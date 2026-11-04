@@ -24,7 +24,8 @@ use crate::{
             },
             types::Update,
         },
-        mocks::Committee,
+        mocks::{Bls, Committee},
+        scheme::Scheme,
         testing::{TestBody, metric_total},
         types::{
             BlockRef, Body, CertificateId, ChainId, Lqc, PathLimits, TipRecord, TransactionBlock,
@@ -36,8 +37,7 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_codec::EncodeSize as _;
 use commonware_cryptography::{
-    Digestible as _, Hasher, Sha256,
-    bls12381::primitives::variant::{MinPk, Variant},
+    Digestible as _, Hasher, Sha256, bls12381::primitives::variant::MinPk,
     sha256::Digest as Sha256Digest,
 };
 use commonware_macros::select;
@@ -55,7 +55,7 @@ use commonware_runtime::{
 use commonware_storage::{Context, translator::TwoCap};
 use commonware_utils::{
     Acknowledgement as _, NZU16, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
-    futures::try_join_all, sync::Mutex,
+    futures::try_join_all, sync::Mutex, test_rng,
 };
 use futures::FutureExt as _;
 use std::{
@@ -77,12 +77,12 @@ mod spans;
 #[derive(Clone, Default)]
 struct SpanPaths(Arc<Mutex<Vec<Vec<&'static str>>>>);
 
-impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SpanPaths {
+impl<Sb: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<Sb> for SpanPaths {
     fn on_new_span(
         &self,
         _: &tracing::span::Attributes<'_>,
         id: &tracing::span::Id,
-        context: LayerContext<'_, S>,
+        context: LayerContext<'_, Sb>,
     ) {
         let span = context.span(id).unwrap();
         self.0
@@ -125,7 +125,7 @@ async fn wait_for_checkpoint_sync(
     );
 }
 
-type Client = Mailbox<Sha256, MinPk, TestBody>;
+type Client = Mailbox<Sha256, Bls<MinPk>, TestBody>;
 
 type DeliveryReceiver = delivery::Receiver<Sha256, TestBody>;
 
@@ -189,7 +189,7 @@ impl Reporter for TestReporter {
 
 /// Couples the mailbox, admission-cut, and pending-segment capacities, mirroring the
 /// pre-split single knob these tests shape storage geometry with.
-fn set_capacity(config: &mut Config<TwoCap, MinPk, TestBody>, capacity: usize) {
+fn set_capacity(config: &mut Config<TwoCap, Bls<MinPk>, TestBody>, capacity: usize) {
     config.capacities.catalog_mailbox_size =
         NonZeroUsize::new(capacity).expect("capacity is non-zero");
     config.capacities.admission_cut_capacity = config.capacities.catalog_mailbox_size;
@@ -197,7 +197,7 @@ fn set_capacity(config: &mut Config<TwoCap, MinPk, TestBody>, capacity: usize) {
         NonZeroU64::new(capacity as u64).expect("capacity is non-zero");
 }
 
-pub(super) fn config(committee: &Committee<MinPk>) -> Config<TwoCap, MinPk, TestBody> {
+pub(super) fn config(committee: &Committee<Bls<MinPk>>) -> Config<TwoCap, Bls<MinPk>, TestBody> {
     let mut archive = ArchiveConfig::new(TwoCap, CacheRef::new(NZU16!(1024), NZUsize!(10)));
     archive.items_per_section = NZU64!(1);
     let mut config = Config::new(
@@ -238,7 +238,7 @@ async fn next_reset(receiver: &mut DeliveryReceiver) -> delivery::Message<Sha256
 }
 
 async fn spawn_catalog<E>(
-    config: Config<TwoCap, MinPk, TestBody>,
+    config: Config<TwoCap, Bls<MinPk>, TestBody>,
     context: E,
 ) -> (Client, Handle<Result<(), Fatal>>, DeliveryReceiver)
 where
@@ -264,7 +264,7 @@ where
 /// Spawn a catalog like [spawn_catalog], also returning the promoter task, which owns the
 /// immutable finalized archives and must stop before a test reopens their storage.
 async fn spawn_catalog_with_promoter<E>(
-    config: Config<TwoCap, MinPk, TestBody>,
+    config: Config<TwoCap, Bls<MinPk>, TestBody>,
     context: E,
 ) -> (
     Client,
@@ -298,7 +298,7 @@ where
 }
 
 async fn spawn_catalog_delivery<E>(
-    config: Config<TwoCap, MinPk, TestBody>,
+    config: Config<TwoCap, Bls<MinPk>, TestBody>,
     context: &E,
     delivery_client: delivery::Mailbox<Sha256, TestBody>,
     delivery_commands: DeliveryReceiver,
@@ -347,7 +347,7 @@ where
 async fn open(
     context: &DeterministicContext,
     label: &'static str,
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
 ) -> (Client, Handle<Result<(), Fatal>>, DeliveryReceiver) {
     spawn_catalog(config(committee), context.child(label)).await
 }
@@ -361,10 +361,10 @@ fn traced<M>(message: M) -> Traced<M> {
     }
 }
 
-impl<H, V, B> Mailbox<H, V, B>
+impl<H, S, B> Mailbox<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Admits a history opening and waits until it is durable.
@@ -382,7 +382,7 @@ where
     }
 
     /// Commits one batch and waits for its publication.
-    pub(crate) async fn commit(&self, batch: Commit<H, V>) -> Result<(), Error> {
+    pub(crate) async fn commit(&self, batch: Commit<H, S>) -> Result<(), Error> {
         self.start_commit(batch, Vec::new()).await?.wait().await
     }
 
@@ -391,7 +391,7 @@ where
         &self,
         view: View,
         id: CertificateId<H::Digest>,
-        proof: Arc<Lqc<V, H::Digest>>,
+        proof: Arc<Lqc<S, H::Digest>>,
         history: Arc<TipRecord<H::Digest>>,
     ) -> Result<(), Error> {
         let expected_history = proof.leader().history();
@@ -407,7 +407,7 @@ where
 }
 
 pub(super) fn producer_block(
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     chain: u32,
     timestamp: u64,
 ) -> Arc<TransactionBlock<Sha256, TestBody>> {
@@ -443,7 +443,7 @@ fn hot_output(
 fn output_commit<'a>(
     current: &Checkpoint<Sha256Digest>,
     blocks: impl IntoIterator<Item = &'a Arc<TransactionBlock<Sha256, TestBody>>>,
-) -> Commit<Sha256, MinPk> {
+) -> Commit<Sha256, Bls<MinPk>> {
     let mut emitted = current.emitted().to_vec();
     let mut committed = current.committed();
     let outputs = blocks
@@ -475,10 +475,10 @@ fn output_commit<'a>(
 }
 
 fn lqc(
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     view: u64,
     signers: impl IntoIterator<Item = usize>,
-) -> Arc<Lqc<MinPk, Sha256Digest>> {
+) -> Arc<Lqc<Bls<MinPk>, Sha256Digest>> {
     let leader = committee.leader_block(View::new(view));
     let votes = signers
         .into_iter()
@@ -487,13 +487,18 @@ fn lqc(
     Arc::new(
         committee
             .verifier
-            .assemble_lqc::<Sha256, _>(leader.block().clone(), &votes, &Sequential)
+            .assemble_lqc::<_, Sha256, _>(
+                &mut test_rng(),
+                leader.block().clone(),
+                &votes,
+                &Sequential,
+            )
             .unwrap(),
     )
 }
 
 pub(super) fn checkpoint(
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     floor_generation: u64,
     floor: CertificateId<Sha256Digest>,
     history: Sha256Digest,
@@ -520,9 +525,9 @@ pub(super) fn checkpoint(
 }
 
 fn selected_commit(
-    proof: Arc<Lqc<MinPk, Sha256Digest>>,
+    proof: Arc<Lqc<Bls<MinPk>, Sha256Digest>>,
     checkpoint: Checkpoint<Sha256Digest>,
-) -> Commit<Sha256, MinPk> {
+) -> Commit<Sha256, Bls<MinPk>> {
     Commit {
         selected: vec![SelectedLqc {
             view: proof.view(),
@@ -545,14 +550,14 @@ fn install_floors(view: View) -> PendingFloors {
 
 /// Artifacts for tests that walk one catalog through commits, reopens, and a floor install.
 struct Lifecycle {
-    committee: Committee<MinPk>,
+    committee: Committee<Bls<MinPk>>,
     /// The genesis history opening.
     record: Arc<TipRecord<Sha256Digest>>,
     history: Sha256Digest,
     /// The L-QC the finalizing commit selects.
-    proof: Arc<Lqc<MinPk, Sha256Digest>>,
+    proof: Arc<Lqc<Bls<MinPk>, Sha256Digest>>,
     /// A same-view L-QC from another committee that stays pending.
-    alternate: Arc<Lqc<MinPk, Sha256Digest>>,
+    alternate: Arc<Lqc<Bls<MinPk>, Sha256Digest>>,
     /// The block the intermediate commit outputs.
     block: Arc<TransactionBlock<Sha256, TestBody>>,
     /// A competing block of the same chain and height that never commits.
@@ -565,12 +570,12 @@ impl Lifecycle {
     fn new() -> Self {
         let limits = PathLimits::new(2, 2);
         let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
-        let committee = Committee::<MinPk>::builder(7, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG")
             .producers(producers.clone())
             .limits(limits)
             .build();
-        let alternate = Committee::<MinPk>::builder(7, 6)
+        let alternate = Committee::<Bls<MinPk>>::builder(7, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_ALTERNATE")
             .producers(producers)
             .limits(limits)
@@ -632,7 +637,7 @@ impl Lifecycle {
     }
 
     /// Commits `block` with the genesis history opening under the genesis floor.
-    fn intermediate(&self) -> Commit<Sha256, MinPk> {
+    fn intermediate(&self) -> Commit<Sha256, Bls<MinPk>> {
         Commit {
             selected: Vec::new(),
             history: vec![HistoryOpening {
@@ -653,7 +658,7 @@ impl Lifecycle {
     }
 
     /// Moves the floor to `proof` without new outputs.
-    fn finalizing(&self) -> Commit<Sha256, MinPk> {
+    fn finalizing(&self) -> Commit<Sha256, Bls<MinPk>> {
         selected_commit(
             self.proof.clone(),
             checkpoint(

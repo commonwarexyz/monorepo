@@ -19,11 +19,12 @@ use crate::{
             },
             types::{CustodyValues, LqcVerifier},
         },
+        scheme::Scheme,
         types::{BlockRef, Body, TransactionBlock},
     },
     types::Epoch,
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select;
 use commonware_utils::futures::Pool;
 use std::{
@@ -422,18 +423,18 @@ fn describes<H: Hasher>(
         && header.block_ref::<H>() == reference
 }
 
-impl<I, C, F, S, K, Q, H, V, B> Core<I, C, F, S, K, Q, H, V, B>
+impl<I, C, F, Hs, K, Q, H, S, B> Core<I, C, F, Hs, K, Q, H, S, B>
 where
-    I: Absorb<V, H::Digest>,
-    C: CatalogPort<H, V, B>,
-    F: Fetcher<H, V, B>,
-    S: HistoryStack<H>,
+    I: Absorb<S, H::Digest>,
+    C: CatalogPort<H, S, B>,
+    F: Fetcher<H, S, B>,
+    Hs: HistoryStack<H>,
     K: BlockStack<H::Digest>,
-    Q: LqcVerifier<H, V>,
+    Q: LqcVerifier<H, S>,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
-    Error: From<C::Error> + From<F::Error> + From<S::Error> + From<K::Error>,
+    Error: From<C::Error> + From<F::Error> + From<Hs::Error> + From<K::Error>,
 {
     /// Resolves the custody of every output `stream` plans above `emitted` and adds them to
     /// `batch` in order.
@@ -454,7 +455,7 @@ where
         stream: &mut J,
         emitted: &[BlockRef<H::Digest>],
         forward: &[Option<Branch<H::Digest>>],
-        batch: &mut PublicationBatch<H, V, B>,
+        batch: &mut PublicationBatch<H, S, B>,
     ) -> Result<(), Error>
     where
         J: Iterator<Item = Slot<H::Digest>>,

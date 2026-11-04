@@ -589,7 +589,7 @@ mod tests {
                 catalog::{Admission, CatalogStore, Footprint},
                 pending::BODY_READ_CONCURRENCY,
             },
-            mocks::Committee,
+            mocks::{Bls, Committee},
             testing::TestBody,
             types::PathLimits,
         },
@@ -600,11 +600,11 @@ mod tests {
     use commonware_storage::translator::TwoCap;
     use commonware_utils::{NZU64, channel::oneshot, futures::try_join_all};
 
-    type Store = CatalogStore<TwoCap, deterministic::Context, Sha256, MinPk, TestBody>;
+    type Store = CatalogStore<TwoCap, deterministic::Context, Sha256, Bls<MinPk>, TestBody>;
     type Block = Arc<TransactionBlock<Sha256, TestBody>>;
 
-    fn committee(namespace: &[u8]) -> Committee<MinPk> {
-        Committee::<MinPk>::builder(7, 6)
+    fn committee(namespace: &[u8]) -> Committee<Bls<MinPk>> {
+        Committee::<Bls<MinPk>>::builder(7, 6)
             .namespace(namespace)
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -628,7 +628,7 @@ mod tests {
     /// Opens a store and makes `blocks` durable pending custody.
     async fn store_with(
         context: &deterministic::Context,
-        committee: &Committee<MinPk>,
+        committee: &Committee<Bls<MinPk>>,
         blocks: &[Block],
     ) -> Store {
         let mut stores = Store::open(context, &config(committee)).await.unwrap();

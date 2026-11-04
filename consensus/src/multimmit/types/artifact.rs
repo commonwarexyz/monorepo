@@ -2,16 +2,19 @@
 
 use crate::{
     Epochable, Viewable as _,
-    multimmit::types::{
-        ChainId, DaCertificate, DaVote, Lqc, NoVote, Nullification, Nullify, SignedLeaderBlock,
-        SignedTransactionBlock, Vote, Vqc,
+    multimmit::{
+        scheme::Scheme,
+        types::{
+            ChainId, DaCertificate, DaVote, Lqc, NoVote, Nullification, Nullify, SignedLeaderBlock,
+            SignedTransactionBlock, Vote, Vqc,
+        },
     },
     types::{Attributable as _, Epoch, Height, Participant, View},
 };
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_codec::Encode;
 use commonware_codec::{EncodeSize as _, Write as _};
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use core::fmt;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
@@ -44,34 +47,34 @@ pub(crate) use each_artifact;
 /// cryptographically and contextually untrusted until the machine processes a matching verification
 /// completion.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Artifact<V: Variant, D: Digest> {
+pub enum Artifact<S: Scheme, D: Digest> {
     /// A producer-authenticated transaction-block header.
-    TransactionBlock(SignedTransactionBlock<V, D>),
+    TransactionBlock(SignedTransactionBlock<S, D>),
     /// One attributed data-availability share.
-    DaVote(DaVote<V, D>),
+    DaVote(DaVote<S, D>),
     /// A recovered data-availability certificate.
-    DaCertificate(DaCertificate<V, D>),
+    DaCertificate(DaCertificate<S, D>),
     /// A scheduled leader's signed proposal.
-    LeaderBlock(SignedLeaderBlock<V, D>),
+    LeaderBlock(SignedLeaderBlock<S, D>),
     /// A complete consensus vote.
-    Vote(Vote<V, D>),
+    Vote(Vote<S, D>),
     /// An attributed abstention.
-    NoVote(NoVote<V>),
+    NoVote(NoVote<S>),
     /// An attributed nullification share.
-    Nullify(Nullify<V>),
+    Nullify(Nullify<S>),
     /// A recovered nullification certificate.
-    Nullification(Nullification<V>),
+    Nullification(Nullification<S>),
     /// A view quorum certificate.
-    Vqc(Vqc<V, D>),
+    Vqc(Vqc<S, D>),
     /// A leader finalization quorum certificate.
-    Lqc(Lqc<V, D>),
+    Lqc(Lqc<S, D>),
 }
 
 /// An immutable atomic publication of canonical artifacts.
 #[cfg(not(target_arch = "wasm32"))]
-pub type ArtifactBatch<V, D> = Arc<[Arc<Artifact<V, D>>]>;
+pub type ArtifactBatch<S, D> = Arc<[Arc<Artifact<S, D>>]>;
 
-impl<V: Variant, D: Digest> Artifact<V, D> {
+impl<S: Scheme, D: Digest> Artifact<S, D> {
     /// Returns whether this artifact carries view progress.
     ///
     /// Proposals, view messages, and view certificates sit on the vote-to-finality path, so
@@ -208,13 +211,13 @@ impl<V: Variant, D: Digest> Artifact<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Epochable for Artifact<V, D> {
+impl<S: Scheme, D: Digest> Epochable for Artifact<S, D> {
     fn epoch(&self) -> Epoch {
         each_artifact!(self, value => value.epoch())
     }
 }
 
-impl<V: Variant, D: Digest> fmt::Display for Artifact<V, D> {
+impl<S: Scheme, D: Digest> fmt::Display for Artifact<S, D> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{:?}", self.kind())
     }

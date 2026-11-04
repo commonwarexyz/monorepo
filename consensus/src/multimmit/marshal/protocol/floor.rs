@@ -1,8 +1,11 @@
 //! Shape checks of a floor checkpoint against the ordering state it replaces.
 
 use super::order::{self, HistoryState};
-use crate::multimmit::types::{BlockRef, CodecConfig, Frontier, Lqc, TipRecord};
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use crate::multimmit::{
+    scheme::Scheme,
+    types::{BlockRef, CodecConfig, Frontier, Lqc, TipRecord},
+};
+use commonware_cryptography::{Digest, Hasher};
 
 /// A floor checkpoint does not match the ordering state it would replace.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -40,16 +43,16 @@ pub(crate) struct Frontiers<D: Digest> {
 /// The history must be the one the anchor commits to, neither frontier may regress, and
 /// `emitted` must end the anchor's final sweep from the ordered frontier. The ancestry between
 /// `emitted` and the returned target is left to the caller.
-pub(crate) fn validate<H, V>(
+pub(crate) fn validate<H, S>(
     state: &HistoryState<H::Digest>,
-    anchor: &Lqc<V, H::Digest>,
+    anchor: &Lqc<S, H::Digest>,
     history: &TipRecord<H::Digest>,
     emitted: &[BlockRef<H::Digest>],
     codec: CodecConfig,
 ) -> Result<Frontiers<H::Digest>, Error>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
 {
     let commitment = history.commitment::<H>();
     if anchor.leader().history() != commitment {
@@ -67,7 +70,7 @@ where
 
     let base = HistoryState::new(commitment, ordered.clone(), ordered.clone())?;
     let sweep = base
-        .final_sweep::<H, V>(anchor, codec, &ordered)?
+        .final_sweep::<H, S>(anchor, codec, &ordered)?
         .into_stream();
     let target = sweep.target().to_vec();
     let mut expected = ordered.clone();

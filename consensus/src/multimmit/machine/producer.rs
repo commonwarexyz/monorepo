@@ -14,10 +14,13 @@ use super::{
     job::{Generation, IdSequence, Issued, SequenceId},
 };
 use crate::{
-    multimmit::types::{BlockRef, ChainId, TransactionBlockHeader},
+    multimmit::{
+        scheme::Scheme,
+        types::{BlockRef, ChainId, TransactionBlockHeader},
+    },
     types::Height,
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use core::time::Duration;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -312,7 +315,7 @@ impl<D: Digest> ProducerState<D> {
     }
 }
 
-impl<V: Variant, D: Digest> ChainState<V, D> {
+impl<S: Scheme, D: Digest> ChainState<S, D> {
     /// Returns the own chain's production state, if this node produces. `finalized` is the
     /// highest final block height finality reported, by chain index.
     pub(crate) fn producer_status<H: Hasher<Digest = D>>(
@@ -471,7 +474,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     }
 
     /// Returns the oldest custodied producer header not yet reserved for signing.
-    pub(crate) fn pending_build_sign_request(&self) -> Option<SignRequest<V, D>> {
+    pub(crate) fn pending_build_sign_request(&self) -> Option<SignRequest<S, D>> {
         self.producer
             .as_ref()?
             .prepared

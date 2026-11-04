@@ -2,13 +2,16 @@
 
 use super::Error;
 use crate::{
-    multimmit::types::{
-        Anchor, BlockRef, ChainId, DigestedLeader, LeaderBlock, Position, SelectedCommitments,
-        TransactionBlockHeader, VoteBody,
+    multimmit::{
+        scheme::Scheme,
+        types::{
+            Anchor, BlockRef, ChainId, DigestedLeader, LeaderBlock, Position, SelectedCommitments,
+            TransactionBlockHeader, VoteBody,
+        },
     },
     types::{Epoch, Height},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     sync::Arc,
@@ -136,10 +139,10 @@ pub(crate) struct ProposalPaths<D: Digest> {
 
 impl<D: Digest> ProposalPaths<D> {
     /// Reconstructs every block reference pinned by `leader`.
-    pub(crate) fn new<H, V>(leader: &LeaderBlock<V, D>) -> Result<Self, Error>
+    pub(crate) fn new<H, S>(leader: &LeaderBlock<S, D>) -> Result<Self, Error>
     where
         H: Hasher<Digest = D>,
-        V: Variant,
+        S: Scheme,
     {
         let mut chains = Vec::with_capacity(leader.proposals().len());
         let mut anchor_parents = Vec::with_capacity(leader.proposals().len());
@@ -165,7 +168,7 @@ impl<D: Digest> ProposalPaths<D> {
             };
             let mut path = Vec::with_capacity(proposal.len() + 1);
             path.push(anchor);
-            append_payloads::<H, V, D>(leader, chain, &mut path, proposal.payloads())?;
+            append_payloads::<H, S, D>(leader, chain, &mut path, proposal.payloads())?;
             chains.push(path);
             anchor_parents.push(parent);
         }
@@ -216,14 +219,14 @@ pub(crate) struct VotePaths<D: Digest> {
 
 impl<D: Digest> VotePaths<D> {
     /// Reconstructs the paths authenticated by `vote`.
-    pub(crate) fn new<H, V>(
-        leader: DigestedLeader<'_, V, D>,
+    pub(crate) fn new<H, S>(
+        leader: DigestedLeader<'_, S, D>,
         proposals: &ProposalPaths<D>,
         vote: &VoteBody<D>,
     ) -> Result<Self, Error>
     where
         H: Hasher<Digest = D>,
-        V: Variant,
+        S: Scheme,
     {
         if !vote.valid_for(leader)
             || proposals.len() != leader.block().proposals().len()
@@ -240,7 +243,7 @@ impl<D: Digest> VotePaths<D> {
             let extension = vote.extensions().get(index).ok_or(Error::Vote)?;
             let mut path = Vec::with_capacity(1 + extension.len());
             path.push(proposals.block(chain, position)?);
-            append_payloads::<H, V, D>(leader.block(), chain, &mut path, extension.payloads())?;
+            append_payloads::<H, S, D>(leader.block(), chain, &mut path, extension.payloads())?;
             chains.push(path);
         }
         Ok(Self { chains })
@@ -289,15 +292,15 @@ fn chain_path<D: Digest>(
         .ok_or(Error::Chain(chain))
 }
 
-fn append_payloads<H, V, D>(
-    leader: &LeaderBlock<V, D>,
+fn append_payloads<H, S, D>(
+    leader: &LeaderBlock<S, D>,
     chain: ChainId,
     path: &mut Vec<BlockRef<D>>,
     payloads: &[D],
 ) -> Result<(), Error>
 where
     H: Hasher<Digest = D>,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     for payload in payloads {

@@ -9,7 +9,7 @@ use crate::{
             voter::{self, Endpoints, Inbox, Observed},
         },
         mocks::{
-            Committee,
+            Bls, Committee,
             cluster::{QUOTA, start_network},
         },
         testing::expect_within,
@@ -50,11 +50,11 @@ use std::{
 
 mod unit;
 
-type TestActor<T, C> = Actor<DeterministicContext, Sha256, Ed25519PublicKey, MinPk, T, C>;
+type TestActor<T, C> = Actor<DeterministicContext, Sha256, Ed25519PublicKey, Bls<MinPk>, T, C>;
 
 /// Builds an ingress configuration for `committee`'s epoch.
 fn config<T, C>(
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     limits: IngressLimits,
     strategy: T,
     critical_strategy: C,
@@ -69,7 +69,7 @@ fn config<T, C>(
         codec: committee.codec(),
         bounds: committee
             .codec()
-            .encoded_bounds::<MinPk, Sha256Digest>()
+            .encoded_bounds::<Bls<MinPk>, Sha256Digest>()
             .unwrap(),
         limits,
         mailbox_size,
@@ -77,18 +77,20 @@ fn config<T, C>(
     }
 }
 
-type TestVerifier<T, C> =
-    verifier::Verifier<DeterministicContext, Sha256, Ed25519PublicKey, MinPk, T, C>;
+type TestVerifier<T, C> = verifier::Verifier<DeterministicContext, Sha256, Bls<MinPk>, T, C>;
 
 /// Builds the verifier that shares the ingress task.
 ///
 /// The task stops when the verifier's mailbox closes, so callers keep the mailbox.
 fn verifier<T: Strategy, C: Strategy>(
     context: &DeterministicContext,
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     strategy: T,
     critical_strategy: C,
-) -> (TestVerifier<T, C>, verifier::Mailbox<MinPk, Sha256Digest>) {
+) -> (
+    TestVerifier<T, C>,
+    verifier::Mailbox<Bls<MinPk>, Sha256Digest>,
+) {
     verifier::Verifier::new(
         context.child("batcher"),
         verifier::Config {
@@ -188,14 +190,14 @@ impl Receiver for ReadyReceiver {
 
 struct ReadyHarness {
     mailbox: Mailbox,
-    observations: mailbox::UnreliableReceiver<Observed<Ed25519PublicKey, MinPk, Sha256Digest>>,
-    _verifier: verifier::Mailbox<MinPk, Sha256Digest>,
+    observations: mailbox::UnreliableReceiver<Observed<Ed25519PublicKey, Bls<MinPk>, Sha256Digest>>,
+    _verifier: verifier::Mailbox<Bls<MinPk>, Sha256Digest>,
 }
 
 impl ReadyHarness {
     fn start(
         context: &DeterministicContext,
-        committee: &Committee<MinPk>,
+        committee: &Committee<Bls<MinPk>>,
         limits: IngressLimits,
         data: ReadyReceiver,
         consensus: ReadyReceiver,
@@ -214,7 +216,7 @@ impl ReadyHarness {
 
     fn start_with_observation_capacity(
         context: &DeterministicContext,
-        committee: &Committee<MinPk>,
+        committee: &Committee<Bls<MinPk>>,
         limits: IngressLimits,
         data: ReadyReceiver,
         consensus: ReadyReceiver,
@@ -258,7 +260,7 @@ impl ReadyHarness {
 fn stalled_ingress_worker_does_not_block_control() {
     let executor = DeterministicRunner::timed(Duration::from_secs(1));
     executor.start(move |context| async move {
-        let committee = Committee::<MinPk>::builder(84, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(84, 6).build();
         let epoch = committee.config.epoch();
         // The pool's workers never start, so the frame's decode job never returns.
         let strategy = mocks::pending(NonZeroUsize::new(2).unwrap());
@@ -286,7 +288,7 @@ fn stalled_ingress_worker_does_not_block_control() {
             committee.identities[1].clone(),
             Envelope::new(
                 epoch,
-                ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+                ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(
                     committee.novote(Participant::new(1), View::new(1)),
                 ),
             )
@@ -322,9 +324,9 @@ fn saturated_observation_handoff_preserves_admitted_certificate() {
     executor.start(|context| async move {
         let mut ingress_limits = IngressLimits::TEST;
         ingress_limits.cohort_items = NonZeroUsize::new(1).unwrap();
-        let committee = Committee::<MinPk>::builder(41, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(41, 6).build();
         let epoch = committee.config.epoch();
-        let filler = ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+        let filler = ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(
             committee.novote(Participant::new(1), View::new(1)),
         );
         let certificate = committee.vqc(View::new(2));
@@ -389,18 +391,18 @@ fn byzantine_replay_saturation_preserves_correct_peer_service() {
         let mut ingress_limits = IngressLimits::TEST;
         ingress_limits.cohort_items = NonZeroUsize::MIN;
         ingress_limits.lane_items = NonZeroUsize::new(4).unwrap();
-        let committee = Committee::<MinPk>::builder(86, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(86, 6).build();
         let epoch = committee.config.epoch();
         let replay = Envelope::new(
             epoch,
-            ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+            ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(
                 committee.novote(Participant::new(1), View::new(1)),
             ),
         )
         .encode();
         let correct = Envelope::new(
             epoch,
-            ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+            ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(
                 committee.novote(Participant::new(2), View::new(1)),
             ),
         )
@@ -446,13 +448,13 @@ fn byzantine_replay_saturation_preserves_correct_peer_service() {
 }
 
 struct Harness {
-    committee: Committee<MinPk>,
+    committee: Committee<Bls<MinPk>>,
     mailbox: Mailbox,
-    observations: mailbox::UnreliableReceiver<Observed<Ed25519PublicKey, MinPk, Sha256Digest>>,
+    observations: mailbox::UnreliableReceiver<Observed<Ed25519PublicKey, Bls<MinPk>, Sha256Digest>>,
     peers: Vec<Ed25519PublicKey>,
     oracle: Oracle<Ed25519PublicKey, DeterministicContext>,
     me: Ed25519PublicKey,
-    _verifier: verifier::Mailbox<MinPk, Sha256Digest>,
+    _verifier: verifier::Mailbox<Bls<MinPk>, Sha256Digest>,
 }
 
 impl Harness {
@@ -462,7 +464,7 @@ impl Harness {
     }
 
     async fn with_limits(context: &DeterministicContext, seed: u64, limits: IngressLimits) -> Self {
-        let committee = Committee::<MinPk>::builder(seed, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(seed, 6).build();
         let me = committee.identities[0].clone();
         let peers = committee.identities.clone();
         let oracle = start_network(context, peers.clone(), 1024 * 1024).await;
@@ -547,7 +549,7 @@ impl Harness {
     }
 
     /// Collects forwarded artifacts until `count` have arrived.
-    async fn observed(&mut self, count: usize) -> Vec<Artifact<MinPk, Sha256Digest>> {
+    async fn observed(&mut self, count: usize) -> Vec<Artifact<Bls<MinPk>, Sha256Digest>> {
         let mut artifacts = Vec::new();
         while artifacts.len() < count {
             let cohort = self
@@ -578,7 +580,7 @@ impl Harness {
 fn a_da_vote_is_dropped_unless_its_sender_is_its_signer() {
     let executor = DeterministicRunner::default();
     executor.start(|context| async move {
-        let committee = Committee::<MinPk>::builder(87, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(87, 6).build();
         let epoch = committee.config.epoch();
         let signer = 3usize;
         let header =
@@ -588,11 +590,11 @@ fn a_da_vote_is_dropped_unless_its_sender_is_its_signer() {
         // different header, then the signer sends its own vote.
         let elsewhere =
             committee.transaction_header(ChainId::new(0), Sha256::hash(&[b"another header"]));
-        let misattributed = DaVote::new(
+        let misattributed = DaVote::<Bls<MinPk>, _>::new(
             header,
             committee
                 .da_vote(Participant::from_usize(signer), elsewhere)
-                .share()
+                .attestation()
                 .clone(),
         );
         let data = vec![
@@ -659,7 +661,7 @@ fn forwards_fair_cohorts_and_transaction_headers() {
         consensus.send(
             Recipients::One(harness.me.clone()),
             harness
-                .envelope(ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+                .envelope(ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(
                     harness.committee.novote(Participant::new(2), View::new(1)),
                 ))
                 .encode(),
@@ -701,11 +703,11 @@ fn continuously_ready_consensus_does_not_starve_other_planes() {
     executor.start(|context| async move {
         let mut ingress_limits = IngressLimits::TEST;
         ingress_limits.cohort_items = NonZeroUsize::new(1).unwrap();
-        let committee = Committee::<MinPk>::builder(39, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(39, 6).build();
         let epoch = committee.config.epoch();
         let consensus = (1..=CONSENSUS_BACKLOG)
             .map(|view| {
-                let message = ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+                let message = ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(
                     committee.novote(Participant::new(1), View::new(view)),
                 );
                 (
@@ -772,11 +774,11 @@ fn partial_cohorts_flush_as_soon_as_credit_allows() {
         let mut ingress_limits = IngressLimits::TEST;
         ingress_limits.cohort_items = NonZeroUsize::new(64).unwrap();
         ingress_limits.lane_items = NonZeroUsize::new(64).unwrap();
-        let committee = Committee::<MinPk>::builder(40, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(40, 6).build();
         let epoch = committee.config.epoch();
         let consensus = (1..=CONSENSUS_BACKLOG)
             .map(|view| {
-                let message = ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+                let message = ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(
                     committee.novote(Participant::new(1), View::new(view)),
                 );
                 (
@@ -819,7 +821,7 @@ fn a_lone_data_artifact_is_forwarded_without_further_ingress() {
     executor.start(|context| async move {
         let mut ingress_limits = IngressLimits::TEST;
         ingress_limits.cohort_items = NonZeroUsize::new(64).unwrap();
-        let committee = Committee::<MinPk>::builder(40, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(40, 6).build();
         let epoch = committee.config.epoch();
         let block = committee.signed_block(ChainId::new(3), Sha256::hash(&[b"lone data"]));
         let data = vec![(
@@ -855,11 +857,11 @@ fn ingress_batches_into_full_cohorts_while_credit_is_held() {
         let mut ingress_limits = IngressLimits::TEST;
         ingress_limits.cohort_items = NonZeroUsize::new(64).unwrap();
         ingress_limits.lane_items = NonZeroUsize::new(64).unwrap();
-        let committee = Committee::<MinPk>::builder(40, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(40, 6).build();
         let epoch = committee.config.epoch();
         let consensus = (1..=CONSENSUS_BACKLOG)
             .map(|view| {
-                let message = ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+                let message = ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(
                     committee.novote(Participant::new(1), View::new(view)),
                 );
                 (
@@ -925,7 +927,7 @@ fn rejects_malformed_and_wrong_epoch_traffic_without_blocking() {
             Recipients::One(harness.me.clone()),
             Envelope::new(
                 harness.committee.config.epoch().next(),
-                ConsensusMessage::<MinPk, Sha256Digest>::NoVote(novote),
+                ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(novote),
             )
             .encode(),
             false,
@@ -936,7 +938,7 @@ fn rejects_malformed_and_wrong_epoch_traffic_without_blocking() {
         valid.send(
             Recipients::One(harness.me.clone()),
             harness
-                .envelope(ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+                .envelope(ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(
                     harness.committee.novote(Participant::new(3), View::new(1)),
                 ))
                 .encode(),
@@ -1140,7 +1142,7 @@ fn saturated_observation_handoff_preserves_bounded_ingress() {
             consensus.send(
                 Recipients::One(harness.me.clone()),
                 harness
-                    .envelope(ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+                    .envelope(ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(
                         harness
                             .committee
                             .novote(Participant::new(1), View::new(view)),
@@ -1182,7 +1184,7 @@ fn consumption_credit_releases_multiple_cohorts() {
                 consensus.send(
                     Recipients::One(harness.me.clone()),
                     harness
-                        .envelope(ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+                        .envelope(ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(
                             harness
                                 .committee
                                 .novote(Participant::new(1), View::new(round * 8 + offset)),
@@ -1208,7 +1210,7 @@ fn stops_cleanly_with_the_runtime() {
         consensus.send(
             Recipients::One(harness.me.clone()),
             harness
-                .envelope(ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+                .envelope(ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(
                     harness.committee.novote(Participant::new(1), View::new(1)),
                 ))
                 .encode(),

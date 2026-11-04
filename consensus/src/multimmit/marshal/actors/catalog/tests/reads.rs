@@ -7,7 +7,7 @@ use commonware_utils::Widen;
 #[test]
 fn pending_metadata_bypasses_finalized_archive_reads() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(52, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(52, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_PENDING_METADATA")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -73,7 +73,7 @@ fn pending_metadata_bypasses_finalized_archive_reads() {
 #[test]
 fn header_batch_capacity_is_independent_of_admission_cut() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(57, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(57, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_HEADER_CAPACITY")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -111,7 +111,7 @@ fn header_batch_capacity_is_independent_of_admission_cut() {
 #[test]
 fn finalized_header_branches_follow_parents() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(58, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(58, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_HEADER_BRANCHES")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -218,7 +218,7 @@ fn finalized_header_branches_follow_parents() {
 #[test]
 fn historical_body_reads_do_not_displace_live_custody() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(40, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(40, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BODY_CACHE")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -314,7 +314,7 @@ fn independent_read_completes_during_segment_open(
     #[case] read_case: IndependentReadCase,
 ) {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(81, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(81, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_READ_DURING_APPEND")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -433,7 +433,7 @@ fn body_reads_wait_for_materialization_capacity() {
     let subscriber = tracing_subscriber::registry().with(paths.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(44, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(44, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BODY_BACKPRESSURE")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -530,7 +530,7 @@ fn body_reads_wait_for_materialization_capacity() {
 #[test]
 fn cache_hit_body_request_runs_while_body_waiters_are_full() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(47, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(47, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_CACHE_HIT_WAITERS")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -596,7 +596,7 @@ fn cache_hit_body_request_runs_while_body_waiters_are_full() {
 #[test]
 fn body_read_groups_respect_materialized_cache_budget() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(54, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(54, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_MATERIALIZED_GROUP_BOUND")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -656,7 +656,7 @@ fn body_read_groups_respect_materialized_cache_budget() {
 #[test]
 fn concurrent_body_reads_share_cold_materialization() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(45, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(45, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BODY_COALESCE")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -719,7 +719,7 @@ fn concurrent_body_reads_share_cold_materialization() {
 #[test]
 fn sequential_body_reads_reuse_resident_immutable_readers() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(50, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(50, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_RETAINED_SEGMENT_READER")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -824,7 +824,7 @@ fn sequential_body_reads_reuse_resident_immutable_readers() {
 #[test]
 fn full_admission_reader_avoids_a_cold_acquisition() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(51, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(51, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_SEALED_READER_HANDOFF")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -866,7 +866,7 @@ fn full_admission_reader_avoids_a_cold_acquisition() {
 #[test]
 fn recovered_full_reader_survives_segment_rollover() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(52, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(52, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_RECOVERED_READER_HANDOFF")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -913,7 +913,7 @@ fn recovered_full_reader_survives_segment_rollover() {
 #[test]
 fn body_reads_refresh_current_segment_snapshot() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(49, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(49, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BODY_SNAPSHOT_REFRESH")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -983,7 +983,7 @@ fn body_reads_refresh_current_segment_snapshot() {
 #[test]
 fn cold_segment_acquisition_is_shared_without_blocking_other_segments() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(48, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(48, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_SEGMENT_READERS")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -1056,7 +1056,7 @@ fn cold_segment_acquisition_is_shared_without_blocking_other_segments() {
 #[test]
 fn producer_admission_progresses_while_cold_body_read_is_blocked() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(42, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(42, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_READ_ADMISSION")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -1131,7 +1131,7 @@ fn producer_admission_progresses_while_cold_body_read_is_blocked() {
 #[case::immutable(ArchiveMode::Immutable)]
 fn committed_output_descriptors_preserve_order_and_bounds(#[case] archive: ArchiveMode) {
     deterministic::Runner::timed(std::time::Duration::from_secs(10)).start(|context| async move {
-        let committee = Committee::<MinPk>::builder(62, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(62, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_OUTPUT_DESCRIPTOR_READS")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -1190,7 +1190,7 @@ fn committed_output_descriptors_preserve_order_and_bounds(#[case] archive: Archi
 #[test]
 fn application_prune_preserves_queued_cold_materialization() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(43, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(43, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_PINNED_PRUNE")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -1376,7 +1376,7 @@ fn application_prune_preserves_queued_cold_materialization() {
 #[test]
 fn body_materialization_balances_request_across_read_jobs() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(54, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(54, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BODY_READ_CONCURRENCY")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))

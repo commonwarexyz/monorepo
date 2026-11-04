@@ -1,10 +1,13 @@
 //! Batch verification of signed transaction blocks.
 
 use super::common::{Fixture, MultimmitScheme, PARTICIPANTS, Workload, bench_strategies};
-use commonware_consensus::multimmit::Artifact;
+use commonware_consensus::multimmit::{
+    Artifact,
+    mocks::{Bls, Fixture as Suite, Sas},
+};
 use commonware_cryptography::{
     Sha256,
-    bls12381::primitives::variant::{MinPk, MinSig, Variant},
+    bls12381::primitives::variant::{MinPk, MinSig},
     sha256::Digest,
 };
 use commonware_parallel::Strategy;
@@ -13,14 +16,14 @@ use criterion::{Criterion, criterion_group};
 use std::hint::black_box;
 
 /// Batch-verifies attributed artifacts.
-pub struct VerifyArtifacts<'a, V: Variant> {
-    pub verifier: &'a MultimmitScheme<V>,
-    pub artifacts: &'a [&'a Artifact<V, Digest>],
+pub struct VerifyArtifacts<'a, S: Suite> {
+    pub verifier: &'a MultimmitScheme<S>,
+    pub artifacts: &'a [&'a Artifact<S, Digest>],
     pub rng: TestRng,
 }
 
-impl<V: Variant> Workload for VerifyArtifacts<'_, V> {
-    fn run<S: Strategy>(&mut self, strategy: &S) {
+impl<S: Suite> Workload for VerifyArtifacts<'_, S> {
+    fn run<St: Strategy>(&mut self, strategy: &St) {
         black_box(self.verifier.verify_artifacts::<_, Sha256, _>(
             &mut self.rng,
             self.artifacts,
@@ -30,8 +33,8 @@ impl<V: Variant> Workload for VerifyArtifacts<'_, V> {
     }
 }
 
-fn register<V: Variant>(c: &mut Criterion, variant: &str) {
-    let fixture = Fixture::<V>::new();
+fn register<S: Suite>(c: &mut Criterion, suite: &str, variant: &str) {
+    let fixture = Fixture::<S>::new();
     let blocks = fixture
         .ordinary_blocks()
         .into_iter()
@@ -40,7 +43,10 @@ fn register<V: Variant>(c: &mut Criterion, variant: &str) {
     let artifacts = blocks.iter().collect::<Vec<_>>();
     bench_strategies(
         c,
-        &format!("{}/variant={variant} n={PARTICIPANTS}", module_path!()),
+        &format!(
+            "{}/suite={suite} variant={variant} n={PARTICIPANTS}",
+            module_path!()
+        ),
         || VerifyArtifacts {
             verifier: &fixture.verifier,
             artifacts: &artifacts,
@@ -50,8 +56,10 @@ fn register<V: Variant>(c: &mut Criterion, variant: &str) {
 }
 
 fn bench_ordinary(c: &mut Criterion) {
-    register::<MinPk>(c, "minpk");
-    register::<MinSig>(c, "minsig");
+    register::<Bls<MinPk>>(c, "bls12381", "minpk");
+    register::<Bls<MinSig>>(c, "bls12381", "minsig");
+    register::<Sas<MinPk>>(c, "bls12381_sas", "minpk");
+    register::<Sas<MinSig>>(c, "bls12381_sas", "minsig");
 }
 
 criterion_group! {

@@ -1,8 +1,11 @@
 //! Test gates that pause the persistence actor at its storage operations.
 
 use super::hooks::Hooks;
-use crate::multimmit::machine::{BatchId, Change, Cursor, EffectId, Generation, PersistJob};
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use crate::multimmit::{
+    machine::{BatchId, Change, Cursor, EffectId, Generation, PersistJob},
+    scheme::Scheme,
+};
+use commonware_cryptography::Digest;
 use commonware_runtime::Clock;
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{
@@ -222,7 +225,7 @@ impl TestGates {
 impl Hooks for TestGates {
     type Point = JournalPoint;
 
-    fn appending<V: Variant, D: Digest>(&self, job: &PersistJob<V, D>) -> JournalPoint {
+    fn appending<S: Scheme, D: Digest>(&self, job: &PersistJob<S, D>) -> JournalPoint {
         let point = JournalPoint {
             ordinal: self.append_ordinal.fetch_add(1, Ordering::SeqCst),
             barrier: job.id(),
@@ -231,7 +234,7 @@ impl Hooks for TestGates {
             result: job.last_cursor(),
         };
         self.appends.lock().push(point);
-        let retires = |change: &Change<V, D>, effect| match change {
+        let retires = |change: &Change<S, D>, effect| match change {
             Change::DaCertificateAdvanced {
                 retired_publications: retired,
                 ..

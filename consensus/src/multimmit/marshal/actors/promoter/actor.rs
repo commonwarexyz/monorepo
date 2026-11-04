@@ -12,9 +12,10 @@ use crate::multimmit::{
         actors::{catalog, delivery::HotOutput},
         storage::Error as StorageError,
     },
+    scheme::Scheme,
     types::{BlockRef, Body},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select_loop;
 use commonware_runtime::{ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell};
 use commonware_storage::{Context, translator::Translator};
@@ -73,17 +74,17 @@ pub(crate) struct PendingFloor<D: Digest> {
 }
 
 /// Promoter configuration.
-pub(crate) struct Config<R, T, E, H, V, B>
+pub(crate) struct Config<R, T, E, H, S, B>
 where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Runtime context of the promoter task.
     pub(crate) context: R,
-    pub(crate) catalog: catalog::Mailbox<H, V, B>,
+    pub(crate) catalog: catalog::Mailbox<H, S, B>,
     /// The immutable archive and its durable promotion cursor.
     pub(crate) store: PromotionStore<T, E, H, B>,
     /// The receiving half of [`super::channel`].
@@ -98,17 +99,17 @@ where
 }
 
 /// Copies committed bodies into the immutable archive behind the catalog checkpoint.
-pub(crate) struct Actor<R, T, E, H, V, B>
+pub(crate) struct Actor<R, T, E, H, S, B>
 where
     R: Spawner + RuntimeMetrics,
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     context: ContextCell<R>,
-    catalog: catalog::Mailbox<H, V, B>,
+    catalog: catalog::Mailbox<H, S, B>,
     store: PromotionStore<T, E, H, B>,
     mailbox: Receiver<H, B>,
     /// Newest committed output to promote through.
@@ -126,16 +127,16 @@ where
     metrics: Metrics,
 }
 
-impl<R, T, E, H, V, B> Actor<R, T, E, H, V, B>
+impl<R, T, E, H, S, B> Actor<R, T, E, H, S, B>
 where
     R: Spawner + RuntimeMetrics,
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
-    pub(crate) fn new(config: Config<R, T, E, H, V, B>) -> Self {
+    pub(crate) fn new(config: Config<R, T, E, H, S, B>) -> Self {
         let Config {
             context,
             catalog,

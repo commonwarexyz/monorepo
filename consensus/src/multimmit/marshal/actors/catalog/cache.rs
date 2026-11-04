@@ -170,14 +170,17 @@ where
 mod tests {
     use super::{super::tests::producer_block, *};
     use crate::{
-        multimmit::{mocks::Committee, types::PathLimits},
+        multimmit::{
+            mocks::{Bls, Committee},
+            types::PathLimits,
+        },
         types::{Height, Participant},
     };
     use commonware_cryptography::bls12381::primitives::variant::MinPk;
 
     #[test]
     fn block_cache_is_byte_bounded_and_idempotent() {
-        let committee = Committee::<MinPk>::builder(7, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BLOCK_CACHE")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -221,7 +224,7 @@ mod tests {
 
     #[test]
     fn prune_evicts_blocks_at_or_below_their_chain_frontier() {
-        let committee = Committee::<MinPk>::builder(7, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BLOCK_CACHE_PRUNE")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))

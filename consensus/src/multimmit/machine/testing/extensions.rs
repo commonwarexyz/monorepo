@@ -13,25 +13,26 @@ use crate::multimmit::{
         reducer::machine::Machine,
         verification::VerifyJob,
     },
+    scheme::Scheme,
     types::{Activity, Artifact, ArtifactBatch},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::sync::Arc;
 
 /// Test queries over the capabilities a step, a poll, or a drain returned.
-pub(crate) trait CapabilitiesExt<V: Variant, D: Digest> {
+pub(crate) trait CapabilitiesExt<S: Scheme, D: Digest> {
     /// Returns the capabilities in issuance order.
-    fn effects(&self) -> &[Capability<V, D>];
+    fn effects(&self) -> &[Capability<S, D>];
 
     /// Returns whether any capability satisfies `predicate`.
-    fn has(&self, predicate: impl FnMut(&Capability<V, D>) -> bool) -> bool {
+    fn has(&self, predicate: impl FnMut(&Capability<S, D>) -> bool) -> bool {
         self.effects().iter().any(predicate)
     }
 
     /// Returns the first value `select` extracts from a capability.
-    fn find<'a, T>(&'a self, select: impl FnMut(&'a Capability<V, D>) -> Option<T>) -> Option<T>
+    fn find<'a, T>(&'a self, select: impl FnMut(&'a Capability<S, D>) -> Option<T>) -> Option<T>
     where
-        V: 'a,
+        S: 'a,
         D: 'a,
     {
         self.effects().iter().find_map(select)
@@ -42,7 +43,7 @@ pub(crate) trait CapabilitiesExt<V: Variant, D: Digest> {
     /// # Panics
     ///
     /// Panics unless exactly one barrier was issued.
-    fn persist_directive(&self) -> PersistDirective<V, D> {
+    fn persist_directive(&self) -> PersistDirective<S, D> {
         let mut directives = self.effects().iter().filter_map(|effect| match effect {
             Capability::Journal(directive) => Some(directive),
             _ => None,
@@ -63,7 +64,7 @@ pub(crate) trait CapabilitiesExt<V: Variant, D: Digest> {
     /// # Panics
     ///
     /// Panics unless exactly one barrier was issued.
-    fn persist_job(&self) -> PersistJob<V, D> {
+    fn persist_job(&self) -> PersistJob<S, D> {
         self.persist_directive().job
     }
 
@@ -72,7 +73,7 @@ pub(crate) trait CapabilitiesExt<V: Variant, D: Digest> {
     /// # Panics
     ///
     /// Panics if no verification job was issued.
-    fn verify_job(&self) -> VerifyJob<V, D> {
+    fn verify_job(&self) -> VerifyJob<S, D> {
         self.find(|effect| match effect {
             Capability::Verify(job) => Some(job.clone()),
             _ => None,
@@ -81,7 +82,7 @@ pub(crate) trait CapabilitiesExt<V: Variant, D: Digest> {
     }
 
     /// Returns the first L-QC aggregation job, if one was issued.
-    fn aggregate_lqc(&self) -> Option<LqcAggregateJob<V, D>> {
+    fn aggregate_lqc(&self) -> Option<LqcAggregateJob<S, D>> {
         self.find(|effect| match effect {
             Capability::Crypto(CryptoJob::AggregateLqc(job)) => Some(job.clone()),
             _ => None,
@@ -115,39 +116,39 @@ pub(crate) trait CapabilitiesExt<V: Variant, D: Digest> {
     }
 }
 
-impl<V: Variant, D: Digest> CapabilitiesExt<V, D> for [Capability<V, D>] {
-    fn effects(&self) -> &[Capability<V, D>] {
+impl<S: Scheme, D: Digest> CapabilitiesExt<S, D> for [Capability<S, D>] {
+    fn effects(&self) -> &[Capability<S, D>] {
         self
     }
 }
 
-impl<V: Variant, D: Digest> CapabilitiesExt<V, D> for Step<V, D> {
-    fn effects(&self) -> &[Capability<V, D>] {
+impl<S: Scheme, D: Digest> CapabilitiesExt<S, D> for Step<S, D> {
+    fn effects(&self) -> &[Capability<S, D>] {
         self.capabilities()
     }
 }
 
-impl<V: Variant, D: Digest> CapabilitiesExt<V, D> for PollResult<V, D> {
-    fn effects(&self) -> &[Capability<V, D>] {
+impl<S: Scheme, D: Digest> CapabilitiesExt<S, D> for PollResult<S, D> {
+    fn effects(&self) -> &[Capability<S, D>] {
         self.capabilities()
     }
 }
 
 /// Test-only construction of merged machine steps.
-pub(crate) trait StepExt<V: Variant, D: Digest> {
+pub(crate) trait StepExt<S: Scheme, D: Digest> {
     /// Builds a step from parts collected across several machine turns.
     fn for_tests(
         status: StepStatus<D>,
-        capabilities: impl Into<Capabilities<V, D>>,
-        activities: Vec<Activity<V, D>>,
+        capabilities: impl Into<Capabilities<S, D>>,
+        activities: Vec<Activity<S, D>>,
     ) -> Self;
 }
 
-impl<V: Variant, D: Digest> StepExt<V, D> for Step<V, D> {
+impl<S: Scheme, D: Digest> StepExt<S, D> for Step<S, D> {
     fn for_tests(
         status: StepStatus<D>,
-        capabilities: impl Into<Capabilities<V, D>>,
-        activities: Vec<Activity<V, D>>,
+        capabilities: impl Into<Capabilities<S, D>>,
+        activities: Vec<Activity<S, D>>,
     ) -> Self {
         Self {
             status,
@@ -158,15 +159,15 @@ impl<V: Variant, D: Digest> StepExt<V, D> for Step<V, D> {
 }
 
 /// Test views of a durable effect or queued publication by its one-item or several-item form.
-pub(crate) trait EffectExt<V: Variant, D: Digest> {
+pub(crate) trait EffectExt<S: Scheme, D: Digest> {
     /// Returns the signing requests, if the value signs.
-    fn signing(&self) -> Option<&[SignRequest<V, D>]>;
+    fn signing(&self) -> Option<&[SignRequest<S, D>]>;
 
     /// Returns the publication, if the value publishes.
-    fn published(&self) -> Option<&Publication<V, D>>;
+    fn published(&self) -> Option<&Publication<S, D>>;
 
     /// Returns the request of a one-request signing effect.
-    fn sign_one(&self) -> Option<&SignRequest<V, D>> {
+    fn sign_one(&self) -> Option<&SignRequest<S, D>> {
         match self.signing()? {
             [request] => Some(request),
             _ => None,
@@ -174,12 +175,12 @@ pub(crate) trait EffectExt<V: Variant, D: Digest> {
     }
 
     /// Returns the requests of a signing effect with several requests.
-    fn sign_many(&self) -> Option<&[SignRequest<V, D>]> {
+    fn sign_many(&self) -> Option<&[SignRequest<S, D>]> {
         self.signing().filter(|requests| requests.len() > 1)
     }
 
     /// Returns the artifact of a one-artifact broadcast.
-    fn broadcast_one(&self) -> Option<&Arc<Artifact<V, D>>> {
+    fn broadcast_one(&self) -> Option<&Arc<Artifact<S, D>>> {
         match self.published()? {
             Publication::Broadcast(artifacts) => match artifacts.as_ref() {
                 [artifact] => Some(artifact),
@@ -190,7 +191,7 @@ pub(crate) trait EffectExt<V: Variant, D: Digest> {
     }
 
     /// Returns the artifacts of a broadcast with several artifacts.
-    fn broadcast_many(&self) -> Option<&ArtifactBatch<V, D>> {
+    fn broadcast_many(&self) -> Option<&ArtifactBatch<S, D>> {
         match self.published()? {
             Publication::Broadcast(artifacts) if artifacts.len() > 1 => Some(artifacts),
             _ => None,
@@ -198,7 +199,7 @@ pub(crate) trait EffectExt<V: Variant, D: Digest> {
     }
 
     /// Returns the request of a one-request send.
-    fn send_one(&self) -> Option<&SendRequest<V, D>> {
+    fn send_one(&self) -> Option<&SendRequest<S, D>> {
         match self.published()? {
             Publication::Send(requests) => match requests.as_ref() {
                 [request] => Some(request),
@@ -209,7 +210,7 @@ pub(crate) trait EffectExt<V: Variant, D: Digest> {
     }
 
     /// Returns the requests of a send with several requests.
-    fn send_many(&self) -> Option<&[SendRequest<V, D>]> {
+    fn send_many(&self) -> Option<&[SendRequest<S, D>]> {
         match self.published()? {
             Publication::Send(requests) if requests.len() > 1 => Some(requests),
             _ => None,
@@ -217,7 +218,7 @@ pub(crate) trait EffectExt<V: Variant, D: Digest> {
     }
 
     /// Returns the proposal publication.
-    fn proposal(&self) -> Option<&ProposalPublication<V, D>> {
+    fn proposal(&self) -> Option<&ProposalPublication<S, D>> {
         match self.published()? {
             Publication::Propose(proposal) => Some(proposal),
             Publication::Broadcast(_) | Publication::Send(_) => None,
@@ -225,38 +226,38 @@ pub(crate) trait EffectExt<V: Variant, D: Digest> {
     }
 }
 
-impl<V: Variant, D: Digest> EffectExt<V, D> for DurableEffect<V, D> {
-    fn signing(&self) -> Option<&[SignRequest<V, D>]> {
+impl<S: Scheme, D: Digest> EffectExt<S, D> for DurableEffect<S, D> {
+    fn signing(&self) -> Option<&[SignRequest<S, D>]> {
         self.sign_requests()
     }
 
-    fn published(&self) -> Option<&Publication<V, D>> {
+    fn published(&self) -> Option<&Publication<S, D>> {
         self.publication()
     }
 }
 
-impl<V: Variant, D: Digest> EffectExt<V, D> for OutboxEntry<V, D> {
-    fn signing(&self) -> Option<&[SignRequest<V, D>]> {
+impl<S: Scheme, D: Digest> EffectExt<S, D> for OutboxEntry<S, D> {
+    fn signing(&self) -> Option<&[SignRequest<S, D>]> {
         None
     }
 
-    fn published(&self) -> Option<&Publication<V, D>> {
+    fn published(&self) -> Option<&Publication<S, D>> {
         Some(self.publication())
     }
 }
 
 /// Test-only entry points into the machine's durability path.
-pub(crate) trait MachineExt<V: Variant, D: Digest> {
+pub(crate) trait MachineExt<S: Scheme, D: Digest> {
     /// Reserves a synthetic durable action and emits its persistence barrier when one is ready.
-    fn reserve_test_effect(&mut self, effect: DurableEffect<V, D>)
-    -> Result<Step<V, D>, StepError>;
+    fn reserve_test_effect(&mut self, effect: DurableEffect<S, D>)
+    -> Result<Step<S, D>, StepError>;
 }
 
-impl<H: Hasher, V: Variant> MachineExt<V, H::Digest> for Machine<H, V> {
+impl<H: Hasher, S: Scheme> MachineExt<S, H::Digest> for Machine<H, S> {
     fn reserve_test_effect(
         &mut self,
-        effect: DurableEffect<V, H::Digest>,
-    ) -> Result<Step<V, H::Digest>, StepError> {
+        effect: DurableEffect<S, H::Digest>,
+    ) -> Result<Step<S, H::Digest>, StepError> {
         let mut capabilities = self.reserve_effect(effect)?;
         capabilities.extend(self.emit_staged());
         Ok(Step::new(StepStatus::Accepted, capabilities))

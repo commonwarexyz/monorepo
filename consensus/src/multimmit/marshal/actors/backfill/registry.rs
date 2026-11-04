@@ -3,23 +3,24 @@
 use super::waiter::{BackfillSubscriber, BlockMode, Resolved, Target, Waiter};
 use crate::multimmit::{
     marshal::{actors::metrics::FetchReason, wire::BackfillKey},
+    scheme::Scheme,
     types::{BlockRef, Body},
 };
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use std::{collections::BTreeMap, num::NonZeroU16};
 
 /// A waiter taken out of the registry.
-pub(super) struct Removed<H: Hasher, V: Variant, B: Body<H>> {
+pub(super) struct Removed<H: Hasher, S: Scheme, B: Body<H>> {
     pub key: BackfillKey<H::Digest>,
-    pub waiter: Waiter<H, V, B>,
+    pub waiter: Waiter<H, S, B>,
     /// Whether the key has no waiters left.
     pub emptied: bool,
 }
 
 /// The outcome of [`Registry::make_room`].
-pub(super) struct Eviction<H: Hasher, V: Variant, B: Body<H>> {
+pub(super) struct Eviction<H: Hasher, S: Scheme, B: Body<H>> {
     /// Waiters removed to make room.
-    pub evicted: Vec<Removed<H, V, B>>,
+    pub evicted: Vec<Removed<H, S, B>>,
     /// Whether one more waiter now fits.
     pub room: bool,
 }
@@ -39,17 +40,17 @@ const fn preempts(reason: FetchReason) -> bool {
 }
 
 /// The waiters of each key, oldest first.
-type Waiters<H, V, B> = BTreeMap<BackfillKey<<H as Hasher>::Digest>, Vec<Waiter<H, V, B>>>;
+type Waiters<H, S, B> = BTreeMap<BackfillKey<<H as Hasher>::Digest>, Vec<Waiter<H, S, B>>>;
 
 /// Every live waiter, grouped by the key it waits on, bounded by `max`.
-pub(super) struct Registry<H: Hasher, V: Variant, B: Body<H>> {
-    waiters: Waiters<H, V, B>,
+pub(super) struct Registry<H: Hasher, S: Scheme, B: Body<H>> {
+    waiters: Waiters<H, S, B>,
     len: usize,
     next: BackfillSubscriber,
     max: usize,
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> Registry<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> Registry<H, S, B> {
     pub(super) fn new(max: usize) -> Self {
         Self {
             waiters: BTreeMap::new(),
@@ -83,7 +84,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Registry<H, V, B> {
     pub(super) fn waiters(
         &self,
         key: &BackfillKey<H::Digest>,
-    ) -> impl Iterator<Item = &Waiter<H, V, B>> {
+    ) -> impl Iterator<Item = &Waiter<H, S, B>> {
         self.waiters.get(key).into_iter().flatten()
     }
 
@@ -91,7 +92,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Registry<H, V, B> {
     pub(super) fn waiters_mut(
         &mut self,
         key: &BackfillKey<H::Digest>,
-    ) -> impl Iterator<Item = &mut Waiter<H, V, B>> {
+    ) -> impl Iterator<Item = &mut Waiter<H, S, B>> {
         self.waiters.get_mut(key).into_iter().flatten()
     }
 
@@ -113,7 +114,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Registry<H, V, B> {
     }
 
     /// Adds `waiter` under `key`.
-    pub(super) fn insert(&mut self, key: BackfillKey<H::Digest>, waiter: Waiter<H, V, B>) {
+    pub(super) fn insert(&mut self, key: BackfillKey<H::Digest>, waiter: Waiter<H, S, B>) {
         self.waiters.entry(key).or_default().push(waiter);
         self.len += 1;
     }
@@ -123,7 +124,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Registry<H, V, B> {
         &mut self,
         key: &BackfillKey<H::Digest>,
         id: BackfillSubscriber,
-    ) -> Option<Removed<H, V, B>> {
+    ) -> Option<Removed<H, S, B>> {
         self.take(key, |waiter| waiter.id == id).pop()
     }
 
@@ -142,7 +143,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Registry<H, V, B> {
         &mut self,
         key: &BackfillKey<H::Digest>,
         reference: &BlockRef<H::Digest>,
-        waiter: Waiter<H, V, B>,
+        waiter: Waiter<H, S, B>,
     ) {
         let marker = self
             .waiters_mut(key)
@@ -152,15 +153,15 @@ impl<H: Hasher, V: Variant, B: Body<H>> Registry<H, V, B> {
     }
 
     /// Removes the waiters of `key` that accept `resolved`.
-    pub(super) fn take_accepting(&mut self, resolved: &Resolved<H, V, B>) -> Vec<Removed<H, V, B>> {
+    pub(super) fn take_accepting(&mut self, resolved: &Resolved<H, S, B>) -> Vec<Removed<H, S, B>> {
         self.take(&resolved.key(), |waiter| waiter.target.accepts(resolved))
     }
 
     /// Removes every waiter matching `predicate`.
     pub(super) fn remove_where(
         &mut self,
-        predicate: impl Fn(&Waiter<H, V, B>) -> bool,
-    ) -> Vec<Removed<H, V, B>> {
+        predicate: impl Fn(&Waiter<H, S, B>) -> bool,
+    ) -> Vec<Removed<H, S, B>> {
         let keys = self
             .waiters
             .iter()
@@ -181,7 +182,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Registry<H, V, B> {
         &mut self,
         target: &Target<H::Digest>,
         reason: FetchReason,
-    ) -> Eviction<H, V, B> {
+    ) -> Eviction<H, S, B> {
         let mut evicted = Vec::new();
         if self.is_full() {
             evicted = self.remove_where(Waiter::is_closed);
@@ -201,8 +202,8 @@ impl<H: Hasher, V: Variant, B: Body<H>> Registry<H, V, B> {
     /// Removes the oldest waiter matching `predicate`.
     fn remove_oldest(
         &mut self,
-        predicate: impl Fn(&Waiter<H, V, B>) -> bool,
-    ) -> Option<Removed<H, V, B>> {
+        predicate: impl Fn(&Waiter<H, S, B>) -> bool,
+    ) -> Option<Removed<H, S, B>> {
         let (key, id) = self
             .waiters
             .iter()
@@ -217,8 +218,8 @@ impl<H: Hasher, V: Variant, B: Body<H>> Registry<H, V, B> {
     fn take(
         &mut self,
         key: &BackfillKey<H::Digest>,
-        predicate: impl FnMut(&mut Waiter<H, V, B>) -> bool,
-    ) -> Vec<Removed<H, V, B>> {
+        predicate: impl FnMut(&mut Waiter<H, S, B>) -> bool,
+    ) -> Vec<Removed<H, S, B>> {
         let Some(waiters) = self.waiters.get_mut(key) else {
             return Vec::new();
         };
@@ -242,8 +243,8 @@ impl<H: Hasher, V: Variant, B: Body<H>> Registry<H, V, B> {
 }
 
 /// Returns whether `waiter` is the DA-certificate marker for block `reference`.
-fn is_marker_for<H: Hasher, V: Variant, B: Body<H>>(
-    waiter: &Waiter<H, V, B>,
+fn is_marker_for<H: Hasher, S: Scheme, B: Body<H>>(
+    waiter: &Waiter<H, S, B>,
     reference: &BlockRef<H::Digest>,
 ) -> bool {
     matches!(

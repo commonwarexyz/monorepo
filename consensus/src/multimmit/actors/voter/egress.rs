@@ -9,13 +9,14 @@ use super::VoterLimits;
 use crate::{
     multimmit::{
         machine::{EffectId, Generation, ProposalParent, ProposalPublication},
+        scheme::Scheme,
         types::{Artifact, Vqc},
         wire::{Frame, Plane},
     },
     types::{Epoch, View},
 };
 use bytes::Bytes;
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::SystemTimeExt as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -156,9 +157,9 @@ impl<P: Clone, D: Digest> Egress<P, D> {
     }
 
     /// Frames a leader proposal from the machine's durable parent-transmission choice.
-    pub(super) fn frame_proposal<V: Variant>(
+    pub(super) fn frame_proposal<S: Scheme>(
         &self,
-        publication: &ProposalPublication<V, D>,
+        publication: &ProposalPublication<S, D>,
     ) -> Transmission<P, D> {
         let Frame {
             plane,
@@ -181,16 +182,16 @@ impl<P: Clone, D: Digest> Egress<P, D> {
     ///
     /// Leader blocks return `None` because they must travel through the typed proposal path with
     /// their exact parent.
-    pub(super) fn frame<H: Hasher<Digest = D>, V: Variant>(
+    pub(super) fn frame<H: Hasher<Digest = D>, S: Scheme>(
         &self,
-        artifact: &Artifact<V, D>,
+        artifact: &Artifact<S, D>,
         recipient: Option<P>,
     ) -> Option<Transmission<P, D>> {
         let Frame {
             plane,
             bytes,
             relay,
-        } = Frame::artifact::<H, V>(self.epoch, artifact)?;
+        } = Frame::artifact::<H, S>(self.epoch, artifact)?;
         Some(Transmission {
             plane,
             bytes,
@@ -393,9 +394,9 @@ impl<P: Clone, D: Digest> Egress<P, D> {
 
 /// Returns the parent a proposal carries: its exact parent V-QC, unless the machine recorded that
 /// the parent was already broadcast or the parent is synthetic genesis.
-fn proposal_parent<V: Variant, D: Digest>(
-    publication: &ProposalPublication<V, D>,
-) -> Option<&Vqc<V, D>> {
+fn proposal_parent<S: Scheme, D: Digest>(
+    publication: &ProposalPublication<S, D>,
+) -> Option<&Vqc<S, D>> {
     match publication.parent() {
         ProposalParent::Genesis => None,
         ProposalParent::Exact(parent) if publication.attach_parent() => Some(parent.as_ref()),
@@ -409,7 +410,7 @@ mod tests {
     use crate::{
         multimmit::{
             machine::{Cursor, ProposalPublication},
-            mocks::Committee,
+            mocks::{Bls, Committee},
             types::{ChainId, ViewMessage},
             wire::{ConsensusMessage, Envelope, EnvelopeConfig},
         },
@@ -420,7 +421,7 @@ mod tests {
         Sha256, bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::TestRng;
+    use commonware_utils::{TestRng, test_rng};
     use rand::RngExt as _;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tracing::{Id, Subscriber};
@@ -431,11 +432,11 @@ mod tests {
         round_closed: Arc<AtomicBool>,
     }
 
-    impl<S> Layer<S> for CloseLayer
+    impl<Sb> Layer<Sb> for CloseLayer
     where
-        S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+        Sb: Subscriber + for<'lookup> LookupSpan<'lookup>,
     {
-        fn on_close(&self, id: Id, context: Context<'_, S>) {
+        fn on_close(&self, id: Id, context: Context<'_, Sb>) {
             let Some(metadata) = context.metadata(&id) else {
                 return;
             };
@@ -447,21 +448,24 @@ mod tests {
 
     /// Decodes a framed proposal back into the artifacts it carries, in observation order.
     fn proposal_artifacts(
-        committee: &Committee<MinPk>,
+        committee: &Committee<Bls<MinPk>>,
         egress: &Egress<(), Sha256Digest>,
-        publication: &ProposalPublication<MinPk, Sha256Digest>,
-    ) -> Vec<Artifact<MinPk, Sha256Digest>> {
+        publication: &ProposalPublication<Bls<MinPk>, Sha256Digest>,
+    ) -> Vec<Artifact<Bls<MinPk>, Sha256Digest>> {
         let transmission = egress.frame_proposal(publication);
         let config = EnvelopeConfig {
             max_frame_bytes: usize::MAX,
             epoch: egress.epoch,
             payload: committee.codec(),
         };
-        Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(transmission.bytes, &config)
-            .expect("the proposal frame decodes")
-            .into_payload()
-            .into_artifacts()
-            .collect()
+        Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
+            transmission.bytes,
+            &config,
+        )
+        .expect("the proposal frame decodes")
+        .into_payload()
+        .into_artifacts()
+        .collect()
     }
 
     const fn limits() -> EgressConfig {
@@ -925,7 +929,7 @@ mod tests {
 
     #[test]
     fn transaction_block_retries_canonical_header_digest() {
-        let committee = Committee::<MinPk>::builder(80, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(80, 6).build();
         let block = committee.signed_block(ChainId::new(0), Sha256::hash(&[b"application body"]));
         let header_digest = block.header().digest::<Sha256>();
         assert_ne!(header_digest, block.header().body_digest());
@@ -979,7 +983,7 @@ mod tests {
 
     #[test]
     fn previously_broadcast_parent_is_omitted_from_proposal() {
-        let committee = Committee::<MinPk>::builder(71, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(71, 6).build();
         let parent = committee.vqc(View::new(1));
         let block = committee.leader_block_with_parent(View::new(2), &parent);
         let publication = ProposalPublication::new(
@@ -996,7 +1000,7 @@ mod tests {
 
     #[test]
     fn unbroadcast_parent_is_attached_to_proposal() {
-        let committee = Committee::<MinPk>::builder(72, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(72, 6).build();
         let parent = committee.vqc(View::new(1));
         let block = committee.leader_block_with_parent(View::new(2), &parent);
         let publication = ProposalPublication::new(
@@ -1016,7 +1020,7 @@ mod tests {
 
     #[test]
     fn updated_broadcast_parent_is_attached_to_proposal() {
-        let committee = Committee::<MinPk>::builder(73, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(73, 6).build();
         let leader = committee.leader_block(View::new(1));
         let first = committee.vqc(View::new(1));
         let messages = [0, 1, 2, 3, 5]
@@ -1027,7 +1031,12 @@ mod tests {
             .collect::<Vec<_>>();
         let parent = committee
             .verifier
-            .assemble_vqc::<Sha256, _>(leader.block().clone(), &messages, &Sequential)
+            .assemble_vqc::<_, Sha256, _>(
+                &mut test_rng(),
+                leader.block().clone(),
+                &messages,
+                &Sequential,
+            )
             .expect("a different quorum for the same view aggregates");
         assert_ne!(parent.id::<Sha256>(), first.id::<Sha256>());
         let block = committee.leader_block_with_parent(View::new(3), &parent);
@@ -1048,7 +1057,7 @@ mod tests {
 
     #[test]
     fn recovered_proposal_reuses_the_durable_parent_choice() {
-        let committee = Committee::<MinPk>::builder(74, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(74, 6).build();
         let parent = committee.vqc(View::new(1));
         let block = committee.leader_block_with_parent(View::new(2), &parent);
         let publication = ProposalPublication::new(

@@ -174,7 +174,7 @@ impl MockFetcher {
     }
 }
 
-impl Fetcher<Sha256, MinPk, TestBody> for MockFetcher {
+impl Fetcher<Sha256, Bls<MinPk>, TestBody> for MockFetcher {
     type Error = MockError;
 
     async fn history(
@@ -326,10 +326,10 @@ pub(super) struct MockVerifier {
     pub(super) calls: CallLog,
 }
 
-impl LqcVerifier<Sha256, MinPk> for MockVerifier {
+impl LqcVerifier<Sha256, Bls<MinPk>> for MockVerifier {
     type Error = MockError;
 
-    async fn verify(&mut self, _: &Lqc<MinPk, Sha256Digest>) -> Result<(), Self::Error> {
+    async fn verify(&mut self, _: &Lqc<Bls<MinPk>, Sha256Digest>) -> Result<(), Self::Error> {
         self.calls.lock().push("verify");
         self.valid.then_some(()).ok_or(MockError)
     }
@@ -337,7 +337,7 @@ impl LqcVerifier<Sha256, MinPk> for MockVerifier {
 
 pub(super) struct MockCatalog {
     pub(super) checkpoint: Checkpoint<Sha256Digest>,
-    pub(super) latest: Option<Arc<Lqc<MinPk, Sha256Digest>>>,
+    pub(super) latest: Option<Arc<Lqc<Bls<MinPk>, Sha256Digest>>>,
     pub(super) blocks: MockBlocks,
     pub(super) block_batches: Arc<Mutex<Vec<Vec<BlockRef<Sha256Digest>>>>>,
     pub(super) block_calls: Arc<AtomicUsize>,
@@ -350,7 +350,7 @@ pub(super) struct MockCatalog {
     pub(super) selected: Vec<CertificateId<Sha256Digest>>,
     pub(super) selected_calls: Arc<Mutex<Vec<CertificateId<Sha256Digest>>>>,
     /// Every committed L-QC, by certificate identity.
-    pub(super) proofs: BTreeMap<CertificateId<Sha256Digest>, Arc<Lqc<MinPk, Sha256Digest>>>,
+    pub(super) proofs: BTreeMap<CertificateId<Sha256Digest>, Arc<Lqc<Bls<MinPk>, Sha256Digest>>>,
     pub(super) commit_calls: Arc<AtomicUsize>,
     pub(super) commit_waiters: Option<CommitWaiters>,
     pub(super) commit_start_gate: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
@@ -358,7 +358,7 @@ pub(super) struct MockCatalog {
     pub(super) calls: CallLog,
 }
 
-impl CatalogPort<Sha256, MinPk, TestBody> for MockCatalog {
+impl CatalogPort<Sha256, Bls<MinPk>, TestBody> for MockCatalog {
     type Error = MockError;
     type CommitToken = oneshot::Receiver<Result<(), MockError>>;
 
@@ -366,14 +366,16 @@ impl CatalogPort<Sha256, MinPk, TestBody> for MockCatalog {
         Ok(self.checkpoint.clone())
     }
 
-    async fn latest_lqc(&mut self) -> Result<Option<Arc<Lqc<MinPk, Sha256Digest>>>, Self::Error> {
+    async fn latest_lqc(
+        &mut self,
+    ) -> Result<Option<Arc<Lqc<Bls<MinPk>, Sha256Digest>>>, Self::Error> {
         Ok(self.latest.take())
     }
 
     async fn lqc(
         &mut self,
         id: CertificateId<Sha256Digest>,
-    ) -> Result<Option<Arc<Lqc<MinPk, Sha256Digest>>>, Self::Error> {
+    ) -> Result<Option<Arc<Lqc<Bls<MinPk>, Sha256Digest>>>, Self::Error> {
         Ok(self.proofs.get(&id).cloned())
     }
 
@@ -442,7 +444,7 @@ impl CatalogPort<Sha256, MinPk, TestBody> for MockCatalog {
 
     async fn start_commit(
         &mut self,
-        batch: Commit<Sha256, MinPk>,
+        batch: Commit<Sha256, Bls<MinPk>>,
         handoff: Vec<delivery::HotOutput<Sha256, TestBody>>,
     ) -> Result<Self::CommitToken, Self::Error> {
         self.commit_calls.fetch_add(1, Ordering::Relaxed);
@@ -480,7 +482,7 @@ impl CatalogPort<Sha256, MinPk, TestBody> for MockCatalog {
         &mut self,
         checkpoint: Checkpoint<Sha256Digest>,
         _: PendingFloors,
-        _: Arc<Lqc<MinPk, Sha256Digest>>,
+        _: Arc<Lqc<Bls<MinPk>, Sha256Digest>>,
         _: Arc<TipRecord<Sha256Digest>>,
     ) -> Result<(), Self::Error> {
         self.checkpoint = checkpoint;

@@ -22,7 +22,7 @@ use crate::{
                 record::OnMissing,
             },
         },
-        mocks::Committee,
+        mocks::{Bls, Committee},
         testing::{SpanRecorder, TestBody},
         types::{BlockRef, ChainId, PathLimits, TransactionBlock, TransactionBlockHeader},
     },
@@ -49,10 +49,10 @@ fn lookup_dequeue_preserves_each_caller() {
     let spans = SpanRecorder::default();
     tracing::subscriber::with_default(tracing_subscriber::registry().with(spans.clone()), || {
         deterministic::Runner::default().start(|context| async move {
-            let committee = Committee::<MinPk>::builder(41, 6)
+            let committee = Committee::<Bls<MinPk>>::builder(41, 6)
                 .limits(PathLimits::new(1, 0))
                 .build();
-            let config = Config::<_, MinPk, TestBody>::new(
+            let config = Config::<_, Bls<MinPk>, TestBody>::new(
                 Start::Genesis(committee.config.genesis().clone()),
                 "promoter_tracing".into(),
                 committee.codec(),
@@ -159,11 +159,11 @@ pub(super) type TestCatalog = catalog::Catalog<
     TwoCap,
     deterministic::Context,
     Sha256,
-    MinPk,
+    Bls<MinPk>,
     TestBody,
 >;
 pub(super) type TestPromoter =
-    Actor<deterministic::Context, TwoCap, deterministic::Context, Sha256, MinPk, TestBody>;
+    Actor<deterministic::Context, TwoCap, deterministic::Context, Sha256, Bls<MinPk>, TestBody>;
 
 /// A promoter one output behind its target, over a catalog that never starts, so every promotion
 /// step waits forever.
@@ -177,10 +177,10 @@ pub(super) struct Stalled {
 }
 
 pub(super) async fn stalled(context: &deterministic::Context, prefix: &'static str) -> Stalled {
-    let committee = Committee::<MinPk>::builder(42, 6)
+    let committee = Committee::<Bls<MinPk>>::builder(42, 6)
         .limits(PathLimits::new(1, 0))
         .build();
-    let config = Config::<_, MinPk, TestBody>::new(
+    let config = Config::<_, Bls<MinPk>, TestBody>::new(
         Start::Genesis(committee.config.genesis().clone()),
         prefix.into(),
         committee.codec(),
@@ -189,7 +189,7 @@ pub(super) async fn stalled(context: &deterministic::Context, prefix: &'static s
     );
     let bounds = config.actor_bounds().unwrap();
     let stores_context = context.child("stores");
-    let stores = CatalogStore::<_, _, Sha256, MinPk, _>::open(&stores_context, &config)
+    let stores = CatalogStore::<_, _, Sha256, Bls<MinPk>, _>::open(&stores_context, &config)
         .await
         .unwrap();
     let checkpoint = stores.checkpoint().clone();

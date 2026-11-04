@@ -5,7 +5,7 @@ use crate::{
     multimmit::{
         actors::resolver::ResolveRequest,
         config::Role,
-        mocks::{Committee, cluster::start_network},
+        mocks::{Bls, Committee, cluster::start_network},
         wire::{CertificateMessage, ConsensusMessage},
     },
     types::View,
@@ -59,14 +59,14 @@ fn skipped_view_nullification_resolves_from_a_peer_node() {
     let executor = DeterministicRunner::timed(Duration::from_secs(60));
     executor.start(|context| async move {
         let seed = 48;
-        let committee = Committee::<MinPk>::builder(seed, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(seed, 6).build();
         let oracle = start_network(&context, committee.identities.clone(), 1024 * 1024).await;
 
         // Two full observers: node A misses the gap proof that node B durably forwarded.
         let mut node_a = Box::pin(
             NodeBuilder::new(seed, Role::Observer, "node_a")
                 .network(
-                    Committee::<MinPk>::builder(seed, 6).build(),
+                    Committee::<Bls<MinPk>>::builder(seed, 6).build(),
                     oracle.clone(),
                     0,
                 )
@@ -77,7 +77,7 @@ fn skipped_view_nullification_resolves_from_a_peer_node() {
         let node_b = Box::pin(
             NodeBuilder::new(seed + 1, Role::Observer, "node_b")
                 .network(
-                    Committee::<MinPk>::builder(seed, 6).build(),
+                    Committee::<Bls<MinPk>>::builder(seed, 6).build(),
                     oracle.clone(),
                     1,
                 )
@@ -115,9 +115,9 @@ fn skipped_view_nullification_resolves_from_a_peer_node() {
         certs_tx.send(
             Recipients::One(node_b.me.clone()),
             node_b
-                .envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
-                    nullification,
-                ))
+                .envelope(
+                    CertificateMessage::<Bls<MinPk>, Sha256Digest>::Nullification(nullification),
+                )
                 .encode(),
             true,
         );

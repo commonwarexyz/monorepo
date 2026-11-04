@@ -48,14 +48,13 @@ use crate::{
     Reporter,
     multimmit::{
         config::max_outbox_effects,
+        scheme::Scheme,
         types::{Body, ChainId, CodecConfig, TransactionBlock},
     },
 };
 use commonware_broadcast::buffered;
 use commonware_codec::Codec;
-use commonware_cryptography::{
-    Digestible, Hasher, PublicKey, bls12381::primitives::variant::Variant,
-};
+use commonware_cryptography::{Digestible, Hasher, PublicKey};
 use commonware_resolver::Resolver;
 use commonware_runtime::Spawner;
 use commonware_storage::{Context, translator::Translator};
@@ -65,21 +64,21 @@ use supervisor::Children;
 pub use supervisor::ServiceHandle;
 
 /// An opened marshal whose remaining actors have not started.
-pub struct Service<E, H, V, B, P>
+pub struct Service<E, H, S, B, P>
 where
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     B: Body<H>,
     P: PublicKey,
 {
     context: E,
-    storage: Opened<E, H, V, B>,
+    storage: Opened<E, H, S, B>,
     delivery: delivery::Receiver<H, B>,
-    bodies: Bodies<H, V, B>,
-    backfill: backfill::Actor<E, H, V, B>,
-    backfill_mailbox: backfill::Mailbox<H, V, B>,
-    serve: serve::Actor<E, H, V, B>,
+    bodies: Bodies<H, S, B>,
+    backfill: backfill::Actor<E, H, S, B>,
+    backfill_mailbox: backfill::Mailbox<H, S, B>,
+    serve: serve::Actor<E, H, S, B>,
     history_scratch: HistoryScratch<E, H>,
     block_scratch: BlockScratch<E, H::Digest>,
     broadcast: buffered::Mailbox<P, TransactionBlock<H, B>>,
@@ -93,16 +92,16 @@ where
 /// Opens marshal-owned storage and returns the bridge used to construct the network resolver.
 ///
 /// `buffer` is the buffered broadcast ingress that block subscriptions race against backfill.
-pub async fn open<E, T, H, V, B, P>(
+pub async fn open<E, T, H, S, B, P>(
     context: E,
-    config: Config<T, V, B>,
+    config: Config<T, S, B>,
     buffer: buffered::Mailbox<P, TransactionBlock<H, B>>,
-) -> Result<(Service<E, H, V, B, P>, BackfillBridge<H, V, B>), OpenError>
+) -> Result<(Service<E, H, S, B, P>, BackfillBridge<H, S, B>), OpenError>
 where
     E: Context + Spawner,
     T: Translator,
     H: Hasher<Digest = B::Digest>,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     B: Codec + Digestible,
     P: PublicKey,
 {
@@ -183,11 +182,11 @@ where
     ))
 }
 
-impl<E, H, V, B, P> Service<E, H, V, B, P>
+impl<E, H, S, B, P> Service<E, H, S, B, P>
 where
     E: Context + Spawner,
     H: Hasher,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     B: Body<H>,
     P: PublicKey,
 {
@@ -213,10 +212,10 @@ where
         network: R,
         verifier: Q,
         application: A,
-    ) -> (Mailbox<H, V, B>, ServiceHandle)
+    ) -> (Mailbox<H, S, B>, ServiceHandle)
     where
         R: Resolver<Key = wire::BackfillKey<H::Digest>, Subscriber = backfill::BackfillSubscriber>,
-        Q: LqcVerifier<H, V> + Clone,
+        Q: LqcVerifier<H, S> + Clone,
         A: Reporter<Activity = Update<TransactionBlock<H, B>>>,
     {
         let Opened {
@@ -304,20 +303,20 @@ where
 #[cfg(test)]
 mod fixtures {
     use super::Service;
-    use crate::multimmit::{marshal::actors::catalog, types::Body};
-    use commonware_cryptography::{Hasher, PublicKey, bls12381::primitives::variant::Variant};
+    use crate::multimmit::{marshal::actors::catalog, scheme::Scheme, types::Body};
+    use commonware_cryptography::{Hasher, PublicKey};
     use commonware_storage::Context;
 
-    impl<E, H, V, B, P> Service<E, H, V, B, P>
+    impl<E, H, S, B, P> Service<E, H, S, B, P>
     where
         E: Context,
         H: Hasher,
-        V: Variant,
+        S: Scheme<PublicKey = P>,
         B: Body<H>,
         P: PublicKey,
     {
         /// Returns the running catalog's mailbox.
-        pub(crate) fn catalog(&self) -> catalog::Mailbox<H, V, B> {
+        pub(crate) fn catalog(&self) -> catalog::Mailbox<H, S, B> {
             self.storage.catalog.clone()
         }
     }

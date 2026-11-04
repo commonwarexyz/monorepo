@@ -9,11 +9,12 @@ use crate::{
     Viewable as _,
     multimmit::{
         algebra::CertificateDerivations,
+        scheme::Scheme,
         types::{Artifact, BlockRef, ChainId, TransactionBlockHeader, VoteBody},
     },
     types::{Attributable as _, Height, Participant, View},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// The first authenticated claims of one signer in one view.
@@ -65,10 +66,10 @@ impl<D: Digest> AccountabilityState<D> {
     }
 
     /// Records one verified artifact and any complete vote transcript authenticated with it.
-    pub(super) fn observe<H: Hasher<Digest = D>, V: Variant>(
+    pub(super) fn observe<H: Hasher<Digest = D>, S: Scheme>(
         &mut self,
-        artifact: &Artifact<V, D>,
-        derivations: Option<&CertificateDerivations<V, D>>,
+        artifact: &Artifact<S, D>,
+        derivations: Option<&CertificateDerivations<S, D>>,
     ) -> Vec<Participant> {
         let mut proven = BTreeSet::new();
         match artifact {

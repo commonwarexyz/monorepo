@@ -8,9 +8,10 @@
 
 use crate::multimmit::{
     machine::durability::SignRequest,
+    scheme::Scheme,
     types::{Artifact, ArtifactId, LeaderBlock, VoteBody},
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 
 /// Whether this node has left one view, and the proof that exited it.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -50,8 +51,8 @@ pub(crate) enum SlotError {
 
 /// One local input to a view slot.
 #[derive(Clone, Debug)]
-enum SlotInput<V: Variant, D: Digest> {
-    Propose(LeaderBlock<V, D>),
+enum SlotInput<S: Scheme, D: Digest> {
+    Propose(LeaderBlock<S, D>),
     Vote(VoteBody<D>),
     NoVote,
     Nullify,
@@ -60,14 +61,14 @@ enum SlotInput<V: Variant, D: Digest> {
 
 /// The local choices for one retained view.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ViewSlotSnapshot<V: Variant, D: Digest> {
+pub(crate) struct ViewSlotSnapshot<S: Scheme, D: Digest> {
     pub(crate) transition: ViewTransition<D>,
     pub(crate) stance: ViewStance<D>,
     pub(crate) nullification: ViewNullification,
-    pub(crate) proposal: Option<LeaderBlock<V, D>>,
+    pub(crate) proposal: Option<LeaderBlock<S, D>>,
 }
 
-impl<V: Variant, D: Digest> Default for ViewSlotSnapshot<V, D> {
+impl<S: Scheme, D: Digest> Default for ViewSlotSnapshot<S, D> {
     fn default() -> Self {
         Self {
             transition: ViewTransition::Active,
@@ -78,12 +79,12 @@ impl<V: Variant, D: Digest> Default for ViewSlotSnapshot<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> ViewSlotSnapshot<V, D> {
+impl<S: Scheme, D: Digest> ViewSlotSnapshot<S, D> {
     /// Applies one input and returns whether the slot changed.
     ///
     /// Repeating an earlier choice changes nothing. Proposing, voting and abstaining require an
     /// active view; a nullify after the view exited changes nothing; the first exit proof is kept.
-    fn apply(&mut self, input: SlotInput<V, D>) -> Result<bool, SlotError> {
+    fn apply(&mut self, input: SlotInput<S, D>) -> Result<bool, SlotError> {
         let active = matches!(self.transition, ViewTransition::Active);
         match input {
             SlotInput::Propose(block) => match &self.proposal {
@@ -133,7 +134,7 @@ impl<V: Variant, D: Digest> ViewSlotSnapshot<V, D> {
     /// Applies the view choice a local signing request makes, if any.
     pub(crate) fn observe_request(
         &mut self,
-        request: &SignRequest<V, D>,
+        request: &SignRequest<S, D>,
     ) -> Result<bool, SlotError> {
         match request {
             SignRequest::LeaderBlock(request) => {
@@ -149,7 +150,7 @@ impl<V: Variant, D: Digest> ViewSlotSnapshot<V, D> {
     /// Applies the view choice a locally signed artifact records, if any.
     pub(crate) fn observe_artifact(
         &mut self,
-        artifact: &Artifact<V, D>,
+        artifact: &Artifact<S, D>,
     ) -> Result<bool, SlotError> {
         match artifact {
             Artifact::LeaderBlock(block) => self.apply(SlotInput::Propose(block.block().clone())),
@@ -209,9 +210,12 @@ impl<V: Variant, D: Digest> ViewSlotSnapshot<V, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::multimmit::machine::{
-        testing::fixtures::Harness,
-        tests::fixtures::{leader, view_vote},
+    use crate::multimmit::{
+        machine::{
+            testing::fixtures::Harness,
+            tests::fixtures::{leader, view_vote},
+        },
+        mocks::Bls,
     };
     use commonware_cryptography::{Hasher, Sha256, bls12381::primitives::variant::MinPk};
 
@@ -334,14 +338,14 @@ mod tests {
         let (machine, _) = Harness::observer().participants(6).start();
         let body = view_vote(&machine, &leader(&machine, 1), 0).body().clone();
 
-        let mut voted_first = ViewSlotSnapshot::<MinPk, _>::default();
+        let mut voted_first = ViewSlotSnapshot::<Bls<MinPk>, _>::default();
         assert!(voted_first.can_vote());
         assert_eq!(voted_first.apply(SlotInput::Vote(body.clone())), Ok(true));
         assert!(!voted_first.can_vote());
         assert_eq!(voted_first.apply(SlotInput::Nullify), Ok(true));
         assert!(voted_first.has_voted() && voted_first.nullified() && voted_first.stable());
 
-        let mut nullified_first = ViewSlotSnapshot::<MinPk, _>::default();
+        let mut nullified_first = ViewSlotSnapshot::<Bls<MinPk>, _>::default();
         assert_eq!(nullified_first.apply(SlotInput::Nullify), Ok(true));
         assert_eq!(
             nullified_first.apply(SlotInput::Vote(body)),

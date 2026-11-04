@@ -1,8 +1,8 @@
 //! Peer L-QC verifications: at most one per key, and a bounded number at once.
 
 use super::{Error, staging::Ready};
-use crate::multimmit::{marshal::wire::BackfillKey, types::Body};
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use crate::multimmit::{marshal::wire::BackfillKey, scheme::Scheme, types::Body};
+use commonware_cryptography::Hasher;
 use commonware_utils::futures::Pool;
 use std::{collections::BTreeSet, future::Future};
 
@@ -15,8 +15,8 @@ pub(super) enum Verdict {
 }
 
 /// A finished L-QC verification for one delivery.
-pub(super) struct Verification<H: Hasher, V: Variant, B: Body<H>> {
-    pub ready: Ready<H, V, B>,
+pub(super) struct Verification<H: Hasher, S: Scheme, B: Body<H>> {
+    pub ready: Ready<H, S, B>,
     pub result: Result<Verdict, Error>,
 }
 
@@ -24,13 +24,13 @@ pub(super) struct Verification<H: Hasher, V: Variant, B: Body<H>> {
 ///
 /// A key stays reserved until its verification finishes, so a delivery that arrives meanwhile does
 /// not start a second verification, even after its waiters were canceled and requested again.
-pub(super) struct Verifications<H: Hasher, V: Variant, B: Body<H>> {
-    active: Pool<'static, Verification<H, V, B>>,
+pub(super) struct Verifications<H: Hasher, S: Scheme, B: Body<H>> {
+    active: Pool<'static, Verification<H, S, B>>,
     keys: BTreeSet<BackfillKey<H::Digest>>,
     capacity: usize,
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> Verifications<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> Verifications<H, S, B> {
     /// Creates an empty set that runs at most `capacity` verifications at once.
     pub(super) fn new(capacity: usize) -> Self {
         Self {
@@ -59,7 +59,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Verifications<H, V, B> {
     pub(super) fn start(
         &mut self,
         key: BackfillKey<H::Digest>,
-        verification: impl Future<Output = Verification<H, V, B>> + Send + 'static,
+        verification: impl Future<Output = Verification<H, S, B>> + Send + 'static,
     ) {
         debug_assert!(!self.is_saturated());
         let inserted = self.keys.insert(key);
@@ -70,7 +70,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Verifications<H, V, B> {
     /// Waits for the next verification to finish. Pends while none is in flight.
     pub(super) fn next_completed(
         &mut self,
-    ) -> impl Future<Output = Verification<H, V, B>> + Send + '_ {
+    ) -> impl Future<Output = Verification<H, S, B>> + Send + '_ {
         self.active.next_completed()
     }
 
