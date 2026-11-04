@@ -1125,7 +1125,7 @@ impl Groups {
     }
 
     /// One line per group: width, home, and in-flight count.
-    #[cfg(any(feature = "test-utils", test))]
+    #[cfg(test)]
     pub(crate) fn describe(&self) -> String {
         self.groups
             .iter()
