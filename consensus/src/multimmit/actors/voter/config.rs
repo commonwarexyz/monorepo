@@ -1,0 +1,194 @@
+//! Voter configuration.
+
+use crate::{
+    Automaton, Relay, Reporter,
+    multimmit::{
+        actors::ingress::IngressLimits,
+        config::{Profile, RETRY_CEILING_VIEWS},
+        scheme::{Generic, Scheme},
+        storage::Recovered,
+        types::{Activity, Context, PathLimits},
+    },
+};
+use commonware_cryptography::{Digest, Hasher, PublicKey};
+use commonware_p2p::Blocker;
+use commonware_parallel::Strategy;
+use commonware_runtime::{
+    Metrics,
+    telemetry::metrics::{Counter, MetricsExt as _},
+};
+use commonware_storage::Context as StorageContext;
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    time::Duration,
+};
+
+/// Registers the counter of peers blocked for authenticated equivocation under `context`.
+///
+/// The counter is labelled with the batcher context so the dashboard metric name stays stable.
+pub(crate) fn blocked_counter(context: &impl Metrics) -> Counter {
+    context
+        .child("batcher")
+        .counter("blocked", "peers blocked for authenticated equivocation")
+}
+
+/// Configuration for the voter.
+pub(crate) struct Config<E, H, P, S, A, R, F, T, C, B>
+where
+    E: StorageContext,
+    H: Hasher,
+    P: PublicKey,
+    S: Scheme<PublicKey = P>,
+    A: Automaton<Context = Context<H::Digest>, Digest = H::Digest>,
+    R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
+    F: Reporter<Activity = Activity<S, H::Digest>>,
+    T: Strategy,
+    C: Strategy,
+    B: Blocker<PublicKey = P>,
+{
+    /// Scheme holding this replica's key material (or verifier-only material).
+    pub(crate) scheme: Generic<S>,
+    /// Execution strategy for bulk CPU-heavy cryptography.
+    ///
+    /// Carries data-availability certificate recovery, the one class of assembly the round does
+    /// not wait on.
+    pub(crate) strategy: T,
+    /// Execution strategy for view-critical CPU-heavy cryptography.
+    ///
+    /// Carries local signing and V-QC, L-QC, and nullification assembly: the work between a
+    /// quorum arriving and the artifact it authorizes leaving this replica.
+    pub(crate) critical_strategy: C,
+    /// The attached application automaton.
+    pub(crate) automaton: A,
+    /// The application payload relay.
+    pub(crate) relay: R,
+    /// Best-effort sink for machine-authorized activity.
+    pub(crate) reporter: F,
+    /// Peer blocker for participants the machine proves equivocated.
+    pub(crate) blocker: B,
+    /// Peers blocked for authenticated equivocation, registered by [`blocked_counter`].
+    pub(crate) blocked: Counter,
+    /// The machine and stores to drive, fresh or recovered.
+    pub(crate) recovered: Recovered<E, H, S>,
+    /// Bounded execution and retry policy.
+    pub(crate) limits: VoterLimits,
+    /// Capacity of each inbound queue.
+    pub(crate) mailbox_size: NonZeroUsize,
+}
+
+/// View timeouts between two heartbeats.
+const HEARTBEAT_VIEWS: u32 = 5;
+
+/// Returns the widest application-validation width of any producer chain.
+pub(crate) fn validation_parallelism<D: Digest>(profile: &Profile<D>) -> usize {
+    profile
+        .codec()
+        .pipeline_window()
+        .min(profile.resources().max_verification_batch())
+}
+
+/// Returns the application-validation width of a producer chain with path limits `limits`: its
+/// own pipeline window, capped by the verification batch.
+///
+/// Admitted blocks may sit two windows above the chain's certified frontier, so a wider width
+/// would let a producer occupy more application validations than its own pipeline needs.
+pub(crate) fn chain_validation_parallelism<D: Digest>(
+    profile: &Profile<D>,
+    limits: PathLimits,
+) -> usize {
+    validation_parallelism(profile).min(limits.pipeline_window() as usize)
+}
+
+/// Returns the global application-validation capacity across all producer chains.
+pub(crate) fn validation_capacity<D: Digest>(profile: &Profile<D>) -> usize {
+    profile
+        .protocol()
+        .chain_limits()
+        .iter()
+        .map(|limits| chain_validation_parallelism(profile, limits))
+        .fold(0, usize::saturating_add)
+        .min(profile.resources().max_cached_artifacts())
+}
+
+/// Bounded execution and retry policy for the voter.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct VoterLimits {
+    /// Initial publication retry backoff.
+    pub(crate) retry_initial: Duration,
+    /// Maximum publication retry backoff.
+    pub(crate) retry_ceiling: Duration,
+    /// Recent peer activity window for early leader timeouts; `None` disables the policy.
+    /// Must exceed the publication retry ceiling.
+    pub(crate) skip_timeout: Option<Duration>,
+    /// Interval between Relay refreshes, periodic metrics, and producer-stall checks.
+    pub(crate) heartbeat: Duration,
+    /// Acknowledged journal events between checkpoint snapshots.
+    pub(crate) checkpoint_interval: NonZeroU64,
+    /// Maximum artifacts merged into one view-critical observation batch.
+    ///
+    /// Matches the ingress actor's view-critical cohort bound, so merging queued cohorts never
+    /// enlarges the batch a vote or certificate verdict waits behind.
+    pub(crate) view_cohort_items: NonZeroUsize,
+}
+
+impl VoterLimits {
+    /// Derives the voter's policy from `profile`'s view timeout and early-timeout window.
+    ///
+    /// Publication retries start at an eighth of the view timeout and back off to
+    /// [`RETRY_CEILING_VIEWS`] view timeouts; the heartbeat runs every [`HEARTBEAT_VIEWS`] view
+    /// timeouts. `checkpoint_interval` sets how many acknowledged journal events separate two
+    /// checkpoint snapshots.
+    pub(crate) fn from_profile<D: Digest>(
+        profile: &Profile<D>,
+        checkpoint_interval: NonZeroU64,
+    ) -> Self {
+        let tuning = profile.tuning();
+        let view_timeout = tuning.view_timeout;
+        Self {
+            retry_initial: (view_timeout / 8).max(Duration::from_nanos(1)),
+            retry_ceiling: view_timeout.saturating_mul(RETRY_CEILING_VIEWS),
+            skip_timeout: tuning.skip_timeout,
+            heartbeat: view_timeout.saturating_mul(HEARTBEAT_VIEWS),
+            checkpoint_interval,
+            view_cohort_items: IngressLimits::VIEW_COHORT_ITEMS,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::multimmit::{machine::testing::fixtures::Harness, types::DaQuorum};
+
+    #[test]
+    fn each_chain_validates_within_its_own_pipeline_window() {
+        let mut limits = vec![PathLimits::new(2, 1); 6];
+        limits[1] = PathLimits::new(0, 0).with_pipeline_window(32).unwrap();
+        let profile = Harness::validator(5)
+            .participants(6)
+            .chain_limits(limits.clone())
+            .da_quorum(DaQuorum::Binding)
+            .profile();
+        let batch = profile.resources().max_verification_batch();
+        let cached = profile.resources().max_cached_artifacts();
+        assert_eq!(chain_validation_parallelism(&profile, limits[0]), 2);
+        let receipt = chain_validation_parallelism(&profile, limits[1]);
+        assert_eq!(receipt, batch.min(32));
+        assert_eq!(validation_capacity(&profile), (5 * 2 + receipt).min(cached));
+
+        // Uniform limits validate every chain at the shared width.
+        let uniform = Harness::validator(5).participants(6).profile();
+        let width = validation_parallelism(&uniform);
+        assert!(
+            uniform
+                .protocol()
+                .chain_limits()
+                .iter()
+                .all(|limits| chain_validation_parallelism(&uniform, limits) == width)
+        );
+        assert_eq!(
+            validation_capacity(&uniform),
+            (uniform.codec().chains() * width).min(uniform.resources().max_cached_artifacts())
+        );
+    }
+}

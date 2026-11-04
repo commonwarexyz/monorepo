@@ -1,0 +1,555 @@
+//! Codec bounds and path limits shared by every Multimmit protocol object.
+
+use crate::multimmit::types::ChainId;
+use commonware_utils::{Faults as _, N5f1};
+use std::sync::Arc;
+
+/// Bounds on the paths one producer chain carries in proposals and votes, immutable within an
+/// epoch.
+///
+/// The pipeline depth `d` (`d_prop`) bounds the blocks one proposal appends to the chain above
+/// its base. The pipeline window (`d_DA`, [`Self::pipeline_window`]) bounds how many blocks a
+/// producer builds, and a validator DA-votes, above the chain's DA-certified anchor. It is `d`
+/// unless [`Self::with_pipeline_window`] widens it, and one when `d = 0`. The extension bound `e`
+/// caps the blocks one vote carries for the chain above its proposal position.
+///
+/// `d = 0` places only DA-certified blocks: a proposal names the chain's highest held DA
+/// certificate and nothing above it. A wider window still lets the producer send blocks ahead of
+/// their certificates. `e = 0` disables vote extensions. A chain with both set places a block only
+/// through its DA certificate, which validators forward to upcoming leaders until it is placed.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PathLimits {
+    pipeline_depth: u32,
+    extension_bound: u32,
+    pipeline_window: u32,
+}
+
+impl PathLimits {
+    /// Creates path limits with pipeline depth `d` and extension bound `e`, whose pipeline window
+    /// is `d`, or one when `d = 0`.
+    pub const fn new(pipeline_depth: u32, extension_bound: u32) -> Self {
+        Self {
+            pipeline_depth,
+            extension_bound,
+            pipeline_window: if pipeline_depth == 0 {
+                1
+            } else {
+                pipeline_depth
+            },
+        }
+    }
+
+    /// Returns these limits with pipeline window `d_DA` = `window`, so the producer builds and
+    /// validators DA-vote that many blocks above the certified anchor while proposals still place
+    /// at most `d`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `window` is below the default window, `max(d, 1)`: proposals place
+    /// only DA-voted blocks, and the chain must advance.
+    pub const fn with_pipeline_window(mut self, window: u32) -> Result<Self, CodecConfigError> {
+        if window < Self::new(self.pipeline_depth, self.extension_bound).pipeline_window {
+            return Err(CodecConfigError::PipelineWindowBelowDepth {
+                depth: self.pipeline_depth,
+                window,
+            });
+        }
+        self.pipeline_window = window;
+        Ok(self)
+    }
+
+    /// Returns the pipeline depth `d`.
+    pub const fn pipeline_depth(self) -> u32 {
+        self.pipeline_depth
+    }
+
+    /// Returns the extension bound `e`.
+    pub const fn extension_bound(self) -> u32 {
+        self.extension_bound
+    }
+
+    /// Returns the pipeline window `d_DA`: how many blocks above the DA-certified anchor a
+    /// producer builds and a validator DA-votes. It is never zero and never below `d`.
+    pub const fn pipeline_window(self) -> u32 {
+        self.pipeline_window
+    }
+
+    /// Returns whether proposals place only DA-certified blocks on the chain, `d = 0`.
+    pub const fn certified_only(self) -> bool {
+        self.pipeline_depth == 0
+    }
+
+    /// Returns the larger of each bound in `self` and `other`.
+    const fn max(self, other: Self) -> Self {
+        Self {
+            pipeline_depth: if self.pipeline_depth > other.pipeline_depth {
+                self.pipeline_depth
+            } else {
+                other.pipeline_depth
+            },
+            extension_bound: if self.extension_bound > other.extension_bound {
+                self.extension_bound
+            } else {
+                other.extension_bound
+            },
+            pipeline_window: if self.pipeline_window > other.pipeline_window {
+                self.pipeline_window
+            } else {
+                other.pipeline_window
+            },
+        }
+    }
+}
+
+/// The [`PathLimits`] of every producer chain in one epoch, in chain order.
+///
+/// Decoding bounds every chain by the largest limits of any chain ([`Self::max`]); validation
+/// then holds each chain to its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChainLimits {
+    chains: Arc<[PathLimits]>,
+    max: PathLimits,
+    uniform: bool,
+}
+
+impl ChainLimits {
+    /// Returns `limits` for each of `chains` producer chains.
+    pub fn uniform(limits: PathLimits, chains: usize) -> Self {
+        Self {
+            chains: vec![limits; chains].into(),
+            max: limits,
+            uniform: true,
+        }
+    }
+
+    /// Returns the limits of each producer chain, in chain order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `limits` is empty.
+    pub fn new(limits: Vec<PathLimits>) -> Result<Self, CodecConfigError> {
+        let max = limits
+            .iter()
+            .copied()
+            .reduce(PathLimits::max)
+            .ok_or(CodecConfigError::ZeroChains)?;
+        let uniform = limits.iter().all(|limits| *limits == max);
+        Ok(Self {
+            chains: limits.into(),
+            max,
+            uniform,
+        })
+    }
+
+    /// Returns the limits of `chain`, or `None` when it is not a producer chain.
+    pub fn get(&self, chain: ChainId) -> Option<PathLimits> {
+        self.chains.get(chain.get() as usize).copied()
+    }
+
+    /// Returns the largest pipeline depth, extension bound, and pipeline window of any chain.
+    pub const fn max(&self) -> PathLimits {
+        self.max
+    }
+
+    /// Returns whether every chain has the same limits, so a bound checked against [`Self::max`]
+    /// already holds each chain to its own.
+    pub(crate) const fn is_uniform(&self) -> bool {
+        self.uniform
+    }
+
+    /// Returns the number of producer chains.
+    pub fn len(&self) -> usize {
+        self.chains.len()
+    }
+
+    /// Returns whether no producer chain is configured, which validated limits never are.
+    pub fn is_empty(&self) -> bool {
+        self.chains.is_empty()
+    }
+
+    /// Returns each chain's limits in chain order.
+    pub fn iter(&self) -> impl Iterator<Item = PathLimits> + '_ {
+        self.chains.iter().copied()
+    }
+}
+
+/// How many DA shares recover a data-availability certificate.
+///
+/// The quorum is the threshold of the DA key sharing, so it is fixed when the epoch's keys are
+/// dealt.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum DaQuorum {
+    /// `n - 2f` shares, so at least `f + 1` correct signers hold the block.
+    #[default]
+    Available,
+    /// `n - f` shares, from every correct validator when `f` are faulty.
+    ///
+    /// Two such quorums share at least `2f + 1` correct validators, each of which signs at most
+    /// one block per chain height, so a height has at most one binding certificate. On a chain
+    /// with `d = 0` and `e = 0`, where nothing uncertified is ever placed, such a certificate is a
+    /// binding receipt: once any correct validator holds it, its block is eventually placed and
+    /// ordered. An equivocating producer can complete a quorum with its own share and withhold the
+    /// certificate, leaving correct validators a share short, so a client holding a receipt must
+    /// deliver it to a correct validator.
+    ///
+    /// The quorum is the whole epoch's, so it applies to every chain, pipelined chains included.
+    Binding,
+}
+
+/// Bounded inputs used while decoding untrusted protocol objects, and the quorums they imply.
+///
+/// Counts are stored as `u32` so their meaning is independent of the target
+/// architecture. Getters convert them to allocation and indexing sizes only
+/// after construction has validated both counts. Path limits are the largest of any chain (see
+/// [`ChainLimits::max`]).
+///
+/// # Quorums
+///
+/// A committee of `n` participants tolerates `f` Byzantine faults with `n >= 5f + 1`, where `f`
+/// is the largest such count. A data-availability certificate needs the [`DaQuorum`]: `n - 2f`
+/// shares by default, so at least `f + 1` of its signers are correct and hold the block, or
+/// `n - f` for binding certificates. An L-QC needs exactly `n - f` votes and
+/// a V-QC accounts for between `n - f` and `n` messages. A nullification and a V-QC designation
+/// each need `2f + 1`: such a set holds at least `f + 1` correct participants and overlaps every
+/// `n - f` set in at least `f + 1` members, at least one of them correct. That overlap is why
+/// neither can coexist with a conflicting L-QC.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct CodecConfig {
+    participants: u32,
+    chains: u32,
+    limits: PathLimits,
+    da_quorum: DaQuorum,
+}
+
+impl CodecConfig {
+    /// Creates bounded codec configuration for an epoch with the default [`DaQuorum`].
+    pub fn new(
+        participants: usize,
+        chains: usize,
+        limits: PathLimits,
+    ) -> Result<Self, CodecConfigError> {
+        if participants == 0 {
+            return Err(CodecConfigError::ZeroParticipants);
+        }
+        if chains == 0 {
+            return Err(CodecConfigError::ZeroChains);
+        }
+
+        let participants = u32::try_from(participants)
+            .map_err(|_| CodecConfigError::TooManyParticipants(participants))?;
+        let chains = u32::try_from(chains).map_err(|_| CodecConfigError::TooManyChains(chains))?;
+
+        Ok(Self {
+            participants,
+            chains,
+            limits,
+            da_quorum: DaQuorum::Available,
+        })
+    }
+
+    /// Returns this configuration with `limits` as the largest path limits of any chain.
+    pub(crate) const fn with_limits(mut self, limits: PathLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Returns this configuration with DA certificates recovered from `quorum` shares.
+    pub const fn with_da_quorum(mut self, quorum: DaQuorum) -> Self {
+        self.da_quorum = quorum;
+        self
+    }
+
+    /// Returns the number of participants.
+    pub const fn participants(self) -> usize {
+        self.participants as usize
+    }
+
+    /// Returns the number of producer chains.
+    pub const fn chains(self) -> usize {
+        self.chains as usize
+    }
+
+    /// Returns every producer chain identifier in ascending order.
+    pub fn chain_ids(self) -> impl Iterator<Item = ChainId> {
+        (0..self.chains).map(ChainId::new)
+    }
+
+    /// Returns the largest path limits of any chain.
+    pub const fn limits(self) -> PathLimits {
+        self.limits
+    }
+
+    /// Returns the maximum number of blocks in one chain proposal on any chain.
+    pub const fn pipeline_depth(self) -> usize {
+        self.limits.pipeline_depth as usize
+    }
+
+    /// Returns the maximum number of blocks a producer builds, or a validator DA-votes, above a
+    /// chain's DA-certified anchor on any chain. It is never zero.
+    pub const fn pipeline_window(self) -> usize {
+        self.limits.pipeline_window() as usize
+    }
+
+    /// Returns the maximum number of blocks in one vote extension on any chain.
+    pub const fn extension_bound(self) -> usize {
+        self.limits.extension_bound as usize
+    }
+
+    /// Returns the largest number of faulty participants tolerated, `f`.
+    pub fn max_faults(self) -> usize {
+        N5f1::max_faults(self.participants) as usize
+    }
+
+    /// Returns the proposal rank a V-QC safe tip must reach, `f + 1`.
+    ///
+    /// Any `f + 1` votes include at least one correct participant.
+    pub fn safe_rank(self) -> usize {
+        N5f1::safe_rank(self.participants) as usize
+    }
+
+    /// Returns the proposal rank a final tip must reach, `3f + 1`.
+    pub fn final_rank(self) -> usize {
+        N5f1::final_rank(self.participants) as usize
+    }
+
+    /// Returns which [`DaQuorum`] recovers DA certificates.
+    pub const fn da_quorum_kind(self) -> DaQuorum {
+        self.da_quorum
+    }
+
+    /// Returns the exact DA-certificate quorum: `n - 2f`, or `n - f` when certificates bind.
+    pub fn da_quorum(self) -> usize {
+        match self.da_quorum {
+            DaQuorum::Available => N5f1::da_quorum(self.participants) as usize,
+            DaQuorum::Binding => self.view_quorum(),
+        }
+    }
+
+    /// Returns the exact nullification quorum, `2f + 1`.
+    pub fn nullification_quorum(self) -> usize {
+        self.two_f_plus_one()
+    }
+
+    /// Returns the minimum messages accounted by a V-QC and the exact L-QC quorum, `n - f`.
+    pub fn view_quorum(self) -> usize {
+        N5f1::quorum(self.participants) as usize
+    }
+
+    /// Returns the maximum number of messages accounted by a V-QC, `n`.
+    pub const fn vqc_max_messages(self) -> usize {
+        self.participants()
+    }
+
+    /// Returns the minimum votes required for a V-QC designation, `2f + 1`.
+    pub fn designation_quorum(self) -> usize {
+        self.two_f_plus_one()
+    }
+
+    /// Returns `2f + 1`, the smallest set that holds `f + 1` correct participants and overlaps
+    /// every `n - f` set in at least one correct participant.
+    fn two_f_plus_one(self) -> usize {
+        N5f1::nullification_quorum(self.participants) as usize
+    }
+}
+
+/// An invalid codec bound or path limit.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CodecConfigError {
+    /// No participant was configured.
+    #[error("participant count must be non-zero")]
+    ZeroParticipants,
+    /// The participant count cannot be represented by protocol identifiers.
+    #[error("participant count {0} exceeds u32::MAX")]
+    TooManyParticipants(usize),
+    /// No producer chain was configured.
+    #[error("producer chain count must be non-zero")]
+    ZeroChains,
+    /// The producer chain count cannot be represented by protocol identifiers.
+    #[error("producer chain count {0} exceeds u32::MAX")]
+    TooManyChains(usize),
+    /// A pipeline window is below its pipeline depth, or zero.
+    #[error("pipeline window {window} is below max(1, pipeline depth {depth})")]
+    PipelineWindowBelowDepth {
+        /// The pipeline depth `d`.
+        depth: u32,
+        /// The requested pipeline window.
+        window: u32,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_extension_bound_is_valid() {
+        let limits = PathLimits::new(1, 0);
+        assert_eq!(limits.pipeline_depth(), 1);
+        assert_eq!(limits.extension_bound(), 0);
+        assert!(!limits.certified_only());
+
+        let codec = CodecConfig::new(1, 1, limits).unwrap();
+        assert_eq!(codec.pipeline_depth(), 1);
+        assert_eq!(codec.pipeline_window(), 1);
+        assert_eq!(codec.extension_bound(), 0);
+    }
+
+    #[test]
+    fn zero_pipeline_depth_places_only_certified_blocks_and_still_advances() {
+        let limits = PathLimits::new(0, 0);
+        assert!(limits.certified_only());
+        assert_eq!(limits.pipeline_depth(), 0);
+        assert_eq!(limits.pipeline_window(), 1);
+        assert_eq!(PathLimits::new(3, 0).pipeline_window(), 3);
+    }
+
+    #[test]
+    fn pipeline_window_widens_but_never_drops_below_the_depth() {
+        let receipts = PathLimits::new(0, 0).with_pipeline_window(8).unwrap();
+        assert!(receipts.certified_only());
+        assert_eq!(receipts.pipeline_depth(), 0);
+        assert_eq!(receipts.pipeline_window(), 8);
+        assert_eq!(
+            PathLimits::new(0, 0).with_pipeline_window(0),
+            Err(CodecConfigError::PipelineWindowBelowDepth {
+                depth: 0,
+                window: 0,
+            })
+        );
+        assert_eq!(
+            PathLimits::new(4, 1).with_pipeline_window(3),
+            Err(CodecConfigError::PipelineWindowBelowDepth {
+                depth: 4,
+                window: 3,
+            })
+        );
+        assert_eq!(
+            PathLimits::new(4, 1).with_pipeline_window(4),
+            Ok(PathLimits::new(4, 1))
+        );
+
+        // Decoding takes the widest window of any chain.
+        let limits = ChainLimits::new(vec![receipts, PathLimits::new(2, 1)]).unwrap();
+        assert_eq!(limits.max().pipeline_window(), 8);
+        assert_eq!(limits.max().pipeline_depth(), 2);
+    }
+
+    #[test]
+    fn widened_pipeline_window_narrows_back_to_the_default() {
+        // The floor is the default window, `max(d, 1)`, not the current one.
+        assert_eq!(
+            PathLimits::new(4, 1)
+                .with_pipeline_window(8)
+                .unwrap()
+                .with_pipeline_window(4),
+            Ok(PathLimits::new(4, 1))
+        );
+        assert_eq!(
+            PathLimits::new(0, 0)
+                .with_pipeline_window(8)
+                .unwrap()
+                .with_pipeline_window(1),
+            Ok(PathLimits::new(0, 0))
+        );
+    }
+
+    #[test]
+    fn chain_limits_decode_under_the_largest_bound_of_any_chain() {
+        let limits = ChainLimits::new(vec![
+            PathLimits::new(0, 0),
+            PathLimits::new(4, 1),
+            PathLimits::new(2, 3),
+        ])
+        .unwrap();
+        assert_eq!(limits.len(), 3);
+        assert_eq!(limits.max(), PathLimits::new(4, 3));
+        assert_eq!(limits.get(ChainId::new(0)), Some(PathLimits::new(0, 0)));
+        assert_eq!(limits.get(ChainId::new(3)), None);
+        assert_eq!(
+            ChainLimits::new(Vec::new()),
+            Err(CodecConfigError::ZeroChains)
+        );
+
+        let uniform = ChainLimits::uniform(PathLimits::new(2, 1), 2);
+        assert_eq!(uniform.max(), PathLimits::new(2, 1));
+        assert!(uniform.iter().all(|chain| chain == PathLimits::new(2, 1)));
+    }
+
+    #[test]
+    fn chain_limits_report_whether_every_chain_shares_its_limits() {
+        assert!(
+            !ChainLimits::new(vec![PathLimits::new(2, 1), PathLimits::new(2, 0)])
+                .unwrap()
+                .is_uniform()
+        );
+        // A widened window alone makes limits distinct.
+        let widened = PathLimits::new(2, 1).with_pipeline_window(4).unwrap();
+        assert!(
+            !ChainLimits::new(vec![PathLimits::new(2, 1), widened])
+                .unwrap()
+                .is_uniform()
+        );
+
+        // Equal limits are uniform however they are built, and compare equal.
+        let uniform = ChainLimits::uniform(PathLimits::new(2, 1), 3);
+        let listed = ChainLimits::new(vec![PathLimits::new(2, 1); 3]).unwrap();
+        assert!(uniform.is_uniform());
+        assert!(listed.is_uniform());
+        assert_eq!(listed, uniform);
+        assert!(ChainLimits::new(vec![widened]).unwrap().is_uniform());
+    }
+
+    #[test]
+    fn rejects_zero_participants_and_chains() {
+        assert_eq!(
+            CodecConfig::new(0, 1, PathLimits::new(1, 0)),
+            Err(CodecConfigError::ZeroParticipants)
+        );
+        assert_eq!(
+            CodecConfig::new(1, 0, PathLimits::new(1, 0)),
+            Err(CodecConfigError::ZeroChains)
+        );
+    }
+
+    #[test]
+    fn rejects_participant_count_above_u32() {
+        let participants = u32::MAX as usize + 1;
+        assert_eq!(
+            CodecConfig::new(participants, 1, PathLimits::new(1, 0)),
+            Err(CodecConfigError::TooManyParticipants(participants))
+        );
+        assert_eq!(
+            CodecConfig::new(1, participants, PathLimits::new(1, 0)),
+            Err(CodecConfigError::TooManyChains(participants))
+        );
+    }
+
+    #[test]
+    fn codec_config_derives_n5f1_quorums() {
+        for (participants, chains) in [(1, 1), (5, 2), (6, 1), (10, 4), (11, 6), (16, 3)] {
+            let codec = CodecConfig::new(
+                participants as usize,
+                chains as usize,
+                PathLimits::new(4, 3),
+            )
+            .unwrap();
+
+            assert_eq!(codec.participants(), participants as usize);
+            assert_eq!(codec.chains(), chains as usize);
+            assert_eq!(codec.da_quorum(), N5f1::da_quorum(participants) as usize);
+            assert_eq!(
+                codec.nullification_quorum(),
+                N5f1::nullification_quorum(participants) as usize
+            );
+            assert_eq!(codec.view_quorum(), N5f1::quorum(participants) as usize);
+            assert_eq!(
+                codec.designation_quorum(),
+                N5f1::nullification_quorum(participants) as usize
+            );
+
+            let binding = codec.with_da_quorum(DaQuorum::Binding);
+            assert_eq!(binding.da_quorum_kind(), DaQuorum::Binding);
+            assert_eq!(binding.da_quorum(), N5f1::quorum(participants) as usize);
+        }
+    }
+}
