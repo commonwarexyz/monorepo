@@ -29,7 +29,7 @@ use super::{
         validate_sharings,
     },
 };
-use crate::multimmit::config::Parameters;
+use crate::multimmit::{checkpoint, config::Parameters};
 use commonware_cryptography::{
     PublicKey,
     bls12381::primitives::{group::Share, ops::sas, sharing::Sharing, variant::Variant},
@@ -258,6 +258,19 @@ impl<P: PublicKey, V: Variant, Q: Quorum> Scheme<P, V, Q> {
             signers,
             verifier,
         })
+    }
+}
+
+/// Checkpoint certificates from the committee's nullification key.
+impl<P: PublicKey, V: Variant, Q: Quorum> Generic<Scheme<P, V, Q>> {
+    /// Returns the scheme that certifies [`aggregation`](crate::aggregation) checkpoints with
+    /// this committee's `2f+1` nullification key, under the aggregation namespace `namespace`.
+    ///
+    /// A signer signs checkpoints with its nullification share, a verifier also verifies
+    /// individual shares, and a certificate verifier verifies recovered certificates. See
+    /// [`checkpoint`].
+    pub fn checkpoint(&self, namespace: &[u8]) -> checkpoint::Scheme<P, V> {
+        self.nullify().checkpoint(namespace)
     }
 }
 

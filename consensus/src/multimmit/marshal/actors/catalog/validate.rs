@@ -290,12 +290,11 @@ mod tests {
     };
     use crate::{
         multimmit::{
-            marshal::OutputIndex,
             mocks::{Bls, Committee},
             testing::TestBody,
             types::{PathLimits, genesis_history},
         },
-        types::Participant,
+        types::{OutputIndex, Participant},
     };
     use commonware_cryptography::{Sha256, bls12381::primitives::variant::MinPk};
     use commonware_utils::NZUsize;

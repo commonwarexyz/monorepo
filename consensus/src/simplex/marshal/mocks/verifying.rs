@@ -4,7 +4,7 @@
 //! `Application` trait, suitable for testing the `Marshaled` wrapper in
 //! both standard and coding variants.
 
-use crate::{CertifiableBlock, Epochable, Handoff, simplex::marshal::ancestry::Ancestry};
+use crate::{CertifiableBlock, Epochable, Handoff, ancestry::Ancestry};
 use commonware_cryptography::Digested;
 use commonware_parallel::Sequential;
 use commonware_runtime::deterministic;
@@ -103,7 +103,6 @@ where
 {
     type Block = B;
     type Context = B::Context;
-    type SigningScheme = S;
     type Input = ();
 
     async fn prepare(
@@ -190,7 +189,6 @@ where
 {
     type Block = B;
     type Context = B::Context;
-    type SigningScheme = S;
     type Input = ();
 
     async fn propose(

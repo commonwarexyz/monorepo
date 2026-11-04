@@ -74,10 +74,6 @@ n_cases = 128
 hash = "193311b31518bf978fdef02998aa7c825949043826137aba5db4b4f2c98c44a3"
 n_cases = 128
 
-["commonware_consensus::multimmit::marshal::types::tests::conformance::CodecConformance<OutputIndex>"]
-hash = "0a64af25ec3432d415e1dc79a96c6e1eb1859a9babb22a843a805c819401f59d"
-n_cases = 1024
-
 ["commonware_consensus::multimmit::marshal::types::tests::conformance::CodecConformance<TestFloor>"]
 hash = "91ac9c1183e914f4d76b20646cccfea12e1fa8a5776028d1f53b36c1648221ca"
 n_cases = 128
@@ -485,6 +481,10 @@ n_cases = 65536
 ["commonware_consensus::types::tests::conformance::CodecConformance<Height>"]
 hash = "56ab85978136cb50f12ea89c8d25ce24451788172fe9d3d3c063f7ae6342d279"
 n_cases = 65536
+
+["commonware_consensus::types::tests::conformance::CodecConformance<OutputIndex>"]
+hash = "0a64af25ec3432d415e1dc79a96c6e1eb1859a9babb22a843a805c819401f59d"
+n_cases = 1024
 
 ["commonware_consensus::types::tests::conformance::CodecConformance<Round>"]
 hash = "d8ccba2653a5a2e5e317f0f365edbfc4845e3dc4325daefe0b43ca75920a654c"

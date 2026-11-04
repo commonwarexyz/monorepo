@@ -12,7 +12,7 @@
 //! - a data-availability [`certificate::Scheme`] signs [`DaSubject`]s and forms DA certificates at
 //!   the epoch's [`DaQuorum`] (see [`DaFaults`]); and
 //! - a nullification [`certificate::Scheme`] signs [`NullifySubject`]s and forms nullifications
-//!   at `2f + 1` ([`NullifyFaults`]).
+//!   at `2f + 1` ([`N5f1Nullification`]).
 //!
 //! A role can only sign its own subject type, and every subject kind signs under its own
 //! namespace, so a signature of one role never verifies as another. A [`Scheme`] names one
@@ -77,7 +77,7 @@ use commonware_cryptography::{
     },
     sha256,
 };
-use commonware_utils::{Faults, N5f1, union};
+use commonware_utils::{Faults, N5f1, faults::N5f1Nullification, union};
 use core::{fmt::Debug, hash::Hash};
 use num_traits::ToPrimitive;
 
@@ -413,19 +413,6 @@ impl DaFaults for Binding {
     const QUORUM: DaQuorum = DaQuorum::Binding;
 }
 
-/// The `2f + 1` nullification quorum of an `n = 5f + 1` committee.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct NullifyFaults;
-
-impl Faults for NullifyFaults {
-    fn max_faults(n: impl ToPrimitive) -> u32 {
-        let n = n
-            .to_u32()
-            .expect("n must be a non-negative integer that fits in u32");
-        n - N5f1::nullification_quorum(n)
-    }
-}
-
 /// The DA certificate type of a suite.
 pub type DaCertificateOf<S> = <<S as Scheme>::Da as Verifier>::Certificate;
 
@@ -478,7 +465,7 @@ pub trait Scheme: Clone + Debug + Default + Eq + Hash + Send + Sync + 'static {
     /// Signs nullify shares and forms nullifications.
     type Nullify: for<'a> certificate::Scheme<
             PublicKey = Self::PublicKey,
-            Faults = NullifyFaults,
+            Faults = N5f1Nullification,
             Subject<'a, RoleDigest> = NullifySubject,
         >;
 
