@@ -45,11 +45,6 @@ impl<
 where
     Operation<F, K, V>: Codec,
 {
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        self.any.get(key).await
-    }
-
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
     /// the provided `root`.
     pub fn verify_key_value_proof(
@@ -78,21 +73,21 @@ impl<
 where
     Operation<F, K, V>: Codec,
 {
-    /// Generate and return a proof of the current value of `key`, along with the other
-    /// [KeyValueProof] required to verify the proof. Returns KeyNotFound error if the key is not
-    /// currently assigned any value.
+    /// Return a proof authenticating the current value of `key` against [`Self::root`], and that
+    /// value.
     ///
     /// # Errors
     ///
     /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
     pub async fn key_value_proof(
         &self,
-        key: K,
-    ) -> Result<KeyValueProof<F, H::Digest, N>, Error<F>> {
-        let op_loc = self.any.get_with_loc(&key).await?;
-        let Some((_, loc)) = op_loc else {
+        key: &K,
+    ) -> Result<(KeyValueProof<F, H::Digest, N>, V::Value), Error<F>> {
+        let op_loc = self.any.get_with_loc(key).await?;
+        let Some((value, loc)) = op_loc else {
             return Err(Error::<F>::KeyNotFound);
         };
-        self.operation_proof(loc).await
+        let proof = self.operation_proof(loc).await?;
+        Ok((proof, value))
     }
 }

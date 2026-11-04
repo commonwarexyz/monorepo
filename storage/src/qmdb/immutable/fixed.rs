@@ -810,7 +810,7 @@ mod tests {
         test_fixed_inactivity_floor_tracking => run_inactivity_floor_tracking, open;
         test_fixed_floor_monotonicity => run_floor_monotonicity, open;
         test_fixed_floor_monotonicity_violation => run_floor_monotonicity_violation, open;
-        test_fixed_floor_beyond_size => run_floor_beyond_size, open;
+        test_fixed_floor_beyond_commit => run_floor_beyond_commit, open;
         test_fixed_chained_floor_regression => run_chained_floor_regression, open;
         test_fixed_chained_floor_beyond_commit => run_chained_floor_beyond_commit, open;
         test_fixed_bounded_initialization_restores_floor => run_bounded_initialization_restores_floor, open_with_max;

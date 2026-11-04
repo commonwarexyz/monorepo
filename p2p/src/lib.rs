@@ -50,6 +50,37 @@ stability_scope!(BETA {
         One(P),
     }
 
+    impl<P: PublicKey> Recipients<P> {
+        /// Adds the recipients in `other` to `self`.
+        ///
+        /// [`Recipients::All`] absorbs any other set. Two equal [`Recipients::One`] remain
+        /// [`Recipients::One`]. All other explicit unions become [`Recipients::Some`] with
+        /// sorted, deduplicated peers, including when the result is empty.
+        pub fn union_with(&mut self, other: Self) {
+            match (&mut *self, other) {
+                (Self::All, _) => return,
+                (_, Self::All) => {
+                    *self = Self::All;
+                    return;
+                }
+                (Self::One(left), Self::One(right)) if *left == right => return,
+                (Self::One(left), Self::One(right)) => {
+                    *self = Self::Some(vec![left.clone(), right]);
+                }
+                (Self::Some(peers), Self::One(peer)) => peers.push(peer),
+                (Self::One(peer), Self::Some(mut peers)) => {
+                    peers.push(peer.clone());
+                    *self = Self::Some(peers);
+                }
+                (Self::Some(peers), Self::Some(more)) => peers.extend(more),
+            }
+            if let Self::Some(peers) = self {
+                peers.sort_unstable();
+                peers.dedup();
+            }
+        }
+    }
+
     /// Interface for sending messages to a set of recipients without rate-limiting restrictions.
     pub trait UnlimitedSender: Clone + Send + Sync + 'static {
         /// Public key type used to identify recipients.
@@ -440,4 +471,66 @@ macro_rules! block {
 #[cfg(test)]
 pub fn block_peer<B: Blocker>(blocker: &mut B, peer: B::PublicKey) -> Feedback {
     blocker.block(peer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Recipients;
+    use commonware_cryptography::{
+        Signer as _,
+        ed25519::{PrivateKey, PublicKey},
+    };
+    use rstest::{fixture, rstest};
+    use std::collections::BTreeSet;
+
+    #[fixture]
+    fn recipients() -> [Recipients<PublicKey>; 5] {
+        let a = PrivateKey::from_seed(1).public_key();
+        let b = PrivateKey::from_seed(2).public_key();
+        [
+            Recipients::All,
+            Recipients::One(a.clone()),
+            Recipients::One(b.clone()),
+            Recipients::Some(Vec::new()),
+            Recipients::Some(vec![a.clone(), b, a]),
+        ]
+    }
+
+    #[rstest]
+    fn recipient_unions(
+        recipients: [Recipients<PublicKey>; 5],
+        #[values(0, 1, 2, 3, 4)] left: usize,
+        #[values(0, 1, 2, 3, 4)] right: usize,
+    ) {
+        let (left, right) = (&recipients[left], &recipients[right]);
+        let mut merged = left.clone();
+        merged.union_with(right.clone());
+        if matches!(left, Recipients::All) || matches!(right, Recipients::All) {
+            assert!(matches!(merged, Recipients::All));
+            return;
+        }
+        let equal_ones =
+            matches!((left, right), (Recipients::One(l), Recipients::One(r)) if l == r);
+        assert_eq!(
+            matches!(merged, Recipients::One(_)),
+            equal_ones,
+            "only two equal One recipients may stay One"
+        );
+        let mut expected = BTreeSet::new();
+        for recipients in [left, right] {
+            match recipients {
+                Recipients::One(peer) => {
+                    expected.insert(peer.clone());
+                }
+                Recipients::Some(peers) => expected.extend(peers.iter().cloned()),
+                Recipients::All => unreachable!(),
+            }
+        }
+        let actual = match merged {
+            Recipients::One(peer) => vec![peer],
+            Recipients::Some(peers) => peers,
+            Recipients::All => panic!("explicit recipients must stay explicit"),
+        };
+        assert_eq!(actual, expected.into_iter().collect::<Vec<_>>());
+    }
 }

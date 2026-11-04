@@ -6,21 +6,11 @@
 //! instead for better performance._
 
 use crate::{
-    Context,
     index::ordered::Index,
     journal::contiguous::variable::Journal,
-    merkle::{Family, Location},
-    qmdb::{
-        Error,
-        any::{VariableConfig, VariableValue, ordered, value::VariableEncoding},
-        operation::Key,
-    },
-    translator::OrderedTranslator,
+    merkle::Location,
+    qmdb::any::{ordered, value::VariableEncoding},
 };
-use commonware_codec::Read;
-use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
 
 pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
 pub type Operation<F, K, V> = ordered::Operation<F, K, VariableEncoding<V>>;
@@ -38,29 +28,6 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<
-    F: Family,
-    E: Context + Spawner,
-    K: Key,
-    V: VariableValue,
-    H: Hasher,
-    T: OrderedTranslator,
-    S: Strategy,
-> Db<F, E, K, V, H, T, S>
-{
-    /// Returns a [Db] QMDB initialized from `cfg`. Any uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
-    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
-    /// `None` selects the latest retained state.
-    pub async fn init(
-        context: E,
-        cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S>,
-        max_size: Option<Location<F>>,
-    ) -> Result<Self, Error<F>> {
-        crate::qmdb::any::init(context, cfg, max_size).await
-    }
-}
-
 /// Partitioned index variants that divide the key space into `2^(P*8)` partitions.
 ///
 /// See [partitioned::Db] for the generic type, or use the convenience aliases:
@@ -73,21 +40,9 @@ impl<
 pub mod partitioned {
     pub use super::{Operation, Update};
     use crate::{
-        Context,
-        index::partitioned::ordered::Index,
-        journal::contiguous::variable::Journal,
-        merkle::{Family, Location},
-        qmdb::{
-            Error,
-            any::{VariableConfig, VariableValue},
-            operation::Key,
-        },
-        translator::OrderedTranslator,
+        index::partitioned::ordered::Index, journal::contiguous::variable::Journal,
+        merkle::Location,
     };
-    use commonware_codec::Read;
-    use commonware_cryptography::Hasher;
-    use commonware_parallel::Strategy;
-    use commonware_runtime::Spawner;
 
     /// An ordered key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -109,30 +64,6 @@ pub mod partitioned {
         S,
     >;
 
-    impl<
-        F: Family,
-        E: Context + Spawner,
-        K: Key,
-        V: VariableValue,
-        H: Hasher,
-        T: OrderedTranslator,
-        const P: usize,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, P, S>
-    {
-        /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
-        /// discarded and the state of the db will be as of the last committed operation.
-        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
-        /// `None` selects the latest retained state.
-        pub async fn init(
-            context: E,
-            cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
-            max_size: Option<Location<F>>,
-        ) -> Result<Self, Error<F>> {
-            crate::qmdb::any::init(context, cfg, max_size).await
-        }
-    }
-
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Variable-value DB with 256 partitions.
@@ -152,7 +83,9 @@ pub(crate) mod test {
     use crate::{
         mmr,
         qmdb::{
+            Error,
             any::{
+                VariableConfig,
                 batch::{DiffEntry, Slot, StagedLoc, lookup_sorted},
                 ordered::test::{
                     test_ordered_any_db_basic, test_ordered_any_db_empty,
@@ -164,7 +97,7 @@ pub(crate) mod test {
         },
         translator::TwoCap,
     };
-    use commonware_cryptography::{Sha256, sha256::Digest};
+    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;

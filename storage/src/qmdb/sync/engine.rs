@@ -140,7 +140,7 @@ async fn wait_for_event<F: Family, Op: Send, D: Digest, E: Send>(
     }
 }
 
-/// Configuration for creating a new Engine
+/// Configuration for synchronizing a database.
 pub struct Config<DB, S>
 where
     DB: Database,

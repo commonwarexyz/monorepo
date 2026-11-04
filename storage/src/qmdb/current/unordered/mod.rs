@@ -10,8 +10,6 @@
 pub mod db;
 pub mod fixed;
 pub mod proof;
-#[cfg(any(test, feature = "test-traits"))]
-mod test_trait_impls;
 pub mod variable;
 
 #[cfg(test)]
@@ -80,7 +78,7 @@ pub mod tests {
         let partition = "build-small".to_string();
         let db: C = open_db(context.child("first"), partition.clone()).await;
         assert_eq!(db.inactivity_floor_loc(), Location::<F>::new(0));
-        assert_eq!(db.oldest_retained(), 0);
+        assert_eq!(db.bounds().start, Location::<F>::new(0));
         let root0 = db.root();
         drop(db);
         let db: C = open_db(context.child("second"), partition.clone()).await;
@@ -196,12 +194,16 @@ pub mod tests {
             let db = db.apply_batch(merkleized).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
-            let proof = db.key_value_proof(k).await.unwrap();
+            let (proof, proved_value) = db.key_value_proof(&k).await.unwrap();
+            assert_eq!(proved_value, v1);
 
             // Proof should be verifiable against current root.
             let root = db.root();
             assert!(TestDb::<F, C, V>::verify_key_value_proof(
-                k, v1, &proof, &root
+                k,
+                proved_value,
+                &proof,
+                &root
             ));
 
             let v2 = Sha256::fill(0xA2);
@@ -226,9 +228,13 @@ pub mod tests {
             ));
 
             // But the new value should verify against a new proof.
-            let proof = db.key_value_proof(k).await.unwrap();
+            let (proof, proved_value) = db.key_value_proof(&k).await.unwrap();
+            assert_eq!(proved_value, v2);
             assert!(TestDb::<F, C, V>::verify_key_value_proof(
-                k, v2, &proof, &root,
+                k,
+                proved_value,
+                &proof,
+                &root,
             ));
 
             // Old value will not verify against new proof.
@@ -413,7 +419,7 @@ pub mod tests {
 
             // Confirm bad keys produce the expected error.
             let bad_key = Sha256::fill(0xAA);
-            let res = db.key_value_proof(bad_key).await;
+            let res = db.key_value_proof(&bad_key).await;
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
             let start = *db.inactivity_floor_loc();
@@ -431,10 +437,14 @@ pub mod tests {
                     }
                 };
 
-                let proof = db.key_value_proof(key).await.unwrap();
+                let (proof, proved_value) = db.key_value_proof(&key).await.unwrap();
+                assert_eq!(proved_value, value);
                 // Proof should validate against the current value and correct root.
                 assert!(TestDb::<F, C, V>::verify_key_value_proof(
-                    key, value, &proof, &root
+                    key,
+                    proved_value,
+                    &proof,
+                    &root
                 ));
                 // Proof should fail against the wrong value. Use hash instead of fill to ensure
                 // the value differs from any key/value created by TestKey::from_seed (which uses
@@ -497,9 +507,10 @@ pub mod tests {
                 let root = db.root();
 
                 // Create a proof for the current value of k.
-                let proof = db.key_value_proof(k).await.unwrap();
+                let (proof, proved_value) = db.key_value_proof(&k).await.unwrap();
+                assert_eq!(proved_value, v);
                 assert!(
-                    TestDb::<F, C, V>::verify_key_value_proof(k, v, &proof, &root),
+                    TestDb::<F, C, V>::verify_key_value_proof(k, proved_value, &proof, &root),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.

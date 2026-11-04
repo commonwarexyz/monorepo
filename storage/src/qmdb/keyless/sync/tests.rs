@@ -11,8 +11,8 @@ use crate::{
         self,
         keyless::{self, Operation, fixed, variable},
         sync::{
-            self, Engine, Target,
-            engine::{Config, NextStep},
+            self, Config, Engine, Target,
+            engine::NextStep,
             harness::{
                 CompactConfigOf, CompactOpOf, CompactSyncTestHarness, ConfigOf, DbOf, JournalOf,
                 OpOf, PAGE_CACHE_SIZE, PAGE_SIZE, SyncTestHarness, compact_engine_config,
@@ -540,7 +540,7 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
         let source = Arc::new(source);
 
         // The sync range holds only the floor commit, so one boundary response supplies all of it.
-        let client: DbOf<harnesses::VariableHarness<F>> = sync::sync(sync::engine::Config {
+        let client: DbOf<harnesses::VariableHarness<F>> = sync::sync(sync::Config {
             context: context.child("client"),
             db_config: fine_config(&format!("{suffix}-client")),
             fetch_batch_size: NZU64!(2),

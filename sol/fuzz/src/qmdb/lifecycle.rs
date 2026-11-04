@@ -117,10 +117,10 @@ fn output<F: Graftable, D: Digest>(
 
 async fn membership<F: Graftable, H: Hasher>(
     db: &Database<F, H>,
-    value: FixedBytes<32>,
+    expected_value: FixedBytes<32>,
 ) -> Result<OperationOutput, qmdb::Error<F>> {
-    assert_eq!(db.get(&key(2)).await?.as_ref(), Some(&value));
-    let proof = db.key_value_proof(key(2)).await?;
+    let (proof, value) = db.key_value_proof(&key(2)).await?;
+    assert_eq!(value, expected_value);
     assert!(proof.verify::<H, FixedEncoding<FixedBytes<32>>>(key(2), value.clone(), &db.root()));
     Ok(output(
         db.root(),
