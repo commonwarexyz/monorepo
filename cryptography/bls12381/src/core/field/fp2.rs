@@ -299,13 +299,14 @@ impl<F> Fp2<F> {
     /// The real component is `a0 b0` less `a1 b1`, and the imaginary component comes from
     /// [`Field::cross`], which reuses both known products. Both factors' components must have limb
     /// bound `1`.
-    /// Runs as its own kernel, so callers share one copy.
+    /// Runs through [`Field::kernel`], as its own kernel unless the representation inlines it.
     #[inline(always)]
     pub fn product<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
     where
         F: Field<S>,
     {
-        simd.execute(
+        F::kernel(
+            simd,
             #[inline(always)]
             move |simd: S| self.product_body(simd, rhs),
         )
@@ -346,13 +347,14 @@ impl<F> Fp2<F> {
     /// `a0 b1 + a1 b0`. Unlike [`Self::product`], no product takes a sum of components, so large
     /// factors keep smaller positional bounds at the cost of one more positional product; residues
     /// form the same products either way. Every factor must be ready, as for [`Field::product`].
-    /// Runs as its own kernel, so callers share one copy.
+    /// Runs through [`Field::kernel`], as its own kernel unless the representation inlines it.
     #[inline(always)]
     pub fn product_schoolbook<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
     where
         F: Field<S>,
     {
-        simd.execute(
+        F::kernel(
+            simd,
             #[inline(always)]
             move |simd: S| self.product_schoolbook_body(simd, rhs),
         )
@@ -382,13 +384,14 @@ impl<F> Fp2<F> {
     /// The real component is `(c0 + c1)(c0 - c1)` and the imaginary component is `(2 c0) c1`.
     /// Both components must have limb bound `1`, and the bias `K` must cover `c1` as for
     /// [`Field::sub`].
-    /// Runs as its own kernel, so callers share one copy.
+    /// Runs through [`Field::kernel`], as its own kernel unless the representation inlines it.
     #[inline(always)]
     pub fn square_product<const K: u64, S: Simd>(self, simd: S) -> Product<F, S>
     where
         F: Field<S>,
     {
-        simd.execute(
+        F::kernel(
+            simd,
             #[inline(always)]
             move |simd: S| self.square_product_body::<K, S>(simd),
         )
@@ -499,13 +502,14 @@ impl<F> Fp2<F> {
     }
 
     /// Reduces both components of a product, as for [`Field::reduce_signed`] with the bias `K`.
-    /// Runs as its own kernel, so callers share one copy.
+    /// Runs through [`Field::kernel`], as its own kernel unless the representation inlines it.
     #[inline(always)]
     pub fn reduce<const K: u64, S: Simd>(simd: S, product: Product<F, S>) -> Self
     where
         F: Field<S>,
     {
-        simd.execute(
+        F::kernel(
+            simd,
             #[inline(always)]
             move |simd: S| Self::reduce_body::<K, S>(simd, product),
         )
@@ -550,13 +554,14 @@ impl<F> Fp2<F> {
 
     /// Reduces both components of a product to integer bound at most [`TIGHT`], as for
     /// [`Field::reduce_signed_tight`] with the bias `K`.
-    /// Runs as its own kernel, so callers share one copy.
+    /// Runs through [`Field::kernel`], as its own kernel unless the representation inlines it.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn reduce_tight<const K: u64, S: Simd>(simd: S, product: Product<F, S>) -> Self
     where
         F: Field<S>,
     {
-        simd.execute(
+        F::kernel(
+            simd,
             #[inline(always)]
             move |simd: S| Self {
                 c0: F::reduce_signed_tight::<K>(simd, product.c0),

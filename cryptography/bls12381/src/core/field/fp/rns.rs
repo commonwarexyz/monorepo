@@ -72,7 +72,7 @@ use crate::{
     },
     montgomery::subtract_modulus,
 };
-use commonware_simd::{Simd, X86V4C};
+use commonware_simd::{Operation, Simd, X86V4C};
 use core::hint::black_box;
 use parameters::{
     CANONICAL_CORRECTION, ENCODED_P, EXPAND, M, M_OVER_P, MODULUS, MODULUS_N0, N, N_OVER_P, REDUCE,
@@ -706,10 +706,11 @@ impl<S: X86V4C> Rns<S> {
     /// conversion accumulates eight rotations of the quotient into the second basis's products,
     /// which are then reduced, folded, and extended back to the first basis.
     ///
-    /// Runs as its own kernel, so formulas call one copy rather than inlining it at every use.
+    /// Runs through [`Field::kernel`], which inlines it.
     #[inline(always)]
     pub fn mul(self, simd: S, rhs: Self) -> Self {
-        simd.execute(
+        Self::kernel(
+            simd,
             #[inline(always)]
             move |simd: S| self.multiply(simd, rhs),
         )
@@ -836,6 +837,13 @@ impl<S: X86V4C> Field<S> for Rns<S> {
 
     const PRODUCTS: usize = SUM_PRODUCTS;
 
+    /// Runs inline: a multiplication is about 200 instructions, and the calling kernel keeps the
+    /// operands in registers rather than passing them through memory.
+    #[inline(always)]
+    fn kernel<O: Operation<S>>(simd: S, operation: O) -> O::Output {
+        operation.x86_v4c(simd)
+    }
+
     #[inline(always)]
     fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
         Self::load(simd, elements, fill)
@@ -956,10 +964,11 @@ impl<S: X86V4C> Field<S> for Rns<S> {
     /// The first basis reduces and folds its accumulators into quotient residues at most `2q`, and
     /// the rest is the reduction of [`Rns::mul`].
     ///
-    /// Runs as its own kernel, so formulas call one copy rather than inlining it at every use.
+    /// Runs through [`Field::kernel`], which inlines it.
     #[inline(always)]
     fn reduce(simd: S, product: Wide<S>) -> Self {
-        simd.execute(
+        Self::kernel(
+            simd,
             #[inline(always)]
             move |simd: S| {
                 product.bound.assert_le(BUDGET);
