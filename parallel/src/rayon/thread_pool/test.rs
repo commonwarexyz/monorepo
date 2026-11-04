@@ -1,6 +1,7 @@
 use super::ThreadPool;
 use crate::rayon::{
-    ThreadPoolBuilder, join, registry::Placement, sleep::with_sleep_notification, unwind, yield_now,
+    ThreadPoolBuilder, WorkerPosition, join, registry::Placement, sleep::with_sleep_notification,
+    unwind, yield_now,
 };
 use commonware_utils::sync::Mutex;
 use futures::{channel::oneshot, future::poll_fn};
@@ -71,7 +72,7 @@ fn sleeper_stop() {
 }
 
 /// Creates a start handler that increments an atomic counter.
-fn count_handler() -> (Arc<AtomicUsize>, impl Fn(usize)) {
+fn count_handler() -> (Arc<AtomicUsize>, impl Fn(WorkerPosition)) {
     let count = Arc::new(AtomicUsize::new(0));
     (Arc::clone(&count), move |_| {
         count.fetch_add(1, Ordering::SeqCst);
@@ -124,11 +125,11 @@ fn panic_thread_name() {
     let builder = ThreadPoolBuilder::new()
         .num_threads(10)
         .start_handler(start_handler)
-        .thread_name(|i| {
-            if i >= 5 {
+        .thread_name(|worker| {
+            if worker.index >= 5 {
                 panic!();
             }
-            format!("panic_thread_name#{i}")
+            format!("panic_thread_name#{}", worker.index)
         });
 
     let pool = unwind::halt_unwinding(|| builder.build());

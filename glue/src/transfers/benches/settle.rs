@@ -1,7 +1,6 @@
 use crate::{BALANCE, Balance, CONCURRENCY, Nonced, for_each_batch};
 use commonware_glue::transfers::{Plan, Transfer};
-use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::NZUsize;
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
 use criterion::{Criterion, criterion_group};
 
 /// Settles the plan of `batch` on one thread and on `pool`, with every key starting at `start`.
@@ -24,7 +23,7 @@ fn bench_batch<T: Transfer + Sync>(
 }
 
 fn bench_settle(c: &mut Criterion) {
-    let pool = Rayon::new(NZUsize!(CONCURRENCY)).unwrap();
+    let pool = Rayon::new(ThreadPoolBuilder::new().num_threads(CONCURRENCY)).unwrap();
     for_each_batch(|params, payments, signed| {
         bench_batch(
             c,

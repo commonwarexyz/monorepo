@@ -8,8 +8,8 @@ use commonware_cryptography::{
     blake3::{Blake3 as OurBlake3, Digest},
     fuzz::Plan,
 };
-use commonware_parallel::{Rayon, mocks::Explorer};
-use commonware_utils::{NZUsize, TestRng};
+use commonware_parallel::{Rayon, mocks::Explorer, rayon::ThreadPoolBuilder};
+use commonware_utils::TestRng;
 use libfuzzer_sys::fuzz_target;
 use rand::Rng as _;
 use std::sync::LazyLock;
@@ -17,8 +17,9 @@ use zeroize::Zeroize;
 
 /// A four-worker explorer that takes every split a hasher offers it. It is built once and reused
 /// across invocations because starting a thread pool is expensive.
-static STRATEGY: LazyLock<Explorer> =
-    LazyLock::new(|| Explorer::parallel(&Rayon::new(NZUsize!(4)).unwrap()));
+static STRATEGY: LazyLock<Explorer> = LazyLock::new(|| {
+    Explorer::parallel(&Rayon::new(ThreadPoolBuilder::new().num_threads(4)).unwrap())
+});
 
 #[derive(Debug, Arbitrary)]
 enum Operation {

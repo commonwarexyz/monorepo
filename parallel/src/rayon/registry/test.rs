@@ -2,8 +2,8 @@
 
 use super::Placement;
 use crate::rayon::{
-    ThreadPool, ThreadPoolBuilder, Yield, join, placement_width, sleep::with_sleep_notification,
-    thread_pool::Worker, yield_now,
+    ThreadPool, ThreadPoolBuilder, WorkerPosition, Yield, join, placement_width,
+    sleep::with_sleep_notification, thread_pool::Worker, yield_now,
 };
 use commonware_utils::{TestRng, Widen, sync::Mutex};
 use rand::RngExt as _;
@@ -128,6 +128,42 @@ fn workers_form_consecutive_groups() {
     }
     let default = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
     assert_eq!(default.group_widths(), [4]);
+}
+
+/// The thread name closure and the start handler receive each worker's index, group, and offset
+/// in its group, with the last group narrower when the width does not divide the thread count.
+#[test]
+fn thread_names_see_worker_positions() {
+    let named = Arc::new(Mutex::new(Vec::new()));
+    let started = Arc::new(Mutex::new(Vec::new()));
+    let (name_seen, start_seen) = (Arc::clone(&named), Arc::clone(&started));
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(5)
+        .group_width(2)
+        .thread_name(move |worker| {
+            name_seen.lock().push(worker);
+            format!("g{}-{}", worker.group, worker.offset)
+        })
+        .start_handler(move |worker| start_seen.lock().push(worker))
+        .build()
+        .unwrap();
+    let names = pool.broadcast(|_| thread::current().name().map(str::to_owned));
+    let expected: Vec<_> = (0..5)
+        .map(|index| WorkerPosition {
+            index,
+            group: index / 2,
+            offset: index % 2,
+        })
+        .collect();
+    for positions in [&named, &started] {
+        let mut positions = positions.lock().clone();
+        positions.sort_by_key(|worker| worker.index);
+        assert_eq!(positions, expected);
+    }
+    assert_eq!(
+        names,
+        ["g0-0", "g0-1", "g1-0", "g1-1", "g2-0"].map(|name| Some(name.to_owned()))
+    );
 }
 
 /// A worker reports its group's width under a Local placement, including a narrower last

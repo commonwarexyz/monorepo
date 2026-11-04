@@ -38,7 +38,7 @@ pub const TASKS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 ///
 /// Panics if the pool fails to build.
 pub fn pooled(workers: NonZeroUsize, parallelism: NonZeroUsize) -> Rayon {
-    Rayon::new(workers)
+    Rayon::new(ThreadPoolBuilder::new().num_threads(workers.get()))
         .expect("the pool must build")
         .with_parallelism(parallelism)
 }
@@ -704,7 +704,7 @@ mod tests {
         fn body(strategy: &Explorer, len: usize) -> &'static str {
             strategy.run(len, || "serial", || "parallel")
         }
-        let strategy = Rayon::new(NonZeroUsize::new(2).unwrap()).unwrap();
+        let strategy = Rayon::new(ThreadPoolBuilder::new().num_threads(2)).unwrap();
         let explorers: Vec<_> = (0..64)
             .map(|seed| Explorer::seeded(&strategy, seed))
             .collect();
@@ -773,7 +773,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "a handed-off job must run on a multi-worker pool")]
     fn parallel_explorer_refuses_to_inline_a_handed_off_job() {
-        let single = Rayon::new(NonZeroUsize::MIN).unwrap();
+        let single = Rayon::new(ThreadPoolBuilder::new().num_threads(1)).unwrap();
         drop(Explorer::parallel(&single).spawn(1, |_| ()));
     }
 }

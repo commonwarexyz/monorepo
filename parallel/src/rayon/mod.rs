@@ -193,7 +193,7 @@ pub struct ThreadPoolBuilder {
     use_current_thread: bool,
 
     /// Closure to compute the name of a thread.
-    get_thread_name: Option<Box<dyn FnMut(usize) -> String>>,
+    get_thread_name: Option<Box<dyn FnMut(WorkerPosition) -> String>>,
 
     /// The stack size for the created worker threads
     stack_size: Option<usize>,
@@ -208,7 +208,22 @@ pub struct ThreadPoolBuilder {
 /// The type for a closure that gets invoked when a thread starts. The
 /// closure is passed the index of the thread on which it is invoked.
 /// Note that this same closure may be invoked multiple times in parallel.
-type StartHandler = dyn Fn(usize) + Send + Sync;
+type StartHandler = dyn Fn(WorkerPosition) + Send + Sync;
+
+/// A worker's position in its pool, passed to the closures set with
+/// [`ThreadPoolBuilder::thread_name`] and [`ThreadPoolBuilder::start_handler`].
+///
+/// A pool's workers form consecutive groups, each of the same width except possibly the last.
+/// A pool built without groups has one group holding every worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkerPosition {
+    /// The worker's index in the pool, from zero.
+    pub index: usize,
+    /// The worker's group, from zero.
+    pub group: usize,
+    /// The worker's offset in its group, from zero.
+    pub offset: usize,
+}
 
 impl Default for ThreadPoolBuilder {
     fn default() -> Self {
@@ -237,7 +252,7 @@ impl ThreadPoolBuilder {
 
     /// Get the number of threads that will be used for the thread
     /// pool. See `num_threads()` for more information.
-    fn get_num_threads(&self) -> usize {
+    pub(crate) fn get_num_threads(&self) -> usize {
         if self.num_threads > 0 {
             self.num_threads
         } else {
@@ -288,17 +303,21 @@ impl ThreadPoolBuilder {
         self
     }
 
-    /// Get the thread name for the thread with the given index.
-    fn get_thread_name(&mut self, index: usize) -> Option<String> {
+    /// Get the thread name for the worker at `position`.
+    fn get_thread_name(&mut self, position: WorkerPosition) -> Option<String> {
         let f = self.get_thread_name.as_mut()?;
-        Some(f(index))
+        Some(f(position))
     }
 
-    /// Sets a closure which takes a thread index and returns
-    /// the thread's name.
+    /// Whether a thread name closure has been set.
+    pub(crate) const fn has_thread_name(&self) -> bool {
+        self.get_thread_name.is_some()
+    }
+
+    /// Sets a closure which takes a worker's position in the pool and returns the thread's name.
     pub fn thread_name<F>(mut self, closure: F) -> Self
     where
-        F: FnMut(usize) -> String + 'static,
+        F: FnMut(WorkerPosition) -> String + 'static,
     {
         self.get_thread_name = Some(Box::new(closure));
         self
@@ -349,18 +368,18 @@ impl ThreadPoolBuilder {
     }
 
     /// Takes the current thread start callback, leaving `None`.
-    const fn take_start_handler(&mut self) -> Option<Box<StartHandler>> {
+    pub(crate) const fn take_start_handler(&mut self) -> Option<Box<StartHandler>> {
         self.start_handler.take()
     }
 
     /// Sets a callback to be invoked on thread start.
     ///
-    /// The closure is passed the index of the thread on which it is invoked.
+    /// The closure is passed the position of the worker on which it is invoked.
     /// Note that this same closure may be invoked multiple times in parallel.
     /// If this closure panics, the process aborts.
     pub fn start_handler<H>(mut self, start_handler: H) -> Self
     where
-        H: Fn(usize) + Send + Sync + 'static,
+        H: Fn(WorkerPosition) + Send + Sync + 'static,
     {
         self.start_handler = Some(Box::new(start_handler));
         self

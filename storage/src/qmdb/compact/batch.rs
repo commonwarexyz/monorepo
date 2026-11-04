@@ -64,9 +64,8 @@ mod tests {
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_parallel::{Rayon, Sequential, mocks::Explorer};
+    use commonware_parallel::{Rayon, Sequential, mocks::Explorer, rayon::ThreadPoolBuilder};
     use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::NZUsize;
     use std::time::Duration;
 
     /// Merkleization retains a speculative suffix after its committed prefix is released.
@@ -129,7 +128,7 @@ mod tests {
     #[test_traced]
     fn test_merkleize_ops_retains_ancestors_after_cancellation() {
         deterministic::Runner::default().start(|_| async move {
-            let pool = Rayon::new(NZUsize!(2)).unwrap();
+            let pool = Rayon::new(ThreadPoolBuilder::new().num_threads(2)).unwrap();
             let strategy = Explorer::parallel(&pool);
             let merkle =
                 compact::Merkle::<mmb::Family, <Sha256 as Hasher>::Digest, _>::new(strategy);

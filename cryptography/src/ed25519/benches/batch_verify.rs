@@ -3,8 +3,8 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey, Signature},
 };
 use commonware_math::algebra::Random;
-use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{NZUsize, TestRng, test_rng};
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
+use commonware_utils::{TestRng, test_rng};
 use criterion::{Criterion, criterion_group};
 use rand::RngExt as _;
 use std::hint::black_box;
@@ -27,7 +27,7 @@ fn signed(rng: &mut TestRng, n: usize, msg_len: usize) -> Vec<(PublicKey, Vec<u8
 fn bench_batch_verify(c: &mut Criterion) {
     let mut rng = test_rng();
     let mut verify_rng = TestRng::new(1);
-    let rayon = Rayon::new(NZUsize!(8)).unwrap();
+    let rayon = Rayon::new(ThreadPoolBuilder::new().num_threads(8)).unwrap();
     for (n, msg_len, concurrency) in [
         (10_000, 32, 8),
         (100_000, 32, 8),

@@ -3,8 +3,8 @@ use commonware_cryptography::{
     bls12381::{PrivateKey, PublicKey},
 };
 use commonware_math::algebra::Random;
-use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{NZUsize, TestRng, test_rng};
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
+use commonware_utils::{TestRng, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 use std::hint::black_box;
@@ -17,7 +17,8 @@ fn bench_scheme_batch_verify_same_message(c: &mut Criterion) {
     rng.fill(&mut msg);
     for n_signers in [1, 10, 100, 1000, 10000].into_iter() {
         for concurrency in [1, 8] {
-            let rayon = (concurrency > 1).then(|| Rayon::new(NZUsize!(concurrency)).unwrap());
+            let rayon = (concurrency > 1)
+                .then(|| Rayon::new(ThreadPoolBuilder::new().num_threads(concurrency)).unwrap());
             c.bench_function(
                 &format!("{}/pks={} conc={}", module_path!(), n_signers, concurrency),
                 |b| {

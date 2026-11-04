@@ -1263,8 +1263,8 @@ mod tests {
     use crate::{mmb, mmr, utils::detached::block_strategy};
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_parallel::{Rayon, mocks::Explorer};
-    use commonware_utils::{NZUsize, bitmap::Prunable as BitMap};
+    use commonware_parallel::{Rayon, mocks::Explorer, rayon::ThreadPoolBuilder};
+    use commonware_utils::bitmap::Prunable as BitMap;
     use std::{
         future::Future as _,
         task::Context as TaskContext,
@@ -1319,7 +1319,7 @@ mod tests {
     /// A detached grafted-tree merkleization owns the full ancestor chain after cancellation.
     #[test_traced]
     fn test_grafted_merkleize_retains_ancestors_after_cancellation() {
-        let pool = Rayon::new(NZUsize!(2)).unwrap();
+        let pool = Rayon::new(ThreadPoolBuilder::new().num_threads(2)).unwrap();
         let strategy = Explorer::parallel(&pool);
         let mem = Arc::new(Mem::<mmb::Family, <Sha256 as Hasher>::Digest>::new());
         let grafting_height = grafting::height::<1>();

@@ -6,8 +6,8 @@ use commonware_allocator::mimalloc;
 use commonware_cryptography::{BatchEntry, BatchVerifier as _};
 use commonware_cryptography_curve25519::signing::{Signature, SigningKey, VerifyingKey};
 use commonware_math::algebra::Random;
-use commonware_parallel::{Rayon, Sequential, Strategy};
-use commonware_utils::{NZUsize, TestRng, test_rng};
+use commonware_parallel::{Rayon, Sequential, Strategy, rayon::ThreadPoolBuilder};
+use commonware_utils::{TestRng, test_rng};
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
@@ -56,7 +56,7 @@ fn verify_batch(
 /// the benchmark-tracking dashboard) expect.
 mod verify_batch_bytes_bench {
     use super::{
-        BatchSize, Criterion, NZUsize, Rayon, Sequential, TestRng, Throughput, black_box,
+        BatchSize, Criterion, Rayon, Sequential, TestRng, ThreadPoolBuilder, Throughput, black_box,
         generate_batch, verify_batch,
     };
 
@@ -65,7 +65,9 @@ mod verify_batch_bytes_bench {
         for n in [1, 10, 100, 1_000, 10_000, 16_384] {
             let batch = generate_batch(n);
             for concurrency in [1, 8, 16, 32] {
-                let rayon = (concurrency > 1).then(|| Rayon::new(NZUsize!(concurrency)).unwrap());
+                let rayon = (concurrency > 1).then(|| {
+                    Rayon::new(ThreadPoolBuilder::new().num_threads(concurrency)).unwrap()
+                });
                 group.throughput(Throughput::Elements(n as u64));
                 group.bench_function(format!("sigs={n} conc={concurrency}"), |b| {
                     b.iter_batched(

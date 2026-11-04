@@ -7,8 +7,8 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
 };
 use commonware_math::algebra::Random;
-use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{Faults, N3f1, NZUsize, TryCollect, ordered::Set, test_rng};
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
+use commonware_utils::{Faults, N3f1, TryCollect, ordered::Set, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand_core::CryptoRng;
 use std::{collections::BTreeMap, hint::black_box};
@@ -127,7 +127,7 @@ fn bench_dkg(c: &mut Criterion, reshare: bool) {
         let t = N3f1::quorum(n);
         let bench = Bench::new(&mut rng, reshare, n);
         for &concurrency in CONCURRENCY {
-            let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
+            let strategy = Rayon::new(ThreadPoolBuilder::new().num_threads(concurrency)).unwrap();
             c.bench_function(
                 &format!(
                     "{}{}/n={} t={} conc={}",

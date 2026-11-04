@@ -684,7 +684,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode, varint::MAX_U32_VARINT_SIZE};
     use commonware_math::algebra::Random;
-    use commonware_parallel::{Rayon, Sequential};
+    use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
     use commonware_utils::{
         Faults, N3f1, NZUsize, Participant, TestRng, TryCollect, non_empty, ordered::Set, test_rng,
     };
@@ -760,7 +760,7 @@ mod tests {
 
         // One seed per signature makes RNG consumption expose the size of the
         // verification batch, even when the single worker executes it serially.
-        let strategy = Rayon::new(NZUsize!(1))
+        let strategy = Rayon::new(ThreadPoolBuilder::new().num_threads(1))
             .unwrap()
             .with_parallelism(NZUsize!(quorum));
         for pending_len in [quorum, 1, 0] {

@@ -1,6 +1,6 @@
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{NZUsize, test_rng};
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
+use commonware_utils::test_rng;
 use criterion::{Criterion, criterion_group};
 use rand::Rng;
 
@@ -9,7 +9,7 @@ const CONCURRENCY: usize = 8;
 
 fn bench_hash_many(c: &mut Criterion) {
     let mut sampler = test_rng();
-    let strategy = Rayon::new(NZUsize!(CONCURRENCY)).unwrap();
+    let strategy = Rayon::new(ThreadPoolBuilder::new().num_threads(CONCURRENCY)).unwrap();
     for len in [64, 256, 4096, 16_384, 65_536, 262_144] {
         let mut messages: [Vec<u8>; 128] = core::array::from_fn(|_| vec![0; len]);
         for message in &mut messages {

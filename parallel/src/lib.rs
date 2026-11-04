@@ -85,7 +85,7 @@ commonware_macros::stability_scope!(BETA {
                 future::{self, Either},
                 FutureExt as _,
             };
-            use self::rayon::ThreadPoolBuildError;
+            use self::rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
             use std::{
                 panic::{self, AssertUnwindSafe, Location},
                 pin::Pin,
@@ -1445,9 +1445,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     ///
     /// # Cache Affinity
     ///
-    /// A strategy built with [`Rayon::new`] or [`Rayon::with_stack_size`] splits its pool's
-    /// workers into groups sized to the host's last-level cache domains. A strategy built with
-    /// [`Rayon::with_pool`] is one group that is never homed.
+    /// A strategy built with [`Rayon::new`] splits its pool's workers into groups sized to the
+    /// host's last-level cache domains. A strategy built with [`Rayon::with_pool`] is one group
+    /// that is never homed.
     ///
     /// A group's home is the domain it requests its workers to run in. An unhomed group can take a
     /// permanent home in the domain of a caller that finds it idle, when that domain allows a CPU
@@ -1461,8 +1461,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// When the chosen group's home is another domain, the calling thread may be moved there for
     /// the call, within its own affinity mask. The caller's own code in that call, such as a
     /// [`Strategy::run_batches`] body, runs under that mask, and threads it creates inherit it.
-    /// Do not create a pool from inside a job or a strategy call: it keeps the CPUs of the thread
-    /// that created it, which may be just one domain.
+    /// A pool keeps the CPUs of the thread that creates it. To give several pools their own CPUs,
+    /// create each from a thread pinned to its share. A pool created from inside a job or a
+    /// strategy call gets only the CPUs that thread was kept to, which may be just one domain.
     ///
     /// A worker's nested calls, joins, and spawned jobs inherit its placement. A job that
     /// [`Strategy::spawn`] hands to the pool from outside it can start on any idle worker and
@@ -1498,10 +1499,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// # Examples
     ///
     /// ```rust
-    /// use commonware_parallel::{Strategy, Rayon};
-    /// use std::num::NonZeroUsize;
+    /// use commonware_parallel::{Rayon, Strategy, rayon::ThreadPoolBuilder};
     ///
-    /// let strategy = Rayon::new(NonZeroUsize::new(2).unwrap()).unwrap();
+    /// let strategy = Rayon::new(ThreadPoolBuilder::new().num_threads(2)).unwrap();
     ///
     /// let data: Vec<i64> = (0..1000).collect();
     /// let sum = strategy.fold(&data, || 0i64, |acc, &n| acc + n, |a, b| a + b);
@@ -1539,8 +1539,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     }
 
     impl Rayon {
-        /// Creates a strategy with `num_threads` workers, grouped by last-level cache domain as
-        /// described on [`Rayon`].
+        /// Builds the pool `builder` describes and creates a strategy whose workers are grouped
+        /// by last-level cache domain as described on [`Rayon`]. Workers are named `group<g>-<w>`
+        /// unless the builder names them, and the builder's start handler runs before the
+        /// strategy's own.
         ///
         /// A group is as wide as the most CPUs the calling thread may use in any one domain, less
         /// one when that number is at least six to leave room for the caller and other threads.
@@ -1549,20 +1551,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         ///
         /// When the pool fills all allowed CPUs across two or more equally sized domains of at
         /// least two CPUs each, groups use the full domain width and get fixed homes at startup. A
-        /// `num_threads` of at most the group width gives one group, and workers past a multiple of
-        /// it form a narrower last group that takes only whole-pool work.
-        pub fn new(num_threads: NonZeroUsize) -> Result<Self, ThreadPoolBuildError> {
-            let groups = topology::Groups::build(num_threads.get(), None)?;
-            Ok(Self::with_groups(Arc::new(groups)))
-        }
-
-        /// Creates a strategy like [`Self::new`] whose workers each have a stack of `stack_size`
-        /// bytes.
-        pub fn with_stack_size(
-            num_threads: NonZeroUsize,
-            stack_size: usize,
-        ) -> Result<Self, ThreadPoolBuildError> {
-            let groups = topology::Groups::build(num_threads.get(), Some(stack_size))?;
+        /// worker count of at most the group width gives one group, and workers past a multiple
+        /// of it form a narrower last group that takes only whole-pool work.
+        pub fn new(builder: ThreadPoolBuilder) -> Result<Self, ThreadPoolBuildError> {
+            let groups = topology::Groups::build(builder)?;
             Ok(Self::with_groups(Arc::new(groups)))
         }
 
@@ -2278,7 +2270,7 @@ mod test {
     };
 
     fn parallel_strategy() -> Rayon {
-        Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap()
+        Rayon::new(ThreadPoolBuilder::new().num_threads(4)).unwrap()
     }
 
     /// Builds a strategy with group `widths` whose groups tests can home through fake domains.
@@ -2289,7 +2281,7 @@ mod test {
         let pool = ThreadPoolBuilder::new()
             .num_threads(widths.iter().sum())
             .group_width(width)
-            .thread_name(move |index| format!("g{}-{}", index / width, index % width))
+            .thread_name(|worker| format!("g{}-{}", worker.group, worker.offset))
             .build()
             .unwrap();
         assert_eq!(pool.group_widths(), widths);
@@ -3781,7 +3773,7 @@ mod test {
             assert_eq!(calls.load(Ordering::Relaxed), 1);
         }
 
-        let one_worker = Rayon::new(NonZeroUsize::MIN).unwrap();
+        let one_worker = Rayon::new(ThreadPoolBuilder::new().num_threads(1)).unwrap();
         let parallel = parallel_strategy();
         let minimum = NonZeroUsize::new(8).unwrap();
         for len in [0, 1, 7, 8, 15] {
@@ -3846,7 +3838,7 @@ mod test {
 
     #[test]
     fn run_batches_supplies_ordered_balanced_ranges() {
-        let strategy = Rayon::new(NonZeroUsize::MIN)
+        let strategy = Rayon::new(ThreadPoolBuilder::new().num_threads(1))
             .unwrap()
             .with_parallelism(NonZeroUsize::new(8).unwrap())
             .without_policy();
@@ -4057,7 +4049,10 @@ mod test {
 
     #[test]
     fn spawn_future_moved_from_outside_to_worker_keeps_helping() {
-        check_moved_future(Rayon::new(NonZeroUsize::new(2).unwrap()).unwrap(), 0);
+        check_moved_future(
+            Rayon::new(ThreadPoolBuilder::new().num_threads(2)).unwrap(),
+            0,
+        );
     }
 
     /// A pending spawn future that moves from outside the pool onto a worker of a grouped
@@ -4185,7 +4180,7 @@ mod test {
 
     #[test]
     fn with_parallelism_overrides_planning_parallelism() {
-        let strategy = Rayon::new(NonZeroUsize::new(1).unwrap())
+        let strategy = Rayon::new(ThreadPoolBuilder::new().num_threads(1))
             .unwrap()
             .with_parallelism(NonZeroUsize::new(4).unwrap())
             .without_policy();
@@ -4199,7 +4194,7 @@ mod test {
     #[test]
     fn nested_calls_use_current_pool() {
         for threads in [1, 2] {
-            let strategy = Rayon::new(NonZeroUsize::new(threads).unwrap())
+            let strategy = Rayon::new(ThreadPoolBuilder::new().num_threads(threads))
                 .unwrap()
                 .with_parallelism(NonZeroUsize::new(4).unwrap())
                 .without_policy();
@@ -4236,7 +4231,7 @@ mod test {
 
     #[test]
     fn with_pool_plans_the_pool_thread_count() {
-        let strategy = Rayon::new(NonZeroUsize::new(3).unwrap()).unwrap();
+        let strategy = Rayon::new(ThreadPoolBuilder::new().num_threads(3)).unwrap();
         assert_eq!(strategy.parallelism, 3);
     }
 
@@ -4840,7 +4835,7 @@ mod test {
     fn run_tiles_bound_workers_by_the_grid() {
         // A planning parallelism far beyond the grid allocates and dispatches only the workers the
         // grid can occupy.
-        let strategy = Rayon::new(NonZeroUsize::new(4).unwrap())
+        let strategy = Rayon::new(ThreadPoolBuilder::new().num_threads(4))
             .unwrap()
             .with_parallelism(NonZeroUsize::MAX)
             .without_policy();

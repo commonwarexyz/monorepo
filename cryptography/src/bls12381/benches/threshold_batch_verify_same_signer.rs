@@ -6,8 +6,8 @@ use commonware_cryptography::{
     },
     ed25519::PrivateKey,
 };
-use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{Faults, N3f1, NZUsize, TryCollect, non_empty, test_rng};
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
+use commonware_utils::{Faults, N3f1, TryCollect, non_empty, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 use std::hint::black_box;
@@ -19,7 +19,8 @@ fn bench_threshold_batch_verify_same_signer(c: &mut Criterion) {
             let t = N3f1::quorum(n);
             for &msgs in &[10, 100] {
                 for concurrency in [1, 8] {
-                    let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
+                    let strategy =
+                        Rayon::new(ThreadPoolBuilder::new().num_threads(concurrency)).unwrap();
                     c.bench_function(
                         &format!(
                             "{}/n={} t={} msgs={} conc={} mode={:?}",

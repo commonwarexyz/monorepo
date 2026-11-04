@@ -6,10 +6,9 @@ use commonware_cryptography::bls12381::primitives::{
     ops::aggregate,
     variant::{MinPk, MinSig},
 };
-use commonware_parallel::{Rayon, Sequential};
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
 use commonware_utils::{iter::NonEmpty, non_empty};
 use libfuzzer_sys::fuzz_target;
-use std::num::NonZeroUsize;
 
 mod common;
 use common::{
@@ -173,7 +172,8 @@ fn fuzz(op: FuzzOperation) {
                 .collect();
 
             let combined_msg = if concurrency > 1 {
-                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+                let strategy =
+                    Rayon::new(ThreadPoolBuilder::new().num_threads(concurrency)).unwrap();
                 aggregate::combine_messages::<MinPk, _>(
                     non_empty![@messages_refs.iter()],
                     &strategy,
@@ -200,7 +200,8 @@ fn fuzz(op: FuzzOperation) {
                 .collect();
 
             let combined_msg = if concurrency > 1 {
-                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+                let strategy =
+                    Rayon::new(ThreadPoolBuilder::new().num_threads(concurrency)).unwrap();
                 aggregate::combine_messages::<MinSig, _>(
                     non_empty![@messages_refs.iter()],
                     &strategy,

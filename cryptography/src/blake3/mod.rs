@@ -7,8 +7,7 @@
 //! # Example
 //! ```rust
 //! use commonware_cryptography::{Hasher, blake3::Blake3};
-//! use commonware_parallel::Rayon;
-//! use std::num::NonZeroUsize;
+//! use commonware_parallel::{Rayon, rayon::ThreadPoolBuilder};
 //!
 //! // Hash data in a single shot
 //! let digest = Blake3::hash(&[b"hello,", b"world!"]);
@@ -22,7 +21,7 @@
 //! println!("digest: {:?}", digest);
 //!
 //! // Hash a long message across a thread pool
-//! let strategy = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
+//! let strategy = Rayon::new(ThreadPoolBuilder::new().num_threads(4)).unwrap();
 //! let message = vec![7u8; 1 << 20];
 //! assert_eq!(
 //!     Blake3::hash_across(&[&message], &strategy),

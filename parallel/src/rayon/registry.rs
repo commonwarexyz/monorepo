@@ -3,7 +3,7 @@
     reason = "Preserve upstream synchronization semantics."
 )]
 use super::{
-    ErrorKind, StartHandler, ThreadPoolBuildError, ThreadPoolBuilder, Yield,
+    ErrorKind, StartHandler, ThreadPoolBuildError, ThreadPoolBuilder, WorkerPosition, Yield,
     job::{JobRef, StackJob},
     latch::{AsCoreLatch, CoreLatch, Latch, LatchRef, LockLatch, OnceLatch, SpinLatch},
     sleep::{Sleep, THREADS_MAX},
@@ -229,7 +229,11 @@ impl Registry {
         let deques = locals.into_iter().zip(wides).zip(broadcast_stealers);
         for (index, ((local, wide), stealer)) in deques.enumerate() {
             let thread = ThreadBuilder {
-                name: builder.get_thread_name(index),
+                name: builder.get_thread_name(WorkerPosition {
+                    index,
+                    group: index / group_width,
+                    offset: index % group_width,
+                }),
                 stack_size: builder.get_stack_size(),
                 registry: Arc::clone(&registry),
                 local,
@@ -1045,7 +1049,12 @@ unsafe fn main_loop(thread: ThreadBuilder) {
 
     // Inform a user callback that we started a thread.
     if let Some(ref handler) = registry.start_handler {
-        registry.catch_unwind(|| handler(index));
+        let position = WorkerPosition {
+            index,
+            group: worker_thread.group,
+            offset: worker_thread.offset,
+        };
+        registry.catch_unwind(|| handler(position));
     }
 
     // SAFETY: `worker_thread` is this thread's worker state.

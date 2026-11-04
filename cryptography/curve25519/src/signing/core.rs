@@ -738,8 +738,9 @@ mod tests {
     use commonware_parallel::{
         Rayon, Sequential,
         mocks::{Explorer, explore},
+        rayon::ThreadPoolBuilder,
     };
-    use commonware_utils::{FuzzRng, NZUsize};
+    use commonware_utils::FuzzRng;
     use core::slice::from_ref;
     use ed25519_consensus::SigningKey as RefSigningKey;
 
@@ -1029,7 +1030,8 @@ mod tests {
     /// Straus cutoffs, so the bucket method runs under the pool.
     #[test]
     fn verify_batch_bytes_accepts_valid_batch_under_real_parallelism() {
-        let strategy = Explorer::parallel(&Rayon::new(NZUsize!(4)).unwrap());
+        let strategy =
+            Explorer::parallel(&Rayon::new(ThreadPoolBuilder::new().num_threads(4)).unwrap());
         Builder::default()
             .with_seed(0)
             .with_search_limit(4)
