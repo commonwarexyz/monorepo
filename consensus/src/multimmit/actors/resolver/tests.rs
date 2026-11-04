@@ -12,7 +12,7 @@ use crate::{
         actors::voter::{Inbox, Mailbox as VoterMailbox, Message as VoterMessage},
         machine::{Generation, ResolutionJob},
         mocks::{
-            Bls, Committee, RecordingBlocker,
+            Bls, Committee, Mock, RecordingBlocker,
             cluster::{QUOTA, link_all, start_network},
         },
         testing::{SpanRecorder, expect_before, expect_within},
@@ -632,7 +632,8 @@ fn wrong_view_response_is_rejected_without_blocking_its_peer() {
 
 #[test]
 fn control_overflow_coalesces_only_between_job_barriers() {
-    let committee = committee();
+    // Thousands of retained proofs make real certificate assembly dominate this queue test.
+    let committee = Committee::<Mock>::builder(7, 6).build();
     let mut expected = State::new();
     let mut overflow = ControlOverflow::default();
 

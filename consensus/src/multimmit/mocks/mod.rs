@@ -1,8 +1,9 @@
 //! Deterministic Multimmit test fixtures.
 //!
-//! These helpers construct one complete epoch committee with real BLS12-381 key material so
-//! attached-actor and integration tests can exercise production cryptography end to end. They are
-//! test support only and make no attempt to protect key material.
+//! These helpers construct one complete epoch committee over any [`Fixture`] suite: the real
+//! suites, so attached-actor and integration tests can exercise production cryptography end to
+//! end, or the ledger-backed [`Mock`] suite, for protocol tests whose cost real cryptography would
+//! dominate. They are test support only and make no attempt to protect key material.
 
 mod attached;
 mod body;
@@ -13,6 +14,7 @@ pub mod keys;
 mod recording;
 #[cfg(test)]
 mod size_probe;
+pub mod suite;
 
 pub use attached::{
     MockApplication, MockApplicationBuilder, MockApplicationLog, MockGate, NoopReporter,
@@ -21,7 +23,7 @@ pub use attached::{
 pub use body::MockBody;
 pub use committee::{Committee, CommitteeBuilder};
 pub use finality::finality_fact;
-pub use keys::{Bls, Ed25519, Fixture, Sas};
+pub use keys::{Bls, Ed25519, Fixture, Mock, Sas};
 pub use recording::{RecordingRelay, RecordingReporter};
 
 /// Namespace for committees built without an explicit one.
