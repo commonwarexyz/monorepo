@@ -256,7 +256,7 @@ pub struct Db<
     /// See the [Root structure](super) section in the module documentation.
     pub(super) root: DigestOf<H>,
 
-    /// Witness computed from the same state as `root`.
+    /// Witness binding the ops root to `root`.
     pub(super) ops_root_witness: OpsRootWitness<F, H::Digest>,
 
     /// Metrics for the Current layer.
@@ -393,10 +393,9 @@ where
         self.any.root()
     }
 
-    /// Returns the witness that this database's canonical root commits to its ops root.
+    /// Returns the witness binding [`Self::ops_root`] to [`Self::root`].
     ///
-    /// It authenticates an ops root against a trusted canonical `current` root and always describes
-    /// the same state as [`Self::root`].
+    /// It authenticates an ops root against a trusted canonical `current` root.
     pub const fn ops_root_witness(&self) -> &OpsRootWitness<F, H::Digest> {
         &self.ops_root_witness
     }
@@ -2150,7 +2149,7 @@ mod tests {
             let db = db.prune(boundary).await.unwrap();
             assert!(
                 db.any.bitmap.pruned_chunks() > 0,
-                "test requires at least one pruned chunk to exercise the zero-chunk path"
+                "pruning to the sync boundary must remove at least one chunk"
             );
             let witness = db.ops_root_witness().clone();
             let ops_root = db.ops_root();
