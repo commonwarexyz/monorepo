@@ -1409,7 +1409,7 @@ fn producer_recovers_the_canonical_da_quorum_and_retains_the_certificate() {
         }
             if matches!(artifact.as_ref(), Artifact::DaCertificate(actual) if actual == &certificate)
     ));
-    let broadcasts = |effect: &Capability<MinPk, Digest>| {
+    let broadcasts = |effect: &Capability<Bls<MinPk>, Digest>| {
         matches!(durable_effect(effect).and_then(EffectExt::broadcast_one), Some(artifact)
             if matches!(artifact.as_ref(), Artifact::DaCertificate(actual) if actual == &certificate))
     };
