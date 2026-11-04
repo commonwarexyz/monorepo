@@ -1,11 +1,19 @@
 //! Mocks for certificate signing schemes.
 
+#[commonware_macros::stability(ALPHA)]
+use super::{
+    Aggregator, Item, list_signatures, listed_codec_config, max_listed_size, stage_listed,
+};
 use super::{AssemblyError, Attestation, Membership, Scheme, Signers, Subject, Verification};
+#[commonware_macros::stability(ALPHA)]
+use crate::Digest;
 use crate::{
     PublicKey,
     ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
 };
 use bytes::Bytes;
+#[commonware_macros::stability(ALPHA)]
+use commonware_codec::{FixedSize, Read, types::lazy::Lazy};
 use commonware_utils::{
     Participant,
     iter::NonEmpty,
@@ -422,6 +430,67 @@ where
         BATCHABLE
     }
 
+    /// Lists the signatures of attestations over any subjects, in input order.
+    ///
+    /// Like real schemes, signatures are not checked against the ledger.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn aggregate<'a, S, I>(
+        &self,
+        attestations: NonEmpty<I>,
+    ) -> Result<Vec<Lazy<U64>>, AssemblyError>
+    where
+        S: Scheme<Signature = U64>,
+        I: Iterator<Item = &'a Attestation<S>>,
+    {
+        list_signatures(self.participants.len(), attestations).map_err(Self::assembly_error)
+    }
+
+    /// Verifies attestations and aggregates over any subjects one-by-one against the ledger, and
+    /// returns one verdict per item.
+    ///
+    /// Listed signatures equal to their term's known attestation are not verified again.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn verify_aggregates<'a, S, D>(&self, items: &[Item<'_, 'a, S, D>]) -> Vec<bool>
+    where
+        S: Aggregator<Signature = U64, Aggregate = Vec<Lazy<U64>>>,
+        S::Subject<'a, D>: Subject<Namespace = N>,
+        D: Digest,
+    {
+        let inner = self.shared.0.lock();
+        items
+            .iter()
+            .map(|item| {
+                stage_listed(
+                    self.participants.len(),
+                    item,
+                    |signer, subject, signature| {
+                        self.participants.key(signer).is_some()
+                            && inner
+                                .signatures
+                                .by_signer
+                                .get(&signer)
+                                .and_then(|entries| entries.by.get(&u64::from(signature)))
+                                .is_some_and(|stored| {
+                                    stored == &SignedSubject::new(subject.clone(), &self.namespace)
+                                })
+                    },
+                ) || Self::invalid("aggregate item invalid")
+            })
+            .collect()
+    }
+
+    /// Returns the maximum encoded size of an aggregate over at most `terms` terms.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn max_aggregate_size(terms: u32) -> usize {
+        max_listed_size(terms, U64::SIZE)
+    }
+
+    /// Returns the configuration that decodes an aggregate over at most `terms` terms.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn aggregate_codec_config(terms: u32) -> <Vec<Lazy<U64>> as Read>::Cfg {
+        listed_codec_config(terms)
+    }
+
     /// Returns the codec bound for certificates produced by this participant set.
     pub const fn certificate_codec_config(&self) {}
 
@@ -750,6 +819,70 @@ macro_rules! impl_certificate_mock {
                     BATCHABLE,
                     ALLOW_INVALID,
                 >::is_attributable()
+            }
+        }
+
+        #[cfg(not(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        )))] // ALPHA
+        impl<
+            P: $crate::PublicKey,
+            const ATTRIBUTABLE: bool,
+            const BATCHABLE: bool,
+            const ALLOW_INVALID: bool,
+        > $crate::certificate::Aggregator for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+        {
+            type Aggregate = ::std::vec::Vec<
+                commonware_codec::types::lazy::Lazy<commonware_utils::sequence::U64>,
+            >;
+
+            fn aggregate<'a, I>(
+                &self,
+                attestations: commonware_utils::iter::NonEmpty<I>,
+            ) -> Result<Self::Aggregate, $crate::certificate::AssemblyError>
+            where
+                I: Iterator<Item = &'a $crate::certificate::Attestation<Self>>,
+            {
+                self.generic.aggregate::<Self, _>(attestations)
+            }
+
+            fn verify_aggregates<R, D>(
+                &self,
+                _rng: &mut R,
+                items: &[$crate::certificate::Item<'_, '_, Self, D>],
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> ::std::vec::Vec<bool>
+            where
+                R: rand_core::CryptoRng,
+                D: $crate::Digest,
+            {
+                self.generic.verify_aggregates(items)
+            }
+
+            fn max_aggregate_size(terms: u32) -> usize {
+                $crate::certificate::mocks::Generic::<
+                    P,
+                    $namespace,
+                    ATTRIBUTABLE,
+                    BATCHABLE,
+                    ALLOW_INVALID,
+                >::max_aggregate_size(terms)
+            }
+
+            fn aggregate_codec_config(
+                terms: u32,
+            ) -> <Self::Aggregate as commonware_codec::Read>::Cfg {
+                $crate::certificate::mocks::Generic::<
+                    P,
+                    $namespace,
+                    ATTRIBUTABLE,
+                    BATCHABLE,
+                    ALLOW_INVALID,
+                >::aggregate_codec_config(terms)
             }
         }
     };
@@ -1331,5 +1464,171 @@ mod tests {
             ],
             &Sequential,
         );
+    }
+
+    #[commonware_macros::stability(ALPHA)]
+    mod aggregator {
+        use crate::{
+            certificate::{
+                Aggregator as _, Attestation, Scheme as _, Term,
+                aggregator_tests::{Suite, malformed},
+            },
+            ed25519::PublicKey,
+            sha256::Digest as Sha256Digest,
+        };
+        use bytes::Bytes;
+        use commonware_parallel::Sequential;
+        use commonware_utils::{N3f1, non_empty, sequence::U64, test_rng};
+
+        #[derive(Clone, Debug)]
+        pub struct TestSubject {
+            message: Bytes,
+        }
+
+        impl crate::certificate::Subject for TestSubject {
+            type Namespace = Vec<u8>;
+
+            fn namespace<'a>(&self, namespace: &'a Self::Namespace) -> &'a [u8] {
+                namespace
+            }
+
+            fn message(&self) -> Bytes {
+                self.message.clone()
+            }
+        }
+
+        impl_certificate_mock!(TestSubject, Vec<u8>, N3f1);
+
+        fn subject(index: usize) -> TestSubject {
+            TestSubject {
+                message: Bytes::from(format!("subject {index}")),
+            }
+        }
+
+        type Fixture<const ALLOW_INVALID: bool> =
+            crate::certificate::mocks::Fixture<Scheme<PublicKey, true, true, ALLOW_INVALID>>;
+
+        fn sign_all<const ALLOW_INVALID: bool>(
+            fixture: &Fixture<ALLOW_INVALID>,
+        ) -> Vec<Attestation<Scheme<PublicKey, true, true, ALLOW_INVALID>>> {
+            fixture
+                .schemes
+                .iter()
+                .enumerate()
+                .map(|(i, scheme)| scheme.sign::<Sha256Digest>(subject(i)).unwrap())
+                .collect()
+        }
+
+        #[test]
+        fn aggregator_suite() {
+            let fixture = fixture(&mut test_rng(), b"mock-scheme", 5);
+            Suite {
+                schemes: &fixture.schemes,
+                verifier: &fixture.verifier,
+                subject,
+                unique: false,
+            }
+            .run();
+
+            // A member that does not sign verifies the same aggregates.
+            let member = Scheme::member(
+                b"mock-scheme",
+                fixture.verifier.participants().clone(),
+                &fixture.participants[0],
+                fixture.verifier.generic.shared.clone(),
+            )
+            .unwrap();
+            Suite {
+                schemes: &fixture.schemes,
+                verifier: &member,
+                subject,
+                unique: false,
+            }
+            .run();
+        }
+
+        /// A malformed or unrecorded listed signature fails its aggregate, whether or not its
+        /// term is known.
+        #[test]
+        fn aggregate_rejects_bad_listed_signature() {
+            let mut rng = test_rng();
+            let fixture = fixture(&mut rng, b"mock-scheme", 4);
+            let attestations = sign_all(&fixture);
+            let mut terms: Vec<Term<'_, _, Sha256Digest>> = attestations
+                .iter()
+                .enumerate()
+                .map(|(i, attestation)| Term {
+                    signer: attestation.signer,
+                    subject: subject(i),
+                    known: None,
+                })
+                .collect();
+            let verifier = &fixture.verifier;
+            let aggregate = verifier.aggregate(non_empty![@&attestations]).unwrap();
+            assert!(verifier.verify_aggregate(&mut rng, &terms, &aggregate, &Sequential));
+
+            let mut unrecorded = aggregate.clone();
+            unrecorded[1] = U64::new(u64::MAX).into();
+            assert!(!verifier.verify_aggregate(&mut rng, &terms, &unrecorded, &Sequential));
+            let mut bad = aggregate;
+            bad[1] = malformed::<Scheme<PublicKey>>();
+            assert!(!verifier.verify_aggregate(&mut rng, &terms, &bad, &Sequential));
+            terms[1].known = Some(&attestations[1]);
+            assert!(!verifier.verify_aggregate(&mut rng, &terms, &bad, &Sequential));
+            assert!(!verifier.verify_aggregate(&mut rng, &terms, &unrecorded, &Sequential));
+        }
+
+        /// Another signer's recorded signature over the same subject does not verify for a term.
+        #[test]
+        fn aggregate_rejects_swapped_signer() {
+            let mut rng = test_rng();
+            let fixture = fixture(&mut rng, b"mock-scheme", 4);
+            let first = fixture.schemes[0].sign::<Sha256Digest>(subject(0)).unwrap();
+            let second = fixture.schemes[1].sign::<Sha256Digest>(subject(0)).unwrap();
+            let terms = [Term::<'_, _, Sha256Digest> {
+                signer: first.signer,
+                subject: subject(0),
+                known: None,
+            }];
+            let verifier = &fixture.verifier;
+            let swapped = verifier
+                .aggregate(non_empty![&Attestation {
+                    signer: first.signer,
+                    signature: second.signature,
+                }])
+                .unwrap();
+            assert!(!verifier.verify_aggregate(&mut rng, &terms, &swapped, &Sequential));
+        }
+
+        #[test]
+        #[should_panic(expected = "invalid mock certificate request")]
+        fn strict_invalid_aggregate_panics() {
+            let mut rng = test_rng();
+            let fixture = fixture_with::<true, true, false, _>(&mut rng, b"mock-scheme", 4);
+            let attestations = sign_all(&fixture);
+            let _ = fixture
+                .verifier
+                .aggregate(non_empty![&attestations[0], &attestations[0]]);
+        }
+
+        #[test]
+        #[should_panic(expected = "invalid mock certificate request")]
+        fn strict_invalid_verify_aggregates_panics() {
+            let mut rng = test_rng();
+            let fixture = fixture_with::<true, true, false, _>(&mut rng, b"mock-scheme", 4);
+            let attestations = sign_all(&fixture);
+            let aggregate = fixture
+                .verifier
+                .aggregate(non_empty![@&attestations])
+                .unwrap();
+            let terms = [Term::<'_, _, Sha256Digest> {
+                signer: attestations[0].signer,
+                subject: subject(1),
+                known: None,
+            }];
+            let _ = fixture
+                .verifier
+                .verify_aggregate(&mut rng, &terms, &aggregate, &Sequential);
+        }
     }
 }

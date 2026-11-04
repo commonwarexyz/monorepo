@@ -790,42 +790,47 @@ macro_rules! impl_certificate_ed25519 {
             }
         }
 
-        $crate::__alpha! {
-            impl $crate::certificate::Aggregator for Scheme {
-                type Aggregate = Vec<commonware_codec::types::lazy::Lazy<$crate::ed25519::Signature>>;
+        #[cfg(not(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        )))] // ALPHA
+        impl $crate::certificate::Aggregator for Scheme {
+            type Aggregate = Vec<commonware_codec::types::lazy::Lazy<$crate::ed25519::Signature>>;
 
-                fn aggregate<'a, I>(
-                    &self,
-                    attestations: commonware_utils::iter::NonEmpty<I>,
-                ) -> Result<Self::Aggregate, $crate::certificate::AssemblyError>
-                where
-                    I: Iterator<Item = &'a $crate::certificate::Attestation<Self>>,
-                {
-                    self.generic.aggregate::<Self, _>(attestations)
-                }
+            fn aggregate<'a, I>(
+                &self,
+                attestations: commonware_utils::iter::NonEmpty<I>,
+            ) -> Result<Self::Aggregate, $crate::certificate::AssemblyError>
+            where
+                I: Iterator<Item = &'a $crate::certificate::Attestation<Self>>,
+            {
+                self.generic.aggregate::<Self, _>(attestations)
+            }
 
-                fn verify_aggregates<R, D>(
-                    &self,
-                    rng: &mut R,
-                    items: &[$crate::certificate::Item<'_, '_, Self, D>],
-                    strategy: &impl commonware_parallel::Strategy,
-                ) -> Vec<bool>
-                where
-                    R: rand_core::CryptoRng,
-                    D: $crate::Digest,
-                {
-                    self.generic.verify_aggregates(rng, items, strategy)
-                }
+            fn verify_aggregates<R, D>(
+                &self,
+                rng: &mut R,
+                items: &[$crate::certificate::Item<'_, '_, Self, D>],
+                strategy: &impl commonware_parallel::Strategy,
+            ) -> Vec<bool>
+            where
+                R: rand_core::CryptoRng,
+                D: $crate::Digest,
+            {
+                self.generic.verify_aggregates(rng, items, strategy)
+            }
 
-                fn max_aggregate_size(terms: u32) -> usize {
-                    $crate::ed25519::certificate::Generic::<$namespace>::max_aggregate_size(terms)
-                }
+            fn max_aggregate_size(terms: u32) -> usize {
+                $crate::ed25519::certificate::Generic::<$namespace>::max_aggregate_size(terms)
+            }
 
-                fn aggregate_codec_config(
-                    terms: u32,
-                ) -> <Self::Aggregate as commonware_codec::Read>::Cfg {
-                    $crate::ed25519::certificate::Generic::<$namespace>::aggregate_codec_config(terms)
-                }
+            fn aggregate_codec_config(
+                terms: u32,
+            ) -> <Self::Aggregate as commonware_codec::Read>::Cfg {
+                $crate::ed25519::certificate::Generic::<$namespace>::aggregate_codec_config(terms)
             }
         }
     };

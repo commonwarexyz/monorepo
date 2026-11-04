@@ -821,46 +821,51 @@ macro_rules! impl_certificate_bls12381_multisig {
             }
         }
 
-        $crate::__alpha! {
-            impl<
-                P: $crate::PublicKey,
-                V: $crate::bls12381::primitives::variant::Variant,
-            > $crate::certificate::Aggregator for Scheme<P, V> {
-                type Aggregate = commonware_codec::types::lazy::Lazy<
-                    $crate::bls12381::primitives::ops::aggregate::Signature<V>,
-                >;
+        #[cfg(not(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        )))] // ALPHA
+        impl<
+            P: $crate::PublicKey,
+            V: $crate::bls12381::primitives::variant::Variant,
+        > $crate::certificate::Aggregator for Scheme<P, V> {
+            type Aggregate = commonware_codec::types::lazy::Lazy<
+                $crate::bls12381::primitives::ops::aggregate::Signature<V>,
+            >;
 
-                fn aggregate<'a, I>(
-                    &self,
-                    attestations: commonware_utils::iter::NonEmpty<I>,
-                ) -> Result<Self::Aggregate, $crate::certificate::AssemblyError>
-                where
-                    I: Iterator<Item = &'a $crate::certificate::Attestation<Self>>,
-                {
-                    self.generic.aggregate::<Self, _>(attestations)
-                }
+            fn aggregate<'a, I>(
+                &self,
+                attestations: commonware_utils::iter::NonEmpty<I>,
+            ) -> Result<Self::Aggregate, $crate::certificate::AssemblyError>
+            where
+                I: Iterator<Item = &'a $crate::certificate::Attestation<Self>>,
+            {
+                self.generic.aggregate::<Self, _>(attestations)
+            }
 
-                fn verify_aggregates<R, D>(
-                    &self,
-                    rng: &mut R,
-                    items: &[$crate::certificate::Item<'_, '_, Self, D>],
-                    strategy: &impl commonware_parallel::Strategy,
-                ) -> Vec<bool>
-                where
-                    R: rand_core::CryptoRng,
-                    D: $crate::Digest,
-                {
-                    self.generic.verify_aggregates(rng, items, strategy)
-                }
+            fn verify_aggregates<R, D>(
+                &self,
+                rng: &mut R,
+                items: &[$crate::certificate::Item<'_, '_, Self, D>],
+                strategy: &impl commonware_parallel::Strategy,
+            ) -> Vec<bool>
+            where
+                R: rand_core::CryptoRng,
+                D: $crate::Digest,
+            {
+                self.generic.verify_aggregates(rng, items, strategy)
+            }
 
-                fn max_aggregate_size(terms: u32) -> usize {
-                    $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::max_aggregate_size(terms)
-                }
+            fn max_aggregate_size(terms: u32) -> usize {
+                $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::max_aggregate_size(terms)
+            }
 
-                fn aggregate_codec_config(
-                    _terms: u32,
-                ) -> <Self::Aggregate as commonware_codec::Read>::Cfg {
-                }
+            fn aggregate_codec_config(
+                _terms: u32,
+            ) -> <Self::Aggregate as commonware_codec::Read>::Cfg {
             }
         }
     };
