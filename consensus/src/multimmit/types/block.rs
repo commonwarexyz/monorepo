@@ -1,17 +1,20 @@
 //! Producer-chain and leader-chain protocol objects.
 
 use super::{
-    Attestation, BlockRef, CertificateId, ChainId, Error, ThresholdShare,
+    Attestation, BlockRef, CertificateId, ChainId, DaAttestation, Error,
     bounds::{
         MAX_U64_VARINT_SIZE, checked_product, checked_sum, encoded_index_sum, encoded_len,
-        encoded_vec, max_index_width,
+        encoded_vec, max_da_certificate_size, max_index_width,
     },
     canonical_digest,
     certificate::DaCertificate,
 };
 use crate::{
     Block, Epochable, Heightable, Viewable,
-    multimmit::types::{ChainLimits, CodecConfig},
+    multimmit::{
+        scheme::{DaSignature, OrdinarySignature, Scheme},
+        types::{ChainLimits, CodecConfig},
+    },
     types::{Attributable, Epoch, Height, Participant, Round, View},
 };
 use bytes::BufMut;
@@ -19,7 +22,7 @@ use commonware_codec::{
     Buf, BufsMut, Codec, EncodeSize, Error as CodecError, FixedSize as _, RangeCfg, Read, ReadExt,
     Write,
 };
-use commonware_cryptography::{Digest, Digestible, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Digestible, Hasher};
 use core::{fmt, marker::PhantomData};
 use std::sync::Arc;
 
@@ -458,16 +461,16 @@ where
 
 /// A producer-authenticated application-block header.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SignedTransactionBlock<V: Variant, D: Digest> {
+pub struct SignedTransactionBlock<S: Scheme, D: Digest> {
     header: TransactionBlockHeader<D>,
-    attestation: Attestation<V>,
+    attestation: Attestation<S>,
 }
 
-impl<V: Variant, D: Digest> SignedTransactionBlock<V, D> {
+impl<S: Scheme, D: Digest> SignedTransactionBlock<S, D> {
     /// Creates an attributed producer signature over `header`.
     ///
     /// This constructor does not verify the signature or that its signer owns the named chain.
-    pub const fn new(header: TransactionBlockHeader<D>, attestation: Attestation<V>) -> Self {
+    pub const fn new(header: TransactionBlockHeader<D>, attestation: Attestation<S>) -> Self {
         Self {
             header,
             attestation,
@@ -480,7 +483,7 @@ impl<V: Variant, D: Digest> SignedTransactionBlock<V, D> {
     }
 
     /// Returns the producer attestation.
-    pub const fn attestation(&self) -> &Attestation<V> {
+    pub const fn attestation(&self) -> &Attestation<S> {
         &self.attestation
     }
 
@@ -489,48 +492,48 @@ impl<V: Variant, D: Digest> SignedTransactionBlock<V, D> {
         checked_sum(&[
             TransactionBlockHeader::<D>::max_encode_size(codec)?,
             max_index_width(codec.participants())?,
-            V::Signature::SIZE,
+            OrdinarySignature::<S>::SIZE,
         ])
     }
 }
 
-impl<V: Variant, D: Digest> Epochable for SignedTransactionBlock<V, D> {
+impl<S: Scheme, D: Digest> Epochable for SignedTransactionBlock<S, D> {
     fn epoch(&self) -> Epoch {
         self.header.epoch()
     }
 }
 
-impl<V: Variant, D: Digest> Heightable for SignedTransactionBlock<V, D> {
+impl<S: Scheme, D: Digest> Heightable for SignedTransactionBlock<S, D> {
     fn height(&self) -> Height {
         self.header.height()
     }
 }
 
-impl<V: Variant, D: Digest> Attributable for SignedTransactionBlock<V, D> {
+impl<S: Scheme, D: Digest> Attributable for SignedTransactionBlock<S, D> {
     fn signer(&self) -> Participant {
-        self.attestation.signer()
+        self.attestation.signer
     }
 }
 
-impl<V: Variant, D: Digest> Write for SignedTransactionBlock<V, D> {
+impl<S: Scheme, D: Digest> Write for SignedTransactionBlock<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.header.write(buf);
         self.attestation.write(buf);
     }
 }
 
-impl<V: Variant, D: Digest> Read for SignedTransactionBlock<V, D> {
+impl<S: Scheme, D: Digest> Read for SignedTransactionBlock<S, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self::new(
             TransactionBlockHeader::read(buf)?,
-            Attestation::read(buf)?,
+            ReadExt::read(buf)?,
         ))
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for SignedTransactionBlock<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for SignedTransactionBlock<S, D> {
     fn encode_size(&self) -> usize {
         self.header.encode_size() + self.attestation.encode_size()
     }
@@ -538,17 +541,20 @@ impl<V: Variant, D: Digest> EncodeSize for SignedTransactionBlock<V, D> {
 
 /// One attributed data-availability vote over a complete transaction-block header.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct DaVote<V: Variant, D: Digest> {
+pub struct DaVote<S: Scheme, D: Digest> {
     header: TransactionBlockHeader<D>,
-    share: ThresholdShare<V>,
+    attestation: DaAttestation<S>,
 }
 
-impl<V: Variant, D: Digest> DaVote<V, D> {
+impl<S: Scheme, D: Digest> DaVote<S, D> {
     /// Creates an attributed data-availability vote.
     ///
     /// This constructor does not verify the signature or the voter's eligibility.
-    pub const fn new(header: TransactionBlockHeader<D>, share: ThresholdShare<V>) -> Self {
-        Self { header, share }
+    pub const fn new(header: TransactionBlockHeader<D>, attestation: DaAttestation<S>) -> Self {
+        Self {
+            header,
+            attestation,
+        }
     }
 
     /// Returns the complete voted header.
@@ -556,9 +562,9 @@ impl<V: Variant, D: Digest> DaVote<V, D> {
         &self.header
     }
 
-    /// Returns the voter's threshold share.
-    pub const fn share(&self) -> &ThresholdShare<V> {
-        &self.share
+    /// Returns the voter's attestation.
+    pub const fn attestation(&self) -> &DaAttestation<S> {
+        &self.attestation
     }
 
     /// Returns the largest encoding of a data-availability vote under `codec`.
@@ -566,66 +572,66 @@ impl<V: Variant, D: Digest> DaVote<V, D> {
         checked_sum(&[
             TransactionBlockHeader::<D>::max_encode_size(codec)?,
             max_index_width(codec.participants())?,
-            V::Signature::SIZE,
+            DaSignature::<S>::SIZE,
         ])
     }
 }
 
-impl<V: Variant, D: Digest> Epochable for DaVote<V, D> {
+impl<S: Scheme, D: Digest> Epochable for DaVote<S, D> {
     fn epoch(&self) -> Epoch {
         self.header.epoch()
     }
 }
 
-impl<V: Variant, D: Digest> Heightable for DaVote<V, D> {
+impl<S: Scheme, D: Digest> Heightable for DaVote<S, D> {
     fn height(&self) -> Height {
         self.header.height()
     }
 }
 
-impl<V: Variant, D: Digest> Attributable for DaVote<V, D> {
+impl<S: Scheme, D: Digest> Attributable for DaVote<S, D> {
     fn signer(&self) -> Participant {
-        self.share.signer()
+        self.attestation.signer
     }
 }
 
-impl<V: Variant, D: Digest> Write for DaVote<V, D> {
+impl<S: Scheme, D: Digest> Write for DaVote<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.header.write(buf);
-        self.share.write(buf);
+        self.attestation.write(buf);
     }
 }
 
-impl<V: Variant, D: Digest> Read for DaVote<V, D> {
+impl<S: Scheme, D: Digest> Read for DaVote<S, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self::new(
             TransactionBlockHeader::read(buf)?,
-            ThresholdShare::read(buf)?,
+            ReadExt::read(buf)?,
         ))
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for DaVote<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for DaVote<S, D> {
     fn encode_size(&self) -> usize {
-        self.header.encode_size() + self.share.encode_size()
+        self.header.encode_size() + self.attestation.encode_size()
     }
 }
 
 /// The base of one producer-chain proposal.
 ///
-/// A certificate variant carries a recovered DA signature. Constructing or decoding an anchor does
+/// A certificate variant carries a DA certificate. Constructing or decoding an anchor does
 /// not cryptographically verify it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Anchor<V: Variant, D: Digest> {
+pub enum Anchor<S: Scheme, D: Digest> {
     /// An explicit safe-tip reference inherited from the parent V-QC.
     Tip(BlockRef<D>),
     /// A higher data-availability certificate carried with the proposal.
-    Certificate(DaCertificate<V, D>),
+    Certificate(DaCertificate<S, D>),
 }
 
-impl<V: Variant, D: Digest> Anchor<V, D> {
+impl<S: Scheme, D: Digest> Anchor<S, D> {
     /// Returns the anchor's producer chain.
     pub const fn chain(&self) -> ChainId {
         match self {
@@ -651,7 +657,7 @@ impl<V: Variant, D: Digest> Anchor<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Write for Anchor<V, D> {
+impl<S: Scheme, D: Digest> Write for Anchor<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::Tip(reference) => {
@@ -666,19 +672,19 @@ impl<V: Variant, D: Digest> Write for Anchor<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for Anchor<V, D> {
-    type Cfg = ();
+impl<S: Scheme, D: Digest> Read for Anchor<S, D> {
+    type Cfg = CodecConfig;
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, config: &CodecConfig) -> Result<Self, CodecError> {
         match u8::read(buf)? {
             0 => Ok(Self::Tip(BlockRef::read(buf)?)),
-            1 => Ok(Self::Certificate(DaCertificate::read(buf)?)),
+            1 => Ok(Self::Certificate(DaCertificate::read_cfg(buf, config)?)),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Anchor<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Anchor<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Tip(reference) => reference.encode_size(),
@@ -689,12 +695,12 @@ impl<V: Variant, D: Digest> EncodeSize for Anchor<V, D> {
 
 /// One producer-chain coordinate in a leader proposal.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct ChainProposal<V: Variant, D: Digest> {
-    anchor: Anchor<V, D>,
+pub struct ChainProposal<S: Scheme, D: Digest> {
+    anchor: Anchor<S, D>,
     payloads: Vec<D>,
 }
 
-impl<V: Variant, D: Digest> fmt::Debug for ChainProposal<V, D> {
+impl<S: Scheme, D: Digest> fmt::Debug for ChainProposal<S, D> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ChainProposal")
@@ -704,11 +710,11 @@ impl<V: Variant, D: Digest> fmt::Debug for ChainProposal<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> ChainProposal<V, D> {
+impl<S: Scheme, D: Digest> ChainProposal<S, D> {
     /// Creates a bounded proposal path for `chain` above `anchor`.
     pub fn new(
         chain: ChainId,
-        anchor: Anchor<V, D>,
+        anchor: Anchor<S, D>,
         payloads: Vec<D>,
         pipeline_depth: usize,
     ) -> Result<Self, Error> {
@@ -739,7 +745,7 @@ impl<V: Variant, D: Digest> ChainProposal<V, D> {
     }
 
     /// Returns the explicit or certified proposal base.
-    pub const fn anchor(&self) -> &Anchor<V, D> {
+    pub const fn anchor(&self) -> &Anchor<S, D> {
         &self.anchor
     }
 
@@ -766,24 +772,24 @@ impl<V: Variant, D: Digest> ChainProposal<V, D> {
         checked_sum(&[
             1,
             TransactionBlockHeader::<D>::max_encode_size_without_chain()?,
-            V::Signature::SIZE,
+            max_da_certificate_size::<S>(codec)?,
             encoded_vec(codec.pipeline_depth(), D::SIZE)?,
         ])
     }
 }
 
-impl<V: Variant, D: Digest> Write for ChainProposal<V, D> {
+impl<S: Scheme, D: Digest> Write for ChainProposal<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.anchor.write(buf);
         self.payloads.write(buf);
     }
 }
 
-impl<V: Variant, D: Digest> Read for ChainProposal<V, D> {
+impl<S: Scheme, D: Digest> Read for ChainProposal<S, D> {
     type Cfg = (ChainId, CodecConfig);
 
     fn read_cfg(buf: &mut impl Buf, (chain, config): &Self::Cfg) -> Result<Self, CodecError> {
-        let anchor = Anchor::read(buf)?;
+        let anchor = Anchor::read_cfg(buf, config)?;
         let payloads = Vec::<D>::read_cfg(buf, &(RangeCfg::from(0..=config.pipeline_depth()), ()))?;
 
         Self::new(*chain, anchor, payloads, config.pipeline_depth())
@@ -791,7 +797,7 @@ impl<V: Variant, D: Digest> Read for ChainProposal<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for ChainProposal<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for ChainProposal<S, D> {
     fn encode_size(&self) -> usize {
         self.anchor.encode_size() + self.payloads.encode_size()
     }
@@ -799,20 +805,20 @@ impl<V: Variant, D: Digest> EncodeSize for ChainProposal<V, D> {
 
 /// A transaction-free leader block spanning every producer chain.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct LeaderBlock<V: Variant, D: Digest> {
+pub struct LeaderBlock<S: Scheme, D: Digest> {
     round: Round,
     parent: CertificateId<D>,
     history: D,
-    proposals: Vec<ChainProposal<V, D>>,
+    proposals: Vec<ChainProposal<S, D>>,
 }
 
-impl<V: Variant, D: Digest> LeaderBlock<V, D> {
+impl<S: Scheme, D: Digest> LeaderBlock<S, D> {
     /// Creates a live-view leader block with exactly one proposal per chain.
     pub fn new(
         round: Round,
         parent: CertificateId<D>,
         history: D,
-        proposals: Vec<ChainProposal<V, D>>,
+        proposals: Vec<ChainProposal<S, D>>,
         limits: CodecConfig,
     ) -> Result<Self, Error> {
         let block = Self {
@@ -878,7 +884,7 @@ impl<V: Variant, D: Digest> LeaderBlock<V, D> {
     }
 
     /// Returns proposals in ascending chain order.
-    pub fn proposals(&self) -> &[ChainProposal<V, D>] {
+    pub fn proposals(&self) -> &[ChainProposal<S, D>] {
         &self.proposals
     }
 
@@ -902,7 +908,7 @@ impl<V: Variant, D: Digest> LeaderBlock<V, D> {
             encoded_len(chains)?,
             checked_product(
                 chains,
-                ChainProposal::<V, D>::max_encode_size_without_chain(codec)?,
+                ChainProposal::<S, D>::max_encode_size_without_chain(codec)?,
             )?,
             encoded_index_sum(chains)?,
         ])?;
@@ -915,14 +921,14 @@ impl<V: Variant, D: Digest> LeaderBlock<V, D> {
 }
 
 /// A leader block paired with its digest, so leader-relative checks hash the block once.
-pub struct DigestedLeader<'a, V: Variant, D: Digest> {
-    block: &'a LeaderBlock<V, D>,
+pub struct DigestedLeader<'a, S: Scheme, D: Digest> {
+    block: &'a LeaderBlock<S, D>,
     digest: D,
 }
 
-impl<'a, V: Variant, D: Digest> DigestedLeader<'a, V, D> {
+impl<'a, S: Scheme, D: Digest> DigestedLeader<'a, S, D> {
     /// Pairs `block` with its digest under `H`.
-    pub fn new<H: Hasher<Digest = D>>(block: &'a LeaderBlock<V, D>) -> Self {
+    pub fn new<H: Hasher<Digest = D>>(block: &'a LeaderBlock<S, D>) -> Self {
         Self {
             block,
             digest: block.digest::<H>(),
@@ -935,12 +941,12 @@ impl<'a, V: Variant, D: Digest> DigestedLeader<'a, V, D> {
     /// Nothing checks this, and a mismatched digest makes every vote check against the pair
     /// judge the wrong block.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) const fn with_digest(block: &'a LeaderBlock<V, D>, digest: D) -> Self {
+    pub(crate) const fn with_digest(block: &'a LeaderBlock<S, D>, digest: D) -> Self {
         Self { block, digest }
     }
 
     /// Returns the leader block.
-    pub const fn block(&self) -> &'a LeaderBlock<V, D> {
+    pub const fn block(&self) -> &'a LeaderBlock<S, D> {
         self.block
     }
 
@@ -950,27 +956,27 @@ impl<'a, V: Variant, D: Digest> DigestedLeader<'a, V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Clone for DigestedLeader<'_, V, D> {
+impl<S: Scheme, D: Digest> Clone for DigestedLeader<'_, S, D> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<V: Variant, D: Digest> Copy for DigestedLeader<'_, V, D> {}
+impl<S: Scheme, D: Digest> Copy for DigestedLeader<'_, S, D> {}
 
-impl<V: Variant, D: Digest> Epochable for LeaderBlock<V, D> {
+impl<S: Scheme, D: Digest> Epochable for LeaderBlock<S, D> {
     fn epoch(&self) -> Epoch {
         self.round.epoch()
     }
 }
 
-impl<V: Variant, D: Digest> Viewable for LeaderBlock<V, D> {
+impl<S: Scheme, D: Digest> Viewable for LeaderBlock<S, D> {
     fn view(&self) -> View {
         self.round.view()
     }
 }
 
-impl<V: Variant, D: Digest> Write for LeaderBlock<V, D> {
+impl<S: Scheme, D: Digest> Write for LeaderBlock<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.round.write(buf);
         self.parent.write(buf);
@@ -979,7 +985,7 @@ impl<V: Variant, D: Digest> Write for LeaderBlock<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for LeaderBlock<V, D> {
+impl<S: Scheme, D: Digest> Read for LeaderBlock<S, D> {
     type Cfg = CodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, limits: &Self::Cfg) -> Result<Self, CodecError> {
@@ -1000,7 +1006,7 @@ impl<V: Variant, D: Digest> Read for LeaderBlock<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for LeaderBlock<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for LeaderBlock<S, D> {
     fn encode_size(&self) -> usize {
         self.round.encode_size()
             + self.parent.encode_size()
@@ -1011,76 +1017,76 @@ impl<V: Variant, D: Digest> EncodeSize for LeaderBlock<V, D> {
 
 /// A leader block signed by its scheduled leader.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SignedLeaderBlock<V: Variant, D: Digest> {
-    block: LeaderBlock<V, D>,
-    attestation: Attestation<V>,
+pub struct SignedLeaderBlock<S: Scheme, D: Digest> {
+    block: LeaderBlock<S, D>,
+    attestation: Attestation<S>,
 }
 
-impl<V: Variant, D: Digest> SignedLeaderBlock<V, D> {
+impl<S: Scheme, D: Digest> SignedLeaderBlock<S, D> {
     /// Creates an attributed leader signature over `block`.
     ///
     /// This constructor does not verify the signature or the scheduled leader assignment.
-    pub const fn new(block: LeaderBlock<V, D>, attestation: Attestation<V>) -> Self {
+    pub const fn new(block: LeaderBlock<S, D>, attestation: Attestation<S>) -> Self {
         Self { block, attestation }
     }
 
     /// Returns the complete leader block.
-    pub const fn block(&self) -> &LeaderBlock<V, D> {
+    pub const fn block(&self) -> &LeaderBlock<S, D> {
         &self.block
     }
 
     /// Returns the leader attestation.
-    pub const fn attestation(&self) -> &Attestation<V> {
+    pub const fn attestation(&self) -> &Attestation<S> {
         &self.attestation
     }
 
     /// Returns the largest encoding of a signed leader block under `codec`.
     pub(super) fn max_encode_size(codec: CodecConfig) -> Option<usize> {
         checked_sum(&[
-            LeaderBlock::<V, D>::max_encode_size(codec)?,
+            LeaderBlock::<S, D>::max_encode_size(codec)?,
             max_index_width(codec.participants())?,
-            V::Signature::SIZE,
+            OrdinarySignature::<S>::SIZE,
         ])
     }
 }
 
-impl<V: Variant, D: Digest> Epochable for SignedLeaderBlock<V, D> {
+impl<S: Scheme, D: Digest> Epochable for SignedLeaderBlock<S, D> {
     fn epoch(&self) -> Epoch {
         self.block.epoch()
     }
 }
 
-impl<V: Variant, D: Digest> Attributable for SignedLeaderBlock<V, D> {
+impl<S: Scheme, D: Digest> Attributable for SignedLeaderBlock<S, D> {
     fn signer(&self) -> Participant {
-        self.attestation.signer()
+        self.attestation.signer
     }
 }
 
-impl<V: Variant, D: Digest> Viewable for SignedLeaderBlock<V, D> {
+impl<S: Scheme, D: Digest> Viewable for SignedLeaderBlock<S, D> {
     fn view(&self) -> View {
         self.block.view()
     }
 }
 
-impl<V: Variant, D: Digest> Write for SignedLeaderBlock<V, D> {
+impl<S: Scheme, D: Digest> Write for SignedLeaderBlock<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.block.write(buf);
         self.attestation.write(buf);
     }
 }
 
-impl<V: Variant, D: Digest> Read for SignedLeaderBlock<V, D> {
+impl<S: Scheme, D: Digest> Read for SignedLeaderBlock<S, D> {
     type Cfg = CodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, limits: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self::new(
             LeaderBlock::read_cfg(buf, limits)?,
-            Attestation::read(buf)?,
+            ReadExt::read(buf)?,
         ))
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for SignedLeaderBlock<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for SignedLeaderBlock<S, D> {
     fn encode_size(&self) -> usize {
         self.block.encode_size() + self.attestation.encode_size()
     }
@@ -1089,7 +1095,10 @@ impl<V: Variant, D: Digest> EncodeSize for SignedLeaderBlock<V, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::multimmit::{mocks::MockBody, types::PathLimits};
+    use crate::multimmit::{
+        mocks::{Bls, MockBody},
+        types::PathLimits,
+    };
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{Sha256, bls12381::primitives::variant::MinSig, sha256};
 
@@ -1101,7 +1110,7 @@ mod tests {
         CodecConfig::new(2, 2, PathLimits::new(2, 1)).unwrap()
     }
 
-    fn proposal(chain: u32, payloads: usize) -> ChainProposal<MinSig, sha256::Digest> {
+    fn proposal(chain: u32, payloads: usize) -> ChainProposal<Bls<MinSig>, sha256::Digest> {
         let chain = ChainId::new(chain);
         let anchor = Anchor::Tip(BlockRef::new(chain, Height::zero(), digest(b"anchor")));
         let payloads = (0..payloads)
@@ -1298,7 +1307,7 @@ mod tests {
     fn chain_proposal_checks_chain_and_pipeline_depth() {
         let chain = ChainId::new(0);
         let anchor =
-            Anchor::<MinSig, _>::Tip(BlockRef::new(chain, Height::zero(), digest(b"anchor")));
+            Anchor::<Bls<MinSig>, _>::Tip(BlockRef::new(chain, Height::zero(), digest(b"anchor")));
 
         assert_eq!(
             ChainProposal::new(ChainId::new(1), anchor.clone(), Vec::new(), 2).unwrap_err(),
@@ -1309,7 +1318,7 @@ mod tests {
             Error::ProposalLength
         );
 
-        let overflow = Anchor::<MinSig, _>::Tip(BlockRef::new(
+        let overflow = Anchor::<Bls<MinSig>, _>::Tip(BlockRef::new(
             chain,
             Height::new(u64::MAX),
             digest(b"overflow"),
@@ -1326,7 +1335,7 @@ mod tests {
         let round = Round::new(Epoch::new(7), View::new(1));
         let parent = CertificateId::new(digest(b"parent"));
         let build = |proposals| {
-            LeaderBlock::<MinSig, _>::new(round, parent, digest(b"history"), proposals, limits)
+            LeaderBlock::<Bls<MinSig>, _>::new(round, parent, digest(b"history"), proposals, limits)
         };
 
         assert_eq!(build(vec![proposal(0, 1)]).unwrap_err(), Error::ChainCount);
@@ -1355,7 +1364,8 @@ mod tests {
         .unwrap();
 
         let decoded =
-            LeaderBlock::<MinSig, sha256::Digest>::decode_cfg(leader.encode(), &limits).unwrap();
+            LeaderBlock::<Bls<MinSig>, sha256::Digest>::decode_cfg(leader.encode(), &limits)
+                .unwrap();
         assert_eq!(decoded, leader);
     }
 }

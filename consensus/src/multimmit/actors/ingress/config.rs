@@ -3,11 +3,12 @@
 use crate::{
     multimmit::{
         config::Profile,
+        scheme::Scheme,
         types::{CodecConfig, EncodedBounds},
     },
     types::Epoch,
 };
-use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_utils::{Faults as _, N5f1, ordered::Set};
 use std::{num::NonZeroUsize, sync::Arc};
 
@@ -60,12 +61,12 @@ impl IngressLimits {
     };
 
     /// Derives the bounds from the profile's committee, codec shape, and resource ceilings.
-    pub(crate) fn from_profile<V: Variant, D: Digest>(profile: &Profile<D>) -> Self {
+    pub(crate) fn from_profile<S: Scheme, D: Digest>(profile: &Profile<D>) -> Self {
         let resources = profile.resources();
         let codec = profile.codec();
         let fault_domains = (N5f1::max_faults(codec.participants()) + 1) as usize;
         let max_ingress_group_bytes = codec
-            .encoded_bounds::<V, D>()
+            .encoded_bounds::<S, D>()
             .expect("profile validated encoded protocol bounds")
             .max_ingress_group_bytes();
         Self {
@@ -133,7 +134,7 @@ mod tests {
     use crate::{
         multimmit::{
             config::{Protocol, Role, Tuning},
-            mocks::Committee,
+            mocks::{Bls, Committee},
             types::{BlockRef, CertificateId, ChainId, EpochGenesis, PathLimits},
         },
         types::{Height, Participant},
@@ -175,9 +176,9 @@ mod tests {
     fn observer_profile(protocol: Protocol<Sha256Digest>) -> Profile<Sha256Digest> {
         let bounds = protocol
             .codec_config()
-            .encoded_bounds::<MinPk, Sha256Digest>()
+            .encoded_bounds::<Bls<MinPk>, Sha256Digest>()
             .unwrap();
-        Profile::new::<MinPk>(
+        Profile::new::<Bls<MinPk>>(
             protocol,
             Role::Observer,
             Tuning {
@@ -190,17 +191,18 @@ mod tests {
 
     #[test]
     fn lanes_reserve_two_codec_groups_per_fault_domain() {
-        let committee = Committee::<MinPk>::builder(81, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(81, 6)
             .limits(PathLimits::new(25_000, 0))
             .build();
         let required = committee
             .codec()
-            .encoded_bounds::<MinPk, Sha256Digest>()
+            .encoded_bounds::<Bls<MinPk>, Sha256Digest>()
             .unwrap()
             .max_ingress_group_bytes();
         assert!(required > 4 * 1024 * 1024);
         assert!(required < MIN_LANE_BYTES);
-        let limits = IngressLimits::from_profile::<MinPk, _>(&observer_profile(committee.config));
+        let limits =
+            IngressLimits::from_profile::<Bls<MinPk>, _>(&observer_profile(committee.config));
 
         assert_eq!(
             limits.lane_bytes.get(),
@@ -211,15 +213,16 @@ mod tests {
 
     #[test]
     fn lanes_scale_large_codec_groups_by_fault_domains() {
-        let committee = Committee::<MinPk>::builder(82, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(82, 6)
             .limits(PathLimits::new(60_000, 0))
             .build();
         let required = committee
             .codec()
-            .encoded_bounds::<MinPk, Sha256Digest>()
+            .encoded_bounds::<Bls<MinPk>, Sha256Digest>()
             .unwrap()
             .max_ingress_group_bytes();
-        let limits = IngressLimits::from_profile::<MinPk, _>(&observer_profile(committee.config));
+        let limits =
+            IngressLimits::from_profile::<Bls<MinPk>, _>(&observer_profile(committee.config));
 
         assert!(required > MIN_LANE_BYTES);
         assert_eq!(limits.lane_bytes.get(), required.saturating_mul(4));
@@ -241,10 +244,10 @@ mod tests {
             );
             let group = protocol
                 .codec_config()
-                .encoded_bounds::<MinPk, Sha256Digest>()
+                .encoded_bounds::<Bls<MinPk>, Sha256Digest>()
                 .unwrap()
                 .max_ingress_group_bytes();
-            let limits = IngressLimits::from_profile::<MinPk, _>(&observer_profile(protocol));
+            let limits = IngressLimits::from_profile::<Bls<MinPk>, _>(&observer_profile(protocol));
             let (peer_items, peer_bytes) = limits.peer_share(participants as usize);
 
             assert!(

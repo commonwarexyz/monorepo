@@ -100,6 +100,9 @@ mod successor_matrix {
     use super::*;
     use crate::{multimmit::machine::durability::ChangeKind, types::ViewDelta};
 
+    /// The suite these tests run on.
+    type Suite = Bls<MinPk>;
+
     #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
     enum SuccessorFamily {
         Da,
@@ -112,10 +115,10 @@ mod successor_matrix {
     struct PublicationWitness {
         id: EffectId,
         generation: Generation,
-        effect: DurableEffect<MinPk, Digest>,
+        effect: DurableEffect<Bls<MinPk>, Digest>,
     }
 
-    fn only_persist(step: &Step<MinPk, Digest>) -> PersistJob<MinPk, Digest> {
+    fn only_persist(step: &Step<Bls<MinPk>, Digest>) -> PersistJob<Bls<MinPk>, Digest> {
         let jobs = step
             .capabilities()
             .iter()
@@ -133,7 +136,7 @@ mod successor_matrix {
     }
 
     /// Returns the publication reserved by the barrier's forwarding event.
-    fn forwarded_publication(job: &PersistJob<MinPk, Digest>) -> EffectId {
+    fn forwarded_publication(job: &PersistJob<Bls<MinPk>, Digest>) -> EffectId {
         job.events()
             .iter()
             .find_map(|event| match event.change() {
@@ -145,9 +148,9 @@ mod successor_matrix {
 
     /// Acknowledges each staged barrier in order until the machine stages no more.
     fn drain_barriers(
-        runner: &mut Driver<Sha256, MinPk>,
-        step: Step<MinPk, Digest>,
-    ) -> Step<MinPk, Digest> {
+        runner: &mut Driver<Sha256, Bls<MinPk>>,
+        step: Step<Bls<MinPk>, Digest>,
+    ) -> Step<Bls<MinPk>, Digest> {
         let mut step = step;
         let mut pending = VecDeque::new();
         for _ in 0..8 {
@@ -169,7 +172,7 @@ mod successor_matrix {
     }
 
     fn publication_witness(
-        effects: &[Capability<MinPk, Digest>],
+        effects: &[Capability<Bls<MinPk>, Digest>],
         id: EffectId,
     ) -> PublicationWitness {
         effects
@@ -194,9 +197,9 @@ mod successor_matrix {
     }
 
     fn authenticate_one(
-        runner: &mut Driver<Sha256, MinPk>,
-        artifact: Artifact<MinPk, Digest>,
-    ) -> Step<MinPk, Digest> {
+        runner: &mut Driver<Sha256, Bls<MinPk>>,
+        artifact: Artifact<Bls<MinPk>, Digest>,
+    ) -> Step<Bls<MinPk>, Digest> {
         let observed = runner.submit(cohort::<Sha256, _>(vec![artifact])).unwrap();
         let verification = observed
             .capabilities()
@@ -213,8 +216,8 @@ mod successor_matrix {
     }
 
     fn acknowledge_recovery_exit(
-        runner: &mut Driver<Sha256, MinPk>,
-        recovery: &Step<MinPk, Digest>,
+        runner: &mut Driver<Sha256, Bls<MinPk>>,
+        recovery: &Step<Bls<MinPk>, Digest>,
         epoch: Epoch,
     ) {
         let resolution = recovery
@@ -257,7 +260,7 @@ mod successor_matrix {
     fn prepare_publication_case(
         fixture: &Fixture,
         family: SuccessorFamily,
-    ) -> (Driver<Sha256, MinPk>, PublicationWitness) {
+    ) -> (Driver<Sha256, Bls<MinPk>>, PublicationWitness) {
         let tuning = Tuning {
             view_timeout: Duration::from_secs(1),
             production_interval: Duration::from_millis(100),
@@ -274,7 +277,7 @@ mod successor_matrix {
         } else {
             Role::Observer
         };
-        let profile = Profile::new::<MinPk>(protocol, role, tuning).unwrap();
+        let profile = Profile::new::<Bls<MinPk>>(protocol, role, tuning).unwrap();
         let epoch = profile.protocol().epoch();
         let predecessor = match family {
             SuccessorFamily::Da => {
@@ -351,11 +354,11 @@ mod successor_matrix {
 
     fn successor_barrier(
         fixture: &Fixture,
-        runner: &mut Driver<Sha256, MinPk>,
+        runner: &mut Driver<Sha256, Suite>,
         family: SuccessorFamily,
     ) -> (
-        PersistJob<MinPk, Digest>,
-        Option<DurableEffect<MinPk, Digest>>,
+        PersistJob<Suite, Digest>,
+        Option<DurableEffect<Suite, Digest>>,
     ) {
         let epoch = runner.profile().protocol().epoch();
         match family {
@@ -582,7 +585,7 @@ mod successor_matrix {
     }
 
     fn recover_publications(
-        runner: &mut Driver<Sha256, MinPk>,
+        runner: &mut Driver<Sha256, Bls<MinPk>>,
         ids: &BTreeSet<EffectId>,
     ) -> (u64, BTreeMap<EffectId, PublicationWitness>) {
         let recovery = runner.crash_and_restore().unwrap();

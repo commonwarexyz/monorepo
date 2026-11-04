@@ -9,10 +9,13 @@ use super::{
 };
 use crate::{
     Viewable,
-    multimmit::types::{Artifact, ChainId},
+    multimmit::{
+        scheme::Scheme,
+        types::{Artifact, ChainId},
+    },
     types::{Height, View},
 };
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 
 /// Outstanding data-availability publications per pipeline-window slot of a chain: a block, a DA
 /// vote, and a DA certificate.
@@ -42,7 +45,7 @@ enum Successor {
     Floor(View),
 }
 
-impl<H: Hasher, V: Variant> Machine<H, V> {
+impl<H: Hasher, S: Scheme> Machine<H, S> {
     /// Returns the most outstanding discharges each bounded family may hold.
     ///
     /// Own messages are counted from the durable retired view, so the retained window is the
@@ -109,7 +112,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     }
 
     /// Returns the fact that ends the publication of `artifact`, or `None` when it already holds.
-    fn discharge_kind(&self, artifact: &Artifact<V, H::Digest>) -> Option<DischargeKind> {
+    fn discharge_kind(&self, artifact: &Artifact<S, H::Digest>) -> Option<DischargeKind> {
         let certified = |chain| {
             self.durable
                 .state
@@ -159,7 +162,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// when no item is outstanding.
     pub(super) fn discharges(
         &self,
-        publication: &Publication<V, H::Digest>,
+        publication: &Publication<S, H::Digest>,
     ) -> Option<Vec<Discharge>> {
         let discharges = match publication {
             Publication::Propose(proposal) => self
@@ -243,7 +246,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(super) fn install_publication(
         &mut self,
         id: EffectId,
-        publication: Publication<V, H::Digest>,
+        publication: Publication<S, H::Digest>,
     ) -> bool {
         let Some(discharges) = self.discharges(&publication) else {
             return false;

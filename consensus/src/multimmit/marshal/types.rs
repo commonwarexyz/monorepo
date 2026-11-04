@@ -9,6 +9,7 @@ use crate::{
     Block, Epochable, Viewable,
     multimmit::{
         actors::util::Completion,
+        scheme::Scheme,
         types::{BlockRef, CertificateId, CodecConfig, Frontier, Lqc, TipRecord, TransactionBlock},
     },
     types::{Epoch, View},
@@ -19,7 +20,7 @@ use bytes::BufMut;
 use commonware_codec::{
     Buf, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{acknowledgement::Exact, channel::oneshot};
 use std::{error::Error as StdError, fmt, future::Future, sync::Arc};
 
@@ -27,10 +28,10 @@ use std::{error::Error as StdError, fmt, future::Future, sync::Arc};
 pub(super) type Reply<T, E> = oneshot::Sender<Result<T, E>>;
 
 /// A retained L-QC, if any.
-pub(super) type MaybeLqc<V, D> = Option<Arc<Lqc<V, D>>>;
+pub(super) type MaybeLqc<S, D> = Option<Arc<Lqc<S, D>>>;
 
 /// A retained floor and the index of its last output, if any.
-pub(super) type MaybeFloor<V, D> = Option<(OutputIndex, Floor<V, D>)>;
+pub(super) type MaybeFloor<S, D> = Option<(OutputIndex, Floor<S, D>)>;
 
 /// Durable custody for each requested block reference, `None` where no body is held.
 pub(super) type CustodyValues<D> = Vec<Option<CustodyRef<D>>>;
@@ -39,14 +40,14 @@ pub(super) type CustodyValues<D> = Vec<Option<CustodyRef<D>>>;
 pub(super) type BodyValues<H, B> = Vec<Option<Arc<TransactionBlock<H, B>>>>;
 
 /// Cryptographic verification for peer-resolved L-QCs and externally supplied floor anchors.
-pub trait LqcVerifier<H: Hasher, V: Variant>: Send + 'static {
+pub trait LqcVerifier<H: Hasher, S: Scheme>: Send + 'static {
     /// Verification failure returned for an invalid proof or unavailable verifier.
     type Error: StdError + Send + Sync + 'static;
 
     /// Authenticates one externally resolved L-QC before marshal admits it.
     fn verify(
         &mut self,
-        proof: &Lqc<V, H::Digest>,
+        proof: &Lqc<S, H::Digest>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
@@ -325,17 +326,17 @@ pub type Custody = Completion<Error>;
 ///
 /// Decoding checks only the floor's shape. Marshal authenticates a floor when it is installed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Floor<V: Variant, D: Digest> {
-    pub(super) anchor: Arc<Lqc<V, D>>,
+pub struct Floor<S: Scheme, D: Digest> {
+    pub(super) anchor: Arc<Lqc<S, D>>,
     pub(super) history: Arc<TipRecord<D>>,
     pub(super) emitted: Vec<BlockRef<D>>,
 }
 
-impl<V: Variant, D: Digest> Floor<V, D> {
+impl<S: Scheme, D: Digest> Floor<S, D> {
     /// Creates a floor from an anchoring L-QC, the tip-history opening its leader committed, and
     /// the highest block of the application snapshot on every chain, in chain order.
     pub const fn new(
-        anchor: Arc<Lqc<V, D>>,
+        anchor: Arc<Lqc<S, D>>,
         history: Arc<TipRecord<D>>,
         emitted: Vec<BlockRef<D>>,
     ) -> Self {
@@ -347,7 +348,7 @@ impl<V: Variant, D: Digest> Floor<V, D> {
     }
 
     /// Returns the L-QC anchoring the floor.
-    pub fn anchor(&self) -> &Lqc<V, D> {
+    pub fn anchor(&self) -> &Lqc<S, D> {
         &self.anchor
     }
 
@@ -363,20 +364,20 @@ impl<V: Variant, D: Digest> Floor<V, D> {
 }
 
 /// A floor's epoch is its anchor's, which the anchor's certificate signs.
-impl<V: Variant, D: Digest> Epochable for Floor<V, D> {
+impl<S: Scheme, D: Digest> Epochable for Floor<S, D> {
     fn epoch(&self) -> Epoch {
         self.anchor.epoch()
     }
 }
 
 /// A floor's view is its anchor's, which the anchor's certificate signs.
-impl<V: Variant, D: Digest> Viewable for Floor<V, D> {
+impl<S: Scheme, D: Digest> Viewable for Floor<S, D> {
     fn view(&self) -> View {
         self.anchor.view()
     }
 }
 
-impl<V: Variant, D: Digest> Write for Floor<V, D> {
+impl<S: Scheme, D: Digest> Write for Floor<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.anchor.write(writer);
         self.history.write(writer);
@@ -384,17 +385,17 @@ impl<V: Variant, D: Digest> Write for Floor<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Floor<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Floor<S, D> {
     fn encode_size(&self) -> usize {
         self.anchor.encode_size() + self.history.encode_size() + self.emitted.encode_size()
     }
 }
 
-impl<V: Variant, D: Digest> Read for Floor<V, D> {
+impl<S: Scheme, D: Digest> Read for Floor<S, D> {
     type Cfg = CodecConfig;
 
     fn read_cfg(reader: &mut impl Buf, config: &Self::Cfg) -> Result<Self, CodecError> {
-        let anchor = Lqc::<V, D>::read_cfg(reader, config)?;
+        let anchor = Lqc::<S, D>::read_cfg(reader, config)?;
         let history = TipRecord::<D>::read_cfg(reader, config)?;
         let emitted =
             Vec::<BlockRef<D>>::read_cfg(reader, &(RangeCfg::exact(config.chains()), ()))?;
@@ -417,10 +418,10 @@ impl<V: Variant, D: Digest> Read for Floor<V, D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<'a, V> arbitrary::Arbitrary<'a> for Floor<V, commonware_cryptography::sha256::Digest>
+impl<'a, S> arbitrary::Arbitrary<'a> for Floor<S, commonware_cryptography::sha256::Digest>
 where
-    V: Variant,
-    Lqc<V, commonware_cryptography::sha256::Digest>: arbitrary::Arbitrary<'a>,
+    S: Scheme,
+    Lqc<S, commonware_cryptography::sha256::Digest>: arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let emitted = (0..crate::multimmit::types::arbitrary_codec_config().chains())
@@ -548,7 +549,7 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
-        use crate::multimmit::types::arbitrary_codec_config;
+        use crate::multimmit::{mocks::Bls, types::arbitrary_codec_config};
         use commonware_codec::{
             Decode as _,
             conformance::{CodecConformance, generate_value},
@@ -557,7 +558,7 @@ mod tests {
             bls12381::primitives::variant::MinSig, sha256::Digest as Sha256Digest,
         };
 
-        type TestFloor = Floor<MinSig, Sha256Digest>;
+        type TestFloor = Floor<Bls<MinSig>, Sha256Digest>;
 
         #[test]
         fn floors_round_trip_and_reject_invalid_frontiers() {

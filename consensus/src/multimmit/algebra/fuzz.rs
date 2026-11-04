@@ -4,6 +4,7 @@ use super::{FinalTips, PoolExtractor, VqcExtraction, reference::ReferenceOrderin
 use crate::{
     multimmit::{
         fuzz::ByteSchedule,
+        mocks::Bls,
         types::{
             Anchor, BlockRef, CertificateId, ChainId, ChainProposal, CodecConfig, DigestedLeader,
             Extension, LeaderBlock, PathLimits, Position, VoteBody,
@@ -57,7 +58,7 @@ pub(crate) fn exercise(input: &[u8]) {
                 .unwrap()
             })
             .collect();
-        let leader = LeaderBlock::<MinSig, Digest>::new(
+        let leader = LeaderBlock::<Bls<MinSig>, Digest>::new(
             Round::new(Epoch::new(7), View::new(view as u64)),
             CertificateId::new(Sha256::hash(&[b"parent"])),
             Sha256::hash(&[b"history"]),
@@ -109,7 +110,7 @@ pub(crate) fn exercise(input: &[u8]) {
             signers.swap(end, next() % (end + 1));
         }
         let mut retained = Vec::new();
-        let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+        let mut pool = PoolExtractor::new::<Sha256, Bls<MinSig>>(&leader, config).unwrap();
         for signer in signers {
             let signer = Participant::new(signer as u32);
             let choice = next();
@@ -120,7 +121,7 @@ pub(crate) fn exercise(input: &[u8]) {
             }]
             .clone();
             assert!(
-                pool.insert::<Sha256, MinSig>(&leader, signer, &body)
+                pool.insert::<Sha256, Bls<MinSig>>(&leader, signer, &body)
                     .unwrap()
             );
             retained.push((signer, body));
@@ -128,7 +129,11 @@ pub(crate) fn exercise(input: &[u8]) {
             let before = pool.final_tips();
             assert!(
                 !pool
-                    .insert::<Sha256, MinSig>(&leader, signer, &templates[next() % templates.len()])
+                    .insert::<Sha256, Bls<MinSig>>(
+                        &leader,
+                        signer,
+                        &templates[next() % templates.len()]
+                    )
                     .unwrap()
             );
             assert_eq!(pool.final_tips(), before);
@@ -140,7 +145,7 @@ pub(crate) fn exercise(input: &[u8]) {
                     .all(|(vote, (signer, _))| vote.signer == *signer)
             );
             if retained.len() > 2 * faults {
-                let (actual, _) = VqcExtraction::from_votes::<Sha256, MinSig>(
+                let (actual, _) = VqcExtraction::from_votes::<Sha256, Bls<MinSig>>(
                     DigestedLeader::new::<Sha256>(&leader),
                     retained.iter().map(|(signer, body)| (*signer, body)),
                     config,
@@ -155,7 +160,7 @@ pub(crate) fn exercise(input: &[u8]) {
             }
             let expected = reference.final_tips(&materialized, config);
             let incremental = pool.final_tips().unwrap();
-            let batch = FinalTips::from_pool::<Sha256, MinSig, _>(
+            let batch = FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(
                 &leader,
                 retained.iter().rev().map(|(signer, body)| (*signer, body)),
                 config,

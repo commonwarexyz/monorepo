@@ -5,7 +5,7 @@ use crate::{
     multimmit::{
         actors::voter::telemetry::{round_span, round_timeout_span},
         config::Role,
-        mocks::MockApplication,
+        mocks::{Bls, MockApplication},
         testing::{SpanRecorder, expect_before, expect_within},
         types::ChainId,
         wire::{DataMessage, Envelope},
@@ -91,7 +91,7 @@ fn round_spans_track_ingress_and_publication_boundaries() {
             )
             .await
             .expect("network stays up");
-            let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 bytes,
                 &node.envelope_cfg(node.committee.codec()),
             )

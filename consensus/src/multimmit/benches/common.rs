@@ -3,8 +3,8 @@
 use commonware_consensus::{
     Epochable as _,
     multimmit::{
-        mocks,
-        scheme::bls12381_threshold::Scheme,
+        mocks::{self, Fixture as Suite},
+        scheme::Generic,
         types::{
             Anchor, BlockRef, CertificateId, ChainId, ChainProposal, CodecConfig, DigestedLeader,
             Extension, LeaderBlock, Lqc, Nullify, PathLimits, Position, SignedTransactionBlock,
@@ -13,11 +13,9 @@ use commonware_consensus::{
     },
     types::{Height, Round, View},
 };
-use commonware_cryptography::{
-    Hasher, Sha256, bls12381::primitives::variant::Variant, ed25519, sha256::Digest,
-};
+use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 use commonware_parallel::{Rayon, Sequential, Strategy};
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, test_rng};
 use criterion::Criterion;
 
 pub const PARTICIPANTS: u32 = 31;
@@ -25,25 +23,26 @@ const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_CRYPTO_BENCH";
 /// The committee seed, which also labels its epoch.
 const EPOCH: u64 = 9;
 
-pub type MultimmitScheme<V> = Scheme<ed25519::PublicKey, V>;
+/// The Multimmit scheme of an epoch over the suite `S`.
+pub type MultimmitScheme<S> = Generic<S>;
 
-pub struct Fixture<V: Variant> {
+pub struct Fixture<S: Suite> {
     pub codec: CodecConfig,
     pub round: Round,
-    pub signers: Vec<MultimmitScheme<V>>,
-    pub verifier: MultimmitScheme<V>,
+    pub signers: Vec<MultimmitScheme<S>>,
+    pub verifier: MultimmitScheme<S>,
     parent_history: TipRecord<Digest>,
     tips: Vec<BlockRef<Digest>>,
 }
 
-impl<V: Variant> Fixture<V> {
+impl<S: Suite> Fixture<S> {
     pub fn new() -> Self {
         Self::new_sized(PARTICIPANTS)
     }
 
     /// Builds one committee of `participants` validators, each producing one chain.
     pub fn new_sized(participants_count: u32) -> Self {
-        let committee = mocks::Committee::<V>::builder(EPOCH, participants_count)
+        let committee = mocks::Committee::<S>::builder(EPOCH, participants_count)
             .namespace(NAMESPACE)
             .limits(PathLimits::new(2, 2))
             .build();
@@ -76,7 +75,7 @@ impl<V: Variant> Fixture<V> {
         .unwrap()
     }
 
-    pub fn ordinary_blocks(&self) -> Vec<SignedTransactionBlock<V, Digest>> {
+    pub fn ordinary_blocks(&self) -> Vec<SignedTransactionBlock<S, Digest>> {
         self.signers
             .iter()
             .enumerate()
@@ -88,27 +87,37 @@ impl<V: Variant> Fixture<V> {
             .collect()
     }
 
-    pub fn nullifies(&self) -> Vec<Nullify<V>> {
+    pub fn nullifies(&self) -> Vec<Nullify<S>> {
         self.signers
             .iter()
             .map(|signer| signer.sign_nullify(self.round).unwrap())
             .collect()
     }
 
-    pub fn certificates(&self) -> (Vqc<V, Digest>, Lqc<V, Digest>) {
+    pub fn certificates(&self) -> (Vqc<S, Digest>, Lqc<S, Digest>) {
         let leader = self.leader();
         let vqc = self
             .verifier
-            .assemble_vqc::<Sha256, _>(leader.clone(), &self.view_messages(&leader), &Sequential)
+            .assemble_vqc::<_, Sha256, _>(
+                &mut test_rng(),
+                leader.clone(),
+                &self.view_messages(&leader),
+                &Sequential,
+            )
             .unwrap();
         let lqc = self
             .verifier
-            .assemble_lqc::<Sha256, _>(leader.clone(), &self.votes(&leader), &Sequential)
+            .assemble_lqc::<_, Sha256, _>(
+                &mut test_rng(),
+                leader.clone(),
+                &self.votes(&leader),
+                &Sequential,
+            )
             .unwrap();
         (vqc, lqc)
     }
 
-    pub fn leader(&self) -> LeaderBlock<V, Digest> {
+    pub fn leader(&self) -> LeaderBlock<S, Digest> {
         let proposals = self
             .tips
             .iter()
@@ -133,7 +142,7 @@ impl<V: Variant> Fixture<V> {
         .unwrap()
     }
 
-    pub fn vote_body(&self, leader: &LeaderBlock<V, Digest>, signer: usize) -> VoteBody<Digest> {
+    pub fn vote_body(&self, leader: &LeaderBlock<S, Digest>, signer: usize) -> VoteBody<Digest> {
         let mut positions = vec![Position::new(1); self.codec.participants()];
         positions[signer] = Position::new(0);
         VoteBody::for_leader(
@@ -145,7 +154,7 @@ impl<V: Variant> Fixture<V> {
         .unwrap()
     }
 
-    pub fn votes(&self, leader: &LeaderBlock<V, Digest>) -> Vec<Vote<V, Digest>> {
+    pub fn votes(&self, leader: &LeaderBlock<S, Digest>) -> Vec<Vote<S, Digest>> {
         self.signers
             .iter()
             .take(self.codec.view_quorum())
@@ -154,7 +163,7 @@ impl<V: Variant> Fixture<V> {
             .collect()
     }
 
-    pub fn view_messages(&self, leader: &LeaderBlock<V, Digest>) -> Vec<ViewMessage<V, Digest>> {
+    pub fn view_messages(&self, leader: &LeaderBlock<S, Digest>) -> Vec<ViewMessage<S, Digest>> {
         let designation = self.codec.designation_quorum();
         self.signers
             .iter()
@@ -183,7 +192,7 @@ pub fn rayon() -> Rayon {
 /// A measured operation that runs under any execution strategy.
 pub trait Workload {
     /// Runs the operation once under `strategy`, passing its result through [`std::hint::black_box`].
-    fn run<S: Strategy>(&mut self, strategy: &S);
+    fn run<St: Strategy>(&mut self, strategy: &St);
 }
 
 /// Registers the workload `new` builds once per execution strategy, sequential then rayon.
@@ -199,11 +208,11 @@ pub fn bench_strategies<W: Workload>(c: &mut Criterion, label: &str, mut new: im
     measure(c, &format!("{label} strategy=rayon"), new(), &rayon());
 }
 
-fn measure<W: Workload, S: Strategy>(
+fn measure<W: Workload, St: Strategy>(
     c: &mut Criterion,
     label: &str,
     mut workload: W,
-    strategy: &S,
+    strategy: &St,
 ) {
     c.bench_function(label, |b| b.iter(|| workload.run(strategy)));
 }

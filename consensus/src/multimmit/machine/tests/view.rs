@@ -30,6 +30,7 @@ use crate::{
             verification::{Observation, Verdict, VerificationCompletion, VerifyJob},
             view::{NullificationRecoveryCompletion, VqcAggregateCompletion},
         },
+        mocks::Bls,
         types::{
             Anchor, Artifact, CertificateId, ChainProposal, DigestedLeader, Extension, FinalityId,
             LeaderBlock, Position, SignedLeaderBlock, ViewMessage, ViewProof, Vote, VoteBody,
@@ -100,7 +101,7 @@ fn locally_assembled_vqc_forwards_and_exits_in_one_work_quantum() {
     );
     machine.verify(&proposal, true, Until::CursorAdvance);
 
-    let vqc_job = |effect: &Capability<MinPk, Digest>| match effect {
+    let vqc_job = |effect: &Capability<Bls<MinPk>, Digest>| match effect {
         Capability::Crypto(CryptoJob::AggregateVqc(job)) => Some(job.clone()),
         _ => None,
     };
@@ -373,7 +374,7 @@ fn nullification_recovery_uses_the_canonical_subset_and_exits() {
         .unwrap();
     let completed = machine.settle(completed, Until::CursorAdvance);
     let retained = machine.persist(&completed.persist_job(), Until::CursorAdvance);
-    Machine::<Sha256, MinPk>::restore(profile, machine.live_snapshot_for_test()).unwrap();
+    Machine::<Sha256, Bls<MinPk>>::restore(profile, machine.live_snapshot_for_test()).unwrap();
     // The recovered nullification is an independently verifiable aggregate with no local
     // signature pending behind it, so its broadcast releases with the forwarding staging
     // instead of waiting for that barrier's acknowledgement.
@@ -462,7 +463,7 @@ fn vqc_aggregation_retains_exact_messages_and_exits_observer() {
         .unwrap();
     let completed = machine.settle(completed, Until::CursorAdvance);
     let retained = machine.persist(&completed.persist_job(), Until::CursorAdvance);
-    Machine::<Sha256, MinPk>::restore(profile, machine.live_snapshot_for_test()).unwrap();
+    Machine::<Sha256, Bls<MinPk>>::restore(profile, machine.live_snapshot_for_test()).unwrap();
     // The exit derives in the drive that stages the forwarding it reads, so one barrier
     // carries the forwarded certificate and the transition it proves.
     let exit = retained.persist_job();
@@ -917,7 +918,7 @@ fn late_leader_cannot_preempt_an_earlier_nullification() {
             )),
         );
 
-        let complete = |job: &VerifyJob<MinPk, Digest>| Input::Verified(job.all_valid());
+        let complete = |job: &VerifyJob<Bls<MinPk>, Digest>| Input::Verified(job.all_valid());
         let (first, second) = if leader_first {
             (&proposal, &nullifies)
         } else {
@@ -1318,7 +1319,7 @@ fn timeout_signing_batch_survives_recovery_intact() {
     machine.persist(&elapsed.persist_job(), Until::CursorAdvance);
 
     let snapshot = machine.live_snapshot_for_test();
-    let mut restored = Machine::<Sha256, MinPk>::restore(profile, snapshot).unwrap();
+    let mut restored = Machine::<Sha256, Bls<MinPk>>::restore(profile, snapshot).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     assert!(recovery.has(
         |effect| matches!(effect, Capability::Timer(TimerCommand::View(timer)) if timer.delay() == expected_delay)
@@ -1356,12 +1357,12 @@ fn restore_derives_the_timeout_choice_from_durable_state() {
         .collect::<Vec<_>>();
     assert_eq!(reserved.len(), 1);
     let config = SnapshotCodecConfig::from_profile(&profile);
-    let decoded = Snapshot::<MinPk, Digest>::decode_cfg(snapshot.encode(), &config).unwrap();
+    let decoded = Snapshot::<Bls<MinPk>, Digest>::decode_cfg(snapshot.encode(), &config).unwrap();
     assert_eq!(decoded, snapshot);
 
     // The snapshot carries no view projection: restore derives the timeout choice from the
     // durable reservation and reissues exactly that reservation.
-    let mut restored = Machine::<Sha256, MinPk>::restore(profile, decoded).unwrap();
+    let mut restored = Machine::<Sha256, Bls<MinPk>>::restore(profile, decoded).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     let recovered = restored.persist(&recovery.persist_job(), Until::CursorAdvance);
     let reissued = recovered
@@ -1390,7 +1391,7 @@ fn timeout_choice_recovers_at_each_durable_crash_prefix() {
     let timeout = elapsed.persist_job();
 
     let mut without_timeout =
-        Machine::<Sha256, MinPk>::restore(profile.clone(), before.clone()).unwrap();
+        Machine::<Sha256, Bls<MinPk>>::restore(profile.clone(), before.clone()).unwrap();
     let recovery = without_timeout.step(Input::RecoveryComplete).unwrap();
     let recovered = without_timeout.persist(&recovery.persist_job(), Until::CursorAdvance);
     assert!(recovered.capabilities().iter().all(|effect| {
@@ -1402,7 +1403,7 @@ fn timeout_choice_recovers_at_each_durable_crash_prefix() {
         )
     }));
 
-    let mut with_timeout = Machine::<Sha256, MinPk>::restore(profile, before).unwrap();
+    let mut with_timeout = Machine::<Sha256, Bls<MinPk>>::restore(profile, before).unwrap();
     for event in timeout.events() {
         with_timeout.replay(event.clone()).unwrap();
     }
@@ -1461,7 +1462,7 @@ fn pending_proposal_parent_survives_recovery() {
     assert!(request.attach_parent());
     assert!(!machine.durable.state.vqc_forwarded(View::new(1)));
 
-    let mut restored = Machine::<Sha256, MinPk>::restore(profile, crashed).unwrap();
+    let mut restored = Machine::<Sha256, Bls<MinPk>>::restore(profile, crashed).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     let mut recovered = restored.persist(&recovery.persist_job(), Until::CursorAdvance);
     let recovered_sign = sign_job(&recovered);
@@ -1550,7 +1551,7 @@ fn outstanding_proposal_parent_survives_recovery() {
     assert!(machine.durable.state.vqc_forwarded(View::new(1)));
 
     let mut restored =
-        Machine::<Sha256, MinPk>::restore(profile, machine.live_snapshot_for_test()).unwrap();
+        Machine::<Sha256, Bls<MinPk>>::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     restored.persist(&recovery.persist_job(), Until::CursorAdvance);
     assert!(restored.inspect().ready_artifacts().contains(&parent_id));
@@ -1594,7 +1595,7 @@ fn pending_proposal_parent_counts_against_recovery_capacity() {
         )
         .profile();
     assert_eq!(
-        snapshot_reason(Machine::<Sha256, MinPk>::restore(
+        snapshot_reason(Machine::<Sha256, Bls<MinPk>>::restore(
             constrained,
             machine.live_snapshot_for_test()
         )),
@@ -2089,7 +2090,7 @@ fn view_retention_retires_history_while_finality_stalls() {
 
     // The retired suffix is exactly what the snapshot carries, and it restores unchanged.
     let restored =
-        Machine::<Sha256, MinPk>::restore(profile, machine.live_snapshot_for_test()).unwrap();
+        Machine::<Sha256, Bls<MinPk>>::restore(profile, machine.live_snapshot_for_test()).unwrap();
     assert_eq!(restored.durable.state, machine.durable.state);
     assert_eq!(restored.views.retained_exit_proofs(), expected_exits);
 }
@@ -2282,7 +2283,7 @@ fn cross_class_exit_selection_is_completion_order_independent() {
         let vqc_job = observe(&mut machine, Artifact::Vqc(vqc));
         let certificate = symbolic_nullification(&machine, View::new(1), 0);
         let nullification_job = observe(&mut machine, Artifact::Nullification(certificate));
-        let complete = |job: &VerifyJob<MinPk, Digest>| Input::Verified(job.all_valid());
+        let complete = |job: &VerifyJob<Bls<MinPk>, Digest>| Input::Verified(job.all_valid());
 
         let selected = if nullification_first {
             let later = machine.step(complete(&nullification_job)).unwrap();
@@ -2317,7 +2318,7 @@ fn cross_class_exit_selection_is_completion_order_independent() {
         machine.persist(&forwarding, Until::Step);
         let crashed = machine.live_snapshot_for_test();
 
-        let mut restored = Machine::<Sha256, MinPk>::restore(profile, crashed).unwrap();
+        let mut restored = Machine::<Sha256, Bls<MinPk>>::restore(profile, crashed).unwrap();
         let recovery = restored.step(Input::RecoveryComplete).unwrap();
         let recovered = restored.persist(&recovery.persist_job(), Until::CursorAdvance);
         assert!(recovered.has(|effect| matches!(

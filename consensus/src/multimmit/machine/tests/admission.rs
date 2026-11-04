@@ -25,11 +25,11 @@ use crate::{
             },
             verification::{Verdict, VerificationCompletion, VerificationTicket},
         },
+        mocks::Bls,
         types::{
-            Artifact, ArtifactId, CertificateId, ChainId, ChainProposal, DaQuorum, DaVote,
-            Extension, LeaderBlock, PathLimits, Position, SignedLeaderBlock,
-            SignedTransactionBlock, ThresholdShare, TransactionBlockHeader, ViewMessage, Vote,
-            VoteBody,
+            Artifact, ArtifactId, CertificateId, ChainId, ChainProposal, DaAttestation, DaQuorum,
+            DaVote, Extension, LeaderBlock, PathLimits, Position, SignedLeaderBlock,
+            SignedTransactionBlock, TransactionBlockHeader, ViewMessage, Vote, VoteBody,
         },
     },
     types::{Epoch, Participant, Round, View},
@@ -48,7 +48,7 @@ use std::sync::Arc;
 #[test]
 fn profile_rejects_validator_outside_committee() {
     assert_eq!(
-        Profile::new::<MinPk>(
+        Profile::new::<Bls<MinPk>>(
             TestConfig::new(1).build(),
             Role::Validator(Participant::new(1)),
             Tuning {
@@ -699,7 +699,7 @@ fn recovery_does_not_apply_the_remote_dependency_ceiling_to_local_votes() {
     }
     let snapshot = Snapshot::new(machine.profile().protocol().epoch(), role, durable);
 
-    let mut restored = Machine::<Sha256, MinPk>::restore(profile, snapshot).unwrap();
+    let mut restored = Machine::<Sha256, Bls<MinPk>>::restore(profile, snapshot).unwrap();
     restored.step(Input::RecoveryComplete).unwrap();
 
     assert_eq!(restored.inspect().waiting_artifacts(), 2);
@@ -888,7 +888,7 @@ fn ingress_bounds_apply_before_verification() {
     let far = leader_artifact(&machine, 4);
     let wrong_epoch = {
         let other = Machine::new(
-            Profile::new::<MinPk>(
+            Profile::new::<Bls<MinPk>>(
                 TestConfig::new(1).epoch(Epoch::new(8)).build(),
                 Role::Observer,
                 Tuning {
@@ -974,7 +974,10 @@ fn inputs_are_lifecycle_gated() {
 }
 
 /// Returns how the machine classifies `artifact` observed alone.
-fn observation(machine: &mut TestMachine, artifact: Artifact<MinPk, Digest>) -> ObservationStatus {
+fn observation(
+    machine: &mut TestMachine,
+    artifact: Artifact<Bls<MinPk>, Digest>,
+) -> ObservationStatus {
     let step = machine.step(cohort::<Sha256, _>(vec![artifact])).unwrap();
     let StepStatus::Observed(results) = step.status() else {
         panic!("one observed artifact must return an observation result");
@@ -982,14 +985,14 @@ fn observation(machine: &mut TestMachine, artifact: Artifact<MinPk, Digest>) -> 
     results[0].status()
 }
 
-fn producer_block(header: &TransactionBlockHeader<Digest>) -> Artifact<MinPk, Digest> {
+fn producer_block(header: &TransactionBlockHeader<Digest>) -> Artifact<Bls<MinPk>, Digest> {
     Artifact::TransactionBlock(SignedTransactionBlock::new(
         header.clone(),
         attestation(header.chain().get()),
     ))
 }
 
-fn da_vote(header: &TransactionBlockHeader<Digest>, signer: u32) -> Artifact<MinPk, Digest> {
+fn da_vote(header: &TransactionBlockHeader<Digest>, signer: u32) -> Artifact<Bls<MinPk>, Digest> {
     Artifact::DaVote(DaVote::new(header.clone(), threshold_share(signer)))
 }
 
@@ -1097,7 +1100,10 @@ fn a_position_holds_one_da_vote_per_signer_for_a_verified_header() {
     // Another share from the same signer for the same header takes no second slot.
     let other_share = Artifact::DaVote(DaVote::new(
         header.clone(),
-        ThresholdShare::new(Participant::new(2), Lazy::from(G2::generator())),
+        DaAttestation::<Bls<MinPk>> {
+            signer: Participant::new(2),
+            signature: Lazy::from(G2::generator()),
+        },
     ));
     assert_eq!(
         observation(&mut machine, other_share),

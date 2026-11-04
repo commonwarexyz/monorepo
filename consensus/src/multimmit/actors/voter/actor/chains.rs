@@ -15,35 +15,35 @@ use crate::multimmit::{
     machine::{
         CoreState, CryptoCompletion, DaVotesOffer, Generation, Input, StepStatus, ValidatorCommand,
     },
-    scheme::bls12381_threshold::Scheme,
+    scheme::{Generic, Scheme},
     types::ChainId,
 };
 use commonware_actor::mailbox;
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_p2p::Sender;
 use commonware_runtime::Supervisor as _;
 use std::{num::NonZeroUsize, sync::Arc};
 
 /// A result from one of the chain tasks, which share one queue to the voter.
-pub(crate) enum ChainUpdate<V: Variant, D: Digest> {
+pub(crate) enum ChainUpdate<S: Scheme, D: Digest> {
     /// An own-chain certificate from the DA recovery task.
-    Recovered(DaUpdate<V, D>),
+    Recovered(DaUpdate<S, D>),
     /// A chain plane's current eligible DA-vote run.
-    DaVoteReady(DaVotesOffer<V, D>),
+    DaVoteReady(DaVotesOffer<S, D>),
 }
 
 // Results beyond the queue's capacity are retained without bound, in arrival order, so no task
 // blocks on the voter.
-reliable_policy!(impl<V: Variant, D: Digest> for ChainUpdate<V, D>);
+reliable_policy!(impl<S: Scheme, D: Digest> for ChainUpdate<S, D>);
 
-impl<V: Variant, D: Digest> From<DaUpdate<V, D>> for ChainUpdate<V, D> {
-    fn from(update: DaUpdate<V, D>) -> Self {
+impl<S: Scheme, D: Digest> From<DaUpdate<S, D>> for ChainUpdate<S, D> {
+    fn from(update: DaUpdate<S, D>) -> Self {
         Self::Recovered(update)
     }
 }
 
-impl<V: Variant, D: Digest> From<DaVotesOffer<V, D>> for ChainUpdate<V, D> {
-    fn from(offer: DaVotesOffer<V, D>) -> Self {
+impl<S: Scheme, D: Digest> From<DaVotesOffer<S, D>> for ChainUpdate<S, D> {
+    fn from(offer: DaVotesOffer<S, D>) -> Self {
         Self::DaVoteReady(offer)
     }
 }
@@ -52,8 +52,7 @@ impl<V: Variant, D: Digest> From<DaVotesOffer<V, D>> for ChainUpdate<V, D> {
 type DaActor<T> = da_recovery::Actor<
     <T as VoterTypes>::Context,
     <T as VoterTypes>::Hasher,
-    <T as VoterTypes>::PublicKey,
-    <T as VoterTypes>::Variant,
+    <T as VoterTypes>::Scheme,
     <T as VoterTypes>::Strategy,
 >;
 
@@ -62,7 +61,7 @@ type PlaneActor<T> = chain_plane::Actor<
     <T as VoterTypes>::Context,
     <T as VoterTypes>::Hasher,
     <T as VoterTypes>::Automaton,
-    <T as VoterTypes>::Variant,
+    <T as VoterTypes>::Scheme,
 >;
 
 /// One chain task: its command mailbox, and its actor until the first generation starts it.
@@ -72,11 +71,11 @@ struct Task<A, M> {
 }
 
 /// The DA recovery task over `T`.
-type DaTask<T> = Task<DaActor<T>, da_recovery::Mailbox<<T as VoterTypes>::Variant, DigestOf<T>>>;
+type DaTask<T> = Task<DaActor<T>, da_recovery::Mailbox<<T as VoterTypes>::Scheme, DigestOf<T>>>;
 
 /// One chain plane task over `T`.
 type PlaneTask<T> =
-    Task<PlaneActor<T>, chain_plane::Mailbox<<T as VoterTypes>::Variant, DigestOf<T>>>;
+    Task<PlaneActor<T>, chain_plane::Mailbox<<T as VoterTypes>::Scheme, DigestOf<T>>>;
 
 /// The DA recovery tasks and one plane per producer chain.
 ///
@@ -88,10 +87,10 @@ pub(crate) struct ChainTasks<T: VoterTypes> {
     /// Each producer chain's plane, indexed by chain.
     planes: Vec<PlaneTask<T>>,
     /// DA recovery certificates and every plane's DA-vote offers.
-    updates: Option<mailbox::Receiver<ChainUpdate<T::Variant, DigestOf<T>>>>,
+    updates: Option<mailbox::Receiver<ChainUpdate<T::Scheme, DigestOf<T>>>>,
     /// Keeps the result queue open for the voter's life, so tasks that all exit early never read
     /// as a closed input that would stop the voter without a fatal error.
-    _sender: Option<mailbox::Sender<ChainUpdate<T::Variant, DigestOf<T>>>>,
+    _sender: Option<mailbox::Sender<ChainUpdate<T::Scheme, DigestOf<T>>>>,
 }
 
 impl<T: VoterTypes> Default for ChainTasks<T> {
@@ -115,7 +114,7 @@ impl<T: VoterTypes> ChainTasks<T> {
     pub(crate) fn new(
         context: &T::Context,
         profile: &Profile<<T::Hasher as Hasher>::Digest>,
-        scheme: &Arc<Scheme<T::PublicKey, T::Variant>>,
+        scheme: &Arc<Generic<T::Scheme>>,
         strategy: T::Strategy,
         automaton: &T::Automaton,
         metrics: &Metrics,
@@ -225,7 +224,7 @@ impl<T: VoterTypes> ChainTasks<T> {
     pub(crate) fn enter(
         &mut self,
         generation: Generation,
-        machine: &CoreState<T::Hasher, T::Variant>,
+        machine: &CoreState<T::Hasher, T::Scheme>,
     ) {
         for da in &mut self.da {
             let certified = machine.machine().certified_height(da.mailbox.chain());
@@ -258,7 +257,7 @@ impl<T: VoterTypes> ChainTasks<T> {
     pub(crate) fn da(
         &mut self,
         chain: ChainId,
-    ) -> Option<&mut da_recovery::Mailbox<T::Variant, DigestOf<T>>> {
+    ) -> Option<&mut da_recovery::Mailbox<T::Scheme, DigestOf<T>>> {
         self.da
             .iter_mut()
             .map(|task| &mut task.mailbox)
@@ -269,7 +268,7 @@ impl<T: VoterTypes> ChainTasks<T> {
     pub(crate) fn plane(
         &mut self,
         chain: ChainId,
-    ) -> Option<&mut chain_plane::Mailbox<T::Variant, DigestOf<T>>> {
+    ) -> Option<&mut chain_plane::Mailbox<T::Scheme, DigestOf<T>>> {
         self.planes
             .get_mut(chain.get() as usize)
             .map(|task| &mut task.mailbox)
@@ -278,26 +277,26 @@ impl<T: VoterTypes> ChainTasks<T> {
     /// Returns the queue of task results, absent for an observer.
     pub(crate) const fn updates(
         &mut self,
-    ) -> Option<&mut mailbox::Receiver<ChainUpdate<T::Variant, DigestOf<T>>>> {
+    ) -> Option<&mut mailbox::Receiver<ChainUpdate<T::Scheme, DigestOf<T>>>> {
         self.updates.as_mut()
     }
 }
 
 /// Replaces `plane`'s copy of the machine's durable DA choices for its chain.
-fn seed_chosen<H, V>(plane: &mut chain_plane::Mailbox<V, H::Digest>, machine: &CoreState<H, V>)
+fn seed_chosen<H, S>(plane: &mut chain_plane::Mailbox<S, H::Digest>, machine: &CoreState<H, S>)
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
 {
     let _ = plane.command(ValidatorCommand::Chosen(
         machine.machine().chosen_choices(plane.chain()),
     ));
 }
 
-impl<T, S> Live<T, S>
+impl<T, Sn> Live<T, Sn>
 where
     T: VoterTypes,
-    S: Sender<PublicKey = T::PublicKey>,
+    Sn: Sender<PublicKey = T::PublicKey>,
 {
     /// Applies one result returned by a chain task.
     ///
@@ -305,7 +304,7 @@ where
     /// a recovered certificate here, and a plane's offer by the machine's generation check.
     pub(crate) fn chain_update(
         &mut self,
-        update: ChainUpdate<T::Variant, DigestOf<T>>,
+        update: ChainUpdate<T::Scheme, DigestOf<T>>,
     ) -> Result<(), Fatal> {
         match update {
             ChainUpdate::Recovered(DaUpdate {

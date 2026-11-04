@@ -2,9 +2,12 @@
 
 use super::tips::deeper;
 use crate::{
-    multimmit::types::{
-        Anchor, BlockRef, ChainId, CodecConfig, LeaderBlock, Position, TransactionBlockHeader,
-        VoteBody,
+    multimmit::{
+        mocks::Bls,
+        types::{
+            Anchor, BlockRef, ChainId, CodecConfig, LeaderBlock, Position, TransactionBlockHeader,
+            VoteBody,
+        },
     },
     types::{Height, Participant},
 };
@@ -47,7 +50,7 @@ pub(super) struct ReferenceOrdering {
 
 impl ReferenceOrdering {
     pub(super) fn new(
-        leader: &LeaderBlock<MinSig, Digest>,
+        leader: &LeaderBlock<Bls<MinSig>, Digest>,
         parent_tips: &[BlockRef<Digest>],
     ) -> Self {
         assert_eq!(leader.proposals().len(), parent_tips.len());
@@ -80,7 +83,7 @@ impl ReferenceOrdering {
 
     pub(super) fn materialize(
         &mut self,
-        leader: &LeaderBlock<MinSig, Digest>,
+        leader: &LeaderBlock<Bls<MinSig>, Digest>,
         votes: &[(Participant, VoteBody<Digest>)],
     ) -> Vec<ReferenceVote> {
         votes
@@ -216,7 +219,7 @@ impl ReferenceOrdering {
     }
 
     pub(super) fn child(
-        leader: &LeaderBlock<MinSig, Digest>,
+        leader: &LeaderBlock<Bls<MinSig>, Digest>,
         parent: BlockRef<Digest>,
         payload: Digest,
     ) -> BlockRef<Digest> {

@@ -22,6 +22,7 @@ use crate::{
             verification::Observation,
             view::VqcAggregateCompletion,
         },
+        mocks::Bls,
         types::{
             Activity, Anchor, Artifact, CertificateId, ChainProposal, ConflictingVote,
             DigestedLeader, Extension, FinalityId, LeaderBlock, Position, SignedLeaderBlock, Tally,
@@ -30,6 +31,7 @@ use crate::{
     },
     types::{Attributable, Height, Participant, Round, View, ViewDelta},
 };
+use commonware_codec::types::lazy::Lazy;
 use commonware_cryptography::{
     Sha256,
     bls12381::primitives::{ops::aggregate, variant::MinPk},
@@ -798,7 +800,7 @@ fn vqc_constituents_preserve_finality_observation_order() {
         let designated = with_payload(b"designated payload");
         let other = with_payload(b"other payload");
 
-        let vote_at = |leader: &LeaderBlock<MinPk, Digest>, signer: u32, position: u32| {
+        let vote_at = |leader: &LeaderBlock<Bls<MinPk>, Digest>, signer: u32, position: u32| {
             let mut positions = vec![Position::new(0); config.chains()];
             positions[0] = Position::new(position);
             Vote::new(
@@ -835,7 +837,7 @@ fn vqc_constituents_preserve_finality_observation_order() {
             tally,
             Signers::new(u32::try_from(config.participants()).unwrap(), []).unwrap(),
             conflicting,
-            aggregate::Signature::<MinPk>::zero(),
+            Lazy::from(aggregate::Signature::<MinPk>::zero()),
             config,
         )
         .unwrap();
@@ -1077,7 +1079,7 @@ fn finality_owner_reservation_waits_for_the_earliest_claim() {
             tally,
             Signers::new(u32::try_from(config.participants()).unwrap(), []).unwrap(),
             conflicting,
-            aggregate::Signature::<MinPk>::zero(),
+            Lazy::from(aggregate::Signature::<MinPk>::zero()),
             config,
         )
         .unwrap(),
@@ -1552,7 +1554,7 @@ fn finality_primaries_rotate_across_correct_owners_and_views() {
         .profile();
     let (mut machine, _) = start_profile(profile);
     let protocol = machine.profile().protocol().clone();
-    let admit = |machine: &mut TestMachine, proposed: LeaderBlock<MinPk, Digest>| {
+    let admit = |machine: &mut TestMachine, proposed: LeaderBlock<Bls<MinPk>, Digest>| {
         let owner = protocol.leader(proposed.round().view());
         let digest = proposed.digest::<Sha256>();
         let proposal = observe(

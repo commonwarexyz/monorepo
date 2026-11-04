@@ -5,15 +5,16 @@ use crate::{
     Viewable as _,
     multimmit::{
         algebra::{ValidatedLqc, ValidatedVqc},
+        scheme::Scheme,
         types::{Artifact, ArtifactId},
     },
     types::{Participant, View},
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use std::sync::Arc;
 
 type ValidatedVqcs<D> = Vec<(usize, ValidatedVqc<D>)>;
-type ValidatedLqcs<V, D> = Vec<(usize, ValidatedLqc<V, D>)>;
+type ValidatedLqcs<S, D> = Vec<(usize, ValidatedLqc<S, D>)>;
 type DaEquivocators = Vec<(usize, Participant)>;
 
 /// Deterministic ingress order assigned before verification is scheduled.
@@ -95,19 +96,19 @@ impl<D: Digest> VerificationTicket<D> {
 
 /// One retained artifact in an immutable verification request.
 #[derive(Clone, Debug)]
-pub(crate) struct VerificationItem<V: Variant, D: Digest> {
+pub(crate) struct VerificationItem<S: Scheme, D: Digest> {
     ticket: VerificationTicket<D>,
-    artifact: Arc<Artifact<V, D>>,
+    artifact: Arc<Artifact<S, D>>,
     /// Locally authenticated claims that can discharge verification or prove equivocation.
-    known: Vec<Arc<Artifact<V, D>>>,
+    known: Vec<Arc<Artifact<S, D>>>,
 }
 
-impl<V: Variant, D: Digest> VerificationItem<V, D> {
+impl<S: Scheme, D: Digest> VerificationItem<S, D> {
     /// Creates an item verifying `artifact` with the `known` claims that may discharge it.
     pub(crate) const fn new(
         ticket: VerificationTicket<D>,
-        artifact: Arc<Artifact<V, D>>,
-        known: Vec<Arc<Artifact<V, D>>>,
+        artifact: Arc<Artifact<S, D>>,
+        known: Vec<Arc<Artifact<S, D>>>,
     ) -> Self {
         Self {
             ticket,
@@ -117,12 +118,12 @@ impl<V: Variant, D: Digest> VerificationItem<V, D> {
     }
 
     /// Returns locally authenticated claims attached to this item.
-    pub(crate) fn known(&self) -> &[Arc<Artifact<V, D>>] {
+    pub(crate) fn known(&self) -> &[Arc<Artifact<S, D>>] {
         &self.known
     }
 
     /// Returns the retained decoded artifact behind its shared pointer.
-    pub(crate) const fn shared_artifact(&self) -> &Arc<Artifact<V, D>> {
+    pub(crate) const fn shared_artifact(&self) -> &Arc<Artifact<S, D>> {
         &self.artifact
     }
 
@@ -132,7 +133,7 @@ impl<V: Variant, D: Digest> VerificationItem<V, D> {
     }
 
     /// Returns the retained decoded artifact.
-    pub(crate) fn artifact(&self) -> &Artifact<V, D> {
+    pub(crate) fn artifact(&self) -> &Artifact<S, D> {
         &self.artifact
     }
 }
@@ -142,17 +143,17 @@ impl<V: Variant, D: Digest> VerificationItem<V, D> {
 /// The items are fixed at issue. Before verifying, the voter may add known messages to
 /// certificate items with [`Self::extend_known`].
 #[derive(Clone, Debug)]
-pub(crate) struct VerifyJob<V: Variant, D: Digest> {
+pub(crate) struct VerifyJob<S: Scheme, D: Digest> {
     issued: Issued<JobId>,
-    items: Vec<VerificationItem<V, D>>,
+    items: Vec<VerificationItem<S, D>>,
 }
 
-impl<V: Variant, D: Digest> VerifyJob<V, D> {
+impl<S: Scheme, D: Digest> VerifyJob<S, D> {
     /// Extends every certificate item's known messages with `lookup(view)`, so a verifier can
     /// discharge transcripts with votes it verified after the machine issued this job.
     pub(crate) fn extend_known(
         &mut self,
-        mut lookup: impl FnMut(View) -> Vec<Arc<Artifact<V, D>>>,
+        mut lookup: impl FnMut(View) -> Vec<Arc<Artifact<S, D>>>,
     ) {
         for item in &mut self.items {
             let view = match item.artifact.as_ref() {
@@ -165,7 +166,7 @@ impl<V: Variant, D: Digest> VerifyJob<V, D> {
     }
 
     /// Creates the job issued as `issued` over `items`.
-    pub(crate) const fn new(issued: Issued<JobId>, items: Vec<VerificationItem<V, D>>) -> Self {
+    pub(crate) const fn new(issued: Issued<JobId>, items: Vec<VerificationItem<S, D>>) -> Self {
         Self { issued, items }
     }
 
@@ -175,7 +176,7 @@ impl<V: Variant, D: Digest> VerifyJob<V, D> {
     }
 
     /// Returns the retained items in observation order.
-    pub(crate) fn items(&self) -> &[VerificationItem<V, D>] {
+    pub(crate) fn items(&self) -> &[VerificationItem<S, D>] {
         &self.items
     }
 
@@ -216,15 +217,15 @@ impl<D: Digest> Verdict<D> {
 
 /// Completion of one verification job.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VerificationCompletion<V: Variant, D: Digest> {
+pub(crate) struct VerificationCompletion<S: Scheme, D: Digest> {
     issued: Issued<JobId>,
     verdicts: Vec<Verdict<D>>,
     validated_vqcs: ValidatedVqcs<D>,
-    validated_lqcs: ValidatedLqcs<V, D>,
+    validated_lqcs: ValidatedLqcs<S, D>,
     da_equivocators: DaEquivocators,
 }
 
-impl<V: Variant, D: Digest> VerificationCompletion<V, D> {
+impl<S: Scheme, D: Digest> VerificationCompletion<S, D> {
     /// Creates a completion for a machine-issued verification request.
     ///
     /// Production completions are built by the verifier, which attaches reusable certificate
@@ -245,7 +246,7 @@ impl<V: Variant, D: Digest> VerificationCompletion<V, D> {
         issued: Issued<JobId>,
         verdicts: Vec<Verdict<D>>,
         validated_vqcs: ValidatedVqcs<D>,
-        validated_lqcs: ValidatedLqcs<V, D>,
+        validated_lqcs: ValidatedLqcs<S, D>,
         da_equivocators: DaEquivocators,
     ) -> Self {
         debug_assert!(
@@ -289,7 +290,7 @@ impl<V: Variant, D: Digest> VerificationCompletion<V, D> {
     }
 
     /// Takes the L-QC validation the verifier derived for item `index`, if any.
-    pub(crate) fn take_validated_lqc(&mut self, index: usize) -> Option<ValidatedLqc<V, D>> {
+    pub(crate) fn take_validated_lqc(&mut self, index: usize) -> Option<ValidatedLqc<S, D>> {
         let position = self
             .validated_lqcs
             .iter()
@@ -319,7 +320,7 @@ impl<V: Variant, D: Digest> VerificationCompletion<V, D> {
             .checked_add(
                 self.validated_lqcs
                     .capacity()
-                    .checked_mul(size_of::<(usize, ValidatedLqc<V, D>)>())?,
+                    .checked_mul(size_of::<(usize, ValidatedLqc<S, D>)>())?,
             )?;
         let equivocations = self
             .da_equivocators
@@ -341,7 +342,7 @@ impl<V: Variant, D: Digest> VerificationCompletion<V, D> {
 }
 
 #[cfg(test)]
-impl<V: Variant, D: Digest> VerificationCompletion<V, D> {
+impl<S: Scheme, D: Digest> VerificationCompletion<S, D> {
     /// Returns the V-QC validation derived for item `index`, if any.
     pub(crate) fn validated_vqc(&self, index: usize) -> Option<&ValidatedVqc<D>> {
         self.validated_vqcs
@@ -350,7 +351,7 @@ impl<V: Variant, D: Digest> VerificationCompletion<V, D> {
     }
 
     /// Returns the L-QC validation derived for item `index`, if any.
-    pub(crate) fn validated_lqc(&self, index: usize) -> Option<&ValidatedLqc<V, D>> {
+    pub(crate) fn validated_lqc(&self, index: usize) -> Option<&ValidatedLqc<S, D>> {
         self.validated_lqcs
             .iter()
             .find_map(|(candidate, validated)| (*candidate == index).then_some(validated))

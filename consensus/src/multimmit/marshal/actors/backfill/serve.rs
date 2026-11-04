@@ -11,12 +11,13 @@ use crate::multimmit::{
         bodies::{self, Bodies},
         wire::{BackfillKey, MAX_SEGMENT_ITEMS, max_block_segment_items, segment_fits},
     },
+    scheme::Scheme,
     types::{BlockRef, Body},
 };
 use bytes::Bytes;
 use commonware_actor::mailbox::{self, UnreliablePolicy, UnreliableReceiver};
 use commonware_codec::{Encode as _, EncodeSize as _};
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select_loop;
 use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_utils::{
@@ -77,11 +78,11 @@ impl<D: Digest> Mailbox<D> {
 }
 
 /// Configuration for the serving actor.
-pub(crate) struct Config<H: Hasher, V: Variant, B: Body<H>> {
+pub(crate) struct Config<H: Hasher, S: Scheme, B: Body<H>> {
     /// Catalog read for L-QCs, tip histories and headers.
-    pub catalog: catalog::Mailbox<H, V, B>,
+    pub catalog: catalog::Mailbox<H, S, B>,
     /// Body lookups across temporary and immutable custody.
-    pub bodies: Bodies<H, V, B>,
+    pub bodies: Bodies<H, S, B>,
     /// Maximum encoded size of one block.
     pub max_block_bytes: NonZeroUsize,
     /// Maximum size of one served value.
@@ -103,15 +104,15 @@ struct Completion<D: Digest> {
 ///
 /// Requests for one key share a single lookup, and different keys run in a rolling pool so a slow
 /// storage read does not block an unrelated response.
-pub(crate) struct Actor<E, H, V, B>
+pub(crate) struct Actor<E, H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     context: ContextCell<E>,
-    catalog: catalog::Mailbox<H, V, B>,
-    bodies: Bodies<H, V, B>,
+    catalog: catalog::Mailbox<H, S, B>,
+    bodies: Bodies<H, S, B>,
     receiver: UnreliableReceiver<Message<H::Digest>>,
     /// Whether every mailbox sender is gone; the actor then drains its callers and stops.
     closed: bool,
@@ -125,18 +126,18 @@ where
     metrics: metrics::Serve,
 }
 
-impl<E, H, V, B> Actor<E, H, V, B>
+impl<E, H, S, B> Actor<E, H, S, B>
 where
     E: Spawner + Metrics,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Creates the serving actor and its mailbox.
     ///
     /// `context` is marshal's: the actor registers its metrics under `resolver_producer` and its
     /// mailbox under `resolver_producer_bridge`.
-    pub(crate) fn new(context: &E, config: Config<H, V, B>) -> (Self, Mailbox<H::Digest>) {
+    pub(crate) fn new(context: &E, config: Config<H, S, B>) -> (Self, Mailbox<H::Digest>) {
         let (sender, receiver) = mailbox::new_unreliable(
             context.child("resolver_producer_bridge"),
             config.mailbox_size,
@@ -248,16 +249,16 @@ where
     }
 }
 
-async fn produce<H, V, B>(
-    catalog: catalog::Mailbox<H, V, B>,
-    bodies: Bodies<H, V, B>,
+async fn produce<H, S, B>(
+    catalog: catalog::Mailbox<H, S, B>,
+    bodies: Bodies<H, S, B>,
     key: BackfillKey<H::Digest>,
     max_blocks_per_value: usize,
     max_value_bytes: usize,
 ) -> Result<Option<Bytes>, Error>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     let value = match key {
@@ -295,16 +296,16 @@ where
 
 /// Encodes the longest locally held run of consecutive blocks, newest first from `head`, that
 /// fits in one resolver value.
-async fn produce_blocks<H, V, B>(
-    catalog: catalog::Mailbox<H, V, B>,
-    bodies: Bodies<H, V, B>,
+async fn produce_blocks<H, S, B>(
+    catalog: catalog::Mailbox<H, S, B>,
+    bodies: Bodies<H, S, B>,
     head: BlockRef<H::Digest>,
     max_items: usize,
     max_value_bytes: usize,
 ) -> Result<Option<Bytes>, Error>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     let headers = catalog

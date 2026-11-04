@@ -255,7 +255,7 @@ pub async fn run(context: tokio::Context, config: RunConfig) {
     let critical_strategy = Rayon::new(critical_threads).expect("critical pool starts");
     let engine = Engine::open(
         context.child("engine"),
-        multimmit::Config::<Sha256, _, _, _, _, _, _, _, _> {
+        multimmit::Config::<Sha256, _, _, _, _, _, _, _> {
             scheme: committee.signers[index].clone(),
             genesis: committee.config.genesis().clone(),
             tuning: multimmit::config::Tuning {

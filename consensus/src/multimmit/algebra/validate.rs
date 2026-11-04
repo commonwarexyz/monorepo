@@ -3,7 +3,7 @@
 use super::{Error, FinalTips, Tips, VqcExtraction, tips};
 use crate::multimmit::{
     machine::{Held, VqcKind},
-    scheme::bls12381_threshold::CertificateVotes,
+    scheme::{CertificateVotes, Scheme},
     types::{
         Artifact, ArtifactId, CertificateId, CodecConfig, DigestedLeader, LeaderBlock, Lqc,
         SelectedCommitments, TipRecord, VoteBody, Vqc,
@@ -11,7 +11,7 @@ use crate::multimmit::{
 };
 use bytes::Bytes;
 use commonware_codec::Encode as _;
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::Participant;
 use std::sync::Arc;
 /// Namespace of the digest by which the finality pool identifies one signer's vote body.
@@ -129,31 +129,31 @@ pub(crate) struct ValidatedVqcParts<D: Digest> {
 
 /// One immutable V-QC and the derivations established for that allocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DerivedVqc<V: Variant, D: Digest> {
-    pub(crate) artifact: Held<VqcKind, V, D>,
+pub(crate) struct DerivedVqc<S: Scheme, D: Digest> {
+    pub(crate) artifact: Held<VqcKind, S, D>,
     pub(crate) artifact_id: ArtifactId<D>,
     pub(crate) validated: ValidatedVqc<D>,
     byte_charge: usize,
 }
 
-impl<V: Variant, D: Digest> DerivedVqc<V, D> {
+impl<S: Scheme, D: Digest> DerivedVqc<S, D> {
     /// Derives and validates the V-QC implied by one L-QC's transcript.
     pub(crate) fn from_lqc<H: Hasher<Digest = D>>(
-        certificate: &Lqc<V, D>,
+        certificate: &Lqc<S, D>,
         config: CodecConfig,
     ) -> Result<Self, Error> {
         let certificate = certificate.derive_vqc(config).map_err(|_| Error::Vote)?;
-        let validated = validate_vqc::<H, V, D>(&certificate, config)?;
+        let validated = validate_vqc::<H, S, D>(&certificate, config)?;
         Self::new::<H>(certificate, validated)
     }
 
     /// Pairs a certificate with projections established for its exact canonical bytes.
     pub(crate) fn new<H: Hasher<Digest = D>>(
-        certificate: Vqc<V, D>,
+        certificate: Vqc<S, D>,
         validated: ValidatedVqc<D>,
     ) -> Result<Self, Error> {
         let byte_charge = Self::resident_bytes(&certificate, &validated).ok_or(Error::Vote)?;
-        let artifact = Held::<VqcKind, V, D>::new(certificate);
+        let artifact = Held::<VqcKind, S, D>::new(certificate);
         let artifact_id = artifact
             .arc()
             .id_from_canonical_encoding::<H>(&validated.canonical);
@@ -166,11 +166,11 @@ impl<V: Variant, D: Digest> DerivedVqc<V, D> {
     }
 
     /// Bytes charged for one retained certificate and its derivations, or `None` on overflow.
-    fn resident_bytes(certificate: &Vqc<V, D>, validated: &ValidatedVqc<D>) -> Option<usize> {
+    fn resident_bytes(certificate: &Vqc<S, D>, validated: &ValidatedVqc<D>) -> Option<usize> {
         // The encoding bounds payload storage; vector elements and the Arc allocation account
         // for resident transcript structure. This charge conservatively includes shared bytes.
         let tally = certificate.tally();
-        let mut bytes = size_of::<Artifact<V, D>>()
+        let mut bytes = size_of::<Artifact<S, D>>()
             .checked_add(2 * size_of::<usize>())?
             .checked_add(validated.canonical.len())?
             .checked_add(size_of_val(certificate.leader().proposals()))?
@@ -192,7 +192,7 @@ impl<V: Variant, D: Digest> DerivedVqc<V, D> {
 
 /// Expensive deterministic outputs derived while validating one L-QC.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ValidatedLqc<V: Variant, D: Digest> {
+pub(crate) struct ValidatedLqc<S: Scheme, D: Digest> {
     /// The designated leader block's digest.
     pub(crate) leader: D,
     /// The final tips and settlement facts the designated votes select.
@@ -200,10 +200,10 @@ pub(crate) struct ValidatedLqc<V: Variant, D: Digest> {
     /// Finality evidence for each designated vote, in signer order.
     pub(crate) votes: Vec<VerifiedVote<D>>,
     /// The V-QC the L-QC implies, with its derivations.
-    pub(crate) derived: DerivedVqc<V, D>,
+    pub(crate) derived: DerivedVqc<S, D>,
 }
 
-impl<V: Variant, D: Digest> ValidatedLqc<V, D> {
+impl<S: Scheme, D: Digest> ValidatedLqc<S, D> {
     /// Bytes charged against the completion lane; the attested votes are excluded as for
     /// [`ValidatedVqc::owned_bytes`].
     pub(crate) fn owned_bytes(&self) -> Option<usize> {
@@ -214,30 +214,30 @@ impl<V: Variant, D: Digest> ValidatedLqc<V, D> {
 }
 
 /// Validates one V-QC and derives its ordering data without finality vote evidence.
-pub(crate) fn validate_vqc<H, V, D>(
-    certificate: &Vqc<V, D>,
+pub(crate) fn validate_vqc<H, S, D>(
+    certificate: &Vqc<S, D>,
     config: CodecConfig,
 ) -> Result<ValidatedVqc<D>, Error>
 where
     H: Hasher<Digest = D>,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     let leader = certificate.leader().digest::<H>();
     let designated = expand_designated_votes(certificate, leader, config)?;
-    derive_validated::<H, V, D>(certificate, config, leader, &designated)
+    derive_validated::<H, S, D>(certificate, config, leader, &designated)
 }
 
 /// Validates one V-QC using its authenticated transcript expansion and derives finality
 /// evidence for every attested vote. The expansion must belong to this certificate.
-pub(crate) fn validate_vqc_with_votes<H, V, D>(
-    certificate: &Vqc<V, D>,
+pub(crate) fn validate_vqc_with_votes<H, S, D>(
+    certificate: &Vqc<S, D>,
     config: CodecConfig,
     votes: CertificateVotes<D>,
 ) -> Result<ValidatedVqc<D>, Error>
 where
     H: Hasher<Digest = D>,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     let CertificateVotes {
@@ -245,7 +245,7 @@ where
         designated,
         conflicting,
     } = votes;
-    let mut validated = derive_validated::<H, V, D>(certificate, config, leader, &designated)?;
+    let mut validated = derive_validated::<H, S, D>(certificate, config, leader, &designated)?;
     validated.votes = designated
         .into_iter()
         .chain(conflicting)
@@ -255,13 +255,13 @@ where
 }
 
 /// Expands the votes a V-QC tally designates, in signer order.
-fn expand_designated_votes<V, D>(
-    certificate: &Vqc<V, D>,
+fn expand_designated_votes<S, D>(
+    certificate: &Vqc<S, D>,
     leader: D,
     config: CodecConfig,
 ) -> Result<Vec<(Participant, VoteBody<D>)>, Error>
 where
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     certificate
@@ -270,19 +270,19 @@ where
 }
 
 /// Derives a V-QC's identity, tips, and selected commitments from its designated votes.
-fn derive_validated<H, V, D>(
-    certificate: &Vqc<V, D>,
+fn derive_validated<H, S, D>(
+    certificate: &Vqc<S, D>,
     config: CodecConfig,
     leader: D,
     designated: &[(Participant, VoteBody<D>)],
 ) -> Result<ValidatedVqc<D>, Error>
 where
     H: Hasher<Digest = D>,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
-    let (canonical, id) = canonical_identity::<H, V, D>(certificate);
-    let (tips, ancestry) = VqcExtraction::from_votes::<H, V>(
+    let (canonical, id) = canonical_identity::<H, S, D>(certificate);
+    let (tips, ancestry) = VqcExtraction::from_votes::<H, S>(
         DigestedLeader::with_digest(certificate.leader(), leader),
         designated.iter().map(|(signer, body)| (*signer, body)),
         config,
@@ -296,7 +296,7 @@ where
         id,
         leader,
         canonical,
-        child_history: child_history::<H, V, D>(certificate.leader(), &tips),
+        child_history: child_history::<H, S, D>(certificate.leader(), &tips),
         tips: Arc::new(tips),
         commitments,
         votes: Vec::new(),
@@ -307,10 +307,10 @@ where
 ///
 /// Validation computes it once, off the voter's thread, so every proposal validity check compares
 /// against the retained value instead of hashing the tips again.
-fn child_history<H, V, D>(leader: &LeaderBlock<V, D>, tips: &Tips<D>) -> Option<D>
+fn child_history<H, S, D>(leader: &LeaderBlock<S, D>, tips: &Tips<D>) -> Option<D>
 where
     H: Hasher<Digest = D>,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     TipRecord::new(
@@ -323,10 +323,10 @@ where
 }
 
 /// Returns a V-QC's canonical encoding and the certificate identifier hashed from it.
-fn canonical_identity<H, V, D>(certificate: &Vqc<V, D>) -> (Bytes, CertificateId<D>)
+fn canonical_identity<H, S, D>(certificate: &Vqc<S, D>) -> (Bytes, CertificateId<D>)
 where
     H: Hasher<Digest = D>,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     let canonical = certificate.encode();
@@ -339,20 +339,20 @@ where
 /// Derives the final tips, finality evidence for every designated vote, and the V-QC the L-QC
 /// implies, whose commitments cover both the safe and the final tips. The expansion must belong
 /// to this certificate.
-pub(crate) fn validate_lqc<H, V, D>(
-    certificate: &Lqc<V, D>,
+pub(crate) fn validate_lqc<H, S, D>(
+    certificate: &Lqc<S, D>,
     config: CodecConfig,
     votes: CertificateVotes<D>,
-) -> Result<ValidatedLqc<V, D>, Error>
+) -> Result<ValidatedLqc<S, D>, Error>
 where
     H: Hasher<Digest = D>,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     let leader = certificate.leader();
     let leader_digest = votes.leader;
     let expanded = votes.designated;
-    let prepared = tips::PreparedVotes::new_digested::<H, V, _>(
+    let prepared = tips::PreparedVotes::new_digested::<H, S, _>(
         DigestedLeader::with_digest(leader, leader_digest),
         expanded.iter().map(|(signer, body)| (*signer, body)),
         config,
@@ -369,14 +369,14 @@ where
         safe_tips.blocks().iter().chain(tips.blocks()).copied(),
     );
     let vqc = certificate.derive_vqc(config).map_err(|_| Error::Vote)?;
-    let (canonical, id) = canonical_identity::<H, V, D>(&vqc);
+    let (canonical, id) = canonical_identity::<H, S, D>(&vqc);
     let derived = DerivedVqc::new::<H>(
         vqc,
         ValidatedVqc {
             id,
             leader: leader_digest,
             canonical,
-            child_history: child_history::<H, V, D>(leader, &safe_tips),
+            child_history: child_history::<H, S, D>(leader, &safe_tips),
             tips: Arc::new(safe_tips),
             commitments,
             votes: Vec::new(),
@@ -394,24 +394,24 @@ where
 ///
 /// The signers must be distinct committee members, at least `2f + 1` of them, and every vote's
 /// paths must fit one consistent ancestry.
-pub(crate) fn validate_vqc_votes<'a, H, V, D>(
-    leader: &LeaderBlock<V, D>,
+pub(crate) fn validate_vqc_votes<'a, H, S, D>(
+    leader: &LeaderBlock<S, D>,
     votes: impl IntoIterator<Item = (Participant, &'a VoteBody<D>)>,
     config: CodecConfig,
 ) -> Result<(), Error>
 where
     H: Hasher<Digest = D>,
-    V: Variant,
+    S: Scheme,
     D: Digest + 'a,
 {
-    let prepared = tips::PreparedVotes::new::<H, V, _>(leader, votes, config)?;
+    let prepared = tips::PreparedVotes::new::<H, S, _>(leader, votes, config)?;
     prepared.check_vqc_quorum(config)?;
     prepared.ancestry().map(drop)
 }
 
 /// Expensive derivations of one verified certificate, produced off the voter thread.
 #[derive(Clone, Debug)]
-pub(crate) enum CertificateDerivations<V: Variant, D: Digest> {
+pub(crate) enum CertificateDerivations<S: Scheme, D: Digest> {
     Vqc {
         leader: D,
         votes: Vec<VerifiedVote<D>>,
@@ -420,12 +420,12 @@ pub(crate) enum CertificateDerivations<V: Variant, D: Digest> {
         leader: D,
         tips: FinalTips<D>,
         votes: Vec<VerifiedVote<D>>,
-        derived: Option<DerivedVqc<V, D>>,
+        derived: Option<DerivedVqc<S, D>>,
     },
 }
 
-impl<V: Variant, D: Digest> From<ValidatedLqc<V, D>> for CertificateDerivations<V, D> {
-    fn from(validated: ValidatedLqc<V, D>) -> Self {
+impl<S: Scheme, D: Digest> From<ValidatedLqc<S, D>> for CertificateDerivations<S, D> {
+    fn from(validated: ValidatedLqc<S, D>) -> Self {
         let ValidatedLqc {
             leader,
             tips,
@@ -442,7 +442,7 @@ impl<V: Variant, D: Digest> From<ValidatedLqc<V, D>> for CertificateDerivations<
 }
 
 /// Takes the attested votes out of the validated V-QC, leaving its ordering data in place.
-impl<V: Variant, D: Digest> From<&mut ValidatedVqc<D>> for CertificateDerivations<V, D> {
+impl<S: Scheme, D: Digest> From<&mut ValidatedVqc<D>> for CertificateDerivations<S, D> {
     fn from(validated: &mut ValidatedVqc<D>) -> Self {
         Self::Vqc {
             leader: validated.leader(),
@@ -451,14 +451,14 @@ impl<V: Variant, D: Digest> From<&mut ValidatedVqc<D>> for CertificateDerivation
     }
 }
 
-impl<V: Variant, D: Digest> CertificateDerivations<V, D> {
+impl<S: Scheme, D: Digest> CertificateDerivations<S, D> {
     pub(crate) fn votes(&self) -> &[VerifiedVote<D>] {
         match self {
             Self::Vqc { votes, .. } | Self::Lqc { votes, .. } => votes,
         }
     }
 
-    pub(crate) const fn take_derived(&mut self) -> Option<DerivedVqc<V, D>> {
+    pub(crate) const fn take_derived(&mut self) -> Option<DerivedVqc<S, D>> {
         match self {
             Self::Lqc { derived, .. } => derived.take(),
             Self::Vqc { .. } => None,

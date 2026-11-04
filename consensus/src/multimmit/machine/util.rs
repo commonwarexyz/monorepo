@@ -184,10 +184,10 @@ impl<K: Copy + Ord, R> ObservedList<K, R> {
 
 /// Removes the ordered prefix selected by `retired`, stopping at the first retained key.
 /// The predicate must select a contiguous prefix of the map's key order.
-pub(crate) fn drain_prefix<K: Ord, V>(
-    entries: &mut BTreeMap<K, V>,
+pub(crate) fn drain_prefix<K: Ord, S>(
+    entries: &mut BTreeMap<K, S>,
     mut retired: impl FnMut(&K) -> bool,
-) -> impl Iterator<Item = (K, V)> {
+) -> impl Iterator<Item = (K, S)> {
     std::iter::from_fn(move || {
         if entries
             .first_key_value()
@@ -202,8 +202,8 @@ pub(crate) fn drain_prefix<K: Ord, V>(
 
 /// Removes the ordered prefix selected by `retired` without yielding it.
 /// The predicate must select a contiguous prefix of the map's key order.
-pub(crate) fn retire_prefix<K: Ord, V>(
-    entries: &mut BTreeMap<K, V>,
+pub(crate) fn retire_prefix<K: Ord, S>(
+    entries: &mut BTreeMap<K, S>,
     retired: impl FnMut(&K) -> bool,
 ) {
     drain_prefix(entries, retired).for_each(drop);
@@ -212,10 +212,10 @@ pub(crate) fn retire_prefix<K: Ord, V>(
 /// Removes `value` from the set indexed by `key` and drops the set once it is empty.
 ///
 /// Returns whether the set was dropped, so callers can react to the last removal.
-pub(super) fn remove_indexed<K: Ord, V: Ord>(
-    map: &mut BTreeMap<K, BTreeSet<V>>,
+pub(super) fn remove_indexed<K: Ord, S: Ord>(
+    map: &mut BTreeMap<K, BTreeSet<S>>,
     key: &K,
-    value: &V,
+    value: &S,
 ) -> bool {
     let Some(values) = map.get_mut(key) else {
         return false;

@@ -1,13 +1,12 @@
 //! Verifier actor configuration.
 
-use crate::multimmit::scheme::bls12381_threshold::Scheme;
-use commonware_cryptography::{PublicKey, bls12381::primitives::variant::Variant};
+use crate::multimmit::scheme::{Generic, Scheme};
 use std::num::NonZeroUsize;
 
 /// Configuration for the verifier actor.
-pub(crate) struct Config<P: PublicKey, V: Variant, T, C> {
+pub(crate) struct Config<S: Scheme, T, C> {
     /// Verification scheme for the epoch committee.
-    pub(crate) scheme: Scheme<P, V>,
+    pub(crate) scheme: Generic<S>,
     /// Execution strategy for every verdict the round does not wait on: transaction-block headers
     /// and data-availability votes and certificates.
     pub(crate) strategy: T,

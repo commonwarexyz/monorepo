@@ -8,13 +8,14 @@ use crate::{
             util::remove_indexed,
             verification::{Observation, VerificationTicket},
         },
+        scheme::Scheme,
         types::{
             Artifact, ArtifactId, BlockRef, CertificateId, ChainId, DaVote, TransactionBlockHeader,
         },
     },
     types::{Attributable as _, Height, Participant, View},
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use core::ops::Bound;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -36,9 +37,9 @@ pub(crate) enum ArtifactState<D: Digest> {
 
 /// One artifact in the machine's store, with the indexes and flags admission maintains for it.
 #[derive(Clone, Debug)]
-pub(crate) struct ArtifactEntry<V: Variant, D: Digest> {
+pub(crate) struct ArtifactEntry<S: Scheme, D: Digest> {
     /// The artifact.
-    pub(crate) artifact: Arc<Artifact<V, D>>,
+    pub(crate) artifact: Arc<Artifact<S, D>>,
     /// The dependencies this artifact provides to waiting artifacts.
     pub(crate) provisions: Arc<[Dependency<D>]>,
     /// The earliest observation of this artifact, which orders it against its peers.
@@ -65,13 +66,13 @@ pub(crate) enum FloorPosition {
 }
 
 /// One artifact promoted to [`ArtifactState::Ready`], as admission telemetry needs it.
-pub(crate) type ReadyPromotion<V, D> = (Observation, ArtifactId<D>, Arc<Artifact<V, D>>);
+pub(crate) type ReadyPromotion<S, D> = (Observation, ArtifactId<D>, Arc<Artifact<S, D>>);
 
 /// A chain position and the signer of one data-availability vote at it.
 pub(crate) type VoteSlotKey = (ChainId, Height, Participant);
 
 /// Returns the slot `vote` takes: its chain position and signer.
-pub(crate) fn vote_slot_key<V: Variant, D: Digest>(vote: &DaVote<V, D>) -> VoteSlotKey {
+pub(crate) fn vote_slot_key<S: Scheme, D: Digest>(vote: &DaVote<S, D>) -> VoteSlotKey {
     (vote.header().chain(), vote.header().height(), vote.signer())
 }
 
@@ -79,8 +80,8 @@ pub(crate) fn vote_slot_key<V: Variant, D: Digest>(vote: &DaVote<V, D>) -> VoteS
 pub(crate) type VerifiedBlocks<D> = [Option<ArtifactId<D>>; VERIFIED_BLOCKS_PER_HEIGHT];
 
 /// Retained artifacts with the indexes admission and retirement keep over them.
-pub(crate) struct ArtifactStore<V: Variant, D: Digest> {
-    pub(in crate::multimmit::machine) artifacts: BTreeMap<ArtifactId<D>, ArtifactEntry<V, D>>,
+pub(crate) struct ArtifactStore<S: Scheme, D: Digest> {
+    pub(in crate::multimmit::machine) artifacts: BTreeMap<ArtifactId<D>, ArtifactEntry<S, D>>,
     /// Retained view-scoped artifacts by view, so retirement visits only the views it retires.
     pub(in crate::multimmit::machine) by_view: BTreeMap<View, BTreeSet<ArtifactId<D>>>,
     /// Retained chain artifacts by chain and height, so retirement visits only heights at or
@@ -111,14 +112,14 @@ pub(crate) struct ArtifactStore<V: Variant, D: Digest> {
     /// Admission telemetry needs the set of newly ready artifacts, and the retained map holds
     /// hundreds of entries: tracking promotions as they happen keeps every step and poll off a
     /// full scan. Entries are drained by both, so a promotion is never reported twice.
-    pub(in crate::multimmit::machine) newly_ready: Vec<ReadyPromotion<V, D>>,
+    pub(in crate::multimmit::machine) newly_ready: Vec<ReadyPromotion<S, D>>,
     /// Reused canonical encoding buffer for machine-validated local artifacts.
     pub(in crate::multimmit::machine) id_scratch: Vec<u8>,
     /// The input cohort the next observation belongs to.
     pub(in crate::multimmit::machine) next_cohort: u64,
 }
 
-impl<V: Variant, D: Digest> ArtifactStore<V, D> {
+impl<S: Scheme, D: Digest> ArtifactStore<S, D> {
     pub(super) const fn new() -> Self {
         Self {
             artifacts: BTreeMap::new(),
@@ -144,7 +145,7 @@ impl<V: Variant, D: Digest> ArtifactStore<V, D> {
     pub(super) fn insert(
         &mut self,
         id: ArtifactId<D>,
-        entry: ArtifactEntry<V, D>,
+        entry: ArtifactEntry<S, D>,
         position: FloorPosition,
     ) {
         let view = entry.artifact.view();
@@ -166,7 +167,7 @@ impl<V: Variant, D: Digest> ArtifactStore<V, D> {
 
     /// Removes the artifact retained under `id` from the store and its retirement, future, and
     /// chain position indices.
-    pub(super) fn remove(&mut self, id: ArtifactId<D>) -> Option<ArtifactEntry<V, D>> {
+    pub(super) fn remove(&mut self, id: ArtifactId<D>) -> Option<ArtifactEntry<S, D>> {
         let entry = self.artifacts.remove(&id)?;
         let view = entry.artifact.view();
         if let Some(view) = view {

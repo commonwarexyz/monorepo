@@ -6,10 +6,11 @@ use super::{
 };
 use crate::multimmit::{
     marshal::{actors::metrics::FetchReason, storage::commit::CustodyRef, wire::BackfillKey},
+    scheme::Scheme,
     types::{BlockRef, Body, CertificateId, Lqc, TransactionBlock},
 };
 use commonware_codec::EncodeSize as _;
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select;
 use commonware_utils::{
     channel::{fallible::OneshotExt as _, oneshot},
@@ -212,10 +213,10 @@ impl<D: Digest> Target<D> {
     }
 
     /// Returns whether `resolved` satisfies this target.
-    pub(super) fn accepts<H, V, B>(&self, resolved: &Resolved<H, V, B>) -> bool
+    pub(super) fn accepts<H, S, B>(&self, resolved: &Resolved<H, S, B>) -> bool
     where
         H: Hasher<Digest = D>,
-        V: Variant,
+        S: Scheme,
         B: Body<H>,
     {
         match (self, resolved) {
@@ -236,16 +237,16 @@ impl<D: Digest> Target<D> {
     }
 }
 
-type LqcReply<V, D> = oneshot::Sender<Result<Arc<Lqc<V, D>>, Error>>;
+type LqcReply<S, D> = oneshot::Sender<Result<Arc<Lqc<S, D>>, Error>>;
 type HistoryReply<D> = oneshot::Sender<Result<SharedHistory<D>, Error>>;
 type HeaderReply<D> = oneshot::Sender<Result<SharedHeaders<D>, Error>>;
 type BlockReply<H, B> = oneshot::Sender<Result<Arc<TransactionBlock<H, B>>, Error>>;
 type BlocksReply<H, B> = oneshot::Sender<Result<ExactPrefix<H, B>, Error>>;
 
 /// The channel a waiter's result goes to, typed by its target.
-pub(super) enum Reply<H: Hasher, V: Variant, B: Body<H>> {
+pub(super) enum Reply<H: Hasher, S: Scheme, B: Body<H>> {
     /// Answers a [`Target::Lqc`] waiter.
-    Lqc(LqcReply<V, H::Digest>),
+    Lqc(LqcReply<S, H::Digest>),
     /// Answers a [`Target::History`] waiter.
     History(HistoryReply<H::Digest>),
     /// Answers a [`Target::Headers`] waiter.
@@ -286,7 +287,7 @@ fn track<T: Send + 'static, D: Digest>(
     sender
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> Reply<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> Reply<H, S, B> {
     /// Returns whether the caller stopped waiting.
     pub(super) fn is_closed(&self) -> bool {
         match self {
@@ -310,7 +311,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Reply<H, V, B> {
     }
 
     /// Answers the caller with `resolved`, which its waiter's target accepted.
-    fn succeed(self, resolved: &Resolved<H, V, B>) {
+    fn succeed(self, resolved: &Resolved<H, S, B>) {
         match (self, resolved) {
             (Self::Lqc(reply), Resolved::Lqc(_, proof)) => reply.send_lossy(Ok(Arc::clone(proof))),
             (Self::History(reply), Resolved::History(_, segment)) => {
@@ -363,13 +364,13 @@ pub(super) enum FetchState {
 }
 
 /// One caller, or DA-certificate marker, waiting on a backfill key.
-pub(super) struct Waiter<H: Hasher, V: Variant, B: Body<H>> {
+pub(super) struct Waiter<H: Hasher, S: Scheme, B: Body<H>> {
     /// Identity of the waiter's fetch in the network resolver.
     pub id: BackfillSubscriber,
     /// The value the waiter needs.
     pub target: Target<H::Digest>,
     /// The caller's reply; a DA-certificate marker has none.
-    pub reply: Option<Reply<H, V, B>>,
+    pub reply: Option<Reply<H, S, B>>,
     /// Span of the request that registered the waiter.
     pub span: Span,
     /// Protocol obligation behind the request.
@@ -378,7 +379,7 @@ pub(super) struct Waiter<H: Hasher, V: Variant, B: Body<H>> {
     pub state: FetchState,
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> Waiter<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> Waiter<H, S, B> {
     /// Returns whether the waiter's caller stopped waiting.
     pub(super) fn is_closed(&self) -> bool {
         self.reply.as_ref().is_some_and(Reply::is_closed)
@@ -412,7 +413,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Waiter<H, V, B> {
     }
 
     /// Answers the caller with `resolved`, which the waiter's target accepts.
-    pub(super) fn complete(self, resolved: &Resolved<H, V, B>) {
+    pub(super) fn complete(self, resolved: &Resolved<H, S, B>) {
         debug_assert!(self.target.accepts(resolved));
         if let Some(reply) = self.reply {
             reply.succeed(resolved);
@@ -421,9 +422,9 @@ impl<H: Hasher, V: Variant, B: Body<H>> Waiter<H, V, B> {
 }
 
 /// A value that satisfies the waiters of one key.
-pub(super) enum Resolved<H: Hasher, V: Variant, B: Body<H>> {
+pub(super) enum Resolved<H: Hasher, S: Scheme, B: Body<H>> {
     /// The L-QC with this identifier.
-    Lqc(CertificateId<H::Digest>, Arc<Lqc<V, H::Digest>>),
+    Lqc(CertificateId<H::Digest>, Arc<Lqc<S, H::Digest>>),
     /// A linked tip-history segment starting at this commitment.
     History(H::Digest, SharedHistory<H::Digest>),
     /// A linked producer-header segment starting at this reference.
@@ -434,7 +435,7 @@ pub(super) enum Resolved<H: Hasher, V: Variant, B: Body<H>> {
     Blocks(BackfillKey<H::Digest>, SharedBlocks<H, B>),
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> Resolved<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> Resolved<H, S, B> {
     /// Returns the key whose waiters the value may satisfy.
     pub(super) const fn key(&self) -> BackfillKey<H::Digest> {
         match self {

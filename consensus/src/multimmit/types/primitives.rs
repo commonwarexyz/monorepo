@@ -1,80 +1,22 @@
 //! Scalar identifiers used by Multimmit.
 
-use crate::{
-    Heightable,
-    types::{Attributable, Height, Participant},
-};
+use crate::{Heightable, multimmit::scheme::Scheme, types::Height};
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy,
-    varint::UInt,
+    Buf, Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write, varint::UInt,
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher, certificate};
 use core::fmt::{self, Display, Formatter};
 
-macro_rules! define_attributed_signature {
-    ($name:ident, $doc:literal) => {
-        #[doc = $doc]
-        #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-        pub struct $name<V: Variant> {
-            signer: Participant,
-            signature: Lazy<V::Signature>,
-        }
+/// An attributed ordinary signature: a vote, novote, or signed block attestation, or a term of an
+/// aggregate transcript.
+pub type Attestation<S> = certificate::Attestation<<S as Scheme>::Ordinary>;
 
-        impl<V: Variant> $name<V> {
-            /// Creates an unverified attributed signature.
-            pub const fn new(signer: Participant, signature: Lazy<V::Signature>) -> Self {
-                Self { signer, signature }
-            }
+/// An attributed data-availability signature.
+pub type DaAttestation<S> = certificate::Attestation<<S as Scheme>::Da>;
 
-            /// Returns the decoded signature, or `None` if its group element is malformed.
-            pub fn signature(&self) -> Option<&V::Signature> {
-                self.signature.get()
-            }
-
-            /// Returns the encoded signature without decoding its group element.
-            pub const fn lazy_signature(&self) -> &Lazy<V::Signature> {
-                &self.signature
-            }
-        }
-
-        impl<V: Variant> Attributable for $name<V> {
-            fn signer(&self) -> Participant {
-                self.signer
-            }
-        }
-
-        impl<V: Variant> Write for $name<V> {
-            fn write(&self, buf: &mut impl BufMut) {
-                self.signer.write(buf);
-                self.signature.write(buf);
-            }
-        }
-
-        impl<V: Variant> Read for $name<V> {
-            type Cfg = ();
-
-            fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-                Ok(Self::new(Participant::read(buf)?, Lazy::read(buf)?))
-            }
-        }
-
-        impl<V: Variant> EncodeSize for $name<V> {
-            fn encode_size(&self) -> usize {
-                self.signer.encode_size() + self.signature.encode_size()
-            }
-        }
-    };
-}
-
-define_attributed_signature!(
-    Attestation,
-    "An attributed ordinary synchronized aggregate signature retained in aggregate transcripts."
-);
-define_attributed_signature!(
-    ThresholdShare,
-    "An attributed BLS threshold share used to recover an unattributed certificate."
-);
+/// An attributed nullification signature.
+pub type NullifyAttestation<S> = certificate::Attestation<<S as Scheme>::Nullify>;
 
 macro_rules! impl_numeric_codec {
     ($type:ty, $integer:ty) => {

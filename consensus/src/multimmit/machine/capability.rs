@@ -11,33 +11,34 @@ use crate::{
             verification::{Observation, VerifyJob},
             view::{NullificationRecoveryJob, ViewTimer, VqcAggregateJob},
         },
+        scheme::Scheme,
         types::{Artifact, ArtifactId, BlockRef, ChainId, DaVote, SignedTransactionBlock},
     },
     types::{Height, Participant, View},
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use std::sync::Arc;
 
 /// Immutable work the machine issues, grouped by the runtime piece that executes it.
 #[derive(Clone, Debug)]
-pub(crate) enum Capability<V: Variant, D: Digest> {
+pub(crate) enum Capability<S: Scheme, D: Digest> {
     /// Cryptographically verify retained decoded artifacts.
-    Verify(VerifyJob<V, D>),
+    Verify(VerifyJob<S, D>),
     /// Quarantine identities named by self-contained authenticated equivocation evidence.
     Quarantine(Vec<Participant>),
     /// Append domain events after installing pre-publication resolver custody.
-    Journal(PersistDirective<V, D>),
+    Journal(PersistDirective<S, D>),
     /// Install resolver custody and accounting released by a durable acknowledgement.
     Acknowledged {
         /// Proofs the acknowledged batch made servable.
-        retention: Vec<Arc<Artifact<V, D>>>,
+        retention: Vec<Arc<Artifact<S, D>>>,
         /// Nullifications the acknowledged batch forwarded.
         forwarded_nullifications: usize,
     },
     /// Execute an action released from the durable outbox.
-    Released(DurableJob<V, D>),
+    Released(DurableJob<S, D>),
     /// Expose an independently verifiable resolver proof whose own-signature floor is durable.
-    Retain(Arc<Artifact<V, D>>),
+    Retain(Arc<Artifact<S, D>>),
     /// Retire volatile publication attempts after every successor command has executed.
     Retire(Vec<EffectId>),
     /// Send each already-public artifact once to its recipient, without retries.
@@ -47,18 +48,18 @@ pub(crate) enum Capability<V: Variant, D: Digest> {
     /// nothing, so forwarding it needs no durable record. A producer's own certificate leaves only
     /// through its durable publication. A lost send is repeated at a later view entry while it
     /// still matters.
-    Forward(Vec<SendRequest<V, D>>),
+    Forward(Vec<SendRequest<S, D>>),
     /// Application work for the local producer.
     Application(AppJob<D>),
     /// Aggregation and recovery work on the critical crypto pool.
-    Crypto(CryptoJob<V, D>),
+    Crypto(CryptoJob<S, D>),
     /// A logical timer to arm.
     Timer(TimerCommand<D>),
     /// A command for the chain plane of one producer chain.
-    Validator(ChainId, ValidatorCommand<V, D>),
+    Validator(ChainId, ValidatorCommand<S, D>),
     /// A command for one chain's DA recovery task: the chain this node produces, or a receipt
     /// chain.
-    ChainDa(ChainId, ChainCommand<V, D>),
+    ChainDa(ChainId, ChainCommand<S, D>),
     /// A command for the resolver.
     Resolver(ResolverCommand),
 }
@@ -76,13 +77,13 @@ pub(crate) enum AppJob<D: Digest> {
 
 /// Aggregation and recovery work on the critical crypto pool.
 #[derive(Clone, Debug)]
-pub(crate) enum CryptoJob<V: Variant, D: Digest> {
+pub(crate) enum CryptoJob<S: Scheme, D: Digest> {
     /// Recover a certificate from one canonical subset of nullification shares.
-    RecoverNullification(NullificationRecoveryJob<V>),
+    RecoverNullification(NullificationRecoveryJob<S>),
     /// Aggregate one canonical V-QC transcript.
-    AggregateVqc(VqcAggregateJob<V, D>),
+    AggregateVqc(VqcAggregateJob<S, D>),
     /// Assemble one L-QC from complete votes selected by the core.
-    AggregateLqc(LqcAggregateJob<V, D>),
+    AggregateLqc(LqcAggregateJob<S, D>),
 }
 
 /// A logical timer the runtime arms.
@@ -98,22 +99,22 @@ pub(crate) enum TimerCommand<D: Digest> {
 ///
 /// The machine assigned its observation identity and recorded its producer ancestry first.
 #[derive(Clone, Debug)]
-pub(crate) struct ObservedBlock<V: Variant, D: Digest> {
+pub(crate) struct ObservedBlock<S: Scheme, D: Digest> {
     /// The observation identity the machine assigned.
     pub(crate) id: ArtifactId<D>,
     /// The observation order the machine assigned.
     pub(crate) observation: Observation,
     /// The authenticated block.
-    pub(crate) block: Arc<SignedTransactionBlock<V, D>>,
+    pub(crate) block: Arc<SignedTransactionBlock<S, D>>,
     /// Whether this is the local producer's own custodied block, valid without a check.
     pub(crate) custodied: bool,
 }
 
 /// A command for the chain plane of one producer chain.
 #[derive(Clone, Debug)]
-pub(crate) enum ValidatorCommand<V: Variant, D: Digest> {
+pub(crate) enum ValidatorCommand<S: Scheme, D: Digest> {
     /// Route an authenticated block to the plane.
-    Observe(ObservedBlock<V, D>),
+    Observe(ObservedBlock<S, D>),
     /// The chain's certified anchor advanced to this block; blocks at or below it are settled.
     AnchorAdvanced(BlockRef<D>),
     /// Replace the plane's read-copy of the machine's durable DA choices above the anchor.
@@ -122,9 +123,9 @@ pub(crate) enum ValidatorCommand<V: Variant, D: Digest> {
 
 /// A command for one chain's DA recovery task.
 #[derive(Clone, Debug)]
-pub(crate) enum ChainCommand<V: Variant, D: Digest> {
+pub(crate) enum ChainCommand<S: Scheme, D: Digest> {
     /// Forward a structurally checked data-availability share of the chain.
-    Observe(Arc<DaVote<V, D>>),
+    Observe(Arc<DaVote<S, D>>),
     /// The chain's certified anchor advanced to this height.
     AnchorAdvanced(Height),
 }
@@ -143,4 +144,4 @@ pub(crate) enum ResolverCommand {
 }
 
 /// Capabilities in deterministic issuance order.
-pub(crate) type Capabilities<V, D> = Vec<Capability<V, D>>;
+pub(crate) type Capabilities<S, D> = Vec<Capability<S, D>>;

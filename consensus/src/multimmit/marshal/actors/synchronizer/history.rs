@@ -23,11 +23,12 @@ use crate::{
             },
             types::LqcVerifier,
         },
+        scheme::Scheme,
         types::{BlockRef, Body},
     },
     types::View,
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select;
 use std::{cmp::Ordering, collections::VecDeque, pin::pin, sync::Arc};
 
@@ -64,18 +65,18 @@ struct StagedWindow<D: Digest> {
     forward: Vec<Option<Branch<D>>>,
 }
 
-impl<I, C, F, S, K, Q, H, V, B> Core<I, C, F, S, K, Q, H, V, B>
+impl<I, C, F, Hs, K, Q, H, S, B> Core<I, C, F, Hs, K, Q, H, S, B>
 where
-    I: Absorb<V, H::Digest>,
-    C: CatalogPort<H, V, B>,
-    F: Fetcher<H, V, B>,
-    S: HistoryStack<H>,
+    I: Absorb<S, H::Digest>,
+    C: CatalogPort<H, S, B>,
+    F: Fetcher<H, S, B>,
+    Hs: HistoryStack<H>,
     K: BlockStack<H::Digest>,
-    Q: LqcVerifier<H, V>,
+    Q: LqcVerifier<H, S>,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
-    Error: From<C::Error> + From<F::Error> + From<S::Error> + From<K::Error>,
+    Error: From<C::Error> + From<F::Error> + From<Hs::Error> + From<K::Error>,
 {
     /// Synchronizes to the same-view finalized `proofs`: opens every tip-history record they
     /// commit to, then emits each proof's final sweep and selects it.
@@ -87,7 +88,7 @@ where
     )]
     pub(super) async fn synchronize_proofs(
         &mut self,
-        proofs: FinalityProofs<V, H::Digest>,
+        proofs: FinalityProofs<S, H::Digest>,
     ) -> Result<(), Error> {
         let selected = self.new_proofs(proofs).await?;
         let Some(first) = selected.first() else {
@@ -167,8 +168,8 @@ where
     /// floor view those not yet selected.
     async fn new_proofs(
         &mut self,
-        proofs: FinalityProofs<V, H::Digest>,
-    ) -> Result<Vec<SelectedLqc<V, H>>, Error> {
+        proofs: FinalityProofs<S, H::Digest>,
+    ) -> Result<Vec<SelectedLqc<S, H>>, Error> {
         let Some(view) = proofs.values().next().map(|proof| proof.view()) else {
             return Ok(Vec::new());
         };
@@ -234,7 +235,7 @@ where
     }
 
     /// Opens every staged tip-history record, oldest first, in custody-window-sized runs.
-    async fn open_history(&mut self, batch: &mut PublicationBatch<H, V, B>) -> Result<(), Error> {
+    async fn open_history(&mut self, batch: &mut PublicationBatch<H, S, B>) -> Result<(), Error> {
         let mut next = self.history_stack.read_oldest().await?;
         while let Some(first) = next.take() {
             let window = self.read_history_window(first).await?;
@@ -253,8 +254,8 @@ where
     /// Emits the final sweep of `selected` and selects it.
     async fn select(
         &mut self,
-        selected: SelectedLqc<V, H>,
-        batch: &mut PublicationBatch<H, V, B>,
+        selected: SelectedLqc<S, H>,
+        batch: &mut PublicationBatch<H, S, B>,
     ) -> Result<(), Error> {
         let preview = HistoryState::new(
             self.state.history(),
@@ -262,7 +263,7 @@ where
             self.state.ordered().to_vec(),
         )?;
         let sweep =
-            preview.final_sweep::<H, V>(&selected.proof, self.codec, self.state.ordered())?;
+            preview.final_sweep::<H, S>(&selected.proof, self.codec, self.state.ordered())?;
         self.sweep(sweep.into_stream(), batch).await?;
         batch.selected.push(selected);
         if batch.selected.len() == self.bounds.max_commit_outputs {
@@ -275,7 +276,7 @@ where
     async fn sweep(
         &mut self,
         mut stream: SlotStream<H::Digest>,
-        batch: &mut PublicationBatch<H, V, B>,
+        batch: &mut PublicationBatch<H, S, B>,
     ) -> Result<(), Error> {
         let target = stream.target().to_vec();
         let emitted = self.state.emitted().to_vec();
@@ -337,7 +338,7 @@ where
     pub(super) async fn open(
         &mut self,
         link: HistoryLink<H>,
-        batch: &mut PublicationBatch<H, V, B>,
+        batch: &mut PublicationBatch<H, S, B>,
     ) -> Result<(), Error> {
         let emitted = self.state.emitted().to_vec();
         let mut stream = SlotStream::new(
@@ -366,7 +367,7 @@ where
     async fn open_window(
         &mut self,
         links: Vec<HistoryLink<H>>,
-        batch: &mut PublicationBatch<H, V, B>,
+        batch: &mut PublicationBatch<H, S, B>,
     ) -> Result<(), Error> {
         let emitted = self.state.emitted().to_vec();
         let Some(staged) = self.stage_window(&links, &emitted).await? else {
@@ -452,7 +453,7 @@ where
     async fn record_opening(
         &mut self,
         link: HistoryLink<H>,
-        batch: &mut PublicationBatch<H, V, B>,
+        batch: &mut PublicationBatch<H, S, B>,
     ) -> Result<(), Error> {
         self.state
             .finish_opening::<H>(link.commitment, &link.record)?;

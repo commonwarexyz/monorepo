@@ -1,8 +1,11 @@
 //! An [`LqcVerifier`] backed by the epoch's committee [`Scheme`].
 
 use super::types::LqcVerifier;
-use crate::multimmit::{scheme::bls12381_threshold::Scheme, types::Lqc};
-use commonware_cryptography::{Hasher, PublicKey, bls12381::primitives::variant::Variant};
+use crate::multimmit::{
+    scheme::{Generic, Scheme},
+    types::Lqc,
+};
+use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Supervisor;
 use rand_core::CryptoRng;
@@ -19,15 +22,15 @@ pub struct InvalidLqc;
 /// polled. The strategy runs it inline in the call or hands it to a worker while the marshal actor
 /// awaits it, whichever it measures cheaper; a sequential strategy always runs it inline.
 /// `context` seeds each verification's batch randomness.
-pub struct SchemeVerifier<E, P: PublicKey, V: Variant, T> {
+pub struct SchemeVerifier<E, S: Scheme, T> {
     context: E,
-    scheme: Arc<Scheme<P, V>>,
+    scheme: Arc<Generic<S>>,
     strategy: T,
 }
 
-impl<E, P: PublicKey, V: Variant, T> SchemeVerifier<E, P, V, T> {
+impl<E, S: Scheme, T> SchemeVerifier<E, S, T> {
     /// Creates a verifier for `scheme`'s committee.
-    pub fn new(context: E, scheme: Scheme<P, V>, strategy: T) -> Self {
+    pub fn new(context: E, scheme: Generic<S>, strategy: T) -> Self {
         Self {
             context,
             scheme: Arc::new(scheme),
@@ -36,11 +39,10 @@ impl<E, P: PublicKey, V: Variant, T> SchemeVerifier<E, P, V, T> {
     }
 }
 
-impl<E, P, V, T> Clone for SchemeVerifier<E, P, V, T>
+impl<E, S, T> Clone for SchemeVerifier<E, S, T>
 where
     E: Supervisor,
-    P: PublicKey,
-    V: Variant,
+    S: Scheme,
     T: Clone,
 {
     fn clone(&self) -> Self {
@@ -52,19 +54,18 @@ where
     }
 }
 
-impl<E, H, P, V, T> LqcVerifier<H, V> for SchemeVerifier<E, P, V, T>
+impl<E, H, S, T> LqcVerifier<H, S> for SchemeVerifier<E, S, T>
 where
     E: CryptoRng + Supervisor,
     H: Hasher,
-    P: PublicKey,
-    V: Variant,
+    S: Scheme,
     T: Strategy,
 {
     type Error = InvalidLqc;
 
     fn verify(
         &mut self,
-        proof: &Lqc<V, H::Digest>,
+        proof: &Lqc<S, H::Digest>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send {
         let scheme = Arc::clone(&self.scheme);
         let strategy = self.strategy.clone();
@@ -82,7 +83,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{multimmit::mocks::Committee, types::View};
+    use crate::{
+        multimmit::mocks::{Bls, Committee},
+        types::View,
+    };
     use commonware_cryptography::{Sha256, bls12381::primitives::variant::MinPk};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, deterministic};
@@ -90,8 +94,8 @@ mod tests {
     #[test]
     fn scheme_verifier_accepts_committee_lqcs_and_rejects_others() {
         deterministic::Runner::default().start(|context| async move {
-            let committee = Committee::<MinPk>::builder(91, 6).build();
-            let other = Committee::<MinPk>::builder(92, 6).build();
+            let committee = Committee::<Bls<MinPk>>::builder(91, 6).build();
+            let other = Committee::<Bls<MinPk>>::builder(92, 6).build();
             let mut verifier = SchemeVerifier::new(
                 context.child("verifier"),
                 committee.verifier.clone(),
@@ -99,13 +103,17 @@ mod tests {
             );
 
             assert!(
-                LqcVerifier::<Sha256, MinPk>::verify(&mut verifier, &committee.lqc(View::new(3)))
-                    .await
-                    .is_ok()
+                LqcVerifier::<Sha256, Bls<MinPk>>::verify(
+                    &mut verifier,
+                    &committee.lqc(View::new(3))
+                )
+                .await
+                .is_ok()
             );
             let mut clone = verifier.clone();
             assert!(matches!(
-                LqcVerifier::<Sha256, MinPk>::verify(&mut clone, &other.lqc(View::new(3))).await,
+                LqcVerifier::<Sha256, Bls<MinPk>>::verify(&mut clone, &other.lqc(View::new(3)))
+                    .await,
                 Err(InvalidLqc)
             ));
         });

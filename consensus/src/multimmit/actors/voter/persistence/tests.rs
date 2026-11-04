@@ -8,7 +8,7 @@ use crate::{
             BatchId, Change, CoreState, Cursor, DomainEvent, DomainEventCodecConfig, Generation,
             PersistJob, Snapshot, SnapshotCodecConfig,
         },
-        mocks::Committee,
+        mocks::{Bls, Committee},
         storage::{JournalConfig, JournalRecord, SafetyJournal, SnapshotStore},
         testing::SpanRecorder,
         types::{CodecConfig, PathLimits},
@@ -35,9 +35,9 @@ use std::{num::NonZeroUsize, time::Duration};
 use tracing::Span;
 use tracing_subscriber::prelude::*;
 
-type TestJob = PersistJob<MinPk, Sha256Digest>;
+type TestJob = PersistJob<Bls<MinPk>, Sha256Digest>;
 type DelayedContext = DelayedSyncContext<deterministic::Context>;
-type Outputs = mailbox::Receiver<Output<MinPk, Sha256Digest>>;
+type Outputs = mailbox::Receiver<Output<Bls<MinPk>, Sha256Digest>>;
 
 const SEED: u64 = 7;
 
@@ -79,8 +79,8 @@ fn job(epoch: Epoch, barrier: u64, previous: u64, urgent: bool) -> TestJob {
 }
 
 fn profile() -> Profile<Sha256Digest> {
-    let committee = Committee::<MinPk>::builder(SEED, 6).build();
-    Profile::new::<MinPk>(
+    let committee = Committee::<Bls<MinPk>>::builder(SEED, 6).build();
+    Profile::new::<Bls<MinPk>>(
         committee.config,
         Role::Validator(Participant::new(0)),
         Tuning::default(),
@@ -89,8 +89,8 @@ fn profile() -> Profile<Sha256Digest> {
 }
 
 /// Returns the cut of a fresh machine, which has nothing staged.
-fn cut() -> Snapshot<MinPk, Sha256Digest> {
-    CoreState::<Sha256, MinPk>::fresh(profile())
+fn cut() -> Snapshot<Bls<MinPk>, Sha256Digest> {
+    CoreState::<Sha256, Bls<MinPk>>::fresh(profile())
         .unwrap()
         .machine()
         .checkpoint_cut()
@@ -110,7 +110,7 @@ async fn open_empty<E>(
     context: &E,
     partition: &str,
     epoch: Epoch,
-) -> SafetyJournal<E, MinPk, Sha256Digest>
+) -> SafetyJournal<E, Bls<MinPk>, Sha256Digest>
 where
     E: commonware_runtime::Metrics + Storage + Spawner,
 {
@@ -128,7 +128,7 @@ where
 async fn open_checkpoints<E: StorageContext + Spawner>(
     context: &E,
     partition: &str,
-) -> SnapshotStore<E, MinPk, Sha256Digest> {
+) -> SnapshotStore<E, Bls<MinPk>, Sha256Digest> {
     let (store, snapshot) = SnapshotStore::open(
         context.child("checkpoints"),
         format!("{partition}-checkpoints"),
@@ -144,8 +144,8 @@ async fn open_checkpoints<E: StorageContext + Spawner>(
 /// Stores over a context whose started syncs park until a test releases them.
 struct Delayed {
     context: DelayedContext,
-    journal: SafetyJournal<DelayedContext, MinPk, Sha256Digest>,
-    checkpoints: SnapshotStore<DelayedContext, MinPk, Sha256Digest>,
+    journal: SafetyJournal<DelayedContext, Bls<MinPk>, Sha256Digest>,
+    checkpoints: SnapshotStore<DelayedContext, Bls<MinPk>, Sha256Digest>,
     pending: PendingSyncs,
     baseline: usize,
 }
@@ -170,7 +170,7 @@ async fn open_delayed(context: deterministic::Context, partition: &str, epoch: E
 
 /// A started actor and the ends of its mailbox and output.
 struct Running<E: StorageContext + Spawner> {
-    client: Mailbox<Sha256, MinPk>,
+    client: Mailbox<Sha256, Bls<MinPk>>,
     flusher: Flusher,
     outputs: Outputs,
     metrics: Metrics,
@@ -180,8 +180,8 @@ struct Running<E: StorageContext + Spawner> {
 
 fn start<E: StorageContext + Spawner>(
     context: E,
-    journal: SafetyJournal<E, MinPk, Sha256Digest>,
-    checkpoints: SnapshotStore<E, MinPk, Sha256Digest>,
+    journal: SafetyJournal<E, Bls<MinPk>, Sha256Digest>,
+    checkpoints: SnapshotStore<E, Bls<MinPk>, Sha256Digest>,
     capacity: NonZeroUsize,
     gates: TestGates,
 ) -> Running<E> {
@@ -224,7 +224,7 @@ impl Delayed {
 }
 
 /// Receives the next output, which must be a durability.
-async fn durable(outputs: &mut Outputs) -> Durable<MinPk, Sha256Digest> {
+async fn durable(outputs: &mut Outputs) -> Durable<Bls<MinPk>, Sha256Digest> {
     match outputs.recv().await {
         Some(Output::Durable(durable)) => durable,
         Some(_) => panic!("expected a durability"),

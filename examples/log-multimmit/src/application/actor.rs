@@ -378,6 +378,7 @@ mod tests {
     use crate::{
         application::{OutputReporter, Relay},
         bench::Schedule,
+        committee::Suite,
     };
     use commonware_actor::Feedback;
     use commonware_broadcast::buffered;
@@ -395,7 +396,7 @@ mod tests {
         },
         types::{Epoch, Height, Participant, Round, View},
     };
-    use commonware_cryptography::{Hasher as _, bls12381::primitives::variant::MinSig, ed25519};
+    use commonware_cryptography::{Hasher as _, ed25519};
     use commonware_parallel::Sequential;
     use commonware_resolver::p2p as resolver;
     use commonware_runtime::{
@@ -403,7 +404,7 @@ mod tests {
     };
     use commonware_storage::translator::EightCap;
     use commonware_utils::{
-        Acknowledgement as _, NZDuration, NZU16, NZU64, NZUsize, acknowledgement::Exact,
+        Acknowledgement as _, NZDuration, NZU16, NZU64, NZUsize, acknowledgement::Exact, test_rng,
     };
     use std::{convert::Infallible, num::NonZeroUsize, time::Duration};
 
@@ -420,12 +421,12 @@ mod tests {
     #[derive(Clone)]
     struct AcceptAll;
 
-    impl LqcVerifier<Sha256, MinSig> for AcceptAll {
+    impl LqcVerifier<Sha256, Suite> for AcceptAll {
         type Error = Infallible;
 
         fn verify(
             &mut self,
-            _: &Lqc<MinSig, Sha256Digest>,
+            _: &Lqc<Suite, Sha256Digest>,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send {
             std::future::ready(Ok(()))
         }
@@ -440,7 +441,7 @@ mod tests {
     /// One node's application actor attached to a real marshal over a simulated network, plus a
     /// peer's buffered broadcast engine that observes what the node's relay disseminates.
     struct Harness {
-        committee: Committee<MinSig>,
+        committee: Committee<Suite>,
         marshal: Marshal,
         relay: Relay,
         mailbox: Mailbox<deterministic::Context>,
@@ -449,7 +450,7 @@ mod tests {
 
     impl Harness {
         async fn new(context: &deterministic::Context, production: Production) -> Self {
-            let committee = Committee::<MinSig>::builder(7, PARTICIPANTS)
+            let committee = Committee::<Suite>::builder(7, PARTICIPANTS)
                 .namespace(b"_COMMONWARE_LOG_MULTIMMIT_ACTOR_TEST")
                 .producers(vec![Participant::new(0), Participant::new(1)])
                 .limits(PathLimits::new(8, 4))
@@ -505,7 +506,7 @@ mod tests {
             // Backfill must not exceed the resolver mailbox.
             .with_backfill_concurrency(RESOLVER_MAILBOX_SIZE);
             let (mut service, bridge) =
-                marshal::open::<_, EightCap, Sha256, MinSig, Body, ed25519::PublicKey>(
+                marshal::open::<_, EightCap, Sha256, Suite, Body, ed25519::PublicKey>(
                     context.child("marshal"),
                     config,
                     buffer.clone(),
@@ -574,7 +575,7 @@ mod tests {
         }
 
         /// Returns a DA certificate for a block at `height` on `chain`.
-        fn certificate(&self, chain: u32, height: u64) -> Arc<Artifact<MinSig, Sha256Digest>> {
+        fn certificate(&self, chain: u32, height: u64) -> Arc<Artifact<Suite, Sha256Digest>> {
             let header = TransactionBlockHeader::new(
                 self.committee.config.epoch(),
                 ChainId::new(chain),
@@ -592,7 +593,7 @@ mod tests {
             let certificate = self
                 .committee
                 .verifier
-                .assemble_da_certificate(&votes, &Sequential)
+                .assemble_da_certificate(&mut test_rng(), &votes, &Sequential)
                 .unwrap();
             Arc::new(Artifact::DaCertificate(certificate))
         }

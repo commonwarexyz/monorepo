@@ -14,13 +14,13 @@ use crate::{
             voter::{Completed, Completions},
         },
         machine::{VerificationCompletion, VerifyJob},
-        scheme::bls12381_threshold::Scheme,
+        scheme::{Generic, Scheme},
         types::Artifact,
     },
     types::Round,
 };
 use commonware_actor::mailbox;
-use commonware_cryptography::{Digest, Hasher, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
@@ -30,10 +30,10 @@ use std::{future::Future, marker::PhantomData, sync::Arc, time::SystemTime};
 use tracing::{Span, debug_span, info_span};
 
 /// One finished job with the span of the caller that issued it.
-type VerifyResult<V, D> = (Span, Result<VerificationCompletion<V, D>, WorkerPanicked>);
+type VerifyResult<S, D> = (Span, Result<VerificationCompletion<S, D>, WorkerPanicked>);
 
 /// Jobs in flight, completed in any order.
-type VerifyResults<V, D> = Pool<'static, VerifyResult<V, D>>;
+type VerifyResults<S, D> = Pool<'static, VerifyResult<S, D>>;
 
 /// Why the verifier stopped the loop that drives it.
 #[derive(Debug, thiserror::Error)]
@@ -48,11 +48,11 @@ pub(crate) enum Fatal {
 }
 
 /// One input the verifier serves.
-pub(crate) enum Event<V: Variant, D: Digest> {
+pub(crate) enum Event<S: Scheme, D: Digest> {
     /// A job message from the voter.
-    Message(Message<V, D>),
+    Message(Message<S, D>),
     /// A finished job.
-    Completed(VerifyResult<V, D>),
+    Completed(VerifyResult<S, D>),
 }
 
 /// Runs machine-issued verification jobs on the configured strategy pools.
@@ -61,38 +61,36 @@ pub(crate) enum Event<V: Variant, D: Digest> {
 /// its own (see [`ingress::Actor::start`]).
 ///
 /// [`ingress::Actor::start`]: crate::multimmit::actors::ingress::Actor::start
-pub(crate) struct Verifier<E, H, P, V, T, C>
+pub(crate) struct Verifier<E, H, S, T, C>
 where
     E: Clock + CryptoRng + Metrics + Spawner,
     H: Hasher,
-    P: PublicKey,
-    V: Variant,
+    S: Scheme,
     T: Strategy,
     C: Strategy,
 {
     context: E,
-    scheme: Arc<Scheme<P, V>>,
-    verified_votes: Arc<Mutex<VerifiedVotes<V, H::Digest>>>,
+    scheme: Arc<Generic<S>>,
+    verified_votes: Arc<Mutex<VerifiedVotes<S, H::Digest>>>,
     pub(super) strategy: T,
     pub(super) critical_strategy: C,
     inflight_jobs: usize,
-    mailbox: mailbox::Receiver<Message<V, H::Digest>>,
-    jobs: VerifyResults<V, H::Digest>,
+    mailbox: mailbox::Receiver<Message<S, H::Digest>>,
+    jobs: VerifyResults<S, H::Digest>,
     metrics: Arc<ActorMetrics>,
     _hasher: PhantomData<H>,
 }
 
-impl<E, H, P, V, T, C> Verifier<E, H, P, V, T, C>
+impl<E, H, S, T, C> Verifier<E, H, S, T, C>
 where
     E: Clock + CryptoRng + Metrics + Spawner,
     H: Hasher,
-    P: PublicKey,
-    V: Variant,
+    S: Scheme,
     T: Strategy,
     C: Strategy,
 {
     /// Creates the verifier and its job mailbox.
-    pub(crate) fn new(context: E, config: Config<P, V, T, C>) -> (Self, Mailbox<V, H::Digest>) {
+    pub(crate) fn new(context: E, config: Config<S, T, C>) -> (Self, Mailbox<S, H::Digest>) {
         let metrics = Arc::new(ActorMetrics::new(&context));
         let (sender, receiver) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
@@ -117,7 +115,7 @@ where
     /// Waits for the next input: a queued job message first, then a finished job.
     ///
     /// Returns `None` once the job mailbox closes.
-    pub(crate) async fn next(&mut self) -> Option<Event<V, H::Digest>> {
+    pub(crate) async fn next(&mut self) -> Option<Event<S, H::Digest>> {
         select! {
             message = self.mailbox.recv() => message.map(Event::Message),
             completion = self.jobs.next_completed() => Some(Event::Completed(completion)),
@@ -127,8 +125,8 @@ where
     /// Serves one input: submits a job, or delivers a finished one to `voter`.
     pub(crate) fn handle(
         &mut self,
-        event: Event<V, H::Digest>,
-        voter: &Completions<V, H::Digest>,
+        event: Event<S, H::Digest>,
+        voter: &Completions<S, H::Digest>,
     ) -> Result<(), Fatal> {
         match event {
             Event::Message(Message::Verify {
@@ -146,7 +144,7 @@ where
         &mut self,
         span: Span,
         round: Round,
-        job: VerifyJob<V, H::Digest>,
+        job: VerifyJob<S, H::Digest>,
         issued_at: SystemTime,
     ) -> Result<(), Fatal> {
         if self.jobs.len() >= self.inflight_jobs {
@@ -171,14 +169,14 @@ where
     ///
     /// Submission waits for the first poll. The completion carries the caller's span so the voter
     /// can preserve trace causality.
-    pub(super) fn verification<S: Strategy>(
+    pub(super) fn verification<St: Strategy>(
         &self,
-        strategy: S,
+        strategy: St,
         span: Span,
         round: Round,
-        job: VerifyJob<V, H::Digest>,
+        job: VerifyJob<S, H::Digest>,
         issued_at: SystemTime,
-    ) -> impl Future<Output = VerifyResult<V, H::Digest>> + Send + 'static {
+    ) -> impl Future<Output = VerifyResult<S, H::Digest>> + Send + 'static {
         let kind = VerificationKind::of(&job);
         let worker = worker_span(&span, kind, round, &job);
         let timing = Timing {
@@ -190,7 +188,7 @@ where
         let verified_votes = Arc::clone(&self.verified_votes);
         let metrics = Arc::clone(&self.metrics);
         let context = self.context.child("verify");
-        let operation = move |mut context: E, strategy: S| {
+        let operation = move |mut context: E, strategy: St| {
             let timer = metrics.kinds[kind].latency.timer(&context);
             let mut job = job;
             {
@@ -216,11 +214,11 @@ where
 ///
 /// Bulk jobs trace at debug level. Every other kind, including mixed jobs, may carry a vote or
 /// certificate the round needs, so it traces at info level.
-fn worker_span<V: Variant, D: Digest>(
+fn worker_span<S: Scheme, D: Digest>(
     parent: &Span,
     kind: VerificationKind,
     round: Round,
-    job: &VerifyJob<V, D>,
+    job: &VerifyJob<S, D>,
 ) -> Span {
     let pool = if job.view_critical() {
         "critical"
@@ -253,7 +251,7 @@ fn worker_span<V: Variant, D: Digest>(
 }
 
 /// Observes the transcript size and cached votes of every certificate in `job`.
-fn observe_transcripts<V: Variant, D: Digest>(metrics: &ActorMetrics, job: &VerifyJob<V, D>) {
+fn observe_transcripts<S: Scheme, D: Digest>(metrics: &ActorMetrics, job: &VerifyJob<S, D>) {
     for item in job.items() {
         let signers = match item.artifact() {
             Artifact::Vqc(certificate) => certificate.tally().signers().count(),
@@ -270,9 +268,9 @@ fn observe_transcripts<V: Variant, D: Digest>(metrics: &ActorMetrics, job: &Veri
 }
 
 /// Forwards one completion to the voter.
-pub(super) fn deliver<V: Variant, D: Digest>(
-    voter: &Completions<V, D>,
-    (span, outcome): VerifyResult<V, D>,
+pub(super) fn deliver<S: Scheme, D: Digest>(
+    voter: &Completions<S, D>,
+    (span, outcome): VerifyResult<S, D>,
 ) -> Result<(), Fatal> {
     let completion = match outcome {
         Ok(completion) => completion,

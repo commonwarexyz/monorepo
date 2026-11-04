@@ -1,8 +1,11 @@
 //! Relay and reporter doubles that record every call for later assertions.
 
-use crate::{Relay, Reporter, multimmit::types::Activity};
+use crate::{
+    Relay, Reporter,
+    multimmit::{scheme::Scheme, types::Activity},
+};
 use commonware_actor::Feedback;
-use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_utils::sync::Mutex;
 use std::{collections::VecDeque, marker::PhantomData, sync::Arc};
 
@@ -72,17 +75,17 @@ impl<D: Digest, P: PublicKey> Relay for RecordingRelay<D, P> {
     }
 }
 
-struct ReporterState<V: Variant, D: Digest> {
+struct ReporterState<S: Scheme, D: Digest> {
     feedback: Feedback,
-    activities: Vec<Activity<V, D>>,
+    activities: Vec<Activity<S, D>>,
 }
 
 /// Configurable reporter that records every submitted activity.
-pub struct RecordingReporter<V: Variant, D: Digest> {
-    state: Arc<Mutex<ReporterState<V, D>>>,
+pub struct RecordingReporter<S: Scheme, D: Digest> {
+    state: Arc<Mutex<ReporterState<S, D>>>,
 }
 
-impl<V: Variant, D: Digest> Clone for RecordingReporter<V, D> {
+impl<S: Scheme, D: Digest> Clone for RecordingReporter<S, D> {
     fn clone(&self) -> Self {
         Self {
             state: Arc::clone(&self.state),
@@ -90,7 +93,7 @@ impl<V: Variant, D: Digest> Clone for RecordingReporter<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> RecordingReporter<V, D> {
+impl<S: Scheme, D: Digest> RecordingReporter<S, D> {
     /// Creates a reporter that returns `feedback` for every submitted activity.
     pub fn with_feedback(feedback: Feedback) -> Self {
         Self {
@@ -102,7 +105,7 @@ impl<V: Variant, D: Digest> RecordingReporter<V, D> {
     }
 
     /// Returns the activities observed so far, in call order.
-    pub fn activities(&self) -> Vec<Activity<V, D>> {
+    pub fn activities(&self) -> Vec<Activity<S, D>> {
         self.state.lock().activities.clone()
     }
 
@@ -111,7 +114,7 @@ impl<V: Variant, D: Digest> RecordingReporter<V, D> {
     /// # Panics
     ///
     /// Panics if fewer than `offset` activities were observed.
-    pub fn since(&self, offset: usize) -> Vec<Activity<V, D>> {
+    pub fn since(&self, offset: usize) -> Vec<Activity<S, D>> {
         self.state
             .lock()
             .activities
@@ -131,14 +134,14 @@ impl<V: Variant, D: Digest> RecordingReporter<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Default for RecordingReporter<V, D> {
+impl<S: Scheme, D: Digest> Default for RecordingReporter<S, D> {
     fn default() -> Self {
         Self::with_feedback(Feedback::Ok)
     }
 }
 
-impl<V: Variant, D: Digest> Reporter for RecordingReporter<V, D> {
-    type Activity = Activity<V, D>;
+impl<S: Scheme, D: Digest> Reporter for RecordingReporter<S, D> {
+    type Activity = Activity<S, D>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         // Span tests locate the reporter call by this event.

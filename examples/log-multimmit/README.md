@@ -37,11 +37,12 @@ All consensus data is persisted to disk in the `--storage-dir` directory. If you
 
 ## Key Material
 
-Multimmit uses one ordinary BLS12-381 roster plus two independent threshold sharings, one for data
-availability and one for nullification. This example derives all of it deterministically from the
-participant list so every node computes the same committee with no setup. It takes that material
-from `commonware_consensus::multimmit::mocks`, so it depends on the consensus `mocks` feature. A
-real deployment runs a distributed key generation instead and never shares private material.
+This example runs Multimmit's default BLS12-381 suite (`multimmit::scheme::bls12381`, with the
+`MinSig` variant over Ed25519 identities): one ordinary BLS12-381 roster plus two independent
+threshold sharings, one for data availability and one for nullification. This example derives all
+of it deterministically from the participant list with the suite's trusted dealer
+(`bls12381::Scheme::deal`), so every node computes the same committee with no setup. A real
+deployment runs a distributed key generation instead and never shares private material.
 
 ## Payloads
 

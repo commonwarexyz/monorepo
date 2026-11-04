@@ -1,7 +1,7 @@
 //! Raw vote and view-message protocol objects.
 
 use super::{
-    Attestation, DigestedLeader, Error, LeaderBlock, Position, ThresholdShare,
+    Attestation, DigestedLeader, Error, LeaderBlock, NullifyAttestation, Position,
     bounds::{
         MAX_U64_VARINT_SIZE, checked_product, checked_sum, encoded_len, encoded_vec,
         max_index_width,
@@ -9,14 +9,17 @@ use super::{
 };
 use crate::{
     Epochable, Viewable,
-    multimmit::types::{ChainLimits, CodecConfig},
+    multimmit::{
+        scheme::{NullifySignature, OrdinarySignature, Scheme},
+        types::{ChainLimits, CodecConfig},
+    },
     types::{Attributable, Epoch, Participant, Round, View},
 };
 use bytes::BufMut;
 use commonware_codec::{
     Buf, EncodeSize, Error as CodecError, FixedSize as _, RangeCfg, Read, ReadExt, Write,
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use core::fmt;
 use std::sync::Arc;
 
@@ -187,7 +190,7 @@ impl<D: Digest> Ballot<D> {
     }
 
     /// Returns whether every position and extension fits `leader`'s proposals.
-    fn fits<V: Variant>(&self, leader: &LeaderBlock<V, D>) -> bool {
+    fn fits<S: Scheme>(&self, leader: &LeaderBlock<S, D>) -> bool {
         paths_valid_for(leader, &self.positions, &self.extensions)
     }
 
@@ -270,8 +273,8 @@ impl<D: Digest> VoteBody<D> {
     }
 
     /// Creates a vote body for `leader` and checks every proposal-relative position.
-    pub fn for_leader<V: Variant>(
-        leader: DigestedLeader<'_, V, D>,
+    pub fn for_leader<S: Scheme>(
+        leader: DigestedLeader<'_, S, D>,
         positions: Vec<Position>,
         extensions: Vec<Extension<D>>,
         limits: CodecConfig,
@@ -292,7 +295,7 @@ impl<D: Digest> VoteBody<D> {
 
     /// Returns whether this body votes for `leader` in its round and all positions fit its
     /// proposals.
-    pub fn valid_for<V: Variant>(&self, leader: DigestedLeader<'_, V, D>) -> bool {
+    pub fn valid_for<S: Scheme>(&self, leader: DigestedLeader<'_, S, D>) -> bool {
         self.round == leader.block().round()
             && self.ballot.leader == leader.digest()
             && self.ballot.fits(leader.block())
@@ -344,8 +347,8 @@ impl<D: Digest> VoteBody<D> {
     }
 }
 
-pub(super) fn paths_valid_for<V: Variant, D: Digest>(
-    leader: &LeaderBlock<V, D>,
+pub(super) fn paths_valid_for<S: Scheme, D: Digest>(
+    leader: &LeaderBlock<S, D>,
     positions: &[Position],
     extensions: &[Extension<D>],
 ) -> bool {
@@ -410,14 +413,14 @@ impl<D: Digest> EncodeSize for VoteBody<D> {
 
 /// One attributed vote over a complete vote body.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Vote<V: Variant, D: Digest> {
+pub struct Vote<S: Scheme, D: Digest> {
     body: VoteBody<D>,
-    attestation: Attestation<V>,
+    attestation: Attestation<S>,
 }
 
-impl<V: Variant, D: Digest> Vote<V, D> {
+impl<S: Scheme, D: Digest> Vote<S, D> {
     /// Creates an unverified attributed vote.
-    pub const fn new(body: VoteBody<D>, attestation: Attestation<V>) -> Self {
+    pub const fn new(body: VoteBody<D>, attestation: Attestation<S>) -> Self {
         Self { body, attestation }
     }
 
@@ -427,7 +430,7 @@ impl<V: Variant, D: Digest> Vote<V, D> {
     }
 
     /// Returns the vote attestation.
-    pub const fn attestation(&self) -> &Attestation<V> {
+    pub const fn attestation(&self) -> &Attestation<S> {
         &self.attestation
     }
 
@@ -436,48 +439,48 @@ impl<V: Variant, D: Digest> Vote<V, D> {
         checked_sum(&[
             VoteBody::<D>::max_encode_size(codec)?,
             max_index_width(codec.participants())?,
-            V::Signature::SIZE,
+            OrdinarySignature::<S>::SIZE,
         ])
     }
 }
 
-impl<V: Variant, D: Digest> Epochable for Vote<V, D> {
+impl<S: Scheme, D: Digest> Epochable for Vote<S, D> {
     fn epoch(&self) -> Epoch {
         self.body.epoch()
     }
 }
 
-impl<V: Variant, D: Digest> Attributable for Vote<V, D> {
+impl<S: Scheme, D: Digest> Attributable for Vote<S, D> {
     fn signer(&self) -> Participant {
-        self.attestation.signer()
+        self.attestation.signer
     }
 }
 
-impl<V: Variant, D: Digest> Viewable for Vote<V, D> {
+impl<S: Scheme, D: Digest> Viewable for Vote<S, D> {
     fn view(&self) -> View {
         self.body.view()
     }
 }
 
-impl<V: Variant, D: Digest> Write for Vote<V, D> {
+impl<S: Scheme, D: Digest> Write for Vote<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.body.write(buf);
         self.attestation.write(buf);
     }
 }
 
-impl<V: Variant, D: Digest> Read for Vote<V, D> {
+impl<S: Scheme, D: Digest> Read for Vote<S, D> {
     type Cfg = CodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, limits: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self::new(
             VoteBody::read_cfg(buf, limits)?,
-            Attestation::read(buf)?,
+            ReadExt::read(buf)?,
         ))
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Vote<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Vote<S, D> {
     fn encode_size(&self) -> usize {
         self.body.encode_size() + self.attestation.encode_size()
     }
@@ -485,16 +488,16 @@ impl<V: Variant, D: Digest> EncodeSize for Vote<V, D> {
 
 /// A signed abstention used to complete a V-QC's accounted-message quorum.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct NoVote<V: Variant> {
+pub struct NoVote<S: Scheme> {
     round: Round,
-    attestation: Attestation<V>,
+    attestation: Attestation<S>,
 }
 
-impl<V: Variant> NoVote<V> {
+impl<S: Scheme> NoVote<S> {
     /// Creates an attributed abstention for a live round.
     ///
     /// This constructor does not verify the signature.
-    pub fn new(round: Round, attestation: Attestation<V>) -> Result<Self, Error> {
+    pub fn new(round: Round, attestation: Attestation<S>) -> Result<Self, Error> {
         if round.view().is_zero() {
             return Err(Error::GenesisView);
         }
@@ -508,7 +511,7 @@ impl<V: Variant> NoVote<V> {
     }
 
     /// Returns the abstention attestation.
-    pub const fn attestation(&self) -> &Attestation<V> {
+    pub const fn attestation(&self) -> &Attestation<S> {
         &self.attestation
     }
 
@@ -517,46 +520,46 @@ impl<V: Variant> NoVote<V> {
         checked_sum(&[
             checked_product(2, MAX_U64_VARINT_SIZE)?,
             max_index_width(codec.participants())?,
-            V::Signature::SIZE,
+            OrdinarySignature::<S>::SIZE,
         ])
     }
 }
 
-impl<V: Variant> Epochable for NoVote<V> {
+impl<S: Scheme> Epochable for NoVote<S> {
     fn epoch(&self) -> Epoch {
         self.round.epoch()
     }
 }
 
-impl<V: Variant> Attributable for NoVote<V> {
+impl<S: Scheme> Attributable for NoVote<S> {
     fn signer(&self) -> Participant {
-        self.attestation.signer()
+        self.attestation.signer
     }
 }
 
-impl<V: Variant> Viewable for NoVote<V> {
+impl<S: Scheme> Viewable for NoVote<S> {
     fn view(&self) -> View {
         self.round.view()
     }
 }
 
-impl<V: Variant> Write for NoVote<V> {
+impl<S: Scheme> Write for NoVote<S> {
     fn write(&self, buf: &mut impl BufMut) {
         self.round.write(buf);
         self.attestation.write(buf);
     }
 }
 
-impl<V: Variant> Read for NoVote<V> {
+impl<S: Scheme> Read for NoVote<S> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::new(Round::read(buf)?, Attestation::read(buf)?)
+        Self::new(Round::read(buf)?, ReadExt::read(buf)?)
             .map_err(|error| CodecError::Wrapped("NoVote", error.into()))
     }
 }
 
-impl<V: Variant> EncodeSize for NoVote<V> {
+impl<S: Scheme> EncodeSize for NoVote<S> {
     fn encode_size(&self) -> usize {
         self.round.encode_size() + self.attestation.encode_size()
     }
@@ -564,21 +567,21 @@ impl<V: Variant> EncodeSize for NoVote<V> {
 
 /// A signed request to nullify a live round.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Nullify<V: Variant> {
+pub struct Nullify<S: Scheme> {
     round: Round,
-    share: ThresholdShare<V>,
+    attestation: NullifyAttestation<S>,
 }
 
-impl<V: Variant> Nullify<V> {
+impl<S: Scheme> Nullify<S> {
     /// Creates an attributed nullification request for a live round.
     ///
     /// This constructor does not verify the signature.
-    pub fn new(round: Round, share: ThresholdShare<V>) -> Result<Self, Error> {
+    pub fn new(round: Round, attestation: NullifyAttestation<S>) -> Result<Self, Error> {
         if round.view().is_zero() {
             return Err(Error::GenesisView);
         }
 
-        Ok(Self { round, share })
+        Ok(Self { round, attestation })
     }
 
     /// Returns the nullification request's round.
@@ -586,9 +589,9 @@ impl<V: Variant> Nullify<V> {
         self.round
     }
 
-    /// Returns the nullification threshold share.
-    pub const fn share(&self) -> &ThresholdShare<V> {
-        &self.share
+    /// Returns the nullification attestation.
+    pub const fn attestation(&self) -> &NullifyAttestation<S> {
+        &self.attestation
     }
 
     /// Returns the largest encoding of a nullify share under `codec`.
@@ -596,61 +599,61 @@ impl<V: Variant> Nullify<V> {
         checked_sum(&[
             checked_product(2, MAX_U64_VARINT_SIZE)?,
             max_index_width(codec.participants())?,
-            V::Signature::SIZE,
+            NullifySignature::<S>::SIZE,
         ])
     }
 }
 
-impl<V: Variant> Epochable for Nullify<V> {
+impl<S: Scheme> Epochable for Nullify<S> {
     fn epoch(&self) -> Epoch {
         self.round.epoch()
     }
 }
 
-impl<V: Variant> Attributable for Nullify<V> {
+impl<S: Scheme> Attributable for Nullify<S> {
     fn signer(&self) -> Participant {
-        self.share.signer()
+        self.attestation.signer
     }
 }
 
-impl<V: Variant> Viewable for Nullify<V> {
+impl<S: Scheme> Viewable for Nullify<S> {
     fn view(&self) -> View {
         self.round.view()
     }
 }
 
-impl<V: Variant> Write for Nullify<V> {
+impl<S: Scheme> Write for Nullify<S> {
     fn write(&self, buf: &mut impl BufMut) {
         self.round.write(buf);
-        self.share.write(buf);
+        self.attestation.write(buf);
     }
 }
 
-impl<V: Variant> Read for Nullify<V> {
+impl<S: Scheme> Read for Nullify<S> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::new(Round::read(buf)?, ThresholdShare::read(buf)?)
+        Self::new(Round::read(buf)?, ReadExt::read(buf)?)
             .map_err(|error| CodecError::Wrapped("Nullify", error.into()))
     }
 }
 
-impl<V: Variant> EncodeSize for Nullify<V> {
+impl<S: Scheme> EncodeSize for Nullify<S> {
     fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.share.encode_size()
+        self.round.encode_size() + self.attestation.encode_size()
     }
 }
 
 /// A fully attributed but cryptographically unverified vote or abstention.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum ViewMessage<V: Variant, D: Digest> {
+pub enum ViewMessage<S: Scheme, D: Digest> {
     /// A complete vote.
-    Vote(Vote<V, D>),
+    Vote(Vote<S, D>),
     /// A complete signed abstention.
-    NoVote(NoVote<V>),
+    NoVote(NoVote<S>),
 }
 
-impl<V: Variant, D: Digest> Epochable for ViewMessage<V, D> {
+impl<S: Scheme, D: Digest> Epochable for ViewMessage<S, D> {
     fn epoch(&self) -> Epoch {
         match self {
             Self::Vote(vote) => vote.epoch(),
@@ -659,7 +662,7 @@ impl<V: Variant, D: Digest> Epochable for ViewMessage<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Attributable for ViewMessage<V, D> {
+impl<S: Scheme, D: Digest> Attributable for ViewMessage<S, D> {
     fn signer(&self) -> Participant {
         match self {
             Self::Vote(vote) => vote.signer(),
@@ -668,7 +671,7 @@ impl<V: Variant, D: Digest> Attributable for ViewMessage<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Viewable for ViewMessage<V, D> {
+impl<S: Scheme, D: Digest> Viewable for ViewMessage<S, D> {
     fn view(&self) -> View {
         match self {
             Self::Vote(vote) => vote.view(),
@@ -677,7 +680,7 @@ impl<V: Variant, D: Digest> Viewable for ViewMessage<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Write for ViewMessage<V, D> {
+impl<S: Scheme, D: Digest> Write for ViewMessage<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::Vote(vote) => {
@@ -692,7 +695,7 @@ impl<V: Variant, D: Digest> Write for ViewMessage<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for ViewMessage<V, D> {
+impl<S: Scheme, D: Digest> Read for ViewMessage<S, D> {
     type Cfg = CodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, limits: &Self::Cfg) -> Result<Self, CodecError> {
@@ -704,7 +707,7 @@ impl<V: Variant, D: Digest> Read for ViewMessage<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for ViewMessage<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for ViewMessage<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Vote(vote) => vote.encode_size(),
@@ -717,7 +720,10 @@ impl<V: Variant, D: Digest> EncodeSize for ViewMessage<V, D> {
 mod tests {
     use super::*;
     use crate::{
-        multimmit::types::{Anchor, BlockRef, CertificateId, ChainId, ChainProposal, PathLimits},
+        multimmit::{
+            mocks::Bls,
+            types::{Anchor, BlockRef, CertificateId, ChainId, ChainProposal, PathLimits},
+        },
         types::Height,
     };
     use commonware_codec::{Decode, Encode};
@@ -731,7 +737,7 @@ mod tests {
         CodecConfig::new(2, 2, PathLimits::new(2, 1)).unwrap()
     }
 
-    fn leader() -> LeaderBlock<MinSig, sha256::Digest> {
+    fn leader() -> LeaderBlock<Bls<MinSig>, sha256::Digest> {
         let limits = codec_config();
         let proposals = [2usize, 1]
             .into_iter()
@@ -923,7 +929,7 @@ mod tests {
         let proposals = (0..limits.chains())
             .map(|index| {
                 let chain = ChainId::new(index as u32);
-                ChainProposal::<MinSig, _>::new(
+                ChainProposal::<Bls<MinSig>, _>::new(
                     chain,
                     Anchor::Tip(BlockRef::new(
                         chain,

@@ -6,7 +6,7 @@ use crate::{
     multimmit::{
         config::{Profile, Protocol, Role},
         machine::job::Issued,
-        scheme::bls12381_threshold::{Error as SchemeError, Scheme},
+        scheme::{Error as SchemeError, Generic, Scheme},
         types::{
             Artifact, ArtifactBatch, ArtifactId, ArtifactKind, LeaderBlock, SignedLeaderBlock,
             SignedTransactionBlock, TransactionBlockHeader, ViewProof, VoteBody, Vqc,
@@ -15,19 +15,19 @@ use crate::{
     types::{Attributable, Epoch, Participant, Round, View},
 };
 use commonware_codec::EncodeSize;
-use commonware_cryptography::{Digest, Hasher, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::{collections::BTreeMap, sync::Arc};
 
 /// A typed subject the local scheme may sign.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SignRequest<V: Variant, D: Digest> {
+pub(crate) enum SignRequest<S: Scheme, D: Digest> {
     /// Authorize one producer-chain header.
     TransactionBlock(TransactionBlockHeader<D>),
     /// Authorize one data-availability share for the authenticated block whose availability it
     /// promises, after local eligibility is durable.
-    DaVote(Arc<SignedTransactionBlock<V, D>>),
+    DaVote(Arc<SignedTransactionBlock<S, D>>),
     /// Authorize one scheduled leader proposal and retain its parent certificate.
-    LeaderBlock(ProposalRequest<V, D>),
+    LeaderBlock(ProposalRequest<S, D>),
     /// Authorize one ordinary signature over a complete vote body.
     Vote(VoteBody<D>),
     /// Authorize an abstention for one round.
@@ -42,7 +42,7 @@ pub(crate) enum SignRequest<V: Variant, D: Digest> {
     },
 }
 
-impl<V: Variant, D: Digest> SignRequest<V, D> {
+impl<S: Scheme, D: Digest> SignRequest<S, D> {
     /// Returns the stable operation label recorded on signing spans.
     pub(crate) const fn label(&self) -> &'static str {
         match self {
@@ -56,10 +56,7 @@ impl<V: Variant, D: Digest> SignRequest<V, D> {
     }
 
     /// Signs this subject with the local key material in `scheme`.
-    pub(crate) fn sign<P: PublicKey>(
-        &self,
-        scheme: &Scheme<P, V>,
-    ) -> Result<Artifact<V, D>, SchemeError> {
+    pub(crate) fn sign(&self, scheme: &Generic<S>) -> Result<Artifact<S, D>, SchemeError> {
         let artifact = match self {
             Self::TransactionBlock(header) => {
                 Artifact::TransactionBlock(scheme.sign_transaction_block(header.clone())?)
@@ -75,7 +72,7 @@ impl<V: Variant, D: Digest> SignRequest<V, D> {
         Ok(artifact)
     }
 
-    fn visit_retained(&self, visit: &mut impl FnMut(Retained<'_, V, D>)) {
+    fn visit_retained(&self, visit: &mut impl FnMut(Retained<'_, S, D>)) {
         match self {
             Self::DaVote(block) => visit(Retained::DaVoteBlock(block)),
             Self::LeaderBlock(request) => {
@@ -109,7 +106,7 @@ impl<V: Variant, D: Digest> SignRequest<V, D> {
         }
     }
 
-    pub(crate) fn matches(&self, signer: Participant, artifact: &Artifact<V, D>) -> bool {
+    pub(crate) fn matches(&self, signer: Participant, artifact: &Artifact<S, D>) -> bool {
         if artifact.signer() != Some(signer) {
             return false;
         }
@@ -157,22 +154,22 @@ impl<Q> ProposalParent<Q> {
 ///
 /// A signing request holds the unsigned block and its publication holds the signed block.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Proposal<V: Variant, D: Digest, B> {
+pub(crate) struct Proposal<S: Scheme, D: Digest, B> {
     pub(super) block: B,
-    pub(super) parent: ProposalParent<Arc<Vqc<V, D>>>,
+    pub(super) parent: ProposalParent<Arc<Vqc<S, D>>>,
     pub(super) attach_parent: bool,
 }
 
 /// A scheduled leader block to sign.
-pub(crate) type ProposalRequest<V, D> = Proposal<V, D, LeaderBlock<V, D>>;
+pub(crate) type ProposalRequest<S, D> = Proposal<S, D, LeaderBlock<S, D>>;
 
 /// A signed leader block to publish.
-pub(crate) type ProposalPublication<V, D> = Proposal<V, D, Arc<SignedLeaderBlock<V, D>>>;
+pub(crate) type ProposalPublication<S, D> = Proposal<S, D, Arc<SignedLeaderBlock<S, D>>>;
 
-impl<V: Variant, D: Digest, B> Proposal<V, D, B> {
+impl<S: Scheme, D: Digest, B> Proposal<S, D, B> {
     pub(crate) const fn new(
         block: B,
-        parent: ProposalParent<Arc<Vqc<V, D>>>,
+        parent: ProposalParent<Arc<Vqc<S, D>>>,
         attach_parent: bool,
     ) -> Self {
         Self {
@@ -188,7 +185,7 @@ impl<V: Variant, D: Digest, B> Proposal<V, D, B> {
     }
 
     /// Returns the non-genesis parent referenced by the block.
-    pub(crate) const fn parent(&self) -> &ProposalParent<Arc<Vqc<V, D>>> {
+    pub(crate) const fn parent(&self) -> &ProposalParent<Arc<Vqc<S, D>>> {
         &self.parent
     }
 
@@ -198,22 +195,22 @@ impl<V: Variant, D: Digest, B> Proposal<V, D, B> {
     }
 }
 
-impl<V: Variant, D: Digest> ProposalRequest<V, D> {
+impl<S: Scheme, D: Digest> ProposalRequest<S, D> {
     /// Returns the publication of this request once signed as `block`.
-    fn signed(&self, block: Arc<SignedLeaderBlock<V, D>>) -> ProposalPublication<V, D> {
+    fn signed(&self, block: Arc<SignedLeaderBlock<S, D>>) -> ProposalPublication<S, D> {
         Proposal::new(block, self.parent.clone(), self.attach_parent)
     }
 }
 
 /// One point-to-point protocol publication.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SendRequest<V: Variant, D: Digest> {
+pub(crate) struct SendRequest<S: Scheme, D: Digest> {
     pub(super) recipient: Participant,
-    pub(super) artifact: Arc<Artifact<V, D>>,
+    pub(super) artifact: Arc<Artifact<S, D>>,
 }
 
-impl<V: Variant, D: Digest> SendRequest<V, D> {
-    pub(crate) const fn new(recipient: Participant, artifact: Arc<Artifact<V, D>>) -> Self {
+impl<S: Scheme, D: Digest> SendRequest<S, D> {
+    pub(crate) const fn new(recipient: Participant, artifact: Arc<Artifact<S, D>>) -> Self {
         Self {
             recipient,
             artifact,
@@ -226,41 +223,41 @@ impl<V: Variant, D: Digest> SendRequest<V, D> {
     }
 
     /// Returns the canonical artifact to send.
-    pub(crate) const fn artifact(&self) -> &Arc<Artifact<V, D>> {
+    pub(crate) const fn artifact(&self) -> &Arc<Artifact<S, D>> {
         &self.artifact
     }
 }
 /// An artifact, or artifact part, retained by durable state.
-pub(crate) enum Retained<'a, V: Variant, D: Digest> {
+pub(crate) enum Retained<'a, S: Scheme, D: Digest> {
     /// A complete artifact.
-    Artifact(&'a Arc<Artifact<V, D>>),
+    Artifact(&'a Arc<Artifact<S, D>>),
     /// The signed block of a proposal publication.
-    LeaderBlock(&'a Arc<SignedLeaderBlock<V, D>>),
+    LeaderBlock(&'a Arc<SignedLeaderBlock<S, D>>),
     /// The parent of a proposal publication or leader-block signing request.
-    Vqc(&'a Arc<Vqc<V, D>>),
+    Vqc(&'a Arc<Vqc<S, D>>),
     /// The block a data-availability signing request votes for.
-    DaVoteBlock(&'a Arc<SignedTransactionBlock<V, D>>),
+    DaVoteBlock(&'a Arc<SignedTransactionBlock<S, D>>),
 }
 
-impl<V: Variant, D: Digest> Retained<'_, V, D> {
+impl<S: Scheme, D: Digest> Retained<'_, S, D> {
     /// Returns the identifier of the artifact this item is or encodes as.
     pub(crate) fn id<H: Hasher<Digest = D>>(&self) -> ArtifactId<D> {
         match self {
             Self::Artifact(artifact) => artifact.id::<H>(),
             Self::LeaderBlock(block) => {
-                Artifact::<V, D>::id_of::<H, _>(ArtifactKind::LeaderBlock, block.as_ref())
+                Artifact::<S, D>::id_of::<H, _>(ArtifactKind::LeaderBlock, block.as_ref())
             }
             Self::Vqc(certificate) => {
-                Artifact::<V, D>::id_of::<H, _>(ArtifactKind::Vqc, certificate.as_ref())
+                Artifact::<S, D>::id_of::<H, _>(ArtifactKind::Vqc, certificate.as_ref())
             }
             Self::DaVoteBlock(block) => {
-                Artifact::<V, D>::id_of::<H, _>(ArtifactKind::TransactionBlock, block.as_ref())
+                Artifact::<S, D>::id_of::<H, _>(ArtifactKind::TransactionBlock, block.as_ref())
             }
         }
     }
 
     /// Returns the item as an artifact, cloning an artifact part into its own artifact.
-    pub(crate) fn to_artifact(&self) -> Arc<Artifact<V, D>> {
+    pub(crate) fn to_artifact(&self) -> Arc<Artifact<S, D>> {
         match self {
             Self::Artifact(artifact) => Arc::clone(artifact),
             Self::LeaderBlock(block) => Arc::new(Artifact::LeaderBlock(block.as_ref().clone())),
@@ -272,7 +269,7 @@ impl<V: Variant, D: Digest> Retained<'_, V, D> {
     }
 
     /// Returns the item as a view proof, if it is one.
-    pub(crate) fn view_proof(&self) -> Option<ViewProof<V, D>> {
+    pub(crate) fn view_proof(&self) -> Option<ViewProof<S, D>> {
         match self {
             Self::Artifact(artifact) => match artifact.as_ref() {
                 Artifact::Nullification(proof) => {
@@ -292,32 +289,32 @@ impl<V: Variant, D: Digest> Retained<'_, V, D> {
 /// A signing choice is one request, a timeout pair (an abstention then a nullify share for one
 /// round), or data-availability votes over runs of consecutive heights on several chains.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SignEffect<V: Variant, D: Digest> {
-    pub(super) requests: Arc<[SignRequest<V, D>]>,
+pub(crate) struct SignEffect<S: Scheme, D: Digest> {
+    pub(super) requests: Arc<[SignRequest<S, D>]>,
 }
 
-impl<V: Variant, D: Digest> SignEffect<V, D> {
-    pub(crate) const fn new(requests: Arc<[SignRequest<V, D>]>) -> Self {
+impl<S: Scheme, D: Digest> SignEffect<S, D> {
+    pub(crate) const fn new(requests: Arc<[SignRequest<S, D>]>) -> Self {
         Self { requests }
     }
 
     /// Returns a signing choice of one request.
-    pub(crate) fn one(request: SignRequest<V, D>) -> Self {
+    pub(crate) fn one(request: SignRequest<S, D>) -> Self {
         Self::new(Arc::from([request]))
     }
 
     /// Returns the requests in signing and publication order.
-    pub(crate) fn requests(&self) -> &[SignRequest<V, D>] {
+    pub(crate) fn requests(&self) -> &[SignRequest<S, D>] {
         &self.requests
     }
 
     /// Returns the shared request list, whose identity names this authorization.
-    pub(crate) const fn shared(&self) -> &Arc<[SignRequest<V, D>]> {
+    pub(crate) const fn shared(&self) -> &Arc<[SignRequest<S, D>]> {
         &self.requests
     }
 
     /// Visits every artifact part the requests retain.
-    pub(crate) fn visit_retained(&self, mut visit: impl FnMut(Retained<'_, V, D>)) {
+    pub(crate) fn visit_retained(&self, mut visit: impl FnMut(Retained<'_, S, D>)) {
         for request in self.requests.iter() {
             request.visit_retained(&mut visit);
         }
@@ -345,7 +342,7 @@ impl<V: Variant, D: Digest> SignEffect<V, D> {
                     request.header().chain().index() < protocol.codec_config().chains()
                 }
                 SignRequest::LeaderBlock(request) => {
-                    proposal_parent_valid::<H, V, D>(request.block(), request.parent(), profile)
+                    proposal_parent_valid::<H, S, D>(request.block(), request.parent(), profile)
                         && (!request.attach_parent() || request.parent().exact().is_some())
                 }
                 SignRequest::Vote(_) | SignRequest::NoVote { .. } | SignRequest::Nullify { .. } => {
@@ -378,25 +375,25 @@ impl<V: Variant, D: Digest> SignEffect<V, D> {
 
 /// A durable network publication.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Publication<V: Variant, D: Digest> {
+pub(crate) enum Publication<S: Scheme, D: Digest> {
     /// Atomically broadcast the artifacts created by one signing choice.
-    Broadcast(ArtifactBatch<V, D>),
+    Broadcast(ArtifactBatch<S, D>),
     /// Publish a signed proposal with its referenced non-genesis V-QC.
-    Propose(ProposalPublication<V, D>),
+    Propose(ProposalPublication<S, D>),
     /// Atomically send the artifacts created by one signing choice, each to its own recipient.
-    Send(Arc<[SendRequest<V, D>]>),
+    Send(Arc<[SendRequest<S, D>]>),
 }
 
-impl<V: Variant, D: Digest> Publication<V, D> {
+impl<S: Scheme, D: Digest> Publication<S, D> {
     /// Returns a broadcast of one artifact.
-    pub(crate) fn broadcast(artifact: Arc<Artifact<V, D>>) -> Self {
+    pub(crate) fn broadcast(artifact: Arc<Artifact<S, D>>) -> Self {
         Self::Broadcast(Arc::from([artifact]))
     }
 
     /// Returns the artifacts published as their own messages, in item order.
     ///
     /// A proposal publishes its block and parent in one proposal message and returns none.
-    pub(crate) fn artifacts(&self) -> impl Iterator<Item = &Arc<Artifact<V, D>>> {
+    pub(crate) fn artifacts(&self) -> impl Iterator<Item = &Arc<Artifact<S, D>>> {
         let broadcast = match self {
             Self::Broadcast(artifacts) => artifacts.as_ref(),
             Self::Propose(_) | Self::Send(_) => &[],
@@ -411,7 +408,7 @@ impl<V: Variant, D: Digest> Publication<V, D> {
     }
 
     /// Returns the artifact published as item `item`, if the publication has one.
-    pub(crate) fn artifact(&self, item: usize) -> Option<&Arc<Artifact<V, D>>> {
+    pub(crate) fn artifact(&self, item: usize) -> Option<&Arc<Artifact<S, D>>> {
         match self {
             Self::Broadcast(artifacts) => artifacts.get(item),
             Self::Send(requests) => requests.get(item).map(SendRequest::artifact),
@@ -420,7 +417,7 @@ impl<V: Variant, D: Digest> Publication<V, D> {
     }
 
     /// Visits every artifact, or artifact part, the publication retains.
-    pub(crate) fn visit_retained(&self, mut visit: impl FnMut(Retained<'_, V, D>)) {
+    pub(crate) fn visit_retained(&self, mut visit: impl FnMut(Retained<'_, S, D>)) {
         match self {
             Self::Propose(publication) => {
                 visit(Retained::LeaderBlock(publication.block()));
@@ -455,8 +452,8 @@ impl<V: Variant, D: Digest> Publication<V, D> {
 
     /// Returns the publication of `artifacts`, freshly signed for `requests` in order.
     pub(crate) fn signed(
-        requests: &[SignRequest<V, D>],
-        artifacts: &ArtifactBatch<V, D>,
+        requests: &[SignRequest<S, D>],
+        artifacts: &ArtifactBatch<S, D>,
         protocol: &Protocol<D>,
     ) -> Option<Self> {
         if let ([SignRequest::LeaderBlock(proposal)], [artifact]) = (requests, artifacts.as_ref())
@@ -530,7 +527,7 @@ impl<V: Variant, D: Digest> Publication<V, D> {
                     && block.epoch() == protocol.epoch()
                     && block.encode_size() <= profile.resources().max_artifact_bytes()
                     && (!publication.attach_parent() || publication.parent().exact().is_some())
-                    && proposal_parent_valid::<H, V, D>(
+                    && proposal_parent_valid::<H, S, D>(
                         block.block(),
                         publication.parent(),
                         profile,
@@ -547,8 +544,8 @@ impl<V: Variant, D: Digest> Publication<V, D> {
 }
 
 /// Returns whether `artifact` fits the epoch, the artifact size bound and the committee.
-fn artifact_in_bounds<V: Variant, D: Digest>(
-    artifact: &Artifact<V, D>,
+fn artifact_in_bounds<S: Scheme, D: Digest>(
+    artifact: &Artifact<S, D>,
     profile: &Profile<D>,
 ) -> bool {
     let protocol = profile.protocol();
@@ -560,8 +557,8 @@ fn artifact_in_bounds<V: Variant, D: Digest>(
 }
 
 /// Returns whether `request` sends this validator's DA vote to the vote's producer.
-fn send_authorized<V: Variant, D: Digest>(
-    request: &SendRequest<V, D>,
+fn send_authorized<S: Scheme, D: Digest>(
+    request: &SendRequest<S, D>,
     profile: &Profile<D>,
 ) -> bool {
     let protocol = profile.protocol();
@@ -575,26 +572,26 @@ fn send_authorized<V: Variant, D: Digest>(
 
 /// An external action whose authorization and stable ID survive recovery.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum DurableEffect<V: Variant, D: Digest> {
+pub(crate) enum DurableEffect<S: Scheme, D: Digest> {
     /// Sign subjects whose results are published together.
-    Sign(SignEffect<V, D>),
+    Sign(SignEffect<S, D>),
     /// Publish artifacts to peers.
-    Publish(Publication<V, D>),
+    Publish(Publication<S, D>),
 }
 
-impl<V: Variant, D: Digest> DurableEffect<V, D> {
+impl<S: Scheme, D: Digest> DurableEffect<S, D> {
     /// Returns an effect signing one request.
-    pub(crate) fn sign(request: SignRequest<V, D>) -> Self {
+    pub(crate) fn sign(request: SignRequest<S, D>) -> Self {
         Self::Sign(SignEffect::one(request))
     }
 
     /// Returns an effect broadcasting one artifact.
-    pub(crate) fn broadcast(artifact: Arc<Artifact<V, D>>) -> Self {
+    pub(crate) fn broadcast(artifact: Arc<Artifact<S, D>>) -> Self {
         Self::Publish(Publication::broadcast(artifact))
     }
 
     /// Returns the signing requests, if this effect signs.
-    pub(crate) fn sign_requests(&self) -> Option<&[SignRequest<V, D>]> {
+    pub(crate) fn sign_requests(&self) -> Option<&[SignRequest<S, D>]> {
         match self {
             Self::Sign(effect) => Some(effect.requests()),
             Self::Publish(_) => None,
@@ -602,7 +599,7 @@ impl<V: Variant, D: Digest> DurableEffect<V, D> {
     }
 
     /// Returns the publication, if this effect publishes.
-    pub(crate) const fn publication(&self) -> Option<&Publication<V, D>> {
+    pub(crate) const fn publication(&self) -> Option<&Publication<S, D>> {
         match self {
             Self::Sign(_) => None,
             Self::Publish(publication) => Some(publication),
@@ -615,7 +612,7 @@ impl<V: Variant, D: Digest> DurableEffect<V, D> {
     }
 
     /// Visits every artifact, or artifact part, this effect retains.
-    pub(crate) fn visit_retained(&self, visit: impl FnMut(Retained<'_, V, D>)) {
+    pub(crate) fn visit_retained(&self, visit: impl FnMut(Retained<'_, S, D>)) {
         match self {
             Self::Sign(effect) => effect.visit_retained(visit),
             Self::Publish(publication) => publication.visit_retained(visit),
@@ -646,14 +643,14 @@ impl<V: Variant, D: Digest> DurableEffect<V, D> {
 
 /// Returns whether `parent` is the exact certificate `block` names as its parent, from this
 /// epoch and an earlier view, within the artifact size bound.
-fn proposal_parent_valid<H, V, D>(
-    block: &LeaderBlock<V, D>,
-    parent: &ProposalParent<Arc<Vqc<V, D>>>,
+fn proposal_parent_valid<H, S, D>(
+    block: &LeaderBlock<S, D>,
+    parent: &ProposalParent<Arc<Vqc<S, D>>>,
     profile: &Profile<H::Digest>,
 ) -> bool
 where
     H: Hasher<Digest = D>,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     let protocol = profile.protocol();
@@ -670,13 +667,13 @@ where
 }
 /// One stable outbox action released only after its journal event is durable.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DurableJob<V: Variant, D: Digest> {
+pub(crate) struct DurableJob<S: Scheme, D: Digest> {
     issued: Issued<EffectId>,
-    request: DurableEffect<V, D>,
+    request: DurableEffect<S, D>,
 }
 
-impl<V: Variant, D: Digest> DurableJob<V, D> {
-    pub(crate) const fn new(issued: Issued<EffectId>, request: DurableEffect<V, D>) -> Self {
+impl<S: Scheme, D: Digest> DurableJob<S, D> {
+    pub(crate) const fn new(issued: Issued<EffectId>, request: DurableEffect<S, D>) -> Self {
         Self { issued, request }
     }
 
@@ -688,30 +685,30 @@ impl<V: Variant, D: Digest> DurableJob<V, D> {
 
     /// Returns the immutable action.
     #[cfg(any(test, feature = "mocks"))]
-    pub(crate) const fn request(&self) -> &DurableEffect<V, D> {
+    pub(crate) const fn request(&self) -> &DurableEffect<S, D> {
         &self.request
     }
 
     /// Consumes the job and returns its stable identity and action.
-    pub(crate) fn into_parts(self) -> (Issued<EffectId>, DurableEffect<V, D>) {
+    pub(crate) fn into_parts(self) -> (Issued<EffectId>, DurableEffect<S, D>) {
         (self.issued, self.request)
     }
 }
 
 /// Completion of one stable outbox action.
 #[derive(Clone, Debug)]
-pub(crate) struct EffectCompletion<V: Variant, D: Digest> {
+pub(crate) struct EffectCompletion<S: Scheme, D: Digest> {
     /// The completed action.
     pub(crate) issued: Issued<EffectId>,
     /// What the action produced.
-    pub(crate) result: EffectResult<V, D>,
+    pub(crate) result: EffectResult<S, D>,
 }
 
-impl<V: Variant, D: Digest> EffectCompletion<V, D> {
+impl<S: Scheme, D: Digest> EffectCompletion<S, D> {
     /// Returns a completion carrying the artifacts of one signing choice, in request order.
     pub(crate) const fn signed(
         issued: Issued<EffectId>,
-        artifacts: Vec<Arc<Artifact<V, D>>>,
+        artifacts: Vec<Arc<Artifact<S, D>>>,
     ) -> Self {
         Self {
             issued,
@@ -730,9 +727,9 @@ impl<V: Variant, D: Digest> EffectCompletion<V, D> {
 
 /// What one stable outbox action produced.
 #[derive(Clone, Debug)]
-pub(crate) enum EffectResult<V: Variant, D: Digest> {
+pub(crate) enum EffectResult<S: Scheme, D: Digest> {
     /// The artifacts of one signing choice, in request order.
-    Signed(Vec<Arc<Artifact<V, D>>>),
+    Signed(Vec<Arc<Artifact<S, D>>>),
     /// The attached transport accepted one publication attempt.
     ///
     /// This is volatile feedback and does not retire the durable publication. Only an authenticated

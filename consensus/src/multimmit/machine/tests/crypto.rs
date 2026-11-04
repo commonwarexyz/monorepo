@@ -22,8 +22,8 @@ use crate::{
             },
             view::{NullificationRecoveryCompletion, VqcAggregateCompletion},
         },
-        mocks::Committee,
-        scheme::bls12381_threshold::Scheme,
+        mocks::{Bls, Committee, Fixture as Suite},
+        scheme::Generic,
         types::{
             Activity, Anchor, Artifact, ChainId, ChainProposal, CodecConfig, DaVote,
             DigestedLeader, Extension, LeaderBlock, PathLimits, Position, TransactionBlockHeader,
@@ -35,8 +35,7 @@ use crate::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     Sha256,
-    bls12381::primitives::variant::{MinPk, MinSig, Variant},
-    ed25519,
+    bls12381::primitives::variant::{MinPk, MinSig},
     sha256::Digest,
 };
 use commonware_parallel::{Rayon, Sequential};
@@ -49,16 +48,16 @@ const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_MACHINE_CRYPTO_TEST";
 /// The committee seed, which also labels its epoch.
 const EPOCH: u64 = 9;
 
-struct Fixture<V: Variant> {
+struct Fixture<S: Suite> {
     protocol: Protocol<Digest>,
     codec: CodecConfig,
-    signers: Vec<Scheme<ed25519::PublicKey, V>>,
-    verifier: Scheme<ed25519::PublicKey, V>,
+    signers: Vec<Generic<S>>,
+    verifier: Generic<S>,
 }
 
-impl<V: Variant> Fixture<V> {
+impl<S: Suite> Fixture<S> {
     fn new() -> Self {
-        let committee = Committee::<V>::builder(EPOCH, PARTICIPANTS)
+        let committee = Committee::<S>::builder(EPOCH, PARTICIPANTS)
             .namespace(NAMESPACE)
             .limits(PathLimits::new(2, 2))
             .build();
@@ -71,7 +70,7 @@ impl<V: Variant> Fixture<V> {
     }
 
     fn profile(&self, role: Role) -> Profile<Digest> {
-        Profile::new::<MinPk>(
+        Profile::new::<Bls<MinPk>>(
             self.protocol.clone(),
             role,
             Tuning {
@@ -83,7 +82,7 @@ impl<V: Variant> Fixture<V> {
         .unwrap()
     }
 
-    fn leader(&self, view: u64) -> LeaderBlock<V, Digest> {
+    fn leader(&self, view: u64) -> LeaderBlock<S, Digest> {
         let proposals = self
             .protocol
             .genesis()
@@ -109,7 +108,7 @@ impl<V: Variant> Fixture<V> {
         .unwrap()
     }
 
-    fn vote_body(&self, leader: &LeaderBlock<V, Digest>) -> VoteBody<Digest> {
+    fn vote_body(&self, leader: &LeaderBlock<S, Digest>) -> VoteBody<Digest> {
         VoteBody::for_leader(
             DigestedLeader::new::<Sha256>(leader),
             vec![Position::new(0); PARTICIPANTS as usize],
@@ -119,7 +118,7 @@ impl<V: Variant> Fixture<V> {
         .unwrap()
     }
 
-    fn leader_with_two_block_path(&self, view: u64) -> LeaderBlock<V, Digest> {
+    fn leader_with_two_block_path(&self, view: u64) -> LeaderBlock<S, Digest> {
         let proposals = self
             .protocol
             .genesis()
@@ -152,7 +151,7 @@ impl<V: Variant> Fixture<V> {
         .unwrap()
     }
 
-    fn vote_body_at(&self, leader: &LeaderBlock<V, Digest>, position: u32) -> VoteBody<Digest> {
+    fn vote_body_at(&self, leader: &LeaderBlock<S, Digest>, position: u32) -> VoteBody<Digest> {
         let mut positions = vec![Position::new(0); PARTICIPANTS as usize];
         positions[0] = Position::new(position);
         VoteBody::for_leader(
@@ -177,7 +176,7 @@ impl<V: Variant> Fixture<V> {
         .unwrap()
     }
 
-    fn sign(&self, signer: Participant, request: &SignRequest<V, Digest>) -> Artifact<V, Digest> {
+    fn sign(&self, signer: Participant, request: &SignRequest<S, Digest>) -> Artifact<S, Digest> {
         let scheme = &self.signers[signer.get() as usize];
         match request {
             SignRequest::TransactionBlock(header) => {
@@ -201,9 +200,9 @@ impl<V: Variant> Fixture<V> {
 
     fn verify(
         &self,
-        machine: &mut Machine<Sha256, V>,
-        artifacts: Vec<Artifact<V, Digest>>,
-    ) -> Step<V, Digest> {
+        machine: &mut Machine<Sha256, S>,
+        artifacts: Vec<Artifact<S, Digest>>,
+    ) -> Step<S, Digest> {
         let observed = machine.step(cohort::<Sha256, _>(artifacts)).unwrap();
         let job = observed.verify_job();
         let count = job.items().len();
@@ -223,7 +222,7 @@ impl<V: Variant> Fixture<V> {
     }
 }
 
-fn assert_duplicate<V: Variant>(machine: &mut Machine<Sha256, V>, artifact: Artifact<V, Digest>) {
+fn assert_duplicate<S: Suite>(machine: &mut Machine<Sha256, S>, artifact: Artifact<S, Digest>) {
     let duplicate = machine.step(cohort::<Sha256, _>(vec![artifact])).unwrap();
     let StepStatus::Observed(results) = duplicate.status() else {
         panic!("a repeated local artifact must follow normal observation");
@@ -237,7 +236,7 @@ fn assert_duplicate<V: Variant>(machine: &mut Machine<Sha256, V>, artifact: Arti
     );
 }
 
-fn blocked<V: Variant>(step: &Step<V, Digest>) -> Vec<Participant> {
+fn blocked<S: Suite>(step: &Step<S, Digest>) -> Vec<Participant> {
     step.capabilities()
         .iter()
         .filter_map(|capability| match capability {
@@ -249,10 +248,10 @@ fn blocked<V: Variant>(step: &Step<V, Digest>) -> Vec<Participant> {
 }
 
 #[track_caller]
-fn assert_objective_fault<V: Variant>(
-    fixture: &Fixture<V>,
-    first: Artifact<V, Digest>,
-    second: Artifact<V, Digest>,
+fn assert_objective_fault<S: Suite>(
+    fixture: &Fixture<S>,
+    first: Artifact<S, Digest>,
+    second: Artifact<S, Digest>,
     signer: Participant,
 ) {
     for pair in [[first.clone(), second.clone()], [second, first]] {
@@ -266,10 +265,10 @@ fn assert_objective_fault<V: Variant>(
 }
 
 #[track_caller]
-fn assert_compatible<V: Variant>(
-    fixture: &Fixture<V>,
-    first: Artifact<V, Digest>,
-    second: Artifact<V, Digest>,
+fn assert_compatible<S: Suite>(
+    fixture: &Fixture<S>,
+    first: Artifact<S, Digest>,
+    second: Artifact<S, Digest>,
 ) {
     for pair in [[first.clone(), second.clone()], [second, first]] {
         let (mut machine, _) = start(fixture.profile(Role::Observer), Until::Persist);
@@ -279,10 +278,10 @@ fn assert_compatible<V: Variant>(
 }
 
 #[track_caller]
-fn assert_objective_fault_in_one_batch<V: Variant>(
-    fixture: &Fixture<V>,
-    first: Artifact<V, Digest>,
-    second: Artifact<V, Digest>,
+fn assert_objective_fault_in_one_batch<S: Suite>(
+    fixture: &Fixture<S>,
+    first: Artifact<S, Digest>,
+    second: Artifact<S, Digest>,
     signer: Participant,
 ) {
     let (mut machine, _) = start(fixture.profile(Role::Observer), Until::Persist);
@@ -296,7 +295,7 @@ fn parallel() -> Rayon {
     Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap()
 }
 
-fn execute_da_trace<V: Variant>(fixture: &Fixture<V>) {
+fn execute_da_trace<S: Suite>(fixture: &Fixture<S>) {
     let producer = Participant::new(0);
     let (mut machine, _) = start(fixture.profile(Role::Validator(producer)), Until::Persist);
     let ready = machine.step(Input::ProducerWake).unwrap();
@@ -337,7 +336,7 @@ fn execute_da_trace<V: Variant>(fixture: &Fixture<V>) {
     let artifact = fixture.sign(producer, request);
     assert!(matches!(
         &artifact,
-        Artifact::TransactionBlock(block) if fixture.verifier.verify_transaction_block(block)
+        Artifact::TransactionBlock(block) if fixture.verifier.verify_transaction_block(&mut test_rng(), block, &Sequential)
     ));
     let artifact_id = artifact.id::<Sha256>();
     let duplicate = artifact.clone();
@@ -404,14 +403,18 @@ fn execute_da_trace<V: Variant>(fixture: &Fixture<V>) {
     assert_eq!(shares.len(), fixture.codec.da_quorum());
     let sequential = fixture
         .verifier
-        .assemble_da_certificate(&shares, &Sequential)
+        .assemble_da_certificate(&mut test_rng(), &shares, &Sequential)
         .unwrap();
     let parallel = fixture
         .verifier
-        .assemble_da_certificate(&shares, &parallel())
+        .assemble_da_certificate(&mut test_rng(), &shares, &parallel())
         .unwrap();
     assert_eq!(sequential, parallel);
-    assert!(fixture.verifier.verify_da_certificate(&sequential));
+    assert!(
+        fixture
+            .verifier
+            .verify_da_certificate(&mut test_rng(), &sequential, &Sequential)
+    );
     let artifact = Artifact::DaCertificate(sequential.clone());
     let artifact_id = artifact.id::<Sha256>();
 
@@ -430,7 +433,7 @@ fn execute_da_trace<V: Variant>(fixture: &Fixture<V>) {
     assert_duplicate(&mut machine, artifact);
 }
 
-fn execute_sign_batch_and_nullification_trace<V: Variant>(fixture: &Fixture<V>) {
+fn execute_sign_batch_and_nullification_trace<S: Suite>(fixture: &Fixture<S>) {
     let signer = Participant::new(0);
     let (mut machine, started) = start(fixture.profile(Role::Validator(signer)), Until::Persist);
     let timer = started
@@ -509,14 +512,18 @@ fn execute_sign_batch_and_nullification_trace<V: Variant>(fixture: &Fixture<V>) 
         .expect("a verified nullification quorum must issue recovery");
     let sequential = fixture
         .verifier
-        .assemble_nullification(recovery.shares(), &Sequential)
+        .assemble_nullification(&mut test_rng(), recovery.shares(), &Sequential)
         .unwrap();
     let parallel = fixture
         .verifier
-        .assemble_nullification(recovery.shares(), &parallel())
+        .assemble_nullification(&mut test_rng(), recovery.shares(), &parallel())
         .unwrap();
     assert_eq!(sequential, parallel);
-    assert!(fixture.verifier.verify_nullification(&sequential));
+    assert!(
+        fixture
+            .verifier
+            .verify_nullification(&mut test_rng(), &sequential, &Sequential)
+    );
     let artifact = Artifact::Nullification(sequential.clone());
     let artifact_id = artifact.id::<Sha256>();
 
@@ -534,10 +541,10 @@ fn execute_sign_batch_and_nullification_trace<V: Variant>(fixture: &Fixture<V>) 
     assert_duplicate(&mut machine, artifact);
 }
 
-fn authenticate_leader<V: Variant>(
-    fixture: &Fixture<V>,
-    machine: &mut Machine<Sha256, V>,
-    leader: &LeaderBlock<V, Digest>,
+fn authenticate_leader<S: Suite>(
+    fixture: &Fixture<S>,
+    machine: &mut Machine<Sha256, S>,
+    leader: &LeaderBlock<S, Digest>,
 ) {
     let signer = LeaderSchedule::round_robin(fixture.codec.participants())
         .unwrap()
@@ -548,7 +555,7 @@ fn authenticate_leader<V: Variant>(
     fixture.verify(machine, vec![Artifact::LeaderBlock(signed)]);
 }
 
-fn execute_vqc_trace<V: Variant>(fixture: &Fixture<V>) {
+fn execute_vqc_trace<S: Suite>(fixture: &Fixture<S>) {
     let (mut machine, _) = start(fixture.profile(Role::Observer), Until::Persist);
     let leader = fixture.leader(1);
     authenticate_leader(fixture, &mut machine, &leader);
@@ -585,12 +592,22 @@ fn execute_vqc_trace<V: Variant>(fixture: &Fixture<V>) {
     let selected = aggregate.messages().collect::<Vec<_>>();
     let sequential = fixture
         .verifier
-        .assemble_vqc::<Sha256, _>(aggregate.leader().clone(), &selected, &Sequential)
+        .assemble_vqc::<_, Sha256, _>(
+            &mut test_rng(),
+            aggregate.leader().clone(),
+            &selected,
+            &Sequential,
+        )
         .unwrap();
     let strategy = parallel();
     let parallel = fixture
         .verifier
-        .assemble_vqc::<Sha256, _>(aggregate.leader().clone(), &selected, &strategy)
+        .assemble_vqc::<_, Sha256, _>(
+            &mut test_rng(),
+            aggregate.leader().clone(),
+            &selected,
+            &strategy,
+        )
         .unwrap();
     assert_eq!(sequential, parallel);
     assert_eq!(
@@ -631,7 +648,7 @@ fn execute_vqc_trace<V: Variant>(fixture: &Fixture<V>) {
 
 #[test]
 fn inbound_larger_vqc_decodes_verifies_admits_and_uses_every_vote_for_tips() {
-    let fixture = Fixture::<MinPk>::new();
+    let fixture = Fixture::<Bls<MinPk>>::new();
     let leader = fixture.leader_with_two_block_path(1);
     let positions = [2, 0, 0, 0, 0, 2];
     let messages = fixture
@@ -650,7 +667,8 @@ fn inbound_larger_vqc_decodes_verifies_admits_and_uses_every_vote_for_tips() {
 
     let quorum = fixture
         .verifier
-        .assemble_vqc::<Sha256, _>(
+        .assemble_vqc::<_, Sha256, _>(
+            &mut test_rng(),
             leader.clone(),
             &messages[..fixture.codec.view_quorum()],
             &Sequential,
@@ -658,10 +676,10 @@ fn inbound_larger_vqc_decodes_verifies_admits_and_uses_every_vote_for_tips() {
         .unwrap();
     let complete = fixture
         .verifier
-        .assemble_vqc::<Sha256, _>(leader.clone(), &messages, &Sequential)
+        .assemble_vqc::<_, Sha256, _>(&mut test_rng(), leader.clone(), &messages, &Sequential)
         .unwrap();
     let encoded = complete.encode();
-    let decoded = Vqc::<MinPk, Digest>::decode_cfg(encoded, &fixture.codec).unwrap();
+    let decoded = Vqc::<Bls<MinPk>, Digest>::decode_cfg(encoded, &fixture.codec).unwrap();
     assert_eq!(decoded, complete);
     assert_eq!(decoded.tally().signers().count(), PARTICIPANTS as usize);
     assert!(
@@ -671,11 +689,11 @@ fn inbound_larger_vqc_decodes_verifies_admits_and_uses_every_vote_for_tips() {
             .is_some()
     );
 
-    let quorum_tips = VqcExtraction::new::<Sha256, MinPk>(&quorum, fixture.codec)
+    let quorum_tips = VqcExtraction::new::<Sha256, Bls<MinPk>>(&quorum, fixture.codec)
         .unwrap()
         .into_parts()
         .0;
-    let complete_tips = VqcExtraction::new::<Sha256, MinPk>(&decoded, fixture.codec)
+    let complete_tips = VqcExtraction::new::<Sha256, Bls<MinPk>>(&decoded, fixture.codec)
         .unwrap()
         .into_parts()
         .0;
@@ -696,7 +714,7 @@ fn inbound_larger_vqc_decodes_verifies_admits_and_uses_every_vote_for_tips() {
         Some(Artifact::Vqc(anchor)) if anchor == &decoded));
 }
 
-fn execute_lqc_trace<V: Variant>(fixture: &Fixture<V>) {
+fn execute_lqc_trace<S: Suite>(fixture: &Fixture<S>) {
     let (mut machine, _) = start(fixture.profile(Role::Observer), Until::Persist);
     let leader = fixture.leader(2);
     authenticate_leader(fixture, &mut machine, &leader);
@@ -727,12 +745,22 @@ fn execute_lqc_trace<V: Variant>(fixture: &Fixture<V>) {
     let selected = aggregate.votes().cloned().collect::<Vec<_>>();
     let sequential = fixture
         .verifier
-        .assemble_lqc::<Sha256, _>(aggregate.leader().clone(), &selected, &Sequential)
+        .assemble_lqc::<_, Sha256, _>(
+            &mut test_rng(),
+            aggregate.leader().clone(),
+            &selected,
+            &Sequential,
+        )
         .unwrap();
     let strategy = parallel();
     let parallel = fixture
         .verifier
-        .assemble_lqc::<Sha256, _>(aggregate.leader().clone(), &selected, &strategy)
+        .assemble_lqc::<_, Sha256, _>(
+            &mut test_rng(),
+            aggregate.leader().clone(),
+            &selected,
+            &strategy,
+        )
         .unwrap();
     assert_eq!(sequential, parallel);
     assert_eq!(
@@ -767,8 +795,8 @@ fn execute_lqc_trace<V: Variant>(fixture: &Fixture<V>) {
     assert_duplicate(&mut machine, artifact);
 }
 
-fn execute_real_crypto_effects<V: Variant>() {
-    let fixture = Fixture::<V>::new();
+fn execute_real_crypto_effects<S: Suite>() {
+    let fixture = Fixture::<S>::new();
     execute_da_trace(&fixture);
     execute_sign_batch_and_nullification_trace(&fixture);
     execute_vqc_trace(&fixture);
@@ -776,9 +804,9 @@ fn execute_real_crypto_effects<V: Variant>() {
 }
 
 fn reused_application_digest_votes(
-    fixture: &Fixture<MinPk>,
-    leader: &LeaderBlock<MinPk, Digest>,
-) -> Vec<Vote<MinPk, Digest>> {
+    fixture: &Fixture<Bls<MinPk>>,
+    leader: &LeaderBlock<Bls<MinPk>, Digest>,
+) -> Vec<Vote<Bls<MinPk>, Digest>> {
     let shared = marked_digest(b"shared application child", 0);
     (0..fixture.codec.view_quorum())
         .map(|signer| {
@@ -803,10 +831,11 @@ fn reused_application_digest_votes(
 }
 
 fn assert_reused_application_digest_is_accepted(
-    fixture: &Fixture<MinPk>,
-    artifact: Artifact<MinPk, Digest>,
+    fixture: &Fixture<Bls<MinPk>>,
+    artifact: Artifact<Bls<MinPk>, Digest>,
 ) {
-    let (mut machine, _) = start::<Sha256, MinPk>(fixture.profile(Role::Observer), Until::Persist);
+    let (mut machine, _) =
+        start::<Sha256, Bls<MinPk>>(fixture.profile(Role::Observer), Until::Persist);
     let id = artifact.id::<Sha256>();
     let is_vqc = matches!(artifact, Artifact::Vqc(_));
     let observed = machine.step(cohort::<Sha256, _>(vec![artifact])).unwrap();
@@ -857,7 +886,7 @@ fn assert_reused_application_digest_is_accepted(
 
 #[test]
 fn vqc_accepts_a_reused_application_digest_on_distinct_ancestry() {
-    let fixture = Fixture::<MinPk>::new();
+    let fixture = Fixture::<Bls<MinPk>>::new();
     let leader = fixture.leader(1);
     let votes = reused_application_digest_votes(&fixture, &leader);
     let messages = votes
@@ -867,7 +896,7 @@ fn vqc_accepts_a_reused_application_digest_on_distinct_ancestry() {
         .collect::<Vec<_>>();
     let certificate = fixture
         .verifier
-        .assemble_vqc::<Sha256, _>(leader, &messages, &Sequential)
+        .assemble_vqc::<_, Sha256, _>(&mut test_rng(), leader, &messages, &Sequential)
         .unwrap();
     assert!(
         fixture
@@ -880,12 +909,12 @@ fn vqc_accepts_a_reused_application_digest_on_distinct_ancestry() {
 
 #[test]
 fn lqc_accepts_a_reused_application_digest_on_distinct_ancestry() {
-    let fixture = Fixture::<MinPk>::new();
+    let fixture = Fixture::<Bls<MinPk>>::new();
     let leader = fixture.leader(1);
     let votes = reused_application_digest_votes(&fixture, &leader);
     let certificate = fixture
         .verifier
-        .assemble_lqc::<Sha256, _>(leader, &votes, &Sequential)
+        .assemble_lqc::<_, Sha256, _>(&mut test_rng(), leader, &votes, &Sequential)
         .unwrap();
     assert!(
         fixture
@@ -896,8 +925,8 @@ fn lqc_accepts_a_reused_application_digest_on_distinct_ancestry() {
     assert_reused_application_digest_is_accepted(&fixture, Artifact::Lqc(certificate));
 }
 
-fn execute_objective_equivocation_trace<V: Variant>() {
-    let fixture = Fixture::<V>::new();
+fn execute_objective_equivocation_trace<S: Suite>() {
+    let fixture = Fixture::<S>::new();
     execute_leader_equivocation_trace(&fixture);
     execute_vote_equivocation_trace(&fixture);
     execute_producer_equivocation_trace(&fixture);
@@ -906,7 +935,7 @@ fn execute_objective_equivocation_trace<V: Variant>() {
 }
 
 /// Two signed leader blocks for one view attribute the leader.
-fn execute_leader_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
+fn execute_leader_equivocation_trace<S: Suite>(fixture: &Fixture<S>) {
     let leader = fixture.leader_with_two_block_path(1);
     let leader_signer = fixture.protocol.leader(leader.view());
     let alternate_leader = LeaderBlock::new(
@@ -933,7 +962,7 @@ fn execute_leader_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
 
 /// Conflicting votes, alone or in one batch, and a vote with a novote attribute the voter; a
 /// nullify or a later view's vote does not.
-fn execute_vote_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
+fn execute_vote_equivocation_trace<S: Suite>(fixture: &Fixture<S>) {
     let leader = fixture.leader_with_two_block_path(1);
     let voter = Participant::new(3);
     let first_vote = fixture.signers[voter.get() as usize]
@@ -1003,7 +1032,7 @@ fn execute_vote_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
 
 /// Producer forks attribute the producer: at one height, at the maximum height, against a signed
 /// parent, and under saturated accountability state.
-fn execute_producer_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
+fn execute_producer_equivocation_trace<S: Suite>(fixture: &Fixture<S>) {
     let chain = ChainId::new(0);
     let producer = fixture.protocol.producer(chain).unwrap();
     let first_header = fixture.first_header(b"producer body");
@@ -1047,11 +1076,15 @@ fn execute_producer_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
         let Artifact::TransactionBlock(block) = &artifact else {
             unreachable!()
         };
-        assert!(fixture.verifier.verify_transaction_block(block));
-        assert!(saturated.observe::<Sha256, V>(&artifact, None).is_empty());
+        assert!(
+            fixture
+                .verifier
+                .verify_transaction_block(&mut test_rng(), block, &Sequential)
+        );
+        assert!(saturated.observe::<Sha256, S>(&artifact, None).is_empty());
     }
     assert_eq!(
-        saturated.observe::<Sha256, V>(&signed_header(30, 31), None),
+        saturated.observe::<Sha256, S>(&signed_header(30, 31), None),
         vec![producer],
     );
 
@@ -1085,13 +1118,13 @@ fn execute_producer_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
         [maximum[1].clone(), maximum[0].clone()],
     ] {
         let mut accountability = AccountabilityState::new(2);
-        assert!(accountability.observe::<Sha256, V>(&first, None).is_empty());
+        assert!(accountability.observe::<Sha256, S>(&first, None).is_empty());
         assert_eq!(
-            accountability.observe::<Sha256, V>(&second, None),
+            accountability.observe::<Sha256, S>(&second, None),
             vec![producer]
         );
     }
-    let (mut machine, _) = start::<Sha256, V>(fixture.profile(Role::Observer), Until::Persist);
+    let (mut machine, _) = start::<Sha256, S>(fixture.profile(Role::Observer), Until::Persist);
     let rejected = machine.step(cohort::<Sha256, _>(maximum.to_vec())).unwrap();
     assert!(matches!(
         rejected.status(),
@@ -1125,7 +1158,7 @@ fn execute_producer_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
 
 /// A signer's second DA vote at a height takes no slot and blames no one, whatever header it
 /// names; the producer's forked blocks are what prove the fault.
-fn execute_da_vote_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
+fn execute_da_vote_equivocation_trace<S: Suite>(fixture: &Fixture<S>) {
     // Only a chain's producer keeps the chain's DA votes, one per signer at each height, so no DA
     // vote has to prove an equivocation.
     let producer = fixture.protocol.producer(ChainId::new(0)).unwrap();
@@ -1152,7 +1185,7 @@ fn execute_da_vote_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
         .unwrap();
     let forged_da_vote = Artifact::DaVote(DaVote::new(
         da_fork_header.clone(),
-        first_da_vote.share().clone(),
+        first_da_vote.attestation().clone(),
     ));
     let first_da_vote = Artifact::DaVote(first_da_vote);
     let second_da_vote = Artifact::DaVote(
@@ -1160,7 +1193,7 @@ fn execute_da_vote_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
             .sign_da_vote(da_fork_header)
             .unwrap(),
     );
-    let position_full = |step: &Step<V, Digest>| {
+    let position_full = |step: &Step<S, Digest>| {
         matches!(step.status(), StepStatus::Observed(results)
             if results.last().map(|result| result.status())
                 == Some(ObservationStatus::Rejected(Rejection::PositionFull)))
@@ -1184,7 +1217,7 @@ fn execute_da_vote_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
 }
 
 /// A vote that conflicts with a signer's certificate transcript attributes that signer.
-fn execute_transcript_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
+fn execute_transcript_equivocation_trace<S: Suite>(fixture: &Fixture<S>) {
     let leader = fixture.leader_with_two_block_path(1);
     let transcript_signer = Participant::new(0);
     let transcript_body = fixture.vote_body_at(&leader, 1);
@@ -1196,7 +1229,7 @@ fn execute_transcript_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
         .collect::<Vec<_>>();
     let vqc = fixture
         .verifier
-        .assemble_vqc::<Sha256, _>(leader.clone(), &messages, &Sequential)
+        .assemble_vqc::<_, Sha256, _>(&mut test_rng(), leader.clone(), &messages, &Sequential)
         .unwrap();
     let conflicting = fixture.signers[transcript_signer.get() as usize]
         .sign_vote(fixture.vote_body_at(&leader, 2))
@@ -1217,7 +1250,7 @@ fn execute_transcript_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
         .collect::<Vec<_>>();
     let lqc = fixture
         .verifier
-        .assemble_lqc::<Sha256, _>(leader.clone(), &lqc_votes, &Sequential)
+        .assemble_lqc::<_, Sha256, _>(&mut test_rng(), leader.clone(), &lqc_votes, &Sequential)
         .unwrap();
     assert_objective_fault(
         fixture,
@@ -1240,7 +1273,7 @@ fn execute_transcript_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
     ));
     let vqc = fixture
         .verifier
-        .assemble_vqc::<Sha256, _>(leader, &novote_messages, &Sequential)
+        .assemble_vqc::<_, Sha256, _>(&mut test_rng(), leader, &novote_messages, &Sequential)
         .unwrap();
     assert_objective_fault(
         fixture,
@@ -1256,27 +1289,27 @@ fn execute_transcript_equivocation_trace<V: Variant>(fixture: &Fixture<V>) {
 
 #[test]
 fn objective_equivocation_is_attributed_for_min_pk() {
-    execute_objective_equivocation_trace::<MinPk>();
+    execute_objective_equivocation_trace::<Bls<MinPk>>();
 }
 
 #[test]
 fn objective_equivocation_is_attributed_for_min_sig() {
-    execute_objective_equivocation_trace::<MinSig>();
+    execute_objective_equivocation_trace::<Bls<MinSig>>();
 }
 
 #[test]
 fn real_crypto_effects_execute_for_min_pk() {
-    execute_real_crypto_effects::<MinPk>();
+    execute_real_crypto_effects::<Bls<MinPk>>();
 }
 
 #[test]
 fn real_crypto_effects_execute_for_min_sig() {
-    execute_real_crypto_effects::<MinSig>();
+    execute_real_crypto_effects::<Bls<MinSig>>();
 }
 
 #[test]
 fn a_conflicting_da_vote_takes_no_second_slot() {
-    let fixture = Fixture::<MinPk>::new();
+    let fixture = Fixture::<Bls<MinPk>>::new();
     let producer = fixture.protocol.producer(ChainId::new(0)).unwrap();
     let headers =
         [b"conflict block".as_slice(), b"conflict fork"].map(|label| fixture.first_header(label));

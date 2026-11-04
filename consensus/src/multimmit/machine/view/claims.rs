@@ -4,11 +4,12 @@ use crate::{
     Viewable,
     multimmit::{
         machine::{util::retire_prefix, verification::Observation},
+        scheme::Scheme,
         types::{Artifact, ArtifactId},
     },
     types::{Attributable, Participant, View},
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use std::collections::BTreeMap;
 
 /// What a claim reserves within its view.
@@ -37,7 +38,7 @@ impl Claim {
     }
 
     /// Returns the slot `artifact` would fill, if it is view-scoped.
-    pub(super) fn for_artifact<V: Variant, D: Digest>(artifact: &Artifact<V, D>) -> Option<Self> {
+    pub(super) fn for_artifact<S: Scheme, D: Digest>(artifact: &Artifact<S, D>) -> Option<Self> {
         let (view, kind) = match artifact {
             Artifact::LeaderBlock(block) => (block.view(), ClaimKind::Proposal),
             Artifact::Vote(vote) => (vote.view(), ClaimKind::ViewMessage(vote.signer())),

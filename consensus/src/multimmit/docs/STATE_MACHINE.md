@@ -24,9 +24,10 @@ Protocol terms follow the specification.
   signed header naming an opaque application commitment.
 - **Leader block:** the scheduled leader's proposal for one view: one anchored path per producer
   chain and the next tip commitment.
-- **DA (data availability):** a validator's DA vote is a threshold share asserting that it holds and
-  validated a producer block. A DA quorum of shares recovers a DA certificate for that chain
-  position: `n - 2f` by default, or `n - f` when certificates bind (`DaQuorum::Binding`).
+- **DA (data availability):** a validator's DA vote is a DA-role attestation (a threshold share in
+  the BLS suites) asserting that it holds and validated a producer block. A DA quorum of votes forms
+  a DA certificate for that chain position: `n - 2f` by default, or `n - f` when certificates bind
+  (`DaQuorum::Binding`).
 - **Certified anchor:** a producer chain's highest DA-certified block.
 - **d:** pipeline depth (`pipeline_depth`), set per chain, the longest proposal path on that chain.
   `d = 0` makes the chain certified-only: proposals name its highest held DA certificate and

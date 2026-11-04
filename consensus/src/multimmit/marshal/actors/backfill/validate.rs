@@ -5,6 +5,7 @@ use crate::{
     Epochable as _,
     multimmit::{
         marshal::wire::{BackfillKey, MAX_SEGMENT_ITEMS},
+        scheme::Scheme,
         types::{
             BlockRef, Body, CodecConfig, Lqc, TipRecord, TransactionBlock, TransactionBlockHeader,
         },
@@ -13,7 +14,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_codec::{Decode as _, EncodeSize as _, RangeCfg};
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use std::sync::Arc;
 
 /// A linked tip-history segment, newest first, shared across waiters.
@@ -102,14 +103,14 @@ where
 ///
 /// Returns `None` when the value is oversized, malformed, from another epoch, or does not match
 /// the key. A returned L-QC is not yet verified.
-pub(super) fn decode<H, V, B>(
+pub(super) fn decode<H, S, B>(
     limits: &Limits<B::Cfg>,
     key: BackfillKey<H::Digest>,
     value: Bytes,
-) -> Option<Resolved<H, V, B>>
+) -> Option<Resolved<H, S, B>>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     if value.len() > limits.max_value_bytes {
@@ -117,7 +118,7 @@ where
     }
     match key {
         BackfillKey::LqcById { id } => {
-            let proof = Lqc::<V, H::Digest>::decode_cfg(value, &limits.codec).ok()?;
+            let proof = Lqc::<S, H::Digest>::decode_cfg(value, &limits.codec).ok()?;
             (proof.epoch() == limits.epoch && proof.id::<H>() == id)
                 .then(|| Resolved::Lqc(id, Arc::new(proof)))
         }

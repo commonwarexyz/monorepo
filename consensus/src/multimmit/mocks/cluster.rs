@@ -13,15 +13,15 @@ use crate::{
         config::{LeaderSchedule, Tuning},
         engine::{Config as EngineConfig, Engine, Overrides, Planes, Running},
         machine::{Generation, Inspection},
-        mocks::{Committee, MockApplication},
-        types::{Activity, DaQuorum, PathLimits, ViewProof},
+        mocks::{Committee, Fixture, MockApplication},
+        types::{Activity, PathLimits, ViewProof},
     },
     types::{Participant, View, ViewDelta},
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::{
-    Sha256, Signer as _, bls12381::primitives::variant::Variant, ed25519,
-    ed25519::PrivateKey as Ed25519PrivateKey, sha256::Digest as Sha256Digest,
+    Sha256, Signer as _, ed25519, ed25519::PrivateKey as Ed25519PrivateKey,
+    sha256::Digest as Sha256Digest,
 };
 use commonware_macros::select;
 use commonware_p2p::simulated::{
@@ -75,19 +75,18 @@ pub const CERTIFICATE_CHANNEL: u64 = 2;
 /// Simulated-network channel of the view-proof resolver plane.
 pub const RESOLVER_CHANNEL: u64 = 3;
 
-type MockEngineConfig<V> = EngineConfig<
+type MockEngineConfig<S> = EngineConfig<
     Sha256,
-    ed25519::PublicKey,
-    V,
+    S,
     MockApplication,
     MockApplication,
-    ClusterReporter<V>,
+    ClusterReporter<S>,
     Sequential,
     Sequential,
     ClusterBlocker,
 >;
 
-type ActivityCallback<V> = Box<dyn FnMut(Activity<V, Sha256Digest>) -> Feedback + Send + 'static>;
+type ActivityCallback<S> = Box<dyn FnMut(Activity<S, Sha256Digest>) -> Feedback + Send + 'static>;
 type BlockCallback = Box<dyn FnMut(ed25519::PublicKey, ed25519::PublicKey) + Send + 'static>;
 
 #[derive(Clone)]
@@ -117,26 +116,26 @@ impl commonware_p2p::Blocker for ClusterBlocker {
 }
 
 #[derive(Clone)]
-struct ClusterReporter<V: Variant> {
-    callback: Option<Arc<Mutex<ActivityCallback<V>>>>,
+struct ClusterReporter<S: Fixture> {
+    callback: Option<Arc<Mutex<ActivityCallback<S>>>>,
 }
 
-impl<V: Variant> ClusterReporter<V> {
-    fn attached(callback: ActivityCallback<V>) -> Self {
+impl<S: Fixture> ClusterReporter<S> {
+    fn attached(callback: ActivityCallback<S>) -> Self {
         Self {
             callback: Some(Arc::new(Mutex::new(callback))),
         }
     }
 }
 
-impl<V: Variant> Default for ClusterReporter<V> {
+impl<S: Fixture> Default for ClusterReporter<S> {
     fn default() -> Self {
         Self { callback: None }
     }
 }
 
-impl<V: Variant> Reporter for ClusterReporter<V> {
-    type Activity = Activity<V, Sha256Digest>;
+impl<S: Fixture> Reporter for ClusterReporter<S> {
+    type Activity = Activity<S, Sha256Digest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         self.callback
@@ -177,8 +176,6 @@ pub struct ClusterOptions {
     pub limits: PathLimits,
     /// Each chain's own path limits, in chain order, replacing [`Self::limits`].
     pub chain_limits: Option<Vec<PathLimits>>,
-    /// DA shares that recover a certificate.
-    pub da_quorum: DaQuorum,
 }
 
 impl Default for ClusterOptions {
@@ -198,7 +195,6 @@ impl Default for ClusterOptions {
             view_retention: ViewDelta::new(16),
             limits: PathLimits::new(2, 1),
             chain_limits: None,
-            da_quorum: DaQuorum::Available,
         }
     }
 }
@@ -245,16 +241,16 @@ struct TestHooks {
 }
 
 /// One engine slot: its application, running engine, and observed finality.
-struct Node<V: Variant> {
+struct Node<S: Fixture> {
     app: MockApplication,
-    engine: Option<RunningEngine<V>>,
+    engine: Option<RunningEngine<S>>,
     finality: FinalityHistory,
     generation: usize,
     #[cfg(test)]
     hooks: TestHooks,
 }
 
-impl<V: Variant> Node<V> {
+impl<S: Fixture> Node<S> {
     #[allow(
         clippy::missing_const_for_fn,
         reason = "test builds initialize hooks, which is not const"
@@ -272,14 +268,14 @@ impl<V: Variant> Node<V> {
 }
 
 /// Which slot an engine occupies, whose keys it signs with, and where its activity goes.
-pub struct LaunchSpec<V: Variant> {
+pub struct LaunchSpec<S: Fixture> {
     slot: usize,
     signer: usize,
     label: Option<&'static str>,
-    reporter: ClusterReporter<V>,
+    reporter: ClusterReporter<S>,
 }
 
-impl<V: Variant> LaunchSpec<V> {
+impl<S: Fixture> LaunchSpec<S> {
     /// Launches `slot` with its own participant's keys, labelled by slot and generation, with
     /// activity discarded.
     pub fn new(slot: usize) -> Self {
@@ -304,9 +300,9 @@ impl<V: Variant> LaunchSpec<V> {
     }
 
     /// Sends the engine's best-effort activity to `reporter`.
-    pub fn reporter<S>(mut self, mut reporter: S) -> Self
+    pub fn reporter<Sn>(mut self, mut reporter: Sn) -> Self
     where
-        S: Reporter<Activity = Activity<V, Sha256Digest>>,
+        Sn: Reporter<Activity = Activity<S, Sha256Digest>>,
     {
         self.reporter =
             ClusterReporter::attached(Box::new(move |activity| reporter.report(activity)));
@@ -333,27 +329,27 @@ type OwnSender = SimulatedSender<ed25519::PublicKey, deterministic::Context>;
 type OwnPlanes = Planes<OwnSender, SimulatedReceiver<ed25519::PublicKey>>;
 
 /// One deterministic cluster of complete Multimmit engines.
-pub struct Cluster<V: Variant> {
+pub struct Cluster<S: Fixture> {
     options: ClusterOptions,
     producers: Vec<Participant>,
     context: deterministic::Context,
     oracle: Oracle<ed25519::PublicKey, deterministic::Context>,
     identities: Vec<ed25519::PublicKey>,
-    nodes: Vec<Node<V>>,
+    nodes: Vec<Node<S>>,
     block_callback: Option<Arc<Mutex<BlockCallback>>>,
     overrides: Overrides,
     production_policy: ProductionPolicy,
     storage_sync_interval: Option<Duration>,
 }
 
-struct RunningEngine<V: Variant> {
+struct RunningEngine<S: Fixture> {
     engine: Running<Sha256Digest>,
-    proofs: resolver::Server<V, Sha256Digest>,
+    proofs: resolver::Server<S, Sha256Digest>,
     flusher: voter::Flusher,
     storage_sync_task: Option<Handle<()>>,
 }
 
-impl<V: Variant> RunningEngine<V> {
+impl<S: Fixture> RunningEngine<S> {
     fn abort(&self) {
         self.engine.abort();
         if let Some(task) = &self.storage_sync_task {
@@ -373,21 +369,21 @@ impl<V: Variant> RunningEngine<V> {
 
 #[cfg(test)]
 #[derive(Clone)]
-struct BlockingSender<S> {
-    inner: S,
+struct BlockingSender<Sn> {
+    inner: Sn,
     me: ed25519::PublicKey,
     identities: Vec<ed25519::PublicKey>,
     blocked: Arc<Mutex<Vec<ed25519::PublicKey>>>,
 }
 
 #[cfg(test)]
-impl<S> LimitedSender for BlockingSender<S>
+impl<Sn> LimitedSender for BlockingSender<Sn>
 where
-    S: LimitedSender<PublicKey = ed25519::PublicKey>,
+    Sn: LimitedSender<PublicKey = ed25519::PublicKey>,
 {
     type PublicKey = ed25519::PublicKey;
     type Checked<'a>
-        = S::Checked<'a>
+        = Sn::Checked<'a>
     where
         Self: 'a;
 
@@ -460,7 +456,7 @@ enum ProductionPolicy {
     Every { interval: usize, polls: usize },
 }
 
-impl<V: Variant> Cluster<V> {
+impl<S: Fixture> Cluster<S> {
     /// Builds the committee, simulated network, and fully connected links.
     pub async fn new(context: &deterministic::Context, options: ClusterOptions) -> Self {
         let producers = (0..options.n).map(Participant::new).collect();
@@ -501,11 +497,10 @@ impl<V: Variant> Cluster<V> {
         cluster
     }
 
-    fn committee(options: &ClusterOptions, producers: &[Participant]) -> Committee<V> {
+    fn committee(options: &ClusterOptions, producers: &[Participant]) -> Committee<S> {
         let mut committee = Committee::builder(options.seed, options.n)
             .producers(producers.to_vec())
-            .limits(options.limits)
-            .da_quorum(options.da_quorum);
+            .limits(options.limits);
         if let Some(limits) = &options.chain_limits {
             committee = committee.chain_limits(limits.clone());
         }
@@ -611,7 +606,7 @@ impl<V: Variant> Cluster<V> {
     }
 
     /// Rebuilds the deterministic committee fixture for artifact crafting.
-    pub fn fixture(&self) -> Committee<V> {
+    pub fn fixture(&self) -> Committee<S> {
         Self::committee(&self.options, &self.producers)
     }
 
@@ -666,7 +661,7 @@ impl<V: Variant> Cluster<V> {
     ///
     /// Re-registration replaces the previous instance's mailboxes, so a restarted node keeps
     /// receiving on the same four planes its peers already target.
-    pub async fn launch(&mut self, spec: LaunchSpec<V>) {
+    pub async fn launch(&mut self, spec: LaunchSpec<S>) {
         let launch = self.launch_racing(spec, future::pending::<()>()).await;
         assert!(matches!(launch, Launch::Started));
     }
@@ -675,7 +670,7 @@ impl<V: Variant> Cluster<V> {
     /// opening: then the open is dropped mid-recovery and nothing starts.
     pub async fn launch_racing<T>(
         &mut self,
-        spec: LaunchSpec<V>,
+        spec: LaunchSpec<S>,
         interrupt: impl Future<Output = T>,
     ) -> Launch<T> {
         self.ensure_slot(spec.slot);
@@ -746,9 +741,9 @@ impl<V: Variant> Cluster<V> {
     /// `spec`'s signer selects whose key material the engine uses, which a twin half sets to
     /// another participant. The slot names the storage and application, so two halves of one
     /// participant keep entirely separate durable state.
-    pub async fn launch_over<S, R>(&mut self, spec: LaunchSpec<V>, planes: Planes<S, R>)
+    pub async fn launch_over<Sn, R>(&mut self, spec: LaunchSpec<S>, planes: Planes<Sn, R>)
     where
-        S: commonware_p2p::Sender<PublicKey = ed25519::PublicKey>,
+        Sn: commonware_p2p::Sender<PublicKey = ed25519::PublicKey>,
         R: commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
     {
         let launch = self
@@ -757,14 +752,14 @@ impl<V: Variant> Cluster<V> {
         assert!(matches!(launch, Launch::Started));
     }
 
-    async fn launch_over_racing<S, R, T>(
+    async fn launch_over_racing<Sn, R, T>(
         &mut self,
-        spec: LaunchSpec<V>,
-        planes: Planes<S, R>,
+        spec: LaunchSpec<S>,
+        planes: Planes<Sn, R>,
         interrupt: impl Future<Output = T>,
     ) -> Launch<T>
     where
-        S: commonware_p2p::Sender<PublicKey = ed25519::PublicKey>,
+        Sn: commonware_p2p::Sender<PublicKey = ed25519::PublicKey>,
         R: commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
     {
         let LaunchSpec {
@@ -845,20 +840,20 @@ impl<V: Variant> Cluster<V> {
     }
 
     /// Opens and starts one engine, unless `interrupt` resolves first.
-    async fn start_engine<E, S, R, T>(
+    async fn start_engine<E, Sn, R, T>(
         &self,
         context: E,
-        config: MockEngineConfig<V>,
-        planes: Planes<S, R>,
+        config: MockEngineConfig<S>,
+        planes: Planes<Sn, R>,
         interrupt: impl Future<Output = T>,
-    ) -> Result<RunningEngine<V>, T>
+    ) -> Result<RunningEngine<S>, T>
     where
         E: commonware_runtime::Clock
             + CryptoRng
             + Spawner
             + commonware_runtime::Storage
             + commonware_runtime::Metrics,
-        S: commonware_p2p::Sender<PublicKey = ed25519::PublicKey>,
+        Sn: commonware_p2p::Sender<PublicKey = ed25519::PublicKey>,
         R: commonware_p2p::Receiver<PublicKey = ed25519::PublicKey>,
     {
         let engine = select! {
@@ -1149,7 +1144,7 @@ impl<V: Variant> Cluster<V> {
     }
 
     /// Reads one checkpoint retained by a running engine's volatile resolver.
-    pub async fn serve(&self, index: usize, view: View) -> Option<Arc<ViewProof<V, Sha256Digest>>> {
+    pub async fn serve(&self, index: usize, view: View) -> Option<Arc<ViewProof<S, Sha256Digest>>> {
         let engine = self.nodes[index].engine.as_ref()?;
         engine.proofs.serve(view).await.ok().flatten()
     }
@@ -1413,6 +1408,7 @@ pub async fn link_all_with(
 #[cfg(test)]
 mod tests {
     use super::{Cluster, ClusterOptions, Plane, engine_label};
+    use crate::multimmit::mocks::Bls;
     use commonware_cryptography::bls12381::primitives::variant::MinPk;
     use commonware_runtime::{Runner as _, deterministic};
     use std::time::Duration;
@@ -1428,7 +1424,8 @@ mod tests {
     #[test]
     fn reserved_slots_own_every_per_node_control() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let mut cluster = Cluster::<MinPk>::new(&context, ClusterOptions::new(79, 6)).await;
+            let mut cluster =
+                Cluster::<Bls<MinPk>>::new(&context, ClusterOptions::new(79, 6)).await;
             let reserved = cluster.reserve_slot("reserved");
             cluster.ensure_slot(reserved + 1);
             assert_eq!(cluster.nodes.len(), reserved + 2);
