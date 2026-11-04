@@ -519,6 +519,11 @@ std::thread_local! {
     /// A domain tests assign to the calling thread in place of the one the kernel reports, so the
     /// group logic can be driven on any platform.
     static FAKE_DOMAIN: std::cell::Cell<Option<u16>> = const { std::cell::Cell::new(None) };
+
+    /// A pause tests insert into the calling thread's next `local` call whose first home lookup
+    /// misses, so another caller can home a group before the call decides what to do.
+    static HOMING_SCAN_PAUSE: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// The [`Lease::Tracked`] claims in flight on a group. The group is idle while it has none.
@@ -932,8 +937,8 @@ impl Groups {
         let domain = self.current_domain()?;
         let submitter = std::thread::current().id();
 
-        // A home never changes once set, so the scan reads homes without a lock and locks only the
-        // claimed group's state.
+        // A home never changes once set, so the scans read homes without a lock and only a claim
+        // locks its group's state.
         let claim_home = || {
             for (index, group) in self.groups.iter().enumerate() {
                 if group.home.get() != Some(&domain) {
@@ -948,10 +953,13 @@ impl Groups {
         if let Some(lease) = claim_home() {
             return Some(lease);
         }
+        #[cfg(test)]
+        if let Some(pause) = HOMING_SCAN_PAUSE.take() {
+            pause();
+        }
 
-        // Homes are permanent and the pool's mask never changes, so a domain without room for a
-        // full group, or a pool whose placeable groups are all homed elsewhere, can be turned away
-        // without the homing lock.
+        // The pool's mask never changes, so a domain without room for a full group is turned away
+        // without the lock.
         #[cfg(all(target_os = "linux", not(miri)))]
         if let Some((topology, allowed)) = &self.affinity {
             let (_, count) = topology.domains[usize::from(domain)].within(allowed);
@@ -959,12 +967,15 @@ impl Groups {
                 return None;
             }
         }
+
+        // Homes are set once and only on placeable groups, so once every placeable group is seen
+        // homed, a second lookup sees every home there will be, and its result is final.
         if !self
             .groups
             .iter()
             .any(|group| group.placeable() && group.home.get().is_none())
         {
-            return None;
+            return claim_home();
         }
 
         // A concurrent creator may assign this domain before the lock is acquired.
@@ -1368,6 +1379,50 @@ mod tests {
             .filter(|group| group.home.get() == Some(&0))
             .count();
         assert_eq!(homes, 1, "the domain must have one home group");
+    }
+
+    /// A caller whose domain gets the last home while its scan is under way claims that home,
+    /// whether it looks for a group directly or through a root.
+    #[test]
+    fn local_claims_home_set_during_scan() {
+        for root in [false, true] {
+            let groups = synthetic(&[2, 2]);
+            Groups::fake_domain(Some(0));
+            drop(groups.local().unwrap());
+
+            // The caller pauses after its first home lookup misses, and resumes once the test has
+            // homed the last unhomed group in the caller's domain. The channels live in the scope
+            // so a failed setup releases the paused caller instead of waiting for it.
+            let caller = std::thread::scope(|scope| {
+                let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+                let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
+                let caller = scope.spawn(|| {
+                    Groups::fake_domain(Some(1));
+                    HOMING_SCAN_PAUSE.set(Some(Box::new(move || {
+                        paused_tx.send(()).unwrap();
+                        resume_rx.recv().unwrap();
+                    })));
+                    if root {
+                        Some(groups.root().0.group())
+                    } else {
+                        groups.local().map(|lease| lease.group())
+                    }
+                });
+                paused_rx.recv().unwrap();
+                Groups::fake_domain(Some(1));
+                let last_home = groups.local().unwrap();
+                assert_eq!(last_home.group(), 1);
+                drop(last_home);
+                resume_tx.send(()).unwrap();
+                caller.join().unwrap()
+            });
+            Groups::fake_domain(None);
+            assert_eq!(
+                caller,
+                Some(1),
+                "the caller must claim the home set during its scan"
+            );
+        }
     }
 
     /// A Wide claim counts against every group and names the group homed in the caller's domain, or
