@@ -19,8 +19,6 @@ use std::{
 };
 
 #[cfg(test)]
-mod future_test;
-#[cfg(test)]
 mod test;
 
 /// Represents a user-created [thread pool].
