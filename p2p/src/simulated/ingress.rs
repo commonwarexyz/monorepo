@@ -358,7 +358,9 @@ pub struct Manager<P: PublicKey, E: Clock> {
 
 impl<P: PublicKey, E: Clock> std::fmt::Debug for Manager<P, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Manager").finish_non_exhaustive()
+        f.debug_struct("Manager")
+            .field("owner", &self.owner)
+            .finish_non_exhaustive()
     }
 }
 
@@ -411,7 +413,9 @@ pub struct SocketManager<P: PublicKey, E: Clock> {
 
 impl<P: PublicKey, E: Clock> std::fmt::Debug for SocketManager<P, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SocketManager").finish_non_exhaustive()
+        f.debug_struct("SocketManager")
+            .field("owner", &self.owner)
+            .finish_non_exhaustive()
     }
 }
 
