@@ -85,8 +85,6 @@ pub use config::{
 };
 pub use mailbox::Mailbox;
 pub use open::OpenError;
-#[cfg(any(test, feature = "mocks"))]
-pub(crate) use protocol::fuzz;
 pub use relay::Relay;
 pub use service::{Service, ServiceHandle, open};
 pub use types::{
