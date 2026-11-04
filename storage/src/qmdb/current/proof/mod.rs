@@ -257,7 +257,7 @@ pub struct RangeProofSpec<F: Family, D: Digest> {
 impl<F: Graftable, D: Digest> RangeProof<F, D> {
     /// Create a new range proof for the provided `range` of operations, fetching the digests of
     /// its [merkle::RangePlan] from `storage` and building with [Self::build].
-    pub async fn new<H: Hasher<Digest = D>, S: Storage<F, Digest = D>, const N: usize>(
+    pub async fn new<H: Hasher<Digest = D>, S: Storage<Family = F, Digest = D>, const N: usize>(
         status: &impl BitmapReadable<N>,
         storage: &S,
         inactivity_floor: Location<F>,
@@ -338,7 +338,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
     pub async fn new_with_ops<
         H: Hasher<Digest = D>,
         C: Contiguous,
-        S: Storage<F, Digest = D>,
+        S: Storage<Family = F, Digest = D>,
         const N: usize,
     >(
         status: &impl BitmapReadable<N>,
@@ -731,7 +731,7 @@ mod tests {
         S: Strategy,
         const N: usize,
     >(
-        ops_tree: &impl Storage<F, Digest = H::Digest>,
+        ops_tree: &impl Storage<Family = F, Digest = H::Digest>,
         chunks: impl IntoIterator<Item = (usize, [u8; N])>,
         strategy: &S,
     ) -> Result<Vec<(usize, H::Digest)>, Error<F>> {

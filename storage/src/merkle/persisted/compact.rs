@@ -4,11 +4,11 @@
 //! current root and append new leaves: the leaf count and the pinned frontier nodes (the
 //! tree's peaks). These suffice because the root is computed by folding the peaks and an
 //! append reads only the peaks it merges with, so a tree rebuilt from a
-//! `(leaf_count, pinned_nodes)` snapshot has the same root and the same future append
+//! `(leaf_count, pinned_nodes)` compact state has the same root and the same future append
 //! behavior as the original.
 //!
 //! Nodes created by appends are retained only until the structure is pruned to its frontier or
-//! reset to a snapshot; after that they are no longer readable.
+//! reset to a compact state; after that they are no longer readable.
 
 use crate::merkle::{
     Error, Family, Location, batch,
@@ -68,10 +68,9 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
 /// A Merkle structure that retains only the state required to continue appending.
 ///
-/// The [`Mem`] is held as an [`Arc`] so `snapshot` can hand a zero-copy, immutable view to
-/// jobs running off the calling task. Mutations go through [`Arc::make_mut`]: they are
-/// in-place while no snapshot is alive and copy-on-write otherwise, so a snapshot never
-/// observes later mutations.
+/// The [`Mem`] is held as an [`Arc`] so `view` can hand a zero-copy, immutable view to jobs
+/// running off the calling task. Mutations go through [`Arc::make_mut`]: they are in-place while
+/// no view is alive and copy-on-write otherwise, so a view never observes later mutations.
 pub struct Merkle<F: Family, D: Digest, S: Strategy> {
     mem: Arc<Mem<F, D>>,
     strategy: S,
@@ -86,7 +85,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         }
     }
 
-    /// Create a `Merkle` from a compact state snapshot.
+    /// Create a `Merkle` from a compact state.
     pub(crate) fn from_compact_state(
         strategy: S,
         leaves: Location<F>,
@@ -99,7 +98,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         })
     }
 
-    /// Build a [`Mem`] with no retained nodes from a compact state snapshot.
+    /// Build a [`Mem`] with no retained nodes from a compact state.
     fn mem_from_compact_state(
         leaves: Location<F>,
         pinned_nodes: Vec<D>,
@@ -121,7 +120,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         }
     }
 
-    /// Replace the in-memory tree with one rebuilt from a compact state snapshot, discarding
+    /// Replace the in-memory tree with one rebuilt from a compact state, discarding
     /// the current state.
     pub(crate) fn reset_to(
         &mut self,
@@ -175,12 +174,12 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         &self.mem
     }
 
-    /// Return a zero-copy, immutable snapshot of the in-memory [`Mem`].
+    /// Return a zero-copy, immutable view of the in-memory [`Mem`].
     ///
-    /// The snapshot never observes later mutations: mutators copy-on-write while a snapshot is
+    /// The view never observes later mutations: mutators copy-on-write while a view is
     /// alive. Use this to move committed node fallback into a job running off the calling task;
     /// prefer [`Merkle::mem()`] when a borrow suffices.
-    pub(crate) fn snapshot(&self) -> Arc<Mem<F, D>> {
+    pub(crate) fn view(&self) -> Arc<Mem<F, D>> {
         Arc::clone(&self.mem)
     }
 
@@ -242,14 +241,14 @@ mod tests {
         merkle.prune_to_frontier();
         assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
 
-        // A fresh tree reset to the snapshot reproduces the same state.
+        // A fresh tree reset to the compact state reproduces the same state.
         let mut restored = TestMerkle::<F>::new(Sequential);
         append(&mut restored, &[b"x"]);
         restored.reset_to(leaves, pinned_nodes.clone()).unwrap();
         assert_eq!(restored.root(&hasher, 0).unwrap(), root);
         assert_eq!(restored.leaves(), leaves);
 
-        // Both trees evolve identically from the snapshot.
+        // Both trees evolve identically from the compact state.
         append(&mut merkle, &[b"d"]);
         append(&mut restored, &[b"d"]);
         assert_eq!(
@@ -274,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reset_to_rejects_invalid_snapshot() {
+    fn test_reset_to_rejects_invalid_compact_state() {
         let mut merkle = TestMerkle::<mmr::Family>::new(Sequential);
         append(&mut merkle, &[b"a", b"b"]);
         let leaves = merkle.leaves();

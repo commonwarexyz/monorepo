@@ -11,7 +11,7 @@ use core::ops::Range;
 pub type ProofStore<D> = crate::merkle::verification::ProofStore<Family, D>;
 
 /// Return a range proof for the nodes corresponding to the given location range.
-pub async fn range_proof<H: Hasher<Family>, S: Storage<Family, Digest = H::Digest>>(
+pub async fn range_proof<H: Hasher<Family>, S: Storage<Family = Family, Digest = H::Digest>>(
     hasher: &H,
     mmr: &S,
     range: Range<Location>,
@@ -21,7 +21,10 @@ pub async fn range_proof<H: Hasher<Family>, S: Storage<Family, Digest = H::Diges
 }
 
 /// Analogous to [range_proof] but for a previous database state.
-pub async fn historical_range_proof<H: Hasher<Family>, S: Storage<Family, Digest = H::Digest>>(
+pub async fn historical_range_proof<
+    H: Hasher<Family>,
+    S: Storage<Family = Family, Digest = H::Digest>,
+>(
     hasher: &H,
     mmr: &S,
     leaves: Location,
@@ -37,7 +40,7 @@ pub async fn historical_range_proof<H: Hasher<Family>, S: Storage<Family, Digest
 /// Locations must be strictly ascending. The error names the first invalid location:
 /// [Error::DuplicateLocation] if it repeats the location before it and [Error::UnsortedLocation]
 /// if it precedes it.
-pub async fn multi_proof<S: Storage<Family>>(
+pub async fn multi_proof<S: Storage<Family = Family>>(
     mmr: &S,
     inactive_peaks: usize,
     locations: &[Location],

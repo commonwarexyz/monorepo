@@ -42,7 +42,7 @@ where
     {
         async move {
             // Resolve translated-key collisions before returning a value and its location.
-            for loc in self.snapshot.get(key).copied() {
+            for loc in self.index.get(key).copied() {
                 let op = self.log.read(*loc).await?;
                 match op {
                     Operation::Update(Update(k, value)) => {

@@ -244,10 +244,8 @@ mod tests {
             // Indexing finishes while journal I/O is parked; publication waits for both.
             let metrics = ctx.encode();
             assert!(
-                metrics
-                    .lines()
-                    .any(|line| line == "delayed_snapshot_items 33"),
-                "snapshot inserts must progress while the journal is pending"
+                metrics.lines().any(|line| line == "delayed_index_items 33"),
+                "index inserts must progress while the journal is pending"
             );
             assert!(metrics.lines().any(|line| line == "delayed_size 3"));
             assert_eq!(pending.completions(), completions_before);
@@ -592,6 +590,7 @@ mod tests {
         test_fixed_multi_key_batch_reads => run_multi_key_batch_reads, open;
         test_fixed_merkleize_across_prune => run_merkleize_across_prune, open;
         test_fixed_stale_fork_refuses => run_stale_fork_refuses, open;
+        test_fixed_snapshot => run_snapshot, open;
         test_fixed_descendant_apply_makes_parent_reads_stale =>
             run_descendant_apply_makes_parent_reads_stale, open;
         test_fixed_reads_ignore_inactive_operations => run_reads_ignore_inactive_operations, open;

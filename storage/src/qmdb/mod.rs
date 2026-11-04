@@ -80,37 +80,38 @@
 
 use crate::{
     index::{Cursor, Unordered as Index},
-    journal::{Error as JournalError, contiguous::Contiguous},
+    journal::{Error as JournalError, authenticated::Authenticated, contiguous::Contiguous},
     merkle::{
-        Bagging, Family, Location,
+        Bagging, Family, Location, Proof,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
     qmdb::operation::Floored,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
+use core::num::NonZeroU64;
 use thiserror::Error;
 
 pub mod any;
 pub(crate) mod bitmap;
 mod cache;
 pub mod chain;
-pub(crate) mod compact;
+pub mod compact;
 #[cfg(test)]
 mod conformance;
 pub mod current;
 pub mod floor;
 pub mod immutable;
+mod index_build;
 pub mod keyless;
 mod metrics;
 pub mod operation;
-mod snapshot;
 pub mod store;
 pub mod sync;
 pub mod verify;
 
-pub use snapshot::SnapshotBuild;
-pub(super) use snapshot::build_snapshot_from_log;
+pub use index_build::IndexBuild;
+pub(super) use index_build::build_index_from_log;
 pub use verify::{
     create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
     verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
@@ -157,7 +158,7 @@ fn validate_initialization_commit<F: Family>(
     Ok(Some(floor))
 }
 
-/// Check the selected commit before recovery discards history. Rebuilding a snapshot from its floor
+/// Check the selected commit before recovery discards history. Rebuilding an index from its floor
 /// additionally requires retaining that floor. Keyless only restores commit fields.
 pub(crate) async fn validate_initialization<F, E, C, H, S>(
     pending: &crate::journal::authenticated::Recovery<F, E, C, H, S>,
@@ -297,6 +298,11 @@ where
 }
 
 /// Compute the inactive peak count for a historical operation count.
+///
+/// # Errors
+///
+/// Returns [crate::merkle::Error::RangeOutOfBounds] if `op_count` exceeds the operations
+/// `reader` holds.
 pub(crate) async fn inactive_peaks_at<F, R>(
     reader: &R,
     op_count: Location<F>,
@@ -305,12 +311,45 @@ where
     F: Family,
     R: Contiguous<Item: Floored<F>>,
 {
+    if *op_count > reader.bounds().end {
+        return Err(crate::merkle::Error::RangeOutOfBounds(op_count).into());
+    }
     if op_count == Location::new(0) {
         return Ok(0);
     }
 
     let floor = find_inactivity_floor_at::<F, _>(reader, op_count).await?;
     Ok(F::inactive_peaks(op_count, floor))
+}
+
+/// Generate a proof of the operations starting at `start_loc` when the database had `op_count`
+/// operations.
+///
+/// # Errors
+///
+/// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `op_count`
+///   exceeds the operations `log` holds or `start_loc >= op_count` (so always for a zero
+///   `op_count`).
+/// - Returns [`Error::HistoricalFloorPruned`] if the operation at `op_count - 1` is not a commit.
+/// - Returns [`Error::DataCorrupted`] if that commit's floor lies past the commit.
+/// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
+///   with [`crate::merkle::Error::ElementPruned`] if a required operation or node was pruned.
+pub(crate) async fn historical_proof<F, C, M, H>(
+    log: &Authenticated<C, M, H>,
+    op_count: Location<F>,
+    start_loc: Location<F>,
+    max_ops: NonZeroU64,
+) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>>
+where
+    F: Family,
+    C: Contiguous<Item: Floored<F>>,
+    M: crate::merkle::storage::Storage<Family = F, Digest = H::Digest>,
+    H: Hasher,
+{
+    let inactive_peaks = inactive_peaks_at::<F, _>(&log.journal, op_count).await?;
+    Ok(log
+        .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
+        .await?)
 }
 
 /// Errors that can occur when interacting with an authenticated database.
@@ -344,7 +383,7 @@ pub enum Error<F: Family> {
     #[error("operation pruned: {0}")]
     OperationPruned(Location<F>),
 
-    /// The requested key was not found in the snapshot.
+    /// The requested key was not found in the index.
     #[error("key not found")]
     KeyNotFound,
 
@@ -430,19 +469,19 @@ impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
     }
 }
 
-/// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
+/// For the given `key` which is known to exist in the index with location `old_loc`, update
 /// its location to `new_loc`.
 ///
 /// # Panics
 ///
-/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
+/// Panics if `key` is not found in the index or if `old_loc` is not found in the cursor.
 fn update_known_loc<F: Family, I: Index<Value = Location<F>>>(
-    snapshot: &mut I,
+    index: &mut I,
     key: &[u8],
     old_loc: Location<F>,
     new_loc: Location<F>,
 ) {
-    let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
+    let mut cursor = index.get_mut(key).expect("key should be known to exist");
     assert!(
         cursor.find(|&loc| *loc == old_loc),
         "known key with given old_loc should have been found"
@@ -450,18 +489,18 @@ fn update_known_loc<F: Family, I: Index<Value = Location<F>>>(
     cursor.update(new_loc);
 }
 
-/// For the given `key` which is known to exist in the snapshot with location `old_loc`, delete
-/// it from the snapshot.
+/// For the given `key` which is known to exist in the index with location `old_loc`, delete
+/// it from the index.
 ///
 /// # Panics
 ///
-/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
+/// Panics if `key` is not found in the index or if `old_loc` is not found in the cursor.
 fn delete_known_loc<F: Family, I: Index<Value = Location<F>>>(
-    snapshot: &mut I,
+    index: &mut I,
     key: &[u8],
     old_loc: Location<F>,
 ) {
-    let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
+    let mut cursor = index.get_mut(key).expect("key should be known to exist");
     assert!(
         cursor.find(|&loc| *loc == old_loc),
         "known key with given old_loc should have been found"
