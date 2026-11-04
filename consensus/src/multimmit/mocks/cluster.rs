@@ -115,22 +115,33 @@ impl commonware_p2p::Blocker for ClusterBlocker {
     }
 }
 
+/// Forwards one engine's activity to a test callback until the engine crashes.
+///
+/// Every clone shares one callback slot, so detaching through the cluster's clone silences the
+/// clones the engine's tasks hold.
 #[derive(Clone)]
 struct ClusterReporter<S: Fixture> {
-    callback: Option<Arc<Mutex<ActivityCallback<S>>>>,
+    callback: Arc<Mutex<Option<ActivityCallback<S>>>>,
 }
 
 impl<S: Fixture> ClusterReporter<S> {
     fn attached(callback: ActivityCallback<S>) -> Self {
         Self {
-            callback: Some(Arc::new(Mutex::new(callback))),
+            callback: Arc::new(Mutex::new(Some(callback))),
         }
+    }
+
+    /// Drops the callback, so nothing the engine reports from now on reaches the test.
+    fn detach(&self) {
+        self.callback.lock().take();
     }
 }
 
 impl<S: Fixture> Default for ClusterReporter<S> {
     fn default() -> Self {
-        Self { callback: None }
+        Self {
+            callback: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
@@ -139,8 +150,9 @@ impl<S: Fixture> Reporter for ClusterReporter<S> {
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         self.callback
-            .as_ref()
-            .map_or(Feedback::Ok, |callback| callback.lock()(activity))
+            .lock()
+            .as_mut()
+            .map_or(Feedback::Ok, |callback| callback(activity))
     }
 }
 
@@ -346,11 +358,18 @@ struct RunningEngine<S: Fixture> {
     engine: Running<Sha256Digest>,
     proofs: resolver::Server<S, Sha256Digest>,
     flusher: voter::Flusher,
+    reporter: ClusterReporter<S>,
     storage_sync_task: Option<Handle<()>>,
 }
 
 impl<S: Fixture> RunningEngine<S> {
+    /// Stops the engine as of this call.
+    ///
+    /// Aborting the root task cancels the engine's other tasks only once the runtime polls the
+    /// root again, so they may still run before then. Detaching the reporter first keeps that
+    /// tail out of the activity a test observes.
     fn abort(&self) {
+        self.reporter.detach();
         self.engine.abort();
         if let Some(task) = &self.storage_sync_task {
             task.abort();
@@ -768,6 +787,7 @@ impl<S: Fixture> Cluster<S> {
             label,
             reporter,
         } = spec;
+        let reporter_handle = reporter.clone();
         self.ensure_slot(slot);
         let committee = Self::committee(&self.options, &self.producers);
         // Both halves of a twin share the signing participant's one network identity, which is
@@ -826,6 +846,7 @@ impl<S: Fixture> Cluster<S> {
         };
         match started {
             Ok(mut running) => {
+                running.reporter = reporter_handle;
                 running.storage_sync_task = storage_sync_task;
                 self.nodes[slot].engine = Some(running);
                 Launch::Started
@@ -868,6 +889,7 @@ impl<S: Fixture> Cluster<S> {
             engine: engine.start(planes),
             proofs,
             flusher,
+            reporter: ClusterReporter::default(),
             storage_sync_task: None,
         })
     }
@@ -902,8 +924,11 @@ impl<S: Fixture> Cluster<S> {
     }
 
     /// Crashes one engine uncleanly, leaving its durable partitions intact.
+    ///
+    /// The engine's reporter is detached before this first yields, so a caller's last observation
+    /// of the engine is final even though its tasks may run until the runtime reaps them.
+    /// Finality of the engines still running is recorded while this waits for that.
     pub async fn crash(&mut self, index: usize) {
-        self.observe_running_finality().await;
         let engine = self.nodes[index].engine.take().expect("engine is running");
 
         #[cfg(test)]
@@ -919,6 +944,7 @@ impl<S: Fixture> Cluster<S> {
         );
 
         engine.abort();
+        self.observe_running_finality().await;
         engine.join().await;
 
         #[cfg(test)]
@@ -1407,11 +1433,46 @@ pub async fn link_all_with(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cluster, ClusterOptions, Plane, engine_label};
-    use crate::multimmit::mocks::Bls;
+    use super::{Cluster, ClusterOptions, LaunchSpec, Plane, engine_label};
+    use crate::multimmit::mocks::{Bls, RecordingReporter};
     use commonware_cryptography::bls12381::primitives::variant::MinPk;
-    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_runtime::{Clock as _, Runner as _, deterministic};
     use std::time::Duration;
+
+    #[test]
+    fn crashed_engine_reports_nothing_after_the_crash() {
+        deterministic::Runner::timed(Duration::from_secs(60)).start(|context| async move {
+            let mut cluster =
+                Cluster::<Bls<MinPk>>::new(&context, ClusterOptions::new(74, 6)).await;
+            cluster.produce();
+            let reporters = (0..6)
+                .map(|_| RecordingReporter::default())
+                .collect::<Vec<_>>();
+            for (node, reporter) in reporters.iter().enumerate() {
+                cluster
+                    .launch(LaunchSpec::new(node).reporter(reporter.clone()))
+                    .await;
+            }
+            cluster.await_ready(&cluster.all_nodes()).await;
+
+            // Crash each node while the committee is busy: whatever an engine reports once the
+            // crash is requested comes from a process that no longer exists.
+            for node in (0..6).cycle().take(12) {
+                context.sleep(Duration::from_millis(50)).await;
+                let reported = reporters[node].len();
+                cluster.crash(node).await;
+                assert_eq!(
+                    reporters[node].len(),
+                    reported,
+                    "engine {node} reported activity after its crash"
+                );
+                cluster
+                    .launch(LaunchSpec::new(node).reporter(reporters[node].clone()))
+                    .await;
+                cluster.await_ready(&[node]).await;
+            }
+        });
+    }
 
     #[test]
     fn engine_labels_are_interned_per_slot_and_generation() {
