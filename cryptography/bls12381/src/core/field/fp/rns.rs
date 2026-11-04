@@ -68,7 +68,7 @@ use super::{BYTES, WORDS, bytes_from_words, limbs_from_words, words_from_bytes};
 use crate::{
     core::{
         debug_counter::DebugCounter,
-        field::arithmetic::{Field, Signed, TIGHT},
+        field::arithmetic::{Field, Signed, TIGHT, UNROLLED, unroll},
     },
     montgomery::subtract_modulus,
 };
@@ -122,6 +122,22 @@ const SUB_TERMS: u64 = 3 * SUM_PRODUCTS as u64 / 2;
 /// Raw products of factors summing at most two reduced values that a sum may hold.
 /// Subtraction biases must also fit the integer budget.
 const SUM_PRODUCTS: usize = 256;
+
+/// Most sums one call of [`Rns::reduce_interleaved`] accepts, as [`Field::INTERLEAVE`]: the
+/// components of an `Fp12` value.
+const BATCH: usize = UNROLLED;
+
+/// Most sums whose reductions one pass of [`Rns::reduce_interleaved`] interleaves.
+///
+/// Six sums hold twelve second-basis accumulators and six quotients during the conversion of their
+/// quotients, which leaves registers for the diagonals and rotations among the 32 vector registers.
+const PASS: usize = 6;
+
+/// Fewest sums in a pass whose high and low accumulators keep enough independent multiply-adds in
+/// flight; smaller passes split every accumulation into two chains, as [`Rns::mul`] does.
+const CHAINS: usize = 4;
+
+const _: () = assert!(BATCH <= 2 * PASS);
 
 /// The moduli of one basis and the constants of their residue reductions.
 pub(crate) struct Basis {
@@ -547,6 +563,20 @@ fn scalars<S: X86V4C>(simd: S, residues: S::U64) -> [u64; MODULI] {
     scalars
 }
 
+/// Calls `f` with each index from `start` to `end`, exclusive, below [`BATCH`], in order, as
+/// [`unroll`] does.
+#[inline(always)]
+fn each(start: usize, end: usize, mut f: impl FnMut(usize)) {
+    unroll::<BATCH>(
+        #[inline(always)]
+        |i| {
+            if start <= i && i < end {
+                f(i);
+            }
+        },
+    );
+}
+
 impl<S: X86V4C> Rns<S> {
     /// Returns every lane set to `element`.
     #[cfg(test)]
@@ -793,6 +823,188 @@ impl<S: X86V4C> Rns<S> {
     pub fn square(self, simd: S) -> Self {
         self.mul(simd, self)
     }
+
+    /// Returns the difference of a signed sum, as `Field::reduce_signed` subtracts it.
+    #[inline(always)]
+    fn difference<const K: u64>(simd: S, sum: Signed<Wide<S>>) -> Wide<S> {
+        let Some(neg) = sum.neg else {
+            return sum.pos;
+        };
+        <Self as Field<S>>::product_sub::<K>(simd, sum.pos, neg)
+    }
+
+    /// Returns `sums(0)`, ..., `sums(SUMS - 1)`, each within `BUDGET`, reduced to at most `REDUCED`
+    /// as `Field::reduce` does.
+    ///
+    /// A reduction is a chain of dependent steps, so this runs each step for every sum of a pass
+    /// before the next step, and the sums' chains overlap. More than [`PASS`] sums take two passes
+    /// of nearly equal sizes, and each pass forms its sums when it starts. The arithmetic, bounds,
+    /// and results are those of reducing each sum alone; only the order of the accumulations
+    /// differs.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn reduce_interleaved<const SUMS: usize>(
+        simd: S,
+        mut sums: impl FnMut(usize) -> Wide<S>,
+    ) -> [Self; SUMS] {
+        const { assert!(0 < SUMS && SUMS <= BATCH) };
+        let zero = simd.u64_splat(0);
+        let (mut m, mut n) = ([zero; SUMS], [zero; SUMS]);
+        let mut bounds = [DebugCounter::new(0); SUMS];
+        let half = if SUMS <= PASS { SUMS } else { SUMS.div_ceil(2) };
+        Self::reduce_pass(simd, 0, half, &mut sums, &mut m, &mut n, &mut bounds);
+        if half < SUMS {
+            Self::reduce_pass(simd, half, SUMS, &mut sums, &mut m, &mut n, &mut bounds);
+        }
+        let mut reduced = [Self {
+            m: m[0],
+            n: n[0],
+            bound: bounds[0],
+        }; SUMS];
+        unroll::<SUMS>(
+            #[inline(always)]
+            |i| {
+                reduced[i] = Self {
+                    m: m[i],
+                    n: n[i],
+                    bound: bounds[i],
+                };
+            },
+        );
+        reduced
+    }
+
+    /// Reduces the sums from `start` to `end`, exclusive, for [`Self::reduce_interleaved`], into
+    /// the residues `m` and `n` and the bounds `bounds` at the same indices.
+    ///
+    /// The steps are those of `Field::reduce`: the first-basis reduction and fold of every sum,
+    /// the eight diagonals of every quotient's conversion, the second-basis reduction and fold,
+    /// the quotient estimates of extension in scalar arithmetic, its eight broadcast rows and two
+    /// corrections, and the final first-basis reduction and fold. A pass of fewer than [`CHAINS`]
+    /// sums accumulates odd diagonals and rows separately, as [`Rns::mul`] does.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn reduce_pass<const SUMS: usize>(
+        simd: S,
+        start: usize,
+        end: usize,
+        sums: &mut impl FnMut(usize) -> Wide<S>,
+        m: &mut [S::U64; SUMS],
+        n: &mut [S::U64; SUMS],
+        bounds: &mut [DebugCounter; SUMS],
+    ) {
+        let split = end - start < CHAINS;
+        let zero = simd.u64_splat(0);
+        let mut quotients = [zero; BATCH];
+        let mut even = [(zero, zero); BATCH];
+        let mut odd = [(zero, zero); BATCH];
+
+        let (modulus, inverse) = (constant(simd, &M.moduli), constant(simd, &M.inverse));
+        let complement = constant(simd, &M.complement);
+        each(
+            start,
+            end,
+            #[inline(always)]
+            |i| {
+                let sum = sums(i);
+                sum.bound.assert_le(BUDGET);
+                let mut bound = sum.bound;
+                bound.div_ceil(M_OVER_P);
+                bound.add(DebugCounter::new(LIFT));
+                bound.assert_le(LIMIT);
+                bounds[i] = bound;
+                let reduced = reduce(simd, sum.m, modulus, inverse);
+                quotients[i] = fold(simd, reduced, complement);
+                even[i] = sum.n;
+            },
+        );
+
+        // Each diagonal is a separate inlined call with a constant rotation.
+        macro_rules! diagonals {
+            ($($even:literal $odd:literal)*) => {$(
+                each(start, end, #[inline(always)] |i| {
+                    even[i] = Self::diagonal::<$even>(simd, quotients[i], even[i]);
+                });
+                each(start, end, #[inline(always)] |i| {
+                    let chain = if split { &mut odd[i] } else { &mut even[i] };
+                    *chain = Self::diagonal::<$odd>(simd, quotients[i], *chain);
+                });
+            )*};
+        }
+        const { assert!(MODULI == 8) };
+        diagonals!(0 1 2 3 4 5 6 7);
+
+        let (modulus, inverse) = (constant(simd, &N.moduli), constant(simd, &N.inverse));
+        let complement = constant(simd, &N.complement);
+        each(
+            start,
+            end,
+            #[inline(always)]
+            |i| {
+                let reduced = reduce(simd, add_wide(simd, even[i], odd[i]), modulus, inverse);
+                n[i] = fold(simd, reduced, complement);
+            },
+        );
+
+        let mut residues = [[0; MODULI]; BATCH];
+        let mut estimates = [0; BATCH];
+        each(
+            start,
+            end,
+            #[inline(always)]
+            |i| {
+                residues[i] = scalars(simd, n[i]);
+                estimates[i] = quotient(&residues[i], &EXPAND.fraction);
+                even[i] = (zero, zero);
+                odd[i] = (zero, zero);
+            },
+        );
+        macro_rules! rows {
+            ($($row:literal)*) => {$(
+                let weights = constant(simd, &EXPAND.matrix[$row]);
+                each(start, end, #[inline(always)] |i| {
+                    let chain = if split && $row % 2 == 1 { &mut odd[i] } else { &mut even[i] };
+                    *chain = madd(simd, *chain, simd.u64_splat(residues[i][$row]), weights);
+                });
+            )*};
+        }
+        rows!(0 1 2 3 4 5 6 7);
+        let correction = constant(simd, &EXPAND.correction);
+        each(
+            start,
+            end,
+            #[inline(always)]
+            |i| {
+                let digit = simd.u64_splat(estimates[i] & MASK);
+                even[i] = madd(simd, even[i], digit, correction);
+            },
+        );
+        let correction = constant(simd, &EXPAND.correction_shift);
+        each(
+            start,
+            end,
+            #[inline(always)]
+            |i| {
+                let chain = if split { &mut odd[i] } else { &mut even[i] };
+                *chain = madd(
+                    simd,
+                    *chain,
+                    simd.u64_splat(estimates[i] >> WORD),
+                    correction,
+                );
+            },
+        );
+
+        let (modulus, inverse) = (constant(simd, &M.moduli), constant(simd, &M.inverse));
+        let complement = constant(simd, &M.complement);
+        each(
+            start,
+            end,
+            #[inline(always)]
+            |i| {
+                let reduced = reduce(simd, add_wide(simd, even[i], odd[i]), modulus, inverse);
+                m[i] = fold(simd, reduced, complement);
+            },
+        );
+    }
 }
 
 /// An unreduced sum of products of [`Rns`] values, as `(high, low)` accumulators in both bases.
@@ -860,6 +1072,8 @@ impl<S: X86V4C> Field<S> for Rns<S> {
     type Product = Wide<S>;
 
     const PRODUCTS: usize = SUM_PRODUCTS;
+
+    const INTERLEAVE: usize = BATCH;
 
     /// Runs inline: a multiplication is about 200 instructions, and the calling kernel keeps the
     /// operands in registers rather than passing them through memory.
@@ -1019,6 +1233,36 @@ impl<S: X86V4C> Field<S> for Rns<S> {
     fn reduce_tight(simd: S, product: Wide<S>) -> Self {
         const { assert!(REDUCED <= TIGHT) };
         Self::reduce(simd, product)
+    }
+
+    /// Interleaves the reductions through [`Rns::reduce_interleaved`].
+    #[inline(always)]
+    fn reduce_each<const SUMS: usize>(simd: S, sums: impl FnMut(usize) -> Wide<S>) -> [Self; SUMS] {
+        Self::reduce_interleaved(simd, sums)
+    }
+
+    /// Interleaves the reductions through [`Rns::reduce_interleaved`]. The subtraction bias of
+    /// wide sums is fixed, so `K` only passes through.
+    #[inline(always)]
+    fn reduce_each_signed<const SUMS: usize, const K: u64>(
+        simd: S,
+        mut sums: impl FnMut(usize) -> Signed<Wide<S>>,
+    ) -> [Self; SUMS] {
+        Self::reduce_interleaved(
+            simd,
+            #[inline(always)]
+            |i| Self::difference::<K>(simd, sums(i)),
+        )
+    }
+
+    /// Every reduction already returns at most `REDUCED`, so this is [`Field::reduce_each_signed`].
+    #[inline(always)]
+    fn reduce_each_signed_tight<const SUMS: usize, const K: u64>(
+        simd: S,
+        sums: impl FnMut(usize) -> Signed<Wide<S>>,
+    ) -> [Self; SUMS] {
+        const { assert!(REDUCED <= TIGHT) };
+        <Self as Field<S>>::reduce_each_signed::<SUMS, K>(simd, sums)
     }
 
     /// Multiplies with [`Rns::mul`], whose single product needs no quotient fold.
@@ -1617,6 +1861,78 @@ mod tests {
     #[test]
     fn lazy_products_match_reference() {
         lazy_products(EmulatedX86V4C);
+    }
+
+    /// Reduces the first `N` sums together, checking that each result has the residues of its
+    /// single reduction and that the sums are formed once each, in order.
+    fn reduce_together<const N: usize, S: X86V4C>(simd: S, sums: &[Signed<Wide<S>>]) {
+        let mut formed = Vec::new();
+        let reduced = Rns::reduce_each_signed::<N, 64>(simd, |i| {
+            formed.push(i);
+            sums[i]
+        });
+        assert_eq!(formed, (0..N).collect::<Vec<_>>());
+        for (value, sum) in reduced.into_iter().zip(sums) {
+            let single = Rns::reduce_signed::<64>(simd, *sum);
+            value.bound.assert_le(REDUCED);
+            assert_eq!(
+                value.to_residues(simd, LIMIT),
+                single.to_residues(simd, LIMIT)
+            );
+        }
+        let tight = Rns::reduce_each_signed_tight::<N, 64>(simd, |i| sums[i]);
+        let positive = Rns::reduce_each::<N>(simd, |i| sums[i].pos);
+        for ((tight, positive), sum) in tight.into_iter().zip(positive).zip(sums) {
+            let single = Rns::reduce_signed::<64>(simd, *sum);
+            assert_eq!(
+                tight.to_residues(simd, LIMIT),
+                single.to_residues(simd, LIMIT)
+            );
+            let single = Rns::reduce(simd, sum.pos);
+            assert_eq!(
+                positive.to_residues(simd, LIMIT),
+                single.to_residues(simd, LIMIT)
+            );
+        }
+    }
+
+    /// Reduces sums together in passes of every size on one backend.
+    fn interleaved_reductions<S: X86V4C>(simd: S) {
+        let largest = largest();
+        minifuzz::test(|u| {
+            let mode: u8 = u.arbitrary()?;
+            let mut sums = Vec::new();
+            for k in 0..BATCH as u32 {
+                let [a, b, c] = [
+                    element(u, largest)?,
+                    element(u, largest)?,
+                    element(u, largest)?,
+                ];
+                let va = loose(simd, a, REDUCED, mode.rotate_left(k));
+                let vb = loose(simd, b, REDUCED, mode.rotate_left(k + 2));
+                let vc = loose(simd, c, LIMIT, mode.rotate_left(k + 4));
+                // Alternate sums with and without a negative sum.
+                let neg = (k % 2 == 1).then(|| vc.lift(simd));
+                sums.push(Signed {
+                    pos: va.product(simd, vb),
+                    neg,
+                });
+            }
+            reduce_together::<1, S>(simd, &sums);
+            reduce_together::<2, S>(simd, &sums);
+            reduce_together::<3, S>(simd, &sums);
+            reduce_together::<4, S>(simd, &sums);
+            reduce_together::<5, S>(simd, &sums);
+            reduce_together::<6, S>(simd, &sums);
+            reduce_together::<7, S>(simd, &sums);
+            reduce_together::<12, S>(simd, &sums);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn interleaved_reductions_match_single_reductions() {
+        interleaved_reductions(EmulatedX86V4C);
     }
 
     /// Fills the integer and term budgets with residues at their largest on one backend.

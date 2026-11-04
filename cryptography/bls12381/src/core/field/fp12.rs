@@ -343,18 +343,18 @@ impl<F> Fp12<F> {
                 let (real14, imaginary14) = square_pair::<S, F>(simd, a1, a4);
                 let (real25, imaginary25) = square_pair::<S, F>(simd, a2, a5);
                 let imaginary25 = Fp2::<F>::product_mul_by_nonresidue(simd, imaginary25);
-                Self {
-                    c0: Fp6 {
-                        c0: three_times::<S, F, false>(simd, real03, a0),
-                        c1: three_times::<S, F, false>(simd, real14, a2),
-                        c2: three_times::<S, F, false>(simd, real25, a4),
+                from_coefficients(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
+                    simd,
+                    #[inline(always)]
+                    |k| match k {
+                        0 => three_times::<S, F, false>(simd, real03, a0),
+                        1 => three_times::<S, F, false>(simd, real14, a2),
+                        2 => three_times::<S, F, false>(simd, real25, a4),
+                        3 => three_times::<S, F, true>(simd, imaginary25, a1),
+                        4 => three_times::<S, F, true>(simd, imaginary03, a3),
+                        _ => three_times::<S, F, true>(simd, imaginary14, a5),
                     },
-                    c1: Fp6 {
-                        c0: three_times::<S, F, true>(simd, imaginary25, a1),
-                        c1: three_times::<S, F, true>(simd, imaginary03, a3),
-                        c2: three_times::<S, F, true>(simd, imaginary14, a5),
-                    },
-                }
+                ))
             },
         )
     }
@@ -511,9 +511,28 @@ fn combine<S: Simd, F: Field<S>>(
     let sum = Fp6::<F>::carry_product(simd, sum);
     let c0 = Fp6::<F>::accumulate(simd, t0, Fp6::<F>::product_mul_by_nonresidue(simd, t1));
     let c1 = Fp6::<F>::product_sub(simd, Fp6::<F>::product_sub(simd, sum, t0), t1);
+    let products = [c0.c0, c0.c1, c0.c2, c1.c0, c1.c1, c1.c2];
+    from_coefficients(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
+        simd,
+        #[inline(always)]
+        |k| products[k],
+    ))
+}
+
+/// Returns the element with the coefficients of `1`, `v`, and `v^2` in `c0`, then in `c1`.
+#[inline(always)]
+fn from_coefficients<T>([c00, c01, c02, c10, c11, c12]: [Fp2<T>; 6]) -> Fp12<T> {
     Fp12 {
-        c0: Fp6::<F>::reduce_tight::<BIAS, S>(simd, c0),
-        c1: Fp6::<F>::reduce_tight::<BIAS, S>(simd, c1),
+        c0: Fp6 {
+            c0: c00,
+            c1: c01,
+            c2: c02,
+        },
+        c1: Fp6 {
+            c0: c10,
+            c1: c11,
+            c2: c12,
+        },
     }
 }
 
@@ -541,21 +560,21 @@ fn square_pair<S: Simd, F: Field<S>>(
     )
 }
 
-/// Returns `3 part + 2 a` when `ADD` is set and `3 part - 2 a` otherwise, reduced tightly.
+/// Returns `3 part + 2 a` when `ADD` is set and `3 part - 2 a` otherwise, as a product to
+/// reduce tightly.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn three_times<S: Simd, F: Field<S>, const ADD: bool>(
     simd: S,
     part: super::fp2::Product<F, S>,
     a: Fp2<F>,
-) -> Fp2<F> {
+) -> super::fp2::Product<F, S> {
     let tripled = Fp2::<F>::accumulate(simd, part, Fp2::<F>::accumulate(simd, part, part));
     let doubled = a.double(simd).lift(simd);
-    let sum = if ADD {
+    if ADD {
         Fp2::<F>::accumulate(simd, tripled, doubled)
     } else {
         Fp2::<F>::product_sub(simd, tripled, doubled)
-    };
-    Fp2::<F>::reduce_tight::<BIAS, S>(simd, sum)
+    }
 }
 
 /// Splits an element's encoding into its `c1` and `c0` encodings.
