@@ -1,7 +1,7 @@
 //! Shape checks of a floor checkpoint against the ordering state it replaces.
 
-use super::order::{self, HistoryState};
 use crate::multimmit::{
+    order::{self, HistoryState},
     scheme::Scheme,
     types::{BlockRef, CodecConfig, Frontier, Lqc, TipRecord},
 };
