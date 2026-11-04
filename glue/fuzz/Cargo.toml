@@ -48,7 +48,7 @@ commonware-cryptography = { workspace = true, features = ["mocks"] }
 commonware-glue.workspace = true
 commonware-macros.workspace = true
 commonware-p2p = { workspace = true, features = ["mocks"] }
-commonware-parallel.workspace = true
+commonware-parallel = { workspace = true, features = ["test-utils"] }
 commonware-resolver = { workspace = true, features = ["mocks"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-storage.workspace = true
@@ -111,6 +111,13 @@ bench = false
 name = "stateful_probe"
 path = "fuzz_targets/stateful_probe.rs"
 required-features = [ "stateful-probe" ]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transfers_invariants"
+path = "fuzz_targets/transfers_invariants.rs"
 test = false
 doc = false
 bench = false
