@@ -295,7 +295,7 @@ mod tests {
     };
     use arbitrary::Unstructured;
     use commonware_simd::{
-        Operation,
+        Operation, X86V4C,
         emulated::{EmulatedNeon, EmulatedScalar, EmulatedX86V4C},
         test_dispatch,
     };
@@ -415,20 +415,31 @@ mod tests {
     struct Pairings<'a>(&'a [Lane], usize);
 
     impl<S: Simd> Operation<S> for Pairings<'_> {
-        type Output = [Vec<[u8; BYTES]>; 3];
+        type Output = [Vec<[u8; BYTES]>; 2];
 
         fn portable(self, simd: S) -> Self::Output {
             simd.execute(|simd: S| {
                 [
                     pairings::<S, Unsat49<S>>(simd, self.0),
                     pairings::<S, Unsat28<S>>(simd, self.0),
-                    pairings::<S, Rns<S>>(simd, &self.0[..self.1]),
                 ]
             })
         }
+
+        // Residues require x86v4c and must match the other representations.
+        fn x86_v4c(self, simd: S) -> Self::Output
+        where
+            S: X86V4C,
+        {
+            let lanes = &self.0[..self.1];
+            let outputs = self.portable(simd);
+            let residues = simd.execute(|simd: S| pairings::<S, Rns<S>>(simd, lanes));
+            assert!(residues == outputs[0][..lanes.len()], "residues differ");
+            outputs
+        }
     }
 
-    fn check(lanes: &[Lane], outputs: [Vec<[u8; BYTES]>; 3]) {
+    fn check(lanes: &[Lane], outputs: [Vec<[u8; BYTES]>; 2]) {
         for (representation, output) in outputs.iter().enumerate() {
             for (k, (output, lane)) in output.iter().zip(lanes).enumerate() {
                 assert!(
@@ -447,7 +458,7 @@ mod tests {
         check(&lanes, test_dispatch(Pairings(&lanes, 2)));
         // Run every representation and vector width even on hosts without native SIMD.
         check(&lanes, Pairings(&lanes, 1).portable(EmulatedNeon));
-        check(&lanes, Pairings(&lanes, 1).portable(EmulatedX86V4C));
+        check(&lanes, EmulatedX86V4C.execute(Pairings(&lanes, 2)));
     }
 
     #[test]
@@ -457,7 +468,7 @@ mod tests {
             .map(|seed| lane(seed, PAIRS, true))
             .collect();
         check(&lanes, test_dispatch(Pairings(&lanes, 1)));
-        check(&lanes, Pairings(&lanes, 1).portable(EmulatedX86V4C));
+        check(&lanes, EmulatedX86V4C.execute(Pairings(&lanes, 1)));
     }
 
     /// Checks that `e(a P, Q) e(-P, a Q)` is one across the lanes, and that a perturbed product is not.
@@ -564,6 +575,8 @@ mod tests {
         EmulatedScalar.execute(|simd: EmulatedScalar| {
             assert!(exponentiate::<_, Unsat49<_>>(simd, &elements) == expected);
             assert!(exponentiate::<_, Unsat28<_>>(simd, &elements) == expected);
+        });
+        EmulatedX86V4C.execute(|simd: EmulatedX86V4C| {
             assert!(exponentiate::<_, Rns<_>>(simd, &elements) == expected);
         });
     }
@@ -594,7 +607,7 @@ mod tests {
         EmulatedScalar.execute(|simd: EmulatedScalar| {
             check_steps::<_, Unsat49<_>>(simd);
             check_steps::<_, Unsat28<_>>(simd);
-            check_steps::<_, Rns<_>>(simd);
         });
+        EmulatedX86V4C.execute(|simd: EmulatedX86V4C| check_steps::<_, Rns<_>>(simd));
     }
 }

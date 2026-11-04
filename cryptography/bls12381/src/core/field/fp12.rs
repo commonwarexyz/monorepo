@@ -559,7 +559,7 @@ pub(crate) mod tests {
     };
     use arbitrary::Unstructured;
     use commonware_simd::{
-        Operation, check_consistent,
+        Operation, X86V4C, check_consistent,
         emulated::{EmulatedNeon, EmulatedScalar, EmulatedX86V4C},
         test_dispatch,
     };
@@ -933,20 +933,31 @@ pub(crate) mod tests {
         outputs
     }
 
-    /// Runs [`evaluate`] in every representation.
+    /// Runs [`evaluate`] in every representation, returning the positional ones' outputs.
     struct Evaluate<'a>(&'a [Inputs]);
 
     impl<S: Simd> Operation<S> for Evaluate<'_> {
-        type Output = [Vec<[[u8; BYTES]; OUTPUTS]>; 3];
+        type Output = [Vec<[[u8; BYTES]; OUTPUTS]>; 2];
 
         fn portable(self, simd: S) -> Self::Output {
             simd.execute(|simd: S| {
                 [
                     evaluate::<S, Unsat49<S>>(simd, self.0),
                     evaluate::<S, Unsat28<S>>(simd, self.0),
-                    evaluate::<S, Rns<S>>(simd, self.0),
                 ]
             })
+        }
+
+        // Residues require x86v4c and must match the other representations.
+        fn x86_v4c(self, simd: S) -> Self::Output
+        where
+            S: X86V4C,
+        {
+            let inputs = self.0;
+            let outputs = self.portable(simd);
+            let residues = simd.execute(|simd: S| evaluate::<S, Rns<S>>(simd, inputs));
+            assert!(residues == outputs[0], "residues differ");
+            outputs
         }
     }
 
@@ -978,7 +989,7 @@ pub(crate) mod tests {
         inputs[1].a = ONE;
         inputs[2].b = ONE;
         let expected: Vec<_> = inputs.iter().map(expected).collect();
-        let check = |outputs: [Vec<[[u8; BYTES]; OUTPUTS]>; 3]| {
+        let check = |outputs: [Vec<[[u8; BYTES]; OUTPUTS]>; 2]| {
             for (representation, output) in outputs.iter().enumerate() {
                 for (lane, (output, expected)) in output.iter().zip(&expected).enumerate() {
                     for k in 0..OUTPUTS {
@@ -994,7 +1005,7 @@ pub(crate) mod tests {
         // Run every representation and vector width even on hosts without native SIMD.
         check(Evaluate(&inputs).portable(EmulatedScalar));
         check(Evaluate(&inputs).portable(EmulatedNeon));
-        check(Evaluate(&inputs).portable(EmulatedX86V4C));
+        check(EmulatedX86V4C.execute(Evaluate(&inputs)));
         check_consistent(|| Evaluate(&inputs[..4]));
     }
 
