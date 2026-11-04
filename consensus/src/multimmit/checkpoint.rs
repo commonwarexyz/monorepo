@@ -23,10 +23,8 @@
 //!
 //! # Caveats
 //!
-//! Aggregation signatures do not cover the epoch, so a checkpoint certificate verifies under
-//! every epoch that shares its nullification identity. A reshare keeps that identity, so this is
-//! every epoch of the deployment. A consumer derives the expected epoch and position range from
-//! authenticated history and checks them with
+//! Aggregation signatures cover the epoch, including when a reshare keeps the nullification
+//! identity. A consumer derives the expected scope from authenticated history and checks it with
 //! [`Certificate::verify_for`](crate::aggregation::types::Certificate::verify_for).
 //!
 //! Because a quorum is only `2f + 1`, a bug that makes `f + 1` honest validators compute the
@@ -53,7 +51,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        aggregation::types::{Ack, Certificate},
+        aggregation::types::{Ack, Certificate, Scope},
         multimmit::{mocks::Committee, types::PathLimits},
         types::{Epoch, Height},
     };
@@ -73,6 +71,7 @@ mod tests {
             .map(|signer| signer.checkpoint(NAMESPACE))
             .collect::<Vec<_>>();
         let item = Item {
+            epoch: Epoch::zero(),
             position: Height::new(9),
             digest: Sha256::hash(&[b"state root"]),
         };
@@ -85,45 +84,21 @@ mod tests {
         let quorum = N5f1Nullification::quorum(schemes.len()) as usize;
         assert_eq!(quorum, 3);
         let below = &acks[..quorum - 1];
-        assert!(
-            Certificate::from_acks(&schemes[0], Epoch::zero(), non_empty![@below], &Sequential)
-                .is_err()
-        );
+        assert!(Certificate::from_acks(&schemes[0], non_empty![@below], &Sequential).is_err());
         let quorum = &acks[..quorum];
         let certificate =
-            Certificate::from_acks(&schemes[0], Epoch::zero(), non_empty![@quorum], &Sequential)
-                .unwrap();
+            Certificate::from_acks(&schemes[0], non_empty![@quorum], &Sequential).unwrap();
 
         // A full verifier checks shares, and anyone with the nullification identity checks the
         // certificate, but only under the same namespace.
         let verifier = committee.verifier.checkpoint(NAMESPACE);
+        let scope = Scope::new(Epoch::zero(), Height::zero(), Height::new(100)).unwrap();
         assert!(acks[0].verify(&mut test_rng(), &verifier, &Sequential));
-        assert!(certificate.verify_for(
-            &mut test_rng(),
-            &verifier,
-            Epoch::zero(),
-            Height::zero(),
-            Height::new(100),
-            &Sequential
-        ));
+        assert!(certificate.verify_for(&mut test_rng(), &verifier, scope, &Sequential));
         let identity = *committee.verifier.nullification_identity();
         let observer = Scheme::<_, MinPk>::certificate_verifier(NAMESPACE, identity);
-        assert!(certificate.verify_for(
-            &mut test_rng(),
-            &observer,
-            Epoch::zero(),
-            Height::zero(),
-            Height::new(100),
-            &Sequential
-        ));
+        assert!(certificate.verify_for(&mut test_rng(), &observer, scope, &Sequential));
         let other = Scheme::<_, MinPk>::certificate_verifier(b"other", identity);
-        assert!(!certificate.verify_for(
-            &mut test_rng(),
-            &other,
-            Epoch::zero(),
-            Height::zero(),
-            Height::new(100),
-            &Sequential
-        ));
+        assert!(!certificate.verify_for(&mut test_rng(), &other, scope, &Sequential));
     }
 }

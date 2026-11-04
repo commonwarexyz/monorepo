@@ -1,6 +1,6 @@
 ["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<Ack<Scheme,Sha256Digest>>"]
 n_cases = 65536
-hash = "403e866144f11c0af693b1009b1e525f0352603baca0fe5dad529f1c1b8f900a"
+hash = "0cfbd96bb6035cf22b19ff72c8d2ac2d883809952befaff668aedcb43589a47f"
 
 ["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<Certificate<Scheme,Sha256Digest>>"]
 n_cases = 65536
@@ -8,7 +8,7 @@ hash = "1cc057914de5688dec8228c0ba788b74f00f2e6d11c5371eeedf0c025b330a73"
 
 ["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<Item<Sha256Digest>>"]
 n_cases = 65536
-hash = "55b287b5530fc9ba77c45ec5030ada38f86b2ddf66a1595fde27d4699667b1a3"
+hash = "23a08d0987ed7ba7f57c7c36fce7b223a9bb0177c144b40cf07b80bd1008cfbb"
 
 ["commonware_consensus::aggregation::types::tests::conformance::CodecConformance<RecoveryKey>"]
 n_cases = 65536
