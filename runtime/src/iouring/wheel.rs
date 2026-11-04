@@ -323,7 +323,8 @@ impl<const RES: u64> Wheel<RES> {
     /// one unit of `budget` per slot fired or refiled. Due slots go first,
     /// then the detached bucket, then buckets in time order. A pass that runs
     /// out of budget leaves the rest for the next one, and [`Self::bound`] then
-    /// stays at or below `now` while any reached slot is due.
+    /// stays at or below `now` while any reached slot is due, and possibly
+    /// while only reached slots to refile remain (see [`Self::bound`]).
     pub fn expire(&mut self, now: u64, budget: &mut u32, fire: &mut impl FnMut(u32)) {
         // An older time is treated as the base, which never exceeds a time an
         // earlier caller passed.
@@ -381,7 +382,13 @@ impl<const RES: u64> Wheel<RES> {
 
     /// A time never later than the earliest resident's firing time, `u64::MAX`
     /// when empty. It is exact unless the slots holding a bucket's minimum
-    /// were removed, and it never walks a bucket.
+    /// were removed, and it never walks a bucket. A detached bucket keeps the
+    /// minimum it had when expiry reached it while slots leave it, fired,
+    /// removed or refiled, so after a pass that runs out of budget in that
+    /// bucket, the bound can stay at or below the pass's time while only
+    /// later slots to refile remain, for the few passes until it is drained.
+    /// A bound at or below the time of the latest pass therefore does not
+    /// strictly mean that a slot is due.
     pub fn bound(&self) -> u64 {
         let mut tick = u64::MAX;
         if self.buckets[DUE].head != NIL {

@@ -63,8 +63,14 @@ impl Deadlines {
     /// Install the deadline of the waiter `id`, whose slot must not be resident.
     pub fn insert(&mut self, id: WaiterId, deadline: Instant) {
         let slot = id.0.index;
-        self.wheel.insert(slot, self.nanos(deadline));
-        self.next = Some(self.next.map_or(deadline, |next| next.min(deadline)));
+        let nanos = self.nanos(deadline);
+        self.wheel.insert(slot, nanos);
+
+        // The bound is the firing time rather than the deadline, so a worker
+        // parked on it wakes when the deadline fires, not up to a tick early.
+        let fires = Duration::from_nanos(Wheel::<RES>::rounded(nanos));
+        let fires = self.epoch.checked_add(fires).unwrap_or(deadline);
+        self.next = Some(self.next.map_or(fires, |next| next.min(fires)));
         let index = slot as usize;
         if index >= self.generations.len() {
             self.generations.resize(index + 1, 0);
@@ -118,8 +124,8 @@ impl Deadlines {
     }
 
     /// A conservative bound on the earliest firing time, or `None` when empty.
-    /// New deadlines use their unrounded time. Removing a deadline can leave
-    /// an early bound until the next expiry pass refreshes it.
+    /// New deadlines lower it to their firing time. Removing a deadline can
+    /// leave an early bound until the next expiry pass refreshes it.
     pub const fn next_deadline(&self) -> Option<Instant> {
         self.next
     }
@@ -181,22 +187,66 @@ mod tests {
         deadlines.insert(id(0, 0), first);
         deadlines.insert(id(1, 0), second);
         deadlines.remove(id(0, 0));
+
+        // The removed deadline's firing time stays cached, early, until a
+        // pass at it refreshes the bound to the survivor's firing time.
         let first = deadlines.fires_at(first);
-        assert!(deadlines.next_deadline().unwrap() <= first);
+        assert_eq!(deadlines.next_deadline(), Some(first));
         assert!(expire(&mut deadlines, first - Duration::from_nanos(1)).is_empty());
         assert!(expire(&mut deadlines, first).is_empty());
         assert_eq!(deadlines.next_deadline(), Some(deadlines.fires_at(second)));
-        let earlier = first + Duration::from_nanos(RES);
+
+        // An earlier insertion between ticks lowers the bound to its firing
+        // time, the next tick, and fires then.
+        let earlier = first + Duration::from_nanos(1);
         deadlines.insert(id(0, 1), earlier);
-        assert_eq!(deadlines.next_deadline(), Some(earlier));
-        assert_eq!(expire(&mut deadlines, earlier), [id(0, 1)]);
+        let fires = deadlines.fires_at(earlier);
+        assert_eq!(fires, first + Duration::from_nanos(RES));
+        assert_eq!(deadlines.next_deadline(), Some(fires));
+        assert!(expire(&mut deadlines, fires - Duration::from_nanos(1)).is_empty());
+        assert_eq!(expire(&mut deadlines, fires), [id(0, 1)]);
+
+        // Removing the last deadline clears the bound, and one installed
+        // after a long idle period caches its own firing time.
         deadlines.remove(id(1, 0));
         assert_eq!(deadlines.next_deadline(), None);
         let after_idle = epoch + Duration::from_secs(3600);
         assert!(expire(&mut deadlines, after_idle).is_empty());
         deadlines.insert(id(1, 1), after_idle);
         let fires = deadlines.fires_at(after_idle);
+        assert_eq!(deadlines.next_deadline(), Some(fires));
         assert_eq!(expire(&mut deadlines, fires), [id(1, 1)]);
+    }
+
+    #[test]
+    fn test_cached_bound_is_the_firing_time() {
+        let epoch = Instant::now();
+        let mut deadlines = Deadlines::new(epoch);
+
+        // A deadline just past a tick fires at the next one, which the bound
+        // caches, so a worker parked on the bound wakes once, when it fires.
+        let deadline = epoch + Duration::from_nanos(RES + 1);
+        deadlines.insert(id(0, 0), deadline);
+        let fires = epoch + Duration::from_nanos(2 * RES);
+        assert_eq!(deadlines.fires_at(deadline), fires);
+        assert_eq!(deadlines.next_deadline(), Some(fires));
+
+        // A later deadline leaves the bound, and one on a tick caches itself.
+        deadlines.insert(id(1, 0), fires + Duration::from_nanos(1));
+        assert_eq!(deadlines.next_deadline(), Some(fires));
+        let aligned = epoch + Duration::from_nanos(RES);
+        deadlines.insert(id(2, 0), aligned);
+        assert_eq!(deadlines.next_deadline(), Some(aligned));
+
+        // Each pass fires the deadlines due by its time and caches the next
+        // firing time, never a deadline.
+        assert_eq!(expire(&mut deadlines, aligned), [id(2, 0)]);
+        assert_eq!(deadlines.next_deadline(), Some(fires));
+        assert_eq!(expire(&mut deadlines, fires), [id(0, 0)]);
+        assert_eq!(
+            deadlines.next_deadline(),
+            Some(epoch + Duration::from_nanos(3 * RES))
+        );
     }
 
     #[test]
