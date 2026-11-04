@@ -111,6 +111,15 @@
 //! point operations, a coordinate contract can bound the inputs and show that the outputs satisfy
 //! the same contract. This does not require canonical coordinates between operations.
 //!
+//! # Several reductions
+//!
+//! [`Field::reduce_each`], [`Field::reduce_each_signed`], and [`Field::reduce_each_signed_tight`]
+//! reduce `N` sums that a closure forms by index, each under the rules of [`Field::reduce`],
+//! [`Field::reduce_signed`], or [`Field::reduce_signed_tight`]. The defaults reduce each sum right
+//! after forming it. [`Rns`] reductions are long dependency chains, so it runs each step of the
+//! reduction for several sums before the next, which overlaps their chains; formulas pass it up to
+//! [`Field::INTERLEAVE`] sums at once.
+//!
 //! [`Unsat49`]: super::fp::unsat49::Unsat49
 //! [`Unsat28`]: super::fp::unsat28::Unsat28
 //! [`Rns`]: super::fp::rns::Rns
@@ -122,6 +131,27 @@ use commonware_simd::{Operation, Simd};
 /// Largest integer bound of a value returned by [`Field::reduce_tight`] in any representation, in
 /// units of `p`.
 pub const TIGHT: u64 = 17;
+
+/// Most indices [`unroll`] calls: the components of an `Fp12` value.
+pub(crate) const UNROLLED: usize = 12;
+
+/// Calls `f` with each index below `N`, in order.
+///
+/// The calls are straight-line code rather than a loop, so every call sees a constant index:
+/// arrays indexed by it stay in registers, and a closure that matches on it runs one arm, however
+/// large the inlined body of `f`.
+#[inline(always)]
+pub(crate) fn unroll<const N: usize>(mut f: impl FnMut(usize)) {
+    const { assert!(N <= UNROLLED) };
+    macro_rules! calls {
+        ($($i:literal)*) => {$(
+            if $i < N {
+                f($i);
+            }
+        )*};
+    }
+    calls!(0 1 2 3 4 5 6 7 8 9 10 11);
+}
 
 /// A sum of products less another, subtracted only when reduced.
 ///
@@ -165,6 +195,14 @@ pub trait Field<S: Simd>: Copy {
         )
     )]
     const PRODUCTS: usize;
+
+    /// Most sums whose reductions one call of [`Self::reduce_each`] or its variants interleaves,
+    /// at most [`UNROLLED`].
+    ///
+    /// The defaults reduce one sum after another. Extension formulas reduce every coefficient of a
+    /// result in one call only when this covers all their components, and otherwise reduce each
+    /// coefficient in its own kernel.
+    const INTERLEAVE: usize = 1;
 
     /// Loads up to [`Self::LANES`] big-endian integers, filling the remaining lanes with `fill`.
     ///
@@ -370,6 +408,74 @@ pub trait Field<S: Simd>: Copy {
             return Self::reduce_tight(simd, sum.pos);
         };
         Self::reduce_tight(simd, Self::product_sub::<K>(simd, sum.pos, neg))
+    }
+
+    /// Returns `sums(0)`, ..., `sums(N - 1)`, each reduced as [`Self::reduce`] does.
+    ///
+    /// Calls `sums` once for each index, in increasing order, so that it may form the sums as
+    /// they are requested. The default reduces each sum right after forming it; representations
+    /// whose reductions are long dependency chains form several sums first and interleave their
+    /// reductions, as [`Self::INTERLEAVE`] documents.
+    #[inline(always)]
+    fn reduce_each<const N: usize>(
+        simd: S,
+        mut sums: impl FnMut(usize) -> Self::Product,
+    ) -> [Self; N] {
+        const { assert!(N > 0) };
+        let mut reduced = [Self::reduce(simd, sums(0)); N];
+        unroll::<N>(
+            #[inline(always)]
+            |i| {
+                if i > 0 {
+                    reduced[i] = Self::reduce(simd, sums(i));
+                }
+            },
+        );
+        reduced
+    }
+
+    /// Returns `sums(0)`, ..., `sums(N - 1)`, each reduced as [`Self::reduce_signed`] does with the
+    /// bias `K`.
+    ///
+    /// Calls `sums` as [`Self::reduce_each`] does.
+    #[inline(always)]
+    fn reduce_each_signed<const N: usize, const K: u64>(
+        simd: S,
+        mut sums: impl FnMut(usize) -> Signed<Self::Product>,
+    ) -> [Self; N] {
+        const { assert!(N > 0) };
+        let mut reduced = [Self::reduce_signed::<K>(simd, sums(0)); N];
+        unroll::<N>(
+            #[inline(always)]
+            |i| {
+                if i > 0 {
+                    reduced[i] = Self::reduce_signed::<K>(simd, sums(i));
+                }
+            },
+        );
+        reduced
+    }
+
+    /// Returns `sums(0)`, ..., `sums(N - 1)`, each reduced as [`Self::reduce_signed_tight`] does
+    /// with the bias `K`.
+    ///
+    /// Calls `sums` as [`Self::reduce_each`] does.
+    #[inline(always)]
+    fn reduce_each_signed_tight<const N: usize, const K: u64>(
+        simd: S,
+        mut sums: impl FnMut(usize) -> Signed<Self::Product>,
+    ) -> [Self; N] {
+        const { assert!(N > 0) };
+        let mut reduced = [Self::reduce_signed_tight::<K>(simd, sums(0)); N];
+        unroll::<N>(
+            #[inline(always)]
+            |i| {
+                if i > 0 {
+                    reduced[i] = Self::reduce_signed_tight::<K>(simd, sums(i));
+                }
+            },
+        );
+        reduced
     }
 
     /// Returns `self^(p - 2)`, the inverse of a nonzero element, or zero for zero.
