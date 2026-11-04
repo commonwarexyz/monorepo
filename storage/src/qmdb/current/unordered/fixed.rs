@@ -7,21 +7,11 @@
 //! See [Db] for the main database type.
 
 use crate::{
-    Context,
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
-    merkle::{Graftable, Location},
-    qmdb::{
-        Error,
-        any::{FixedValue, unordered::fixed::Operation, value::FixedEncoding},
-        current::FixedConfig as Config,
-    },
-    translator::Translator,
+    merkle::Location,
+    qmdb::any::{unordered::fixed::Operation, value::FixedEncoding},
 };
-use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
-use commonware_utils::Array;
 
 /// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
@@ -35,33 +25,6 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     N,
     S,
 >;
-
-impl<
-    F: Graftable,
-    E: Context + Spawner,
-    K: Array,
-    V: FixedValue,
-    H: Hasher,
-    T: Translator,
-    const N: usize,
-    S: Strategy,
-> Db<F, E, K, V, H, T, N, S>
-{
-    /// Initializes a [Db] authenticated database from the given `config`.
-    /// The configured [`Strategy`] is used to parallelize merkleization.
-    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
-    /// while `None` selects the latest retained state. Initialization fails with
-    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor,
-    /// and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
-    /// itself has been pruned.
-    pub async fn init(
-        context: E,
-        config: Config<T, S>,
-        max_size: Option<Location<F>>,
-    ) -> Result<Self, Error<F>> {
-        crate::qmdb::current::init(context, config, max_size).await
-    }
-}
 
 pub mod partitioned {
     //! A partitioned variant of [super] that uses a partitioned index for the snapshot.
@@ -90,34 +53,6 @@ pub mod partitioned {
             N,
             S,
         >;
-
-    impl<
-        F: Graftable,
-        E: Context + Spawner,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const P: usize,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, P, N, S>
-    {
-        /// Initializes a [Db] authenticated database from the given `config`.
-        /// The configured [`Strategy`] is used to parallelize merkleization.
-        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
-        /// while `None` selects the latest retained state. Initialization fails with
-        /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
-        /// floor, and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected
-        /// commit itself has been pruned.
-        pub async fn init(
-            context: E,
-            config: Config<T, S, core::num::NonZeroUsize>,
-            max_size: Option<Location<F>>,
-        ) -> Result<Self, Error<F>> {
-            crate::qmdb::current::init(context, config, max_size).await
-        }
-    }
 }
 
 #[cfg(test)]
@@ -139,7 +74,7 @@ pub mod test {
         translator::{OneCap, TwoCap},
     };
     use commonware_codec::FixedSize;
-    use commonware_cryptography::{Sha256, sha256::Digest};
+    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{

@@ -535,7 +535,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         // Sync targets the ops root, which is what the engine verifies. `build_db` reconstructs
         // the canonical root without authenticating it, so the assertions below compare it
         // against `verification_root`.
-        let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::engine::Config {
+        let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::Config {
             context: context.child("client"),
             db_config: client_config.clone(),
             fetch_batch_size: commonware_utils::NZU64!(64),

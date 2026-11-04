@@ -327,7 +327,7 @@
 
 use crate::{
     Context,
-    index::Factory as IndexFactory,
+    index::{Factory as IndexFactory, Ordered as OrderedIndex},
     journal::{
         authenticated,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -335,10 +335,14 @@ use crate::{
     merkle::{self, Location, full::Config as MerkleConfig},
     qmdb::{
         any::{
-            self, Config as AnyConfig,
-            operation::{Operation, Update},
+            self, Config as AnyConfig, ValueEncoding,
+            operation::{
+                Operation, Update,
+                update::{Ordered as OrderedUpdate, Unordered as UnorderedUpdate},
+            },
         },
         bitmap::Shared,
+        operation::Key,
     },
     translator::Translator,
 };
@@ -358,6 +362,8 @@ pub mod grafting;
 pub mod ordered;
 pub mod proof;
 pub(crate) mod sync;
+#[cfg(any(test, feature = "test-traits"))]
+mod test_trait_impls;
 pub mod unordered;
 
 use self::db::Metrics;
@@ -412,9 +418,77 @@ pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
 /// Configuration for a `Current` authenticated db with variable-sized values.
 pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
+impl<F, E, K, V, C, I, H, const N: usize, S> db::Db<F, E, C, I, H, UnorderedUpdate<K, V>, N, S>
+where
+    F: merkle::Graftable,
+    E: Context + Spawner,
+    K: Key,
+    V: ValueEncoding,
+    C: authenticated::Backing<E, Item = Operation<F, UnorderedUpdate<K, V>>> + 'static,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, UnorderedUpdate<K, V>>: Codec,
+{
+    /// Initialize an unordered `Current` authenticated db from the given config.
+    ///
+    /// The configured [`Strategy`] is used to parallelize merkleization. `Some(max_size)` selects
+    /// the latest retained commit with at most `max_size` operations, while `None` selects the
+    /// latest retained state. Initialization fails with [crate::qmdb::Error::HistoricalFloorPruned]
+    /// if the log or bitmap has pruned the commit's inactivity floor, and with
+    /// [crate::qmdb::Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
+    /// itself has been pruned.
+    pub async fn init(
+        context: E,
+        config: Config<
+            I::Translator,
+            C::Config,
+            S,
+            <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+        >,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, crate::qmdb::Error<F>> {
+        init_db(context, config, max_size).await
+    }
+}
+
+impl<F, E, K, V, C, I, H, const N: usize, S> db::Db<F, E, C, I, H, OrderedUpdate<K, V>, N, S>
+where
+    F: merkle::Graftable,
+    E: Context + Spawner,
+    K: Key,
+    V: ValueEncoding,
+    C: authenticated::Backing<E, Item = Operation<F, OrderedUpdate<K, V>>> + 'static,
+    I: IndexFactory<Value = Location<F>> + OrderedIndex + crate::qmdb::SnapshotBuild<F>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, OrderedUpdate<K, V>>: Codec,
+{
+    /// Initialize an ordered `Current` authenticated db from the given config.
+    ///
+    /// The configured [`Strategy`] is used to parallelize merkleization. `Some(max_size)` selects
+    /// the latest retained commit with at most `max_size` operations, while `None` selects the
+    /// latest retained state. Initialization fails with [crate::qmdb::Error::HistoricalFloorPruned]
+    /// if the log or bitmap has pruned the commit's inactivity floor, and with
+    /// [crate::qmdb::Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
+    /// itself has been pruned.
+    pub async fn init(
+        context: E,
+        config: Config<
+            I::Translator,
+            C::Config,
+            S,
+            <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+        >,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, crate::qmdb::Error<F>> {
+        init_db(context, config, max_size).await
+    }
+}
+
 /// Initialize a `Current` authenticated db from the given config.
 #[boxed]
-pub(super) async fn init<F, E, U, H, I, J, const N: usize, S>(
+async fn init_db<F, E, U, H, I, J, const N: usize, S>(
     context: E,
     config: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
     max_size: Option<Location<F>>,
@@ -504,9 +578,6 @@ pub trait BitmapPrunedBits {
 
     /// Returns the value of the bit at the given index.
     fn get_bit(&self, index: u64) -> bool;
-
-    /// Returns the position of the oldest retained bit.
-    fn oldest_retained(&self) -> u64;
 }
 
 #[cfg(test)]
@@ -2108,7 +2179,7 @@ pub mod tests {
             // Forge attempt: package `b`'s authenticated update as an exclusion proof for `c`. The
             // span [b, c) does not cover `c`, so the verifier rejects it (pre-fix the span was
             // [b, a), which cyclically covered `c` and verified).
-            let kvp = db.key_value_proof(b.clone()).await.unwrap();
+            let (kvp, _) = db.key_value_proof(&b).await.unwrap();
             let forged = ordered::proof::constant::ExclusionProof::KeyValue(kvp.proof, span_b);
             assert!(!forged.verify::<Sha256>(&c, &root));
 
@@ -2944,7 +3015,8 @@ pub mod tests {
             assert_eq!(reopened.get(&k).await.unwrap(), expected);
 
             // key_value_proof: RangeProof::new must also handle pruned chunk 0.
-            let _proof = reopened.key_value_proof(k).await.unwrap();
+            let (_proof, value) = reopened.key_value_proof(&k).await.unwrap();
+            assert_eq!(Some(value), expected);
 
             reopened.destroy().await.unwrap();
         });
@@ -3200,10 +3272,11 @@ pub mod tests {
                 db = mmb_commit(db, [(key(1), Some(val(round)))]).await;
             }
 
-            let proof = db.key_value_proof(k).await.unwrap();
+            let (proof, value) = db.key_value_proof(&k).await.unwrap();
+            assert_eq!(value, val(60_000 + 199));
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
                 k,
-                val(60_000 + 199),
+                value,
                 &proof,
                 &db.root()
             ));
@@ -3222,10 +3295,11 @@ pub mod tests {
 
             assert_eq!(reopened.root(), target_root);
 
-            let proof = reopened.key_value_proof(k).await.unwrap();
+            let (proof, value) = reopened.key_value_proof(&k).await.unwrap();
+            assert_eq!(value, val(60_000 + 199));
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
                 k,
-                val(60_000 + 199),
+                value,
                 &proof,
                 &reopened.root()
             ));
@@ -3458,14 +3532,10 @@ pub mod tests {
                     "root mismatch after prune at round {round}"
                 );
 
-                let proof = db.key_value_proof(k).await.unwrap();
+                let (proof, value) = db.key_value_proof(&k).await.unwrap();
+                assert_eq!(Some(value), expected);
                 assert!(
-                    UnorderedVariableMmbDb::verify_key_value_proof(
-                        k,
-                        expected.expect("value should exist"),
-                        &proof,
-                        &db.root()
-                    ),
+                    UnorderedVariableMmbDb::verify_key_value_proof(k, value, &proof, &db.root()),
                     "proof verification failed at round {round}"
                 );
 
@@ -3490,14 +3560,10 @@ pub mod tests {
                     "value mismatch after reopen at round {round}"
                 );
 
-                let proof = db.key_value_proof(k).await.unwrap();
+                let (proof, value) = db.key_value_proof(&k).await.unwrap();
+                assert_eq!(Some(value), expected);
                 assert!(
-                    UnorderedVariableMmbDb::verify_key_value_proof(
-                        k,
-                        expected.expect("value should exist"),
-                        &proof,
-                        &db.root()
-                    ),
+                    UnorderedVariableMmbDb::verify_key_value_proof(k, value, &proof, &db.root()),
                     "proof verification failed after reopen at round {round}"
                 );
             }
@@ -5132,22 +5198,20 @@ pub mod tests {
             let db = db.apply_batch(child).await.unwrap();
             let root = db.root();
             assert_eq!(root, speculative_root);
-            let proof = db.key_value_proof(keys[0]).await.unwrap();
+            let (proof, value) = db.key_value_proof(&keys[0]).await.unwrap();
+            assert_eq!(value, val(10));
             assert_eq!(proof.next_key, keys[1]);
             assert!(
                 proof.verify::<Sha256, crate::qmdb::any::value::FixedEncoding<Digest>>(
-                    keys[0],
-                    val(10),
-                    &root
+                    keys[0], value, &root
                 )
             );
-            let proof = db.key_value_proof(keys[1]).await.unwrap();
+            let (proof, value) = db.key_value_proof(&keys[1]).await.unwrap();
+            assert_eq!(value, val(11));
             assert_eq!(proof.next_key, keys[0]);
             assert!(
                 proof.verify::<Sha256, crate::qmdb::any::value::FixedEncoding<Digest>>(
-                    keys[1],
-                    val(11),
-                    &root
+                    keys[1], value, &root
                 )
             );
             let exclusion = db.exclusion_proof(&keys[2]).await.unwrap();
@@ -5399,16 +5463,17 @@ pub mod tests {
                 async fn assert_proves(&self, live: &BTreeMap<Digest, Digest>, evicted: &[Digest]) {
                     let root = self.root();
                     for (key, value) in live {
-                        let proof = self.key_value_proof(*key).await.unwrap();
+                        let (proof, proved_value) = self.key_value_proof(key).await.unwrap();
+                        assert_eq!(proved_value, *value);
                         assert!(
-                            Self::verify_key_value_proof(*key, *value, &proof, &root),
+                            Self::verify_key_value_proof(*key, proved_value, &proof, &root),
                             "{key} fails to prove its value",
                         );
                     }
                     for key in evicted {
                         assert_eq!(self.get(key).await.unwrap(), None, "{key} is live");
                         assert!(matches!(
-                            self.key_value_proof(*key).await,
+                            self.key_value_proof(key).await,
                             Err(Error::KeyNotFound)
                         ));
                     }
@@ -6151,7 +6216,8 @@ pub mod tests {
     {
         async fn assert_link(&self, key: Digest, value: Digest, next: Digest) {
             assert_eq!(self.get(&key).await.unwrap(), Some(value), "{key} diverged");
-            let proof = self.key_value_proof(key).await.unwrap();
+            let (proof, proved_value) = self.key_value_proof(&key).await.unwrap();
+            assert_eq!(proved_value, value, "{key} diverged");
             assert_eq!(proof.next_key, next, "{key} links to the wrong key");
             assert!(
                 proof.verify::<Sha256, V>(key, value, &self.root()),

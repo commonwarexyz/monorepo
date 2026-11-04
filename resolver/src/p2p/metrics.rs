@@ -11,7 +11,9 @@ pub struct Metrics {
     pub fetch_active: Gauge,
     /// Current number of serves currently in flight
     pub serve_processing: Gauge,
-    /// Number of fetches by status
+    /// Number of fetch outcome events by status. Complete and partial resolutions count as
+    /// `Success`. Responses judged valid but resolving no subscribers count as `Ambiguous`.
+    /// Redelivering an accepted response adds neither count.
     pub fetch: status::Counter,
     /// Number of canceled fetches by status
     pub cancel: status::Counter,
@@ -19,7 +21,7 @@ pub struct Metrics {
     pub serve: status::Counter,
     /// Histogram of successful serves
     pub serve_duration: histogram::Timed,
-    /// Histogram of successful fetches
+    /// Time from starting a fetch until all subscribers in a delivery are resolved
     pub fetch_duration: histogram::Timed,
 }
 
@@ -43,7 +45,7 @@ impl Metrics {
         );
         let fetch_duration_registered = context.histogram(
             "fetch_duration",
-            "Histogram of successful fetches",
+            "Time from starting a fetch until all subscribers in a delivery are resolved",
             histogram::Buckets::NETWORK,
         );
 

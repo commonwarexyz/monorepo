@@ -14,7 +14,7 @@
 //! fetchers do not have peer-specific routing.
 
 use crate::{
-    Consumer, Delivery, Fetch, Outcome, TargetedResolver,
+    Consumer, Delivery, Fetch, Outcome, Resolution, TargetedResolver,
     delivery::{Completion as DeliveryCompletion, Tracker as DeliveryTracker},
     ingress::{self, FetchKey, Message},
     subscribers,
@@ -171,7 +171,7 @@ pub fn init<E, F, Con, P>(
     fetcher: F,
     consumer: Con,
     mailbox_size: NonZeroUsize,
-    fetch_retry_timeout: Duration,
+    fetch_retry_delay: Duration,
 ) -> Resolver<F::Key, Con::Subscriber, P>
 where
     E: Clock + Spawner + Metrics,
@@ -187,7 +187,7 @@ where
         fetcher,
         mailbox_rx,
         consumer,
-        fetch_retry_timeout,
+        fetch_retry_delay,
     )
     .start();
     Resolver::new(mailbox_tx)
@@ -210,7 +210,7 @@ where
     subscribers: subscribers::Tracker<F::Key, Con::Subscriber>,
     fetch: status::Counter,
     retry_schedule: BTreeSet<(SystemTime, F::Key)>,
-    fetch_retry_timeout: Duration,
+    fetch_retry_delay: Duration,
 }
 
 /// Current attempt for a tracked key.
@@ -246,7 +246,7 @@ where
         fetcher: F,
         mailbox: mailbox::Receiver<Message<F::Key, Con::Subscriber>>,
         consumer: Con,
-        fetch_retry_timeout: Duration,
+        fetch_retry_delay: Duration,
     ) -> Self {
         let fetch = context.family("fetch", "Number of fetches by status");
         Self {
@@ -258,7 +258,7 @@ where
             subscribers: subscribers::Tracker::new(),
             fetch,
             retry_schedule: BTreeSet::new(),
-            fetch_retry_timeout,
+            fetch_retry_delay,
         }
     }
 
@@ -273,15 +273,8 @@ where
             Ok(FetchCompletion { key, value }) = self.fetches.next_completed() else continue => {
                 self.handle_fetched(key, value);
             },
-            Ok(DeliveryCompletion {
-                delivery: Delivery {
-                    key,
-                    subscribers: delivered,
-                },
-                outcome,
-                ..
-            }) = self.deliveries.next_completion() else continue => {
-                self.handle_delivered(key, delivered, outcome);
+            Ok(completed) = self.deliveries.next_completion() else continue => {
+                self.handle_delivered(completed);
             },
             _ = match self.retry_schedule.first() {
                 Some((deadline, _)) => Either::Left(self.context.sleep_until(*deadline)),
@@ -389,13 +382,30 @@ where
     }
 
     /// Complete, redeliver, or retry a key after consumer validation.
-    fn handle_delivered(
-        &mut self,
-        key: F::Key,
-        delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
-        outcome: Option<Outcome>,
-    ) {
-        let accepted = self.deliveries.response_accepted(&key);
+    fn handle_delivered(&mut self, completed: DeliveryCompletion<F::Key, Con::Subscriber>) {
+        let DeliveryCompletion {
+            delivery:
+                Delivery {
+                    key,
+                    subscribers: delivered,
+                },
+            outcome,
+            canceled,
+            previously_accepted: accepted,
+            ..
+        } = completed;
+
+        // Count useful source responses once, even if their fetch was canceled.
+        if !accepted {
+            match outcome {
+                Some(Outcome::Resolved(_)) => self.fetch.inc(Status::Success),
+                Some(Outcome::Unresolved) => self.fetch.inc(Status::Ambiguous),
+                _ => {}
+            }
+        }
+        if canceled {
+            return;
+        }
 
         // A dropped verdict says nothing about the response, only that the consumer
         // did not judge it for these subscribers. Hand the response to the
@@ -415,8 +425,10 @@ where
             return;
         };
 
+        // Resolution reports demand within the delivered subscriber snapshot.
+        // Ignored cancels demand for the entire key, including later subscribers.
         match outcome {
-            Outcome::Complete => {
+            Outcome::Resolved(Resolution::Complete) => {
                 let remaining = self
                     .subscribers
                     .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
@@ -434,11 +446,9 @@ where
                     self.deliveries.remove(&key);
                 }
             }
-            Outcome::Ambiguous => {
-                // The fetcher returned one of multiple valid responses, but this response did not
-                // satisfy every subscriber. Discard it and retain the fetch so another response
-                // can be tried.
-                self.fetch.inc(Status::Ambiguous);
+            Outcome::Resolved(Resolution::Partial) | Outcome::Unresolved => {
+                // Valid data can leave subscribers unresolved. Discard it and retry
+                // without recounting an accepted response.
                 self.deliveries.discard_response(&key);
                 self.schedule_retry(key);
             }
@@ -456,6 +466,8 @@ where
                     return;
                 }
 
+                // Subscribers still need valid data, so discard the rejected response
+                // and schedule another attempt.
                 warn!(?key, "consumer rejected opaque resolver delivery");
                 self.deliveries.discard_response(&key);
                 self.schedule_retry(key);
@@ -472,11 +484,11 @@ where
 
     /// Schedule the next fetch attempt for `key`.
     fn schedule_retry(&mut self, key: F::Key) {
-        let deadline = self.context.current() + self.fetch_retry_timeout;
-        let Some(attempt) = self.deliveries.state_mut(&key) else {
-            return;
-        };
-        *attempt = Attempt::Scheduled(deadline);
+        let deadline = self.context.current() + self.fetch_retry_delay;
+        *self
+            .deliveries
+            .state_mut(&key)
+            .expect("key must have an attempt") = Attempt::Scheduled(deadline);
         debug!(?key, ?deadline, "scheduled opaque resolver retry");
         self.retry_schedule.insert((deadline, key));
     }
@@ -490,20 +502,12 @@ where
                 break;
             }
 
-            let Some(state) = self.deliveries.state(&key) else {
-                continue;
-            };
-            match state {
-                Attempt::Scheduled(state_deadline) if *state_deadline == deadline => {
-                    debug!(?key, "retrying opaque resolver fetch");
-                    let attempt = self.start_fetch(key.clone());
-                    *self
-                        .deliveries
-                        .state_mut(&key)
-                        .expect("key must have an attempt") = attempt;
-                }
-                Attempt::Scheduled(_) | Attempt::Fetching { .. } | Attempt::Delivering => {}
-            }
+            debug!(?key, "retrying opaque resolver fetch");
+            let attempt = self.start_fetch(key.clone());
+            *self
+                .deliveries
+                .state_mut(&key)
+                .expect("scheduled key must have an attempt") = attempt;
         }
     }
 
@@ -525,6 +529,7 @@ mod tests {
     };
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, deterministic::Runner};
     use commonware_utils::{channel::oneshot, non_empty_vec, sync::Mutex};
+    use futures::FutureExt as _;
     use std::{
         collections::{HashMap, VecDeque},
         sync::{
@@ -533,7 +538,7 @@ mod tests {
         },
     };
 
-    const RETRY_TIMEOUT: Duration = Duration::from_millis(100);
+    const RETRY_DELAY: Duration = Duration::from_millis(100);
 
     #[derive(Clone, Default)]
     struct MockFetcher {
@@ -666,7 +671,7 @@ mod tests {
             fetcher,
             consumer,
             NonZeroUsize::new(16).unwrap(),
-            RETRY_TIMEOUT,
+            RETRY_DELAY,
         )
     }
 
@@ -685,59 +690,315 @@ mod tests {
 
     #[test]
     fn fetch_during_validation_reuses_response_after_success() {
-        Runner::default().start(|context| async move {
-            let fetcher = MockFetcher::default();
-            fetcher.push(1, Some(Bytes::from_static(b"value")));
-            let consumer = MockConsumer::default();
-            let mut resolver =
-                start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+        for outcome in [
+            Outcome::Resolved(Resolution::Complete),
+            Outcome::Resolved(Resolution::Partial),
+            Outcome::Unresolved,
+        ] {
+            Runner::default().start(move |context| async move {
+                let fetcher = MockFetcher::default();
+                fetcher.push(1, Some(Bytes::from_static(b"value")));
+                fetcher.push(1, Some(Bytes::from_static(b"refetched")));
+                let consumer = MockConsumer::default();
+                let mut resolver =
+                    start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
 
-            assert!(
-                resolver
-                    .fetch(Fetch {
+                // Add two late subscribers while the original snapshot is being judged.
+                assert!(
+                    resolver
+                        .fetch(Fetch {
+                            key: 1,
+                            subscriber: 10,
+                            span: tracing::Span::none(),
+                        })
+                        .accepted()
+                );
+                let first = wait_for_delivery(&context, &consumer).await;
+                assert_eq!(
+                    first.delivery,
+                    Delivery {
                         key: 1,
-                        subscriber: 10,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
-            let first = wait_for_delivery(&context, &consumer).await;
-            assert_eq!(first.value, Bytes::from_static(b"value"));
+                        subscribers: non_empty_vec![(10, tracing::Span::none())],
+                    }
+                );
+                assert_eq!(first.value, Bytes::from_static(b"value"));
+                assert!(
+                    resolver
+                        .fetch_all(
+                            [11, 12]
+                                .into_iter()
+                                .map(|subscriber| Fetch {
+                                    key: 1,
+                                    subscriber,
+                                    span: tracing::Span::none(),
+                                })
+                                .collect()
+                        )
+                        .accepted()
+                );
+                context.sleep(Duration::from_millis(10)).await;
+                first
+                    .response
+                    .send(Outcome::Resolved(Resolution::Complete))
+                    .unwrap();
 
-            assert!(
-                resolver
-                    .fetch(Fetch {
+                // Acceptance reuses the same value for the late snapshot and counts it once.
+                let second = wait_for_delivery(&context, &consumer).await;
+                assert_eq!(second.value, Bytes::from_static(b"value"));
+                assert_eq!(
+                    second.delivery,
+                    Delivery {
                         key: 1,
-                        subscriber: 11,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
-            context.sleep(Duration::from_millis(10)).await;
-            first
-                .response
-                .send(Outcome::Complete)
-                .expect("response dropped");
+                        subscribers: non_empty_vec![
+                            (11, tracing::Span::none()),
+                            (12, tracing::Span::none()),
+                        ],
+                    }
+                );
+                assert_eq!(fetcher.calls(), 1);
+                assert!(
+                    context
+                        .encode()
+                        .contains("resolver_actor_fetch_total{status=\"Success\"} 1")
+                );
+                if outcome == Outcome::Resolved(Resolution::Partial) {
+                    assert!(
+                        resolver
+                            .retain(|_, subscriber| *subscriber != 11)
+                            .accepted()
+                    );
+                }
+                second.response.send(outcome).unwrap();
 
-            let second = wait_for_delivery(&context, &consumer).await;
-            assert_eq!(second.value, Bytes::from_static(b"value"));
-            assert_eq!(
-                second
-                    .delivery
-                    .subscribers
-                    .iter()
-                    .map(|(subscriber, _)| *subscriber)
-                    .collect::<Vec<_>>(),
-                vec![11]
-            );
-            second
-                .response
-                .send(Outcome::Complete)
-                .expect("response dropped");
+                let expected_successes = if outcome == Outcome::Resolved(Resolution::Complete) {
+                    1
+                } else {
+                    // A fresh fetch confirms the cached verdict was processed without
+                    // another count. The new response can earn a separate success.
+                    let third = wait_for_delivery(&context, &consumer).await;
+                    assert_eq!(third.value, Bytes::from_static(b"refetched"));
+                    let expected = if outcome == Outcome::Resolved(Resolution::Partial) {
+                        non_empty_vec![(12, tracing::Span::none())]
+                    } else {
+                        non_empty_vec![(11, tracing::Span::none()), (12, tracing::Span::none())]
+                    };
+                    assert_eq!(
+                        third.delivery,
+                        Delivery {
+                            key: 1,
+                            subscribers: expected
+                        }
+                    );
+                    let metrics = context.encode();
+                    assert!(metrics.contains("resolver_actor_fetch_total{status=\"Success\"} 1"));
+                    assert!(!metrics.contains("resolver_actor_fetch_total{status=\"Ambiguous\"}"));
+                    third
+                        .response
+                        .send(Outcome::Resolved(Resolution::Complete))
+                        .unwrap();
+                    2
+                };
+                context.sleep(Duration::from_millis(10)).await;
+                assert_eq!(consumer.len(), 0);
+                assert_eq!(fetcher.calls(), expected_successes);
+                let metrics = context.encode();
+                assert!(metrics.contains(&format!(
+                    "resolver_actor_fetch_total{{status=\"Success\"}} {expected_successes}"
+                )));
+                assert!(!metrics.contains("resolver_actor_fetch_total{status=\"Ambiguous\"}"));
+            });
+        }
+    }
 
-            context.sleep(Duration::from_millis(10)).await;
-            assert_eq!(fetcher.calls(), 1);
-        });
+    #[test]
+    fn canceled_retry_cannot_restart_reinserted_key_early() {
+        for reinsert in [false, true] {
+            Runner::default().start(move |context| async move {
+                // A value becomes available only after two failed fetches.
+                let fetcher = MockFetcher::default();
+                fetcher.push(1, None);
+                fetcher.push(1, None);
+                fetcher.push(1, Some(Bytes::from_static(b"new")));
+                let consumer = MockConsumer::default();
+                let (_sender, receiver) =
+                    mailbox::new(context.child("mailbox"), NonZeroUsize::new(16).unwrap());
+                let mut actor = Actor::new(
+                    context.child("actor"),
+                    fetcher.clone(),
+                    receiver,
+                    consumer.clone(),
+                    RETRY_DELAY,
+                );
+                let fetch = || FetchKey {
+                    key: 1,
+                    metadata: (),
+                    subscribers: non_empty_vec![(10, tracing::Span::none())],
+                };
+
+                // A missing value schedules a retry for the original request.
+                actor.add_fetch(fetch());
+                let completed = actor.fetches.next_completed().await.unwrap();
+                actor.handle_fetched(completed.key, completed.value);
+                assert_eq!(fetcher.calls(), 1);
+
+                // Cancel halfway to its deadline; a replacement gets a later retry deadline.
+                context.sleep(RETRY_DELAY / 2).await;
+                actor.retain(Box::new(|_, _| false));
+                if reinsert {
+                    actor.add_fetch(fetch());
+                    let completed = actor.fetches.next_completed().await.unwrap();
+                    actor.handle_fetched(completed.key, completed.value);
+                    assert_eq!(fetcher.calls(), 2);
+                }
+
+                // Reaching the canceled deadline must not start another fetch.
+                context.sleep(RETRY_DELAY / 2).await;
+                actor.process_retries();
+                assert!(actor.fetches.next_completed().now_or_never().is_none());
+                assert_eq!(fetcher.calls(), if reinsert { 2 } else { 1 });
+
+                // At the later deadline, only a reinserted key may fetch again.
+                context.sleep(RETRY_DELAY / 2).await;
+                actor.process_retries();
+                if reinsert {
+                    let completed = actor.fetches.next_completed().await.unwrap();
+                    actor.handle_fetched(completed.key, completed.value);
+                    assert_eq!(fetcher.calls(), 3);
+                    let delivered = consumer.pop().unwrap();
+                    assert_eq!(delivered.value, Bytes::from_static(b"new"));
+                    assert_eq!(delivered.delivery.subscribers.first().0, 10);
+                } else {
+                    assert!(actor.fetches.next_completed().now_or_never().is_none());
+                    assert_eq!(fetcher.calls(), 1);
+                }
+            });
+        }
+    }
+
+    /// Canceled verdicts retain source feedback without changing a replacement's demand.
+    #[test]
+    fn canceled_delivery_cannot_change_reinserted_key() {
+        for previously_accepted in [false, true] {
+            for outcome in [
+                Outcome::Resolved(Resolution::Complete),
+                Outcome::Resolved(Resolution::Partial),
+                Outcome::Unresolved,
+                Outcome::Invalid,
+                Outcome::Ignored,
+            ] {
+                Runner::default().start(move |context| async move {
+                    // Hold a verdict from either a fresh response or an accepted redelivery.
+                    let fetcher = MockFetcher::default();
+                    fetcher.push(1, Some(Bytes::from_static(b"old")));
+                    fetcher.push(1, Some(Bytes::from_static(b"new")));
+                    let consumer = MockConsumer::default();
+                    let (_sender, receiver) =
+                        mailbox::new(context.child("mailbox"), NonZeroUsize::new(16).unwrap());
+                    let mut actor = Actor::new(
+                        context.child("actor"),
+                        fetcher.clone(),
+                        receiver,
+                        consumer.clone(),
+                        RETRY_DELAY,
+                    );
+                    let fetch = |subscriber| FetchKey {
+                        key: 1,
+                        metadata: (),
+                        subscribers: non_empty_vec![(subscriber, tracing::Span::none())],
+                    };
+                    actor.add_fetch(fetch(10));
+                    actor.add_fetch(fetch(12));
+                    let completed = actor.fetches.next_completed().await.unwrap();
+                    actor.handle_fetched(completed.key, completed.value);
+                    let mut old = consumer.pop().unwrap();
+                    if previously_accepted {
+                        actor.add_fetch(fetch(11));
+                        actor.add_fetch(fetch(13));
+                        old.response
+                            .send(Outcome::Resolved(Resolution::Complete))
+                            .unwrap();
+                        let completed = actor.deliveries.next_completion().await.unwrap();
+                        actor.handle_delivered(completed);
+                        old = consumer.pop().unwrap();
+                        assert_eq!(old.value, Bytes::from_static(b"old"));
+                    }
+                    assert_eq!(old.delivery.subscribers.len().get(), 2);
+
+                    // Remove the old entry and reuse its key and subscriber before polling
+                    // the accepted verdict. The new response stays unjudged throughout.
+                    old.response.send(outcome).unwrap();
+                    actor.retain(Box::new(|_, _| false));
+                    actor.add_fetch(fetch(if previously_accepted { 11 } else { 10 }));
+                    let completed = actor.fetches.next_completed().await.unwrap();
+                    actor.handle_fetched(completed.key, completed.value);
+                    let new = consumer.pop().unwrap();
+                    assert_eq!(new.value, Bytes::from_static(b"new"));
+                    let completed = actor.deliveries.next_completion().await.unwrap();
+                    assert!(completed.canceled);
+                    assert_eq!(completed.previously_accepted, previously_accepted);
+                    actor.handle_delivered(completed);
+
+                    // No old outcome may retire subscribers, discard the new response,
+                    // or schedule another attempt for the replacement.
+                    assert_eq!(
+                        actor
+                            .subscribers
+                            .pending(&1)
+                            .unwrap()
+                            .map_into(|(subscriber, _)| subscriber),
+                        new.delivery
+                            .subscribers
+                            .clone()
+                            .map_into(|(subscriber, _)| subscriber)
+                    );
+                    assert!(matches!(
+                        actor.deliveries.state_mut(&1),
+                        Some(Attempt::Delivering)
+                    ));
+                    assert!(actor.retry_schedule.is_empty());
+                    assert!(actor.deliveries.next_completion().now_or_never().is_none());
+                    assert_eq!(fetcher.calls(), 2);
+                    let successes =
+                        u64::from(previously_accepted || matches!(outcome, Outcome::Resolved(_)));
+                    let unresolved =
+                        u64::from(!previously_accepted && outcome == Outcome::Unresolved);
+                    for (status, count) in [("Success", successes), ("Ambiguous", unresolved)] {
+                        let prefix = format!("actor_fetch_total{{status=\"{status}\"}}");
+                        let metrics = context.encode();
+                        let actual = metrics
+                            .lines()
+                            .find_map(|line| {
+                                line.strip_prefix(&prefix)
+                                    .map(|value| value.trim().parse::<u64>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        assert_eq!(actual, count);
+                    }
+
+                    // A late subscriber receives the replacement's cached response
+                    // after its first verdict, without another source fetch.
+                    actor.add_fetch(fetch(20));
+                    new.response
+                        .send(Outcome::Resolved(Resolution::Complete))
+                        .unwrap();
+                    let completed = actor.deliveries.next_completion().await.unwrap();
+                    assert!(!completed.canceled);
+                    actor.handle_delivered(completed);
+                    let late = consumer.pop().unwrap();
+                    assert_eq!(late.value, Bytes::from_static(b"new"));
+                    assert_eq!(late.delivery.subscribers.first().0, 20);
+                    assert_eq!(late.delivery.subscribers.len().get(), 1);
+                    assert_eq!(fetcher.calls(), 2);
+                    late.response
+                        .send(Outcome::Resolved(Resolution::Complete))
+                        .unwrap();
+                    let completed = actor.deliveries.next_completion().await.unwrap();
+                    actor.handle_delivered(completed);
+                    assert!(!actor.subscribers.contains(&1));
+                    assert!(!actor.deliveries.contains(&1));
+                });
+            }
+        }
     }
 
     #[test]
@@ -761,9 +1022,7 @@ mod tests {
             );
 
             // The first attempt finds nothing, so the retry waits for its deadline.
-            context
-                .sleep(RETRY_TIMEOUT - Duration::from_millis(10))
-                .await;
+            context.sleep(RETRY_DELAY - Duration::from_millis(10)).await;
             assert_eq!(fetcher.calls(), 1);
             assert_eq!(consumer.len(), 0);
 
@@ -771,17 +1030,18 @@ mod tests {
             assert_eq!(delivery.value, Bytes::from_static(b"value"));
             delivery
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::Complete))
                 .expect("response dropped");
             assert_eq!(fetcher.calls(), 2);
         });
     }
 
     #[test]
-    fn ambiguous_delivery_retries_without_retiring_subscriber() {
+    fn unresolved_delivery_retries_without_retiring_subscribers() {
         Runner::default().start(|context| async move {
             let fetcher = MockFetcher::default();
-            fetcher.push(1, Some(Bytes::from_static(b"ambiguous")));
+            fetcher.push(1, Some(Bytes::from_static(b"unhelpful")));
+            fetcher.push(1, Some(Bytes::from_static(b"partial")));
             fetcher.push(1, Some(Bytes::from_static(b"complete")));
             let consumer = MockConsumer::default();
             let mut resolver =
@@ -789,58 +1049,73 @@ mod tests {
 
             assert!(
                 resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 10,
-                        span: tracing::Span::none(),
-                    })
+                    .fetch_all(
+                        [10, 11]
+                            .into_iter()
+                            .map(|subscriber| Fetch {
+                                key: 1,
+                                subscriber,
+                                span: tracing::Span::none(),
+                            })
+                            .collect()
+                    )
                     .accepted()
             );
+            let expected = Delivery {
+                key: 1,
+                subscribers: non_empty_vec![
+                    (10, tracing::Span::none()),
+                    (11, tracing::Span::none())
+                ],
+            };
 
+            // A valid response that resolves neither subscriber counts as Ambiguous.
             let first = wait_for_delivery(&context, &consumer).await;
-            assert_eq!(first.value, Bytes::from_static(b"ambiguous"));
-            assert_eq!(
-                first
-                    .delivery
-                    .subscribers
-                    .iter()
-                    .map(|(subscriber, _)| *subscriber)
-                    .collect::<Vec<_>>(),
-                vec![10]
-            );
-            first
-                .response
-                .send(Outcome::Ambiguous)
-                .expect("response dropped");
-
-            context
-                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
-                .await;
+            assert_eq!(first.value, Bytes::from_static(b"unhelpful"));
+            assert_eq!(first.delivery, expected);
+            first.response.send(Outcome::Unresolved).unwrap();
             let second = wait_for_delivery(&context, &consumer).await;
-            assert_eq!(second.value, Bytes::from_static(b"complete"));
-            assert_eq!(
-                second
-                    .delivery
-                    .subscribers
-                    .iter()
-                    .map(|(subscriber, _)| *subscriber)
-                    .collect::<Vec<_>>(),
-                vec![10]
-            );
+            assert_eq!(second.value, Bytes::from_static(b"partial"));
+            assert_eq!(second.delivery, expected);
             assert_eq!(fetcher.calls(), 2);
+            let metrics = context.encode();
+            assert!(metrics.contains("resolver_actor_fetch_total{status=\"Ambiguous\"} 1"));
+            assert!(!metrics.contains("resolver_actor_fetch_total{status=\"Success\"}"));
 
+            // Resolving one subscriber earns success while the remaining subscriber retries.
+            assert!(
+                resolver
+                    .retain(|_, subscriber| *subscriber != 10)
+                    .accepted()
+            );
             second
                 .response
-                .send(Outcome::Complete)
-                .expect("response dropped");
+                .send(Outcome::Resolved(Resolution::Partial))
+                .unwrap();
+            let third = wait_for_delivery(&context, &consumer).await;
+            assert_eq!(third.value, Bytes::from_static(b"complete"));
+            assert_eq!(
+                third.delivery,
+                Delivery {
+                    key: 1,
+                    subscribers: non_empty_vec![(11, tracing::Span::none())],
+                }
+            );
+            let metrics = context.encode();
+            assert!(metrics.contains("resolver_actor_fetch_total{status=\"Ambiguous\"} 1"));
+            assert!(metrics.contains("resolver_actor_fetch_total{status=\"Success\"} 1"));
+
+            // A second useful response completes the fetch and contributes its own success.
+            third
+                .response
+                .send(Outcome::Resolved(Resolution::Complete))
+                .unwrap();
             context.sleep(Duration::from_millis(10)).await;
             assert_eq!(consumer.len(), 0);
-            assert_eq!(fetcher.calls(), 2);
-            assert!(
-                context
-                    .encode()
-                    .contains("resolver_actor_fetch_total{status=\"Ambiguous\"} 1")
-            );
+            assert_eq!(fetcher.calls(), 3);
+            let metrics = context.encode();
+            assert!(metrics.contains("resolver_actor_fetch_total{status=\"Ambiguous\"} 1"));
+            assert!(metrics.contains("resolver_actor_fetch_total{status=\"Success\"} 2"));
         });
     }
 
@@ -870,9 +1145,7 @@ mod tests {
                 .send(Outcome::Ignored)
                 .expect("response dropped");
 
-            context
-                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
-                .await;
+            context.sleep(RETRY_DELAY + Duration::from_millis(10)).await;
             assert_eq!(fetcher.calls(), 1);
             assert_eq!(consumer.len(), 0);
             assert!(
@@ -895,7 +1168,7 @@ mod tests {
             assert_eq!(delivery.value, Bytes::from_static(b"fresh"));
             delivery
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::Complete))
                 .expect("response dropped");
             assert_eq!(fetcher.calls(), 2);
         });
@@ -928,9 +1201,7 @@ mod tests {
             // rather than retried.
             drop(delivery);
 
-            context
-                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
-                .await;
+            context.sleep(RETRY_DELAY + Duration::from_millis(10)).await;
             assert_eq!(fetcher.calls(), 1);
             assert_eq!(consumer.len(), 0);
             assert!(
@@ -953,7 +1224,7 @@ mod tests {
             assert_eq!(delivery.value, Bytes::from_static(b"fresh"));
             delivery
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::Complete))
                 .expect("response dropped");
             assert_eq!(fetcher.calls(), 2);
         });
@@ -1007,12 +1278,10 @@ mod tests {
             assert_eq!(second.value, Bytes::from_static(b"unjudged"));
             second
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::Complete))
                 .expect("response dropped");
 
-            context
-                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
-                .await;
+            context.sleep(RETRY_DELAY + Duration::from_millis(10)).await;
             assert_eq!(fetcher.calls(), 1);
             assert_eq!(consumer.len(), 0);
         });
@@ -1050,7 +1319,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
             first
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::Complete))
                 .expect("response dropped");
 
             let second = wait_for_delivery(&context, &consumer).await;
@@ -1059,9 +1328,7 @@ mod tests {
                 .send(Outcome::Invalid)
                 .expect("response dropped");
 
-            context
-                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
-                .await;
+            context.sleep(RETRY_DELAY + Duration::from_millis(10)).await;
             assert_eq!(fetcher.calls(), 1);
             assert_eq!(consumer.len(), 0);
         });
@@ -1115,7 +1382,7 @@ mod tests {
             );
             delivery
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::Complete))
                 .expect("response dropped");
         });
     }
@@ -1144,9 +1411,7 @@ mod tests {
                 response.send(Some(Bytes::from_static(b"value"))).is_err(),
                 "fetch future should be aborted after its last subscriber is pruned"
             );
-            context
-                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
-                .await;
+            context.sleep(RETRY_DELAY + Duration::from_millis(10)).await;
             assert_eq!(consumer.len(), 0);
         });
     }
@@ -1177,9 +1442,7 @@ mod tests {
                 delivery.response.send(Outcome::Invalid).is_err(),
                 "delivery future should be aborted after its last subscriber is pruned"
             );
-            context
-                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
-                .await;
+            context.sleep(RETRY_DELAY + Duration::from_millis(10)).await;
             assert_eq!(fetcher.calls(), 1);
             assert_eq!(consumer.len(), 0);
         });
@@ -1211,7 +1474,7 @@ mod tests {
             assert_eq!(delivery.value, Bytes::from_static(b"value"));
             delivery
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::Complete))
                 .expect("response dropped");
             assert_eq!(fetcher.calls(), 1);
         });

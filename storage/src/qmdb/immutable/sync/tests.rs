@@ -10,8 +10,7 @@ use crate::{
         self,
         immutable::{self, variable::Operation},
         sync::{
-            self, Target,
-            engine::Config,
+            self, Config, Target,
             harness::{
                 CompactConfigOf, CompactOpOf, CompactSyncTestHarness, ConfigOf, DbOf, JournalOf,
                 OpOf, PAGE_CACHE_SIZE, PAGE_SIZE, SyncTestHarness, prune_boxed,
