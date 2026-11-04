@@ -119,10 +119,10 @@
 //! restored caller and its later threads may not gain added CPUs. Older kernels can replace a
 //! written mask with the cpuset's effective CPUs, undoing a group's confinement.
 //!
-//! A thread created under a requested mask inherits it and keeps it: a worker's threads stay in
-//! its home or floating mask, and a moved caller's threads stay in the home domain. A pool built
-//! from such a thread reads that mask as its allowed CPUs, so it sizes its groups from one domain
-//! and confines every worker to it. Build pools from a thread that still has its original mask.
+//! Do not create a pool from inside a job or inside a strategy call. A new thread keeps the mask
+//! of the thread that created it, so a pool created on a homed worker, or during a call that
+//! moved its caller, puts all of its workers in that one domain, and a pool created on a
+//! floating worker keeps only the CPUs outside the homes.
 
 use crate::ThreadPool;
 use commonware_utils::sync::Mutex;
