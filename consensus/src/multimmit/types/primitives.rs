@@ -69,7 +69,7 @@ macro_rules! define_attributed_signature {
 
 define_attributed_signature!(
     Attestation,
-    "An attributed ordinary BLS signature retained in aggregate transcripts."
+    "An attributed ordinary synchronized aggregate signature retained in aggregate transcripts."
 );
 define_attributed_signature!(
     ThresholdShare,
