@@ -1,10 +1,23 @@
-//! Leader-finality facts for tests that consume finality reports.
+//! Leader-finality facts and placements for tests that consume finality reports.
 
 use crate::{
-    multimmit::types::{BlockRef, CertificateId, FinalityFact, FinalityId, Position},
+    multimmit::types::{BlockRef, CertificateId, FinalityFact, FinalityId, Placement, Position},
     types::{Height, Round},
 };
-use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest as Sha256Digest};
+use commonware_cryptography::{Digest, Hasher as _, Sha256, sha256::Digest as Sha256Digest};
+
+/// Returns the placed run of `tip`'s ancestors at heights in `(above, height]`.
+///
+/// # Panics
+///
+/// Panics unless `above < height <= tip.height()`.
+pub fn placement<D: Digest>(tip: BlockRef<D>, above: Height, height: Height) -> Placement<D> {
+    assert!(
+        above < height && height <= tip.height(),
+        "a placed run is non-empty and ends at or below its tip"
+    );
+    Placement::new(tip, above, height)
+}
 
 /// Returns a leader-finality fact for `round` that finalizes the chain tips `blocks`, whose
 /// leader proposed up to `proposed` on each chain, supported by `votes` votes.
