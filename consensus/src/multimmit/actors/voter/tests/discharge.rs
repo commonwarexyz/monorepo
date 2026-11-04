@@ -508,7 +508,7 @@ async fn submit_actor_discharge_successor(node: &Node, successor: &ActorDischarg
 
 /// Returns whether `effect` publishes `successor`.
 fn publishes_successor(
-    effect: &DurableEffect<MinPk, Sha256Digest>,
+    effect: &DurableEffect<Bls<MinPk>, Sha256Digest>,
     successor: &ActorDischargeSuccessor,
 ) -> bool {
     match successor {
@@ -554,7 +554,7 @@ async fn wait_for_successor_publication(
 /// Asserts that `successor` stays unpublished while the barrier recording it is unacknowledged.
 async fn assert_successor_withheld(
     context: &DeterministicContext,
-    hooks: &TestHooks<MinPk, Sha256Digest>,
+    hooks: &TestHooks<Bls<MinPk>, Sha256Digest>,
     successor: &ActorDischargeSuccessor,
 ) {
     // Give an early release the time it would take to reach egress.
