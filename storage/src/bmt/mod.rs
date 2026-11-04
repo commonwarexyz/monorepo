@@ -559,6 +559,11 @@ impl<D: Digest> Proof<D> {
     /// Verifies that a given `leaf` at `position` is included in a Binary Merkle Tree
     /// with `root`.
     ///
+    /// The proof consists of sibling hashes stored from the leaf up to the root. At each
+    /// level, if the current node is a left child (even index), the sibling is combined
+    /// to the right; if it is a right child (odd index), the sibling is combined to the
+    /// left.
+    ///
     /// The `leaf_count` stored in the proof is incorporated into the finalized root
     /// computation, so any modification to it will cause verification to fail.
     pub fn verify_element_inclusion<H: Hasher<Digest = D>>(
@@ -567,21 +572,13 @@ impl<D: Digest> Proof<D> {
         position: u32,
         root: &D,
     ) -> Result<(), Error> {
-        let reconstructed = self.reconstruct_element_root::<H>(leaf, position)?;
-        Self::check_root(reconstructed, root)
+        let reconstructed = self.reconstruct_element_root::<H>(position, leaf)?;
+        Self::ensure_root_matches(reconstructed, root)
     }
 
-    /// Reconstructs the finalized root of the Binary Merkle Tree that includes `leaf` at
-    /// `position`.
-    ///
-    /// The proof consists of sibling hashes stored from the leaf up to the root. At each
-    /// level, if the current node is a left child (even index), the sibling is combined
-    /// to the right; if it is a right child (odd index), the sibling is combined to the
-    /// left.
-    ///
-    /// The returned root incorporates the `leaf_count` stored in the proof. Use it when the
-    /// trusted value is derived from the root rather than the root itself. Otherwise, prefer
-    /// [Proof::verify_element_inclusion].
+    /// Reconstruct the finalized root from this proof and the `leaf` at `position`, or return
+    /// an error if the input data is invalid. Use this when the trusted value is derived from
+    /// the root, and [Proof::verify_element_inclusion] when it is the root.
     ///
     /// # Examples
     ///
@@ -600,13 +597,13 @@ impl<D: Digest> Proof<D> {
     /// let commitment = Sha256::hash(&[b"domain", tree.root().as_ref()]);
     ///
     /// let proof = tree.proof(2).unwrap();
-    /// let root = proof.reconstruct_element_root::<Sha256>(&digests[2], 2).unwrap();
+    /// let root = proof.reconstruct_element_root::<Sha256>(2, &digests[2]).unwrap();
     /// assert_eq!(Sha256::hash(&[b"domain", root.as_ref()]), commitment);
     /// ```
     pub fn reconstruct_element_root<H: Hasher<Digest = D>>(
         &self,
-        leaf: &D,
         mut position: u32,
+        leaf: &D,
     ) -> Result<D, Error> {
         // Validate position
         if position >= self.leaf_count {
@@ -670,23 +667,27 @@ impl<D: Digest> Proof<D> {
         elements: &[(D, u32)],
         root: &D,
     ) -> Result<(), Error> {
-        let reconstructed = self.reconstruct_multi_root::<H>(elements)?;
-        Self::check_root(reconstructed, root)
+        let reconstructed =
+            self.reconstruct_multi::<H, _>(elements, |&(leaf, position)| (position, leaf))?;
+        Self::ensure_root_matches(reconstructed, root)
     }
 
-    /// Reconstructs the finalized root of the Binary Merkle Tree that includes the given
-    /// `elements` at their respective positions.
-    ///
-    /// Positions must be strictly ascending and in range, as for
-    /// [Proof::verify_multi_inclusion]. An empty `elements` reconstructs the empty tree's
-    /// root only from an empty proof with a `leaf_count` of zero.
-    ///
-    /// The returned root incorporates the `leaf_count` stored in the proof. Use it when the
-    /// trusted value is derived from the root rather than the root itself. Otherwise, prefer
-    /// [Proof::verify_multi_inclusion].
+    /// Reconstruct the finalized root from this proof and the `(position, leaf)` `elements`,
+    /// or return an error if the input data is invalid. Positions must be strictly ascending
+    /// and in range, as for [Proof::verify_multi_inclusion].
     pub fn reconstruct_multi_root<H: Hasher<Digest = D>>(
         &self,
-        elements: &[(D, u32)],
+        elements: &[(u32, D)],
+    ) -> Result<D, Error> {
+        self.reconstruct_multi::<H, _>(elements, |&element| element)
+    }
+
+    /// Reconstruct the finalized root from `elements`, reading each one's position and leaf
+    /// with `split`.
+    fn reconstruct_multi<H: Hasher<Digest = D>, E>(
+        &self,
+        elements: &[E],
+        split: impl Fn(&E) -> (u32, D),
     ) -> Result<D, Error> {
         // Handle empty case
         if elements.is_empty() {
@@ -700,7 +701,8 @@ impl<D: Digest> Proof<D> {
 
         // 1. Check that positions are strictly ascending and in range
         let mut previous = None;
-        for &(_, position) in elements {
+        for element in elements {
+            let (position, _) = split(element);
             if position >= self.leaf_count {
                 return Err(Error::InvalidPosition(position));
             }
@@ -719,19 +721,20 @@ impl<D: Digest> Proof<D> {
         let mut current: Vec<(u32, D)> = Vec::with_capacity(elements.len());
         let (leaf_chunks, leaf_remainder) = elements.as_chunks::<2>();
         for chunk in leaf_chunks {
-            let (leaf_a, pos_a) = &chunk[0];
-            let (leaf_b, pos_b) = &chunk[1];
+            let (pos_a, leaf_a) = split(&chunk[0]);
+            let (pos_b, leaf_b) = split(&chunk[1]);
             let (digest_a, digest_b) = H::hash_pair(
                 &[&pos_a.to_be_bytes(), leaf_a.as_ref()],
                 &[&pos_b.to_be_bytes(), leaf_b.as_ref()],
                 &Sequential,
             );
-            current.push((*pos_a, digest_a));
-            current.push((*pos_b, digest_b));
+            current.push((pos_a, digest_a));
+            current.push((pos_b, digest_b));
         }
-        for (leaf, position) in leaf_remainder {
+        for element in leaf_remainder {
+            let (position, leaf) = split(element);
             let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
-            current.push((*position, digest));
+            current.push((position, digest));
         }
 
         // 3. Iterate up the tree
@@ -833,15 +836,11 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> Result<(), Error> {
         let reconstructed = self.reconstruct_range_root::<H>(position, leaves)?;
-        Self::check_root(reconstructed, root)
+        Self::ensure_root_matches(reconstructed, root)
     }
 
-    /// Reconstructs the finalized root of the Binary Merkle Tree that includes the
-    /// contiguous range of `leaves` starting at `position`.
-    ///
-    /// The returned root incorporates the `leaf_count` stored in the proof. Use it when the
-    /// trusted value is derived from the root rather than the root itself. Otherwise, prefer
-    /// [Proof::verify_range_inclusion].
+    /// Reconstruct the finalized root from this proof and the consecutive `leaves` starting
+    /// at `position`, or return an error if the input data is invalid.
     pub fn reconstruct_range_root<H: Hasher<Digest = D>>(
         &self,
         position: u32,
@@ -863,16 +862,16 @@ impl<D: Digest> Proof<D> {
         }
 
         // Convert to format expected by reconstruct_multi_root
-        let elements: Vec<(D, u32)> = leaves
+        let elements: Vec<(u32, D)> = leaves
             .iter()
             .enumerate()
-            .map(|(i, leaf)| (*leaf, position + i as u32))
+            .map(|(i, leaf)| (position + i as u32, *leaf))
             .collect();
         self.reconstruct_multi_root::<H>(&elements)
     }
 
     /// Returns [Error::InvalidProof] unless `reconstructed` equals `root`.
-    fn check_root(reconstructed: D, root: &D) -> Result<(), Error> {
+    fn ensure_root_matches(reconstructed: D, root: &D) -> Result<(), Error> {
         if reconstructed == *root {
             Ok(())
         } else {
@@ -2889,64 +2888,68 @@ mod tests {
         (digests, builder.build())
     }
 
-    /// Asserts that `verified` is exactly what comparing `reconstructed` with `expected`
-    /// implies, and that tampered input (`honest == false`) never reconstructs `root`.
-    fn assert_agrees(
-        honest: bool,
-        reconstructed: Result<Digest, Error>,
-        verified: Result<(), Error>,
-        expected: &Digest,
-        root: &Digest,
-    ) {
-        match &reconstructed {
-            Ok(r) if honest => assert_eq!(r, root),
-            Ok(r) => assert_ne!(r, root, "tampered input reconstructed the root"),
-            Err(e) => assert!(!honest, "honest input failed to reconstruct: {e:?}"),
-        }
-        match (reconstructed, verified) {
-            (Ok(r), Ok(())) => assert_eq!(r, *expected),
-            (Ok(r), Err(Error::InvalidProof(_, _))) => assert_ne!(r, *expected),
-            (Err(a), Err(b)) => {
-                assert_eq!(core::mem::discriminant(&a), core::mem::discriminant(&b))
-            }
-            (r, v) => panic!("reconstruct {r:?} disagrees with verify {v:?}"),
-        }
-    }
-
-    /// Returns tampered variants of `proof`: each sibling replaced, a sibling added, a
-    /// sibling removed, and the leaf count moved by one in each direction.
-    fn tampered(proof: &Proof<Digest>) -> Vec<Proof<Digest>> {
+    /// Returns `proof` marked honest, followed by tampered copies marked dishonest: each
+    /// sibling replaced, a sibling added, a sibling removed, and the leaf count moved by one.
+    fn proof_cases(proof: &Proof<Digest>) -> Vec<(bool, Proof<Digest>)> {
         let bad = Sha256::hash(&[b"tampered"]);
-        let mut out = Vec::new();
+        let mut cases = vec![(true, proof.clone())];
         for i in 0..proof.siblings.len() {
             let mut p = proof.clone();
             p.siblings[i] = bad;
-            out.push(p);
+            cases.push((false, p));
         }
         let mut p = proof.clone();
         p.siblings.push(bad);
-        out.push(p);
+        cases.push((false, p));
         if !proof.siblings.is_empty() {
             let mut p = proof.clone();
             p.siblings.pop();
-            out.push(p);
+            cases.push((false, p));
         }
-        for leaf_count in [proof.leaf_count.wrapping_sub(1), proof.leaf_count + 1] {
+        for leaf_count in [proof.leaf_count - 1, proof.leaf_count + 1] {
             let mut p = proof.clone();
             p.leaf_count = leaf_count;
-            out.push(p);
+            cases.push((false, p));
         }
-        out
+        cases
+    }
+
+    /// Asserts that honest input reconstructs `root` and dishonest input never does, and that
+    /// `verify` against either `root` or a wrong root matches comparing with `reconstructed`.
+    fn assert_agrees(
+        honest: bool,
+        root: &Digest,
+        reconstructed: Result<Digest, Error>,
+        verify: impl Fn(&Digest) -> Result<(), Error>,
+    ) {
+        match &reconstructed {
+            Ok(r) if honest => assert_eq!(r, root),
+            Ok(r) => assert_ne!(r, root, "dishonest input reconstructed the root"),
+            Err(e) => assert!(!honest, "honest input failed to reconstruct: {e:?}"),
+        }
+        let wrong_root = Sha256::hash(&[b"wrong root"]);
+        for expected in [root, &wrong_root] {
+            match (&reconstructed, verify(expected)) {
+                (Ok(r), Ok(())) => assert_eq!(r, expected),
+                (Ok(r), Err(Error::InvalidProof(_, _))) => assert_ne!(r, expected),
+                // `Error` does not implement `PartialEq`, so compare variants.
+                (Err(a), Err(b)) => assert_eq!(
+                    core::mem::discriminant(a),
+                    core::mem::discriminant(&b)
+                ),
+                (r, v) => panic!("reconstruct {r:?} disagrees with verify {v:?}"),
+            }
+        }
     }
 
     #[test]
     fn test_reconstruct_element_root_matches_tree_root() {
         for n in 1..=33 {
             let (digests, tree) = build_tree(n);
-            for (i, leaf) in digests.iter().enumerate() {
-                let proof = tree.proof(i as u32).unwrap();
+            for (i, leaf) in (0..).zip(&digests) {
+                let proof = tree.proof(i).unwrap();
                 assert_eq!(
-                    proof.reconstruct_element_root::<Sha256>(leaf, i as u32).unwrap(),
+                    proof.reconstruct_element_root::<Sha256>(i, leaf).unwrap(),
                     tree.root(),
                     "size={n} position={i}"
                 );
@@ -2991,9 +2994,9 @@ mod tests {
             let (digests, tree) = build_tree(n);
             for mask in 1u32..(1 << n) {
                 let positions: Vec<u32> = (0..n).filter(|p| mask & (1 << p) != 0).collect();
-                let proof = tree.multi_proof(positions.iter().copied()).unwrap();
-                let elements: Vec<(Digest, u32)> =
-                    positions.iter().map(|&p| (digests[p as usize], p)).collect();
+                let proof = tree.multi_proof(&positions).unwrap();
+                let elements: Vec<(u32, Digest)> =
+                    positions.iter().map(|&p| (p, digests[p as usize])).collect();
                 assert_eq!(
                     proof.reconstruct_multi_root::<Sha256>(&elements).unwrap(),
                     tree.root(),
@@ -3005,30 +3008,22 @@ mod tests {
 
     #[test]
     fn test_verify_element_inclusion_agrees_with_reconstruct() {
-        let wrong_root = Sha256::hash(&[b"wrong root"]);
         let wrong_leaf = Sha256::hash(&[b"wrong leaf"]);
-        for n in 0..=17 {
+        for n in 1..=17 {
             let (digests, tree) = build_tree(n);
             let root = tree.root();
-            for i in 0..n.max(1) {
-                let proof = tree.proof(i).unwrap_or_default();
-                let leaf = digests.get(i as usize).copied().unwrap_or(wrong_leaf);
-                let honest_proof = n > 0;
-                let mut proofs = vec![proof.clone()];
-                proofs.extend(tampered(&proof));
-                for (p, proof) in proofs.iter().enumerate() {
-                    for (v, (leaf, position)) in
-                        [(leaf, i), (wrong_leaf, i), (leaf, i + 1)].into_iter().enumerate()
-                    {
-                        for expected in [&root, &wrong_root] {
-                            assert_agrees(
-                                honest_proof && p == 0 && v == 0,
-                                proof.reconstruct_element_root::<Sha256>(&leaf, position),
-                                proof.verify_element_inclusion::<Sha256>(&leaf, position, expected),
-                                expected,
-                                &root,
-                            );
-                        }
+            for (i, &leaf) in (0..).zip(&digests) {
+                let inputs = [(true, i, leaf), (false, i, wrong_leaf), (false, i + 1, leaf)];
+                for (honest_proof, proof) in proof_cases(&tree.proof(i).unwrap()) {
+                    for (honest_input, position, leaf) in inputs {
+                        assert_agrees(
+                            honest_proof && honest_input,
+                            &root,
+                            proof.reconstruct_element_root::<Sha256>(position, &leaf),
+                            |expected| {
+                                proof.verify_element_inclusion::<Sha256>(&leaf, position, expected)
+                            },
+                        );
                     }
                 }
             }
@@ -3037,54 +3032,38 @@ mod tests {
 
     #[test]
     fn test_verify_range_inclusion_agrees_with_reconstruct() {
-        let wrong_root = Sha256::hash(&[b"wrong root"]);
         let wrong_leaf = Sha256::hash(&[b"wrong leaf"]);
-        for n in 0..=9 {
+        for n in 1..=9 {
             let (digests, tree) = build_tree(n);
             let root = tree.root();
-            let ranges: Vec<(u32, u32)> = if n == 0 {
-                vec![(0, 0)]
-            } else {
-                (0..n).flat_map(|s| (s..n).map(move |e| (s, e))).collect()
-            };
-            for (start, end) in ranges {
-                let proof = tree.range_proof(start, end).unwrap();
-                let leaves: Vec<Digest> = if n == 0 {
-                    Vec::new()
-                } else {
-                    digests[start as usize..=end as usize].to_vec()
-                };
-                let mut wrong_leaves = leaves.clone();
-                if let Some(first) = wrong_leaves.first_mut() {
-                    *first = wrong_leaf;
-                }
-                let mut short_leaves = leaves.clone();
-                short_leaves.pop();
-                let mut long_leaves = leaves.clone();
-                long_leaves.push(wrong_leaf);
-                let mut proofs = vec![proof.clone()];
-                proofs.extend(tampered(&proof));
-                for (p, proof) in proofs.iter().enumerate() {
-                    for (v, (position, leaves)) in [
-                        (start, &leaves),
-                        (start, &wrong_leaves),
-                        (start, &short_leaves),
-                        (start, &long_leaves),
-                        (start + 1, &leaves),
-                        (u32::MAX, &leaves),
-                    ]
-                    .into_iter()
-                    .enumerate()
+            for start in 0..n {
+                for end in start..n {
+                    let leaves = digests[start as usize..=end as usize].to_vec();
+                    let mut wrong = leaves.clone();
+                    wrong[0] = wrong_leaf;
+                    let short = leaves[..leaves.len() - 1].to_vec();
+                    let mut long = leaves.clone();
+                    long.push(wrong_leaf);
+                    let inputs = [
+                        (true, start, &leaves),
+                        (false, start, &wrong),
+                        (false, start, &short),
+                        (false, start, &long),
+                        (false, start + 1, &leaves),
+                        (false, u32::MAX, &leaves),
+                    ];
+                    for (honest_proof, proof) in proof_cases(&tree.range_proof(start, end).unwrap())
                     {
-                        // In an empty tree, the wrong and short leaf sets are also empty.
-                        let honest = p == 0 && (v == 0 || (n == 0 && v <= 2));
-                        for expected in [&root, &wrong_root] {
+                        for (honest_input, position, leaves) in inputs {
                             assert_agrees(
-                                honest,
-                                proof.reconstruct_range_root::<Sha256>(position, leaves),
-                                proof.verify_range_inclusion::<Sha256>(position, leaves, expected),
-                                expected,
+                                honest_proof && honest_input,
                                 &root,
+                                proof.reconstruct_range_root::<Sha256>(position, leaves),
+                                |expected| {
+                                    proof.verify_range_inclusion::<Sha256>(
+                                        position, leaves, expected,
+                                    )
+                                },
                             );
                         }
                     }
@@ -3095,49 +3074,42 @@ mod tests {
 
     #[test]
     fn test_verify_multi_inclusion_agrees_with_reconstruct() {
-        let wrong_root = Sha256::hash(&[b"wrong root"]);
         let wrong_leaf = Sha256::hash(&[b"wrong leaf"]);
-        for n in 0..=7u32 {
+        for n in 1..=7u32 {
             let (digests, tree) = build_tree(n);
             let root = tree.root();
-            for mask in 0u32..(1 << n) {
+            for mask in 1u32..(1 << n) {
                 let positions: Vec<u32> = (0..n).filter(|p| mask & (1 << p) != 0).collect();
-                let Ok(proof) = tree.multi_proof(positions.iter().copied()) else {
-                    continue;
-                };
-                let elements: Vec<(Digest, u32)> =
-                    positions.iter().map(|&p| (digests[p as usize], p)).collect();
-                let mut variants = vec![elements.clone()];
-                if let Some(&(_, p)) = elements.first() {
-                    let mut wrong = elements.clone();
-                    wrong[0] = (wrong_leaf, p);
-                    variants.push(wrong);
-                    let mut duplicate = elements.clone();
-                    duplicate.push(elements[elements.len() - 1]);
-                    variants.push(duplicate);
-                    let mut out_of_range = elements.clone();
-                    out_of_range.push((wrong_leaf, n));
-                    variants.push(out_of_range);
-                }
-                if elements.len() >= 2 {
-                    let mut unsorted = elements.clone();
+                let elements: Vec<(u32, Digest)> =
+                    positions.iter().map(|&p| (p, digests[p as usize])).collect();
+                let mut wrong = elements.clone();
+                wrong[0].1 = wrong_leaf;
+                let mut duplicate = elements.clone();
+                duplicate.push(elements[elements.len() - 1]);
+                let mut out_of_range = elements.clone();
+                out_of_range.push((n, wrong_leaf));
+                let mut inputs = vec![
+                    (true, elements),
+                    (false, wrong),
+                    (false, duplicate),
+                    (false, out_of_range),
+                    (false, Vec::new()),
+                ];
+                if positions.len() >= 2 {
+                    let mut unsorted = inputs[0].1.clone();
                     unsorted.swap(0, 1);
-                    variants.push(unsorted);
+                    inputs.push((false, unsorted));
                 }
-                variants.push(Vec::new());
-                let mut proofs = vec![proof.clone()];
-                proofs.extend(tampered(&proof));
-                for (p, proof) in proofs.iter().enumerate() {
-                    for (v, elements) in variants.iter().enumerate() {
-                        for expected in [&root, &wrong_root] {
-                            assert_agrees(
-                                p == 0 && v == 0,
-                                proof.reconstruct_multi_root::<Sha256>(elements),
-                                proof.verify_multi_inclusion::<Sha256>(elements, expected),
-                                expected,
-                                &root,
-                            );
-                        }
+                for (honest_proof, proof) in proof_cases(&tree.multi_proof(&positions).unwrap()) {
+                    for (honest_input, elements) in &inputs {
+                        let legacy: Vec<(Digest, u32)> =
+                            elements.iter().map(|&(p, leaf)| (leaf, p)).collect();
+                        assert_agrees(
+                            honest_proof && *honest_input,
+                            &root,
+                            proof.reconstruct_multi_root::<Sha256>(elements),
+                            |expected| proof.verify_multi_inclusion::<Sha256>(&legacy, expected),
+                        );
                     }
                 }
             }
