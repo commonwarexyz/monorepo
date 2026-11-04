@@ -395,7 +395,7 @@ mod tests {
         },
         types::{Epoch, Height, Participant, Round, View},
     };
-    use commonware_cryptography::{Hasher as _, bls12381::primitives::variant::MinPk, ed25519};
+    use commonware_cryptography::{Hasher as _, bls12381::primitives::variant::MinSig, ed25519};
     use commonware_parallel::Sequential;
     use commonware_resolver::p2p as resolver;
     use commonware_runtime::{
@@ -420,12 +420,12 @@ mod tests {
     #[derive(Clone)]
     struct AcceptAll;
 
-    impl LqcVerifier<Sha256, MinPk> for AcceptAll {
+    impl LqcVerifier<Sha256, MinSig> for AcceptAll {
         type Error = Infallible;
 
         fn verify(
             &mut self,
-            _: &Lqc<MinPk, Sha256Digest>,
+            _: &Lqc<MinSig, Sha256Digest>,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send {
             std::future::ready(Ok(()))
         }
@@ -440,7 +440,7 @@ mod tests {
     /// One node's application actor attached to a real marshal over a simulated network, plus a
     /// peer's buffered broadcast engine that observes what the node's relay disseminates.
     struct Harness {
-        committee: Committee<MinPk>,
+        committee: Committee<MinSig>,
         marshal: Marshal,
         relay: Relay,
         mailbox: Mailbox<deterministic::Context>,
@@ -449,7 +449,7 @@ mod tests {
 
     impl Harness {
         async fn new(context: &deterministic::Context, production: Production) -> Self {
-            let committee = Committee::<MinPk>::builder(7, PARTICIPANTS)
+            let committee = Committee::<MinSig>::builder(7, PARTICIPANTS)
                 .namespace(b"_COMMONWARE_LOG_MULTIMMIT_ACTOR_TEST")
                 .producers(vec![Participant::new(0), Participant::new(1)])
                 .limits(PathLimits::new(8, 4))
@@ -505,7 +505,7 @@ mod tests {
             // Backfill must not exceed the resolver mailbox.
             .with_backfill_concurrency(RESOLVER_MAILBOX_SIZE);
             let (mut service, bridge) =
-                marshal::open::<_, EightCap, Sha256, MinPk, Body, ed25519::PublicKey>(
+                marshal::open::<_, EightCap, Sha256, MinSig, Body, ed25519::PublicKey>(
                     context.child("marshal"),
                     config,
                     buffer.clone(),
@@ -574,7 +574,7 @@ mod tests {
         }
 
         /// Returns a DA certificate for a block at `height` on `chain`.
-        fn certificate(&self, chain: u32, height: u64) -> Arc<Artifact<MinPk, Sha256Digest>> {
+        fn certificate(&self, chain: u32, height: u64) -> Arc<Artifact<MinSig, Sha256Digest>> {
             let header = TransactionBlockHeader::new(
                 self.committee.config.epoch(),
                 ChainId::new(chain),
