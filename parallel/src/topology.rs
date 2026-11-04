@@ -649,11 +649,16 @@ impl std::fmt::Debug for Groups {
 }
 
 /// Counts one call or job against a group, or against every group for a Wide claim, until the
-/// lease is dropped. An unhomed group with work in flight cannot acquire a home.
+/// lease is dropped. An unhomed group with counted work in flight cannot acquire a home.
+///
+/// A claim on a strategy's only group counts nowhere when the calling thread's domain is unknown,
+/// as on every thread when homing is disabled. Such a thread can neither use nor create a home,
+/// and with one group no placement choice depends on the count.
 #[derive(Debug)]
 pub(crate) struct Lease {
-    /// The groups the claim counts against.
-    groups: Arc<Groups>,
+    /// The groups the claim counts against and the thread that made it, or `None` when the
+    /// claim counts nowhere.
+    claim: Option<(Arc<Groups>, ThreadId)>,
 
     /// The leased group, or for a Wide claim the group its work is offered to first.
     index: usize,
@@ -661,14 +666,31 @@ pub(crate) struct Lease {
     /// Whether the claim counts against every group.
     wide: bool,
 
-    /// The thread that made the claim.
-    submitter: ThreadId,
-
     /// Whether the lease holds one of its group's root admissions.
     admitted: bool,
 }
 
 impl Lease {
+    /// A claim of `submitter` on group `index` of `groups` that the caller has already counted.
+    fn counted(groups: &Arc<Groups>, submitter: ThreadId, index: usize, wide: bool) -> Self {
+        Self {
+            claim: Some((Arc::clone(groups), submitter)),
+            index,
+            wide,
+            admitted: false,
+        }
+    }
+
+    /// A claim on group `index` that counts nowhere.
+    const fn uncounted(index: usize, wide: bool) -> Self {
+        Self {
+            claim: None,
+            index,
+            wide,
+            admitted: false,
+        }
+    }
+
     /// The leased group's index among the pool's groups.
     pub(crate) const fn group(&self) -> usize {
         self.index
@@ -677,13 +699,15 @@ impl Lease {
     /// Extends this claim to every group while retaining its root admission, if any.
     pub(crate) fn into_wide(mut self) -> Self {
         if !self.wide {
-            let tick = self.groups.ticks.fetch_add(1, Ordering::Relaxed);
-            for (index, group) in self.groups.groups.iter().enumerate() {
-                let mut state = group.state.lock();
-                if index == self.index {
-                    state.last_used = tick;
-                } else {
-                    state.claim(tick, self.submitter);
+            if let Some((groups, submitter)) = &self.claim {
+                let tick = groups.ticks.fetch_add(1, Ordering::Relaxed);
+                for (index, group) in groups.groups.iter().enumerate() {
+                    let mut state = group.state.lock();
+                    if index == self.index {
+                        state.last_used = tick;
+                    } else {
+                        state.claim(tick, *submitter);
+                    }
                 }
             }
             self.wide = true;
@@ -694,19 +718,22 @@ impl Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        let groups = &self.groups.groups;
+        let Some((groups, submitter)) = &self.claim else {
+            return;
+        };
+        let groups = &groups.groups;
         {
             let mut state = groups[self.index].state.lock();
             if self.admitted {
                 assert!(state.admitted_roots > 0);
                 state.admitted_roots -= 1;
             }
-            state.release(self.submitter);
+            state.release(*submitter);
         }
         if self.wide {
             for (index, group) in groups.iter().enumerate() {
                 if index != self.index {
-                    group.state.lock().release(self.submitter);
+                    group.state.lock().release(*submitter);
                 }
             }
         }
@@ -897,13 +924,7 @@ impl Groups {
                 }
                 let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
                 group.state.lock().claim(tick, submitter);
-                return Some(Lease {
-                    groups: Arc::clone(self),
-                    index,
-                    wide: false,
-                    submitter,
-                    admitted: false,
-                });
+                return Some(Lease::counted(self, submitter, index, false));
             }
             None
         };
@@ -942,13 +963,7 @@ impl Groups {
             }
             assert!(group.home.set(domain).is_ok(), "a group must be homed once");
             state.claim(tick, submitter);
-            let lease = Lease {
-                groups: Arc::clone(self),
-                index,
-                wide: false,
-                submitter,
-                admitted: false,
-            };
+            let lease = Lease::counted(self, submitter, index, false);
             drop(state);
             self.home(index);
             return Some(lease);
@@ -995,7 +1010,11 @@ impl Groups {
     /// first. Any worker may take the call's work, and the lease counts it on every group until
     /// the call finishes.
     pub(crate) fn wide(self: &Arc<Self>) -> Lease {
-        let home = self.current_domain().and_then(|domain| {
+        let domain = self.current_domain();
+        if !self.counts(domain) {
+            return Lease::uncounted(0, true);
+        }
+        let home = domain.and_then(|domain| {
             self.groups
                 .iter()
                 .position(|group| group.home.get() == Some(&domain))
@@ -1005,33 +1024,27 @@ impl Groups {
         for group in &self.groups {
             group.state.lock().claim(tick, submitter);
         }
-        Lease {
-            groups: Arc::clone(self),
-            index: home.unwrap_or(0),
-            wide: true,
-            submitter,
-            admitted: false,
-        }
+        Lease::counted(self, submitter, home.unwrap_or(0), true)
     }
 
     /// Claims an existing placement's group without changing its home.
     pub(crate) fn lease(self: &Arc<Self>, index: usize) -> Lease {
+        if !self.counts(self.current_domain()) {
+            return Lease::uncounted(index, false);
+        }
         let submitter = std::thread::current().id();
         let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
         self.groups[index].state.lock().claim(tick, submitter);
-        Lease {
-            groups: Arc::clone(self),
-            index,
-            wide: false,
-            submitter,
-            admitted: false,
-        }
+        Lease::counted(self, submitter, index, false)
     }
 
     /// Claims a group for a caller without a usable home, preferring groups that can take Local
     /// work, then fewer calls and jobs in flight to limit contention, then the least recent claim.
     /// Recency steers fallback work away from groups whose callers were recently active.
     pub(crate) fn least_loaded(self: &Arc<Self>) -> Lease {
+        if self.groups.len() == 1 {
+            return self.lease(0);
+        }
         let index = (0..self.groups.len())
             .min_by_key(|&index| {
                 let group = &self.groups[index];
@@ -1040,6 +1053,11 @@ impl Groups {
             })
             .expect("a strategy must have at least one group");
         self.lease(index)
+    }
+
+    /// Whether a claim from a thread in `domain` must be counted, as described on [`Lease`].
+    fn counts(&self, domain: Option<u16>) -> bool {
+        domain.is_some() || self.groups.len() > 1
     }
 
     /// Requests placement in the home domain of `group`, within the caller's current mask. A
@@ -1574,17 +1592,47 @@ mod tests {
         }
     }
 
-    /// A pool with one group admits every root without counting admissions, and the roots' claims
-    /// are released with their leases.
+    /// A pool with one group admits every root without counting admissions, and the claims of
+    /// roots from a known domain are released with their leases.
     #[test]
     fn single_group_admits_all_roots() {
         let groups = synthetic(&[2]);
+        Groups::fake_domain(Some(0));
         let roots: Vec<_> = (0..8).map(|_| groups.root()).collect();
         assert!(roots.iter().all(|(_, admitted)| *admitted));
         assert_eq!(groups.groups[0].state.lock().admitted_roots, 0);
         assert_eq!(groups.groups[0].state.lock().in_flight(), 8);
         drop(roots);
         assert_eq!(groups.groups[0].state.lock().in_flight(), 0);
+        Groups::fake_domain(None);
+    }
+
+    /// Claims on a strategy's only group count only when the calling thread's domain is known.
+    /// Claims from a thread without one leave the group idle, so a caller with a domain can still
+    /// home it.
+    #[test]
+    fn single_group_counts_only_known_domains() {
+        let groups = synthetic(&[2]);
+
+        // No kind of claim from a thread without a domain reaches the group.
+        Groups::fake_domain(None);
+        let uncounted = [
+            groups.wide(),
+            groups.lease(0),
+            groups.least_loaded(),
+            groups.root().0.into_wide(),
+        ];
+        assert!(!groups.groups[0].has_leases());
+
+        // A caller with a domain homes the group and counts its claims.
+        Groups::fake_domain(Some(0));
+        let local = groups.local().expect("the idle group must take a home");
+        let wide = groups.wide();
+        assert_eq!(groups.groups[0].state.lock().in_flight(), 2);
+
+        drop((uncounted, local, wide));
+        assert!(!groups.groups[0].has_leases());
+        Groups::fake_domain(None);
     }
 
     /// A group narrower than the first is never homed or leased for Local work, while a call on
