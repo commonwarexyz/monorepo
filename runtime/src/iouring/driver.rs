@@ -1531,7 +1531,10 @@ pub mod tests {
 
         assert!(harness.completed.is_empty());
         assert!(harness.driver.state.waiters.is_in_flight(id));
-        assert_eq!(harness.driver.next_deadline(), Some(deadline));
+        assert_eq!(
+            harness.driver.next_deadline(),
+            Some(harness.fires_at(deadline))
+        );
 
         harness.orphan(id);
         harness.drain();

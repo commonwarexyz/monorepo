@@ -4372,26 +4372,40 @@ fn test_busy_worker_checks_the_global_queue_every_interval() {
 /// and each group completes its other sleeps early once woken. With a full
 /// batch between passes, every group after the first would wait for about
 /// [`BATCH_SIZE`] of the long polls. The slice holds the whole storm to a few.
+/// Once the storm has drained, a pass that reaches every due deadline clears
+/// the backlog, and the long polls get full batches again.
 #[test]
 fn test_expiry_backlog_keeps_pace_with_long_polls() {
     /// Groups of sleeps, each owned by one task.
     const GROUPS: usize = 4;
     Runner::new(config()).start(|context| async move {
-        // A task that requeues itself after polling for twice the slice.
+        // A task that requeues itself after polling for twice the slice. Once
+        // the storm has drained, it measures the longest run of its polls that
+        // share one service time, so no pass came between them, over enough
+        // polls to span a full batch.
         let polls = Arc::new(AtomicUsize::new(0));
-        let stop = Arc::new(AtomicBool::new(false));
+        let drained = Arc::new(AtomicBool::new(false));
         let spinner = context.child("spinner").spawn({
             let polls = polls.clone();
-            let stop = stop.clone();
+            let drained = drained.clone();
             move |_| async move {
-                while !stop.load(Ordering::Relaxed) {
+                let (mut turn, mut run, mut longest, mut measured) = (0, 0, 0, 0);
+                while measured < 2 * BATCH_SIZE {
                     let began = Instant::now();
                     while began.elapsed() < 2 * BACKLOG_SLICE {
                         std::hint::spin_loop();
                     }
                     polls.fetch_add(1, Ordering::Relaxed);
+                    if drained.load(Ordering::Relaxed) {
+                        let current = clock::turn();
+                        run = if current == turn { run + 1 } else { 1 };
+                        turn = current;
+                        longest = longest.max(run);
+                        measured += 1;
+                    }
                     reschedule().await;
                 }
+                longest
             }
         });
 
@@ -4427,8 +4441,8 @@ fn test_expiry_backlog_keeps_pace_with_long_polls() {
             first = first.min(began);
             last = last.max(ended);
         }
-        stop.store(true, Ordering::Relaxed);
-        spinner.await.unwrap();
+        drained.store(true, Ordering::Relaxed);
+        let longest = spinner.await.unwrap();
 
         // Every pass after the first followed a slice, not a full batch.
         assert!(
@@ -4436,6 +4450,10 @@ fn test_expiry_backlog_keeps_pace_with_long_polls() {
             "the storm spanned {} long polls",
             last - first
         );
+
+        // The pass that reached the last due deadline cleared the backlog, so
+        // a full batch of long polls ran between two later passes.
+        assert_eq!(longest, BATCH_SIZE, "the backlog outlived the storm");
     });
 }
 

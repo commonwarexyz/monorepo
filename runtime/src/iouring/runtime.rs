@@ -97,7 +97,8 @@
 //! Polled later on another worker, I/O has the registering worker forward its
 //! result through a channel, while a sleep is polled and dropped directly in
 //! the registering worker's timer shard, and a drop on the registering worker
-//! leaves the removal to its next service pass (see [`super::sleep`]).
+//! leaves the removal to its next service pass, or to its next registration
+//! (see [`super::sleep`]).
 //! Mailboxes carry root wakes and the observation transfers and cancellations
 //! of I/O.
 //!
@@ -111,9 +112,9 @@
 //! [`Config::with_global_queue_interval`] takes and whenever its own run
 //! queue is empty. A take returns one runnable to poll next and queues the
 //! rest of its share in the run queue, no more than it has room for and no
-//! more than fill it to half. A pool worker that finds both queues empty
-//! after a service pass tries to steal before parking, or relies on workers
-//! already holding search counts when the search cap refuses it.
+//! more than would fill it to half. A pool worker that finds both queues
+//! empty after a service pass tries to steal before parking, or relies on
+//! workers already holding search counts when the search cap refuses it.
 //!
 //! Before parking, the worker checks readiness again because polls and
 //! callbacks can produce more work. Pool workers coordinate through
@@ -244,6 +245,12 @@ const BATCH_SIZE: usize = 64;
 /// budget per turn, and a full batch of long polls would hold each later pass
 /// back by [`BATCH_SIZE`] of them. A budget's pass is short next to this
 /// slice, so tasks keep most of the worker while a backlog drains.
+/// The backlog is conservative: a pass that runs out of budget while expiry
+/// drains a detached wheel bucket can leave a bound at or below its time with
+/// only later deadlines left to refile (see [`Wheel::bound`]), so for a few
+/// passes a backlog may hold no due deadline.
+///
+/// [`Wheel::bound`]: super::wheel::Wheel::bound
 const BACKLOG_SLICE: Duration = Duration::from_micros(50);
 
 /// Largest network timeout, 30 years of 365 days, which keeps every request
@@ -1091,9 +1098,12 @@ pub struct Local {
     pub timers_next: u64,
     /// Registrations in `timers` whose sleeps were dropped on this worker
     /// while it was not closing, which its next service pass, or its cleanup
-    /// before closing `timers`, removes in one critical section. Only this
-    /// worker pushes and drains it, and it keeps its capacity. While any
-    /// remain, the worker serves again rather than park.
+    /// before closing `timers`, removes, at most one
+    /// [`BUDGET`](super::wheel::BUDGET) per critical section. Each
+    /// registration here first removes the latest one and takes its slot (see
+    /// [`super::sleep`]). Only this worker pushes and drains it, and it keeps
+    /// its capacity. While any remain, the worker serves again rather than
+    /// park.
     pub timers_dropped: Vec<Id>,
     /// Reject new registration and send wakes to the global queue, while
     /// allowing idempotent cancellation.
@@ -1310,9 +1320,9 @@ impl Local {
 
     /// Earliest absolute deadline across driver requests and sleepers, or a
     /// time never later than it.
-    fn next_deadline(&mut self) -> Option<Instant> {
+    fn next_deadline(&self) -> Option<Instant> {
         [
-            self.driver.as_mut().unwrap().next_deadline(),
+            self.driver.as_ref().unwrap().next_deadline(),
             clock::instant(self.timers_next),
         ]
         .into_iter()
@@ -1530,6 +1540,8 @@ pub struct Worker {
     rescue_at: Instant,
     /// Whether the latest service pass left due sleeps or request deadlines
     /// behind, which ends the next polling batch after [`BACKLOG_SLICE`].
+    /// Cleared by a pass that reaches every due deadline. A pass that runs
+    /// out of budget sets it even if only deadlines to refile remain.
     backlog: bool,
     /// False until kernel retirement and callback cleanup have finished.
     finished: bool,
@@ -1960,10 +1972,10 @@ impl Worker {
         let nanos = clock::nanos(*now);
         clock::set_turn(nanos);
 
-        // Registrations of sleeps dropped here leave first, in one critical
-        // section that defers their wakers' destruction, so expiry never
-        // fires them. A batch that leaves the wheel empty leaves no firing
-        // time to cache.
+        // Registrations of sleeps dropped here leave first, in critical
+        // sections of at most one budget each that defer their wakers'
+        // destruction, so expiry never fires them. A batch that leaves the
+        // wheel empty leaves no firing time to cache.
         if !timers_dropped.is_empty() && timers.drain(timers_dropped, deferred) {
             *timers_next = u64::MAX;
         }
@@ -2239,7 +2251,7 @@ impl Worker {
             // at this actual idle boundary after any elapsed callback time.
             // Waiting for an expired deadline would not block, so this ends a
             // search as well, and the catch-up's callbacks run user code.
-            let deadline = self.local.borrow_mut().next_deadline();
+            let deadline = self.local.borrow().next_deadline();
             let now = Instant::now();
             if deadline.is_some_and(|deadline| deadline <= now) {
                 if let Some(searcher) = &mut searcher {
