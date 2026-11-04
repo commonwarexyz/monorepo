@@ -634,7 +634,7 @@ fn restored_producer_reports_the_window_its_build_gate_applies() {
     let custodied = complete_custody(&mut machine, &prepared.custody_job());
     machine.drain_persisting(custodied);
 
-    let mut restored = Machine::<Sha256, MinPk>::restore(
+    let mut restored = Machine::<Sha256, Bls<MinPk>>::restore(
         Harness::builder(role).profile(),
         machine.live_snapshot_for_test(),
     )
