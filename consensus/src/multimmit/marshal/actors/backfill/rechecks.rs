@@ -7,9 +7,10 @@ use crate::multimmit::{
         bodies::Bodies,
         wire::{BackfillKey, MAX_SEGMENT_ITEMS},
     },
+    scheme::Scheme,
     types::{BlockRef, Body},
 };
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::future::Aborted;
 use std::{
@@ -19,10 +20,10 @@ use std::{
 };
 
 /// A finished local recheck of one key.
-pub(super) struct RecheckCompletion<H: Hasher, V: Variant, B: Body<H>> {
+pub(super) struct RecheckCompletion<H: Hasher, S: Scheme, B: Body<H>> {
     pub key: BackfillKey<H::Digest>,
     /// The locally held value, if any.
-    pub result: Result<Option<Resolved<H, V, B>>, Error>,
+    pub result: Result<Option<Resolved<H, S, B>>, Error>,
 }
 
 /// Progress of one key's recheck.
@@ -34,14 +35,14 @@ enum RecheckState {
 }
 
 /// One recheck per key, at most `max_active` running at once, the rest queued in order.
-pub(super) struct Rechecks<H: Hasher, V: Variant, B: Body<H>> {
+pub(super) struct Rechecks<H: Hasher, S: Scheme, B: Body<H>> {
     states: BTreeMap<BackfillKey<H::Digest>, RecheckState>,
     queued: VecDeque<BackfillKey<H::Digest>>,
-    active: AbortablePool<'static, RecheckCompletion<H, V, B>>,
+    active: AbortablePool<'static, RecheckCompletion<H, S, B>>,
     max_active: usize,
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> Rechecks<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> Rechecks<H, S, B> {
     pub(super) fn new(max_active: usize) -> Self {
         Self {
             states: BTreeMap::new(),
@@ -87,7 +88,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Rechecks<H, V, B> {
     pub(super) fn start(
         &mut self,
         key: BackfillKey<H::Digest>,
-        recheck: impl Future<Output = RecheckCompletion<H, V, B>> + Send + 'static,
+        recheck: impl Future<Output = RecheckCompletion<H, S, B>> + Send + 'static,
     ) {
         let aborter = self.active.push(recheck);
         *self
@@ -112,7 +113,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Rechecks<H, V, B> {
     }
 
     /// Resolves to the next finished or canceled recheck.
-    pub(super) async fn next_completed(&mut self) -> Result<RecheckCompletion<H, V, B>, Aborted> {
+    pub(super) async fn next_completed(&mut self) -> Result<RecheckCompletion<H, S, B>, Aborted> {
         self.active.next_completed().await
     }
 }
@@ -121,16 +122,16 @@ impl<H: Hasher, V: Variant, B: Body<H>> Rechecks<H, V, B> {
 ///
 /// A range recheck returns the held prefix of `references`, which must be the range's exact
 /// references.
-pub(super) async fn local_value<H, V, B>(
-    catalog: catalog::Mailbox<H, V, B>,
-    bodies: Bodies<H, V, B>,
+pub(super) async fn local_value<H, S, B>(
+    catalog: catalog::Mailbox<H, S, B>,
+    bodies: Bodies<H, S, B>,
     key: BackfillKey<H::Digest>,
     references: Option<Arc<Vec<BlockRef<H::Digest>>>>,
     max_value_bytes: usize,
-) -> Result<Option<Resolved<H, V, B>>, Error>
+) -> Result<Option<Resolved<H, S, B>>, Error>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     match key {

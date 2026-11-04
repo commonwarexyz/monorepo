@@ -3,11 +3,12 @@
 use super::lanes::{Group, LaneId};
 use crate::multimmit::{
     actors::util::offload,
+    scheme::Scheme,
     types::{Artifact, CertificateId, CodecConfig},
     wire::{CertificateMessage, ConsensusMessage, DataMessage, Envelope, EnvelopeConfig, Plane},
 };
 use commonware_codec::{Decode as _, EncodeSize as _, Write as _};
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select;
 use commonware_p2p::Receiver;
 use commonware_parallel::Strategy;
@@ -31,12 +32,12 @@ pub(super) enum InvalidIngress {
     clippy::large_enum_variant,
     reason = "most frames are ready; boxing the group would allocate once per frame"
 )]
-pub(super) enum IngressOutcome<P, V: Variant, D: Digest> {
+pub(super) enum IngressOutcome<P, S: Scheme, D: Digest> {
     /// A decoded and identified group, ready for its lane.
     Ready {
         peer: P,
         lane: LaneId,
-        group: Group<V, D>,
+        group: Group<S, D>,
     },
     /// A frame dropped before reaching a lane.
     Invalid { reason: InvalidIngress },
@@ -45,20 +46,20 @@ pub(super) enum IngressOutcome<P, V: Variant, D: Digest> {
 }
 
 /// Decode-and-identify jobs of one plane, completed in any order.
-pub(super) type IngressResults<P, V, D> = Pool<'static, IngressOutcome<P, V, D>>;
+pub(super) type IngressResults<P, S, D> = Pool<'static, IngressOutcome<P, S, D>>;
 
 /// Owns decode-and-identify jobs across cancellation of the network select.
-pub(super) struct IngressReceiver<E, R: Receiver, H: Hasher, V: Variant, S> {
+pub(super) struct IngressReceiver<E, R: Receiver, H: Hasher, S: Scheme, St> {
     context: E,
     pub(super) receiver: R,
     plane: Plane,
     config: EnvelopeConfig<CodecConfig>,
-    strategy: S,
-    pub(super) jobs: IngressResults<R::PublicKey, V, H::Digest>,
+    strategy: St,
+    pub(super) jobs: IngressResults<R::PublicKey, S, H::Digest>,
     pub(super) closed: bool,
 }
 
-impl<E: Clock, R: Receiver, H: Hasher, V: Variant, S: Strategy> IngressReceiver<E, R, H, V, S> {
+impl<E: Clock, R: Receiver, H: Hasher, S: Scheme, St: Strategy> IngressReceiver<E, R, H, S, St> {
     /// Creates a receiver that decodes `plane` frames on `strategy`.
     ///
     /// Each frame is submitted as soon as it is read, so receiving never waits on earlier decodes.
@@ -68,7 +69,7 @@ impl<E: Clock, R: Receiver, H: Hasher, V: Variant, S: Strategy> IngressReceiver<
         receiver: R,
         plane: Plane,
         config: EnvelopeConfig<CodecConfig>,
-        strategy: S,
+        strategy: St,
     ) -> Self {
         Self {
             context,
@@ -84,7 +85,7 @@ impl<E: Clock, R: Receiver, H: Hasher, V: Variant, S: Strategy> IngressReceiver<
     /// Returns the next completed decode, receiving and submitting frames until one completes.
     ///
     /// Returns `None` once the network receiver is closed and every owned job has completed.
-    pub(super) async fn recv(&mut self) -> Option<IngressOutcome<R::PublicKey, V, H::Digest>> {
+    pub(super) async fn recv(&mut self) -> Option<IngressOutcome<R::PublicKey, S, H::Digest>> {
         loop {
             if self.closed {
                 if self.jobs.is_empty() {
@@ -106,7 +107,7 @@ impl<E: Clock, R: Receiver, H: Hasher, V: Variant, S: Strategy> IngressReceiver<
                     let weight = bytes.len();
                     self.jobs.push(async move {
                         let (_, outcome) = offload(strategy, weight, Span::none(), move |_| {
-                            prepare::<H, V, _>(plane, peer, bytes, &config, received_at)
+                            prepare::<H, S, _>(plane, peer, bytes, &config, received_at)
                         })
                         .await;
                         outcome.unwrap_or(IngressOutcome::Panicked)
@@ -117,34 +118,34 @@ impl<E: Clock, R: Receiver, H: Hasher, V: Variant, S: Strategy> IngressReceiver<
     }
 
     /// Returns a decode that has already completed, without receiving more frames.
-    pub(super) fn try_completed(&mut self) -> Option<IngressOutcome<R::PublicKey, V, H::Digest>> {
+    pub(super) fn try_completed(&mut self) -> Option<IngressOutcome<R::PublicKey, S, H::Digest>> {
         self.jobs.next_completed().now_or_never()
     }
 }
 
 /// Checks contextual frame constraints and identifies an entire atomic ingress group.
-fn prepare<H: Hasher, V: Variant, P>(
+fn prepare<H: Hasher, S: Scheme, P>(
     plane: Plane,
     peer: P,
     bytes: IoBuf,
     config: &EnvelopeConfig<CodecConfig>,
     received_at: SystemTime,
-) -> IngressOutcome<P, V, H::Digest> {
+) -> IngressOutcome<P, S, H::Digest> {
     match plane {
-        Plane::Consensus => prepare_consensus::<H, V, P>(peer, bytes, config, received_at),
-        Plane::Certificate => prepare_certificate::<H, V, P>(peer, bytes, config, received_at),
-        Plane::Data => prepare_data::<H, V, P>(peer, bytes, config, received_at),
+        Plane::Consensus => prepare_consensus::<H, S, P>(peer, bytes, config, received_at),
+        Plane::Certificate => prepare_certificate::<H, S, P>(peer, bytes, config, received_at),
+        Plane::Data => prepare_data::<H, S, P>(peer, bytes, config, received_at),
     }
 }
 
 /// Decodes one consensus-plane frame, checking that an attached parent is the referenced one.
-fn prepare_consensus<H: Hasher, V: Variant, P>(
+fn prepare_consensus<H: Hasher, S: Scheme, P>(
     peer: P,
     bytes: IoBuf,
     config: &EnvelopeConfig<CodecConfig>,
     received_at: SystemTime,
-) -> IngressOutcome<P, V, H::Digest> {
-    let Ok(envelope) = Envelope::<ConsensusMessage<V, H::Digest>>::decode_cfg(bytes, config) else {
+) -> IngressOutcome<P, S, H::Digest> {
+    let Ok(envelope) = Envelope::<ConsensusMessage<S, H::Digest>>::decode_cfg(bytes, config) else {
         return IngressOutcome::Invalid {
             reason: InvalidIngress::Decode,
         };
@@ -187,13 +188,13 @@ fn prepare_consensus<H: Hasher, V: Variant, P>(
 }
 
 /// Decodes one certificate-plane frame.
-fn prepare_certificate<H: Hasher, V: Variant, P>(
+fn prepare_certificate<H: Hasher, S: Scheme, P>(
     peer: P,
     bytes: IoBuf,
     config: &EnvelopeConfig<CodecConfig>,
     received_at: SystemTime,
-) -> IngressOutcome<P, V, H::Digest> {
-    let Ok(envelope) = Envelope::<CertificateMessage<V, H::Digest>>::decode_cfg(bytes, config)
+) -> IngressOutcome<P, S, H::Digest> {
+    let Ok(envelope) = Envelope::<CertificateMessage<S, H::Digest>>::decode_cfg(bytes, config)
     else {
         return IngressOutcome::Invalid {
             reason: InvalidIngress::Decode,
@@ -208,13 +209,13 @@ fn prepare_certificate<H: Hasher, V: Variant, P>(
 }
 
 /// Decodes one data-plane frame into the lane of its producer chain.
-fn prepare_data<H: Hasher, V: Variant, P>(
+fn prepare_data<H: Hasher, S: Scheme, P>(
     peer: P,
     bytes: IoBuf,
     config: &EnvelopeConfig<CodecConfig>,
     received_at: SystemTime,
-) -> IngressOutcome<P, V, H::Digest> {
-    let Ok(envelope) = Envelope::<DataMessage<V, H::Digest>>::decode_cfg(bytes, config) else {
+) -> IngressOutcome<P, S, H::Digest> {
+    let Ok(envelope) = Envelope::<DataMessage<S, H::Digest>>::decode_cfg(bytes, config) else {
         return IngressOutcome::Invalid {
             reason: InvalidIngress::Decode,
         };

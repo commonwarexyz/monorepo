@@ -9,39 +9,40 @@ use crate::{
             catalog_state::{Checkpoint, PendingFloors},
             floors::FloorRecord,
         },
+        scheme::Scheme,
         types::{Body, Lqc, TipRecord},
     },
 };
 use commonware_codec::{Decode as _, Encode as _};
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{Context, translator::Translator};
 use commonware_utils::futures::try_join_all;
 use std::{collections::BTreeSet, sync::Arc};
 
 /// A verified state-sync floor to install.
-pub(crate) struct InstallRequest<V: Variant, D: Digest> {
+pub(crate) struct InstallRequest<S: Scheme, D: Digest> {
     /// Checkpoint the installation publishes.
     pub(crate) checkpoint: Checkpoint<D>,
     /// Pending-storage floors applied with the checkpoint.
     pub(crate) floors: PendingFloors,
     /// The floor L-QC.
-    pub(crate) proof: Arc<Lqc<V, D>>,
+    pub(crate) proof: Arc<Lqc<S, D>>,
     /// The history opening the floor L-QC's leader committed to.
     pub(crate) history: Arc<TipRecord<D>>,
 }
 
 /// The decoded artifacts that establish an installed checkpoint.
-pub(super) struct InstallArtifacts<V: Variant, H: Hasher> {
-    pub(super) proof: Arc<Lqc<V, H::Digest>>,
+pub(super) struct InstallArtifacts<S: Scheme, H: Hasher> {
+    pub(super) proof: Arc<Lqc<S, H::Digest>>,
     pub(super) history: Arc<TipRecord<H::Digest>>,
 }
 
-impl<T, E, H, V, B> CatalogStore<T, E, H, V, B>
+impl<T, E, H, S, B> CatalogStore<T, E, H, S, B>
 where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Installs a floor with its authenticated artifacts.
@@ -49,7 +50,7 @@ where
     /// The caller has verified that the request's L-QC and history establish its checkpoint.
     pub(crate) async fn install(
         &mut self,
-        request: InstallRequest<V, H::Digest>,
+        request: InstallRequest<S, H::Digest>,
     ) -> Result<(), Error> {
         let InstallRequest {
             checkpoint,
@@ -80,7 +81,7 @@ where
         &mut self,
         checkpoint: Checkpoint<H::Digest>,
         floors: PendingFloors,
-        proof: &Lqc<V, H::Digest>,
+        proof: &Lqc<S, H::Digest>,
         history: &TipRecord<H::Digest>,
     ) -> Result<(), Error> {
         let state = self
@@ -104,7 +105,7 @@ where
     pub(super) async fn archive_install(
         &mut self,
         checkpoint: &Checkpoint<H::Digest>,
-        artifacts: InstallArtifacts<V, H>,
+        artifacts: InstallArtifacts<S, H>,
     ) -> Result<(), Error> {
         let lqc_index = self
             .state
@@ -160,12 +161,12 @@ where
 
     /// Decodes the artifacts recorded by the pending installation and checks that they establish
     /// its checkpoint.
-    fn install_artifacts(&self) -> Result<InstallArtifacts<V, H>, Error> {
+    fn install_artifacts(&self) -> Result<InstallArtifacts<S, H>, Error> {
         let install = self
             .state
             .install()
             .ok_or(Error::Inconsistent("floor install intent is missing"))?;
-        let proof = Lqc::<V, H::Digest>::decode_cfg(install.proof.clone(), &self.codec_config)?;
+        let proof = Lqc::<S, H::Digest>::decode_cfg(install.proof.clone(), &self.codec_config)?;
         let history =
             TipRecord::<H::Digest>::decode_cfg(install.history.clone(), &self.codec_config)?;
         let checkpoint = &install.checkpoint;

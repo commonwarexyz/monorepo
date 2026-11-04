@@ -1,10 +1,13 @@
 //! Best-effort activity reported to the attached [`crate::Reporter`].
 
 use crate::{
-    multimmit::types::{Artifact, ArtifactId, BlockRef, FinalityFact, TipRecord},
+    multimmit::{
+        scheme::Scheme,
+        types::{Artifact, ArtifactId, BlockRef, FinalityFact, TipRecord},
+    },
     types::{Epoch, Height, View},
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use std::sync::Arc;
 
 /// Heap bytes an `Arc` allocation holds ahead of its value: the strong and weak reference counts.
@@ -62,7 +65,7 @@ impl<D: Digest> SelectedCommitments<D> {
 /// authorize protocol progress. Only [`Activity::CertificateRecorded`] bounds what an application
 /// retains for the engine.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Activity<V: Variant, D: Digest> {
+pub enum Activity<S: Scheme, D: Digest> {
     /// Selected producer paths reconstructed from authenticated consensus evidence.
     CommitmentsAccepted {
         /// Contiguous ranges available for local ancestry reuse.
@@ -90,7 +93,7 @@ pub enum Activity<V: Variant, D: Digest> {
         /// Stable identifier for the canonical artifact.
         artifact_id: ArtifactId<D>,
         /// Admitted artifact.
-        artifact: Arc<Artifact<V, D>>,
+        artifact: Arc<Artifact<S, D>>,
     },
     /// An authenticated leader exposed its safe-tip history opening for peer seeding.
     HistoryAccepted {

@@ -17,9 +17,9 @@ use super::{
     },
     types::{Cause, Failure},
 };
-use crate::multimmit::types::Body;
+use crate::multimmit::{scheme::Scheme, types::Body};
 use commonware_codec::Codec;
-use commonware_cryptography::{Digestible, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digestible, Hasher};
 use commonware_macros::boxed;
 use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_storage::{Context, translator::Translator};
@@ -57,14 +57,14 @@ where
 }
 
 /// Recovered storage, with the catalog and promoter running.
-pub(super) struct Opened<E, H, V, B>
+pub(super) struct Opened<E, H, S, B>
 where
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
-    pub(super) catalog: catalog::Mailbox<H, V, B>,
+    pub(super) catalog: catalog::Mailbox<H, S, B>,
     pub(super) catalog_handle: Handle<Result<(), catalog::Fatal>>,
     /// The promoter, when finalized bodies move to an immutable archive.
     pub(super) promoter: Option<Promoter<H, B>>,
@@ -77,21 +77,21 @@ where
 ///
 /// `delivery` is the mailbox of the delivery actor the caller starts later.
 #[boxed]
-pub(super) async fn storage<E, T, H, V, B>(
+pub(super) async fn storage<E, T, H, S, B>(
     context: E,
-    config: &Config<T, V, B>,
+    config: &Config<T, S, B>,
     bounds: &ActorBounds,
     delivery: delivery::Mailbox<H, B>,
-) -> Result<Opened<E, H, V, B>, OpenError>
+) -> Result<Opened<E, H, S, B>, OpenError>
 where
     E: Clock + Context + Spawner,
     T: Translator,
     H: Hasher<Digest = B::Digest>,
-    V: Variant,
+    S: Scheme,
     B: Codec + Digestible,
     B::Cfg: Clone,
 {
-    let mut stores = CatalogStore::<T, E, H, V, B>::open(&context, config).await?;
+    let mut stores = CatalogStore::<T, E, H, S, B>::open(&context, config).await?;
     let delivery_store = open_delivery(&context, config, stores.state()).await?;
     let promotion = match config.retention.blocks {
         ArchiveMode::Immutable => {
@@ -171,15 +171,15 @@ where
 ///
 /// A pending installation owns the recovery cut, and a missing cursor may be created only where
 /// it cannot skip committed output.
-async fn open_delivery<E, T, V, B>(
+async fn open_delivery<E, T, S, B>(
     context: &E,
-    config: &Config<T, V, B>,
+    config: &Config<T, S, B>,
     state: &CatalogState<B::Digest>,
 ) -> Result<delivery::DeliveryCursor<E>, StorageError>
 where
     E: Context,
     T: Translator,
-    V: Variant,
+    S: Scheme,
     B: Codec + Digestible,
 {
     let recovery = state
@@ -208,9 +208,9 @@ where
 ///
 /// Without any output row (`fresh`), no promotion could have started, so a missing cursor is
 /// seeded from the checkpoint.
-async fn open_promotion<E, T, H, V, B>(
+async fn open_promotion<E, T, H, S, B>(
     context: &E,
-    config: &Config<T, V, B>,
+    config: &Config<T, S, B>,
     checkpoint: &Checkpoint<H::Digest>,
     fresh: bool,
 ) -> Result<promoter::PromotionStore<T, E, H, B>, StorageError>
@@ -218,7 +218,7 @@ where
     E: Context,
     T: Translator,
     H: Hasher<Digest = B::Digest>,
-    V: Variant,
+    S: Scheme,
     B: Codec + Digestible,
 {
     let name = |suffix: &str| format!("{}_{suffix}", config.partition_prefix);
@@ -265,7 +265,7 @@ mod tests {
                 },
                 types::Floor,
             },
-            mocks::Committee,
+            mocks::{Bls, Committee},
             types::{
                 BlockRef, CertificateId, ChainId, CodecConfig, EpochGenesis, PathLimits, TipRecord,
                 genesis_history,
@@ -288,8 +288,8 @@ mod tests {
     use commonware_utils::{NZU16, NZU64, NZUsize, sequence::Unit};
     use std::{error::Error as _, sync::Arc};
 
-    type TestConfig = Config<TwoCap, MinPk, EmptyBlock<Sha256>>;
-    type TestOpened = Opened<deterministic::Context, Sha256, MinPk, EmptyBlock<Sha256>>;
+    type TestConfig = Config<TwoCap, Bls<MinPk>, EmptyBlock<Sha256>>;
+    type TestOpened = Opened<deterministic::Context, Sha256, Bls<MinPk>, EmptyBlock<Sha256>>;
 
     const IMMUTABLE: Retention = Retention {
         lqc: ArchiveMode::Immutable,
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn trusted_start_floor_seeds_only_a_fresh_namespace() {
         deterministic::Runner::default().start(|context| async move {
-            let committee = Committee::<MinPk>::builder(8, 6)
+            let committee = Committee::<Bls<MinPk>>::builder(8, 6)
                 .limits(PathLimits::new(4, 0))
                 .build();
             let genesis = committee.config.genesis();
@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn interrupted_fresh_floor_seed_recovers_original_intent() {
         deterministic::Runner::default().start(|context| async move {
-            let committee = Committee::<MinPk>::builder(8, 6)
+            let committee = Committee::<Bls<MinPk>>::builder(8, 6)
                 .limits(PathLimits::new(4, 0))
                 .build();
             let genesis = committee.config.genesis();

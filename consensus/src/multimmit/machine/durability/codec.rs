@@ -15,6 +15,7 @@ use crate::{
     multimmit::{
         config::{Profile, Role},
         machine::{job::Generation, scheduler::DA_VOTE_RUN},
+        scheme::Scheme,
         types::{
             Artifact, ArtifactBatch, ArtifactId, ArtifactKind, ChainId, CodecConfig, DaCertificate,
             DaVote, Lqc, NoVote, Nullification, Nullify, SignedLeaderBlock, SignedTransactionBlock,
@@ -25,7 +26,7 @@ use crate::{
 };
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use std::{collections::BTreeMap, sync::Arc};
 
 /// Bounds used to decode one acknowledged machine snapshot.
@@ -142,7 +143,7 @@ impl DomainEventCodecConfig {
     }
 }
 
-impl<V: Variant, D: Digest> Write for DomainEvent<V, D> {
+impl<S: Scheme, D: Digest> Write for DomainEvent<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         DURABILITY_SCHEMA_VERSION.write(buf);
         self.epoch.write(buf);
@@ -151,7 +152,7 @@ impl<V: Variant, D: Digest> Write for DomainEvent<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for DomainEvent<V, D> {
+impl<S: Scheme, D: Digest> Read for DomainEvent<S, D> {
     type Cfg = DomainEventCodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, config: &Self::Cfg) -> Result<Self, Error> {
@@ -164,7 +165,7 @@ impl<V: Variant, D: Digest> Read for DomainEvent<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for DomainEvent<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for DomainEvent<S, D> {
     fn encode_size(&self) -> usize {
         DURABILITY_SCHEMA_VERSION.encode_size()
             + self.epoch.encode_size()
@@ -173,7 +174,7 @@ impl<V: Variant, D: Digest> EncodeSize for DomainEvent<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Write for Change<V, D> {
+impl<S: Scheme, D: Digest> Write for Change<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::GenerationAdvanced(generation) => {
@@ -243,7 +244,7 @@ impl<V: Variant, D: Digest> Write for Change<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for Change<V, D> {
+impl<S: Scheme, D: Digest> Read for Change<S, D> {
     type Cfg = DomainEventCodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, config: &Self::Cfg) -> Result<Self, Error> {
@@ -287,7 +288,7 @@ impl<V: Variant, D: Digest> Read for Change<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Change<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Change<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::GenerationAdvanced(generation) => generation.encode_size(),
@@ -426,14 +427,14 @@ impl EncodeSize for Discharge {
     }
 }
 
-impl<V: Variant, D: Digest> Write for OutboxEntry<V, D> {
+impl<S: Scheme, D: Digest> Write for OutboxEntry<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.publication.write(buf);
         self.discharges.as_ref().write(buf);
     }
 }
 
-impl<V: Variant, D: Digest> Read for OutboxEntry<V, D> {
+impl<S: Scheme, D: Digest> Read for OutboxEntry<S, D> {
     type Cfg = DomainEventCodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, config: &Self::Cfg) -> Result<Self, Error> {
@@ -449,13 +450,13 @@ impl<V: Variant, D: Digest> Read for OutboxEntry<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for OutboxEntry<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for OutboxEntry<S, D> {
     fn encode_size(&self) -> usize {
         self.publication.encode_size() + self.discharges.as_ref().encode_size()
     }
 }
 
-impl<V: Variant, D: Digest> Write for DurableEffect<V, D> {
+impl<S: Scheme, D: Digest> Write for DurableEffect<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::Sign(effect) => {
@@ -470,7 +471,7 @@ impl<V: Variant, D: Digest> Write for DurableEffect<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for DurableEffect<V, D> {
+impl<S: Scheme, D: Digest> Read for DurableEffect<S, D> {
     type Cfg = DomainEventCodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, config: &Self::Cfg) -> Result<Self, Error> {
@@ -482,7 +483,7 @@ impl<V: Variant, D: Digest> Read for DurableEffect<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for DurableEffect<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for DurableEffect<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Sign(effect) => effect.encode_size(),
@@ -491,13 +492,13 @@ impl<V: Variant, D: Digest> EncodeSize for DurableEffect<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Write for SignEffect<V, D> {
+impl<S: Scheme, D: Digest> Write for SignEffect<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.requests.as_ref().write(buf);
     }
 }
 
-impl<V: Variant, D: Digest> Read for SignEffect<V, D> {
+impl<S: Scheme, D: Digest> Read for SignEffect<S, D> {
     type Cfg = DomainEventCodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, config: &Self::Cfg) -> Result<Self, Error> {
@@ -505,13 +506,13 @@ impl<V: Variant, D: Digest> Read for SignEffect<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for SignEffect<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for SignEffect<S, D> {
     fn encode_size(&self) -> usize {
         self.requests.as_ref().encode_size()
     }
 }
 
-impl<V: Variant, D: Digest> Write for Publication<V, D> {
+impl<S: Scheme, D: Digest> Write for Publication<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::Broadcast(artifacts) => {
@@ -530,7 +531,7 @@ impl<V: Variant, D: Digest> Write for Publication<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for Publication<V, D> {
+impl<S: Scheme, D: Digest> Read for Publication<S, D> {
     type Cfg = DomainEventCodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, config: &Self::Cfg) -> Result<Self, Error> {
@@ -548,7 +549,7 @@ impl<V: Variant, D: Digest> Read for Publication<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Publication<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Publication<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Broadcast(artifacts) => artifacts.as_ref().encode_size(),
@@ -558,7 +559,7 @@ impl<V: Variant, D: Digest> EncodeSize for Publication<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest, B: Write> Write for Proposal<V, D, B> {
+impl<S: Scheme, D: Digest, B: Write> Write for Proposal<S, D, B> {
     fn write(&self, buf: &mut impl BufMut) {
         self.block.write(buf);
         self.parent.write(buf);
@@ -566,7 +567,7 @@ impl<V: Variant, D: Digest, B: Write> Write for Proposal<V, D, B> {
     }
 }
 
-impl<V: Variant, D: Digest, B: Read<Cfg = CodecConfig>> Read for Proposal<V, D, B> {
+impl<S: Scheme, D: Digest, B: Read<Cfg = CodecConfig>> Read for Proposal<S, D, B> {
     type Cfg = CodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, config: &Self::Cfg) -> Result<Self, Error> {
@@ -578,20 +579,20 @@ impl<V: Variant, D: Digest, B: Read<Cfg = CodecConfig>> Read for Proposal<V, D, 
     }
 }
 
-impl<V: Variant, D: Digest, B: EncodeSize> EncodeSize for Proposal<V, D, B> {
+impl<S: Scheme, D: Digest, B: EncodeSize> EncodeSize for Proposal<S, D, B> {
     fn encode_size(&self) -> usize {
         self.block.encode_size() + self.parent.encode_size() + self.attach_parent.encode_size()
     }
 }
 
-impl<V: Variant, D: Digest> Write for SendRequest<V, D> {
+impl<S: Scheme, D: Digest> Write for SendRequest<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.recipient.write(buf);
         self.artifact.write(buf);
     }
 }
 
-impl<V: Variant, D: Digest> Read for SendRequest<V, D> {
+impl<S: Scheme, D: Digest> Read for SendRequest<S, D> {
     type Cfg = DomainEventCodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, config: &Self::Cfg) -> Result<Self, Error> {
@@ -602,13 +603,13 @@ impl<V: Variant, D: Digest> Read for SendRequest<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for SendRequest<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for SendRequest<S, D> {
     fn encode_size(&self) -> usize {
         self.recipient.encode_size() + self.artifact.encode_size()
     }
 }
 
-impl<V: Variant, D: Digest> Write for SignRequest<V, D> {
+impl<S: Scheme, D: Digest> Write for SignRequest<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::TransactionBlock(header) => {
@@ -639,13 +640,13 @@ impl<V: Variant, D: Digest> Write for SignRequest<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for SignRequest<V, D> {
+impl<S: Scheme, D: Digest> Read for SignRequest<S, D> {
     type Cfg = DomainEventCodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, config: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(buf)? {
             0 => Ok(Self::TransactionBlock(TransactionBlockHeader::read(buf)?)),
-            1 => Ok(Self::DaVote(Arc::<SignedTransactionBlock<V, D>>::read(
+            1 => Ok(Self::DaVote(Arc::<SignedTransactionBlock<S, D>>::read(
                 buf,
             )?)),
             2 => Ok(Self::LeaderBlock(ProposalRequest::read_cfg(
@@ -664,7 +665,7 @@ impl<V: Variant, D: Digest> Read for SignRequest<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for SignRequest<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for SignRequest<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::TransactionBlock(header) => header.encode_size(),
@@ -676,7 +677,7 @@ impl<V: Variant, D: Digest> EncodeSize for SignRequest<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for ProposalParent<Arc<Vqc<V, D>>> {
+impl<S: Scheme, D: Digest> Read for ProposalParent<Arc<Vqc<S, D>>> {
     type Cfg = CodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, config: &Self::Cfg) -> Result<Self, Error> {
@@ -688,7 +689,7 @@ impl<V: Variant, D: Digest> Read for ProposalParent<Arc<Vqc<V, D>>> {
     }
 }
 
-impl<V: Variant, D: Digest> Write for ProposalParent<Arc<Vqc<V, D>>> {
+impl<S: Scheme, D: Digest> Write for ProposalParent<Arc<Vqc<S, D>>> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::Genesis => 0u8.write(buf),
@@ -700,7 +701,7 @@ impl<V: Variant, D: Digest> Write for ProposalParent<Arc<Vqc<V, D>>> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for ProposalParent<Arc<Vqc<V, D>>> {
+impl<S: Scheme, D: Digest> EncodeSize for ProposalParent<Arc<Vqc<S, D>>> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Genesis => 0,
@@ -710,21 +711,21 @@ impl<V: Variant, D: Digest> EncodeSize for ProposalParent<Arc<Vqc<V, D>>> {
 }
 
 /// Reads a non-empty batch of artifacts.
-fn read_batch<V: Variant, D: Digest>(
+fn read_batch<S: Scheme, D: Digest>(
     buf: &mut impl Buf,
     config: &DomainEventCodecConfig,
-) -> Result<ArtifactBatch<V, D>, Error> {
+) -> Result<ArtifactBatch<S, D>, Error> {
     Ok(Vec::read_cfg(buf, &config.batch_cfg())?.into())
 }
 
-impl<V: Variant, D: Digest> Write for Artifact<V, D> {
+impl<S: Scheme, D: Digest> Write for Artifact<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         (self.kind() as u8).write(buf);
         each_artifact!(self, value => value.write(buf));
     }
 }
 
-impl<V: Variant, D: Digest> Read for Artifact<V, D> {
+impl<S: Scheme, D: Digest> Read for Artifact<S, D> {
     type Cfg = DomainEventCodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, config: &Self::Cfg) -> Result<Self, Error> {
@@ -734,14 +735,18 @@ impl<V: Variant, D: Digest> Read for Artifact<V, D> {
                 Self::TransactionBlock(SignedTransactionBlock::read(buf)?)
             }
             ArtifactKind::DaVote => Self::DaVote(DaVote::read(buf)?),
-            ArtifactKind::DaCertificate => Self::DaCertificate(DaCertificate::read(buf)?),
+            ArtifactKind::DaCertificate => {
+                Self::DaCertificate(DaCertificate::read_cfg(buf, protocol)?)
+            }
             ArtifactKind::LeaderBlock => {
                 Self::LeaderBlock(SignedLeaderBlock::read_cfg(buf, protocol)?)
             }
             ArtifactKind::Vote => Self::Vote(Vote::read_cfg(buf, protocol)?),
             ArtifactKind::NoVote => Self::NoVote(NoVote::read(buf)?),
             ArtifactKind::Nullify => Self::Nullify(Nullify::read(buf)?),
-            ArtifactKind::Nullification => Self::Nullification(Nullification::read(buf)?),
+            ArtifactKind::Nullification => {
+                Self::Nullification(Nullification::read_cfg(buf, protocol)?)
+            }
             ArtifactKind::Vqc => Self::Vqc(Vqc::read_cfg(buf, protocol)?),
             ArtifactKind::Lqc => Self::Lqc(Lqc::read_cfg(buf, protocol)?),
         };
@@ -749,7 +754,7 @@ impl<V: Variant, D: Digest> Read for Artifact<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Artifact<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Artifact<S, D> {
     fn encode_size(&self) -> usize {
         1 + self.encoded_len()
     }
@@ -863,7 +868,7 @@ const fn require_version(version: u8) -> Result<(), Error> {
     Ok(())
 }
 
-impl<V: Variant, D: Digest> Write for Snapshot<V, D> {
+impl<S: Scheme, D: Digest> Write for Snapshot<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         DURABILITY_SCHEMA_VERSION.write(buf);
         self.epoch.write(buf);
@@ -872,7 +877,7 @@ impl<V: Variant, D: Digest> Write for Snapshot<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Snapshot<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Snapshot<S, D> {
     fn encode_size(&self) -> usize {
         DURABILITY_SCHEMA_VERSION.encode_size()
             + self.epoch.encode_size()
@@ -881,7 +886,7 @@ impl<V: Variant, D: Digest> EncodeSize for Snapshot<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for Snapshot<V, D> {
+impl<S: Scheme, D: Digest> Read for Snapshot<S, D> {
     type Cfg = SnapshotCodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, config: &Self::Cfg) -> Result<Self, Error> {
@@ -927,7 +932,7 @@ impl EncodeSize for Role {
     }
 }
 
-impl<V: Variant, D: Digest> Write for DurableState<V, D> {
+impl<S: Scheme, D: Digest> Write for DurableState<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.view.write(buf);
         self.produced_blocks.write(buf);
@@ -949,7 +954,7 @@ impl<V: Variant, D: Digest> Write for DurableState<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for DurableState<V, D> {
+impl<S: Scheme, D: Digest> Read for DurableState<S, D> {
     type Cfg = SnapshotCodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, config: &Self::Cfg) -> Result<Self, Error> {
@@ -1002,7 +1007,7 @@ impl<V: Variant, D: Digest> Read for DurableState<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for DurableState<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for DurableState<S, D> {
     fn encode_size(&self) -> usize {
         self.view.encode_size()
             + self.produced_blocks.encode_size()
@@ -1035,7 +1040,7 @@ mod tests {
         Epochable as _,
         multimmit::{
             config::{Role, Tuning},
-            mocks::Committee,
+            mocks::{Bls, Committee},
             types::{Attestation, BlockRef, ChainId, PathLimits},
         },
         types::Height,
@@ -1046,8 +1051,8 @@ mod tests {
             config::Protocol,
             machine::reducer::machine::Machine,
             types::{
-                Anchor, CertificateId, ChainProposal, DigestedLeader, EpochGenesis, Extension,
-                LeaderBlock, Position, Tally, ThresholdShare,
+                Anchor, CertificateId, ChainProposal, DaAttestation, DigestedLeader, EpochGenesis,
+                Extension, LeaderBlock, NullifyAttestation, Position, Tally,
             },
         },
         types::ViewDelta,
@@ -1062,7 +1067,7 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     use commonware_cryptography::bls12381::primitives::ops::aggregate;
     #[cfg(feature = "arbitrary")]
-    use commonware_cryptography::bls12381::primitives::variant::MinPk;
+    use commonware_cryptography::bls12381::primitives::variant::{MinPk, Variant};
     use commonware_cryptography::{
         Hasher, Sha256,
         bls12381::{
@@ -1077,9 +1082,9 @@ mod tests {
     };
     #[cfg(feature = "arbitrary")]
     use std::num::NonZeroUsize;
-    type Event = DomainEvent<MinSig, Sha256Digest>;
+    type Event = DomainEvent<Bls<MinSig>, Sha256Digest>;
     #[cfg(feature = "arbitrary")]
-    type ConformanceArtifact<V> = Arc<Artifact<V, Sha256Digest>>;
+    type ConformanceArtifact<S> = Arc<Artifact<S, Sha256Digest>>;
 
     fn digest(label: &[u8]) -> Sha256Digest {
         Sha256::hash(&[label])
@@ -1103,7 +1108,7 @@ mod tests {
         }
     }
 
-    fn context(change: Change<MinSig, Sha256Digest>) -> Event {
+    fn context(change: Change<Bls<MinSig>, Sha256Digest>) -> Event {
         Event::new(Epoch::new(7), Cursor(3), change)
     }
 
@@ -1115,7 +1120,7 @@ mod tests {
         )
     }
 
-    fn proof(view: u64) -> Arc<Artifact<MinSig, Sha256Digest>> {
+    fn proof(view: u64) -> Arc<Artifact<Bls<MinSig>, Sha256Digest>> {
         let private = Private::new(Scalar::from_u64(view + 1));
         Arc::new(Artifact::Nullification(
             Nullification::new(
@@ -1130,7 +1135,7 @@ mod tests {
         ))
     }
 
-    fn entry(view: u64) -> OutboxEntry<MinSig, Sha256Digest> {
+    fn entry(view: u64) -> OutboxEntry<Bls<MinSig>, Sha256Digest> {
         OutboxEntry::new(
             Publication::broadcast(proof(view)),
             vec![Discharge::new(
@@ -1142,7 +1147,7 @@ mod tests {
         )
     }
 
-    fn snapshot<V: Variant>(seed: u64) -> Snapshot<V, Sha256Digest> {
+    fn snapshot<S: Scheme>(seed: u64) -> Snapshot<S, Sha256Digest> {
         let mut state =
             DurableState::new(vec![block(0, seed + 1), block(1, seed + 2)], Height::zero());
         state.cursor = Cursor(3);
@@ -1215,7 +1220,10 @@ mod tests {
                 );
                 SignRequest::DaVote(Arc::new(SignedTransactionBlock::new(
                     header,
-                    Attestation::new(Participant::new(seed), signature.into()),
+                    Attestation::<Bls<MinSig>> {
+                        signer: Participant::new(seed),
+                        signature: signature.into(),
+                    },
                 )))
             })
             .collect::<Vec<_>>();
@@ -1232,9 +1240,10 @@ mod tests {
 
     #[test]
     fn profile_bounds_admit_a_full_da_vote_run_batch() {
-        let committee = Committee::<MinSig>::builder(7, 1).build();
+        let committee = Committee::<Bls<MinSig>>::builder(7, 1).build();
         let profile: Profile<Sha256Digest> =
-            Profile::new::<MinSig>(committee.config, Role::Observer, Tuning::default()).unwrap();
+            Profile::new::<Bls<MinSig>>(committee.config, Role::Observer, Tuning::default())
+                .unwrap();
         let chains = profile.codec().chains();
         let config = DomainEventCodecConfig::from_profile(&profile);
         assert_eq!(config.max_artifacts, chains * DA_VOTE_RUN);
@@ -1258,7 +1267,10 @@ mod tests {
                 );
                 SignRequest::DaVote(Arc::new(SignedTransactionBlock::new(
                     header,
-                    Attestation::new(Participant::new((seed % chains) as u32), signature.into()),
+                    Attestation::<Bls<MinSig>> {
+                        signer: Participant::new((seed % chains) as u32),
+                        signature: signature.into(),
+                    },
                 )))
             })
             .collect::<Vec<_>>();
@@ -1352,10 +1364,10 @@ mod tests {
                 Err(Error::InvalidEnum(version)) if version == unsupported
             ));
 
-            let mut snapshot = snapshot::<MinSig>(9).encode().to_vec();
+            let mut snapshot = snapshot::<Bls<MinSig>>(9).encode().to_vec();
             snapshot[0] = unsupported;
             assert!(matches!(
-                Snapshot::<MinSig, Sha256Digest>::decode_cfg(
+                Snapshot::<Bls<MinSig>, Sha256Digest>::decode_cfg(
                     snapshot,
                     &snapshot_config()
                 ),
@@ -1370,14 +1382,17 @@ mod tests {
 
         let mut genesis = Copying(&[0u8]);
         assert_eq!(
-            ProposalParent::<Arc<Vqc<MinSig, Sha256Digest>>>::read_cfg(&mut genesis, &protocol,)
-                .unwrap(),
+            ProposalParent::<Arc<Vqc<Bls<MinSig>, Sha256Digest>>>::read_cfg(
+                &mut genesis,
+                &protocol,
+            )
+            .unwrap(),
             ProposalParent::Genesis
         );
 
         let mut exact_without_certificate = Copying(&[1u8]);
         assert!(matches!(
-            ProposalParent::<Arc<Vqc<MinSig, Sha256Digest>>>::read_cfg(
+            ProposalParent::<Arc<Vqc<Bls<MinSig>, Sha256Digest>>>::read_cfg(
                 &mut exact_without_certificate,
                 &protocol,
             ),
@@ -1386,7 +1401,10 @@ mod tests {
 
         let mut unknown = Copying(&[2u8]);
         assert!(matches!(
-            ProposalParent::<Arc<Vqc<MinSig, Sha256Digest>>>::read_cfg(&mut unknown, &protocol,),
+            ProposalParent::<Arc<Vqc<Bls<MinSig>, Sha256Digest>>>::read_cfg(
+                &mut unknown,
+                &protocol,
+            ),
             Err(Error::InvalidEnum(2))
         ));
     }
@@ -1470,7 +1488,7 @@ mod tests {
         }
         let next = changes.len() as u8;
         assert!(matches!(
-            Change::<MinSig, Sha256Digest>::decode_cfg(Copying(&[next]), &config(4)),
+            Change::<Bls<MinSig>, Sha256Digest>::decode_cfg(Copying(&[next]), &config(4)),
             Err(Error::InvalidEnum(tag)) if tag == next
         ));
 
@@ -1482,12 +1500,13 @@ mod tests {
             let encoded = effect.encode();
             assert_eq!(usize::from(encoded[0]), tag);
             assert_eq!(
-                DurableEffect::<MinSig, Sha256Digest>::decode_cfg(encoded, &config(4)).unwrap(),
+                DurableEffect::<Bls<MinSig>, Sha256Digest>::decode_cfg(encoded, &config(4))
+                    .unwrap(),
                 effect
             );
         }
         assert!(matches!(
-            DurableEffect::<MinSig, Sha256Digest>::decode_cfg(Copying(&[2]), &config(4)),
+            DurableEffect::<Bls<MinSig>, Sha256Digest>::decode_cfg(Copying(&[2]), &config(4)),
             Err(Error::InvalidEnum(2))
         ));
 
@@ -1503,19 +1522,19 @@ mod tests {
             let encoded = publication.encode();
             assert_eq!(encoded[0], tag);
             assert_eq!(
-                Publication::<MinSig, Sha256Digest>::decode_cfg(encoded, &config(4)).unwrap(),
+                Publication::<Bls<MinSig>, Sha256Digest>::decode_cfg(encoded, &config(4)).unwrap(),
                 publication
             );
         }
         assert!(matches!(
-            Publication::<MinSig, Sha256Digest>::decode_cfg(Copying(&[3]), &config(4)),
+            Publication::<Bls<MinSig>, Sha256Digest>::decode_cfg(Copying(&[3]), &config(4)),
             Err(Error::InvalidEnum(3))
         ));
     }
 
     #[test]
     fn snapshot_round_trips_every_state_field() {
-        let mut snapshot = snapshot::<MinSig>(9);
+        let mut snapshot = snapshot::<Bls<MinSig>>(9);
         snapshot.state.outbox.insert(EffectId(3), entry(3));
         snapshot
             .state
@@ -1545,37 +1564,37 @@ mod tests {
         let discharge = entry.discharges()[0];
         let overfull = OutboxEntry::new(entry.publication().clone(), vec![discharge, discharge]);
         assert!(matches!(
-            OutboxEntry::<MinSig, Sha256Digest>::decode_cfg(overfull.encode(), &config(4)),
+            OutboxEntry::<Bls<MinSig>, Sha256Digest>::decode_cfg(overfull.encode(), &config(4)),
             Err(Error::InvalidLength(2))
         ));
     }
 
     #[test]
     fn snapshot_bounds_reservations_and_publications_together() {
-        let mut snapshot = snapshot::<MinSig>(9);
+        let mut snapshot = snapshot::<Bls<MinSig>>(9);
         snapshot.state.outbox.insert(EffectId(1), entry(3));
         let mut config = snapshot_config();
         config.max_outbox = 1;
 
         assert!(matches!(
-            Snapshot::<MinSig, Sha256Digest>::decode_cfg(snapshot.encode(), &config),
+            Snapshot::<Bls<MinSig>, Sha256Digest>::decode_cfg(snapshot.encode(), &config),
             Err(Error::InvalidLength(1))
         ));
     }
 
     #[test]
     fn snapshot_rejects_trailing_bytes() {
-        let mut encoded = snapshot::<MinSig>(9).encode().to_vec();
+        let mut encoded = snapshot::<Bls<MinSig>>(9).encode().to_vec();
         encoded.push(0);
         assert!(matches!(
-            Snapshot::<MinSig, Sha256Digest>::decode_cfg(encoded, &snapshot_config()),
+            Snapshot::<Bls<MinSig>, Sha256Digest>::decode_cfg(encoded, &snapshot_config()),
             Err(Error::ExtraData(1))
         ));
     }
 
     #[test]
     fn snapshot_rejects_unsorted_maps() {
-        let mut snapshot = snapshot::<MinSig>(9);
+        let mut snapshot = snapshot::<Bls<MinSig>>(9);
         let state = &mut snapshot.state;
         state.exits.insert(View::new(1), proof(1));
         state.exits.insert(View::new(2), proof(2));
@@ -1588,7 +1607,7 @@ mod tests {
         swapped.extend_from_slice(&encoded[second..]);
         swapped.extend_from_slice(&encoded[first..second]);
         assert!(matches!(
-            Snapshot::<MinSig, Sha256Digest>::decode_cfg(swapped, &snapshot_config()),
+            Snapshot::<Bls<MinSig>, Sha256Digest>::decode_cfg(swapped, &snapshot_config()),
             Err(Error::Invalid(_, "Keys must ascend"))
         ));
     }
@@ -1601,7 +1620,7 @@ mod tests {
             encoded.extend(publication);
             encoded.push(0);
             assert!(matches!(
-                DurableEffect::<MinSig, Sha256Digest>::decode_cfg(encoded, &config(4)),
+                DurableEffect::<Bls<MinSig>, Sha256Digest>::decode_cfg(encoded, &config(4)),
                 Err(Error::InvalidLength(0))
             ));
         }
@@ -1613,7 +1632,7 @@ mod tests {
     }
 
     #[cfg(feature = "arbitrary")]
-    fn conformance_artifact<V: Variant>(seed: u64, arm: u64) -> Arc<Artifact<V, Sha256Digest>>
+    fn conformance_artifact<V: Variant>(seed: u64, arm: u64) -> Arc<Artifact<Bls<V>, Sha256Digest>>
     where
         V::Signature: for<'a> Arbitrary<'a>,
     {
@@ -1633,7 +1652,7 @@ mod tests {
     }
 
     #[cfg(feature = "arbitrary")]
-    fn conformance_parent<V: Variant>(seed: u64) -> ProposalParent<Arc<Vqc<V, Sha256Digest>>>
+    fn conformance_parent<V: Variant>(seed: u64) -> ProposalParent<Arc<Vqc<Bls<V>, Sha256Digest>>>
     where
         V::Signature: for<'a> Arbitrary<'a>,
     {
@@ -1645,7 +1664,7 @@ mod tests {
     }
 
     #[cfg(feature = "arbitrary")]
-    fn conformance_sign_request<V: Variant>(seed: u64) -> SignRequest<V, Sha256Digest>
+    fn conformance_sign_request<V: Variant>(seed: u64) -> SignRequest<Bls<V>, Sha256Digest>
     where
         V::Signature: for<'a> Arbitrary<'a>,
     {
@@ -1669,7 +1688,7 @@ mod tests {
     }
 
     #[cfg(feature = "arbitrary")]
-    fn conformance_timeout_artifacts<V: Variant>(seed: u64) -> ArtifactBatch<V, Sha256Digest>
+    fn conformance_timeout_artifacts<V: Variant>(seed: u64) -> ArtifactBatch<Bls<V>, Sha256Digest>
     where
         V::Signature: for<'a> Arbitrary<'a>,
     {
@@ -1679,17 +1698,20 @@ mod tests {
             Arc::new(Artifact::NoVote(
                 NoVote::new(
                     round,
-                    Attestation::new(signer, generated::<V::Signature>(seed).into()),
+                    Attestation::<Bls<V>> {
+                        signer,
+                        signature: generated::<V::Signature>(seed).into(),
+                    },
                 )
                 .unwrap(),
             )),
             Arc::new(Artifact::Nullify(
                 Nullify::new(
                     round,
-                    ThresholdShare::new(
+                    NullifyAttestation::<Bls<V>> {
                         signer,
-                        generated::<V::Signature>(seed.wrapping_add(1)).into(),
-                    ),
+                        signature: generated::<V::Signature>(seed.wrapping_add(1)).into(),
+                    },
                 )
                 .unwrap(),
             )),
@@ -1698,7 +1720,10 @@ mod tests {
     }
 
     #[cfg(feature = "arbitrary")]
-    fn conformance_outbox_effect<V: Variant>(seed: u64, lane: u64) -> DurableEffect<V, Sha256Digest>
+    fn conformance_outbox_effect<V: Variant>(
+        seed: u64,
+        lane: u64,
+    ) -> DurableEffect<Bls<V>, Sha256Digest>
     where
         V::Signature: for<'a> Arbitrary<'a>,
     {
@@ -1745,7 +1770,7 @@ mod tests {
     }
 
     #[cfg(feature = "arbitrary")]
-    impl<V: Variant> DomainEvent<V, Sha256Digest>
+    impl<V: Variant> DomainEvent<Bls<V>, Sha256Digest>
     where
         V::Signature: for<'a> Arbitrary<'a>,
     {
@@ -1862,7 +1887,7 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     fn conformance_leader<V: Variant>(
         profile: &Profile<Sha256Digest>,
-    ) -> LeaderBlock<V, Sha256Digest> {
+    ) -> LeaderBlock<Bls<V>, Sha256Digest> {
         let protocol = profile.protocol();
         let round = Round::new(protocol.epoch(), View::new(1));
         let proposals = protocol
@@ -1894,7 +1919,7 @@ mod tests {
     fn conformance_finality_pair<V: Variant>(
         seed: u64,
         profile: &Profile<Sha256Digest>,
-    ) -> (ConformanceArtifact<V>, ConformanceArtifact<V>)
+    ) -> (ConformanceArtifact<Bls<V>>, ConformanceArtifact<Bls<V>>)
     where
         V::Signature: for<'a> Arbitrary<'a>,
     {
@@ -1917,7 +1942,7 @@ mod tests {
         let lqc = Lqc::new(
             leader,
             tally,
-            generated::<aggregate::Signature<V>>(seed),
+            generated::<aggregate::Signature<V>>(seed).into(),
             protocol,
         )
         .unwrap();
@@ -1941,7 +1966,7 @@ mod tests {
     fn conformance_publication<V: Variant>(
         seed: u64,
         profile: &Profile<Sha256Digest>,
-    ) -> Publication<V, Sha256Digest>
+    ) -> Publication<Bls<V>, Sha256Digest>
     where
         V::Signature: for<'a> Arbitrary<'a>,
     {
@@ -1954,7 +1979,10 @@ mod tests {
                 let header = conformance_header(seed, ChainId::new(0));
                 let artifact = Arc::new(Artifact::TransactionBlock(SignedTransactionBlock::new(
                     header,
-                    Attestation::new(signer, generated::<V::Signature>(seed).into()),
+                    Attestation::<Bls<V>> {
+                        signer,
+                        signature: generated::<V::Signature>(seed).into(),
+                    },
                 )));
                 Publication::broadcast(artifact)
             }
@@ -1987,17 +2015,20 @@ mod tests {
                     Arc::new(Artifact::NoVote(
                         NoVote::new(
                             round,
-                            Attestation::new(signer, generated::<V::Signature>(seed).into()),
+                            Attestation::<Bls<V>> {
+                                signer,
+                                signature: generated::<V::Signature>(seed).into(),
+                            },
                         )
                         .unwrap(),
                     )),
                     Arc::new(Artifact::Nullify(
                         Nullify::new(
                             round,
-                            ThresholdShare::new(
+                            NullifyAttestation::<Bls<V>> {
                                 signer,
-                                generated::<V::Signature>(seed.wrapping_add(1)).into(),
-                            ),
+                                signature: generated::<V::Signature>(seed.wrapping_add(1)).into(),
+                            },
                         )
                         .unwrap(),
                     )),
@@ -2009,7 +2040,10 @@ mod tests {
                 let block = conformance_leader(profile);
                 let signed = Arc::new(SignedLeaderBlock::new(
                     block,
-                    Attestation::new(signer, generated::<V::Signature>(seed).into()),
+                    Attestation::<Bls<V>> {
+                        signer,
+                        signature: generated::<V::Signature>(seed).into(),
+                    },
                 ));
                 Publication::Propose(ProposalPublication::new(
                     signed,
@@ -2021,7 +2055,10 @@ mod tests {
                 let header = conformance_header(seed, ChainId::new(0));
                 let artifact = Arc::new(Artifact::DaVote(DaVote::new(
                     header,
-                    ThresholdShare::new(signer, generated::<V::Signature>(seed).into()),
+                    DaAttestation::<Bls<V>> {
+                        signer,
+                        signature: generated::<V::Signature>(seed).into(),
+                    },
                 )));
                 Publication::Send(Arc::from([SendRequest::new(Participant::new(0), artifact)]))
             }
@@ -2032,10 +2069,13 @@ mod tests {
                     let header = conformance_header(seed.wrapping_add(u64::from(item)), chain);
                     let artifact = Arc::new(Artifact::DaVote(DaVote::new(
                         header,
-                        ThresholdShare::new(
+                        DaAttestation::<Bls<V>> {
                             signer,
-                            generated::<V::Signature>(seed.wrapping_add(u64::from(item))).into(),
-                        ),
+                            signature: generated::<V::Signature>(
+                                seed.wrapping_add(u64::from(item)),
+                            )
+                            .into(),
+                        },
                     )));
                     requests.push(SendRequest::new(Participant::new(item), artifact));
                 }
@@ -2048,7 +2088,7 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     fn conformance_snapshot<V: Variant>(
         seed: u64,
-    ) -> (Profile<Sha256Digest>, Snapshot<V, Sha256Digest>)
+    ) -> (Profile<Sha256Digest>, Snapshot<Bls<V>, Sha256Digest>)
     where
         V::Signature: for<'a> Arbitrary<'a>,
     {
@@ -2119,7 +2159,7 @@ mod tests {
             .unwrap(),
         ));
         let publication = conformance_publication(seed, &profile);
-        let discharges = Machine::<Sha256, V>::new(profile.clone())
+        let discharges = Machine::<Sha256, Bls<V>>::new(profile.clone())
             .discharges(&publication)
             .unwrap();
         state
@@ -2149,7 +2189,10 @@ mod tests {
             let block = conformance_leader(&profile);
             let artifact = Arc::new(Artifact::LeaderBlock(SignedLeaderBlock::new(
                 block,
-                Attestation::new(Participant::new(1), generated::<V::Signature>(seed).into()),
+                Attestation::<Bls<V>> {
+                    signer: Participant::new(1),
+                    signature: generated::<V::Signature>(seed).into(),
+                },
             )));
             state.local.insert(artifact.id::<Sha256>(), artifact);
         }
@@ -2174,7 +2217,7 @@ mod tests {
     }
 
     #[cfg(feature = "arbitrary")]
-    const fn artifact_arm<V: Variant>(artifact: &Artifact<V, Sha256Digest>) -> u16 {
+    const fn artifact_arm<V: Variant>(artifact: &Artifact<Bls<V>, Sha256Digest>) -> u16 {
         1 << match artifact {
             Artifact::TransactionBlock(_) => 0,
             Artifact::DaVote(_) => 1,
@@ -2190,7 +2233,7 @@ mod tests {
     }
 
     #[cfg(feature = "arbitrary")]
-    const fn sign_request_arm<V: Variant>(request: &SignRequest<V, Sha256Digest>) -> u8 {
+    const fn sign_request_arm<V: Variant>(request: &SignRequest<Bls<V>, Sha256Digest>) -> u8 {
         1 << match request {
             SignRequest::TransactionBlock(_) => 0,
             SignRequest::DaVote(_) => 1,
@@ -2202,7 +2245,7 @@ mod tests {
     }
 
     #[cfg(feature = "arbitrary")]
-    fn publication_arm<V: Variant>(publication: &Publication<V, Sha256Digest>) -> u8 {
+    fn publication_arm<V: Variant>(publication: &Publication<Bls<V>, Sha256Digest>) -> u8 {
         match publication {
             Publication::Broadcast(artifacts) if artifacts.len() == 1 => 1 << 2,
             Publication::Broadcast(_) => 1 << 3,
@@ -2213,7 +2256,7 @@ mod tests {
     }
 
     #[cfg(feature = "arbitrary")]
-    fn sign_arms<V: Variant>(effect: &SignEffect<V, Sha256Digest>, requests: &mut u8) -> u8 {
+    fn sign_arms<V: Variant>(effect: &SignEffect<Bls<V>, Sha256Digest>, requests: &mut u8) -> u8 {
         for request in effect.requests() {
             *requests |= sign_request_arm(request);
         }
@@ -2225,7 +2268,10 @@ mod tests {
     }
 
     #[cfg(feature = "arbitrary")]
-    fn effect_arms<V: Variant>(effect: &DurableEffect<V, Sha256Digest>, requests: &mut u8) -> u8 {
+    fn effect_arms<V: Variant>(
+        effect: &DurableEffect<Bls<V>, Sha256Digest>,
+        requests: &mut u8,
+    ) -> u8 {
         match effect {
             DurableEffect::Sign(effect) => sign_arms(effect, requests),
             DurableEffect::Publish(publication) => publication_arm(publication),
@@ -2242,7 +2288,9 @@ mod tests {
         let mut view_certificates = 0u16;
         let mut forwarded = 0u16;
         for seed in 0..128 {
-            match DomainEvent::<MinPk, Sha256Digest>::conformance(seed, Cursor(seed + 1)).change() {
+            match DomainEvent::<Bls<MinPk>, Sha256Digest>::conformance(seed, Cursor(seed + 1))
+                .change()
+            {
                 Change::GenerationAdvanced(_) => changes |= 1 << 0,
                 Change::OutboxQueued { effect, .. } => {
                     changes |= 1 << 1;

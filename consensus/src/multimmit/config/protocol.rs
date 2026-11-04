@@ -129,7 +129,7 @@ fn participant_count(participants: usize) -> Result<u32, Error> {
 
 /// The consensus-critical parameters of one epoch, apart from its genesis.
 ///
-/// A signing [`Scheme`](crate::multimmit::scheme::bls12381_threshold::Scheme) holds these, and an
+/// A signing [`Scheme`](crate::multimmit::scheme::Generic) holds these, and an
 /// engine builds its [`Protocol`] from the scheme's copy, so the two cannot disagree.
 ///
 /// # Binding receipts

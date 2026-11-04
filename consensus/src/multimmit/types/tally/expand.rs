@@ -1,11 +1,14 @@
 //! Reconstructing each signer's vote from a tally and checking that a tally is canonical.
 
 use super::{Deviation, Tally, compress::canonical_reference};
-use crate::multimmit::types::{
-    CodecConfig, DigestedLeader, Error, Extension, LeaderBlock, Position, VoteBody,
-    vote::paths_valid_for,
+use crate::multimmit::{
+    scheme::Scheme,
+    types::{
+        CodecConfig, DigestedLeader, Error, Extension, LeaderBlock, Position, VoteBody,
+        vote::paths_valid_for,
+    },
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use commonware_utils::Participant;
 
 /// One signer's positions and extensions reconstructed from a tally.
@@ -16,9 +19,9 @@ struct Paths<D: Digest> {
 
 impl<D: Digest> Tally<D> {
     /// Expands one signer's vote body for `leader`.
-    pub fn vote<V: Variant>(
+    pub fn vote<S: Scheme>(
         &self,
-        leader: DigestedLeader<'_, V, D>,
+        leader: DigestedLeader<'_, S, D>,
         signer: Participant,
         config: CodecConfig,
     ) -> Result<VoteBody<D>, Error> {
@@ -37,9 +40,9 @@ impl<D: Digest> Tally<D> {
     }
 
     /// Applies `signer`'s deviation, if any, to the proposal tips and reference extensions.
-    fn expand<V: Variant>(
+    fn expand<S: Scheme>(
         &self,
-        leader: &LeaderBlock<V, D>,
+        leader: &LeaderBlock<S, D>,
         signer: Participant,
         config: CodecConfig,
     ) -> Result<Paths<D>, Error> {
@@ -77,9 +80,9 @@ impl<D: Digest> Tally<D> {
     }
 
     /// Checks that this tally is the canonical transcript of valid votes for `leader`.
-    pub(crate) fn validate<V: Variant>(
+    pub(crate) fn validate<S: Scheme>(
         &self,
-        leader: &LeaderBlock<V, D>,
+        leader: &LeaderBlock<S, D>,
         config: CodecConfig,
     ) -> Result<(), Error> {
         if self.reference_extensions.len() != config.chains()

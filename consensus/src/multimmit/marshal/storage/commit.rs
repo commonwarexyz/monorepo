@@ -6,21 +6,22 @@ use crate::{
             OutputIndex,
             storage::{blocks::BlockMeta, catalog_state::Checkpoint},
         },
+        scheme::Scheme,
         types::{BlockRef, CertificateId, Lqc, TipRecord},
     },
     types::View,
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::sync::Arc;
 
 /// The selected finality proof in a commit.
-pub(crate) struct SelectedLqc<V: Variant, H: Hasher> {
+pub(crate) struct SelectedLqc<S: Scheme, H: Hasher> {
     /// View of the L-QC.
     pub view: View,
     /// Certificate identity of the L-QC.
     pub id: CertificateId<H::Digest>,
     /// The L-QC.
-    pub proof: Arc<Lqc<V, H::Digest>>,
+    pub proof: Arc<Lqc<S, H::Digest>>,
 }
 
 /// One authenticated tip-history opening, ordered oldest first.
@@ -90,13 +91,13 @@ impl<D: Digest> OutputRow<D> {
 }
 
 /// A complete checkpoint-last commit.
-pub(crate) struct Commit<H, V>
+pub(crate) struct Commit<H, S>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
 {
     /// L-QCs selected by the commit, in view order; the last one anchors the checkpoint.
-    pub selected: Vec<SelectedLqc<V, H>>,
+    pub selected: Vec<SelectedLqc<S, H>>,
     /// History openings from the current checkpoint's history to the new one.
     pub history: Vec<HistoryOpening<H>>,
     /// Dense output rows following the current committed output.

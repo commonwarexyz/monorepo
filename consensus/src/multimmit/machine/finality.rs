@@ -49,7 +49,7 @@ use crate::{
             VerifiedVote, validate_lqc, vote_evidence,
         },
         config::Profile,
-        scheme::bls12381_threshold::{CertificateVotes, Error as SchemeError},
+        scheme::{CertificateVotes, Error as SchemeError, Scheme},
         types::{
             Artifact, ArtifactId, CodecConfig, DigestedLeader, FinalityFact, FinalityId,
             LeaderBlock, Lqc, PoolSummary, SelectedCommitments, Vote, VoteBody, Vqc,
@@ -57,7 +57,7 @@ use crate::{
     },
     types::{Attributable, Height, Participant, Round, View},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{Faults as _, N5f1};
 use core::{
     convert::Infallible,
@@ -71,7 +71,7 @@ use std::{
 const FINALITY_EVIDENCE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_FINALITY_EVIDENCE";
 
 /// The complete votes an L-QC aggregates, in participant order.
-type VoteArtifacts<V, D> = Arc<[Held<VoteKind, V, D>]>;
+type VoteArtifacts<S, D> = Arc<[Held<VoteKind, S, D>]>;
 
 /// Identifies the finality pool of one designated leader block.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -91,21 +91,21 @@ impl<D: Digest> PoolKey<D> {
 }
 
 /// A verified L-QC released in claim order, which may advance the signing floor.
-pub(super) struct FinalityOutput<V: Variant, D: Digest> {
+pub(super) struct FinalityOutput<S: Scheme, D: Digest> {
     /// The certificate's earliest observation.
     pub(super) observation: Observation,
     /// The verified L-QC artifact.
-    pub(super) certificate: Arc<Artifact<V, D>>,
+    pub(super) certificate: Arc<Artifact<S, D>>,
     /// The V-QC projection verification derived from the certificate, if any.
-    pub(super) derived: Option<DerivedVqc<V, D>>,
+    pub(super) derived: Option<DerivedVqc<S, D>>,
 }
 
-impl<V: Variant, D: Digest> FinalityOutput<V, D> {
+impl<S: Scheme, D: Digest> FinalityOutput<S, D> {
     /// Releases a verified L-QC, taking the V-QC projection its verification derived.
     fn lqc(
         observation: Observation,
-        certificate: &Arc<Artifact<V, D>>,
-        derivations: Option<&mut CertificateDerivations<V, D>>,
+        certificate: &Arc<Artifact<S, D>>,
+        derivations: Option<&mut CertificateDerivations<S, D>>,
     ) -> Self {
         Self {
             observation,
@@ -116,7 +116,7 @@ impl<V: Variant, D: Digest> FinalityOutput<V, D> {
 }
 
 /// The L-QCs one finality transition releases, in claim order.
-type FinalityOutputs<V, D> = Vec<FinalityOutput<V, D>>;
+type FinalityOutputs<S, D> = Vec<FinalityOutput<S, D>>;
 
 /// One per-leader vote slot an artifact claims before cryptographic verification.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -129,13 +129,13 @@ struct VoteClaim<D: Digest> {
 ///
 /// A certificate's tallied signers all vote for its designated leader, so `leader` passes a digest
 /// the caller already holds instead of re-encoding the leader block.
-fn visit_vote_claims<H, V, D>(
-    artifact: &Artifact<V, D>,
+fn visit_vote_claims<H, S, D>(
+    artifact: &Artifact<S, D>,
     leader: Option<D>,
     mut visit: impl FnMut(VoteClaim<D>),
 ) where
     H: Hasher<Digest = D>,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     match artifact {
@@ -190,10 +190,10 @@ fn visit_vote_claims<H, V, D>(
 }
 
 /// Returns the finality pool of `leader`, reusing `cached` as its digest when the caller holds it.
-fn pool_key<H, V, D>(leader: &LeaderBlock<V, D>, cached: Option<D>) -> PoolKey<D>
+fn pool_key<H, S, D>(leader: &LeaderBlock<S, D>, cached: Option<D>) -> PoolKey<D>
 where
     H: Hasher<Digest = D>,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     PoolKey::new(
@@ -205,15 +205,15 @@ where
 /// Returns the finality pool of the leader `artifact` proposes or certifies.
 ///
 /// `cached` is the leader digest when the caller already derived it.
-fn leader_key<H, V, D>(artifact: &Artifact<V, D>, cached: Option<D>) -> Option<PoolKey<D>>
+fn leader_key<H, S, D>(artifact: &Artifact<S, D>, cached: Option<D>) -> Option<PoolKey<D>>
 where
     H: Hasher<Digest = D>,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     artifact
         .designated_leader()
-        .map(|leader| pool_key::<H, V, D>(leader, cached))
+        .map(|leader| pool_key::<H, S, D>(leader, cached))
 }
 
 /// A change to a leader's local finality fact, with the producer commitments its tips select.
@@ -226,18 +226,18 @@ pub(super) enum FinalityUpdate<D: Digest> {
 ///
 /// The entry is removed once every part is empty. The direct pool and certified fact are boxed,
 /// so pools that hold only unsettled votes stay small in the map.
-struct PoolEntry<V: Variant, D: Digest> {
+struct PoolEntry<S: Scheme, D: Digest> {
     /// The pool of authenticated votes, once the leader block itself is known.
-    direct: Option<Box<DirectPool<V, D>>>,
+    direct: Option<Box<DirectPool<S, D>>>,
     /// The earliest verified L-QC fact for the leader.
     certified: Option<Box<CertifiedRecord<D>>>,
     /// Artifacts that reserved the pool before verification.
     claims: BTreeSet<ArtifactId<D>>,
     /// Authenticated votes and unverified vote claims not yet settled into the direct pool.
-    pending: PendingPool<V, D>,
+    pending: PendingPool<S, D>,
 }
 
-impl<V: Variant, D: Digest> Default for PoolEntry<V, D> {
+impl<S: Scheme, D: Digest> Default for PoolEntry<S, D> {
     fn default() -> Self {
         Self {
             direct: None,
@@ -248,7 +248,7 @@ impl<V: Variant, D: Digest> Default for PoolEntry<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> PoolEntry<V, D> {
+impl<S: Scheme, D: Digest> PoolEntry<S, D> {
     /// Returns whether the pool knows its leader, directly or through an L-QC.
     const fn has_leader(&self) -> bool {
         self.direct.is_some() || self.certified.is_some()
@@ -260,16 +260,16 @@ impl<V: Variant, D: Digest> PoolEntry<V, D> {
 }
 
 /// Finality state for one epoch.
-pub(crate) struct FinalityState<V: Variant, D: Digest> {
+pub(crate) struct FinalityState<S: Scheme, D: Digest> {
     config: CodecConfig,
     capacity: FinalityPoolCapacity<D>,
-    pools: BTreeMap<PoolKey<D>, PoolEntry<V, D>>,
-    claims: BTreeMap<ArtifactId<D>, FinalityClaim<V, D>>,
+    pools: BTreeMap<PoolKey<D>, PoolEntry<S, D>>,
+    claims: BTreeMap<ArtifactId<D>, FinalityClaim<S, D>>,
     claim_order: BTreeMap<Participant, BTreeSet<(Observation, ArtifactId<D>)>>,
     pub(super) ready_lqcs: BTreeSet<(Observation, PoolKey<D>)>,
-    pub(super) lqc_aggregate_jobs: JobTable<LqcAggregateId, AggregateRecord<V, D>>,
+    pub(super) lqc_aggregate_jobs: JobTable<LqcAggregateId, AggregateRecord<S, D>>,
     lqc_aggregate_ids: IdSequence<LqcAggregateId>,
-    capabilities: Capabilities<V, D>,
+    capabilities: Capabilities<S, D>,
     updates: Vec<FinalityUpdate<D>>,
     /// The highest final block height a finality update reported, by chain index.
     finalized: Vec<Height>,
@@ -280,14 +280,14 @@ pub(crate) struct FinalityState<V: Variant, D: Digest> {
     ///
     /// Finality evidence owns its proof because it can outlive its general ready-artifact cache
     /// entry. Equal-view arrivals retain the first proof.
-    proof: Option<FinalityProof<V, D>>,
+    proof: Option<FinalityProof<S, D>>,
 }
 
 /// An admitted L-QC with the V-QC projection it implies.
-struct FinalityProof<V: Variant, D: Digest> {
+struct FinalityProof<S: Scheme, D: Digest> {
     view: View,
-    artifact: Arc<Artifact<V, D>>,
-    derived: DerivedVqc<V, D>,
+    artifact: Arc<Artifact<S, D>>,
+    derived: DerivedVqc<S, D>,
 }
 
 /// The verification verdict of one finality claim.
@@ -378,20 +378,20 @@ impl<D: Digest> PoolReservations<D> {
 }
 
 /// An artifact holding finality pool reservations while it awaits or passes verification.
-pub(super) struct FinalityClaim<V: Variant, D: Digest> {
+pub(super) struct FinalityClaim<S: Scheme, D: Digest> {
     pub(super) observation: Observation,
-    pub(super) artifact: Arc<Artifact<V, D>>,
+    pub(super) artifact: Arc<Artifact<S, D>>,
     reservations: PoolReservations<D>,
     verdict: ClaimVerdict,
     /// Vote and tip derivations produced while verifying a certificate, reused when the claim
     /// is observed instead of re-expanding and hashing its attested votes.
-    derivations: Option<CertificateDerivations<V, D>>,
+    derivations: Option<CertificateDerivations<S, D>>,
 }
 
-impl<V: Variant, D: Digest> FinalityClaim<V, D> {
+impl<S: Scheme, D: Digest> FinalityClaim<S, D> {
     const fn new(
         observation: Observation,
-        artifact: Arc<Artifact<V, D>>,
+        artifact: Arc<Artifact<S, D>>,
         reservations: PoolReservations<D>,
     ) -> Self {
         Self {
@@ -678,32 +678,31 @@ impl SequenceId for LqcAggregateId {
 
 /// Immutable work for assembling one L-QC from a machine-selected vote set.
 #[derive(Clone, Debug)]
-pub(crate) struct LqcAggregateJob<V: Variant, D: Digest> {
+pub(crate) struct LqcAggregateJob<S: Scheme, D: Digest> {
     issued: Issued<LqcAggregateId>,
-    leader: LeaderBlock<V, D>,
-    votes: VoteArtifacts<V, D>,
+    leader: LeaderBlock<S, D>,
+    votes: VoteArtifacts<S, D>,
 }
 
-impl<V: Variant, D: Digest> LqcAggregateJob<V, D> {
+impl<S: Scheme, D: Digest> LqcAggregateJob<S, D> {
     /// Returns the job's identity and issuing generation.
     pub(crate) const fn issued(&self) -> Issued<LqcAggregateId> {
         self.issued
     }
 
     /// Returns the unsigned leader finalized by the selected votes.
-    pub(crate) const fn leader(&self) -> &LeaderBlock<V, D> {
+    pub(crate) const fn leader(&self) -> &LeaderBlock<S, D> {
         &self.leader
     }
 
     /// Returns the selected complete votes in ascending participant order.
-    pub(crate) fn votes(&self) -> impl ExactSizeIterator<Item = &Vote<V, D>> {
+    pub(crate) fn votes(&self) -> impl ExactSizeIterator<Item = &Vote<S, D>> {
         self.votes.iter().map(Held::get)
     }
 
     /// Returns whether `certificate` aggregates exactly this job's leader and votes.
-    fn matches<H: Hasher<Digest = D>>(&self, certificate: &Lqc<V, D>, config: CodecConfig) -> bool {
+    fn matches<H: Hasher<Digest = D>>(&self, certificate: &Lqc<S, D>, config: CodecConfig) -> bool {
         if certificate.leader() != self.leader()
-            || certificate.signature().is_none()
             || certificate.tally().signers().count() != config.view_quorum()
         {
             return false;
@@ -726,17 +725,17 @@ impl<V: Variant, D: Digest> LqcAggregateJob<V, D> {
 
 /// Completion of one L-QC aggregation request.
 #[derive(Clone, Debug)]
-pub(crate) struct LqcAggregateCompletion<V: Variant, D: Digest> {
+pub(crate) struct LqcAggregateCompletion<S: Scheme, D: Digest> {
     issued: Issued<LqcAggregateId>,
-    certificate: Lqc<V, D>,
-    validated: ValidatedLqc<V, D>,
+    certificate: Lqc<S, D>,
+    validated: ValidatedLqc<S, D>,
 }
 
-impl<V: Variant, D: Digest> LqcAggregateCompletion<V, D> {
+impl<S: Scheme, D: Digest> LqcAggregateCompletion<S, D> {
     /// Prepares certificate projections in the aggregation worker.
     pub(crate) fn prepare<H: Hasher<Digest = D>>(
-        job: &LqcAggregateJob<V, D>,
-        certificate: Lqc<V, D>,
+        job: &LqcAggregateJob<S, D>,
+        certificate: Lqc<S, D>,
         config: CodecConfig,
     ) -> Result<Self, SchemeError> {
         let leader = certificate.leader().digest::<H>();
@@ -744,7 +743,7 @@ impl<V: Variant, D: Digest> LqcAggregateCompletion<V, D> {
             .votes()
             .map(|vote| (vote.signer(), vote.body().clone()))
             .collect();
-        let validated = validate_lqc::<H, V, D>(
+        let validated = validate_lqc::<H, S, D>(
             &certificate,
             config,
             CertificateVotes {
@@ -762,31 +761,31 @@ impl<V: Variant, D: Digest> LqcAggregateCompletion<V, D> {
     }
 
     /// Returns the aggregated certificate.
-    pub(crate) const fn certificate(&self) -> &Lqc<V, D> {
+    pub(crate) const fn certificate(&self) -> &Lqc<S, D> {
         &self.certificate
     }
 }
 
 /// One authenticated vote in a pool, with its complete artifact once a witness is held.
 #[derive(Clone, Debug)]
-struct VoteRecord<V: Variant, D: Digest> {
+struct VoteRecord<S: Scheme, D: Digest> {
     id: ArtifactId<D>,
     observation: Observation,
     body: VoteBody<D>,
     evidence: D,
-    artifact: Option<Held<VoteKind, V, D>>,
+    artifact: Option<Held<VoteKind, S, D>>,
 }
 
 /// Unverified vote claims and authenticated votes not yet settled into a pool, in arrival
 /// order.
-pub(super) struct PendingPool<V: Variant, D: Digest> {
+pub(super) struct PendingPool<S: Scheme, D: Digest> {
     claims: BTreeMap<Participant, BTreeMap<ArtifactId<D>, Observation>>,
     claim_order: BTreeSet<(Observation, Participant, ArtifactId<D>)>,
-    candidates: BTreeMap<Participant, BTreeMap<ArtifactId<D>, VoteRecord<V, D>>>,
+    candidates: BTreeMap<Participant, BTreeMap<ArtifactId<D>, VoteRecord<S, D>>>,
     candidate_order: BTreeSet<(Observation, Participant, ArtifactId<D>)>,
 }
 
-impl<V: Variant, D: Digest> Default for PendingPool<V, D> {
+impl<S: Scheme, D: Digest> Default for PendingPool<S, D> {
     fn default() -> Self {
         Self {
             claims: BTreeMap::new(),
@@ -797,7 +796,7 @@ impl<V: Variant, D: Digest> Default for PendingPool<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> PendingPool<V, D> {
+impl<S: Scheme, D: Digest> PendingPool<S, D> {
     fn claim(&mut self, signer: Participant, id: ArtifactId<D>, observation: Observation) {
         let claims = self.claims.entry(signer).or_default();
         if let Some(previous) = claims.insert(id, observation) {
@@ -818,7 +817,7 @@ impl<V: Variant, D: Digest> PendingPool<V, D> {
         }
     }
 
-    fn insert_candidate(&mut self, signer: Participant, candidate: VoteRecord<V, D>) {
+    fn insert_candidate(&mut self, signer: Participant, candidate: VoteRecord<S, D>) {
         let candidates = self.candidates.entry(signer).or_default();
         if let Some(previous) = candidates.get(&candidate.id) {
             if previous.observation <= candidate.observation {
@@ -849,7 +848,7 @@ impl<V: Variant, D: Digest> PendingPool<V, D> {
         &mut self,
         signer: Participant,
         id: ArtifactId<D>,
-    ) -> Option<VoteRecord<V, D>> {
+    ) -> Option<VoteRecord<S, D>> {
         let candidates = self.candidates.get_mut(&signer)?;
         let selected = candidates.remove(&id)?;
         self.candidate_order
@@ -860,7 +859,7 @@ impl<V: Variant, D: Digest> PendingPool<V, D> {
         Some(selected)
     }
 
-    fn witness(&self, signer: Participant, body: &VoteBody<D>) -> Option<Held<VoteKind, V, D>> {
+    fn witness(&self, signer: Participant, body: &VoteBody<D>) -> Option<Held<VoteKind, S, D>> {
         self.candidates
             .get(&signer)?
             .values()
@@ -893,7 +892,7 @@ impl<V: Variant, D: Digest> PendingPool<V, D> {
 
 /// Where a direct pool is in its lifecycle.
 #[derive(Clone, Debug)]
-enum PoolPhase<V: Variant, D: Digest> {
+enum PoolPhase<S: Scheme, D: Digest> {
     /// The pool holds fewer than a view quorum of votes.
     ///
     /// `certified` records that an L-QC for the leader was already observed, so reaching the
@@ -904,24 +903,24 @@ enum PoolPhase<V: Variant, D: Digest> {
         tips: FinalTips<D>,
         /// Commits to every vote the pool holds.
         evidence: D,
-        lqc: LqcProgress<V, D>,
+        lqc: LqcProgress<S, D>,
     },
 }
 
 /// Progress toward the L-QC a finalized direct pool owes other replicas.
 #[derive(Clone, Debug)]
-enum LqcProgress<V: Variant, D: Digest> {
+enum LqcProgress<S: Scheme, D: Digest> {
     /// The quorum that finalized the pool, in ascending order, waits for a complete witness of
     /// every vote.
     AwaitingWitnesses(Vec<Participant>),
     /// The witnessed votes wait for an aggregation job.
     Ready {
-        votes: VoteArtifacts<V, D>,
+        votes: VoteArtifacts<S, D>,
         observation: Observation,
     },
     /// An aggregation job over the witnessed votes is outstanding.
     Pending {
-        votes: VoteArtifacts<V, D>,
+        votes: VoteArtifacts<S, D>,
         id: LqcAggregateId,
     },
     /// An L-QC for the leader is held, locally assembled or observed.
@@ -939,26 +938,26 @@ enum Inserted {
 }
 
 /// The first authenticated vote of each participant for one leader block.
-struct DirectPool<V: Variant, D: Digest> {
-    leader: LeaderBlock<V, D>,
+struct DirectPool<S: Scheme, D: Digest> {
+    leader: LeaderBlock<S, D>,
     leader_observation: Observation,
-    votes: Vec<Option<VoteRecord<V, D>>>,
+    votes: Vec<Option<VoteRecord<S, D>>>,
     /// The participants holding a vote in `votes`, ascending, tracked until the pool finalizes.
     signers: Vec<Participant>,
     extractor: PoolExtractor<D>,
-    phase: PoolPhase<V, D>,
+    phase: PoolPhase<S, D>,
     sources: BTreeSet<ArtifactId<D>>,
 }
 
-impl<V: Variant, D: Digest> DirectPool<V, D> {
+impl<S: Scheme, D: Digest> DirectPool<S, D> {
     fn new<H: Hasher<Digest = D>>(
-        leader: LeaderBlock<V, D>,
+        leader: LeaderBlock<S, D>,
         observation: Observation,
         source: ArtifactId<D>,
         config: CodecConfig,
     ) -> Result<Self, FinalityError> {
         let extractor =
-            PoolExtractor::new::<H, V>(&leader, config).map_err(|_| FinalityError::Invariant)?;
+            PoolExtractor::new::<H, S>(&leader, config).map_err(|_| FinalityError::Invariant)?;
         Ok(Self {
             leader,
             leader_observation: observation,
@@ -974,12 +973,12 @@ impl<V: Variant, D: Digest> DirectPool<V, D> {
     fn insert<H: Hasher<Digest = D>>(
         &mut self,
         signer: Participant,
-        vote: VoteRecord<V, D>,
+        vote: VoteRecord<S, D>,
         config: CodecConfig,
     ) -> Inserted {
         if self
             .extractor
-            .insert::<H, V>(&self.leader, signer, &vote.body)
+            .insert::<H, S>(&self.leader, signer, &vote.body)
             .is_err()
         {
             return Inserted::Rejected;
@@ -1083,7 +1082,7 @@ impl<V: Variant, D: Digest> DirectPool<V, D> {
                     .clone()
                     .expect("every finalizing vote has a complete witness")
             })
-            .collect::<VoteArtifacts<V, D>>();
+            .collect::<VoteArtifacts<S, D>>();
         let observation = signers
             .iter()
             .map(|signer| record(signer).observation)
@@ -1098,7 +1097,7 @@ impl<V: Variant, D: Digest> DirectPool<V, D> {
     }
 
     /// Marks an L-QC for the leader as held, returning the progress it replaces.
-    const fn complete_lqc(&mut self) -> Option<LqcProgress<V, D>> {
+    const fn complete_lqc(&mut self) -> Option<LqcProgress<S, D>> {
         match &mut self.phase {
             PoolPhase::Collecting { certified } => {
                 *certified = true;
@@ -1109,14 +1108,14 @@ impl<V: Variant, D: Digest> DirectPool<V, D> {
     }
 
     /// Returns the outstanding aggregation progress, if the pool is finalized.
-    const fn lqc(&self) -> Option<&LqcProgress<V, D>> {
+    const fn lqc(&self) -> Option<&LqcProgress<S, D>> {
         match &self.phase {
             PoolPhase::Collecting { .. } => None,
             PoolPhase::Finalized { lqc, .. } => Some(lqc),
         }
     }
 
-    const fn lqc_mut(&mut self) -> Option<&mut LqcProgress<V, D>> {
+    const fn lqc_mut(&mut self) -> Option<&mut LqcProgress<S, D>> {
         match &mut self.phase {
             PoolPhase::Collecting { .. } => None,
             PoolPhase::Finalized { lqc, .. } => Some(lqc),
@@ -1167,10 +1166,10 @@ impl<V: Variant, D: Digest> DirectPool<V, D> {
 
 /// An outstanding L-QC aggregation job and the pool it serves.
 #[derive(Clone, Debug)]
-pub(super) struct AggregateRecord<V: Variant, D: Digest> {
+pub(super) struct AggregateRecord<S: Scheme, D: Digest> {
     key: PoolKey<D>,
     observation: Observation,
-    job: LqcAggregateJob<V, D>,
+    job: LqcAggregateJob<S, D>,
 }
 
 /// The finality fact of the earliest verified L-QC for a leader.
@@ -1180,14 +1179,14 @@ struct CertifiedRecord<D: Digest> {
 }
 
 /// A locally prepared L-QC awaiting canonical self-admission.
-pub(crate) struct PreparedLqc<V: Variant, D: Digest> {
+pub(crate) struct PreparedLqc<S: Scheme, D: Digest> {
     pub(crate) issued: Issued<LqcAggregateId>,
-    pub(crate) artifact: Arc<Artifact<V, D>>,
+    pub(crate) artifact: Arc<Artifact<S, D>>,
     pub(crate) artifact_id: ArtifactId<D>,
     pub(crate) encoded_len: usize,
     pub(crate) observation: Observation,
     /// The worker's validation, taken when the certificate is admitted.
-    pub(crate) validated: Option<ValidatedLqc<V, D>>,
+    pub(crate) validated: Option<ValidatedLqc<S, D>>,
 }
 
 /// A finality operation that cannot proceed.
@@ -1207,7 +1206,7 @@ pub(crate) enum FinalityError {
     Invariant,
 }
 
-impl<V: Variant, D: Digest> FinalityState<V, D> {
+impl<S: Scheme, D: Digest> FinalityState<S, D> {
     /// Creates the finality state for the profile's epoch.
     pub(crate) fn new(profile: &Profile<D>) -> Self {
         let participants = profile.codec().participants();
@@ -1237,8 +1236,8 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
     /// Returns whether the retained proof changed.
     pub(crate) fn retain_proof<H: Hasher<Digest = D>>(
         &mut self,
-        artifact: &Arc<Artifact<V, D>>,
-        derived: Option<DerivedVqc<V, D>>,
+        artifact: &Arc<Artifact<S, D>>,
+        derived: Option<DerivedVqc<S, D>>,
     ) -> Result<bool, FinalityError> {
         let Artifact::Lqc(certificate) = artifact.as_ref() else {
             return Err(FinalityError::Invariant);
@@ -1265,7 +1264,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
 
     /// Returns the highest admitted L-QC above the durable signing floor, whether or not it
     /// covers the current view.
-    pub(crate) fn signing_floor_candidate(&self, floor: View) -> Option<Arc<Artifact<V, D>>> {
+    pub(crate) fn signing_floor_candidate(&self, floor: View) -> Option<Arc<Artifact<S, D>>> {
         self.proof
             .as_ref()
             .and_then(|proof| (proof.view > floor).then(|| Arc::clone(&proof.artifact)))
@@ -1274,8 +1273,8 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
     /// Reuses the projection only for the immutable proof that owns it.
     pub(crate) fn finality_anchor(
         &self,
-        artifact: &Arc<Artifact<V, D>>,
-    ) -> Option<&DerivedVqc<V, D>> {
+        artifact: &Arc<Artifact<S, D>>,
+    ) -> Option<&DerivedVqc<S, D>> {
         self.proof
             .as_ref()
             .and_then(|proof| Arc::ptr_eq(&proof.artifact, artifact).then_some(&proof.derived))
@@ -1284,7 +1283,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
     /// Returns the selected paths of the retained proof `artifact`.
     pub(crate) fn selected_commitments(
         &self,
-        artifact: &Arc<Artifact<V, D>>,
+        artifact: &Arc<Artifact<S, D>>,
     ) -> Option<&SelectedCommitments<D>> {
         self.finality_anchor(artifact)
             .map(|derived| derived.validated.commitments())
@@ -1304,7 +1303,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        artifact: Arc<Artifact<V, D>>,
+        artifact: Arc<Artifact<S, D>>,
         profile: &Profile<H::Digest>,
     ) -> Result<(), FinalityError> {
         if self.is_retired(&artifact) {
@@ -1372,9 +1371,9 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        artifact: &Arc<Artifact<V, D>>,
+        artifact: &Arc<Artifact<S, D>>,
         profile: &Profile<H::Digest>,
-    ) -> Result<FinalityOutputs<V, D>, FinalityError> {
+    ) -> Result<FinalityOutputs<S, D>, FinalityError> {
         self.resolve_finality_claim::<H>(
             id,
             observation,
@@ -1391,10 +1390,10 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        artifact: &Arc<Artifact<V, D>>,
+        artifact: &Arc<Artifact<S, D>>,
         profile: &Profile<H::Digest>,
-        mut derivations: Option<CertificateDerivations<V, D>>,
-    ) -> Result<FinalityOutputs<V, D>, FinalityError> {
+        mut derivations: Option<CertificateDerivations<S, D>>,
+    ) -> Result<FinalityOutputs<S, D>, FinalityError> {
         if matches!(artifact.as_ref(), Artifact::Lqc(_)) && self.is_retired(artifact) {
             // Diagnostic retention may discard an L-QC claim before verification completes.
             // The verified certificate remains portable consensus evidence and must still reach
@@ -1419,11 +1418,11 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        artifact: &Arc<Artifact<V, D>>,
+        artifact: &Arc<Artifact<S, D>>,
         verdict: ClaimVerdict,
         profile: &Profile<H::Digest>,
-        derivations: Option<CertificateDerivations<V, D>>,
-    ) -> Result<FinalityOutputs<V, D>, FinalityError> {
+        derivations: Option<CertificateDerivations<S, D>>,
+    ) -> Result<FinalityOutputs<S, D>, FinalityError> {
         let Some(claim) = self.claims.get(&id) else {
             // A discarded artifact may already have drained its claim as valid; the rejection
             // that accompanies its removal must still release every registered claim it holds,
@@ -1512,7 +1511,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         {
             capacity.retain_earlier_observation(reservation.key, observation);
         }
-        visit_vote_claims::<H, V, D>(&claim.artifact, claim.derived_leader(), |vote| {
+        visit_vote_claims::<H, S, D>(&claim.artifact, claim.derived_leader(), |vote| {
             if claim.retains(vote.pool) {
                 pools
                     .entry(vote.pool)
@@ -1528,7 +1527,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         &mut self,
         owner: Participant,
         profile: &Profile<H::Digest>,
-    ) -> Result<FinalityOutputs<V, D>, FinalityError> {
+    ) -> Result<FinalityOutputs<S, D>, FinalityError> {
         let mut outputs = Vec::new();
         loop {
             let Some((observation, id)) = self
@@ -1562,9 +1561,9 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
     fn apply_finality_claim<H: Hasher<Digest = D>>(
         &mut self,
         id: ArtifactId<D>,
-        mut claim: FinalityClaim<V, D>,
+        mut claim: FinalityClaim<S, D>,
         profile: &Profile<H::Digest>,
-        outputs: &mut FinalityOutputs<V, D>,
+        outputs: &mut FinalityOutputs<S, D>,
     ) -> Result<(), FinalityError> {
         let observation = claim.observation;
         match claim.verdict {
@@ -1574,7 +1573,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
             ClaimVerdict::Valid => {
                 let certificate_key =
                     if matches!(claim.artifact.as_ref(), Artifact::Vqc(_) | Artifact::Lqc(_)) {
-                        leader_key::<H, V, D>(&claim.artifact, claim.derived_leader())
+                        leader_key::<H, S, D>(&claim.artifact, claim.derived_leader())
                     } else {
                         None
                     };
@@ -1626,14 +1625,14 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
 
     fn reservation_keys<H: Hasher<Digest = D>>(
         &self,
-        artifact: &Artifact<V, D>,
+        artifact: &Artifact<S, D>,
     ) -> Option<OneOrMany<ReservationKey<D>>> {
         let mut keys = None;
-        let leader = leader_key::<H, V, D>(artifact, None);
+        let leader = leader_key::<H, S, D>(artifact, None);
         if let Some(key) = leader {
             push_reservation_key(&mut keys, key, true);
         }
-        visit_vote_claims::<H, V, D>(artifact, leader.map(|key| key.leader), |claim| {
+        visit_vote_claims::<H, S, D>(artifact, leader.map(|key| key.leader), |claim| {
             push_reservation_key(&mut keys, claim.pool, false)
         });
         keys
@@ -1643,11 +1642,11 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        artifact: &Artifact<V, D>,
-        batch: &FinalityClaim<V, D>,
+        artifact: &Artifact<S, D>,
+        batch: &FinalityClaim<S, D>,
         leader: Option<D>,
     ) {
-        let leader_key = leader_key::<H, V, D>(artifact, leader);
+        let leader_key = leader_key::<H, S, D>(artifact, leader);
         if let Some(key) = leader_key.filter(|key| batch.retains(*key)) {
             self.pools.entry(key).or_default().claims.insert(id);
         }
@@ -1680,7 +1679,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
     /// first error `visit` returns.
     fn for_each_distinct_pool<H, E>(
         &mut self,
-        artifact: &Artifact<V, D>,
+        artifact: &Artifact<S, D>,
         leader: Option<D>,
         mut settle: impl FnMut(&mut Self, PoolKey<D>) -> bool,
         mut visit: impl FnMut(&mut Self, VoteClaim<D>) -> Result<(), E>,
@@ -1690,7 +1689,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
     {
         let mut result = Ok(());
         let mut settled: Option<(PoolKey<D>, bool)> = None;
-        visit_vote_claims::<H, V, D>(artifact, leader, |claim| {
+        visit_vote_claims::<H, S, D>(artifact, leader, |claim| {
             if result.is_err() {
                 return;
             }
@@ -1712,7 +1711,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
     fn reject_finality<H: Hasher<Digest = D>>(
         &mut self,
         id: ArtifactId<D>,
-        artifact: &Artifact<V, D>,
+        artifact: &Artifact<S, D>,
     ) -> Result<(), FinalityError> {
         if self.is_retired(artifact) {
             return Ok(());
@@ -1723,8 +1722,8 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
     fn remove_dropped_claims<H: Hasher<Digest = D>>(
         &mut self,
         id: ArtifactId<D>,
-        artifact: &Artifact<V, D>,
-        claim: &FinalityClaim<V, D>,
+        artifact: &Artifact<S, D>,
+        claim: &FinalityClaim<S, D>,
         leader: Option<D>,
     ) -> Result<(), FinalityError> {
         self.release_unretained_finality::<H, _>(id, artifact, leader, |key| claim.retains(key))
@@ -1733,7 +1732,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
     fn release_unretained_finality<H, F>(
         &mut self,
         id: ArtifactId<D>,
-        artifact: &Artifact<V, D>,
+        artifact: &Artifact<S, D>,
         leader: Option<D>,
         retained: F,
     ) -> Result<(), FinalityError>
@@ -1742,7 +1741,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         F: Fn(PoolKey<D>) -> bool,
     {
         if let Artifact::LeaderBlock(block) = artifact {
-            let key = pool_key::<H, V, D>(block.block(), leader);
+            let key = pool_key::<H, S, D>(block.block(), leader);
             if retained(key) {
                 return Ok(());
             }
@@ -1778,7 +1777,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        claim: &mut FinalityClaim<V, D>,
+        claim: &mut FinalityClaim<S, D>,
         profile: &Profile<H::Digest>,
     ) -> Result<(), FinalityError> {
         let artifact = Arc::clone(&claim.artifact);
@@ -1788,7 +1787,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         if self.is_retired(&artifact) {
             return Ok(());
         }
-        if let Some(vote) = Held::<VoteKind, V, D>::try_new(&artifact) {
+        if let Some(vote) = Held::<VoteKind, S, D>::try_new(&artifact) {
             let key = Self::pool_key_and_signer(vote.get()).0;
             if claim.retains(key) {
                 self.observe_vote::<H>(id, observation, vote)?;
@@ -1797,7 +1796,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         }
         match artifact.as_ref() {
             Artifact::LeaderBlock(block) => {
-                let key = pool_key::<H, V, D>(block.block(), None);
+                let key = pool_key::<H, S, D>(block.block(), None);
                 self.observe_leader::<H>(
                     id,
                     observation,
@@ -1914,7 +1913,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
     }
 
     /// Takes the work issued since the last call.
-    pub(crate) fn take_capabilities(&mut self) -> Capabilities<V, D> {
+    pub(crate) fn take_capabilities(&mut self) -> Capabilities<S, D> {
         take(&mut self.capabilities)
     }
 
@@ -1931,9 +1930,9 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
     pub(crate) fn prepare_lqc<H: Hasher<Digest = D>>(
         &mut self,
         profile: &Profile<H::Digest>,
-        completion: LqcAggregateCompletion<V, D>,
+        completion: LqcAggregateCompletion<S, D>,
         generation: Generation,
-    ) -> Result<Option<PreparedLqc<V, D>>, FinalityError> {
+    ) -> Result<Option<PreparedLqc<S, D>>, FinalityError> {
         let record = match self.lqc_aggregate_jobs.admit(completion.issued, generation) {
             Admit::Current(record) => record,
             Admit::Stale => return Ok(None),
@@ -1990,7 +1989,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         }
     }
 
-    fn release_lqc(&mut self, record: AggregateRecord<V, D>) {
+    fn release_lqc(&mut self, record: AggregateRecord<S, D>) {
         let id = record.job.issued.id();
         if let Some(lqc) = self
             .direct_pool_mut(record.key)
@@ -2052,7 +2051,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         &mut self,
         profile: &Profile<H::Digest>,
         floor: View,
-    ) -> Result<FinalityOutputs<V, D>, FinalityError> {
+    ) -> Result<FinalityOutputs<S, D>, FinalityError> {
         if floor <= self.retired_through {
             return Ok(Vec::new());
         }
@@ -2101,11 +2100,11 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         &mut self,
         source: ArtifactId<D>,
         observation: Observation,
-        leader: LeaderBlock<V, D>,
+        leader: LeaderBlock<S, D>,
         digest: Option<D>,
         retained: bool,
     ) -> Result<(), FinalityError> {
-        let key = pool_key::<H, V, D>(&leader, digest);
+        let key = pool_key::<H, S, D>(&leader, digest);
         if !retained {
             // Without a direct pool or another claim, nothing can settle the pool's pending
             // votes.
@@ -2145,7 +2144,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        artifact: Held<VoteKind, V, D>,
+        artifact: Held<VoteKind, S, D>,
     ) -> Result<(), FinalityError> {
         let vote = artifact.get();
         let (key, signer) = Self::pool_key_and_signer(vote);
@@ -2168,9 +2167,9 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        certificate: &Vqc<V, D>,
-        claim: &FinalityClaim<V, D>,
-        derivations: Option<CertificateDerivations<V, D>>,
+        certificate: &Vqc<S, D>,
+        claim: &FinalityClaim<S, D>,
+        derivations: Option<CertificateDerivations<S, D>>,
     ) -> Result<(), FinalityError> {
         let votes = match derivations {
             Some(CertificateDerivations::Vqc { votes, .. }) => votes,
@@ -2193,7 +2192,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
     /// Rebuilds every attested vote of a V-QC in place: the recovery path, where no compute-pool
     /// derivation accompanies the certificate.
     fn expand_vqc_votes<H: Hasher<Digest = D>>(
-        certificate: &Vqc<V, D>,
+        certificate: &Vqc<S, D>,
         config: CodecConfig,
     ) -> Result<Vec<VerifiedVote<D>>, FinalityError> {
         let designated = certificate
@@ -2240,8 +2239,8 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        certificate: &Lqc<V, D>,
-        derivations: Option<CertificateDerivations<V, D>>,
+        certificate: &Lqc<S, D>,
+        derivations: Option<CertificateDerivations<S, D>>,
     ) -> Result<(), FinalityError> {
         let leader = certificate.leader();
         let (leader_digest, tips, votes) = match derivations {
@@ -2257,7 +2256,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
                 let expanded = certificate
                     .expand_votes(leader_digest, self.config)
                     .map_err(|_| FinalityError::Invariant)?;
-                let tips = FinalTips::from_pool::<H, V, _>(
+                let tips = FinalTips::from_pool::<H, S, _>(
                     leader,
                     expanded.iter().map(|(signer, body)| (*signer, body)),
                     self.config,
@@ -2427,7 +2426,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         self.updates.clear();
     }
 
-    fn pool_key_and_signer(vote: &Vote<V, D>) -> (PoolKey<D>, Participant) {
+    fn pool_key_and_signer(vote: &Vote<S, D>) -> (PoolKey<D>, Participant) {
         (
             PoolKey::new(vote.body().round(), vote.body().leader()),
             vote.signer(),
@@ -2450,7 +2449,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         }
     }
 
-    fn is_retired(&self, artifact: &Artifact<V, D>) -> bool {
+    fn is_retired(&self, artifact: &Artifact<S, D>) -> bool {
         artifact
             .view()
             .is_some_and(|view| view <= self.retired_through)
@@ -2479,11 +2478,11 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
         }
     }
 
-    fn direct_pool(&self, key: PoolKey<D>) -> Option<&DirectPool<V, D>> {
+    fn direct_pool(&self, key: PoolKey<D>) -> Option<&DirectPool<S, D>> {
         self.pools.get(&key)?.direct.as_deref()
     }
 
-    fn direct_pool_mut(&mut self, key: PoolKey<D>) -> Option<&mut DirectPool<V, D>> {
+    fn direct_pool_mut(&mut self, key: PoolKey<D>) -> Option<&mut DirectPool<S, D>> {
         self.pools.get_mut(&key)?.direct.as_deref_mut()
     }
 
@@ -2532,7 +2531,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
 }
 
 #[cfg(test)]
-impl<V: Variant, D: Digest> FinalityState<V, D> {
+impl<S: Scheme, D: Digest> FinalityState<S, D> {
     /// Returns the number of retained finality proofs, zero or one.
     pub(crate) fn retained_finality_proofs(&self) -> usize {
         usize::from(self.proof.is_some())

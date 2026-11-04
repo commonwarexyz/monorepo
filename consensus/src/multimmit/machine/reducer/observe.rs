@@ -14,11 +14,12 @@ use crate::{
             job::Issued,
             verification::{JobId, Observation, VerificationItem, VerificationTicket, VerifyJob},
         },
+        scheme::Scheme,
         types::{Anchor, Artifact, ArtifactId, ChainId},
     },
     types::{Attributable, Height},
 };
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use std::sync::Arc;
 
 /// Holds back one slot of `limit` for view-critical work while at least two slots exist.
@@ -26,11 +27,11 @@ const fn reserve_one(limit: usize) -> usize {
     if limit >= 2 { limit - 1 } else { limit }
 }
 
-impl<H: Hasher, V: Variant> Machine<H, V> {
+impl<H: Hasher, S: Scheme> Machine<H, S> {
     pub(super) fn observe_artifacts(
         &mut self,
-        artifacts: impl ExactSizeIterator<Item = IdentifiedArtifact<V, H::Digest>>,
-    ) -> Result<Step<V, H::Digest>, StepError> {
+        artifacts: impl ExactSizeIterator<Item = IdentifiedArtifact<S, H::Digest>>,
+    ) -> Result<Step<S, H::Digest>, StepError> {
         let artifact_count = artifacts.len();
         let cohort = self.store.next_cohort;
         self.store.next_cohort = self
@@ -170,7 +171,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         &mut self,
         ticket: VerificationTicket<H::Digest>,
         observation: Observation,
-        artifact: &Arc<Artifact<V, H::Digest>>,
+        artifact: &Arc<Artifact<S, H::Digest>>,
         provisions: Vec<Dependency<H::Digest>>,
         future: bool,
         dependency_slot: bool,
@@ -224,8 +225,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn known_constituents(
         &self,
         id: ArtifactId<H::Digest>,
-        artifact: &Artifact<V, H::Digest>,
-    ) -> Vec<Arc<Artifact<V, H::Digest>>> {
+        artifact: &Artifact<S, H::Digest>,
+    ) -> Vec<Arc<Artifact<S, H::Digest>>> {
         match artifact {
             Artifact::Vqc(certificate) => self.views.verified_messages(certificate.view()),
             Artifact::Lqc(certificate) => self.views.verified_messages(certificate.view()),
@@ -272,7 +273,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         }
     }
 
-    fn precheck_unidentified(&self, artifact: &Artifact<V, H::Digest>) -> Option<Rejection> {
+    fn precheck_unidentified(&self, artifact: &Artifact<S, H::Digest>) -> Option<Rejection> {
         let resources = self.profile.resources();
         let protocol = self.profile.protocol();
         if artifact.epoch() != protocol.epoch() {
@@ -353,7 +354,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// certified tip retains one data-availability vote per signer, for a header this node holds
     /// a verified block for. Votes at or below the tip are late and retire as soon as they are
     /// ready.
-    fn precheck_position(&self, artifact: &Artifact<V, H::Digest>) -> Option<Rejection> {
+    fn precheck_position(&self, artifact: &Artifact<S, H::Digest>) -> Option<Rejection> {
         match artifact {
             Artifact::TransactionBlock(block) => self
                 .store
@@ -378,7 +379,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn precheck_identified(
         &self,
-        artifact: &Artifact<V, H::Digest>,
+        artifact: &Artifact<S, H::Digest>,
         id: ArtifactId<H::Digest>,
         local_artifact_reservations: usize,
     ) -> ObservationStatus {

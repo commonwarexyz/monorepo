@@ -12,7 +12,7 @@ use crate::{
         actors::voter::{Inbox, Mailbox as VoterMailbox, Message as VoterMessage},
         machine::{Generation, ResolutionJob},
         mocks::{
-            Committee, RecordingBlocker,
+            Bls, Committee, RecordingBlocker,
             cluster::{QUOTA, link_all, start_network},
         },
         testing::{SpanRecorder, expect_before, expect_within},
@@ -96,14 +96,14 @@ impl CodecGate {
     }
 }
 
-fn committee() -> Committee<MinPk> {
+fn committee() -> Committee<Bls<MinPk>> {
     Committee::builder(7, 6).build()
 }
 
 fn resolver_response(
     request: impl AsRef<[u8]>,
     requested: View,
-    proof: ViewProof<MinPk, Digest>,
+    proof: ViewProof<Bls<MinPk>, Digest>,
 ) -> Bytes {
     let mut request = Copying(request.as_ref());
     let id = u64::read(&mut request).expect("resolver request id");
@@ -188,7 +188,7 @@ fn resolver_responses_are_prioritized() {
             inner: local_sender,
             priorities: Arc::clone(&priorities),
         };
-        let (actor, _endpoints): (Actor<_, Sha256, _, MinPk, _, _>, _) = Actor::new(
+        let (actor, _endpoints): (Actor<_, Sha256, _, Bls<MinPk>, _, _>, _) = Actor::new(
             context.child("resolver"),
             Config {
                 scheme: committee.signers[0].clone(),
@@ -199,7 +199,7 @@ fn resolver_responses_are_prioritized() {
             },
         );
         let voter_context = context.child("voter");
-        let (voter, _inbox) = VoterMailbox::<Ed25519PublicKey, MinPk, Digest>::new(
+        let (voter, _inbox) = VoterMailbox::<Ed25519PublicKey, Bls<MinPk>, Digest>::new(
             &voter_context,
             &context,
             NonZeroUsize::new(8).unwrap(),
@@ -235,7 +235,7 @@ fn serve_overflow_does_not_retain_queries() {
             context.child("serve_queries"),
             NonZeroUsize::MIN,
         );
-        let server = Mailbox::<MinPk, Digest>::new(control, queries).server();
+        let server = Mailbox::<Bls<MinPk>, Digest>::new(control, queries).server();
         let mut first = server.serve(View::zero());
         let overflow = server.serve(View::zero());
         assert!(
@@ -323,7 +323,7 @@ fn local_cache_materialization_keeps_request_trace_parent_and_root_until_cancel(
                 .register(3, QUOTA)
                 .await
                 .expect("resolver network registered");
-            let (actor, endpoints): (Actor<_, Sha256, _, MinPk, _, _>, _) = Actor::new(
+            let (actor, endpoints): (Actor<_, Sha256, _, Bls<MinPk>, _, _>, _) = Actor::new(
                 context.child("resolver"),
                 Config {
                     scheme: committee.signers[0].clone(),
@@ -340,7 +340,7 @@ fn local_cache_materialization_keeps_request_trace_parent_and_root_until_cancel(
                     resolutions: mut voter_receiver,
                     ..
                 },
-            ) = VoterMailbox::<Ed25519PublicKey, MinPk, Digest>::new(
+            ) = VoterMailbox::<Ed25519PublicKey, Bls<MinPk>, Digest>::new(
                 &voter_context,
                 &context,
                 NonZeroUsize::new(8).unwrap(),
@@ -425,7 +425,7 @@ fn stalled_codec_worker_keeps_control_and_queries_live() {
         };
         gate.wait_started(2);
         let blocker = RecordingBlocker::default();
-        let (actor, endpoints): (Actor<_, Sha256, _, MinPk, _, _>, _) = Actor::new(
+        let (actor, endpoints): (Actor<_, Sha256, _, Bls<MinPk>, _, _>, _) = Actor::new(
             context.child("resolver"),
             Config {
                 scheme: committee.signers[0].clone(),
@@ -442,7 +442,7 @@ fn stalled_codec_worker_keeps_control_and_queries_live() {
                 resolutions: mut voter_receiver,
                 ..
             },
-        ) = VoterMailbox::<Ed25519PublicKey, MinPk, Digest>::new(
+        ) = VoterMailbox::<Ed25519PublicKey, Bls<MinPk>, Digest>::new(
             &voter_context,
             &context,
             NonZeroUsize::new(8).unwrap(),
@@ -537,7 +537,7 @@ fn wrong_view_response_is_rejected_without_blocking_its_peer() {
             .await
             .expect("correct resolver network registered");
         let blocker = RecordingBlocker::default();
-        let (actor, endpoints): (Actor<_, Sha256, _, MinPk, _, _>, _) = Actor::new(
+        let (actor, endpoints): (Actor<_, Sha256, _, Bls<MinPk>, _, _>, _) = Actor::new(
             context.child("resolver"),
             Config {
                 scheme: committee.signers[0].clone(),
@@ -554,7 +554,7 @@ fn wrong_view_response_is_rejected_without_blocking_its_peer() {
                 resolutions: mut voter_receiver,
                 ..
             },
-        ) = VoterMailbox::<Ed25519PublicKey, MinPk, Digest>::new(
+        ) = VoterMailbox::<Ed25519PublicKey, Bls<MinPk>, Digest>::new(
             &voter_context,
             &context,
             NonZeroUsize::new(8).unwrap(),
@@ -579,7 +579,7 @@ fn wrong_view_response_is_rejected_without_blocking_its_peer() {
             .await
             .expect("malicious peer receives request");
         assert_eq!(sender, local);
-        let wrong: ViewProof<MinPk, Digest> =
+        let wrong: ViewProof<Bls<MinPk>, Digest> =
             ViewProof::Nullification(Box::new(committee.nullification(requested.next())));
         let _ = malicious_sender.send(
             Recipients::One(local.clone()),
@@ -795,12 +795,11 @@ fn panicked_decode_is_an_invalid_response() {
     ];
     for strategy in strategies {
         let (response, _verdict) = oneshot::channel();
-        let (_, completion) = futures::executor::block_on(decode_delivery::<_, MinPk, Digest>(
-            strategy,
-            Span::none(),
-            response,
-            || panic!("malformed proof"),
-        ));
+        let (_, completion) = futures::executor::block_on(
+            decode_delivery::<_, Bls<MinPk>, Digest>(strategy, Span::none(), response, || {
+                panic!("malformed proof")
+            }),
+        );
         assert!(
             matches!(completion, CodecCompletion::Decoded { proofs: None, .. }),
             "a panicked decode must complete without proofs"

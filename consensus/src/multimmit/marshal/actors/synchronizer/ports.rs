@@ -16,11 +16,12 @@ use crate::{
             },
             types::{CustodyValues, MaybeLqc},
         },
+        scheme::Scheme,
         types::{BlockRef, Body, CertificateId, Lqc, TipRecord, TransactionBlockHeader},
     },
     types::View,
 };
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use std::{future::Future, sync::Arc};
 
 /// Producer-header segments, one per request.
@@ -32,10 +33,10 @@ pub(super) type HeaderSegments<D> = Vec<Vec<TransactionBlockHeader<D>>>;
 /// beginning at the requested commitment or reference, or the requested blocks with
 /// catalog-proven custody. An error means the value could not be resolved, which the synchronizer
 /// treats as fatal.
-pub(crate) trait Fetcher<H, V, B>: Clone + Send + 'static
+pub(crate) trait Fetcher<H, S, B>: Clone + Send + 'static
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Fetch failure.
@@ -70,10 +71,10 @@ where
 /// The catalog requests synchronization issues.
 ///
 /// Lookups that run concurrently with a pass take `&self` and return detached futures.
-pub(crate) trait CatalogPort<H, V, B>: Send + 'static
+pub(crate) trait CatalogPort<H, S, B>: Send + 'static
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Catalog failure.
@@ -89,13 +90,13 @@ where
     /// Returns the highest retained L-QC, if any.
     fn latest_lqc(
         &mut self,
-    ) -> impl Future<Output = Result<MaybeLqc<V, H::Digest>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<MaybeLqc<S, H::Digest>, Self::Error>> + Send;
 
     /// Returns the retained L-QC `id`, if any.
     fn lqc(
         &mut self,
         id: CertificateId<H::Digest>,
-    ) -> impl Future<Output = Result<MaybeLqc<V, H::Digest>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<MaybeLqc<S, H::Digest>, Self::Error>> + Send;
 
     /// Returns whether `id` is already a selected finality proof.
     fn final_lqc(
@@ -124,7 +125,7 @@ where
     /// durable. Commits become durable in the order they were started.
     fn start_commit(
         &mut self,
-        batch: Commit<H, V>,
+        batch: Commit<H, S>,
         handoff: Vec<delivery::HotOutput<H, B>>,
     ) -> impl Future<Output = Result<Self::CommitToken, Self::Error>> + Send;
 
@@ -139,15 +140,15 @@ where
         &mut self,
         checkpoint: Checkpoint<H::Digest>,
         prune: PendingFloors,
-        proof: Arc<Lqc<V, H::Digest>>,
+        proof: Arc<Lqc<S, H::Digest>>,
         history: Arc<TipRecord<H::Digest>>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
-impl<H, V, B> CatalogPort<H, V, B> for catalog::Mailbox<H, V, B>
+impl<H, S, B> CatalogPort<H, S, B> for catalog::Mailbox<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     type Error = catalog::Error;
@@ -157,14 +158,14 @@ where
         Self::checkpoint(self).await
     }
 
-    async fn latest_lqc(&mut self) -> Result<MaybeLqc<V, H::Digest>, Self::Error> {
+    async fn latest_lqc(&mut self) -> Result<MaybeLqc<S, H::Digest>, Self::Error> {
         Self::latest_lqc(self).await
     }
 
     async fn lqc(
         &mut self,
         id: CertificateId<H::Digest>,
-    ) -> Result<MaybeLqc<V, H::Digest>, Self::Error> {
+    ) -> Result<MaybeLqc<S, H::Digest>, Self::Error> {
         Self::lqc(self, id).await
     }
 
@@ -191,7 +192,7 @@ where
 
     async fn start_commit(
         &mut self,
-        batch: Commit<H, V>,
+        batch: Commit<H, S>,
         handoff: Vec<delivery::HotOutput<H, B>>,
     ) -> Result<Self::CommitToken, Self::Error> {
         Self::start_commit(self, batch, handoff).await
@@ -205,7 +206,7 @@ where
         &mut self,
         checkpoint: Checkpoint<H::Digest>,
         prune: PendingFloors,
-        proof: Arc<Lqc<V, H::Digest>>,
+        proof: Arc<Lqc<S, H::Digest>>,
         history: Arc<TipRecord<H::Digest>>,
     ) -> Result<(), Self::Error> {
         Self::install(
@@ -222,25 +223,25 @@ where
 }
 
 /// Backfill client that returns blocks only with their catalog-proven custody.
-pub(crate) struct CustodyFetcher<H, V, B>
+pub(crate) struct CustodyFetcher<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
-    backfill: backfill::Mailbox<H, V, B>,
-    catalog: catalog::Mailbox<H, V, B>,
+    backfill: backfill::Mailbox<H, S, B>,
+    catalog: catalog::Mailbox<H, S, B>,
 }
 
-impl<H, V, B> CustodyFetcher<H, V, B>
+impl<H, S, B> CustodyFetcher<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     pub(crate) const fn new(
-        backfill: backfill::Mailbox<H, V, B>,
-        catalog: catalog::Mailbox<H, V, B>,
+        backfill: backfill::Mailbox<H, S, B>,
+        catalog: catalog::Mailbox<H, S, B>,
     ) -> Self {
         Self { backfill, catalog }
     }
@@ -270,10 +271,10 @@ where
     }
 }
 
-impl<H, V, B> Clone for CustodyFetcher<H, V, B>
+impl<H, S, B> Clone for CustodyFetcher<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     fn clone(&self) -> Self {
@@ -281,7 +282,7 @@ where
     }
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> Fetcher<H, V, B> for CustodyFetcher<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> Fetcher<H, S, B> for CustodyFetcher<H, S, B> {
     type Error = backfill::Error;
 
     async fn history(

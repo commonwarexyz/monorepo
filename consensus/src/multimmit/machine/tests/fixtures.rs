@@ -39,6 +39,7 @@ use crate::{
             verification::{Observation, VerifyJob},
             view::{ViewTimer, VqcAggregateCompletion, VqcAggregateJob},
         },
+        mocks::Bls,
         types::{
             Activity, Artifact, ArtifactId, ChainId, CodecConfig, DaCertificate, DigestedLeader,
             Extension, LeaderBlock, Lqc, NoVote, Nullification, Nullify, Position,
@@ -63,9 +64,12 @@ use commonware_cryptography::{
 use core::{num::NonZeroUsize, time::Duration};
 use std::sync::Arc;
 
-pub(super) type TestMachine = Machine<Sha256, MinPk>;
+/// The suite these tests run on.
+type Suite = Bls<MinPk>;
 
-type TestDurableJob = DurableJob<MinPk, Digest>;
+pub(super) type TestMachine = Machine<Sha256, Bls<MinPk>>;
+
+type TestDurableJob = DurableJob<Bls<MinPk>, Digest>;
 
 /// Returns the check a rejected replay or restore failed.
 pub(super) fn transition_reason<T>(result: Result<T, ReplayError>) -> TransitionReason {
@@ -85,11 +89,13 @@ pub(super) fn snapshot_reason<T>(result: Result<T, ReplayError>) -> SnapshotReas
     }
 }
 
-pub(super) fn release_after_enqueue(step: &Step<MinPk, Digest>) -> Vec<TestDurableJob> {
+pub(super) fn release_after_enqueue(step: &Step<Bls<MinPk>, Digest>) -> Vec<TestDurableJob> {
     step.persist_directive().release_after_enqueue
 }
 
-pub(super) const fn durable_job(effect: &Capability<MinPk, Digest>) -> Option<&TestDurableJob> {
+pub(super) const fn durable_job(
+    effect: &Capability<Bls<MinPk>, Digest>,
+) -> Option<&TestDurableJob> {
     let Capability::Released(job) = effect else {
         return None;
     };
@@ -97,19 +103,19 @@ pub(super) const fn durable_job(effect: &Capability<MinPk, Digest>) -> Option<&T
 }
 
 pub(in crate::multimmit::machine) fn durable_effect(
-    effect: &Capability<MinPk, Digest>,
-) -> Option<&DurableEffect<MinPk, Digest>> {
+    effect: &Capability<Bls<MinPk>, Digest>,
+) -> Option<&DurableEffect<Bls<MinPk>, Digest>> {
     Some(durable_job(effect)?.request())
 }
 
-pub(super) fn sign_request(job: &TestDurableJob) -> &SignRequest<MinPk, Digest> {
+pub(super) fn sign_request(job: &TestDurableJob) -> &SignRequest<Bls<MinPk>, Digest> {
     let Some(request) = job.request().sign_one() else {
         unreachable!("test helper only accepts signing jobs")
     };
     request
 }
 
-pub(super) fn queued_effect_id(step: &Step<MinPk, Digest>) -> EffectId {
+pub(super) fn queued_effect_id(step: &Step<Bls<MinPk>, Digest>) -> EffectId {
     let job = step.persist_job();
     let Change::OutboxQueued { id, .. } = job.events()[0].change() else {
         panic!("test effect reservation must queue one outbox effect");
@@ -154,7 +160,7 @@ pub(super) fn active_machine(role: Role) -> TestMachine {
     machine
 }
 
-pub(in crate::multimmit::machine) fn active_driver(role: Role) -> Driver<Sha256, MinPk> {
+pub(in crate::multimmit::machine) fn active_driver(role: Role) -> Driver<Sha256, Bls<MinPk>> {
     let mut driver = Driver::new(Harness::builder(role).profile());
     let start = driver.submit(Input::Start).unwrap();
     let unhandled = driver.drain(
@@ -177,7 +183,7 @@ pub(in crate::multimmit::machine) fn active_driver(role: Role) -> Driver<Sha256,
     driver
 }
 
-pub(super) fn sign_job(step: &Step<MinPk, Digest>) -> TestDurableJob {
+pub(super) fn sign_job(step: &Step<Bls<MinPk>, Digest>) -> TestDurableJob {
     step.find(|effect| match effect {
         Capability::Released(job) if job.request().sign_one().is_some() => Some(job.clone()),
         _ => None,
@@ -197,14 +203,14 @@ fn symbolic_threshold_certificate(marker: u64) -> ThresholdCertificate<MinPk> {
 pub(in crate::multimmit::machine) fn leader(
     machine: &TestMachine,
     view: u64,
-) -> LeaderBlock<MinPk, Digest> {
+) -> LeaderBlock<Bls<MinPk>, Digest> {
     genesis_leader(machine.profile().protocol(), View::new(view))
 }
 
 pub(in crate::multimmit::machine) fn leader_artifact(
     machine: &TestMachine,
     view: u64,
-) -> Artifact<MinPk, Digest> {
+) -> Artifact<Bls<MinPk>, Digest> {
     Artifact::LeaderBlock(SignedLeaderBlock::new(
         leader(machine, view),
         attestation(0),
@@ -212,16 +218,16 @@ pub(in crate::multimmit::machine) fn leader_artifact(
 }
 
 pub(super) const fn proposal_request(
-    block: LeaderBlock<MinPk, Digest>,
-) -> ProposalRequest<MinPk, Digest> {
+    block: LeaderBlock<Bls<MinPk>, Digest>,
+) -> ProposalRequest<Bls<MinPk>, Digest> {
     ProposalRequest::new(block, ProposalParent::Genesis, false)
 }
 
 pub(super) fn proposal_request_with_parent(
     machine: &TestMachine,
     view: View,
-    parent: Vqc<MinPk, Digest>,
-) -> ProposalRequest<MinPk, Digest> {
+    parent: Vqc<Bls<MinPk>, Digest>,
+) -> ProposalRequest<Bls<MinPk>, Digest> {
     let base = leader(machine, view.get());
     let parent_id = Artifact::Vqc(parent.clone())
         .provisions::<Sha256>()
@@ -244,8 +250,8 @@ pub(super) fn proposal_request_with_parent(
 
 pub(super) fn vote_artifact(
     machine: &TestMachine,
-    leader: &LeaderBlock<MinPk, Digest>,
-) -> Artifact<MinPk, Digest> {
+    leader: &LeaderBlock<Bls<MinPk>, Digest>,
+) -> Artifact<Bls<MinPk>, Digest> {
     let body = VoteBody::for_leader(
         DigestedLeader::new::<Sha256>(leader),
         vec![Position::new(0)],
@@ -258,19 +264,19 @@ pub(super) fn vote_artifact(
 
 pub(in crate::multimmit::machine) fn view_vote(
     machine: &TestMachine,
-    leader: &LeaderBlock<MinPk, Digest>,
+    leader: &LeaderBlock<Bls<MinPk>, Digest>,
     signer: u32,
-) -> Vote<MinPk, Digest> {
+) -> Vote<Bls<MinPk>, Digest> {
     let codec = machine.profile().codec();
     vote(leader, signer, &vec![0; codec.chains()], codec)
 }
 
 pub(super) fn view_messages(
     machine: &TestMachine,
-    leader: &LeaderBlock<MinPk, Digest>,
+    leader: &LeaderBlock<Bls<MinPk>, Digest>,
     voters: &[u32],
     nonvoters: &[u32],
-) -> Vec<ViewMessage<MinPk, Digest>> {
+) -> Vec<ViewMessage<Bls<MinPk>, Digest>> {
     let mut messages = Vec::with_capacity(voters.len() + nonvoters.len());
     messages.extend(
         voters
@@ -289,7 +295,7 @@ pub(in crate::multimmit::machine) fn no_vote(
     machine: &TestMachine,
     view: View,
     signer: u32,
-) -> NoVote<MinPk> {
+) -> NoVote<Bls<MinPk>> {
     NoVote::new(
         Round::new(machine.profile().protocol().epoch(), view),
         attestation(signer),
@@ -297,7 +303,7 @@ pub(in crate::multimmit::machine) fn no_vote(
     .unwrap()
 }
 
-pub(super) fn nullify(machine: &TestMachine, view: View, signer: u32) -> Nullify<MinPk> {
+pub(super) fn nullify(machine: &TestMachine, view: View, signer: u32) -> Nullify<Bls<MinPk>> {
     Nullify::new(
         Round::new(machine.profile().protocol().epoch(), view),
         threshold_share(signer),
@@ -309,7 +315,7 @@ pub(super) fn symbolic_nullification(
     machine: &TestMachine,
     view: View,
     marker: u64,
-) -> Nullification<MinPk> {
+) -> Nullification<Bls<MinPk>> {
     let certificate = symbolic_threshold_certificate(marker);
     Nullification::new(
         Round::new(machine.profile().protocol().epoch(), view),
@@ -320,32 +326,32 @@ pub(super) fn symbolic_nullification(
 
 pub(super) fn vqc(
     machine: &TestMachine,
-    leader: LeaderBlock<MinPk, Digest>,
-    messages: &[ViewMessage<MinPk, Digest>],
-) -> Vqc<MinPk, Digest> {
+    leader: LeaderBlock<Bls<MinPk>, Digest>,
+    messages: &[ViewMessage<Bls<MinPk>, Digest>],
+) -> Vqc<Bls<MinPk>, Digest> {
     symbolic_vqc(leader, messages, machine.profile().codec())
 }
 
 pub(super) fn vqc_completion(
-    aggregate: &VqcAggregateJob<MinPk, Digest>,
-    certificate: Vqc<MinPk, Digest>,
+    aggregate: &VqcAggregateJob<Bls<MinPk>, Digest>,
+    certificate: Vqc<Bls<MinPk>, Digest>,
     codec: CodecConfig,
-) -> VqcAggregateCompletion<MinPk, Digest> {
+) -> VqcAggregateCompletion<Bls<MinPk>, Digest> {
     VqcAggregateCompletion::prepare::<Sha256>(aggregate, certificate, codec).unwrap()
 }
 
 pub(super) fn lqc(
     machine: &TestMachine,
-    leader: LeaderBlock<MinPk, Digest>,
-    votes: &[Vote<MinPk, Digest>],
-) -> Lqc<MinPk, Digest> {
+    leader: LeaderBlock<Bls<MinPk>, Digest>,
+    votes: &[Vote<Bls<MinPk>, Digest>],
+) -> Lqc<Bls<MinPk>, Digest> {
     symbolic_lqc(leader, votes, machine.profile().codec())
 }
 
 pub(super) fn self_certifying_view_proofs(
     machine: &TestMachine,
     view: View,
-) -> [Artifact<MinPk, Digest>; 3] {
+) -> [Artifact<Bls<MinPk>, Digest>; 3] {
     let proposed = leader(machine, view.get());
     let votes = (0..5)
         .map(|signer| view_vote(machine, &proposed, signer))
@@ -362,7 +368,7 @@ pub(super) fn self_certifying_view_proofs(
     ]
 }
 
-pub(super) fn view_one_vqc(machine: &TestMachine) -> Vqc<MinPk, Digest> {
+pub(super) fn view_one_vqc(machine: &TestMachine) -> Vqc<Bls<MinPk>, Digest> {
     let proposed = leader(machine, 1);
     let messages = [
         ViewMessage::Vote(view_vote(machine, &proposed, 0)),
@@ -377,10 +383,10 @@ pub(super) fn view_one_vqc(machine: &TestMachine) -> Vqc<MinPk, Digest> {
 pub(super) fn leader_extending_view_one_vqc(
     machine: &TestMachine,
     view: u64,
-    parent: &Vqc<MinPk, Digest>,
-) -> (LeaderBlock<MinPk, Digest>, Digest) {
+    parent: &Vqc<Bls<MinPk>, Digest>,
+) -> (LeaderBlock<Bls<MinPk>, Digest>, Digest) {
     let protocol = machine.profile().protocol();
-    let (tips, _) = VqcExtraction::new::<Sha256, MinPk>(parent, protocol.codec_config())
+    let (tips, _) = VqcExtraction::new::<Sha256, Bls<MinPk>>(parent, protocol.codec_config())
         .unwrap()
         .into_parts();
     let history = TipRecord::new(
@@ -403,14 +409,14 @@ pub(super) fn leader_extending_view_one_vqc(
 
 pub(in crate::multimmit::machine) fn start_profile(
     profile: Profile<Digest>,
-) -> (TestMachine, Step<MinPk, Digest>) {
+) -> (TestMachine, Step<Bls<MinPk>, Digest>) {
     start(profile, Until::CursorAdvance)
 }
 
 pub(super) fn observe(
     machine: &mut TestMachine,
-    artifact: Artifact<MinPk, Digest>,
-) -> VerifyJob<MinPk, Digest> {
+    artifact: Artifact<Bls<MinPk>, Digest>,
+) -> VerifyJob<Bls<MinPk>, Digest> {
     let step = machine.step(cohort::<Sha256, _>(vec![artifact])).unwrap();
     let StepStatus::Observed(results) = step.status() else {
         panic!("one observed artifact must return an observation result");
@@ -424,7 +430,7 @@ pub(super) fn observe(
 pub(super) fn record_view_fact(
     machine: &mut TestMachine,
     observation: Observation,
-    artifact: Artifact<MinPk, Digest>,
+    artifact: Artifact<Bls<MinPk>, Digest>,
 ) {
     let artifact = Arc::new(artifact);
     machine
@@ -436,7 +442,7 @@ pub(super) fn record_view_fact(
 pub(super) struct RecoveredVoteSigning {
     pub(super) machine: TestMachine,
     pub(super) sign: TestDurableJob,
-    pub(super) leader: LeaderBlock<MinPk, Digest>,
+    pub(super) leader: LeaderBlock<Bls<MinPk>, Digest>,
     pub(super) signer: Participant,
 }
 
@@ -468,7 +474,7 @@ pub(super) fn recover_vote_signing(resources: ResourceLimits) -> RecoveredVoteSi
     }
 }
 
-pub(super) fn mismatched_resolution_proof(machine: &TestMachine) -> ViewProof<MinPk, Digest> {
+pub(super) fn mismatched_resolution_proof(machine: &TestMachine) -> ViewProof<Bls<MinPk>, Digest> {
     ViewProof::Nullification(Box::new(symbolic_nullification(
         machine,
         View::new(u64::MAX),
@@ -488,7 +494,7 @@ pub(super) struct ExitDrive {
 /// when the machine reports no remaining work.
 pub(super) fn drive_to_exit(
     machine: &mut TestMachine,
-    staged: Step<MinPk, Digest>,
+    staged: Step<Bls<MinPk>, Digest>,
     from: View,
 ) -> ExitDrive {
     const MAX_QUANTA: usize = 64;
@@ -555,7 +561,7 @@ pub(super) fn prepare_block(
     machine: &mut TestMachine,
     job: &BuildJob<Digest>,
     body: Digest,
-) -> Step<MinPk, Digest> {
+) -> Step<Bls<MinPk>, Digest> {
     let completed = machine
         .step(Input::BlockBuilt(BuildCompletion::new(
             job.issued(),
@@ -569,7 +575,7 @@ pub(super) fn prepare_block(
 pub(super) fn complete_custody(
     machine: &mut TestMachine,
     job: &CustodyJob<Digest>,
-) -> Step<MinPk, Digest> {
+) -> Step<Bls<MinPk>, Digest> {
     let completed = machine
         .step(Input::BlockCustodied(CustodyCompletion::new(
             job.issued(),
@@ -583,7 +589,7 @@ pub(super) fn authenticate_block(
     machine: &mut TestMachine,
     header: TransactionBlockHeader<Digest>,
     producer: u32,
-) -> Step<MinPk, Digest> {
+) -> Step<Bls<MinPk>, Digest> {
     let verification = observe(
         machine,
         Artifact::TransactionBlock(SignedTransactionBlock::new(header, attestation(producer))),
@@ -608,7 +614,7 @@ pub(super) fn validate_block(
     machine: &mut TestMachine,
     header: TransactionBlockHeader<Digest>,
     producer: u32,
-) -> Step<MinPk, Digest> {
+) -> Step<Bls<MinPk>, Digest> {
     let chain = header.chain().get();
     let routed = route_blocks(machine, producer, std::slice::from_ref(&header));
     offer_eligible(machine, chain, &routed)
@@ -618,12 +624,12 @@ pub(super) fn validate_block(
 type RoutedBlock = (
     ArtifactId<Digest>,
     Observation,
-    Arc<SignedTransactionBlock<MinPk, Digest>>,
+    Arc<SignedTransactionBlock<Bls<MinPk>, Digest>>,
     bool,
 );
 
 /// A benign settled step to seed [`settle`] when driving the machine outside an input.
-pub(super) fn poll_seed() -> Step<MinPk, Digest> {
+pub(super) fn poll_seed() -> Step<Bls<MinPk>, Digest> {
     Step::for_tests(StepStatus::Accepted, Capabilities::new(), Vec::new())
 }
 
@@ -672,7 +678,7 @@ pub(super) fn plane_eligible_run(
     machine: &TestMachine,
     chain: u32,
     routed: &[RoutedBlock],
-) -> (Vec<Arc<SignedTransactionBlock<MinPk, Digest>>>, Height) {
+) -> (Vec<Arc<SignedTransactionBlock<Suite, Digest>>>, Height) {
     let chain_id = ChainId::new(chain);
     // Like the chain's plane, the validator works within the chain's own pipeline window.
     let window = machine
@@ -685,7 +691,7 @@ pub(super) fn plane_eligible_run(
     let items_limit = validation_parallelism(machine.profile());
     let bytes_limit =
         items_limit.saturating_mul(machine.profile().resources().max_artifact_bytes());
-    let mut validator = ChainEligibility::<MinPk, Digest>::new(
+    let mut validator = ChainEligibility::<Bls<MinPk>, Digest>::new(
         chain_id,
         u64::from(window),
         items_limit,
@@ -715,7 +721,7 @@ pub(super) fn offer_eligible(
     machine: &mut TestMachine,
     chain: u32,
     routed: &[RoutedBlock],
-) -> Step<MinPk, Digest> {
+) -> Step<Bls<MinPk>, Digest> {
     stage_eligible(machine, chain, routed);
     machine.settle(poll_seed(), Until::CursorAdvance)
 }
@@ -736,13 +742,13 @@ pub(super) fn stage_eligible(machine: &mut TestMachine, chain: u32, routed: &[Ro
 pub(super) fn symbolic_da_certificate(
     header: TransactionBlockHeader<Digest>,
     marker: u64,
-) -> DaCertificate<MinPk, Digest> {
+) -> DaCertificate<Bls<MinPk>, Digest> {
     DaCertificate::new(header, symbolic_threshold_certificate(marker))
 }
 
 pub(super) fn drain_da_choices(
     machine: &mut TestMachine,
-    mut step: Step<MinPk, Digest>,
+    mut step: Step<Bls<MinPk>, Digest>,
     choices: &mut Vec<TransactionBlockHeader<Digest>>,
 ) {
     loop {
@@ -820,7 +826,7 @@ pub(super) fn assert_lqc_floors_restore(machine: &mut TestMachine) {
     assert!(matches!(machine.anchor_vqc(),
         Some(Artifact::Vqc(anchor)) if certificate.equivalent_vqc(anchor)));
 
-    let restored = Machine::<Sha256, MinPk>::restore(
+    let restored = Machine::<Sha256, Bls<MinPk>>::restore(
         machine.profile().clone(),
         machine.live_snapshot_for_test(),
     )
@@ -839,10 +845,10 @@ pub(super) fn assert_lqc_floors_restore(machine: &mut TestMachine) {
 /// of local finality.
 pub(super) fn drive_unanimous_votes(
     machine: &mut TestMachine,
-    proposed: &LeaderBlock<MinPk, Digest>,
+    proposed: &LeaderBlock<Bls<MinPk>, Digest>,
 ) -> (
-    VqcAggregateJob<MinPk, Digest>,
-    LqcAggregateJob<MinPk, Digest>,
+    VqcAggregateJob<Bls<MinPk>, Digest>,
+    LqcAggregateJob<Bls<MinPk>, Digest>,
 ) {
     let proposal = observe(
         machine,
@@ -852,9 +858,9 @@ pub(super) fn drive_unanimous_votes(
     let mut vqc_aggregate = None;
     let mut lqc_aggregate = None;
     fn collect<'a>(
-        effects: impl IntoIterator<Item = &'a Capability<MinPk, Digest>>,
-        vqc: &mut Option<VqcAggregateJob<MinPk, Digest>>,
-        lqc: &mut Option<LqcAggregateJob<MinPk, Digest>>,
+        effects: impl IntoIterator<Item = &'a Capability<Bls<MinPk>, Digest>>,
+        vqc: &mut Option<VqcAggregateJob<Bls<MinPk>, Digest>>,
+        lqc: &mut Option<LqcAggregateJob<Bls<MinPk>, Digest>>,
     ) {
         for effect in effects {
             match effect {
@@ -888,7 +894,7 @@ pub(super) fn drive_unanimous_votes(
     )
 }
 
-pub(super) fn unacknowledged_proposal() -> (TestMachine, Step<MinPk, Digest>) {
+pub(super) fn unacknowledged_proposal() -> (TestMachine, Step<Bls<MinPk>, Digest>) {
     let mut machine = active_machine(Role::Validator(Participant::new(0)));
     let proposed = leader(&machine, 2);
     let reserved = machine
@@ -938,7 +944,7 @@ pub(super) fn da_run_headers(
 
 /// Returns the data-availability vote run staged by each signing reservation in `job`.
 pub(super) fn reserved_da_runs(
-    job: &PersistJob<MinPk, Digest>,
+    job: &PersistJob<Bls<MinPk>, Digest>,
 ) -> Vec<Vec<TransactionBlockHeader<Digest>>> {
     job.events()
         .iter()
@@ -981,7 +987,7 @@ pub(super) fn frontier_chain(
 }
 
 pub(super) fn enqueue_due_batch_controls(
-    composer: &mut CoreState<Sha256, MinPk>,
+    composer: &mut CoreState<Sha256, Bls<MinPk>>,
     persistence: BarrierAck,
 ) -> [(InputTicket, Lane); 3] {
     let epoch = composer.machine().profile().protocol().epoch();
@@ -1014,7 +1020,7 @@ pub(super) fn enqueue_due_batch_controls(
 
 pub(super) fn record_protocol_acceptances(
     accepted: &mut Vec<ArtifactId<Digest>>,
-    activities: &[Activity<MinPk, Digest>],
+    activities: &[Activity<Bls<MinPk>, Digest>],
 ) {
     accepted.extend(activities.iter().filter_map(|activity| match activity {
         Activity::ProtocolAccepted { artifact_id, .. } => Some(*artifact_id),

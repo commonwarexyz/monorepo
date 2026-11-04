@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn hot_custody_does_not_read_storage() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(39, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(39, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_HOT_CUSTODY")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -32,7 +32,7 @@ fn custody_sync_does_not_block_catalog_reads() {
     deterministic::Runner::default().start(|context| async move {
         let limits = PathLimits::new(2, 2);
         let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
-        let committee = Committee::<MinPk>::builder(7, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_ASYNC_CUSTODY")
             .producers(producers)
             .limits(limits)
@@ -100,7 +100,7 @@ fn custody_sync_does_not_block_catalog_reads() {
 #[test]
 fn custody_waiter_does_not_block_unrelated_commands() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(43, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(43, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_CUSTODY_WAITER")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -153,7 +153,7 @@ fn custody_waiter_does_not_block_unrelated_commands() {
 #[test]
 fn custody_waiters_cover_resolver_and_synchronizer_fanout() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(45, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(45, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_CUSTODY_FANOUT")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -216,7 +216,7 @@ fn custody_waiters_cover_resolver_and_synchronizer_fanout() {
 #[test]
 fn custody_is_invisible_until_admission_is_durable() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(35, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(35, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_DURABLE_CUSTODY")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -264,7 +264,7 @@ fn custody_is_invisible_until_admission_is_durable() {
 #[test]
 fn admission_cut_triggers_label_reply_and_eager_cuts() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(27, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(27, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_CUT_TRIGGERS")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -335,7 +335,7 @@ fn admission_cut_triggers_label_reply_and_eager_cuts() {
 #[test]
 fn deferred_barrier_commands_hold_intake_and_admissions_record_dwell() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(26, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(26, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_INTAKE_INSTRUMENTATION")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -408,7 +408,7 @@ fn deferred_barrier_commands_hold_intake_and_admissions_record_dwell() {
 #[test]
 fn oversized_block_is_rejected_before_custody() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(32, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(32, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BLOCK_BOUND")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -433,7 +433,7 @@ fn oversized_block_is_rejected_before_custody() {
 #[test]
 fn durable_admission_starts_before_deferred_reads() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(24, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(24, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_DURABILITY_FAIRNESS")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -493,7 +493,7 @@ fn durable_admission_starts_before_deferred_reads() {
 #[test]
 fn block_runs_preserve_interleaved_admissions_and_duplicates() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(23, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(23, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BLOCK_RUNS")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -563,7 +563,7 @@ fn block_runs_preserve_interleaved_admissions_and_duplicates() {
 #[test]
 fn staged_admissions_coalesce_one_trailing_cut_and_reopen() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(23, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(23, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_CUSTODY_PIPELINE")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -658,7 +658,7 @@ fn staged_admissions_coalesce_one_trailing_cut_and_reopen() {
 #[test]
 fn bounded_admission_batch_moves_to_the_next_trailing_cut() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(44, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(44, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_ADMISSION_BOUNDARY")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -744,7 +744,7 @@ fn staged_lqc_buffers_without_durability() {
     deterministic::Runner::default().start(|context| async move {
         let limits = PathLimits::new(2, 2);
         let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
-        let committee = Committee::<MinPk>::builder(9, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(9, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_STAGED_LQC")
             .producers(producers)
             .limits(limits)

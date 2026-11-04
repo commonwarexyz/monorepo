@@ -3,9 +3,10 @@
 use crate::multimmit::{
     actors::metrics::{COUNT_POW2_FROM_ZERO, STAGE_LATENCY, Traffic, WAN_LATENCY, plane_counter},
     machine::{ObservationStatus, Rejection, SignRequest},
+    scheme::Scheme,
     types::{Anchor, Artifact, ViewProof},
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use commonware_runtime::{
     Metrics as MetricsTrait,
     telemetry::{
@@ -40,7 +41,7 @@ pub(crate) enum ViewProofKind {
 
 impl ViewProofKind {
     /// Returns the kind of view proof `artifact` carries, or `None` for other artifacts.
-    pub(crate) const fn of<V: Variant, D: Digest>(artifact: &Artifact<V, D>) -> Option<Self> {
+    pub(crate) const fn of<S: Scheme, D: Digest>(artifact: &Artifact<S, D>) -> Option<Self> {
         match artifact {
             Artifact::Nullification(_) => Some(Self::Nullification),
             Artifact::Vqc(_) => Some(Self::Vqc),
@@ -50,8 +51,8 @@ impl ViewProofKind {
     }
 }
 
-impl<V: Variant, D: Digest> From<&ViewProof<V, D>> for ViewProofKind {
-    fn from(proof: &ViewProof<V, D>) -> Self {
+impl<S: Scheme, D: Digest> From<&ViewProof<S, D>> for ViewProofKind {
+    fn from(proof: &ViewProof<S, D>) -> Self {
         match proof {
             ViewProof::Nullification(_) => Self::Nullification,
             ViewProof::Vqc(_) => Self::Vqc,
@@ -566,9 +567,9 @@ impl Metrics {
     }
 
     /// Records the coverage of one vote or leader block about to be signed on its `span`.
-    pub(crate) fn observe_sign_request<V: Variant, D: Digest>(
+    pub(crate) fn observe_sign_request<S: Scheme, D: Digest>(
         &self,
-        request: &SignRequest<V, D>,
+        request: &SignRequest<S, D>,
         span: &Span,
     ) {
         match request {
@@ -613,7 +614,10 @@ impl Metrics {
 mod tests {
     use super::*;
     use crate::{
-        multimmit::{mocks::Committee, types::ChainId},
+        multimmit::{
+            mocks::{Bls, Committee},
+            types::ChainId,
+        },
         types::{Participant, View},
     };
     use commonware_cryptography::{
@@ -623,8 +627,8 @@ mod tests {
 
     #[test]
     fn view_proof_kind_matches_the_projected_proof() {
-        let committee = Committee::<MinPk>::builder(88, 6).build();
-        let artifacts: [Artifact<MinPk, Sha256Digest>; 6] = [
+        let committee = Committee::<Bls<MinPk>>::builder(88, 6).build();
+        let artifacts: [Artifact<Bls<MinPk>, Sha256Digest>; 6] = [
             Artifact::Nullification(committee.nullification(View::new(1))),
             Artifact::Vqc(committee.vqc(View::new(1))),
             Artifact::Lqc(committee.lqc(View::new(1))),

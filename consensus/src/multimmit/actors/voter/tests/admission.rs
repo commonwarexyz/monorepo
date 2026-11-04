@@ -9,7 +9,7 @@ use crate::{
         actors::voter::{Query, actor::TestHooks},
         config::Role,
         machine::{Generation, Lane, ResolutionCompletion, ResolutionJob},
-        mocks::{Committee, MockApplication, cluster::start_network},
+        mocks::{Bls, Committee, MockApplication, cluster::start_network},
         testing::{SpanRecorder, expect_before, expect_within},
         types::{
             ChainId, DaVote, LeaderBlock, PathLimits, SignedTransactionBlock,
@@ -26,12 +26,13 @@ use commonware_cryptography::{
 };
 use commonware_macros::{select, test_traced};
 use commonware_p2p::{Receiver as _, Recipients, Sender as _};
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock as _, Metrics as _, Runner as _, Supervisor as _,
     deterministic::Runner as DeterministicRunner,
     telemetry::{metrics::metric_sum, traces::collector::TraceStorage},
 };
-use commonware_utils::channel::oneshot;
+use commonware_utils::{channel::oneshot, test_rng};
 use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
 use tracing::Level;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -84,9 +85,11 @@ fn work_quanta_refresh_round_without_reparenting_async_inputs() {
         let (mut certificates, _) = node.peer(1, 2).await;
         certificates.send(
             Recipients::One(node.me.clone()),
-            node.envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
-                node.committee.nullification(View::new(1)),
-            ))
+            node.envelope(
+                CertificateMessage::<Bls<MinPk>, Sha256Digest>::Nullification(
+                    node.committee.nullification(View::new(1)),
+                ),
+            )
             .encode(),
             true,
         );
@@ -103,9 +106,11 @@ fn work_quanta_refresh_round_without_reparenting_async_inputs() {
         }
         certificates.send(
             Recipients::One(node.me.clone()),
-            node.envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
-                node.committee.nullification(View::new(2)),
-            ))
+            node.envelope(
+                CertificateMessage::<Bls<MinPk>, Sha256Digest>::Nullification(
+                    node.committee.nullification(View::new(2)),
+                ),
+            )
             .encode(),
             true,
         );
@@ -262,11 +267,11 @@ fn an_invalid_da_share_is_discarded_and_the_quorum_still_certifies() {
         let elsewhere = node
             .committee
             .transaction_header(ChainId::new(0), Sha256::hash(&[b"another subject"]));
-        let invalid = DaVote::new(
+        let invalid = DaVote::<Bls<MinPk>, _>::new(
             header.clone(),
             node.committee
                 .da_vote(Participant::new(1), elsewhere)
-                .share()
+                .attestation()
                 .clone(),
         );
         culprit.send(
@@ -298,7 +303,7 @@ fn an_invalid_da_share_is_discarded_and_the_quorum_still_certifies() {
             )
             .await
             .expect("network stays up");
-            let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 bytes,
                 &node.envelope_cfg(node.committee.codec()),
             )
@@ -306,7 +311,11 @@ fn an_invalid_da_share_is_discarded_and_the_quorum_still_certifies() {
             if let DataMessage::DaCertificate(certificate) = envelope.into_payload()
                 && certificate.header() == &header
             {
-                assert!(node.committee.verifier.verify_da_certificate(&certificate));
+                assert!(node.committee.verifier.verify_da_certificate(
+                    &mut test_rng(),
+                    &certificate,
+                    &Sequential
+                ));
                 break;
             }
         }
@@ -344,11 +353,11 @@ fn misattributed_da_shares_are_dropped_and_the_quorum_certifies_without_fallback
             .committee
             .transaction_header(ChainId::new(0), Sha256::hash(&[b"another subject"]));
         for signer in 2..=excluded + 1 {
-            let misattributed = DaVote::new(
+            let misattributed = DaVote::<Bls<MinPk>, _>::new(
                 header.clone(),
                 node.committee
                     .da_vote(Participant::from_usize(signer), elsewhere.clone())
-                    .share()
+                    .attestation()
                     .clone(),
             );
             sender.send(
@@ -379,7 +388,7 @@ fn misattributed_da_shares_are_dropped_and_the_quorum_certifies_without_fallback
                     panic!("misattributed shares stalled the honest quorum")
                 },
             };
-            let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 bytes,
                 &node.envelope_cfg(node.committee.codec()),
             )
@@ -387,7 +396,11 @@ fn misattributed_da_shares_are_dropped_and_the_quorum_certifies_without_fallback
             if let DataMessage::DaCertificate(certificate) = envelope.into_payload()
                 && certificate.header() == &header
             {
-                assert!(node.committee.verifier.verify_da_certificate(&certificate));
+                assert!(node.committee.verifier.verify_da_certificate(
+                    &mut test_rng(),
+                    &certificate,
+                    &Sequential
+                ));
                 break;
             }
         }
@@ -418,7 +431,7 @@ fn invalid_verification_does_not_block_its_authenticated_source() {
         let original_a0 = node
             .committee
             .signed_block(ChainId::new(0), Sha256::hash(&[b"original a0"]));
-        let forged_a0 = SignedTransactionBlock::new(
+        let forged_a0 = SignedTransactionBlock::<Bls<MinPk>, _>::new(
             node.committee
                 .transaction_header(ChainId::new(0), Sha256::hash(&[b"forged a0"])),
             original_a0.attestation().clone(),
@@ -429,7 +442,7 @@ fn invalid_verification_does_not_block_its_authenticated_source() {
         let original_a2 = node
             .committee
             .signed_block(ChainId::new(2), Sha256::hash(&[b"original a2"]));
-        let forged_a2 = SignedTransactionBlock::new(
+        let forged_a2 = SignedTransactionBlock::<Bls<MinPk>, _>::new(
             node.committee
                 .transaction_header(ChainId::new(2), Sha256::hash(&[b"forged a2"])),
             original_a2.attestation().clone(),
@@ -611,21 +624,21 @@ fn application_eventual_validity_restores_correct_chain_liveness() {
                 result = consensus_rx.recv() => {
                     let (_, bytes) = result.expect("network stays up");
                     let envelope =
-                        Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+                        Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                             bytes,
                             &node.envelope_cfg(node.committee.codec()),
                         )
                         .expect("canonical envelope");
                     match envelope.into_payload() {
                         ConsensusMessage::NoVote(vote) => {
-                            assert!(node.committee.verifier.verify_novote(&vote));
+                            assert!(node.committee.verifier.verify_novote(&mut test_rng(), &vote, &Sequential));
                             saw_novote = true;
                         }
                         ConsensusMessage::Nullify(nullify) => {
                             assert!(
                                 node.committee
                                     .verifier
-                                    .verify_nullify(&nullify)
+                                    .verify_nullify(&mut test_rng(), &nullify, &Sequential)
                             );
                             saw_nullify = true;
                         }
@@ -650,7 +663,7 @@ fn application_eventual_validity_restores_correct_chain_liveness() {
             )
             .await
             .expect("network stays up");
-            let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 bytes,
                 &node.envelope_cfg(node.committee.codec()),
             )
@@ -800,7 +813,7 @@ fn same_chain_validations_overlap_without_voting_past_pending_parent() {
             select! {
                 result = data_rx.recv() => {
                     let (_, bytes) = result.expect("network stays up");
-                    let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+                    let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                         bytes,
                         &node.envelope_cfg(node.committee.codec()),
                     )
@@ -829,7 +842,7 @@ fn same_chain_validations_overlap_without_voting_past_pending_parent() {
             )
             .await
             .expect("network stays up");
-            let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 bytes,
                 &node.envelope_cfg(node.committee.codec()),
             )
@@ -859,7 +872,7 @@ fn da_certificate_cancels_superseded_local_custody() {
             .gate_chain(ChainId::new(0))
             .build();
         let mut custody = application.gate_verification();
-        let committee = Committee::<MinPk>::builder(109, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(109, 6)
             .limits(PathLimits::new(1, 1))
             .build();
         let role = Role::Validator(Participant::new(0));
@@ -986,7 +999,7 @@ fn da_certificate_cancels_all_obsolete_pipelined_validations() {
             )
             .await
             .expect("network stays up");
-            let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 bytes,
                 &node.envelope_cfg(node.committee.codec()),
             )

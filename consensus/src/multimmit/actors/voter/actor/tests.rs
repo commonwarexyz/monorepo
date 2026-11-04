@@ -36,10 +36,10 @@ use crate::{
             Observation, Publication, SendRequest, TimerCommand, VerificationItem,
             VerificationTicket, VerifyJob,
         },
-        mocks::{Committee, MockApplication, RecordingRelay, RecordingReporter},
-        scheme::bls12381_threshold::Error as SchemeError,
+        mocks::{Bls, Committee, Fixture, MockApplication, RecordingRelay, RecordingReporter},
+        scheme::{Binding, Error as SchemeError},
         storage::{Recovered, RecoveryConfig, recover},
-        types::{Artifact, ChainId, DaQuorum, PathLimits, TransactionBlockHeader},
+        types::{Artifact, ChainId, PathLimits, TransactionBlockHeader},
         wire::Plane,
     },
     types::{Epoch, Height, Participant, View},
@@ -88,7 +88,7 @@ use tracing_subscriber::{Layer, layer::Context as LayerContext, prelude::*, regi
 #[test]
 fn observed_batches_merge_ready_cohorts_within_pool_bounds() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(81, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(81, 6).build();
         let critical = Artifact::LeaderBlock(committee.leader_block(View::new(1)));
         let bulk = Artifact::TransactionBlock(
             committee.signed_block(ChainId::new(0), Sha256::hash(&[b"coalesced body"])),
@@ -184,7 +184,7 @@ fn observed_batches_merge_ready_cohorts_within_pool_bounds() {
 #[test]
 fn observed_batches_keep_parent_proposal_groups_atomic() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(82, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(82, 6).build();
         let parent = committee.vqc(View::new(1));
         let proposal = committee.leader_block_with_parent(View::new(2), &parent);
         let pair = vec![Artifact::Vqc(parent), Artifact::LeaderBlock(proposal)];
@@ -354,18 +354,18 @@ async fn wait_for_durable_barriers(context: &deterministic::Context, expected: u
     );
 }
 
-type TestTypes = (
+type TestTypes<S = Bls<MinPk>> = (
     deterministic::Context,
     Sha256,
     ed25519::PublicKey,
-    MinPk,
+    S,
     MockApplication,
     RecordingRelay<Sha256Digest, ed25519::PublicKey>,
-    RecordingReporter<MinPk, Sha256Digest>,
+    RecordingReporter<S, Sha256Digest>,
     Sequential,
     Sequential,
     NoopBlocker<ed25519::PublicKey>,
-    TestHooks<MinPk, Sha256Digest>,
+    TestHooks<S, Sha256Digest>,
 );
 
 /// Drives the core and the persistence pipeline until neither has work left.
@@ -388,8 +388,8 @@ const VIEW_COHORT_ITEMS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
 fn ready_runtime_source_between_actions(scenario: RuntimeSourceScenario) {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-        let committee = Committee::<MinPk>::builder(87, 6).build();
-        let profile = Profile::new::<MinPk>(
+        let committee = Committee::<Bls<MinPk>>::builder(87, 6).build();
+        let profile = Profile::new::<Bls<MinPk>>(
             committee.config.clone(),
             Role::Validator(Participant::new(0)),
             Tuning::default(),
@@ -439,7 +439,7 @@ fn ready_runtime_source_between_actions(scenario: RuntimeSourceScenario) {
 
         // Issue real barriers without delivering their responses back to Core.
         let mut held_signing = None;
-        let mut collect = |machine: &mut CoreState<Sha256, MinPk>| {
+        let mut collect = |machine: &mut CoreState<Sha256, Bls<MinPk>>| {
             let mut jobs = Vec::new();
             loop {
                 let capabilities = match machine.next_action(|_| {}).unwrap() {
@@ -664,7 +664,7 @@ fn ready_runtime_source_between_actions(scenario: RuntimeSourceScenario) {
                 .collect::<Vec<_>>();
             let certificate = committee
                 .verifier
-                .assemble_da_certificate(&votes, &Sequential)
+                .assemble_da_certificate(&mut test_rng(), &votes, &Sequential)
                 .unwrap();
             let offer = |generation| {
                 ChainUpdate::DaVoteReady(DaVotesOffer {
@@ -958,21 +958,20 @@ fn every_validator_recovers_receipt_chain_certificates() {
     deterministic::Runner::default().start(|context| async move {
         let mut limits = vec![PathLimits::new(2, 1); 6];
         limits[3] = PathLimits::new(0, 0);
-        let committee = Committee::<MinPk>::builder(88, 6)
+        let committee = Committee::<Bls<MinPk, Binding>>::builder(88, 6)
             .chain_limits(limits)
-            .da_quorum(DaQuorum::Binding)
             .build();
         let metrics_context = context.child("metrics");
         let metrics = Metrics::new(&metrics_context, committee.identities.len());
         let scheme = Arc::new(committee.signers[0].clone());
-        let profile = Profile::new::<MinPk>(
+        let profile = Profile::new::<Bls<MinPk, Binding>>(
             committee.config.clone(),
             Role::Validator(Participant::new(0)),
             Tuning::default(),
         )
         .unwrap();
         let validator_context = context.child("validator");
-        let mut validator = ChainTasks::<TestTypes>::new(
+        let mut validator = ChainTasks::<TestTypes<Bls<MinPk, Binding>>>::new(
             &validator_context,
             &profile,
             &scheme,
@@ -1044,13 +1043,13 @@ impl CheckedSender for RecordingCheck {
 
 /// Builds a voter driver over fresh stores at validator 0 of `committee` that transmits through
 /// `sender`. The core is never started: the driver only executes capabilities it is handed.
-async fn transmitting_driver(
+async fn transmitting_driver<S: Fixture>(
     context: &deterministic::Context,
-    committee: &Committee<MinPk>,
+    committee: &Committee<S>,
     partition_prefix: &str,
     sender: RecordingSender,
-) -> Live<TestTypes, RecordingSender> {
-    let profile = Profile::new::<MinPk>(
+) -> Live<TestTypes<S>, RecordingSender> {
+    let profile = Profile::new::<S>(
         committee.config.clone(),
         Role::Validator(Participant::new(0)),
         Tuning::default(),
@@ -1172,9 +1171,8 @@ fn a_mixed_da_vote_publication_broadcasts_only_receipt_chain_votes() {
         let (pipelined, receipt) = (ChainId::new(2), ChainId::new(3));
         let mut limits = vec![PathLimits::new(2, 1); 6];
         limits[receipt.get() as usize] = PathLimits::new(0, 0);
-        let committee = Committee::<MinPk>::builder(89, 6)
+        let committee = Committee::<Bls<MinPk, Binding>>::builder(89, 6)
             .chain_limits(limits)
-            .da_quorum(DaQuorum::Binding)
             .build();
         assert!(!committee.config.receipt_chain(pipelined));
         assert!(committee.config.receipt_chain(receipt));
@@ -1225,66 +1223,80 @@ fn a_mixed_da_vote_publication_broadcasts_only_receipt_chain_votes() {
 
 #[test]
 fn only_receipt_chain_recovery_tasks_are_labelled_by_chain() {
+    /// Starts validator 0's chain tasks for `committee` under `label` and checks which recovery
+    /// tasks are labelled by chain.
+    fn assert_recovery_labels<S: Fixture>(
+        context: &deterministic::Context,
+        label: &'static str,
+        committee: Committee<S>,
+    ) {
+        let metrics_context = context.child("metrics");
+        let metrics = Metrics::new(&metrics_context, committee.identities.len());
+        let profile = Profile::new::<S>(
+            committee.config.clone(),
+            Role::Validator(Participant::new(0)),
+            Tuning::default(),
+        )
+        .unwrap();
+        let tasks_context = context.child(label);
+        let _tasks = ChainTasks::<TestTypes<S>>::new(
+            &tasks_context,
+            &profile,
+            &Arc::new(committee.signers[0].clone()),
+            Sequential,
+            &MockApplication::default(),
+            &metrics,
+            NonZeroUsize::new(4).unwrap(),
+        );
+
+        // The own chain's task keeps the default route's labels, and each receipt chain's
+        // task is told apart by its chain.
+        let encoded = context.encode();
+        let series = encoded
+            .lines()
+            .filter(|line| line.starts_with(&format!("{label}_da_commands_backoff_total")))
+            .collect::<Vec<_>>();
+        let labelled = series
+            .iter()
+            .filter(|line| line.contains("chain="))
+            .collect::<Vec<_>>();
+        assert_eq!(series.len() - labelled.len(), 1, "{label}: {series:?}");
+        if label == "uniform" {
+            assert!(labelled.is_empty(), "{series:?}");
+        } else {
+            assert_eq!(labelled.len(), 1, "{series:?}");
+            assert!(labelled[0].contains("chain=\"3\""), "{series:?}");
+        }
+    }
+
     deterministic::Runner::default().start(|context| async move {
         let mut receipts = vec![PathLimits::new(2, 1); 6];
         receipts[3] = PathLimits::new(0, 0);
-        for (label, limits) in [("uniform", None), ("receipts", Some(receipts))] {
-            let mut builder = Committee::<MinPk>::builder(89, 6);
-            if let Some(limits) = limits {
-                builder = builder.chain_limits(limits).da_quorum(DaQuorum::Binding);
-            }
-            let committee = builder.build();
-            let metrics_context = context.child("metrics");
-            let metrics = Metrics::new(&metrics_context, committee.identities.len());
-            let profile = Profile::new::<MinPk>(
-                committee.config.clone(),
-                Role::Validator(Participant::new(0)),
-                Tuning::default(),
-            )
-            .unwrap();
-            let tasks_context = context.child(label);
-            let _tasks = ChainTasks::<TestTypes>::new(
-                &tasks_context,
-                &profile,
-                &Arc::new(committee.signers[0].clone()),
-                Sequential,
-                &MockApplication::default(),
-                &metrics,
-                NonZeroUsize::new(4).unwrap(),
-            );
-
-            // The own chain's task keeps the default route's labels, and each receipt chain's
-            // task is told apart by its chain.
-            let encoded = context.encode();
-            let series = encoded
-                .lines()
-                .filter(|line| line.starts_with(&format!("{label}_da_commands_backoff_total")))
-                .collect::<Vec<_>>();
-            let labelled = series
-                .iter()
-                .filter(|line| line.contains("chain="))
-                .collect::<Vec<_>>();
-            assert_eq!(series.len() - labelled.len(), 1, "{label}: {series:?}");
-            if label == "uniform" {
-                assert!(labelled.is_empty(), "{series:?}");
-            } else {
-                assert_eq!(labelled.len(), 1, "{series:?}");
-                assert!(labelled[0].contains("chain=\"3\""), "{series:?}");
-            }
-        }
+        assert_recovery_labels(
+            &context,
+            "uniform",
+            Committee::<Bls<MinPk>>::builder(89, 6).build(),
+        );
+        assert_recovery_labels(
+            &context,
+            "receipts",
+            Committee::<Bls<MinPk, Binding>>::builder(89, 6)
+                .chain_limits(receipts)
+                .build(),
+        );
     });
 }
 
 #[test]
 fn chain_tasks_follow_the_role() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(87, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(87, 6).build();
         let metrics_context = context.child("metrics");
         let metrics = Metrics::new(&metrics_context, committee.identities.len());
         let scheme = Arc::new(committee.signers[0].clone());
         let mailbox_size = NonZeroUsize::new(4).unwrap();
         let profile = |role: Role| {
-            Profile::new::<MinPk>(committee.config.clone(), role, Tuning::default()).unwrap()
+            Profile::new::<Bls<MinPk>>(committee.config.clone(), role, Tuning::default()).unwrap()
         };
         let tasks = |label: &'static str, profile: &Profile<Sha256Digest>| {
             let child_context = context.child(label);

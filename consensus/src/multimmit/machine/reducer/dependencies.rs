@@ -16,11 +16,12 @@ use crate::{
             util::remove_indexed,
             verification::{Observation, Verdict},
         },
+        scheme::Scheme,
         types::{Anchor, Artifact, ArtifactId},
     },
     types::Participant,
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use core::mem::take;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -35,21 +36,21 @@ pub(super) struct DerivedIdentity<D: Digest> {
 }
 
 /// A certificate transcript a verification or aggregation job already validated off-thread.
-pub(super) enum ValidatedCertificate<V: Variant, D: Digest> {
+pub(super) enum ValidatedCertificate<S: Scheme, D: Digest> {
     Vqc(ValidatedVqc<D>),
-    Lqc(ValidatedLqc<V, D>),
+    Lqc(ValidatedLqc<S, D>),
 }
 
 /// A validated certificate split by the state that consumes it.
-struct ValidatedParts<V: Variant, D: Digest> {
+struct ValidatedParts<S: Scheme, D: Digest> {
     /// Attested votes and tips for the finality pool.
-    derivations: Option<CertificateDerivations<V, D>>,
+    derivations: Option<CertificateDerivations<S, D>>,
     /// V-QC ordering data for the view state.
     vqc: Option<ValidatedVqc<D>>,
 }
 
-impl<V: Variant, D: Digest> From<Option<ValidatedCertificate<V, D>>> for ValidatedParts<V, D> {
-    fn from(validated: Option<ValidatedCertificate<V, D>>) -> Self {
+impl<S: Scheme, D: Digest> From<Option<ValidatedCertificate<S, D>>> for ValidatedParts<S, D> {
+    fn from(validated: Option<ValidatedCertificate<S, D>>) -> Self {
         match validated {
             Some(ValidatedCertificate::Vqc(mut vqc)) => Self {
                 derivations: Some(CertificateDerivations::from(&mut vqc)),
@@ -158,17 +159,17 @@ impl<D: Digest> DependencyIndex<D> {
 }
 
 /// A promoted artifact: its observation, the artifact, and the dependencies it provides.
-struct ReadyArtifact<V: Variant, D: Digest> {
+struct ReadyArtifact<S: Scheme, D: Digest> {
     observation: Observation,
-    artifact: Arc<Artifact<V, D>>,
+    artifact: Arc<Artifact<S, D>>,
     provisions: Arc<[Dependency<D>]>,
 }
 
-impl<H: Hasher, V: Variant> Machine<H, V> {
+impl<H: Hasher, S: Scheme> Machine<H, S> {
     pub(super) fn apply_verification_verdict(
         &mut self,
         verdict: Verdict<H::Digest>,
-        validated: Option<ValidatedCertificate<V, H::Digest>>,
+        validated: Option<ValidatedCertificate<S, H::Digest>>,
         da_equivocator: Option<Participant>,
     ) -> Result<Option<bool>, StepError> {
         let ticket = verdict.ticket();
@@ -192,7 +193,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             } = validated.into();
             let mut proven = self
                 .accountability
-                .observe::<H, V>(&artifact, prepared.as_ref());
+                .observe::<H, S>(&artifact, prepared.as_ref());
             if let Some(participant) = da_equivocator
                 && self.accountability.record_fault(participant)
             {
@@ -245,7 +246,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         &mut self,
         valid: usize,
         invalid: usize,
-    ) -> Result<Step<V, H::Digest>, StepError> {
+    ) -> Result<Step<S, H::Digest>, StepError> {
         self.discard_chain_artifacts()?;
         self.wake_components();
         self.forget_retired_artifacts()?;
@@ -341,7 +342,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     ///
     /// Accountability has already seen the block, so a fork beyond the bound still proves its
     /// producer faulty.
-    fn exceeds_fork_bound(&self, artifact: &Artifact<V, H::Digest>) -> bool {
+    fn exceeds_fork_bound(&self, artifact: &Artifact<S, H::Digest>) -> bool {
         matches!(artifact, Artifact::TransactionBlock(block)
             if self
                 .store
@@ -462,7 +463,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         &mut self,
         id: ArtifactId<H::Digest>,
         validated_vqc: Option<&ValidatedVqc<H::Digest>>,
-    ) -> Result<ReadyArtifact<V, H::Digest>, StepError> {
+    ) -> Result<ReadyArtifact<S, H::Digest>, StepError> {
         let entry = self.store.artifacts.get_mut(&id).expect("artifact exists");
         let promoted = !matches!(entry.state, ArtifactState::Ready);
         entry.state = ArtifactState::Ready;
@@ -510,7 +511,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         &mut self,
         id: ArtifactId<H::Digest>,
         observation: Observation,
-        artifact: &Arc<Artifact<V, H::Digest>>,
+        artifact: &Arc<Artifact<S, H::Digest>>,
         validated_vqc: Option<ValidatedVqc<H::Digest>>,
     ) -> Result<(), StepError> {
         for key in self.resolution.verification_ready(id) {
@@ -616,7 +617,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// cannot fail.
     pub(super) fn validate_self_admission(
         &mut self,
-        artifact: &Artifact<V, H::Digest>,
+        artifact: &Artifact<S, H::Digest>,
         derived: Option<DerivedIdentity<H::Digest>>,
     ) -> Result<ArtifactId<H::Digest>, StepError> {
         let encoded_len =
@@ -652,7 +653,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     pub(super) fn self_admit(
         &mut self,
-        artifact: Arc<Artifact<V, H::Digest>>,
+        artifact: Arc<Artifact<S, H::Digest>>,
         id: ArtifactId<H::Digest>,
     ) -> Result<(), StepError> {
         if let Some(existing) = self.store.artifacts.get(&id) {
@@ -670,10 +671,10 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     pub(super) fn self_admit_at(
         &mut self,
-        artifact: Arc<Artifact<V, H::Digest>>,
+        artifact: Arc<Artifact<S, H::Digest>>,
         id: ArtifactId<H::Digest>,
         observation: Observation,
-        validated: Option<ValidatedCertificate<V, H::Digest>>,
+        validated: Option<ValidatedCertificate<S, H::Digest>>,
     ) -> Result<(), StepError> {
         let ValidatedParts {
             derivations,
@@ -738,7 +739,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(super) fn retain_entry(
         &mut self,
         id: ArtifactId<H::Digest>,
-        entry: ArtifactEntry<V, H::Digest>,
+        entry: ArtifactEntry<S, H::Digest>,
         position: FloorPosition,
     ) {
         if entry.dependency_slot {
@@ -752,7 +753,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(super) fn remove_entry(
         &mut self,
         id: ArtifactId<H::Digest>,
-    ) -> Option<ArtifactEntry<V, H::Digest>> {
+    ) -> Option<ArtifactEntry<S, H::Digest>> {
         let entry = self.store.remove(id)?;
         if entry.dependency_slot {
             self.dependencies.release_slot();
@@ -781,7 +782,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .state = ArtifactState::Waiting(dependency);
     }
 
-    pub(super) fn needs_dependency_slot(&self, artifact: &Artifact<V, H::Digest>) -> bool {
+    pub(super) fn needs_dependency_slot(&self, artifact: &Artifact<S, H::Digest>) -> bool {
         artifact
             .dependency()
             .is_some_and(|dependency| !self.dependencies.available.contains(&dependency))

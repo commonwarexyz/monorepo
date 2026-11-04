@@ -3,10 +3,11 @@
 use super::mailbox::{Error, FinalityBatch, Message, Reply};
 use crate::multimmit::{
     marshal::types::Floor,
+    scheme::Scheme,
     types::{FinalityFact, SelectedCommitments, TransactionBlockHeader},
 };
 use commonware_actor::mailbox;
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use std::future::{Future, pending};
 use tracing::Span;
 
@@ -21,14 +22,14 @@ pub(super) enum Absorbed<D: Digest> {
 }
 
 /// A synchronization target merged from the messages a pass took in.
-pub(super) struct DeferredSync<V: Variant, D: Digest> {
+pub(super) struct DeferredSync<S: Scheme, D: Digest> {
     pub span: Span,
-    pub batch: FinalityBatch<V, D>,
+    pub batch: FinalityBatch<S, D>,
 }
 
-impl<V: Variant, D: Digest> DeferredSync<V, D> {
+impl<S: Scheme, D: Digest> DeferredSync<S, D> {
     /// Merges the target `batch`, requested under `span`.
-    fn merge(&mut self, span: Span, batch: FinalityBatch<V, D>) {
+    fn merge(&mut self, span: Span, batch: FinalityBatch<S, D>) {
         // Multiple hints from one router batch share their origin span.
         if self.span.id() != span.id() {
             self.span.follows_from(span.id());
@@ -38,14 +39,14 @@ impl<V: Variant, D: Digest> DeferredSync<V, D> {
 }
 
 /// A floor installation waiting for the current pass to finish.
-pub(super) struct DeferredFloor<V: Variant, D: Digest> {
+pub(super) struct DeferredFloor<S: Scheme, D: Digest> {
     pub span: Span,
-    pub checkpoint: Floor<V, D>,
+    pub checkpoint: Floor<S, D>,
     pub reply: Reply,
 }
 
 /// Input a synchronization pass takes in while it waits for storage or peers.
-pub(super) trait Absorb<V: Variant, D: Digest>: Send {
+pub(super) trait Absorb<S: Scheme, D: Digest>: Send {
     /// Takes one message: defers a command, or returns a hint for the pass to apply.
     ///
     /// Resolves to `None` when the message was deferred or the mailbox closed, and pends while
@@ -61,7 +62,7 @@ pub(super) trait Absorb<V: Variant, D: Digest>: Send {
 /// The input of recovery, which takes nothing in.
 pub(super) struct Idle;
 
-impl<V: Variant, D: Digest> Absorb<V, D> for Idle {
+impl<S: Scheme, D: Digest> Absorb<S, D> for Idle {
     async fn absorb(&mut self) -> Result<Option<Absorbed<D>>, Error> {
         pending().await
     }
@@ -74,15 +75,15 @@ impl<V: Variant, D: Digest> Absorb<V, D> for Idle {
 /// command overtakes it. A deferred floor install also stops the pass, which may be waiting for
 /// history that peers no longer serve, and the pass's target is deferred again. Deferred commands
 /// then run floor install first, then the synchronization.
-pub(super) struct Inbox<V: Variant, D: Digest> {
-    receiver: mailbox::Receiver<Message<V, D>>,
-    synchronize: Option<DeferredSync<V, D>>,
-    floor: Option<DeferredFloor<V, D>>,
+pub(super) struct Inbox<S: Scheme, D: Digest> {
+    receiver: mailbox::Receiver<Message<S, D>>,
+    synchronize: Option<DeferredSync<S, D>>,
+    floor: Option<DeferredFloor<S, D>>,
     closed: bool,
 }
 
-impl<V: Variant, D: Digest> Inbox<V, D> {
-    pub(super) const fn new(receiver: mailbox::Receiver<Message<V, D>>) -> Self {
+impl<S: Scheme, D: Digest> Inbox<S, D> {
+    pub(super) const fn new(receiver: mailbox::Receiver<Message<S, D>>) -> Self {
         Self {
             receiver,
             synchronize: None,
@@ -97,7 +98,7 @@ impl<V: Variant, D: Digest> Inbox<V, D> {
     }
 
     /// Takes the next deferred command: the floor install, then the synchronization.
-    pub(super) fn next_deferred(&mut self) -> Option<Message<V, D>> {
+    pub(super) fn next_deferred(&mut self) -> Option<Message<S, D>> {
         if let Some(floor) = self.floor.take() {
             return Some(Message::InstallFloor {
                 span: floor.span,
@@ -111,7 +112,7 @@ impl<V: Variant, D: Digest> Inbox<V, D> {
     }
 
     /// Receives the next message, or `None` once the mailbox closed.
-    pub(super) async fn recv(&mut self) -> Option<Message<V, D>> {
+    pub(super) async fn recv(&mut self) -> Option<Message<S, D>> {
         let message = self.receiver.recv().await;
         if message.is_none() {
             self.closed = true;
@@ -126,7 +127,7 @@ impl<V: Variant, D: Digest> Inbox<V, D> {
     }
 
     /// Defers `sync`, the target of a pass a floor install stopped, behind that install.
-    pub(super) fn requeue(&mut self, sync: DeferredSync<V, D>) {
+    pub(super) fn requeue(&mut self, sync: DeferredSync<S, D>) {
         let DeferredSync { span, batch } = sync;
         match &mut self.synchronize {
             Some(pending) => pending.merge(span, batch),
@@ -135,7 +136,7 @@ impl<V: Variant, D: Digest> Inbox<V, D> {
     }
 
     /// Takes an already queued message, unless it would cross a deferred floor install.
-    pub(super) fn try_recv(&mut self) -> Option<Message<V, D>> {
+    pub(super) fn try_recv(&mut self) -> Option<Message<S, D>> {
         if !self.can_receive() {
             return None;
         }
@@ -147,7 +148,7 @@ impl<V: Variant, D: Digest> Inbox<V, D> {
     /// `None` once nothing more may be taken.
     pub(super) fn drain(
         &mut self,
-        sync: &mut DeferredSync<V, D>,
+        sync: &mut DeferredSync<S, D>,
     ) -> Result<Option<Absorbed<D>>, Error> {
         while let Some(message) = self.try_recv() {
             match message {
@@ -163,7 +164,7 @@ impl<V: Variant, D: Digest> Inbox<V, D> {
     }
 
     /// Defers a command behind the current pass, or returns a hint.
-    pub(super) fn defer(&mut self, message: Message<V, D>) -> Result<Option<Absorbed<D>>, Error> {
+    pub(super) fn defer(&mut self, message: Message<S, D>) -> Result<Option<Absorbed<D>>, Error> {
         Ok(match message {
             Message::Header { header, .. } => Some(Absorbed::Header(header)),
             Message::Commitments { commitments } => Some(Absorbed::Commitments(commitments)),
@@ -194,7 +195,7 @@ impl<V: Variant, D: Digest> Inbox<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Absorb<V, D> for Inbox<V, D> {
+impl<S: Scheme, D: Digest> Absorb<S, D> for Inbox<S, D> {
     async fn absorb(&mut self) -> Result<Option<Absorbed<D>>, Error> {
         if !self.can_receive() {
             return pending().await;

@@ -4,9 +4,9 @@
 //! runs. Only commands and reads park; cursor updates always run.
 
 use super::mailbox::{Command, CursorMessage, Message, Read, Traced};
-use crate::multimmit::types::Body;
+use crate::multimmit::{scheme::Scheme, types::Body};
 use commonware_actor::mailbox::{self, Policy};
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use std::sync::mpsc::TryRecvError;
 
 /// One mailbox and the request taken from it that is waiting to run.
@@ -95,24 +95,24 @@ where
 }
 
 /// The catalog's request lanes.
-pub(super) struct Intake<H, V, B>
+pub(super) struct Intake<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Ordered commands.
-    pub(super) commands: Lane<Traced<Message<H, V, B>>>,
+    pub(super) commands: Lane<Traced<Message<H, S, B>>>,
     /// Independent reads.
     pub(super) reads: Lane<Traced<Read<H, B>>>,
     /// Delivery-cursor updates.
     pub(super) cursors: Lane<CursorMessage>,
 }
 
-impl<H, V, B> Intake<H, V, B>
+impl<H, S, B> Intake<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Returns whether the read lane may deliver requests.
@@ -161,10 +161,10 @@ impl Readiness {
     /// Pruning waits for every commit and admission cut to finish; a floor installation also
     /// waits for body reads, whose segments it may reuse. A body request is always ready here;
     /// the catalog parks it only when it would need a waiter slot and none is free.
-    pub(super) const fn command<H, V, B>(&self, message: &Message<H, V, B>) -> bool
+    pub(super) const fn command<H, S, B>(&self, message: &Message<H, S, B>) -> bool
     where
         H: Hasher,
-        V: Variant,
+        S: Scheme,
         B: Body<H>,
     {
         match message {

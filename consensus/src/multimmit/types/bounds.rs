@@ -10,8 +10,14 @@ use super::{
     CodecConfig, DaCertificate, DaVote, Lqc, NoVote, Nullification, Nullify, SignedLeaderBlock,
     SignedTransactionBlock, Vote, Vqc,
 };
-use commonware_codec::{EncodeSize as _, FixedSize as _, varint::UInt};
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use crate::multimmit::scheme::{AggregateOf, Scheme};
+use commonware_codec::{
+    Buf, EncodeSize as _, Error as CodecError, FixedSize as _, Read, varint::UInt,
+};
+use commonware_cryptography::{
+    Digest,
+    certificate::{Aggregator, Verifier},
+};
 use std::num::NonZeroUsize;
 
 /// Largest encoding of a `u64` varint.
@@ -63,13 +69,13 @@ impl CodecConfig {
     /// A deployment's artifact byte limit must cover this value: a V-QC whose votes all deviate
     /// carries every voter's positions and extensions for every chain, so the figure grows with
     /// participants, chains, pipeline depth, and extension bound together.
-    pub fn max_artifact_bytes<V: Variant, D: Digest>(self) -> Option<NonZeroUsize> {
-        NonZeroUsize::new(self.encoded_bounds::<V, D>()?.max_artifact_bytes())
+    pub fn max_artifact_bytes<S: Scheme, D: Digest>(self) -> Option<NonZeroUsize> {
+        NonZeroUsize::new(self.encoded_bounds::<S, D>()?.max_artifact_bytes())
     }
 
     /// Computes encoded upper bounds for this epoch's bounded protocol objects.
-    pub(crate) fn encoded_bounds<V: Variant, D: Digest>(self) -> Option<EncodedBounds> {
-        let sizes = ProtocolSizes::new::<V, D>(self)?;
+    pub(crate) fn encoded_bounds<S: Scheme, D: Digest>(self) -> Option<EncodedBounds> {
+        let sizes = ProtocolSizes::new::<S, D>(self)?;
         let envelope = checked_sum(&[1, MAX_U64_VARINT_SIZE])?;
 
         let max_artifact_bytes = sizes.max_artifact();
@@ -123,18 +129,18 @@ struct ProtocolSizes {
 }
 
 impl ProtocolSizes {
-    fn new<V: Variant, D: Digest>(codec: CodecConfig) -> Option<Self> {
+    fn new<S: Scheme, D: Digest>(codec: CodecConfig) -> Option<Self> {
         Some(Self {
-            signed_transaction: SignedTransactionBlock::<V, D>::max_encode_size(codec)?,
-            da_vote: DaVote::<V, D>::max_encode_size(codec)?,
-            da_certificate: DaCertificate::<V, D>::max_encode_size(codec)?,
-            signed_leader: SignedLeaderBlock::<V, D>::max_encode_size(codec)?,
-            vote: Vote::<V, D>::max_encode_size(codec)?,
-            no_vote: NoVote::<V>::max_encode_size(codec)?,
-            nullify: Nullify::<V>::max_encode_size(codec)?,
-            nullification: Nullification::<V>::max_encode_size()?,
-            vqc: Vqc::<V, D>::max_encode_size(codec)?,
-            lqc: Lqc::<V, D>::max_encode_size(codec)?,
+            signed_transaction: SignedTransactionBlock::<S, D>::max_encode_size(codec)?,
+            da_vote: DaVote::<S, D>::max_encode_size(codec)?,
+            da_certificate: DaCertificate::<S, D>::max_encode_size(codec)?,
+            signed_leader: SignedLeaderBlock::<S, D>::max_encode_size(codec)?,
+            vote: Vote::<S, D>::max_encode_size(codec)?,
+            no_vote: NoVote::<S>::max_encode_size(codec)?,
+            nullify: Nullify::<S>::max_encode_size(codec)?,
+            nullification: Nullification::<S>::max_encode_size(codec)?,
+            vqc: Vqc::<S, D>::max_encode_size(codec)?,
+            lqc: Lqc::<S, D>::max_encode_size(codec)?,
         })
     }
 
@@ -158,6 +164,37 @@ impl ProtocolSizes {
 }
 
 /// Returns the sum of `values`.
+/// Largest encoding of a suite's data-availability certificate under `codec`.
+pub(super) fn max_da_certificate_size<S: Scheme>(codec: CodecConfig) -> Option<usize> {
+    let participants = u32::try_from(codec.participants()).ok()?;
+    Some(<S::Da as Verifier>::max_certificate_size(participants))
+}
+
+/// Largest encoding of a suite's nullification certificate under `codec`.
+pub(super) fn max_nullification_size<S: Scheme>(codec: CodecConfig) -> Option<usize> {
+    let participants = u32::try_from(codec.participants()).ok()?;
+    Some(<S::Nullify as Verifier>::max_certificate_size(participants))
+}
+
+/// Largest encoding of a suite's aggregate over `terms` transcript terms.
+pub(super) fn max_aggregate_size<S: Scheme>(terms: usize) -> Option<usize> {
+    Some(<S::Ordinary as Aggregator>::max_aggregate_size(
+        u32::try_from(terms).ok()?,
+    ))
+}
+
+/// Decodes a suite's aggregate over `terms` transcript terms.
+pub(super) fn read_aggregate<S: Scheme>(
+    reader: &mut impl Buf,
+    terms: usize,
+) -> Result<AggregateOf<S>, CodecError> {
+    let terms = u32::try_from(terms).map_err(|_| CodecError::Invalid("Aggregate", "terms"))?;
+    AggregateOf::<S>::read_cfg(
+        reader,
+        &<S::Ordinary as Aggregator>::aggregate_codec_config(terms),
+    )
+}
+
 pub(super) fn checked_sum(values: &[usize]) -> Option<usize> {
     values
         .iter()
@@ -221,21 +258,24 @@ pub(super) fn largest_index_width_sum(participants: usize, count: usize) -> Opti
 mod tests {
     use super::*;
     use crate::{
-        multimmit::types::{
-            Anchor, Ballot, CertificateId, ChainId, ChainProposal, ConflictingVote, DaCertificate,
-            DigestedLeader, Extension, LeaderBlock, Lqc, PathLimits, Position, Tally,
-            TransactionBlockHeader, VoteBody, Vqc,
+        multimmit::{
+            mocks::Bls,
+            types::{
+                Anchor, Ballot, CertificateId, ChainId, ChainProposal, ConflictingVote,
+                DaCertificate, DigestedLeader, Extension, LeaderBlock, Lqc, PathLimits, Position,
+                Tally, TransactionBlockHeader, VoteBody, Vqc,
+            },
         },
         types::{Epoch, Height, Participant, Round, View},
     };
-    use commonware_codec::Encode;
+    use commonware_codec::{Encode, types::lazy::Lazy};
     use commonware_cryptography::{
         Hasher, Sha256,
         bls12381::{
             certificate::threshold,
             primitives::{
                 ops::aggregate,
-                variant::{MinPk, MinSig},
+                variant::{MinPk, MinSig, Variant},
             },
         },
         certificate::Signers,
@@ -266,7 +306,7 @@ mod tests {
                         digest,
                     )
                     .unwrap();
-                    let anchor = Anchor::Certificate(DaCertificate::<V, _>::new(
+                    let anchor = Anchor::Certificate(DaCertificate::<Bls<V>, _>::new(
                         header,
                         threshold::Certificate::new(V::Signature::zero()),
                     ));
@@ -279,7 +319,7 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            let leader = LeaderBlock::<V, _>::new(
+            let leader = LeaderBlock::<Bls<V>, _>::new(
                 round,
                 CertificateId::new(digest),
                 digest,
@@ -323,11 +363,11 @@ mod tests {
             let lqc = Lqc::new(
                 leader.clone(),
                 tally(config.view_quorum()),
-                aggregate::Signature::zero(),
+                Lazy::from(aggregate::Signature::<V>::zero()),
                 config,
             )
             .unwrap();
-            let sizes = ProtocolSizes::new::<V, Sha256Digest>(config).unwrap();
+            let sizes = ProtocolSizes::new::<Bls<V>, Sha256Digest>(config).unwrap();
             assert!(
                 lqc.encode().len() <= sizes.lqc,
                 "participants={participants} chains={chains} depth={depth} bound={bound}"
@@ -352,7 +392,7 @@ mod tests {
                         tally(count),
                         Signers::new(u32::try_from(participants).unwrap(), []).unwrap(),
                         conflicting,
-                        aggregate::Signature::zero(),
+                        Lazy::from(aggregate::Signature::<V>::zero()),
                         config,
                     )
                     .unwrap()
@@ -377,11 +417,11 @@ mod tests {
     /// Committee shapes, and for each the per-artifact maxima and then the encoded bounds.
     type Recorded = [((usize, usize, u32, u32), [usize; 10], [usize; 5]); 7];
 
-    fn assert_recorded<V: Variant>(recorded: Recorded) {
+    fn assert_recorded<S: Scheme>(recorded: Recorded) {
         for ((participants, chains, depth, bound), artifacts, bounds) in recorded {
             let codec =
                 CodecConfig::new(participants, chains, PathLimits::new(depth, bound)).unwrap();
-            let sizes = ProtocolSizes::new::<V, Sha256Digest>(codec).unwrap();
+            let sizes = ProtocolSizes::new::<S, Sha256Digest>(codec).unwrap();
             assert_eq!(
                 [
                     sizes.signed_transaction,
@@ -398,7 +438,7 @@ mod tests {
                 artifacts,
                 "participants={participants} chains={chains} depth={depth} bound={bound}"
             );
-            let encoded = codec.encoded_bounds::<V, Sha256Digest>().unwrap();
+            let encoded = codec.encoded_bounds::<S, Sha256Digest>().unwrap();
             assert_eq!(
                 [
                     encoded.max_artifact_bytes(),
@@ -416,7 +456,7 @@ mod tests {
     #[test]
     fn encoded_bounds_match_the_wire_format() {
         // Any change here changes which frames an engine admits, which is a wire format change.
-        assert_recorded::<MinPk>([
+        assert_recorded::<Bls<MinPk>>([
             (
                 (1, 1, 1, 0),
                 [182, 182, 181, 397, 153, 117, 117, 116, 424, 414],
@@ -455,7 +495,7 @@ mod tests {
                 [10637127, 10725183, 196, 10725196, 10637139],
             ),
         ]);
-        assert_recorded::<MinSig>([
+        assert_recorded::<Bls<MinSig>>([
             (
                 (1, 1, 1, 0),
                 [134, 134, 133, 301, 105, 69, 69, 68, 328, 318],
@@ -503,9 +543,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(codec.encoded_bounds::<MinPk, Sha256Digest>(), None);
-        assert_eq!(codec.encoded_bounds::<MinSig, Sha256Digest>(), None);
-        assert_eq!(codec.max_artifact_bytes::<MinPk, Sha256Digest>(), None);
+        assert_eq!(codec.encoded_bounds::<Bls<MinPk>, Sha256Digest>(), None);
+        assert_eq!(codec.encoded_bounds::<Bls<MinSig>, Sha256Digest>(), None);
+        assert_eq!(codec.max_artifact_bytes::<Bls<MinPk>, Sha256Digest>(), None);
     }
 
     #[test]
@@ -519,14 +559,14 @@ mod tests {
                 PathLimits::new(pipeline_depth, extension_bound),
             )
             .unwrap();
-            let sizes = ProtocolSizes::new::<MinPk, Sha256Digest>(codec).unwrap();
+            let sizes = ProtocolSizes::new::<Bls<MinPk>, Sha256Digest>(codec).unwrap();
             let expected = sizes
                 .max_artifact()
                 .max(sizes.vqc.checked_add(sizes.signed_leader).unwrap());
 
             assert_eq!(
                 codec
-                    .encoded_bounds::<MinPk, Sha256Digest>()
+                    .encoded_bounds::<Bls<MinPk>, Sha256Digest>()
                     .unwrap()
                     .max_ingress_group_bytes(),
                 expected,

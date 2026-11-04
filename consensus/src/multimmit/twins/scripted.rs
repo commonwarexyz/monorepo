@@ -18,7 +18,7 @@ use commonware_macros::{test_group, test_traced};
 use commonware_p2p::{
     Manager as _, Provider as _, Receiver as _, Sender as _, simulated::Sender as SimulatedSender,
 };
-use commonware_utils::ordered::Set;
+use commonware_utils::{ordered::Set, test_rng};
 
 /// Each shard contains one singleton and five unordered pairs at `n=11, f=2`.
 const F2_PLACEMENT_SHARDS: usize = LARGE_PARTICIPANTS as usize;
@@ -40,10 +40,10 @@ struct ReorderedDelivery {
 
 #[derive(Default)]
 struct InclusionEvents {
-    blocks: Vec<(usize, SignedTransactionBlock<MinPk, Sha256Digest>)>,
-    da_votes: Vec<(usize, DaVote<MinPk, Sha256Digest>)>,
-    proposals: Vec<(usize, SignedLeaderBlock<MinPk, Sha256Digest>)>,
-    votes: Vec<(usize, Vote<MinPk, Sha256Digest>)>,
+    blocks: Vec<(usize, SignedTransactionBlock<Bls<MinPk>, Sha256Digest>)>,
+    da_votes: Vec<(usize, DaVote<Bls<MinPk>, Sha256Digest>)>,
+    proposals: Vec<(usize, SignedLeaderBlock<Bls<MinPk>, Sha256Digest>)>,
+    votes: Vec<(usize, Vote<Bls<MinPk>, Sha256Digest>)>,
 }
 
 #[derive(Clone)]
@@ -51,11 +51,11 @@ struct InclusionTrace {
     events: Arc<Mutex<InclusionEvents>>,
     epoch: Epoch,
     codec: CodecConfig,
-    verifier: Scheme<ed25519::PublicKey, MinPk>,
+    verifier: Generic<Bls<MinPk>>,
 }
 
 impl InclusionTrace {
-    fn new(fixture: &Committee<MinPk>) -> Self {
+    fn new(fixture: &Committee<Bls<MinPk>>) -> Self {
         Self {
             events: Arc::new(Mutex::new(InclusionEvents::default())),
             epoch: fixture.config.epoch(),
@@ -76,10 +76,10 @@ impl InclusionTrace {
     }
 
     fn record_data(&self, source: usize, bytes: &[u8]) -> bool {
-        let Some(bounds) = self.codec.encoded_bounds::<MinPk, Sha256Digest>() else {
+        let Some(bounds) = self.codec.encoded_bounds::<Bls<MinPk>, Sha256Digest>() else {
             return false;
         };
-        let Ok(envelope) = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+        let Ok(envelope) = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
             Copying(bytes),
             &EnvelopeConfig {
                 max_frame_bytes: bounds.max_data_frame_bytes(),
@@ -91,12 +91,20 @@ impl InclusionTrace {
         };
         let mut events = self.events.lock();
         match envelope.into_payload() {
-            DataMessage::Block(block) if self.verifier.verify_transaction_block(&block) => {
+            DataMessage::Block(block)
+                if self
+                    .verifier
+                    .verify_transaction_block(&mut test_rng(), &block, &Sequential) =>
+            {
                 assert_eq!(block.signer(), Participant::from_usize(source));
                 events.blocks.push((source, block));
                 false
             }
-            DataMessage::DaVote(vote) if self.verifier.verify_da_vote(&vote) => {
+            DataMessage::DaVote(vote)
+                if self
+                    .verifier
+                    .verify_da_vote(&mut test_rng(), &vote, &Sequential) =>
+            {
                 assert_eq!(vote.signer(), Participant::from_usize(source));
                 events.da_votes.push((source, vote));
                 true
@@ -106,10 +114,10 @@ impl InclusionTrace {
     }
 
     fn record_consensus(&self, source: usize, bytes: &[u8]) {
-        let Some(bounds) = self.codec.encoded_bounds::<MinPk, Sha256Digest>() else {
+        let Some(bounds) = self.codec.encoded_bounds::<Bls<MinPk>, Sha256Digest>() else {
             return;
         };
-        let Ok(envelope) = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+        let Ok(envelope) = Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
             Copying(bytes),
             &EnvelopeConfig {
                 max_frame_bytes: bounds.max_consensus_frame_bytes(),
@@ -122,12 +130,18 @@ impl InclusionTrace {
         let mut events = self.events.lock();
         match envelope.into_payload() {
             ConsensusMessage::Proposal { block, .. }
-                if self.verifier.verify_leader_block(&block, &Sequential) =>
+                if self
+                    .verifier
+                    .verify_leader_block(&mut test_rng(), &block, &Sequential) =>
             {
                 assert_eq!(block.signer(), Participant::from_usize(source));
                 events.proposals.push((source, *block));
             }
-            ConsensusMessage::Vote(vote) if self.verifier.verify_vote(&vote) => {
+            ConsensusMessage::Vote(vote)
+                if self
+                    .verifier
+                    .verify_vote(&mut test_rng(), &vote, &Sequential) =>
+            {
                 assert_eq!(vote.signer(), Participant::from_usize(source));
                 events.votes.push((source, vote));
             }
@@ -135,7 +149,10 @@ impl InclusionTrace {
         }
     }
 
-    fn block_from(&self, source: usize) -> Option<SignedTransactionBlock<MinPk, Sha256Digest>> {
+    fn block_from(
+        &self,
+        source: usize,
+    ) -> Option<SignedTransactionBlock<Bls<MinPk>, Sha256Digest>> {
         self.events
             .lock()
             .blocks
@@ -158,7 +175,7 @@ impl InclusionTrace {
         voters
     }
 
-    fn votes_for(&self, leader: Sha256Digest) -> Vec<(usize, Vote<MinPk, Sha256Digest>)> {
+    fn votes_for(&self, leader: Sha256Digest) -> Vec<(usize, Vote<Bls<MinPk>, Sha256Digest>)> {
         let mut votes = BTreeMap::new();
         for (source, vote) in &self.events.lock().votes {
             if vote.body().leader() == leader {
@@ -168,7 +185,7 @@ impl InclusionTrace {
         votes.into_iter().collect()
     }
 
-    fn proposal_at(&self, view: View) -> Option<SignedLeaderBlock<MinPk, Sha256Digest>> {
+    fn proposal_at(&self, view: View) -> Option<SignedLeaderBlock<Bls<MinPk>, Sha256Digest>> {
         self.events
             .lock()
             .proposals
@@ -275,7 +292,7 @@ struct DeliveryPlan {
     fair_view: View,
     epoch: Epoch,
     codec: CodecConfig,
-    verifier: Scheme<ed25519::PublicKey, MinPk>,
+    verifier: Generic<Bls<MinPk>>,
 }
 
 impl DeliveryPlan {
@@ -495,7 +512,11 @@ fn assert_selective_disclosure(
 }
 
 /// Asserts that both halves built conflicting headers at one producer-chain position.
-fn assert_producer_equivocation(slots: &TwinSlots, cluster: &Cluster<MinPk>, byzantine: usize) {
+fn assert_producer_equivocation(
+    slots: &TwinSlots,
+    cluster: &Cluster<Bls<MinPk>>,
+    byzantine: usize,
+) {
     assert!(
         slots.has_producer_equivocation(cluster, byzantine),
         "both halves built conflicting headers at one producer-chain position"
@@ -540,7 +561,7 @@ fn placement_scenario(participants: usize) -> Scenario {
 }
 
 async fn launch_traced_honest(
-    cluster: &mut Cluster<MinPk>,
+    cluster: &mut Cluster<Bls<MinPk>>,
     honest: &[usize],
     trace: &InclusionTrace,
 ) {
@@ -592,9 +613,9 @@ async fn launch_traced_honest(
 }
 
 fn censorship_proposal(
-    fixture: &Committee<MinPk>,
+    fixture: &Committee<Bls<MinPk>>,
     junk: Option<Sha256Digest>,
-) -> SignedLeaderBlock<MinPk, Sha256Digest> {
+) -> SignedLeaderBlock<Bls<MinPk>, Sha256Digest> {
     let view = CENSORSHIP_VIEW;
     let codec = fixture.codec();
     let genesis = fixture.config.genesis();
@@ -634,7 +655,7 @@ fn send_consensus(
     sender: &mut NetworkSender,
     recipients: Vec<ed25519::PublicKey>,
     epoch: Epoch,
-    message: ConsensusMessage<MinPk, Sha256Digest>,
+    message: ConsensusMessage<Bls<MinPk>, Sha256Digest>,
 ) {
     let frame = IoBuf::from(Envelope::new(epoch, message).encode());
     assert_eq!(
@@ -645,8 +666,8 @@ fn send_consensus(
 }
 
 fn vote_counts_for(
-    vote: &Vote<MinPk, Sha256Digest>,
-    leader: &SignedLeaderBlock<MinPk, Sha256Digest>,
+    vote: &Vote<Bls<MinPk>, Sha256Digest>,
+    leader: &SignedLeaderBlock<Bls<MinPk>, Sha256Digest>,
     target: &TransactionBlockHeader<Sha256Digest>,
 ) -> bool {
     let chain = target.chain().get() as usize;
@@ -667,7 +688,7 @@ fn vote_counts_for(
 }
 
 fn proposal_extends(
-    proposal: &SignedLeaderBlock<MinPk, Sha256Digest>,
+    proposal: &SignedLeaderBlock<Bls<MinPk>, Sha256Digest>,
     target: &TransactionBlockHeader<Sha256Digest>,
 ) -> bool {
     let chain = target.chain().get() as usize;
@@ -684,7 +705,7 @@ fn proposal_extends(
 
 async fn launch_scripted_honest(
     context: &deterministic::Context,
-    cluster: &mut Cluster<MinPk>,
+    cluster: &mut Cluster<Bls<MinPk>>,
     honest: &[usize],
     scripted_node: usize,
     plan: &DeliveryPlan,
@@ -742,7 +763,7 @@ async fn launch_scripted_honest(
 
 async fn wait_twin_equivocation(
     context: &deterministic::Context,
-    cluster: &mut Cluster<MinPk>,
+    cluster: &mut Cluster<Bls<MinPk>>,
     twins: &TwinSlots,
     byzantine: usize,
 ) {
@@ -778,7 +799,7 @@ async fn run_placement_case(
     let participants = participants as usize;
     let scenario = placement_scenario(participants);
     assert_eq!(scenario.rounds().len(), ROUNDS);
-    let mut cluster = Cluster::<MinPk>::new(
+    let mut cluster = Cluster::<Bls<MinPk>>::new(
         context,
         ClusterOptions {
             leaders: Some(schedule_for(&scenario, participants)),
@@ -872,7 +893,11 @@ fn run_f2_placement_shard(shard: usize) {
     }
 }
 
-async fn require_fair_suffix_progress(cluster: &mut Cluster<MinPk>, honest: &[usize], height: u64) {
+async fn require_fair_suffix_progress(
+    cluster: &mut Cluster<Bls<MinPk>>,
+    honest: &[usize],
+    height: u64,
+) {
     cluster.produce_once();
     cluster
         .wait_produced(honest, height, Duration::from_secs(60))
@@ -886,7 +911,7 @@ async fn require_fair_suffix_progress(cluster: &mut Cluster<MinPk>, honest: &[us
 
 async fn rotate_byzantine_peer(
     context: &deterministic::Context,
-    cluster: &mut Cluster<MinPk>,
+    cluster: &mut Cluster<Bls<MinPk>>,
     honest: &[usize],
     attacker: &mut NetworkSender,
     target: &ed25519::PublicKey,
@@ -1011,7 +1036,7 @@ async fn cancel_pending_recv(
 fn scripted_receiver_survives_cancelled_receives() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        let fixture = Committee::<MinPk>::builder(979, PARTICIPANTS).build();
+        let fixture = Committee::<Bls<MinPk>>::builder(979, PARTICIPANTS).build();
         let source = fixture.identities[1].clone();
         let signer = Participant::new(1);
         let script = DeliveryScript::default();
@@ -1024,7 +1049,7 @@ fn scripted_receiver_survives_cancelled_receives() {
             codec: fixture.codec(),
             verifier: fixture.verifier.clone(),
         };
-        let frame = |payload: ConsensusMessage<MinPk, Sha256Digest>| {
+        let frame = |payload: ConsensusMessage<Bls<MinPk>, Sha256Digest>| {
             IoBuf::from(Envelope::new(fixture.config.epoch(), payload).encode())
         };
         let held = frame(ConsensusMessage::NoVote(
@@ -1069,11 +1094,11 @@ fn scripted_receiver_survives_cancelled_receives() {
 /// honest engine is still in the view the Byzantine leader will censor.
 async fn disseminate_target(
     context: &deterministic::Context,
-    cluster: &mut Cluster<MinPk>,
+    cluster: &mut Cluster<Bls<MinPk>>,
     trace: &InclusionTrace,
     honest: &[usize],
     producer: usize,
-) -> SignedTransactionBlock<MinPk, Sha256Digest> {
+) -> SignedTransactionBlock<Bls<MinPk>, Sha256Digest> {
     cluster.app(producer).permit_builds(1);
     let mut target = None;
     for _ in 0..80 {
@@ -1107,10 +1132,10 @@ async fn disseminate_target(
 /// Returns the censoring leader's two conflicting proposals, each carrying junk on `producer`'s
 /// chain in place of `target`.
 fn equivocating_proposals(
-    fixture: &Committee<MinPk>,
+    fixture: &Committee<Bls<MinPk>>,
     producer: usize,
     target: &TransactionBlockHeader<Sha256Digest>,
-) -> [SignedLeaderBlock<MinPk, Sha256Digest>; 2] {
+) -> [SignedLeaderBlock<Bls<MinPk>, Sha256Digest>; 2] {
     let junk = [
         Sha256::hash(&[b"primary junk"]),
         Sha256::hash(&[b"secondary junk"]),
@@ -1122,7 +1147,11 @@ fn equivocating_proposals(
         "the leader equivocates"
     );
     for (proposal, junk) in proposals.iter().zip(junk) {
-        assert!(fixture.verifier.verify_leader_block(proposal, &Sequential));
+        assert!(
+            fixture
+                .verifier
+                .verify_leader_block(&mut test_rng(), proposal, &Sequential)
+        );
         let chain = &proposal.block().proposals()[producer];
         assert_eq!(chain.anchor().height().get(), 0, "the proposal is stale");
         assert_eq!(chain.payloads(), &[junk], "the proposal carries junk");
@@ -1137,7 +1166,7 @@ async fn collect_votes(
     trace: &InclusionTrace,
     leader: Sha256Digest,
     voters: &[usize],
-) -> Vec<(usize, Vote<MinPk, Sha256Digest>)> {
+) -> Vec<(usize, Vote<Bls<MinPk>, Sha256Digest>)> {
     let mut supporting = Vec::new();
     for _ in 0..80 {
         context.sleep(Duration::from_millis(5)).await;
@@ -1157,7 +1186,7 @@ async fn collect_votes(
 /// and returns their inspections.
 async fn wait_deadline_finality(
     context: &deterministic::Context,
-    cluster: &mut Cluster<MinPk>,
+    cluster: &mut Cluster<Bls<MinPk>>,
     honest: &[usize],
 ) -> Vec<Inspection<Sha256Digest>> {
     for _ in 0..600 {
@@ -1190,7 +1219,7 @@ fn well_disseminated_block_survives_byzantine_leader_censorship() {
         let honest = (0..PARTICIPANTS as usize)
             .filter(|participant| *participant != BYZANTINE)
             .collect::<Vec<_>>();
-        let mut cluster = Cluster::<MinPk>::new(
+        let mut cluster = Cluster::<Bls<MinPk>>::new(
             &context,
             ClusterOptions {
                 production: Duration::from_millis(10),
@@ -1286,7 +1315,11 @@ fn well_disseminated_block_survives_byzantine_leader_censorship() {
 
         // The leader's own vote completes n-f without counting for the omitted block.
         let byzantine_vote = fixture.vote(Participant::from_usize(BYZANTINE), &primary);
-        assert!(fixture.verifier.verify_vote(&byzantine_vote));
+        assert!(
+            fixture
+                .verifier
+                .verify_vote(&mut test_rng(), &byzantine_vote, &Sequential)
+        );
         assert!(!vote_counts_for(&byzantine_vote, &primary, target_header));
         assert_eq!(supporting.len() + 1, fixture.codec().view_quorum());
         send_consensus(
@@ -1390,7 +1423,7 @@ fn scripted_delivery_and_peer_rotation_recover_to_fairness() {
         let scripted_node = honest[0];
         let source_node = honest[1];
         let script = DeliveryScript::default();
-        let mut cluster = Cluster::<MinPk>::new(
+        let mut cluster = Cluster::<Bls<MinPk>>::new(
             &context,
             ClusterOptions {
                 leaders: Some(schedule_for(&scenario, PARTICIPANTS as usize)),
@@ -1462,7 +1495,7 @@ fn twin_halves_equivocate_without_extra_weight() {
     let executor = deterministic::Runner::timed(Duration::from_secs(900));
     executor.start(|context| async move {
         let byzantine = PARTICIPANTS as usize - 1;
-        let mut cluster = Cluster::<MinPk>::new(
+        let mut cluster = Cluster::<Bls<MinPk>>::new(
             &context,
             ClusterOptions::new(950, PARTICIPANTS),
         )

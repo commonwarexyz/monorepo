@@ -35,19 +35,20 @@ use crate::{
             voter::tasks::{TaskError, TaskPermit},
         },
         machine::{CoreError, StepError},
-        scheme::bls12381_threshold::Error as SchemeError,
+        scheme::{Error as SchemeError, Scheme},
         types::{Activity, Context},
         wire::Plane,
     },
 };
 pub(crate) use chains::ChainUpdate;
-use commonware_cryptography::{Hasher, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Hasher, PublicKey};
 use commonware_p2p::{Blocker, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{ContextCell, Handle, Spawner};
 use commonware_storage::Context as StorageContext;
 use commonware_utils::channel::oneshot;
 pub(crate) use hooks::{Hooks, RetentionBoundary};
+use rand_core::CryptoRng;
 use startup::{Parts, Starting};
 use std::num::NonZeroUsize;
 #[cfg(test)]
@@ -60,13 +61,13 @@ use tracing::{Span, error, info};
 ///
 /// Implemented for the tuple of a voter's generic parameters.
 pub(crate) trait VoterTypes: 'static {
-    type Context: Spawner + StorageContext;
+    type Context: CryptoRng + Spawner + StorageContext;
     type Hasher: Hasher;
     type PublicKey: PublicKey;
-    type Variant: Variant;
+    type Scheme: Scheme<PublicKey = Self::PublicKey>;
     type Automaton: Automaton<Context = Context<DigestOf<Self>>, Digest = DigestOf<Self>>;
     type Relay: Relay<Digest = DigestOf<Self>, PublicKey = Self::PublicKey, Plan = ()>;
-    type Reporter: Reporter<Activity = Activity<Self::Variant, DigestOf<Self>>>;
+    type Reporter: Reporter<Activity = Activity<Self::Scheme, DigestOf<Self>>>;
     /// Execution strategy for bulk CPU-heavy cryptography.
     type Strategy: Strategy;
     /// Execution strategy for view-critical CPU-heavy cryptography.
@@ -74,7 +75,7 @@ pub(crate) trait VoterTypes: 'static {
     /// Peer blocker for participants the machine proves equivocated.
     type Blocker: Blocker<PublicKey = Self::PublicKey>;
     /// Observes the voter's typed boundaries.
-    type Hooks: Hooks<Self::Variant, DigestOf<Self>>;
+    type Hooks: Hooks<Self::Scheme, DigestOf<Self>>;
 }
 
 /// The digest type of a voter's hasher.
@@ -85,7 +86,7 @@ pub(crate) type ConfigOf<T> = Config<
     <T as VoterTypes>::Context,
     <T as VoterTypes>::Hasher,
     <T as VoterTypes>::PublicKey,
-    <T as VoterTypes>::Variant,
+    <T as VoterTypes>::Scheme,
     <T as VoterTypes>::Automaton,
     <T as VoterTypes>::Relay,
     <T as VoterTypes>::Reporter,
@@ -96,18 +97,18 @@ pub(crate) type ConfigOf<T> = Config<
 
 /// The inbound queue endpoints of a voter over `T`.
 pub(crate) type MailboxOf<T> =
-    Mailbox<<T as VoterTypes>::PublicKey, <T as VoterTypes>::Variant, DigestOf<T>>;
+    Mailbox<<T as VoterTypes>::PublicKey, <T as VoterTypes>::Scheme, DigestOf<T>>;
 
 /// A voter's generic parameters, in [`Config`] order, name its [`VoterTypes`].
-impl<E, H, P, V, A, R, F, T, C, B> VoterTypes for (E, H, P, V, A, R, F, T, C, B)
+impl<E, H, P, S, A, R, F, T, C, B> VoterTypes for (E, H, P, S, A, R, F, T, C, B)
 where
-    E: Spawner + StorageContext,
+    E: CryptoRng + Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest>,
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
-    F: Reporter<Activity = Activity<V, H::Digest>>,
+    F: Reporter<Activity = Activity<S, H::Digest>>,
     T: Strategy,
     C: Strategy,
     B: Blocker<PublicKey = P>,
@@ -115,7 +116,7 @@ where
     type Context = E;
     type Hasher = H;
     type PublicKey = P;
-    type Variant = V;
+    type Scheme = S;
     type Automaton = A;
     type Relay = R;
     type Reporter = F;
@@ -126,24 +127,24 @@ where
 }
 
 /// A voter's generic parameters followed by its hooks name its [`VoterTypes`].
-impl<E, H, P, V, A, R, F, T, C, B, K> VoterTypes for (E, H, P, V, A, R, F, T, C, B, K)
+impl<E, H, P, S, A, R, F, T, C, B, K> VoterTypes for (E, H, P, S, A, R, F, T, C, B, K)
 where
-    E: Spawner + StorageContext,
+    E: CryptoRng + Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest>,
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
-    F: Reporter<Activity = Activity<V, H::Digest>>,
+    F: Reporter<Activity = Activity<S, H::Digest>>,
     T: Strategy,
     C: Strategy,
     B: Blocker<PublicKey = P>,
-    K: Hooks<V, H::Digest>,
+    K: Hooks<S, H::Digest>,
 {
     type Context = E;
     type Hasher = H;
     type PublicKey = P;
-    type Variant = V;
+    type Scheme = S;
     type Automaton = A;
     type Relay = R;
     type Reporter = F;
@@ -154,18 +155,18 @@ where
 }
 
 /// The network planes the voter publishes on.
-pub(crate) struct Planes<S> {
+pub(crate) struct Planes<Sn> {
     /// Transaction blocks, DA votes, and DA certificates.
-    pub(crate) data: S,
+    pub(crate) data: Sn,
     /// Leader proposals, votes, novotes, and nullify shares.
-    pub(crate) consensus: S,
+    pub(crate) consensus: Sn,
     /// Nullifications, V-QCs, and L-QCs.
-    pub(crate) certificates: S,
+    pub(crate) certificates: Sn,
 }
 
-impl<S> Planes<S> {
+impl<Sn> Planes<Sn> {
     /// Returns the sender for `plane`.
-    const fn sender(&mut self, plane: Plane) -> &mut S {
+    const fn sender(&mut self, plane: Plane) -> &mut Sn {
         match plane {
             Plane::Data => &mut self.data,
             Plane::Consensus => &mut self.consensus,
@@ -259,7 +260,7 @@ impl<T, E: Into<Fatal>> AtRoot<T> for Result<T, E> {
 pub(crate) struct Actor<T: VoterTypes> {
     context: ContextCell<T::Context>,
     config: ConfigOf<T>,
-    inbox: Inbox<T::PublicKey, T::Variant, DigestOf<T>>,
+    inbox: Inbox<T::PublicKey, T::Scheme, DigestOf<T>>,
     metrics: Metrics,
     hooks: T::Hooks,
     /// Overrides the persistence actor's command capacity.
@@ -268,15 +269,15 @@ pub(crate) struct Actor<T: VoterTypes> {
     flushes: persistence::Flushes,
 }
 
-impl<E, H, P, V, A, R, F, T, C, B> Actor<(E, H, P, V, A, R, F, T, C, B)>
+impl<E, H, P, S, A, R, F, T, C, B> Actor<(E, H, P, S, A, R, F, T, C, B)>
 where
-    E: Spawner + StorageContext,
+    E: CryptoRng + Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest>,
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
-    F: Reporter<Activity = Activity<V, H::Digest>>,
+    F: Reporter<Activity = Activity<S, H::Digest>>,
     T: Strategy,
     C: Strategy,
     B: Blocker<PublicKey = P>,
@@ -287,34 +288,34 @@ where
     pub(crate) fn new(
         context: E,
         queues: &E,
-        config: Config<E, H, P, V, A, R, F, T, C, B>,
-    ) -> (Self, Mailbox<P, V, H::Digest>) {
+        config: Config<E, H, P, S, A, R, F, T, C, B>,
+    ) -> (Self, Mailbox<P, S, H::Digest>) {
         Self::build(context, queues, config, NoHooks)
     }
 }
 
-impl<E, H, P, V, A, R, F, T, C, B, K> Actor<(E, H, P, V, A, R, F, T, C, B, K)>
+impl<E, H, P, S, A, R, F, T, C, B, K> Actor<(E, H, P, S, A, R, F, T, C, B, K)>
 where
-    E: Spawner + StorageContext,
+    E: CryptoRng + Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest>,
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
-    F: Reporter<Activity = Activity<V, H::Digest>>,
+    F: Reporter<Activity = Activity<S, H::Digest>>,
     T: Strategy,
     C: Strategy,
     B: Blocker<PublicKey = P>,
-    K: Hooks<V, H::Digest>,
+    K: Hooks<S, H::Digest>,
 {
     /// Creates the voter with `hooks` observing its typed boundaries.
     #[cfg(test)]
     pub(crate) fn new_with_hooks(
         context: E,
         queues: &E,
-        config: Config<E, H, P, V, A, R, F, T, C, B>,
+        config: Config<E, H, P, S, A, R, F, T, C, B>,
         hooks: K,
-    ) -> (Self, Mailbox<P, V, H::Digest>) {
+    ) -> (Self, Mailbox<P, S, H::Digest>) {
         Self::build(context, queues, config, hooks)
     }
 }
@@ -368,16 +369,16 @@ impl<T: VoterTypes> Actor<T> {
     /// `ready` resolves after the startup or recovery durability barrier is acknowledged and one
     /// initial producer wake has been submitted. Ingress queued by the surrounding actors cannot
     /// enter the core until that point.
-    pub(crate) fn start<S>(
+    pub(crate) fn start<Sn>(
         mut self,
         ready: oneshot::Sender<()>,
-        planes: Planes<S>,
+        planes: Planes<Sn>,
         ingress: ingress::Mailbox,
-        verifier: verifier::Mailbox<T::Variant, DigestOf<T>>,
-        resolver: resolver::Mailbox<T::Variant, DigestOf<T>>,
+        verifier: verifier::Mailbox<T::Scheme, DigestOf<T>>,
+        resolver: resolver::Mailbox<T::Scheme, DigestOf<T>>,
     ) -> Handle<()>
     where
-        S: Sender<PublicKey = T::PublicKey>,
+        Sn: Sender<PublicKey = T::PublicKey>,
     {
         // `spawn_cell!` spawns on the shared executor; the voter needs its own dedicated thread.
         let context = self.context.take();
@@ -392,7 +393,7 @@ impl<T: VoterTypes> Actor<T> {
                 ..
             } = self;
             let failures = metrics.clone();
-            let starting = Starting::<T, S>::new(Parts {
+            let starting = Starting::<T, Sn>::new(Parts {
                 context,
                 config,
                 inbox,

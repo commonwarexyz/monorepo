@@ -2,10 +2,11 @@
 
 use super::*;
 use crate::types::View;
+use commonware_utils::test_rng;
 
 fn floor_fixture(
-    committee: &Committee<MinPk>,
-) -> (Checkpoint<Sha256Digest>, Floor<MinPk, Sha256Digest>) {
+    committee: &Committee<Bls<MinPk>>,
+) -> (Checkpoint<Sha256Digest>, Floor<Bls<MinPk>, Sha256Digest>) {
     let genesis = committee.config.genesis();
     let parent = genesis_history::<Sha256>(genesis);
     let history = Arc::new(TipRecord::at_tips(parent, genesis.tips().to_vec()).unwrap());
@@ -23,12 +24,12 @@ fn floor_fixture(
 /// Returns an L-QC for `history` whose voters leave every chain at its anchor. Each chain proposes
 /// `payloads`, so a chain with any falls short and halts the final sweep.
 fn anchored_lqc(
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     view: u64,
     history: Sha256Digest,
     anchors: Vec<BlockRef<Sha256Digest>>,
     payloads: Vec<Vec<Sha256Digest>>,
-) -> Arc<Lqc<MinPk, Sha256Digest>> {
+) -> Arc<Lqc<Bls<MinPk>, Sha256Digest>> {
     let chains = anchors.len();
     let proposals = anchors
         .into_iter()
@@ -64,7 +65,7 @@ fn anchored_lqc(
     Arc::new(
         committee
             .verifier
-            .assemble_lqc::<Sha256, _>(leader, &votes, &Sequential)
+            .assemble_lqc::<_, Sha256, _>(&mut test_rng(), leader, &votes, &Sequential)
             .unwrap(),
     )
 }
@@ -167,7 +168,7 @@ fn synchronization_overflow_discards_canceled_floor_installations() {
     let (_, first_floor) = floor_fixture(&committee);
     let (first_reply, first_receiver) = oneshot::channel();
     let mut overflow = VecDeque::new();
-    Message::<MinPk, Sha256Digest>::handle(
+    Message::<Bls<MinPk>, Sha256Digest>::handle(
         &mut overflow,
         Message::InstallFloor {
             span: Span::none(),
@@ -181,7 +182,7 @@ fn synchronization_overflow_discards_canceled_floor_installations() {
     let (_, second_floor) = floor_fixture(&committee);
     let (second_reply, second_receiver) = oneshot::channel();
     drop(second_receiver);
-    Message::<MinPk, Sha256Digest>::handle(
+    Message::<Bls<MinPk>, Sha256Digest>::handle(
         &mut overflow,
         Message::InstallFloor {
             span: Span::none(),
