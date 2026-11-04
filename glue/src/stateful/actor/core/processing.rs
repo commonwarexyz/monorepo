@@ -738,10 +738,11 @@ mod tests {
     }
 
     /// Returns a block far above every test block, its parent, and selected history ending at the
-    /// parent whose acquisitions never complete. `acquisitions` counts each acquisition started,
-    /// one per recovery attempt.
+    /// parent whose acquisitions either never complete or return unavailable. `acquisitions`
+    /// counts each acquisition started, one per recovery attempt.
     fn pending_history(
         acquisitions: Arc<AtomicUsize>,
+        terminal: bool,
     ) -> (Digested<TestBlock>, Digested<TestBlock>, Blocks<TestBlock>) {
         let parent = TestBlock::new(99, 0xf1);
         let block = TestBlock::child(&parent, 0xf0);
@@ -751,7 +752,13 @@ mod tests {
             |_| None,
             move |_| {
                 acquisitions.fetch_add(1, Ordering::SeqCst);
-                futures::future::pending()
+                async move {
+                    if terminal {
+                        None
+                    } else {
+                        futures::future::pending().await
+                    }
+                }
             },
         );
         (digested(block), digested(parent), blocks)
@@ -2908,7 +2915,7 @@ mod tests {
             for _ in 0..BACKLOG {
                 let mut caller = mailbox.clone();
                 let request_context = (context.child("queued_verify"), queued_context.clone());
-                let (block, parent, blocks) = pending_history(admissions.clone());
+                let (block, parent, blocks) = pending_history(admissions.clone(), false);
                 let mut request: PendingRequest =
                     Box::pin(
                         async move { caller.verify(request_context, block, parent, blocks).await },
@@ -5769,16 +5776,18 @@ mod tests {
 
     /// A verification whose selected history never arrives keeps acquiring across a finalization
     /// without delaying it.
-    #[test]
-    fn unavailable_history_does_not_block_finalization() {
-        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+    #[rstest::rstest]
+    #[case::never_resolves(false)]
+    #[case::terminal(true)]
+    fn unavailable_history_does_not_block_finalization(#[case] terminal: bool) {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(move |context| async move {
             let (mut mailbox, control, marshal, actor) =
                 spawn_processing(&context, "unavailable-history", None).await;
             let parent = TestBlock::child(&TestBlock::new(0, 0), 1);
 
             // The history never yields the missing blocks between the anchor and the parent.
             let clones = Arc::new(AtomicUsize::new(0));
-            let (block, unavailable_parent, blocks) = pending_history(clones.clone());
+            let (block, unavailable_parent, blocks) = pending_history(clones.clone(), terminal);
             let mut verifier = mailbox.clone();
             let mut verification = Box::pin(verifier.verify(
                 (context.child("verify"), block.context()),
@@ -5790,6 +5799,8 @@ mod tests {
             drop(mailbox.subscribe_databases().await);
             let acquisitions = clones.load(Ordering::SeqCst);
             assert!(acquisitions > 0);
+            // Terminal unavailability must abstain rather than vote false.
+            assert!(poll!(&mut verification).is_pending());
 
             // Finalization pauses the acquisition, completes, and then restarts it.
             let (acknowledgement, receipt) = Exact::handle();
@@ -6288,7 +6299,7 @@ mod tests {
 
             // Start a verification whose selected history never yields its missing blocks.
             let clones = Arc::new(AtomicUsize::new(0));
-            let (block, parent, blocks) = pending_history(clones.clone());
+            let (block, parent, blocks) = pending_history(clones.clone(), false);
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), block.context()),
