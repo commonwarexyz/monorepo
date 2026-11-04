@@ -184,20 +184,12 @@ pub trait Field<S: Simd>: Copy {
     /// Requires positional limb bound `1` and integer bound at most `A`, so that
     /// [`Self::load_raw`] with the same `A` returns a valid value. Costs no conversion. Entries
     /// beyond [`Self::LANES`] are unchanged.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Used by multi-scalar multiplication.")
-    )]
     fn store_raw<const A: u64>(self, simd: S, lanes: &mut [Self::Raw]);
 
     /// Loads lane `i` from `lanes[i]`, as [`Self::store_raw`] stored it with the same `A`.
     ///
     /// Requires at least [`Self::LANES`] entries and ignores the rest. Returns integer bound `A`
     /// and positional limb bound `1`. Costs no conversion.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Used by multi-scalar multiplication.")
-    )]
     fn load_raw<const A: u64>(simd: S, lanes: &[&Self::Raw]) -> Self;
 
     /// Returns `self + rhs`, without reducing.

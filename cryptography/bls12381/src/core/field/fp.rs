@@ -28,10 +28,6 @@ pub(crate) const MODULUS: [u64; WORDS] = [
 pub(crate) const MAX_LANES: usize = 8;
 
 /// `p - 1`, the encoding of `-1`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Used by multi-scalar multiplication.")
-)]
 pub(crate) const MINUS_ONE: [u8; BYTES] = {
     let mut bytes = [0; BYTES];
     let mut i = 0;

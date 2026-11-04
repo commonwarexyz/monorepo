@@ -42,6 +42,10 @@
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
+commonware_macros::stability_scope!(ALPHA {
+    extern crate alloc;
+});
+
 commonware_macros::stability_mod!(ALPHA, mod core);
 commonware_macros::stability_mod!(ALPHA, pub mod group);
 commonware_macros::stability_mod!(ALPHA, mod montgomery);

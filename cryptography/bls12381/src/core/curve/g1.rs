@@ -32,10 +32,6 @@ use commonware_simd::Simd;
 pub type Coordinates = [[u8; BYTES]; 3];
 
 /// Largest integer bound of a coordinate, in units of `p`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Used by multi-scalar multiplication.")
-)]
 pub const BOUND: u64 = 73;
 
 /// The identity `(0 : 1 : 0)` as projective coordinates.
@@ -132,10 +128,6 @@ impl<F> Point<F> {
     }
 
     /// Stores each lane's raw coordinates, dropping lanes beyond `points`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Used by multi-scalar multiplication.")
-    )]
     #[inline(always)]
     pub fn store_raw<S: Simd>(self, simd: S, points: &mut [[F::Raw; 3]])
     where
@@ -160,10 +152,6 @@ impl<F> Point<F> {
     }
 
     /// Loads lane `i` from the raw coordinates `points[i]`, for at least `F::LANES` entries.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Used by multi-scalar multiplication.")
-    )]
     #[inline(always)]
     pub fn load_raw<S: Simd>(simd: S, points: &[&[F::Raw; 3]]) -> Self
     where
@@ -187,10 +175,6 @@ impl<F> Point<F> {
     /// Returns `-self`.
     ///
     /// Multiplies `Y` by `-1` rather than subtracting it, so the coordinates keep their bounds.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Used by multi-scalar multiplication.")
-    )]
     #[inline(always)]
     pub fn neg<S: Simd>(self, simd: S) -> Self
     where

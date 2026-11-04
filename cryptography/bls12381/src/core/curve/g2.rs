@@ -166,10 +166,6 @@ impl<F> Point<F> {
     }
 
     /// Stores each lane's raw coordinates, dropping lanes beyond `points`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Used by multi-scalar multiplication.")
-    )]
     #[inline(always)]
     pub fn store_raw<S: Simd>(self, simd: S, points: &mut [[[F::Raw; 2]; 3]])
     where
@@ -194,10 +190,6 @@ impl<F> Point<F> {
     }
 
     /// Loads lane `i` from the raw coordinates `points[i]`, for at least `F::LANES` entries.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Used by multi-scalar multiplication.")
-    )]
     #[inline(always)]
     pub fn load_raw<S: Simd>(simd: S, points: &[&[[F::Raw; 2]; 3]]) -> Self
     where
@@ -221,10 +213,6 @@ impl<F> Point<F> {
     /// Returns `-self`.
     ///
     /// Multiplies `Y` by `-1` rather than subtracting it, so the coordinates keep their bounds.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Used by multi-scalar multiplication.")
-    )]
     #[inline(always)]
     pub fn neg<S: Simd>(self, simd: S) -> Self
     where
