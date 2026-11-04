@@ -57,7 +57,11 @@
 //! A busy pool worker therefore checks its peers' published bounds in its
 //! service pass, at most once per [`RESCUE_INTERVAL`], and expires, with its
 //! own budget and callback batch, the due registrations of a peer whose bound
-//! is overdue by [`RESCUE_THRESHOLD`], skipping a shard whose lock is held.
+//! is overdue by [`RESCUE_THRESHOLD`] and whose owner has run no expiry pass
+//! for as long, skipping a shard whose lock is held. An owner that is still
+//! draining a backlog keeps it: a rescuer's wakes join its own run queue, and
+//! a run queue they overflow moves its newest runnables, such as a task that
+//! has just requeued itself, behind the backlog in the global queue.
 //! Only a worker that runs service passes checks: a parked worker, or one
 //! spinning idle before it parks, does not, so a frozen worker's timers wait
 //! for some peer's service pass. A dedicated worker's shard is private, so no
@@ -139,20 +143,22 @@ cfg_if::cfg_if! {
 /// adds less than the latency of one wake.
 const RES: u64 = 1024;
 
-/// How long a shard's published bound must be overdue before a busy peer
-/// expires its due registrations. An owner whose turns stay short serves a
-/// small backlog well within it, so peers act on a worker that has not run a
-/// service pass for about this long, such as one stalled in a long poll, or on
-/// a backlog that the owner's budgeted passes have not drained within it.
+/// How long a shard's published bound must be overdue, and its owner's latest
+/// expiry pass past, before a busy peer expires its due registrations. An
+/// owner whose turns stay short serves a small backlog well within it, and
+/// drains a large one itself one budget per pass, so peers act on a worker
+/// that has not run an expiry pass for about this long, such as one stalled
+/// in a long poll.
 pub const RESCUE_THRESHOLD: Duration = Duration::from_millis(1);
 
 /// Least time between two checks of the peers' bounds by one pool worker, a
 /// quarter of [`RESCUE_THRESHOLD`]. Checks run only in the worker's service
 /// pass, so a stalled worker's timers fire within about 1.25 ms of their
-/// deadline while some peer runs short turns, and later when every peer's
-/// turns are long, the shard's lock is held, or a backlog needs several
-/// budgeted passes. A parked peer, or one spinning idle before it parks, runs
-/// no service pass and checks nothing.
+/// deadline, or of the worker's latest expiry pass if that is later, while
+/// some peer runs short turns, and later when every peer's turns are long, the
+/// shard's lock is held, or a backlog needs several budgeted passes. A parked
+/// peer, or one spinning idle before it parks, runs no service pass and checks
+/// nothing.
 pub const RESCUE_INTERVAL: Duration = Duration::from_micros(250);
 
 /// How a registration ended.
@@ -249,6 +255,10 @@ pub struct TimerShard {
     /// under the lock, never later than the earliest waiting registration's
     /// firing time. Peers read it to find a stalled owner.
     published: CachePadded<AtomicU64>,
+    /// Time of the owner's latest expiry pass in nanoseconds. Written only by
+    /// the owner. Peers read it to leave an owner that is still serving its
+    /// due registrations to itself.
+    served: CachePadded<AtomicU64>,
     /// Number of critical sections in which a party other than a sleep ended
     /// a waiting registration. Advanced only under the lock, by
     /// [`Self::end`], before the ended registrations' wakes run, so a
@@ -267,6 +277,7 @@ impl TimerShard {
                 closed: false,
             })),
             published: CachePadded::new(AtomicU64::new(u64::MAX)),
+            served: CachePadded::new(AtomicU64::new(0)),
             epoch: CachePadded::new(AtomicU64::new(0)),
         }
     }
@@ -394,6 +405,7 @@ impl TimerShard {
         });
         let bound = registrations.wheel.bound();
         self.published.store(bound, Ordering::Relaxed);
+        self.served.store(now, Ordering::Relaxed);
         bound
     }
 
@@ -485,8 +497,9 @@ impl TimerShard {
 }
 
 /// Expire, at `now`, the due registrations of every shard but `own` whose
-/// published bound is overdue by [`RESCUE_THRESHOLD`], with one budget per
-/// shard, skipping a shard whose lock is held. Wakes land in `deferred`.
+/// published bound is overdue by [`RESCUE_THRESHOLD`] and whose owner has run
+/// no expiry pass for as long, with one budget per shard, skipping a shard
+/// whose lock is held. Wakes land in `deferred`.
 pub fn rescue(shards: &[Arc<TimerShard>], own: usize, now: u64, deferred: &mut Deferred) {
     let threshold = RESCUE_THRESHOLD.as_nanos() as u64;
     for (index, shard) in shards.iter().enumerate() {
@@ -498,6 +511,13 @@ pub fn rescue(shards: &[Arc<TimerShard>], own: usize, now: u64, deferred: &mut D
         // their state, so a stale bound costs one check, never a timer.
         let bound = shard.published.load(Ordering::Relaxed);
         if bound == u64::MAX || now < bound.saturating_add(threshold) {
+            continue;
+        }
+
+        // An owner that served recently drains its own backlog. Like the
+        // bound, a stale time only delays or advances one check.
+        let served = shard.served.load(Ordering::Relaxed);
+        if now < served.saturating_add(threshold) {
             continue;
         }
         shard.rescue(now, deferred);
@@ -1444,6 +1464,38 @@ mod tests {
         assert_eq!(shards[0].resident(), 1);
         assert_eq!(shards[1].resident(), 0);
         assert_eq!(shards[2].resident(), 0);
+    }
+
+    #[test]
+    fn test_rescue_leaves_a_backlog_to_an_owner_that_serves() {
+        // Two budgets of registrations on shard 1, all firing at `firing`.
+        let threshold = RESCUE_THRESHOLD.as_nanos() as u64;
+        let shards: Vec<_> = (0..2).map(|_| Arc::new(TimerShard::new())).collect();
+        let (count, waker) = counter();
+        let deadline = later();
+        let firing = Wheel::<RES>::rounded(deadline);
+        let _sleepers: Vec<_> = (0..2 * BUDGET)
+            .map(|_| register(&shards[1], deadline, &waker))
+            .collect();
+
+        // The owner's late pass fires at most one budget and leaves the rest
+        // due, with its bound still at their firing time.
+        let served = firing + 2 * threshold;
+        let mut deferred = Deferred::default();
+        assert_eq!(shards[1].expire(served, &mut deferred), firing);
+        run(&mut deferred);
+        let fired = count.get();
+        assert!(fired < 2 * BUDGET as usize);
+
+        // The bound is overdue by more than the threshold, but while the
+        // owner's pass is recent, peers leave the backlog to the owner.
+        rescue(&shards, 0, served + threshold - 1, &mut deferred);
+        assert!(deferred.is_empty());
+
+        // An owner that has not served for the threshold is rescued.
+        rescue(&shards, 0, served + threshold, &mut deferred);
+        run(&mut deferred);
+        assert!(count.get() > fired);
     }
 
     #[test]
