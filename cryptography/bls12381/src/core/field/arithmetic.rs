@@ -49,6 +49,8 @@
 //! | Operation | Positional integer and limb bounds | RNS integer bound |
 //! |---|---|---|
 //! | [`load`](Field::load) | `(2, 1)` | `2` |
+//! | [`store_raw::<A>`](Field::store_raw) | Requires `(A, 1)` | Requires `A` |
+//! | [`load_raw::<A>`](Field::load_raw) | `(A, 1)` | `A` |
 //! | [`add`](Field::add) | `(A + B, L + M)` | `A + B` |
 //! | [`double`](Field::double) | `(2A, 2L)` | `2A` |
 //! | [`mul_small::<C>`](Field::mul_small) | `(C * A, C * L)` | `C * A` |
@@ -173,6 +175,30 @@ pub trait Field<S: Simd>: Copy {
     ///
     /// Requires valid value bounds. Entries beyond [`Self::LANES`] are unchanged.
     fn store(self, simd: S, elements: &mut [[u8; BYTES]]);
+
+    /// One lane of a value in the representation's own form, as [`Self::store_raw`] stores it.
+    type Raw: Copy + Default;
+
+    /// Stores each lane in the representation's own form, dropping lanes beyond `lanes`.
+    ///
+    /// Requires positional limb bound `1` and integer bound at most `A`, so that
+    /// [`Self::load_raw`] with the same `A` returns a valid value. Costs no conversion. Entries
+    /// beyond [`Self::LANES`] are unchanged.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Used by multi-scalar multiplication.")
+    )]
+    fn store_raw<const A: u64>(self, simd: S, lanes: &mut [Self::Raw]);
+
+    /// Loads lane `i` from `lanes[i]`, as [`Self::store_raw`] stored it with the same `A`.
+    ///
+    /// Requires at least [`Self::LANES`] entries and ignores the rest. Returns integer bound `A`
+    /// and positional limb bound `1`. Costs no conversion.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Used by multi-scalar multiplication.")
+    )]
+    fn load_raw<const A: u64>(simd: S, lanes: &[&Self::Raw]) -> Self;
 
     /// Returns `self + rhs`, without reducing.
     ///
@@ -523,6 +549,25 @@ mod tests {
         let scaled_value = reference::mul(ra, [12, 0, 0, 0, 0, 0]);
         for (lane, value) in selected.iter().enumerate() {
             let expected = if lane % 2 == 0 { scaled_value } else { ra };
+            assert_eq!(*value, reference::to_bytes(expected));
+        }
+        // Raw forms round-trip without conversion and load as valid operands.
+        let mut raw = vec![F::Raw::default(); F::LANES];
+        F::mul(a, simd, b).store_raw::<TIGHT>(simd, &mut raw);
+        let lanes: Vec<&F::Raw> = raw.iter().collect();
+        let loaded = F::load_raw::<TIGHT>(simd, &lanes);
+        assert_value(loaded, reference::mul(ra, rb));
+        assert_value(
+            F::mul(loaded, simd, c),
+            reference::mul(reference::mul(ra, rb), rc),
+        );
+        // Each lane loads its own entry.
+        F::load(simd, &inputs[..1], &inputs[1]).store_raw::<2>(simd, &mut raw);
+        let reversed: Vec<&F::Raw> = raw.iter().rev().collect();
+        let mut stored = vec![[0; BYTES]; F::LANES];
+        F::load_raw::<2>(simd, &reversed).store(simd, &mut stored);
+        for (lane, value) in stored.iter().enumerate() {
+            let expected = if lane + 1 == F::LANES { ra } else { rb };
             assert_eq!(*value, reference::to_bytes(expected));
         }
         assert!(F::LANES > 0);

@@ -6,11 +6,15 @@
 //! # Coordinate bounds
 //!
 //! Every coordinate a formula accepts or returns has positional limb bound `1` and integer bound at
-//! most `73`, as defined by the [base field arithmetic](crate::core::field::arithmetic): the
+//! most [`BOUND`], as defined by the [base field arithmetic](crate::core::field::arithmetic): the
 //! positional representations return at most `73` from the subtraction in [`Point::add`]'s `X`
 //! coordinate, and residues reduce to at most `17`. Loaded coordinates and every formula's outputs
 //! satisfy this, so points chain through any number of operations without carrying or
 //! canonicalizing between them.
+//!
+//! Raw coordinates hold each lane of a point in the representation's own form, through
+//! [`Field::store_raw`] with bound [`BOUND`], so storing and loading them costs no conversion and
+//! loaded raw coordinates satisfy the coordinate bounds.
 //!
 //! Subtractions remove small multiples of reduced products of coordinates. Such a product is
 //! bounded by `4p` in the positional representations and by `17p` in residues, so a multiple
@@ -18,11 +22,21 @@
 //! formula, the positional representations reach integer bounds of at most `912` and limb bounds
 //! of at most `12`; residues reach integer bounds of at most `629`.
 
-use crate::core::field::{arithmetic::Field, fp::BYTES};
+use crate::core::field::{
+    arithmetic::Field,
+    fp::{BYTES, MINUS_ONE},
+};
 use commonware_simd::Simd;
 
 /// Projective coordinates `[X, Y, Z]` as big-endian integers.
 pub type Coordinates = [[u8; BYTES]; 3];
+
+/// Largest integer bound of a coordinate, in units of `p`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Used by multi-scalar multiplication.")
+)]
+pub const BOUND: u64 = 73;
 
 /// The identity `(0 : 1 : 0)` as projective coordinates.
 pub const IDENTITY: Coordinates = {
@@ -114,6 +128,78 @@ impl<F> Point<F> {
             x: self.x.select(simd, rhs.x, lanes),
             y: self.y.select(simd, rhs.y, lanes),
             z: self.z.select(simd, rhs.z, lanes),
+        }
+    }
+
+    /// Stores each lane's raw coordinates, dropping lanes beyond `points`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Used by multi-scalar multiplication.")
+    )]
+    #[inline(always)]
+    pub fn store_raw<S: Simd>(self, simd: S, points: &mut [[F::Raw; 3]])
+    where
+        F: Field<S>,
+    {
+        const { assert!(F::LANES <= MAX_LANES) };
+        let mut coordinates = [[F::Raw::default(); MAX_LANES]; 3];
+        let lanes = points.len().min(F::LANES);
+        self.x
+            .store_raw::<BOUND>(simd, &mut coordinates[0][..lanes]);
+        self.y
+            .store_raw::<BOUND>(simd, &mut coordinates[1][..lanes]);
+        self.z
+            .store_raw::<BOUND>(simd, &mut coordinates[2][..lanes]);
+        for (lane, point) in points[..lanes].iter_mut().enumerate() {
+            *point = [
+                coordinates[0][lane],
+                coordinates[1][lane],
+                coordinates[2][lane],
+            ];
+        }
+    }
+
+    /// Loads lane `i` from the raw coordinates `points[i]`, for at least `F::LANES` entries.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Used by multi-scalar multiplication.")
+    )]
+    #[inline(always)]
+    pub fn load_raw<S: Simd>(simd: S, points: &[&[F::Raw; 3]]) -> Self
+    where
+        F: Field<S>,
+    {
+        const { assert!(F::LANES <= MAX_LANES) };
+        let coordinate = |i: usize| {
+            let mut lanes = [&points[0][i]; MAX_LANES];
+            for (lane, point) in lanes.iter_mut().zip(points).take(F::LANES) {
+                *lane = &point[i];
+            }
+            F::load_raw::<BOUND>(simd, &lanes)
+        };
+        Self {
+            x: coordinate(0),
+            y: coordinate(1),
+            z: coordinate(2),
+        }
+    }
+
+    /// Returns `-self`.
+    ///
+    /// Multiplies `Y` by `-1` rather than subtracting it, so the coordinates keep their bounds.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Used by multi-scalar multiplication.")
+    )]
+    #[inline(always)]
+    pub fn neg<S: Simd>(self, simd: S) -> Self
+    where
+        F: Field<S>,
+    {
+        let minus_one = F::load(simd, &[], &MINUS_ONE);
+        Self {
+            y: self.y.ready::<1>(simd).mul(simd, minus_one),
+            ..self
         }
     }
 
@@ -296,7 +382,8 @@ mod tests {
             for round in 0..ROUNDS {
                 let addend = &points[round * lanes + start..(round + 1) * lanes];
                 sum = sum.add(simd, Point::load(simd, addend, &IDENTITY));
-                // Chain some sums through doublings and round-trip others through bytes.
+                // Chain some sums through doublings and round-trip others through bytes or raw
+                // coordinates.
                 match round % 3 {
                     0 => sum = sum.add(simd, sum).add(simd, sum.double(simd).double(simd)),
                     1 => {
@@ -304,7 +391,14 @@ mod tests {
                         sum.store(simd, &mut stored);
                         sum = Point::load(simd, &stored, &IDENTITY);
                     }
-                    _ => {}
+                    // Negate through -s + 2s, and round-trip through raw coordinates.
+                    _ => {
+                        sum = sum.neg(simd).add(simd, sum.double(simd));
+                        let mut raw = [[F::Raw::default(); 3]; MAX_LANES];
+                        sum.store_raw(simd, &mut raw);
+                        let lanes: Vec<_> = raw.iter().collect();
+                        sum = Point::load_raw(simd, &lanes);
+                    }
                 }
             }
             sum.store(simd, &mut output[start..lanes]);

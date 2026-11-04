@@ -27,6 +27,23 @@ pub(crate) const MODULUS: [u64; WORDS] = [
 /// Largest lane count of any backend.
 pub(crate) const MAX_LANES: usize = 8;
 
+/// `p - 1`, the encoding of `-1`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Used by multi-scalar multiplication.")
+)]
+pub(crate) const MINUS_ONE: [u8; BYTES] = {
+    let mut bytes = [0; BYTES];
+    let mut i = 0;
+    while i < BYTES {
+        bytes[i] = (MODULUS[WORDS - 1 - i / 8] >> (56 - 8 * (i % 8))) as u8;
+        i += 1;
+    }
+    // The modulus is odd, so its low byte does not borrow.
+    bytes[BYTES - 1] -= 1;
+    bytes
+};
+
 /// Returns `2^k mod p`.
 const fn power_of_two(k: u32) -> [u64; WORDS] {
     montgomery::power_of_two(k, &MODULUS)

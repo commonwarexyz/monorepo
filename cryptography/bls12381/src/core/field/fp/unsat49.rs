@@ -154,7 +154,7 @@ impl<S: Simd> Unsat49<S> {
             .carry(simd)
             .mul(simd, Self::raw(simd, &[FROM_LANES; MAX_LANES], 1))
             .subtract_modulus(simd);
-        let lanes = canonical.store_raw(simd);
+        let lanes = canonical.lane_limbs(simd);
         for (element, limbs) in elements.iter_mut().zip(lanes).take(S::U64_LANES) {
             *element = bytes_from_words(&words_from_limbs(limbs));
         }
@@ -183,7 +183,7 @@ impl<S: Simd> Unsat49<S> {
 
     /// Returns each lane's limbs, without any conversion.
     #[inline(always)]
-    fn store_raw(self, simd: S) -> [[u64; LIMBS]; MAX_LANES] {
+    fn lane_limbs(self, simd: S) -> [[u64; LIMBS]; MAX_LANES] {
         let mut lanes = [[0; LIMBS]; MAX_LANES];
         for (i, row) in self.limbs.into_iter().enumerate() {
             let mut values = [0; MAX_LANES];
@@ -430,6 +430,40 @@ impl<S: Simd> Field<S> for Unsat49<S> {
     #[inline(always)]
     fn store(self, simd: S, elements: &mut [[u8; BYTES]]) {
         self.store(simd, elements);
+    }
+
+    type Raw = [u64; LIMBS];
+
+    #[inline(always)]
+    fn store_raw<const A: u64>(self, simd: S, lanes: &mut [[u64; LIMBS]]) {
+        self.bound.assert_le(A);
+        self.limb_bound.assert_le(1);
+        for (lane, limbs) in lanes
+            .iter_mut()
+            .zip(self.lane_limbs(simd))
+            .take(S::U64_LANES)
+        {
+            *lane = limbs;
+        }
+    }
+
+    #[inline(always)]
+    fn load_raw<const A: u64>(simd: S, lanes: &[&[u64; LIMBS]]) -> Self {
+        const { assert!(A <= LIMIT) };
+        debug_assert!(lanes.len() >= S::U64_LANES);
+        let mut limbs = [simd.u64_splat(0); LIMBS];
+        for (i, limb) in limbs.iter_mut().enumerate() {
+            let mut row = [0; MAX_LANES];
+            for (value, lane) in row.iter_mut().zip(lanes).take(S::U64_LANES) {
+                *value = lane[i];
+            }
+            *limb = simd.u64_load(&row);
+        }
+        Self {
+            limbs,
+            bound: DebugCounter::new(A),
+            limb_bound: DebugCounter::new(1),
+        }
     }
 
     #[inline(always)]

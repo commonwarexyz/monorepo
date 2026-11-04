@@ -135,6 +135,52 @@ impl<F> Fp2<F> {
         }
     }
 
+    /// Stores each lane's components in the representation's own form, as for
+    /// [`Field::store_raw`], dropping lanes beyond `elements`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Used by multi-scalar multiplication.")
+    )]
+    #[inline(always)]
+    pub fn store_raw<const A: u64, S: Simd>(self, simd: S, elements: &mut [[F::Raw; 2]])
+    where
+        F: Field<S>,
+    {
+        const { assert!(F::LANES <= MAX_LANES) };
+        let mut components = [[F::Raw::default(); MAX_LANES]; 2];
+        let lanes = elements.len().min(F::LANES);
+        self.c0.store_raw::<A>(simd, &mut components[0][..lanes]);
+        self.c1.store_raw::<A>(simd, &mut components[1][..lanes]);
+        for (lane, element) in elements[..lanes].iter_mut().enumerate() {
+            *element = [components[0][lane], components[1][lane]];
+        }
+    }
+
+    /// Loads lane `i` from `elements[i]`, as [`Self::store_raw`] stored it, for at least
+    /// [`Field::LANES`] entries.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Used by multi-scalar multiplication.")
+    )]
+    #[inline(always)]
+    pub fn load_raw<const A: u64, S: Simd>(simd: S, elements: &[&[F::Raw; 2]]) -> Self
+    where
+        F: Field<S>,
+    {
+        const { assert!(F::LANES <= MAX_LANES) };
+        let component = |i: usize| {
+            let mut lanes = [&elements[0][i]; MAX_LANES];
+            for (lane, element) in lanes.iter_mut().zip(elements).take(F::LANES) {
+                *lane = &element[i];
+            }
+            F::load_raw::<A>(simd, &lanes)
+        };
+        Self {
+            c0: component(0),
+            c1: component(1),
+        }
+    }
+
     /// Returns `self + self`, without reducing.
     #[inline(always)]
     pub fn double<S: Simd>(self, simd: S) -> Self

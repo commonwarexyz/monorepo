@@ -231,7 +231,7 @@ impl<S: Simd> Unsat28<S> {
             .carry(simd)
             .mul(simd, Self::constant(simd, &FROM_LANES, 1))
             .subtract_modulus(simd);
-        let rows = canonical.store_raw(simd);
+        let rows = canonical.to_rows(simd);
         for (lane, element) in elements.iter_mut().enumerate().take(S::U32_LANES) {
             let limbs = core::array::from_fn(|i| rows[i][lane]);
             *element = bytes_from_words(&words_from_limbs(limbs));
@@ -274,7 +274,7 @@ impl<S: Simd> Unsat28<S> {
 
     /// Returns the limb rows, without any conversion. Lanes beyond `S::U32_LANES` are zero.
     #[inline(always)]
-    fn store_raw(self, simd: S) -> [[u32; MAX_LANES]; LIMBS] {
+    fn to_rows(self, simd: S) -> [[u32; MAX_LANES]; LIMBS] {
         let mut rows = [[0; MAX_LANES]; LIMBS];
         for (row, limb) in rows.iter_mut().zip(self.limbs) {
             simd.u32_store(limb, row);
@@ -659,6 +659,39 @@ impl<S: Simd> Field<S> for Unsat28<S> {
     #[inline(always)]
     fn store(self, simd: S, elements: &mut [[u8; BYTES]]) {
         self.store(simd, elements);
+    }
+
+    type Raw = [u32; LIMBS];
+
+    #[inline(always)]
+    fn store_raw<const A: u64>(self, simd: S, lanes: &mut [[u32; LIMBS]]) {
+        self.bound.assert_le(A);
+        self.limb_bound.assert_le(1);
+        let rows = self.to_rows(simd);
+        for (lane, limbs) in lanes.iter_mut().enumerate().take(S::U32_LANES) {
+            for (limb, row) in limbs.iter_mut().zip(&rows) {
+                *limb = row[lane];
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn load_raw<const A: u64>(simd: S, lanes: &[&[u32; LIMBS]]) -> Self {
+        const { assert!(A <= LIMIT) };
+        debug_assert!(lanes.len() >= S::U32_LANES);
+        let mut limbs = [simd.u32_splat(0); LIMBS];
+        for (i, limb) in limbs.iter_mut().enumerate() {
+            let mut row = [0; MAX_LANES];
+            for (value, lane) in row.iter_mut().zip(lanes).take(S::U32_LANES) {
+                *value = lane[i];
+            }
+            *limb = simd.u32_load(&row);
+        }
+        Self {
+            limbs,
+            bound: DebugCounter::new(A),
+            limb_bound: DebugCounter::new(1),
+        }
     }
 
     #[inline(always)]
@@ -1166,7 +1199,7 @@ mod tests {
             let mut outputs = Vec::new();
             let mut fold = |value: Unsat28<S>| {
                 let folded = <Unsat28<S> as Field<S>>::reduce_tight(simd, value);
-                let rows = folded.store_raw(simd);
+                let rows = folded.to_rows(simd);
                 let lanes = (0..S::U32_LANES).map(|lane| rows.map(|row| row[lane]));
                 for limbs in lanes {
                     assert!(limbs.iter().all(|limb| *limb <= MASK));
