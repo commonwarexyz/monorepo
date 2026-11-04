@@ -118,6 +118,11 @@
 //! were offline then. Linux 6.2 and newer can keep a written mask across cpuset changes, so a
 //! restored caller and its later threads may not gain added CPUs. Older kernels can replace a
 //! written mask with the cpuset's effective CPUs, undoing a group's confinement.
+//!
+//! A thread created under a requested mask inherits it and keeps it: a worker's threads stay in
+//! its home or floating mask, and a moved caller's threads stay in the home domain. A pool built
+//! from such a thread reads that mask as its allowed CPUs, so it sizes its groups from one domain
+//! and confines every worker to it. Build pools from a thread that still has its original mask.
 
 use crate::ThreadPool;
 use commonware_utils::sync::Mutex;

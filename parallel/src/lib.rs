@@ -1461,6 +1461,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// When the chosen group's home is another domain, the calling thread may be moved there for
     /// the call, within its own affinity mask. The caller's own code in that call, such as a
     /// [`Strategy::run_batches`] body, runs under that mask, and threads it creates inherit it.
+    /// Do not create a strategy from inside such a call or from a pool worker: the new pool only
+    /// sees the CPUs of that one domain and keeps all of its workers there.
     ///
     /// A worker's nested calls, joins, and spawned jobs inherit its placement. A job that
     /// [`Strategy::spawn`] hands to the pool from outside it can start on any idle worker and
