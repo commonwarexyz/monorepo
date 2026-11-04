@@ -12,7 +12,7 @@ use commonware_consensus::{
     },
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest,
+    bls12381::primitives::variant::MinSig, sha256::Digest as Sha256Digest,
 };
 use commonware_runtime::Clock;
 use commonware_utils::channel::oneshot;
@@ -174,7 +174,7 @@ impl<C: Clock> Automaton for Mailbox<C> {
 }
 
 impl<C: Clock> Reporter for Mailbox<C> {
-    type Activity = Activity<MinPk, Sha256Digest>;
+    type Activity = Activity<MinSig, Sha256Digest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let message = match activity {
