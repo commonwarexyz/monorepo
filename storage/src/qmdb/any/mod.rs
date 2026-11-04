@@ -181,10 +181,10 @@ pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 #[derive(Clone)]
 pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle_config: MerkleConfig<S>,
+    pub merkle: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
-    pub journal_config: J,
+    pub log: J,
 
     /// The translator used by the compressed index. Ordered databases require an
     /// [OrderedTranslator](crate::translator::OrderedTranslator).
@@ -289,8 +289,8 @@ where
     // been checked against the same retained prefix.
     let pending = crate::qmdb::prepare_initialization::<F, E, J, H, S>(
         context.child("log"),
-        cfg.merkle_config,
-        cfg.journal_config,
+        cfg.merkle,
+        cfg.log,
         max_size,
     )
     .await?;
@@ -412,7 +412,7 @@ pub(crate) mod test {
     ) -> FixedConfig<T, S, B> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -421,7 +421,7 @@ pub(crate) mod test {
                 strategy,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FConfig {
+            log: FConfig {
                 partition: format!("log-journal-{suffix}"),
                 items_per_blob: NZU64!(7),
                 page_cache,
@@ -463,7 +463,7 @@ pub(crate) mod test {
     ) -> VariableConfig<T, ((), ()), Sequential, B> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -472,7 +472,7 @@ pub(crate) mod test {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: VConfig {
+            log: VConfig {
                 partition: format!("log-journal-{suffix}"),
                 items_per_section: NZU64!(7),
                 compression: None,
@@ -7046,7 +7046,7 @@ pub(crate) mod test {
         deterministic::Runner::default().start(|context| async move {
             let ctx = context.child("db");
             let mut cfg = variable_db_config::<OneCap>("coarse-prune");
-            cfg.journal_config.items_per_section = NZU64!(2048);
+            cfg.log.items_per_section = NZU64!(2048);
             let db = UnorderedVariable::init(ctx.child("storage"), cfg.clone(), None)
                 .await
                 .unwrap();
@@ -7097,7 +7097,7 @@ pub(crate) mod test {
                     let suffix = format!("any-live-child-{child_after_prune}-{prune}");
                     let ctx = context.child("db").with_attribute("case", &suffix);
                     let mut cfg = variable_db_config::<OneCap>(&suffix);
-                    cfg.journal_config.items_per_section = NZU64!(2048);
+                    cfg.log.items_per_section = NZU64!(2048);
                     let db = UnorderedVariable::init(ctx.child("storage"), cfg, None)
                         .await
                         .unwrap();

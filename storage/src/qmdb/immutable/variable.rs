@@ -52,7 +52,7 @@ mod tests {
     fn config(suffix: &str) -> Config<TwoCap, ((), ()), Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         super::BaseConfig {
-            merkle_config: MmrConfig {
+            merkle: MmrConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),

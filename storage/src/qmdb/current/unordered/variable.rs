@@ -120,15 +120,15 @@ mod test {
             // Configure the operation codec for variable-length keys.
             let base = variable_config::<TwoCap>("vec-keys");
             let cfg = crate::qmdb::current::VariableConfig {
-                merkle_config: base.merkle_config.clone(),
-                journal_config: crate::journal::contiguous::variable::Config {
-                    partition: base.journal_config.partition.clone(),
-                    items_per_section: base.journal_config.items_per_section,
+                merkle: base.merkle.clone(),
+                log: crate::journal::contiguous::variable::Config {
+                    partition: base.log.partition.clone(),
+                    items_per_section: base.log.items_per_section,
                     compression: None,
                     codec_config: (((0..).into(), ()), ()),
-                    page_cache: base.journal_config.page_cache.clone(),
-                    write_buffer: base.journal_config.write_buffer,
-                    replay_buffer: base.journal_config.replay_buffer,
+                    page_cache: base.log.page_cache.clone(),
+                    write_buffer: base.log.write_buffer,
+                    replay_buffer: base.log.replay_buffer,
                 },
                 grafted_metadata_partition: base.grafted_metadata_partition.clone(),
                 translator: TwoCap,

@@ -1201,7 +1201,7 @@ impl EngineDefinition for ReshareEngine {
             .insert(public_key.clone(), marshal.clone());
 
         let db_config = FixedConfig {
-            merkle_config: MmrJournalConfig {
+            merkle: MmrJournalConfig {
                 journal_partition: format!("{partition_prefix}-qmdb-mmr-journal"),
                 metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
                 items_per_blob: NZU64!(11),
@@ -1210,7 +1210,7 @@ impl EngineDefinition for ReshareEngine {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FixedLogConfig {
+            log: FixedLogConfig {
                 partition: format!("{partition_prefix}-qmdb-log-journal"),
                 items_per_blob: NZU64!(7),
                 page_cache: page_cache.clone(),

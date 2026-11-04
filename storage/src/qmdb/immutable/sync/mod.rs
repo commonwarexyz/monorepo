@@ -71,7 +71,7 @@ where
         let merkle = Merkle::<F, _, _, S>::init_sync(
             context.child("merkle"),
             full::SyncConfig {
-                config: db_config.merkle_config,
+                config: db_config.merkle,
                 range: range.clone(),
                 pinned_nodes,
             },
@@ -143,7 +143,7 @@ where
 
         sync::local_pinned_nodes::<F, _, H, S>(
             context,
-            config.merkle_config.clone(),
+            config.merkle.clone(),
             target,
             inactivity_floor,
         )

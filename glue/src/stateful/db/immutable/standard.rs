@@ -537,7 +537,7 @@ mod tests {
     fn fixed_config(suffix: &str) -> fixed::Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
         fixed::Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("stateful-immutable-journal-{suffix}"),
                 metadata_partition: format!("stateful-immutable-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),

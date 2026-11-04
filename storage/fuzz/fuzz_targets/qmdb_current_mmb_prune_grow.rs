@@ -148,7 +148,7 @@ const WRITE_BUFFER_SIZE: usize = 1024;
 
 fn test_config(name: &str, page_cache: CacheRef) -> Config<TwoCap, Sequential> {
     Config {
-        merkle_config: MerkleConfig {
+        merkle: MerkleConfig {
             journal_partition: format!("fuzz-current-mmb-pruning-{name}-merkle-journal"),
             metadata_partition: format!("fuzz-current-mmb-pruning-{name}-merkle-metadata"),
             items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
@@ -157,7 +157,7 @@ fn test_config(name: &str, page_cache: CacheRef) -> Config<TwoCap, Sequential> {
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: FConfig {
+        log: FConfig {
             partition: format!("fuzz-current-mmb-pruning-{name}-log-journal"),
             items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
             write_buffer: NZUsize!(WRITE_BUFFER_SIZE),

@@ -108,7 +108,7 @@ pub(crate) mod test {
     pub(crate) fn create_test_config(seed: u64) -> VarConfig {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            merkle_config: crate::mmr::full::Config {
+            merkle: crate::mmr::full::Config {
                 journal_partition: format!("journal-{seed}"),
                 metadata_partition: format!("metadata-{seed}"),
                 items_per_blob: NZU64!(13),
@@ -117,7 +117,7 @@ pub(crate) mod test {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: crate::journal::contiguous::variable::Config {
+            log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{seed}"),
                 items_per_section: NZU64!(7),
                 write_buffer: NZUsize!(1024),

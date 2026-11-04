@@ -1887,7 +1887,7 @@ mod tests {
     fn qmdb_config(prefix: &str) -> any::FixedConfig<TwoCap, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         any::FixedConfig {
-            merkle_config: MmrJournalConfig {
+            merkle: MmrJournalConfig {
                 journal_partition: format!("{prefix}_mmr_journal"),
                 metadata_partition: format!("{prefix}_mmr_metadata"),
                 items_per_blob: NZU64!(11),
@@ -1896,7 +1896,7 @@ mod tests {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FixedLogConfig {
+            log: FixedLogConfig {
                 partition: format!("{prefix}_log_journal"),
                 items_per_blob: NZU64!(7),
                 page_cache,

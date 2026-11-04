@@ -181,8 +181,8 @@ pub fn any_fix_cfg_full<B>(
 ) -> AnyFixedConfig<EightCap, Rayon, B> {
     let page_cache = CacheRef::new(PAGE_SIZE, page_cache_size);
     AnyFixedConfig {
-        merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
-        journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
+        merkle: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
+        log: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
@@ -196,7 +196,7 @@ pub fn imm_fix_cfg_with(
 ) -> ImmutableFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     ImmutableFixedConfig {
-        merkle_config: merkle_cfg(PARTITION_IMM, ctx, page_cache.clone(), items_per_blob),
+        merkle: merkle_cfg(PARTITION_IMM, ctx, page_cache.clone(), items_per_blob),
         log: fix_log_cfg(PARTITION_IMM, page_cache, items_per_blob),
         translator: EightCap,
         init_buffer: NZUsize!(1 << 21),
@@ -213,8 +213,8 @@ pub fn cur_fix_cfg_with(
 ) -> CurrentFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentFixedConfig {
-        merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
-        journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
+        merkle: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
+        log: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
@@ -233,8 +233,8 @@ pub fn any_var_digest_cfg_with(
 ) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
-        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
+        merkle: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        log: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
@@ -254,8 +254,8 @@ pub fn cur_var_digest_cfg_with(
 ) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
-        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
+        merkle: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        log: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
@@ -277,8 +277,8 @@ pub fn any_var_vec_cfg_with(
 ) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
-        journal_config: var_log_cfg(
+        merkle: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        log: var_log_cfg(
             PARTITION_VAR,
             page_cache,
             ((), ((0..=10000).into(), ())),
@@ -303,8 +303,8 @@ pub fn cur_var_vec_cfg_with(
 ) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
-        journal_config: var_log_cfg(
+        merkle: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        log: var_log_cfg(
             PARTITION_VAR,
             page_cache,
             ((), ((0..=10000).into(), ())),

@@ -158,8 +158,8 @@ fn variable_log_config<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -
 fn any_fixed_config(suffix: &str) -> any::FixedConfig<OneCap, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
-        merkle_config: merkle_config(suffix, &pc),
-        journal_config: fixed_log_config(suffix, pc),
+        merkle: merkle_config(suffix, &pc),
+        log: fixed_log_config(suffix, pc),
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
@@ -170,8 +170,8 @@ fn any_fixed_config(suffix: &str) -> any::FixedConfig<OneCap, Sequential> {
 fn any_variable_config(suffix: &str) -> any::VariableConfig<OneCap, ((), ()), Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
-        merkle_config: merkle_config(suffix, &pc),
-        journal_config: variable_log_config(suffix, pc, ((), ())),
+        merkle: merkle_config(suffix, &pc),
+        log: variable_log_config(suffix, pc, ((), ())),
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
@@ -182,8 +182,8 @@ fn any_variable_config(suffix: &str) -> any::VariableConfig<OneCap, ((), ()), Se
 fn current_fixed_config(suffix: &str) -> current::FixedConfig<OneCap, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
-        merkle_config: merkle_config(suffix, &pc),
-        journal_config: fixed_log_config(suffix, pc),
+        merkle: merkle_config(suffix, &pc),
+        log: fixed_log_config(suffix, pc),
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
@@ -195,8 +195,8 @@ fn current_fixed_config(suffix: &str) -> current::FixedConfig<OneCap, Sequential
 fn current_variable_config(suffix: &str) -> current::VariableConfig<OneCap, ((), ()), Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
-        merkle_config: merkle_config(suffix, &pc),
-        journal_config: variable_log_config(suffix, pc, ((), ())),
+        merkle: merkle_config(suffix, &pc),
+        log: variable_log_config(suffix, pc, ((), ())),
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
@@ -208,7 +208,7 @@ fn current_variable_config(suffix: &str) -> current::VariableConfig<OneCap, ((),
 fn immutable_fixed_config(suffix: &str) -> immutable::fixed::Config<TwoCap, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
-        merkle_config: merkle_config(suffix, &pc),
+        merkle: merkle_config(suffix, &pc),
         log: fixed_log_config(suffix, pc),
         translator: TwoCap,
         init_buffer: NZUsize!(1 << 21),
@@ -220,7 +220,7 @@ fn immutable_variable_config(
 ) -> immutable::variable::Config<TwoCap, ((), ()), Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
-        merkle_config: merkle_config(suffix, &pc),
+        merkle: merkle_config(suffix, &pc),
         log: variable_log_config(suffix, pc, ((), ())),
         translator: TwoCap,
         init_buffer: NZUsize!(1 << 21),

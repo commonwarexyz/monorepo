@@ -59,7 +59,7 @@ mod tests {
     fn config(suffix: &str) -> Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            merkle_config: MmrConfig {
+            merkle: MmrConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -181,8 +181,8 @@ mod tests {
         let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
         cfg.log.items_per_blob = NZU64!(1000);
         cfg.log.page_cache = page_cache.clone();
-        cfg.merkle_config.items_per_blob = NZU64!(1000);
-        cfg.merkle_config.page_cache = page_cache;
+        cfg.merkle.items_per_blob = NZU64!(1000);
+        cfg.merkle.page_cache = page_cache;
         DelayedDb::init(
             DelayedSyncContext {
                 inner: context,
@@ -730,7 +730,7 @@ mod tests {
                 NonZeroU16::new(<Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16)
                     .unwrap();
             let mut cfg = config("rebranch");
-            cfg.merkle_config.items_per_blob = NZU64!(100_000);
+            cfg.merkle.items_per_blob = NZU64!(100_000);
             cfg.log.items_per_blob = NZU64!(100_000);
             cfg.log.page_cache = CacheRef::new(page_size, PAGE_CACHE_SIZE);
             cfg

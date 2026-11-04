@@ -137,7 +137,7 @@ type CodecConfig = ((), (commonware_codec::RangeCfg<usize>, ()));
 fn test_config(test_name: &str) -> Config<TwoCap, CodecConfig, Sequential> {
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(1));
     Config {
-        merkle_config: MerkleConfig {
+        merkle: MerkleConfig {
             journal_partition: format!("{test_name}-merkle"),
             metadata_partition: format!("{test_name}-meta"),
             items_per_blob: NZU64!(3),
@@ -146,7 +146,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, CodecConfig, Sequential> {
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: VConfig {
+        log: VConfig {
             partition: format!("{test_name}-log"),
             items_per_section: NZU64!(3),
             write_buffer: NZUsize!(1024),

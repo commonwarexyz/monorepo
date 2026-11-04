@@ -175,8 +175,8 @@ pub(crate) mod test {
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedTest, crate::qmdb::Error<mmr::Family>>> {
         let mut cfg = fixed_db_config::<TwoCap>(suffix);
-        cfg.journal_config.items_per_blob = NZU64!(1000);
-        cfg.journal_config.page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
+        cfg.log.items_per_blob = NZU64!(1000);
+        cfg.log.page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
         DelayedTest::init(
             DelayedSyncContext {
                 inner: context,
@@ -733,7 +733,7 @@ pub(crate) mod test {
                 let cfg = fixed_db_config::<OneCap>(if cached { "cached" } else { "uncached" });
                 let mut log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
                     context.child("log"),
-                    cfg.journal_config,
+                    cfg.log,
                 )
                 .await
                 .unwrap();
@@ -994,7 +994,7 @@ pub(crate) mod test {
             let cfg = fixed_db_config_partitioned::<OneCap>("unordered_parallel_replay_fail");
             let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
                 context.child("log"),
-                cfg.journal_config,
+                cfg.log,
             )
             .await
             .unwrap();
@@ -1112,7 +1112,7 @@ pub(crate) mod test {
             let cfg = fixed_db_config_partitioned::<OneCap>("unordered_parallel_worker_fail");
             let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
                 context.child("log"),
-                cfg.journal_config,
+                cfg.log,
             )
             .await
             .unwrap();
@@ -1154,7 +1154,7 @@ pub(crate) mod test {
                     context
                         .child("log")
                         .with_attribute("concurrency", concurrency),
-                    cfg.journal_config,
+                    cfg.log,
                 )
                 .await
                 .unwrap();

@@ -146,7 +146,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
     runner.start(|context| async move {
         let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
         let cfg = Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("fuzz-current-{suffix}-merkle-journal"),
                 metadata_partition: format!("fuzz-current-{suffix}-merkle-metadata"),
                 items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
@@ -155,7 +155,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FConfig {
+            log: FConfig {
                 partition: format!("fuzz-current-{suffix}-log-journal"),
                 items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
