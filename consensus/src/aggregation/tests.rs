@@ -1673,6 +1673,69 @@ fn test_locally_assembled_certificate_cancels_recovery() {
 }
 
 #[test_traced("INFO")]
+fn test_closed_recovery_coordinator_allows_local_completion() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 4);
+        let epoch = Epoch::new(96);
+        let position = Height::new(560);
+        let participant = fixture.participants[0].clone();
+        let (oracle, mut registrations) =
+            simulation(context.child("simulation"), &fixture, true).await;
+        let (coordinator, recovery, _consumer) =
+            RecoveryCoordinator::new(context.child("recovery"), NZUsize!(4), NZUsize!(4));
+        let reporter = RecordingReporter::default();
+        let mut cfg = with_recoverer(
+            config(
+                &context,
+                fixture.schemes[0].clone(),
+                ImmediateApplication::default(),
+                reporter.clone(),
+                oracle.control(participant.clone()),
+                EngineScope {
+                    partition: "aggregation-closed-recovery-local-completion".into(),
+                    epoch,
+                    first: position,
+                    last: position,
+                    window: 1,
+                },
+            ),
+            recovery,
+        );
+        cfg.recovery_after_rebroadcasts = NonZeroU64::new(1).unwrap();
+        let timeout = cfg.rebroadcast_timeout.get();
+        let engine = Engine::new(context.child("engine"), cfg).unwrap();
+        drop(coordinator);
+        let start = context.current();
+        let mut handle = engine.start(registrations.remove(&participant).unwrap());
+
+        // Cross the first recovery attempt and its retry before allowing a peer quorum.
+        context.sleep_until(start + timeout * 2 + timeout / 2).await;
+        assert!(futures::poll!(&mut handle).is_pending());
+        assert!(reporter.certificates.lock().is_empty());
+
+        let item = Item {
+            epoch,
+            position,
+            digest: digest(position),
+        };
+        for index in 1..3 {
+            let peer = fixture.participants[index].clone();
+            let (mut sender, _) = registrations.remove(&peer).unwrap();
+            let ack = Ack::sign(&fixture.schemes[index], item.clone()).unwrap();
+            sender.send(Recipients::One(participant.clone()), ack.encode(), false);
+        }
+
+        assert_eq!(
+            handle.await.expect("aggregation engine failed"),
+            EngineOutcome::Completed
+        );
+        let certificates = reporter.certificates.lock();
+        assert_eq!(certificates.len(), 1);
+        assert_eq!(certificates[0].item, item);
+    });
+}
+
+#[test_traced("INFO")]
 fn test_closed_proposal_response_is_terminal() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
         let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 4);
