@@ -34,7 +34,7 @@ use commonware_consensus::{
             self as marshal, ArchiveConfig, ArchiveMode, Inline, Retention, SchemeVerifier,
             ServiceHandle, Start,
         },
-        mocks::{Committee, MockBody},
+        mocks::{Bls, Committee, MockBody},
         types::{Context as Producing, TransactionBlock},
     },
     types::{EpochDelta, Height, HeightDelta, Participant, ViewDelta},
@@ -85,7 +85,7 @@ const PROBE: u64 = 7;
 const QMDB: u64 = 8;
 
 type Input = TransactionBlock<Sha256, MockBody>;
-type Marshal = marshal::Mailbox<Sha256, MinPk, MockBody>;
+type Marshal = marshal::Mailbox<Sha256, Bls<MinPk>, MockBody>;
 type Scheme = CheckpointScheme<ed25519::PublicKey, MinPk>;
 type Chain = executor::Mailbox<State>;
 type Resolver = qmdb_resolver::Mailbox<Qmdb<deterministic::Context>, mmr::Family, Op, Digest>;
@@ -156,13 +156,13 @@ impl Validator {
 /// A Multimmit committee on a simulated network.
 struct Cluster {
     context: deterministic::Context,
-    committee: Committee<MinPk>,
+    committee: Committee<Bls<MinPk>>,
     oracle: Oracle<ed25519::PublicKey, deterministic::Context>,
 }
 
 impl Cluster {
     async fn new(context: deterministic::Context) -> Self {
-        let committee = Committee::<MinPk>::builder(7, VALIDATORS)
+        let committee = Committee::<Bls<MinPk>>::builder(7, VALIDATORS)
             .namespace(NAMESPACE)
             .build();
         let (network, oracle) = Network::new_with_peers(
@@ -397,7 +397,7 @@ impl Cluster {
         // The engine orders the blocks the inline producer builds.
         let engine = multimmit::Engine::open(
             context.child("engine"),
-            multimmit::Config::<Sha256, _, _, _, _, _, _, _, _> {
+            multimmit::Config::<Sha256, _, _, _, _, _, _, _> {
                 scheme: self.committee.signers[index].clone(),
                 genesis: self.committee.config.genesis().clone(),
                 tuning: Tuning {
