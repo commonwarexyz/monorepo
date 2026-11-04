@@ -1835,7 +1835,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     // worker, and its wakeup prefers its submitter's home group.
                     //
                     // Admissions limit how many roots learn descendant placement, and excess roots
-                    // execute Wide. Every counted external root leases all groups, so no group
+                    // execute Wide. Every tracked external root leases all groups, so no group
                     // gains a new home until it finishes. Leases belong to the job, even after its
                     // future or parent is gone.
                     //

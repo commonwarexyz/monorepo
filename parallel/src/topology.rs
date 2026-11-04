@@ -516,9 +516,9 @@ std::thread_local! {
     static FAKE_DOMAIN: std::cell::Cell<Option<u16>> = const { std::cell::Cell::new(None) };
 }
 
-/// The counted work in flight on a group, as described on [`Lease`]. The group is idle while no
-/// thread has counted work in flight on it. Claims, releases, and homing all hold the group's lock
-/// on this state, so a group found idle gains no counted work before it is homed.
+/// The tracked work in flight on a group, as described on [`Lease`]. The group is idle while no
+/// thread has tracked work in flight on it. Claims, releases, and homing all hold the group's lock
+/// on this state, so a group found idle gains no tracked work before it is homed.
 #[derive(Debug)]
 struct State {
     /// The tick of the group's latest claim of any kind, so [`Groups::least_loaded`] breaks ties
@@ -553,7 +553,7 @@ impl State {
         }
     }
 
-    /// The number of counted calls and jobs in flight on the group.
+    /// The number of tracked calls and jobs in flight on the group.
     fn in_flight(&self) -> usize {
         self.submitters.iter().map(|(_, count)| count).sum()
     }
@@ -649,14 +649,14 @@ impl std::fmt::Debug for Groups {
 }
 
 /// Counts one call or job against a group, or against every group for a Wide claim, until the
-/// lease is dropped. An unhomed group with counted work in flight cannot acquire a home.
+/// lease is dropped. An unhomed group with tracked work in flight cannot acquire a home.
 ///
-/// With only one group, a claim from a thread with no known domain is not counted, since there is
+/// With only one group, a claim from a thread with no known domain is not tracked, since there is
 /// no other group to pick and that thread cannot home this one.
 #[derive(Debug)]
 pub(crate) struct Lease {
     /// The strategy's groups and the thread that made the claim, or `None` when the claim is not
-    /// counted.
+    /// tracked.
     claim: Option<(Arc<Groups>, ThreadId)>,
 
     /// The leased group, or for a Wide claim the group its work is offered to first.
@@ -670,8 +670,8 @@ pub(crate) struct Lease {
 }
 
 impl Lease {
-    /// A lease for a claim of `submitter` that the caller has already counted in `groups`.
-    fn counted(groups: &Arc<Groups>, submitter: ThreadId, index: usize, wide: bool) -> Self {
+    /// A lease for a claim of `submitter` that the caller has already recorded in `groups`.
+    fn tracked(groups: &Arc<Groups>, submitter: ThreadId, index: usize, wide: bool) -> Self {
         Self {
             claim: Some((Arc::clone(groups), submitter)),
             index,
@@ -680,8 +680,8 @@ impl Lease {
         }
     }
 
-    /// A lease for a claim that is not counted.
-    const fn uncounted(index: usize, wide: bool) -> Self {
+    /// A lease for a claim that is not tracked.
+    const fn untracked(index: usize, wide: bool) -> Self {
         Self {
             claim: None,
             index,
@@ -720,7 +720,7 @@ impl Drop for Lease {
         let Some((groups, submitter)) = &self.claim else {
             assert!(
                 !self.admitted,
-                "an uncounted lease must hold no root admission"
+                "an untracked lease must hold no root admission"
             );
             return;
         };
@@ -927,7 +927,7 @@ impl Groups {
                 }
                 let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
                 group.state.lock().claim(tick, submitter);
-                return Some(Lease::counted(self, submitter, index, false));
+                return Some(Lease::tracked(self, submitter, index, false));
             }
             None
         };
@@ -966,7 +966,7 @@ impl Groups {
             }
             assert!(group.home.set(domain).is_ok(), "a group must be homed once");
             state.claim(tick, submitter);
-            let lease = Lease::counted(self, submitter, index, false);
+            let lease = Lease::tracked(self, submitter, index, false);
             drop(state);
             self.home(index);
             return Some(lease);
@@ -1011,11 +1011,11 @@ impl Groups {
     /// Claims every group for a call that may run on any of them. The lease names the group homed
     /// in the calling thread's domain, or the first group, so the caller can offer its work there
     /// first. Any worker may take the call's work. The lease counts it on every group until the
-    /// call finishes, except in the uncounted case described on [`Lease`].
+    /// call finishes, except in the untracked case described on [`Lease`].
     pub(crate) fn wide(self: &Arc<Self>) -> Lease {
         let domain = self.current_domain();
-        if !self.must_count(|| domain) {
-            return Lease::uncounted(0, true);
+        if !self.must_track(|| domain) {
+            return Lease::untracked(0, true);
         }
         let home = domain.and_then(|domain| {
             self.groups
@@ -1027,18 +1027,18 @@ impl Groups {
         for group in &self.groups {
             group.state.lock().claim(tick, submitter);
         }
-        Lease::counted(self, submitter, home.unwrap_or(0), true)
+        Lease::tracked(self, submitter, home.unwrap_or(0), true)
     }
 
     /// Claims an existing placement's group without changing its home.
     pub(crate) fn lease(self: &Arc<Self>, index: usize) -> Lease {
-        if !self.must_count(|| self.current_domain()) {
-            return Lease::uncounted(index, false);
+        if !self.must_track(|| self.current_domain()) {
+            return Lease::untracked(index, false);
         }
         let submitter = std::thread::current().id();
         let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
         self.groups[index].state.lock().claim(tick, submitter);
-        Lease::counted(self, submitter, index, false)
+        Lease::tracked(self, submitter, index, false)
     }
 
     /// Claims a group for a caller without a usable home, preferring groups that can take Local
@@ -1058,10 +1058,10 @@ impl Groups {
         self.lease(index)
     }
 
-    /// Whether a claim must be counted, as described on [`Lease`], where `domain` looks up the
-    /// claiming thread's domain. A strategy with several groups counts every claim without calling
+    /// Whether a claim must be tracked, as described on [`Lease`], where `domain` looks up the
+    /// claiming thread's domain. A strategy with several groups tracks every claim without calling
     /// it.
-    fn must_count(&self, domain: impl FnOnce() -> Option<u16>) -> bool {
+    fn must_track(&self, domain: impl FnOnce() -> Option<u16>) -> bool {
         self.groups.len() > 1 || domain().is_some()
     }
 
@@ -1612,16 +1612,16 @@ mod tests {
         Groups::fake_domain(None);
     }
 
-    /// Claims on a strategy's only group count only when the calling thread's domain is known.
-    /// Claims from a thread without one leave the group idle, so a caller with a domain can still
-    /// home it.
+    /// Claims on a strategy's only group are tracked only when the calling thread's domain is
+    /// known. Claims from a thread without one leave the group idle, so a caller with a domain can
+    /// still home it.
     #[test]
-    fn single_group_counts_only_known_domains() {
+    fn single_group_tracks_only_known_domains() {
         let groups = synthetic(&[2]);
 
-        // No kind of claim from a thread without a domain counts against the group.
+        // No kind of claim from a thread without a domain is tracked.
         Groups::fake_domain(None);
-        let uncounted = [
+        let untracked = [
             groups.wide(),
             groups.lease(0),
             groups.least_loaded(),
@@ -1629,8 +1629,8 @@ mod tests {
         ];
         assert!(!groups.groups[0].has_leases());
 
-        // Callers with a known domain count their claims. The first homes the group, and one from
-        // another domain falls back to it.
+        // Claims from callers with a known domain are tracked. The first caller homes the group,
+        // and one from another domain falls back to it.
         Groups::fake_domain(Some(0));
         let local = groups.local().expect("the idle group must take a home");
         let wide = groups.wide();
@@ -1638,11 +1638,11 @@ mod tests {
         let fallback = groups.least_loaded();
         assert_eq!(groups.groups[0].state.lock().in_flight(), 3);
 
-        // Dropping the uncounted leases releases none of the counted claims.
-        drop(uncounted);
+        // Dropping the untracked leases releases none of the tracked claims.
+        drop(untracked);
         assert_eq!(groups.groups[0].state.lock().in_flight(), 3);
 
-        // Dropping the counted leases leaves the group idle.
+        // Dropping the tracked leases leaves the group idle.
         drop((local, wide, fallback));
         assert!(!groups.groups[0].has_leases());
         Groups::fake_domain(None);
