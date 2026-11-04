@@ -516,9 +516,9 @@ std::thread_local! {
     static FAKE_DOMAIN: std::cell::Cell<Option<u16>> = const { std::cell::Cell::new(None) };
 }
 
-/// The tracked work in flight on a group, as described on [`Lease`]. The group is idle while no
-/// thread has tracked work in flight on it. Claims, releases, and homing all hold the group's lock
-/// on this state, so a group found idle gains no tracked work before it is homed.
+/// The [`Lease::Tracked`] claims in flight on a group. The group is idle while it has none.
+/// Claims, releases, and homing all hold the group's lock on this state, so a group found idle
+/// gains no tracked work before it is homed.
 #[derive(Debug)]
 struct State {
     /// The tick of the group's latest claim of any kind, so [`Groups::least_loaded`] breaks ties
@@ -648,8 +648,8 @@ impl std::fmt::Debug for Groups {
     }
 }
 
-/// Counts one call or job against a group, or against every group for a Wide claim, until the
-/// lease is dropped. An unhomed group with tracked work in flight cannot acquire a home.
+/// A claim by one call or job on a group, or on every group for a Wide claim, until the lease is
+/// dropped. An unhomed group with tracked work in flight cannot acquire a home.
 #[derive(Debug)]
 pub(crate) enum Lease {
     /// A claim on a strategy's only group from a thread with no known domain. It records nothing,
@@ -1019,8 +1019,8 @@ impl Groups {
 
     /// Claims every group for a call that may run on any of them. The lease names the group homed
     /// in the calling thread's domain, or the first group, so the caller can offer its work there
-    /// first. Any worker may take the call's work. The lease counts it on every group until the
-    /// call finishes, unless it is [`Lease::Untracked`].
+    /// first. Any worker may take the call's work. A tracked lease counts it on every group until
+    /// the call finishes.
     pub(crate) fn wide(self: &Arc<Self>) -> Lease {
         let domain = self.current_domain();
         if !self.must_track(|| domain) {
