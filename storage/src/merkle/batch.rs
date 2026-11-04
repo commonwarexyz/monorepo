@@ -415,10 +415,10 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     ///
     /// # Panics
     ///
-    /// Panics if a node it reads is in neither the batch chain nor `base`. This happens when an
-    /// unapplied ancestor that appended the node has been dropped, or when `base` has been pruned
-    /// past a leaf this batch updates. The [module docs](crate::merkle::batch) describe both cases
-    /// under "Batch invalidation".
+    /// Panics if a node it reads is in neither the batch chain nor `base`, which happens when
+    /// `base` has been pruned past a leaf this batch updates. A batch merkleized after an unapplied
+    /// ancestor was dropped does not panic, but [`Mem::apply_batch`] rejects it. The
+    /// [module docs](crate::merkle::batch) describe both cases under "Batch invalidation".
     pub fn merkleize(
         mut self,
         base: &Mem<F, D>,
@@ -752,17 +752,23 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Mem::validate_batch`].
+    /// Returns the errors of [`Mem::validate_batch`], and [`Error::DataCorrupted`] if any of
+    /// those records overwrites a node.
     #[cfg(feature = "std")]
     pub(crate) fn unapplied<'a>(
         &'a self,
         mem: &Mem<F, D>,
     ) -> Result<impl Iterator<Item = &'a [D]> + use<'a, F, D, S>, Error<F>> {
         let start = mem.validate_batch(self)?;
-        Ok(self.ancestors[start..]
-            .iter()
-            .chain(core::iter::once(&self.data))
-            .map(|data| data.appended.as_slice()))
+        let records = || {
+            self.ancestors[start..]
+                .iter()
+                .chain(core::iter::once(&self.data))
+        };
+        if records().any(|data| !data.overwrites.is_empty()) {
+            return Err(Error::DataCorrupted("batch overwrites nodes"));
+        }
+        Ok(records().map(|data| data.appended.as_slice()))
     }
 
     /// Return a reference to the batch's strategy.

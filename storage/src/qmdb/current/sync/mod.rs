@@ -190,9 +190,6 @@ where
     };
     current_db.update_metrics();
 
-    // Persist metadata so the db can be reopened with init_fixed/init_variable.
-    let current_db = current_db.sync_metadata().await?;
-
     Ok(current_db)
 }
 
@@ -248,8 +245,9 @@ where
         .await
     }
 
-    async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
-        Ok(self)
+    async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
+        self.any.log = self.any.log.persist_boundary().await?;
+        self.sync_metadata().await
     }
 
     async fn local_pinned_nodes(

@@ -607,7 +607,9 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                     (Some(left), Some(right), held) => {
                         let digest = hasher.node_digest(pos, &left, &right);
                         if held.is_some_and(|held| held != digest) {
-                            return Err(merkle::Error::RootMismatch);
+                            return Err(merkle::Error::DataCorrupted(
+                                "rebuilt region does not match",
+                            ));
                         }
                         digest
                     }
@@ -798,8 +800,9 @@ mod tests {
             .unwrap()
     }
 
-    /// Every available node matches an in-memory oracle at each resident height, as the boundary
-    /// advances over one tree.
+    /// Every node at or past the boundary, and every pinned node, matches an in-memory oracle at
+    /// each resident height, both as the boundary advances over one tree and in a tree opened at
+    /// the boundary. Other nodes read as pruned.
     async fn matches_oracle<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
         let mut ops = Operations::new(513);
@@ -813,37 +816,52 @@ mod tests {
             );
             for boundary in [0, 1, 7, 31, 32, 33, 46, 47, 48, 255, 256, 257] {
                 let boundary = Location::new(boundary);
-                let pins = F::nodes_to_pin(boundary)
-                    .map(|p| expected.get_node(p).unwrap())
+                let first = F::location_to_position(boundary);
+                let pinned: Vec<_> = F::nodes_to_pin(boundary).collect();
+                let pins: Vec<_> = pinned
+                    .iter()
+                    .map(|&p| expected.get_node(p).unwrap())
                     .collect();
-                tree.prune(boundary, pins);
-                let (end, start) = (born(tree.size()), born(F::location_to_position(boundary)));
-                let held: u64 = (height as usize..end.len())
-                    .map(|h| end[h] - start[h])
-                    .sum();
-                assert_eq!(tree.resident.len() as u64, held, "pruned nodes retained");
+                tree.prune(boundary, pins.clone());
+                let resident = (*first..*expected.size())
+                    .filter(|&p| F::pos_to_height(Position::new(p)) >= height)
+                    .count();
+                assert_eq!(tree.resident.len(), resident, "pruned nodes retained");
                 ops.bounds.start = *boundary;
-                ops.clear_reads();
-                let positions: Vec<_> = (0..*expected.size())
+                let opened = Tree::new(boundary, pins, &config(height), Metrics::new(&context))
+                    .unwrap()
+                    .replay(&ops, &hasher, Location::new(513), NZU64!(7))
+                    .await
+                    .unwrap();
+
+                let positions: Vec<_> = (*first..*expected.size())
                     .map(Position::new)
-                    .filter(|&p| tree.available(p))
+                    .chain(pinned.iter().copied())
                     .collect();
-                let got = tree.get_nodes(&ops, &hasher, &positions).await.unwrap();
-                for (&pos, node) in positions.iter().zip(got) {
-                    assert_eq!(
-                        Some(node),
-                        expected.get_node(pos),
-                        "height {height}, boundary {boundary}, position {pos}"
-                    );
-                }
-                for (loc, count) in ops.reads.iter().enumerate() {
-                    assert!(
-                        count.load(Ordering::Relaxed) <= 1,
-                        "operation {loc} read twice in one request"
-                    );
-                }
-                if height == 0 {
-                    assert_eq!(ops.reads(), 0, "resident nodes need no reads");
+                for tree in [&tree, &opened] {
+                    ops.clear_reads();
+                    let got = tree.get_nodes(&ops, &hasher, &positions).await.unwrap();
+                    for (&pos, node) in positions.iter().zip(got) {
+                        assert_eq!(
+                            Some(node),
+                            expected.get_node(pos),
+                            "height {height}, boundary {boundary}, position {pos}"
+                        );
+                    }
+                    for (loc, count) in ops.reads.iter().enumerate() {
+                        assert!(
+                            count.load(Ordering::Relaxed) <= 1,
+                            "operation {loc} read twice in one request"
+                        );
+                    }
+                    if height == 0 {
+                        assert_eq!(ops.reads(), 0, "resident nodes need no reads");
+                    }
+                    for pos in (0..*first).map(Position::new) {
+                        if !pinned.contains(&pos) {
+                            assert!(matches!(tree.get_node(&ops, &hasher, pos).await, Ok(None)));
+                        }
+                    }
                 }
             }
         }
@@ -858,29 +876,48 @@ mod tests {
         deterministic::Runner::default().start(matches_oracle::<mmb::Family>);
     }
 
-    /// Appending up to the largest supported size, and rebuilding the regions there, never places
-    /// a node that is not born yet.
+    /// Appending up to the largest supported size matches an oracle, and rebuilding the regions
+    /// there never places a node that is not born yet.
     async fn appends_near_maximum<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
         let boundary = Location::<F>::new(*F::MAX_LEAVES - 40);
         let ops = Operations::range(*boundary..*F::MAX_LEAVES);
-        let pins = F::nodes_to_pin(boundary).map(|_| Sha256::fill(7)).collect();
-        let tree =
-            Tree::<F, D, _>::new(boundary, pins, &config(5), Metrics::new(&context)).unwrap();
+        let pins: Vec<_> = F::nodes_to_pin(boundary).map(|_| Sha256::fill(7)).collect();
+        let tree = Tree::<F, D, _>::new(boundary, pins.clone(), &config(5), Metrics::new(&context))
+            .unwrap();
         let mut batch = tree.new_batch();
         for loc in ops.bounds.clone() {
             batch = batch.add(&hasher, &ops.item(loc).encode());
         }
         let batch = batch.merkleize(tree.mem(), &hasher);
-        let tree = tree.apply_batch(&batch).unwrap();
+        let mut tree = tree.apply_batch(&batch).unwrap();
         assert_eq!(*tree.leaves(), ops.bounds.end);
+
+        // An oracle that retains every node past the same boundary.
+        let mut expected = Mem::from_components(Vec::new(), boundary, pins).unwrap();
+        let mut batch = expected.new_batch();
         for loc in ops.bounds.clone() {
-            let pos = F::location_to_position(Location::new(loc));
-            assert!(tree.get_node(&ops, &hasher, pos).await.unwrap().is_some());
+            batch = batch.add(&hasher, &ops.item(loc).encode());
         }
-        tree.pinned_nodes_at(&ops, &hasher, tree.leaves())
-            .await
+        expected
+            .apply_batch(&batch.merkleize(&expected, &hasher))
             .unwrap();
+        assert_eq!(tree.size(), expected.size());
+
+        // Every node past the boundary matches, before and after a prune near the end.
+        for boundary in [boundary, Location::new(*F::MAX_LEAVES - 8)] {
+            let pins: Vec<_> = F::nodes_to_pin(boundary)
+                .map(|p| expected.get_node(p).unwrap())
+                .collect();
+            tree.prune(boundary, pins);
+            let positions: Vec<_> = (*F::location_to_position(boundary)..*tree.size())
+                .map(Position::new)
+                .collect();
+            let got = tree.get_nodes(&ops, &hasher, &positions).await.unwrap();
+            for (&pos, node) in positions.iter().zip(got) {
+                assert_eq!(Some(node), expected.get_node(pos), "position {pos}");
+            }
+        }
     }
 
     #[test]
@@ -939,6 +976,36 @@ mod tests {
         }
     }
 
+    /// A chain that overwrites a node is rejected, since the tree applies only appended nodes.
+    async fn rejects_overwrites<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
+        let ops = Operations::new(4);
+        let tree = replayed::<F>(&context, &ops, &hasher, 2, 2).await;
+        let parent = tree
+            .new_batch()
+            .add(&hasher, &ops.item(2).encode())
+            .add(&hasher, &ops.item(3).encode())
+            .merkleize(tree.mem(), &hasher);
+        let child = parent
+            .new_batch()
+            .update_leaf_digest(Location::new(3), Sha256::fill(1))
+            .unwrap()
+            .merkleize(tree.mem(), &hasher);
+        assert!(matches!(
+            tree.apply_batch(&child),
+            Err(merkle::Error::DataCorrupted(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_overwrites_mmr() {
+        deterministic::Runner::default().start(rejects_overwrites::<mmr::Family>);
+    }
+    #[test]
+    fn rejects_overwrites_mmb() {
+        deterministic::Runner::default().start(rejects_overwrites::<mmb::Family>);
+    }
+
     #[test]
     fn applied_chain_mmr() {
         deterministic::Runner::default().start(applied_chain::<mmr::Family>);
@@ -960,7 +1027,7 @@ mod tests {
             assert!(
                 matches!(
                     tree.get_node(&ops, &hasher, pos).await,
-                    Err(merkle::Error::RootMismatch)
+                    Err(merkle::Error::DataCorrupted(_))
                 ),
                 "{leaves} leaves"
             );
@@ -996,7 +1063,7 @@ mod tests {
                 assert!(
                     matches!(
                         tree.get_node(&ops, &hasher, pos).await,
-                        Err(merkle::Error::RootMismatch)
+                        Err(merkle::Error::DataCorrupted(_))
                     ),
                     "boundary {boundary}, corrupt {corrupt}"
                 );

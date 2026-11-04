@@ -50,9 +50,10 @@ use tracing::{error, warn};
 /// Ops-tree roots at the grafting height for the graftable bitmap chunks not wholly below the
 /// inactivity floor.
 ///
-/// Merkleization re-grafts a dirty chunk from its retained root, since the ops tree may have
-/// flushed that node from memory. Roots are stored densely from chunk `start`. The ops tree only
-/// appends, so a retained root never changes.
+/// Merkleization re-grafts a dirty chunk from its retained root without reading the ops tree,
+/// which holds that node in memory only if its resident height is at most the grafting height.
+/// Roots are stored densely from chunk `start`. The ops tree only appends, so a retained root
+/// never changes.
 pub(super) struct GraftRoots<D> {
     start: usize,
     roots: VecDeque<D>,
@@ -240,7 +241,7 @@ pub struct Db<
     /// otherwise, so a snapshot never observes later mutations.
     pub(super) grafted_tree: Arc<Mem<F, H::Digest>>,
 
-    /// Ops-tree roots at the grafting height, kept in memory across journal flushes.
+    /// Ops-tree roots at the grafting height, held whatever the ops tree's resident height.
     pub(super) graft_roots: GraftRoots<H::Digest>,
 
     /// Persists:

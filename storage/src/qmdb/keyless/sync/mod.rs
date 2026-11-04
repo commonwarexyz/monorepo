@@ -83,7 +83,8 @@ where
         db.sync().await
     }
 
-    async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+    async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
+        self.journal = self.journal.persist_boundary().await?;
         Ok(self)
     }
 

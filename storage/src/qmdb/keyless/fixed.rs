@@ -153,97 +153,8 @@ mod tests {
             .start(bounded_init_preserves_latest_after_missing_commit::<mmb::Family>);
     }
 
-    /// A commit retained as blob padding cannot satisfy a bounded reopen below the frontier.
-    async fn bounded_init_rejects_commit_below_frontier<F: Family>(
-        context: deterministic::Context,
-    ) {
-        // Place the last old commit in the blob that will contain the imported frontier.
-        let cfg = db_config("bounded-retained-commit", Sequential);
-        let mut db = TestDb::<F>::init(context.child("initial"), cfg.clone(), None)
-            .await
-            .unwrap();
-        for _ in 0..7 {
-            let batch = db
-                .new_batch()
-                .with_inactivity_floor(Location::new(0))
-                .merkleize(&db)
-                .await
-                .unwrap();
-            db = db.apply_batch(batch).await.unwrap();
-        }
-        let old_end = db.bounds().end;
-
-        // Persist a newer commit whose inactivity floor permits importing at the old end.
-        let batch = db
-            .new_batch()
-            .with_inactivity_floor(old_end)
-            .merkleize(&db)
-            .await
-            .unwrap();
-        let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
-        let latest_root = db.root();
-        let latest_end = db.bounds().end;
-
-        // Import at the old end while retaining the preceding commit as blob padding.
-        let pins = db.journal.pinned_nodes_at(old_end).await.unwrap();
-        let crate::journal::authenticated::Journal {
-            journal,
-            frontier,
-            hasher,
-            ..
-        } = db.journal;
-        drop(frontier);
-        let journal =
-            crate::journal::authenticated::Journal::<F, _, _, Sha256, _>::from_components(
-                context.child("import"),
-                &cfg.merkle,
-                journal,
-                hasher,
-                old_end,
-                pins,
-                NZU64!(8),
-            )
-            .await
-            .unwrap();
-        assert_eq!(journal.journal.bounds().start, 7);
-        assert_eq!(journal.bounds().start, *old_end);
-        drop(journal);
-
-        // The cap selects only commits below the authenticated frontier.
-        let result = TestDb::<F>::init(context.child("bounded"), cfg.clone(), Some(old_end)).await;
-        assert!(matches!(
-            result,
-            Err(Error::Journal(crate::journal::Error::ItemPruned(8)))
-        ));
-
-        // The failed bounded selection must preserve the newer committed state.
-        let db = TestDb::<F>::init(context.child("latest"), cfg, None)
-            .await
-            .unwrap();
-        assert_eq!(db.bounds().end, latest_end);
-        assert_eq!(db.root(), latest_root);
-        db.destroy().await.unwrap();
-    }
-
-    #[test_traced]
-    fn test_bounded_init_rejects_commit_below_frontier_mmr() {
-        // Blob padding below the frontier must not supply a bounded recovery commit.
-        deterministic::Runner::default()
-            .start(bounded_init_rejects_commit_below_frontier::<mmr::Family>);
-    }
-
-    #[test_traced]
-    fn test_bounded_init_rejects_commit_below_frontier_mmb() {
-        // Blob padding below the frontier must not supply a bounded recovery commit.
-        deterministic::Runner::default()
-            .start(bounded_init_rejects_commit_below_frontier::<mmb::Family>);
-    }
-
     /// Imported history excludes local blob padding from reads and commit selection.
-    async fn imported_padding_is_not_authenticated<F: Family>(
-        context: deterministic::Context,
-        check_reads: bool,
-    ) {
+    async fn imported_padding_is_not_authenticated<F: Family>(context: deterministic::Context) {
         /// Create durable histories that differ only in metadata before the imported range.
         async fn history<F: Family>(
             context: deterministic::Context,
@@ -302,36 +213,34 @@ mod tests {
         assert_eq!(db.root(), root);
 
         // Reads and proofs must exclude the local commit retained below the import boundary.
-        if check_reads {
-            assert_eq!(db.bounds(), Location::new(8)..Location::new(9));
-            assert!(matches!(
-                db.journal.read(7).await,
-                Err(crate::journal::Error::ItemPruned(7))
-            ));
-            assert!(matches!(
-                db.journal.read_many(&[7, 8]).await,
-                Err(crate::journal::Error::ItemPruned(7))
-            ));
+        assert_eq!(db.bounds(), Location::new(8)..Location::new(9));
+        assert!(matches!(
+            db.journal.read(7).await,
+            Err(crate::journal::Error::ItemPruned(7))
+        ));
+        assert!(matches!(
+            db.journal.read_many(&[7, 8]).await,
+            Err(crate::journal::Error::ItemPruned(7))
+        ));
 
-            // Cached reads obey the same boundary as storage reads.
-            assert!(db.journal.try_read_sync(7).is_none());
-            let cached = db.journal.try_read_many_sync(&[7, 8]);
-            assert!(cached[0].is_none());
+        // Cached reads obey the same boundary as storage reads.
+        assert!(db.journal.try_read_sync(7).is_none());
+        let cached = db.journal.try_read_many_sync(&[7, 8]);
+        assert!(cached[0].is_none());
 
-            // Neither replay nor historical proofs may expose the unauthenticated prefix.
-            assert!(matches!(
-                db.journal
-                    .replay(7..9, NZUsize!(1024), Default::default())
-                    .await,
-                Err(crate::journal::Error::ItemPruned(7))
-            ));
-            assert!(
-                db.journal
-                    .historical_proof(Location::new(8), Location::new(7), NZU64!(1), 0)
-                    .await
-                    .is_err()
-            );
-        }
+        // Neither replay nor historical proofs may expose the unauthenticated prefix.
+        assert!(matches!(
+            db.journal
+                .replay(7..9, NZUsize!(1024), Default::default())
+                .await,
+            Err(crate::journal::Error::ItemPruned(7))
+        ));
+        assert!(
+            db.journal
+                .historical_proof(Location::new(8), Location::new(7), NZU64!(1), 0)
+                .await
+                .is_err()
+        );
         drop(db);
 
         // A bounded reopen cannot select the conflicting local commit in the padding.
@@ -357,31 +266,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_imported_padding_rejects_bounded_commit_mmr() {
-        // A bounded reopen must reject commits in unauthenticated import padding.
+    fn test_imported_padding_is_not_authenticated_mmr() {
         deterministic::Runner::default()
-            .start(|context| imported_padding_is_not_authenticated::<mmr::Family>(context, false));
+            .start(imported_padding_is_not_authenticated::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_imported_padding_rejects_bounded_commit_mmb() {
-        // A bounded reopen must reject commits in unauthenticated import padding.
+    fn test_imported_padding_is_not_authenticated_mmb() {
         deterministic::Runner::default()
-            .start(|context| imported_padding_is_not_authenticated::<mmb::Family>(context, false));
-    }
-
-    #[test_traced]
-    fn test_imported_padding_rejects_reads_mmr() {
-        // Read paths must reject unauthenticated import padding.
-        deterministic::Runner::default()
-            .start(|context| imported_padding_is_not_authenticated::<mmr::Family>(context, true));
-    }
-
-    #[test_traced]
-    fn test_imported_padding_rejects_reads_mmb() {
-        // Read paths must reject unauthenticated import padding.
-        deterministic::Runner::default()
-            .start(|context| imported_padding_is_not_authenticated::<mmb::Family>(context, true));
+            .start(imported_padding_is_not_authenticated::<mmb::Family>);
     }
 
     async fn open_db<F: Family>(context: deterministic::Context) -> TestDb<F> {
@@ -1185,10 +1078,16 @@ mod tests {
             let floor = db.inactivity_floor_loc();
             assert!(*floor > 0);
             let db = {
+                pending.arm();
                 let mut prune = std::pin::pin!(db.prune(floor));
                 assert!(
                     prune.as_mut().now_or_never().is_none(),
                     "prune proceeded while the started sync was pending"
+                );
+                assert_eq!(
+                    pending.calls(),
+                    0,
+                    "prune synced while the started sync was pending"
                 );
                 pending.unblock();
                 prune.await.unwrap()

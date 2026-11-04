@@ -22,10 +22,11 @@ pub trait Journal<F: Family>: Sized + Send {
     /// Create/open a journal for syncing the given range.
     ///
     /// The implementation must:
-    /// - Discard/ignore any data outside the range.
+    /// - Discard any data past the range end.
     /// - Report `size()` equal to the next location to be filled.
     ///
-    /// On-disk data whose logical locations lie within the range may be reused or discarded.
+    /// On-disk data whose logical locations lie within the range may be reused or discarded. Data
+    /// before the range may be kept until the synced database prunes it.
     fn new(
         context: Self::Context,
         config: Self::Config,

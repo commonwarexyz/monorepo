@@ -4,8 +4,9 @@ use std::num::NonZeroUsize;
 /// Memory policy for Merkle digests.
 #[derive(Clone, Debug)]
 pub struct CacheConfig {
-    /// Lowest node height kept in memory, at most eight. Resident memory is about `2 / 2^height`
-    /// digests per retained operation. Height zero keeps every node.
+    /// Lowest node height kept in memory, at most eight so that rebuilding a lower node reads at
+    /// most 256 operations. Resident memory is about `2 / 2^height` digests per retained
+    /// operation. Height zero keeps every node.
     pub resident_height: u32,
 }
 
@@ -28,7 +29,7 @@ impl Default for CacheConfig {
 /// Configuration for an authenticated journal.
 #[derive(Clone)]
 pub struct Config<S: Strategy> {
-    /// Metadata partition holding the frontier.
+    /// Metadata partition holding the frontier. It must stay the same for the life of the journal.
     pub metadata_partition: String,
     /// Memory policy for Merkle digests.
     pub cache: CacheConfig,

@@ -261,6 +261,9 @@ mod tests {
                 NZU64!(8),
             )
             .await
+            .unwrap()
+            .persist_boundary()
+            .await
             .unwrap();
         assert_eq!(journal.journal.bounds().start, 5);
         assert_eq!(journal.bounds().start, *start);
@@ -658,10 +661,16 @@ mod tests {
             let floor = db.inactivity_floor_loc();
             assert!(*floor > 0);
             let db = {
+                pending.arm();
                 let mut prune = std::pin::pin!(db.prune(floor));
                 assert!(
                     prune.as_mut().now_or_never().is_none(),
                     "prune proceeded while the started sync was pending"
+                );
+                assert_eq!(
+                    pending.calls(),
+                    0,
+                    "prune synced while the started sync was pending"
                 );
                 pending.unblock();
                 prune.await.unwrap()

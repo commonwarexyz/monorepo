@@ -197,7 +197,6 @@ where
             cfg.merkle,
             cfg.log,
             max_size,
-            false,
         )
         .await?;
         let metrics = Metrics::new(context);

@@ -132,7 +132,7 @@ pub(crate) fn journal_covers_range<F: Family>(
 
 /// Shared body for [`Database::local_pinned_nodes`] implementations backed by an authenticated
 /// journal. Returns the pinned nodes at `target.range.start()`, rebuilt by replaying `journal`
-/// from the boundary of the frontier read from `config` through the target end. Returns `None`
+/// from the boundary of the frontier read from `config` through its end. Returns `None`
 /// if that boundary lies after the target start, `journal` does not hold the operations from the
 /// boundary through the target start, or the rebuilt root differs from the target root.
 pub(crate) async fn local_pinned_nodes<F, E, H, S>(
@@ -379,6 +379,87 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(reopened.root(), root);
+        });
+    }
+
+    /// A sync whose root check fails records nothing, so the database reopens at its previous
+    /// state. Here the source's pins and the kept local operations rebuild a root matching
+    /// neither.
+    #[test]
+    fn sync_with_mismatched_root_leaves_the_database_as_it_was() {
+        deterministic::Runner::default().start(|context| async move {
+            // The local and source databases hold the same commits at 0, 2 and 4, and different
+            // values at 1 and 3.
+            type Db =
+                keyless::fixed::Db<MmrFamily, deterministic::Context, U64, Sha256, Sequential>;
+            let local_config = keyless::Config {
+                merkle: merkle_config(),
+                log: journal_config(),
+            };
+            let mut source_config = local_config.clone();
+            source_config.merkle.metadata_partition.push_str("-source");
+            source_config.log.partition.push_str("-source");
+            let populate = |label: &'static str, config, values: [u64; 2]| {
+                let context = context.child(label);
+                async move {
+                    let mut db = Db::init(context, config, None).await.unwrap();
+                    for value in values {
+                        let batch = db
+                            .new_batch()
+                            .append(U64::new(value))
+                            .with_inactivity_floor(Location::new(0))
+                            .merkleize(&db)
+                            .await
+                            .unwrap();
+                        db = db.apply_batch(batch).await.unwrap();
+                    }
+                    db.sync().await.unwrap()
+                }
+            };
+            let local = populate("local", local_config.clone(), [11, 13]).await;
+            let source_db = populate("source", source_config, [22, 24]).await;
+            let local_root = local.root();
+            assert_eq!(local.bounds(), Location::new(0)..Location::new(5));
+            drop(local);
+
+            // The local journal already reaches the target end, so the sync fetches only the
+            // source's pins at 2 and keeps the local operations from 2.
+            let root = source_db.root();
+            let response = source_db
+                .serve(Request::Boundary {
+                    size: Location::new(5),
+                    start: Location::new(2),
+                })
+                .await
+                .unwrap()
+                .0;
+            let result = sync::sync::<Db, _>(Config {
+                context: context.child("sync"),
+                source: SequenceSource::new(vec![response]),
+                target: Target {
+                    root,
+                    range: non_empty_range!(Location::new(2), Location::new(5)),
+                },
+                max_outstanding_requests: NZUsize!(1),
+                fetch_batch_size: NZU64!(1),
+                apply_batch_size: NZU64!(1),
+                db_config: local_config.clone(),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await;
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
+            ));
+
+            // The local frontier and operations are untouched.
+            let reopened = Db::init(context.child("reopen"), local_config, None)
+                .await
+                .unwrap();
+            assert_eq!(reopened.bounds(), Location::new(0)..Location::new(5));
+            assert_eq!(reopened.root(), local_root);
         });
     }
 

@@ -411,10 +411,16 @@ pub(crate) mod test {
             let floor = db.inactivity_floor_loc();
             assert!(*floor > 0);
             let db = {
+                pending.arm();
                 let mut prune = std::pin::pin!(db.prune(floor));
                 assert!(
                     prune.as_mut().now_or_never().is_none(),
                     "prune proceeded while the commit sync was pending"
+                );
+                assert_eq!(
+                    pending.calls(),
+                    0,
+                    "prune synced while the started sync was pending"
                 );
                 pending.unblock();
                 prune.await.unwrap()

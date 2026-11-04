@@ -134,7 +134,8 @@ where
         .await
     }
 
-    async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+    async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
+        self.log = self.log.persist_boundary().await?;
         Ok(self)
     }
 

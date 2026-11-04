@@ -104,7 +104,8 @@ where
         db.sync().await
     }
 
-    async fn persist_sync_result(self) -> Result<Self, Error<F>> {
+    async fn persist_sync_result(mut self) -> Result<Self, Error<F>> {
+        self.journal = self.journal.persist_boundary().await?;
         Ok(self)
     }
 

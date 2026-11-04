@@ -220,14 +220,14 @@ where
     .await?)
 }
 
-/// Publish a standard QMDB journal after validating the retained commit.
+/// Publish a QMDB journal after validating the retained commit. The commit's inactivity floor
+/// need not be retained.
 #[commonware_macros::boxed]
 pub(crate) async fn init_journal<F, E, C, H, S>(
     context: E,
     merkle: crate::journal::authenticated::Config<S>,
     journal: C::Config,
     max_size: Option<Location<F>>,
-    replay_from_floor: bool,
 ) -> Result<crate::journal::authenticated::Journal<F, E, C, H, S>, Error<F>>
 where
     F: Family,
@@ -237,7 +237,7 @@ where
     S: commonware_parallel::Strategy,
 {
     let pending = prepare_initialization(context, merkle, journal, max_size).await?;
-    validate_initialization(&pending, replay_from_floor).await?;
+    validate_initialization(&pending, false).await?;
     Ok(pending.finish().await?)
 }
 

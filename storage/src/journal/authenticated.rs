@@ -11,15 +11,15 @@
 //! the pruning boundary and the digests pinned there. Startup replays the retained operations to
 //! rebuild the Merkle digests kept in memory.
 //!
-//! The frontier is also the earliest readable item. Older bytes retained in a backing blob are
-//! outside the authenticated journal's range.
+//! The frontier's boundary is also the earliest readable item. Older bytes retained in a backing
+//! blob are outside the authenticated journal's range.
 //!
 //! Nodes at or above [`CacheConfig::resident_height`] stay in memory. A lower node is rebuilt when
 //! needed from the operations in its aligned region of leaves.
 //!
 //! A prune commits the operations, writes the frontier at the new boundary, then deletes
-//! operation blobs. A state sync that reuses local operations deletes the ones before its target
-//! only after writing its boundary. Startup finishes a deletion that a crash interrupted.
+//! operation blobs. A state sync writes its boundary only after its root is verified, and deletes
+//! the operations before it after that. Startup finishes a deletion that a crash interrupted.
 //!
 //! # Ownership
 //!
@@ -634,8 +634,9 @@ where
     }
 
     /// Build a journal from synced operations starting at `start`, whose pinned digests are `pins`,
-    /// record `start` as its boundary in the frontier opened under `context`, and then prune the
-    /// operations before it. The operations must be durable.
+    /// using the frontier opened under `context`. Nothing is written until
+    /// [Self::persist_boundary], so the frontier and the operations before `start` stay as they
+    /// were until the caller has verified the root. The operations must be durable.
     ///
     /// Returns [Error::Merkle] with [`merkle::Error::RangeOutOfBounds`] if `start` lies outside
     /// the retained operation range. Its end is a valid start for a fully pruned journal.
@@ -649,16 +650,13 @@ where
         pins: Vec<H::Digest>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
-        let merkle = Tree::new(start, pins.clone(), config, Metrics::new(&context))?;
+        let merkle = Tree::new(start, pins, config, Metrics::new(&context))?;
         let bounds = journal.bounds();
         if *start < bounds.start || *start > bounds.end {
             return Err(merkle::Error::RangeOutOfBounds(start).into());
         }
-        let frontier = Frontier::open(context.child("frontier"), config.metadata_partition.clone())
-            .await?
-            .set(start, pins)
-            .await?;
-        let (journal, _) = journal.prune(*start).await?;
+        let frontier =
+            Frontier::open(context.child("frontier"), config.metadata_partition.clone()).await?;
         let merkle = Self::align(merkle, &journal, &hasher, apply_batch_size).await?;
         Ok(Self {
             merkle,
@@ -666,6 +664,16 @@ where
             journal,
             hasher,
         })
+    }
+
+    /// Record the boundary of a journal built by [Self::from_components] in its frontier, then
+    /// prune the operations before it.
+    pub async fn persist_boundary(mut self) -> Result<Self, Error<F>> {
+        let boundary = self.merkle.bounds().start;
+        let pins = self.pinned_nodes_at(boundary).await?;
+        self.frontier = self.frontier.set(boundary, pins).await?;
+        (self.journal, _) = self.journal.prune(*boundary).await?;
+        Ok(self)
     }
 
     /// Align the Merkle structure with the journal.
@@ -2602,12 +2610,17 @@ mod tests {
 
             // While the operation sync is parked, the prune starts no durability work. Its
             // frontier write must follow the operations that justify it.
+            pending.arm();
             let mut prune = std::pin::pin!(journal.prune(Location::new(14)));
             assert!(
                 prune.as_mut().now_or_never().is_none(),
                 "prune finished while the in-flight sync was pending"
             );
-            assert_eq!(pending.lock().len(), in_flight);
+            assert_eq!(
+                pending.calls(),
+                0,
+                "prune synced while the in-flight sync was pending"
+            );
 
             pending.unblock();
             let (journal, boundary) = prune.await.unwrap();
@@ -2767,6 +2780,45 @@ mod tests {
         deterministic::Runner::default().start(frontier_before_deletion::<mmb::Family>);
     }
 
+    /// A frontier whose pins don't match its boundary, or whose boundary is not a valid location,
+    /// fails the open instead of panicking. An invalid location fails to decode.
+    #[test]
+    fn test_malformed_frontier_fails_open() {
+        deterministic::Runner::default().start(|context| async move {
+            type F = mmr::Family;
+            let records = [
+                (Location::new(8), Vec::new()),
+                (Location::new(8), vec![Sha256::fill(1); 2]),
+                (Location::new(u64::MAX), Vec::new()),
+            ];
+            for (index, (boundary, pins)) in records.into_iter().enumerate() {
+                let suffix = format!("malformed-frontier-{index}");
+                let frontier = Frontier::<F, _, Digest>::open(
+                    context.child("write"),
+                    merkle_config(&suffix).metadata_partition,
+                )
+                .await
+                .unwrap();
+                drop(frontier.set(boundary, pins).await.unwrap());
+                let result = TestJournal::<F>::new(
+                    context.child("open"),
+                    merkle_config(&suffix),
+                    journal_config(&suffix),
+                    |_| true,
+                    ForwardFold,
+                )
+                .await;
+                assert!(matches!(
+                    result,
+                    Err(Error::Merkle(merkle::Error::InvalidPinnedNodes))
+                        | Err(Error::Journal(JournalError::Metadata(
+                            crate::metadata::Error::Corruption(_)
+                        )))
+                ));
+            }
+        });
+    }
+
     /// A failed read returns only once the replay has released the journal, so it reopens at once.
     #[test_traced]
     fn test_finish_with_failed_read_releases_journal() {
@@ -2822,7 +2874,8 @@ mod tests {
             } = journal;
             drop(frontier);
 
-            // Importing the components records the boundary without changing the root.
+            // Importing the components keeps the root and writes nothing until the boundary is
+            // persisted.
             let journal = TestJournal::<F>::from_components(
                 context.child("import"),
                 &merkle_config(&suffix),
@@ -2835,6 +2888,8 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(journal.root(0).unwrap(), root);
+            assert_eq!(journal.frontier.boundary(), Default::default());
+            let journal = journal.persist_boundary().await.unwrap();
             assert_eq!(journal.frontier.boundary(), (start, pins));
             drop(journal);
 
