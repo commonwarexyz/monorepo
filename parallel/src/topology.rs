@@ -680,12 +680,12 @@ impl Lease {
         }
     }
 
-    /// A lease for a claim that is not tracked.
-    const fn untracked(index: usize, wide: bool) -> Self {
+    /// A lease for an untracked claim on a strategy's only group.
+    const fn untracked() -> Self {
         Self {
             claim: None,
-            index,
-            wide,
+            index: 0,
+            wide: false,
             admitted: false,
         }
     }
@@ -697,16 +697,16 @@ impl Lease {
 
     /// Extends this claim to every group while retaining its root admission, if any.
     pub(crate) fn into_wide(mut self) -> Self {
-        if !self.wide {
-            if let Some((groups, submitter)) = &self.claim {
-                let tick = groups.ticks.fetch_add(1, Ordering::Relaxed);
-                for (index, group) in groups.groups.iter().enumerate() {
-                    let mut state = group.state.lock();
-                    if index == self.index {
-                        state.last_used = tick;
-                    } else {
-                        state.claim(tick, *submitter);
-                    }
+        if let Some((groups, submitter)) = &self.claim
+            && !self.wide
+        {
+            let tick = groups.ticks.fetch_add(1, Ordering::Relaxed);
+            for (index, group) in groups.groups.iter().enumerate() {
+                let mut state = group.state.lock();
+                if index == self.index {
+                    state.last_used = tick;
+                } else {
+                    state.claim(tick, *submitter);
                 }
             }
             self.wide = true;
@@ -1015,7 +1015,7 @@ impl Groups {
     pub(crate) fn wide(self: &Arc<Self>) -> Lease {
         let domain = self.current_domain();
         if !self.must_track(|| domain) {
-            return Lease::untracked(0, true);
+            return Lease::untracked();
         }
         let home = domain.and_then(|domain| {
             self.groups
@@ -1033,7 +1033,7 @@ impl Groups {
     /// Claims an existing placement's group without changing its home.
     pub(crate) fn lease(self: &Arc<Self>, index: usize) -> Lease {
         if !self.must_track(|| self.current_domain()) {
-            return Lease::untracked(index, false);
+            return Lease::untracked();
         }
         let submitter = std::thread::current().id();
         let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
