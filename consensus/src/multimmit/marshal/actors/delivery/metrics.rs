@@ -11,6 +11,7 @@ pub(super) struct Metrics {
     attempts: Counter,
     hot_outputs: Counter,
     stored_outputs: Counter,
+    final_blocks: Counter,
     acknowledgements: Counter,
     acknowledgement_starts: Counter,
     acknowledgement_durability: histogram::Timed,
@@ -34,6 +35,10 @@ impl Metrics {
             stored_outputs: context.counter(
                 "stored_outputs",
                 "Outputs materialized from storage for application delivery",
+            ),
+            final_blocks: context.counter(
+                "final_blocks_total",
+                "Final blocks reported to the application before they are ordered",
             ),
             acknowledgements: context.counter(
                 "acknowledgements_total",
@@ -81,6 +86,11 @@ impl Metrics {
     /// Counts outputs reported from bodies read back from storage.
     pub(super) fn stored_outputs(&self, outputs: usize) {
         self.stored_outputs.inc_by(saturating_u64(outputs));
+    }
+
+    /// Counts one final block reported before it is ordered.
+    pub(super) fn final_reported(&self) {
+        self.final_blocks.inc();
     }
 
     /// Counts one acknowledged prefix whose cursor sync started.
