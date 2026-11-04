@@ -8,7 +8,7 @@ fn fault_models_match_the_codec_quorums() {
         let codec = CodecConfig::new(n, 1, PathLimits::new(1, 0)).unwrap();
         assert_eq!(Available::quorum(n) as usize, codec.da_quorum(), "n = {n}");
         assert_eq!(
-            NullifyFaults::quorum(n) as usize,
+            N5f1Nullification::quorum(n) as usize,
             codec.nullification_quorum(),
             "n = {n}"
         );
