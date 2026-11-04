@@ -1,6 +1,6 @@
 //! Staging durable changes and the journal barrier pipeline.
 
-use super::{machine::Machine, store::ArtifactState};
+use super::{machine::Machine, step::history_accepted, store::ArtifactState};
 use crate::{
     Epochable as _,
     multimmit::{
@@ -652,11 +652,22 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
             self.validate_finality(*id, *observation, artifact, None)?;
             self.chain.observe::<H>(*id, *observation, artifact)?;
             self.views.observe::<H>(*id, *observation, artifact, None)?;
+            let provisions = Arc::clone(&self.store.artifacts[id].provisions);
+            self.report_leader_history(artifact, &provisions);
         }
         let mut activities = Vec::with_capacity(ready.len());
         for (_, artifact_id, artifact) in ready {
             self.push_acceptance(artifact_id, artifact, &mut activities);
         }
+        // Recovery never reports, so a restarted engine reports the history of the leaders its
+        // retained state still proves once more.
+        self.report_finality_histories();
+        activities.extend(
+            self.views
+                .take_histories()
+                .into_iter()
+                .map(history_accepted),
+        );
         Ok(activities)
     }
 

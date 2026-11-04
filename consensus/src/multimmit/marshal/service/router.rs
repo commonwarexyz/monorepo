@@ -272,6 +272,7 @@ where
                 view,
                 commitment,
                 record,
+                ..
             } => {
                 if record.commitment::<H>() != commitment {
                     return;
