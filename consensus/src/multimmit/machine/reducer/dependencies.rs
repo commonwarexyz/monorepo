@@ -489,6 +489,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
             self.store
                 .newly_ready
                 .push((*observation, id, Arc::clone(artifact)));
+            self.report_leader_history(artifact, &ready.provisions);
         }
         if let Artifact::Vqc(certificate) = artifact.as_ref() {
             let certificate = validated_vqc
