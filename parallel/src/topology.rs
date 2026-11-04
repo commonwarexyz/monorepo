@@ -1016,7 +1016,7 @@ impl Groups {
     /// call finishes, unless the claim counts nowhere as [`Lease`] describes.
     pub(crate) fn wide(self: &Arc<Self>) -> Lease {
         let domain = self.current_domain();
-        if self.groups.len() == 1 && domain.is_none() {
+        if !self.must_count(|| domain) {
             return Lease::uncounted(0, true);
         }
         let home = domain.and_then(|domain| {
@@ -1034,7 +1034,7 @@ impl Groups {
 
     /// Claims an existing placement's group without changing its home.
     pub(crate) fn lease(self: &Arc<Self>, index: usize) -> Lease {
-        if self.groups.len() == 1 && self.current_domain().is_none() {
+        if !self.must_count(|| self.current_domain()) {
             return Lease::uncounted(index, false);
         }
         let submitter = std::thread::current().id();
@@ -1058,6 +1058,13 @@ impl Groups {
             })
             .expect("a strategy must have at least one group");
         self.lease(index)
+    }
+
+    /// Whether a claim must be counted, as described on [`Lease`], where `domain` looks up the
+    /// claiming thread's domain. A strategy with several groups counts every claim without calling
+    /// it.
+    fn must_count(&self, domain: impl FnOnce() -> Option<u16>) -> bool {
+        self.groups.len() > 1 || domain().is_some()
     }
 
     /// Requests placement in the home domain of `group`, within the caller's current mask. A
