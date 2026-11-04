@@ -720,6 +720,10 @@ impl Lease {
 impl Drop for Lease {
     fn drop(&mut self) {
         let Some((groups, submitter)) = &self.claim else {
+            assert!(
+                !self.admitted,
+                "an uncounted lease must hold no root admission"
+            );
             return;
         };
         let groups = &groups.groups;
