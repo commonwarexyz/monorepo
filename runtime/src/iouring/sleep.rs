@@ -8,12 +8,38 @@
 //!
 //! A [`Sleep`] fixes its deadline in monotonic nanoseconds ([`clock`]) when
 //! it is created and registers on the worker of its first pending poll, which
-//! keeps the registration for life. Polls and drops on any thread act on that
-//! shard directly, and a drop unlinks its registration at once. Waker clones,
-//! wakes, and waker destruction never run under the shard lock or a worker
-//! borrow: a pending poll clones a changed waker before it relocks, while
-//! wakes and released wakers go through the current worker's [`Deferred`]
-//! batch, or are dropped at once on a thread without a worker.
+//! keeps the registration for life. A first poll compares the deadline with
+//! the worker's latest service time instead of reading the clock, so a
+//! deadline that passed after that time registers and fires at its firing
+//! time in a later service pass. Only a first poll on a thread whose worker is
+//! missing or closing reads the clock, to complete a deadline that has passed.
+//! Polls and drops on any thread act on that shard directly, and a drop
+//! unlinks its registration at once. Waker clones, wakes, and waker
+//! destruction never run under the shard lock or a worker borrow: a pending
+//! poll clones a changed waker before it locks, while wakes and released
+//! wakers go through the current worker's [`Deferred`] batch, or are dropped
+//! at once on a thread without a worker.
+//!
+//! A pending poll at an unchanged epoch whose waker matches an identity that
+//! cannot recur unseen takes no lock. Only the sleep writes its registration's
+//! waker, and every other party that ends a waiting registration (expiry,
+//! rescue, closure) advances the shard's epoch inside its critical section,
+//! before it runs the deferred wake that consumes the stored waker. A sleeper
+//! caches the epoch at which it last saw its registration waiting. Matching
+//! the stored waker's identity alone is not enough: once an ending consumes
+//! that waker, a waker implementation may give its identity to another task
+//! without synchronizing with the consumption, and a poll from that task could
+//! read the old epoch. A poll therefore skips the lock only with one of two
+//! identities. A runtime task's waker carries its task header, which is freed
+//! only after its last reference is released and acquired, and the allocator
+//! orders a free before any reuse of the address, so the identity recurs only
+//! after the consumption and hence after the epoch advance. Any other waker
+//! matches only the identity of an owned clone that the sleeper keeps once a
+//! repoll finds its registration waiting with an equivalent waker, so that
+//! identity stays live, and names the same task, while polls can match it.
+//! Either way, a matching poll that misses an ending belongs to the task that
+//! the ending wakes, whose poll scheduled by that wake reads the advanced
+//! epoch and takes the lock.
 //!
 //! The owner expires due registrations in its service pass, at most
 //! [`BUDGET`] per pass. A pass that leaves due registrations behind keeps the
@@ -36,7 +62,9 @@
 //! remove registrations, which can leave cached and published bounds early but
 //! never late. An early bound costs spurious expiry passes or lock attempts
 //! until expiry has drained the wheel bucket whose minimum was removed (see
-//! [`Wheel`]).
+//! [`Wheel`]). A drop that empties the wheel publishes no bound, and on the
+//! owner it also clears the owner's cached bound, so an idle worker takes no
+//! timed wake for a cancelled sleep.
 //!
 //! Worker cleanup closes the shard: later registration is rejected and every
 //! pending sleeper is woken. A sleep then observes how its registration ended.
@@ -47,21 +75,32 @@ use super::{
     clock,
     runtime::{Deferred, Local},
     slab::{Id, Slab},
+    task::is_task_waker,
     wheel::{BUDGET, Wheel},
 };
-use commonware_utils::sync::Mutex;
 use crossbeam_utils::CachePadded;
 use std::{
     future::Future,
-    mem,
+    mem::{self, ManuallyDrop},
+    num::NonZeroUsize,
+    panic::{self, AssertUnwindSafe},
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     task::{Context, Poll, Waker},
     time::{Duration, SystemTime},
 };
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "loom")] {
+        use loom::sync::{
+            Mutex, MutexGuard,
+            atomic::{AtomicU64, Ordering},
+        };
+    } else {
+        use commonware_utils::sync::{Mutex, MutexGuard};
+        use std::sync::atomic::{AtomicU64, Ordering};
+    }
+}
 
 /// Resolution of the sleep wheel in nanoseconds. Rounding a deadline up to it
 /// adds less than the latency of one wake.
@@ -111,20 +150,59 @@ struct Registrations {
 }
 
 impl Registrations {
-    /// Fire the registrations due at `now`, within one budget, deferring
-    /// their wakes.
-    fn expire(&mut self, now: u64, deferred: &mut Deferred) {
+    /// Fire the registrations due at `now`, within one budget.
+    fn expire(&mut self, now: u64, ending: &mut Ending<'_>) {
         let Self { entries, wheel, .. } = self;
         let mut budget = BUDGET;
         wheel.expire(now, &mut budget, &mut |index| {
             // A slot is resident exactly while its entry waits.
             let id = entries.id_at(index as usize).unwrap();
-            let entry = entries.get_mut(id).unwrap();
-            let Entry::Waiting(waker) = mem::replace(entry, Entry::Fired) else {
-                unreachable!("resident timer is not waiting");
-            };
-            deferred.wakes.push(waker);
+            ending.end(entries.get_mut(id).unwrap(), Outcome::Fired);
         });
+    }
+
+    /// Reject later registrations and close every waiting one.
+    fn close(&mut self, ending: &mut Ending<'_>) {
+        let Self {
+            entries,
+            wheel,
+            closed,
+        } = self;
+        *closed = true;
+        wheel.clear();
+        for index in 0..entries.slots() {
+            let Some(id) = entries.id_at(index) else {
+                continue;
+            };
+            let entry = entries.get_mut(id).unwrap();
+            if matches!(entry, Entry::Waiting(_)) {
+                ending.end(entry, Outcome::Closed);
+            }
+        }
+    }
+}
+
+/// Ends waiting registrations on behalf of a party other than their sleeps,
+/// within one critical section opened by [`TimerShard::end`].
+struct Ending<'a> {
+    /// Wakes of the ended registrations, run after the lock is released.
+    wakes: &'a mut Vec<Waker>,
+    /// Whether any registration ended.
+    ended: bool,
+}
+
+impl Ending<'_> {
+    /// End the waiting `entry` with `outcome`, deferring its wake.
+    fn end(&mut self, entry: &mut Entry, outcome: Outcome) {
+        let ended = match outcome {
+            Outcome::Fired => Entry::Fired,
+            Outcome::Closed => Entry::Closed,
+        };
+        let Entry::Waiting(waker) = mem::replace(entry, ended) else {
+            unreachable!("only a waiting registration ends");
+        };
+        self.wakes.push(waker);
+        self.ended = true;
     }
 }
 
@@ -136,6 +214,12 @@ pub struct TimerShard {
     /// under the lock, never later than the earliest waiting registration's
     /// firing time. Peers read it to find a stalled owner.
     published: CachePadded<AtomicU64>,
+    /// Number of critical sections in which a party other than a sleep ended
+    /// a waiting registration. Advanced only under the lock, by
+    /// [`Self::end`], before the ended registrations' wakes run, so a
+    /// sleeper that saw its registration waiting at some epoch and reads the
+    /// same epoch later knows that it still waits.
+    epoch: CachePadded<AtomicU64>,
 }
 
 impl TimerShard {
@@ -148,6 +232,65 @@ impl TimerShard {
                 closed: false,
             })),
             published: CachePadded::new(AtomicU64::new(u64::MAX)),
+            epoch: CachePadded::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Lock the registrations, counting the acquisition in tests.
+    #[inline]
+    fn lock(&self) -> MutexGuard<'_, Registrations> {
+        #[cfg(test)]
+        tests::count_lock();
+        self.guard()
+    }
+
+    /// Lock the registrations.
+    #[inline]
+    fn guard(&self) -> MutexGuard<'_, Registrations> {
+        // Loom's mutex reports poisoning, the standard build's does not.
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "loom")] {
+                let registrations = self.registrations.lock().unwrap();
+            } else {
+                let registrations = self.registrations.lock();
+            }
+        }
+        registrations
+    }
+
+    /// Lock the registrations unless another thread holds them.
+    #[inline]
+    fn try_guard(&self) -> Option<MutexGuard<'_, Registrations>> {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "loom")] {
+                let registrations = self.registrations.try_lock().ok();
+            } else {
+                let registrations = self.registrations.try_lock();
+            }
+        }
+        registrations
+    }
+
+    /// Run `pass` on `registrations`, which the caller holds locked, with
+    /// wakes deferred to `deferred`, and advance the epoch before the lock is
+    /// released if the pass ended any waiting registration. Every party but
+    /// the sleep itself ends a waiting registration only through the
+    /// [`Ending`] of such a pass.
+    fn end(
+        &self,
+        registrations: &mut Registrations,
+        deferred: &mut Deferred,
+        pass: impl FnOnce(&mut Registrations, &mut Ending<'_>),
+    ) {
+        let mut ending = Ending {
+            wakes: &mut deferred.wakes,
+            ended: false,
+        };
+        pass(registrations, &mut ending);
+        if ending.ended {
+            // Only lock holders write, so a plain increment cannot lose one.
+            let epoch = self.epoch.load(Ordering::Relaxed);
+            self.epoch.store(epoch + 1, Ordering::Release);
         }
     }
 
@@ -155,7 +298,8 @@ impl TimerShard {
     /// checked that it is not closing. Returns the registration and the time
     /// at which it fires, for the owner's cached bound.
     fn register(self: &Arc<Self>, waker: Waker, deadline: u64) -> (Sleeper, u64) {
-        let mut registrations = self.registrations.lock();
+        let fast = Fast::stored(&waker);
+        let mut registrations = self.lock();
         assert!(
             !registrations.closed,
             "io_uring sleep polled after its worker closed"
@@ -166,12 +310,15 @@ impl TimerShard {
         if at < self.published.load(Ordering::Relaxed) {
             self.published.store(at, Ordering::Relaxed);
         }
+        let epoch = self.epoch.load(Ordering::Relaxed);
         drop(registrations);
 
         let sleeper = Sleeper {
             shard: self.clone(),
             id,
             deadline,
+            fast,
+            epoch,
         };
         (sleeper, at)
     }
@@ -180,8 +327,10 @@ impl TimerShard {
     /// budget and publish the new bound, which the owner caches. The bound
     /// stays at or below `now` while due registrations remain.
     pub fn expire(&self, now: u64, deferred: &mut Deferred) -> u64 {
-        let mut registrations = self.registrations.lock();
-        registrations.expire(now, deferred);
+        let mut registrations = self.lock();
+        self.end(&mut registrations, deferred, |registrations, ending| {
+            registrations.expire(now, ending);
+        });
         let bound = registrations.wheel.bound();
         self.published.store(bound, Ordering::Relaxed);
         bound
@@ -190,13 +339,15 @@ impl TimerShard {
     /// A peer's expiry pass at `now`, skipped while the lock is held or after
     /// closure. Returns whether it ran.
     fn rescue(&self, now: u64, deferred: &mut Deferred) -> bool {
-        let Some(mut registrations) = self.registrations.try_lock() else {
+        let Some(mut registrations) = self.try_guard() else {
             return false;
         };
         if registrations.closed {
             return false;
         }
-        registrations.expire(now, deferred);
+        self.end(&mut registrations, deferred, |registrations, ending| {
+            registrations.expire(now, ending);
+        });
         self.published
             .store(registrations.wheel.bound(), Ordering::Relaxed);
         true
@@ -206,29 +357,11 @@ impl TimerShard {
     /// wake every waiting sleeper, whose next poll observes the closure.
     /// Repeated calls do nothing.
     pub fn close(&self, deferred: &mut Deferred) {
-        let mut registrations = self.registrations.lock();
-        let Registrations {
-            entries,
-            wheel,
-            closed,
-        } = &mut *registrations;
-        if *closed {
+        let mut registrations = self.lock();
+        if registrations.closed {
             return;
         }
-        *closed = true;
-        wheel.clear();
-        for index in 0..entries.slots() {
-            let Some(id) = entries.id_at(index) else {
-                continue;
-            };
-            let entry = entries.get_mut(id).unwrap();
-            if matches!(entry, Entry::Waiting(_)) {
-                let Entry::Waiting(waker) = mem::replace(entry, Entry::Closed) else {
-                    unreachable!();
-                };
-                deferred.wakes.push(waker);
-            }
-        }
+        self.end(&mut registrations, deferred, Registrations::close);
         self.published.store(u64::MAX, Ordering::Relaxed);
     }
 }
@@ -253,6 +386,70 @@ pub fn rescue(shards: &[Arc<TimerShard>], own: usize, now: u64, deferred: &mut D
     }
 }
 
+/// What a pending poll's waker may match to skip the shard lock: an identity
+/// that cannot recur before an ending is visible to the poll (see the module
+/// documentation). Two variants keep it the size of a waker.
+enum Fast {
+    /// The stored waker is a task waker with this data address, matched by
+    /// any task waker with that address. `None` means it is a waker of
+    /// another kind and no clone is held yet, so nothing matches.
+    Stored(Option<NonZeroUsize>),
+    /// An owned clone of a waker that was equivalent to the stored one when
+    /// the registration last waited with it, of a kind other than a task
+    /// waker, matched by the clone's own identity. It has no drop glue, so
+    /// a sleep's drop costs no check for it: every end of a sleeper releases
+    /// it through [`Self::take_held`] instead.
+    Held(ManuallyDrop<Waker>),
+}
+
+impl Fast {
+    /// The state for a newly stored `waker`, holding no clone. The address
+    /// is held as an integer so that a sleep stays `Send` and `Sync`.
+    fn stored(waker: &Waker) -> Self {
+        Self::Stored(
+            is_task_waker(waker)
+                .then(|| NonZeroUsize::new(waker.data().addr()))
+                .flatten(),
+        )
+    }
+
+    /// Whether a poll with `waker` may skip the lock at an unchanged epoch.
+    #[inline]
+    fn matches(&self, waker: &Waker) -> bool {
+        match self {
+            Self::Stored(Some(data)) => is_task_waker(waker) && waker.data().addr() == data.get(),
+            Self::Stored(None) => false,
+            Self::Held(held) => held.will_wake(waker),
+        }
+    }
+
+    /// Whether this state describes `stored`, the registration's waker.
+    fn describes(&self, stored: &Waker) -> bool {
+        match self {
+            Self::Stored(Some(_)) => self.matches(stored),
+            Self::Stored(None) | Self::Held(_) => !is_task_waker(stored),
+        }
+    }
+
+    /// Switch to `fast`, returning the held clone that it displaces.
+    const fn replace(&mut self, fast: Self) -> Option<Waker> {
+        match mem::replace(self, fast) {
+            Self::Held(held) => Some(ManuallyDrop::into_inner(held)),
+            Self::Stored(_) => None,
+        }
+    }
+
+    /// Take the held clone, if any, leaving nothing to match. Writes nothing
+    /// when no clone is held.
+    #[inline]
+    const fn take_held(&mut self) -> Option<Waker> {
+        match self {
+            Self::Held(_) => self.replace(Self::Stored(None)),
+            Self::Stored(_) => None,
+        }
+    }
+}
+
 /// A sleep's registration, polled and dropped on any thread.
 struct Sleeper {
     /// The registering worker's shard, kept for life.
@@ -261,6 +458,14 @@ struct Sleeper {
     id: Id,
     /// Deadline in nanoseconds.
     deadline: u64,
+    /// What a poll may match to skip the lock while the registration waits.
+    /// A repoll that finds the registration waiting with an equivalent waker
+    /// that is not a task waker holds a clone of it, and a change of waker
+    /// drops that clone.
+    fast: Fast,
+    /// The shard's epoch, read under its lock when this sleeper last saw its
+    /// registration waiting.
+    epoch: u64,
 }
 
 impl Sleeper {
@@ -268,58 +473,97 @@ impl Sleeper {
     /// worker service time completes it at once. A ready result consumes the
     /// registration, so the sleeper must then be dropped without
     /// [`Self::cancel`].
+    ///
+    /// A poll at an unchanged epoch returns pending without the lock if its
+    /// waker matches [`Fast`]: a task waker with the stored waker's address,
+    /// or a waker with the held clone's identity. The registration then still
+    /// waits with an equivalent waker: only this sleeper writes its waker,
+    /// every other ending advances the epoch before its wake, and neither
+    /// identity can recur before that wake (see the module documentation).
+    /// Any other poll locks once.
     fn poll(&mut self, cx: &Context<'_>) -> Poll<Outcome> {
         if self.deadline <= clock::turn() {
             self.cancel();
             return Poll::Ready(Outcome::Fired);
         }
 
-        let mut registrations = self.shard.registrations.lock();
-        match registrations.entries.get(self.id) {
-            Some(Entry::Waiting(current)) if current.will_wake(cx.waker()) => {
-                return Poll::Pending;
-            }
-            Some(Entry::Waiting(_)) => {}
-            Some(_) => return Poll::Ready(conclude(&mut registrations.entries, self.id)),
-            None => unreachable!("io_uring sleep registration missing"),
+        // An ending that this load misses wakes the stored waker afterwards,
+        // and the poll that wake schedules reads the advanced epoch.
+        let waker = cx.waker();
+        let matched = self.fast.matches(waker);
+        if matched && self.shard.epoch.load(Ordering::Acquire) == self.epoch {
+            return Poll::Pending;
         }
-        drop(registrations);
+        self.poll_locked(waker, matched)
+    }
 
-        // A waker's clone may reenter the runtime, so clone outside the lock
-        // and recheck, since expiry or closure may have ended the registration.
-        let waker = cx.waker().clone();
-        let mut registrations = self.shard.registrations.lock();
+    /// The part of [`Self::poll`] that takes the lock, after its waker failed
+    /// to match [`Fast`] (`matched` is false) or matched at a moved epoch.
+    /// Kept out of line, since it locks anyway, so that the code of the first
+    /// poll and of the lock-free path stays compact.
+    #[inline(never)]
+    fn poll_locked(&mut self, waker: &Waker, matched: bool) -> Poll<Outcome> {
+        // A waker's clone may reenter the runtime, so clone an unmatched
+        // waker before locking, to hold or to store. Expiry or closure may
+        // end the registration first.
+        let clone = (!matched).then(|| waker.clone());
+        let mut registrations = self.shard.lock();
+        let epoch = self.shard.epoch.load(Ordering::Relaxed);
         match registrations.entries.get_mut(self.id) {
             Some(Entry::Waiting(current)) => {
-                let displaced = mem::replace(current, waker);
+                debug_assert!(self.fast.describes(current));
+                let (first, second) = match clone {
+                    None => (None, None),
+                    // The registration waits with an equivalent waker that is
+                    // not a task waker, so polls may match a held clone from
+                    // now on. It displaces any older one.
+                    Some(clone) if current.will_wake(waker) && !is_task_waker(&clone) => {
+                        let held = Fast::Held(ManuallyDrop::new(clone));
+                        (self.fast.replace(held), None)
+                    }
+                    // Any other waker replaces the stored one, which a held
+                    // clone no longer matches.
+                    Some(clone) => {
+                        let held = self.fast.replace(Fast::stored(&clone));
+                        (Some(mem::replace(current, clone)), held)
+                    }
+                };
+                self.epoch = epoch;
                 drop(registrations);
-                release(displaced);
+                release_all(first, second, None);
                 Poll::Pending
             }
             Some(_) => {
                 let outcome = conclude(&mut registrations.entries, self.id);
                 drop(registrations);
-                release(waker);
+                release_all(clone, self.fast.take_held(), None);
                 Poll::Ready(outcome)
             }
             None => unreachable!("io_uring sleep registration missing"),
         }
     }
 
-    /// Remove the registration and release its waker outside the lock.
+    /// Remove the registration and release its wakers outside the lock.
     fn cancel(&mut self) {
-        let removed = {
-            let mut registrations = self.shard.registrations.lock();
+        let (removed, emptied) = {
+            let mut registrations = self.shard.lock();
             let Registrations { entries, wheel, .. } = &mut *registrations;
-            let removed = entries.remove(self.id);
-            if matches!(removed, Some(Entry::Waiting(_))) {
-                wheel.remove(self.id.index);
+            match entries.remove(self.id) {
+                Some(Entry::Waiting(waker)) => {
+                    wheel.remove(self.id.index);
+
+                    // An empty wheel has no firing time to publish.
+                    let emptied = wheel.is_empty();
+                    if emptied {
+                        self.shard.published.store(u64::MAX, Ordering::Relaxed);
+                    }
+                    (Some(waker), emptied)
+                }
+                _ => (None, false),
             }
-            removed
         };
-        if let Some(Entry::Waiting(waker)) = removed {
-            release(waker);
-        }
+        let held = self.fast.take_held();
+        release_all(removed, held, emptied.then_some(&self.shard));
     }
 }
 
@@ -332,18 +576,75 @@ fn conclude(entries: &mut Slab<Entry>, id: Id) -> Outcome {
     }
 }
 
-/// Destroy a cancelled or displaced waker in the current worker's next
-/// callback batch, whose failures that worker retains, or at once on a thread
-/// without a worker. The caller holds no worker borrow and no shard lock.
-fn release(waker: Waker) {
+/// Destroy a cancelled, displaced, held, or unused waker in the current
+/// worker's next callback batch, whose failures that worker retains, or at
+/// once on a thread without a worker. The caller holds no worker borrow and
+/// no shard lock.
+///
+/// `emptied` is a shard whose wheel the caller emptied by removing a waiting
+/// registration. If it is the current worker's own, that worker's cached
+/// bound is cleared in the same access: only the owner registers, so the
+/// wheel stays empty until this worker registers again and lowers the bound.
+fn release(waker: Waker, emptied: Option<&Arc<TimerShard>>) {
     let waker = Local::with_current(|local| match local {
         Some(local) => {
+            if emptied.is_some_and(|shard| Arc::ptr_eq(shard, &local.timers)) {
+                local.timers_next = u64::MAX;
+            }
             local.deferred.drops.push(waker);
             None
         }
         None => Some(waker),
     });
     drop(waker);
+}
+
+/// Release two wakers in one access, as [`release`] does. Kept out of line,
+/// since only a held clone ends alongside another waker.
+///
+/// Without a worker, each waker drops under its own guard, so two panicking
+/// destructors unwind once, as one would, instead of aborting the process.
+/// The first panic propagates, and a second one's payload is leaked, since
+/// dropping it could panic as well.
+#[inline(never)]
+fn release_pair(first: Waker, second: Waker, emptied: Option<&Arc<TimerShard>>) {
+    let wakers = Local::with_current(|local| match local {
+        Some(local) => {
+            if emptied.is_some_and(|shard| Arc::ptr_eq(shard, &local.timers)) {
+                local.timers_next = u64::MAX;
+            }
+            local.deferred.drops.push(first);
+            local.deferred.drops.push(second);
+            None
+        }
+        None => Some((first, second)),
+    });
+    let Some((first, second)) = wakers else {
+        return;
+    };
+    let first = panic::catch_unwind(AssertUnwindSafe(|| drop(first)));
+    let second = panic::catch_unwind(AssertUnwindSafe(|| drop(second)));
+    match (first, second) {
+        (Err(payload), second) => {
+            if let Err(unreported) = second {
+                mem::forget(unreported);
+            }
+            panic::resume_unwind(payload);
+        }
+        (Ok(()), Err(payload)) => panic::resume_unwind(payload),
+        (Ok(()), Ok(())) => {}
+    }
+}
+
+/// Release whichever of `first` and `second` are present, as [`release`]
+/// does, so that the common case of one waker costs no more than one.
+#[inline]
+fn release_all(first: Option<Waker>, second: Option<Waker>, emptied: Option<&Arc<TimerShard>>) {
+    match (first, second) {
+        (Some(waker), None) | (None, Some(waker)) => release(waker, emptied),
+        (Some(first), Some(second)) => release_pair(first, second, emptied),
+        (None, None) => {}
+    }
 }
 
 /// Ownership held by a sleep between polls.
@@ -419,17 +720,34 @@ impl Future for Sleep {
             State::Unregistered(deadline) => {
                 let deadline = *deadline;
 
-                // Synchronous work may have made the worker's cached time stale.
-                // An elapsed first poll needs neither a worker nor a registration.
-                if deadline <= clock::now() {
+                // The latest service time on this thread never runs ahead of
+                // the clock, so a deadline at or before it has passed, and the
+                // sleep needs neither a worker nor a registration.
+                if deadline <= clock::turn() {
                     this.state = State::Done;
                     return Poll::Ready(());
                 }
-                let owner = Local::current().expect("io_uring sleep requires a current worker");
-                assert!(
-                    !owner.borrow().closing,
-                    "io_uring sleep polled after its worker closed"
-                );
+
+                // A running worker registers without reading the clock. A
+                // deadline that passed after its service time fires at the
+                // worker's next service pass that reaches its firing time.
+                let owner = match Local::current() {
+                    Some(owner) if !owner.borrow().closing => owner,
+                    owner => {
+                        // Without one, only a deadline that has passed completes.
+                        assert!(
+                            deadline <= clock::now(),
+                            "{}",
+                            if owner.is_some() {
+                                "io_uring sleep polled after its worker closed"
+                            } else {
+                                "io_uring sleep requires a current worker"
+                            }
+                        );
+                        this.state = State::Done;
+                        return Poll::Ready(());
+                    }
+                };
 
                 // Clone before the worker borrow and the shard lock, under
                 // which no user code may run.
@@ -459,17 +777,17 @@ impl Drop for Sleep {
 impl TimerShard {
     /// Number of registrations, waiting or awaiting observation.
     pub fn live(&self) -> usize {
-        self.registrations.lock().entries.len()
+        self.guard().entries.len()
     }
 
     /// Number of registrations resident in the wheel.
     pub fn resident(&self) -> usize {
-        self.registrations.lock().wheel.len()
+        self.guard().wheel.len()
     }
 
     /// The exact bound, as an expiry pass would publish it.
     pub fn bound(&self) -> u64 {
-        self.registrations.lock().wheel.bound()
+        self.guard().wheel.bound()
     }
 
     /// The published bound.
@@ -477,27 +795,54 @@ impl TimerShard {
         self.published.load(Ordering::Relaxed)
     }
 
+    /// The epoch.
+    fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
+    }
+
     /// Whether the owner's cleanup closed the shard.
     pub fn is_closed(&self) -> bool {
-        self.registrations.lock().closed
+        self.guard().closed
     }
 
     /// Whether the registration `id` is still held, in any state.
     fn holds(&self, id: Id) -> bool {
-        self.registrations.lock().entries.get(id).is_some()
+        self.guard().entries.get(id).is_some()
     }
 
     /// Whether the registration `id` waits with a waker that wakes `waker`'s task.
     fn waits_with(&self, id: Id, waker: &Waker) -> bool {
         matches!(
-            self.registrations.lock().entries.get(id),
+            self.guard().entries.get(id),
             Some(Entry::Waiting(current)) if current.will_wake(waker)
         )
     }
 
     /// Hold the lock, for tests of contention.
-    fn hold(&self) -> commonware_utils::sync::MutexGuard<'_, impl Sized> {
-        self.registrations.lock()
+    fn hold(&self) -> MutexGuard<'_, impl Sized> {
+        self.guard()
+    }
+}
+
+#[cfg(test)]
+impl Sleeper {
+    /// Whether the sleeper holds a clone of its waker.
+    const fn holds_clone(&self) -> bool {
+        matches!(self.fast, Fast::Held(_))
+    }
+}
+
+/// A held clone has no drop glue, so tests check that every end of a sleeper
+/// released it.
+#[cfg(test)]
+impl Drop for Sleeper {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            assert!(
+                !self.holds_clone(),
+                "a sleeper ended without releasing its held clone"
+            );
+        }
     }
 }
 
@@ -515,6 +860,7 @@ mod tests {
     use commonware_utils::channel::oneshot;
     use futures::{FutureExt as _, poll};
     use std::{
+        cell::Cell,
         panic::{AssertUnwindSafe, catch_unwind},
         sync::{
             Barrier, OnceLock,
@@ -525,6 +871,21 @@ mod tests {
         thread,
         time::Instant,
     };
+
+    thread_local! {
+        /// Shard locks taken by [`TimerShard::lock`] on this thread.
+        static LOCKS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Count a shard lock taken on this thread.
+    pub(super) fn count_lock() {
+        LOCKS.set(LOCKS.get() + 1);
+    }
+
+    /// Shard locks taken on this thread so far.
+    fn locks() -> usize {
+        LOCKS.get()
+    }
 
     impl TimerShard {
         /// Register a timer that is already due, so the next expiry sweep
@@ -608,6 +969,16 @@ mod tests {
             assert!(sleep.poll_unpin(&mut cx).is_ready());
             assert!(matches!(sleep.state, State::Done));
         }
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn test_lock_free_poll_state_keeps_the_sleep_size() {
+        // What a poll may match without the lock is no larger than a waker,
+        // which keeps a sleep's footprint.
+        assert_eq!(size_of::<Fast>(), size_of::<Waker>());
+        assert_eq!(size_of::<Sleeper>(), 56);
+        assert_eq!(size_of::<Sleep>(), 64);
     }
 
     #[test]
@@ -929,6 +1300,281 @@ mod tests {
         assert_eq!(poll_with(&mut current, &waker), Poll::Ready(Outcome::Fired));
     }
 
+    #[test]
+    fn test_non_task_waker_holds_a_clone_from_its_first_repoll() {
+        // A registration with a waker that is not a task waker holds no clone.
+        let shard = Arc::new(TimerShard::new());
+        let (count, waker) = counter();
+        let mut sleeper = register(&shard, later(), &waker);
+        assert!(!sleeper.holds_clone());
+        assert_eq!(Arc::strong_count(&count), 3);
+
+        // The first repoll locks once and keeps a clone.
+        let before = locks();
+        assert!(poll_with(&mut sleeper, &waker).is_pending());
+        assert_eq!(locks() - before, 1);
+        assert!(sleeper.holds_clone());
+        assert_eq!(Arc::strong_count(&count), 4);
+
+        // Later polls match the held clone and take no lock.
+        let before = locks();
+        assert!(poll_with(&mut sleeper, &waker).is_pending());
+        assert!(poll_with(&mut sleeper, &waker).is_pending());
+        assert_eq!(locks(), before);
+
+        // Cancelling releases the stored waker and the held clone.
+        sleeper.cancel();
+        assert!(!sleeper.holds_clone());
+        assert_eq!(Arc::strong_count(&count), 2);
+    }
+
+    #[test]
+    fn test_held_clone_polls_without_the_lock() {
+        // A registration whose sleeper holds a clone of its waker.
+        let shard = Arc::new(TimerShard::new());
+        let (_, waker) = counter();
+        let mut sleeper = register(&shard, later(), &waker);
+        assert!(poll_with(&mut sleeper, &waker).is_pending());
+
+        // While this thread holds the lock, a poll with the registered waker
+        // on another thread returns pending, which it could not if it locked.
+        let held = shard.hold();
+        let (sender, receiver) = mpsc::channel();
+        let poller = thread::spawn(move || {
+            let mut sleeper = sleeper;
+            let pending = poll_with(&mut sleeper, &waker).is_pending();
+            sender.send((pending, locks())).unwrap();
+            sleeper
+        });
+        let (pending, locked) = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a poll with an unchanged waker waited for the lock");
+        assert!(pending);
+        assert_eq!(locked, 0);
+        drop(held);
+
+        // Cancelling releases the held clone.
+        poller.join().unwrap().cancel();
+    }
+
+    #[test]
+    fn test_changed_waker_locks_once_and_releases_the_old_ones() {
+        // Register with a first waker and hold a clone of it, then poll with a
+        // second.
+        let shard = Arc::new(TimerShard::new());
+        let (first, first_waker) = counter();
+        let (second, second_waker) = counter();
+        let deadline = later();
+        let mut sleeper = register(&shard, deadline, &first_waker);
+        assert!(poll_with(&mut sleeper, &first_waker).is_pending());
+        assert_eq!(Arc::strong_count(&first), 4);
+        let before = locks();
+        assert!(poll_with(&mut sleeper, &second_waker).is_pending());
+
+        // One critical section stored a clone of the second waker, and off a
+        // worker the displaced and held clones of the first were released at
+        // once.
+        assert_eq!(locks() - before, 1);
+        assert!(!sleeper.holds_clone());
+        assert!(shard.waits_with(sleeper.id, &second_waker));
+        assert_eq!(Arc::strong_count(&first), 2);
+        assert_eq!(Arc::strong_count(&second), 3);
+
+        // The first poll with the second waker locks once to hold a clone,
+        // and later ones take no lock.
+        let before = locks();
+        assert!(poll_with(&mut sleeper, &second_waker).is_pending());
+        assert!(poll_with(&mut sleeper, &second_waker).is_pending());
+        assert_eq!(locks() - before, 1);
+        assert_eq!(Arc::strong_count(&second), 4);
+
+        // Once fired, a poll with a changed waker locks once, reports the
+        // firing, and releases the clone it made and the held one.
+        let mut deferred = Deferred::default();
+        shard.expire(deadline + RES, &mut deferred);
+        run(&mut deferred);
+        assert_eq!((first.get(), second.get()), (0, 1));
+        let before = locks();
+        assert_eq!(
+            poll_with(&mut sleeper, &first_waker),
+            Poll::Ready(Outcome::Fired)
+        );
+        assert_eq!(locks() - before, 1);
+        assert_eq!(Arc::strong_count(&first), 2);
+        assert_eq!(Arc::strong_count(&second), 2);
+    }
+
+    #[test]
+    fn test_endings_invalidate_lock_free_polls() {
+        // Expiry, rescue, and closure each end a waiting registration.
+        type End = fn(&TimerShard, u64, &mut Deferred);
+        let ends: [(End, Outcome); 3] = [
+            (
+                |shard, now, deferred| {
+                    shard.expire(now, deferred);
+                },
+                Outcome::Fired,
+            ),
+            (
+                |shard, now, deferred| assert!(shard.rescue(now, deferred)),
+                Outcome::Fired,
+            ),
+            (|shard, _, deferred| shard.close(deferred), Outcome::Closed),
+        ];
+        for (end, outcome) in ends {
+            // A pending registration, polled without the lock once its
+            // sleeper holds a clone.
+            let shard = Arc::new(TimerShard::new());
+            let (count, waker) = counter();
+            let deadline = later();
+            let mut sleeper = register(&shard, deadline, &waker);
+            assert!(poll_with(&mut sleeper, &waker).is_pending());
+            let before = locks();
+            assert!(poll_with(&mut sleeper, &waker).is_pending());
+            assert_eq!(locks(), before);
+
+            // A pass that ends nothing keeps the epoch, and an ending
+            // advances it before its wake runs.
+            let epoch = shard.epoch();
+            let mut deferred = Deferred::default();
+            shard.expire(deadline - RES, &mut deferred);
+            assert_eq!(shard.epoch(), epoch);
+            end(&shard, deadline + RES, &mut deferred);
+            assert_eq!(shard.epoch(), epoch + 1);
+            run(&mut deferred);
+            assert_eq!(count.get(), 1);
+
+            // The next poll with the same waker locks, observes the ending,
+            // and releases the held clone.
+            let before = locks();
+            assert_eq!(poll_with(&mut sleeper, &waker), Poll::Ready(outcome));
+            assert_eq!(locks() - before, 1);
+            assert!(!sleeper.holds_clone());
+            assert_eq!(Arc::strong_count(&count), 2);
+        }
+    }
+
+    #[test]
+    fn test_epoch_change_costs_one_lock() {
+        // A waiting registration whose sleeper holds a clone, and an earlier
+        // one that fires.
+        let shard = Arc::new(TimerShard::new());
+        let (_, waker) = counter();
+        let deadline = later();
+        let mut waiting = register(&shard, deadline + 1_000_000, &waker);
+        assert!(poll_with(&mut waiting, &waker).is_pending());
+        let _fired = register(&shard, deadline, Waker::noop());
+        let mut deferred = Deferred::default();
+        shard.expire(deadline + RES, &mut deferred);
+        run(&mut deferred);
+
+        // The firing advanced the epoch, so the waiting sleeper's next poll
+        // locks once, finds it waiting, and caches the new epoch.
+        let before = locks();
+        assert!(poll_with(&mut waiting, &waker).is_pending());
+        assert_eq!(locks() - before, 1);
+
+        // Later polls take no lock.
+        assert!(poll_with(&mut waiting, &waker).is_pending());
+        assert_eq!(locks() - before, 1);
+        waiting.cancel();
+    }
+
+    /// Wait without sleeping until both of two threads have called this for
+    /// `round`, counting arrivals in `arrived`, so their next steps overlap.
+    /// Returns false at once if `gone` reports that the other thread exited.
+    fn meet(arrived: &AtomicUsize, round: usize, gone: impl Fn() -> bool) -> bool {
+        arrived.fetch_add(1, Ordering::SeqCst);
+        while arrived.load(Ordering::SeqCst) < 2 * (round + 1) {
+            if gone() {
+                return false;
+            }
+            std::hint::spin_loop();
+        }
+        true
+    }
+
+    #[test]
+    fn test_lock_free_polls_race_expiry_without_losing_wakes() {
+        // A thread polls each registration it receives with the registered
+        // waker, whose clone the sleeper holds, until it completes.
+        let shard = Arc::new(TimerShard::new());
+        let arrived = Arc::new(AtomicUsize::new(0));
+        let (sender, receiver) = mpsc::channel::<(Sleeper, Arc<Count>, Waker)>();
+        let poller = thread::spawn({
+            let arrived = arrived.clone();
+            move || {
+                for (round, (mut sleeper, count, waker)) in receiver.into_iter().enumerate() {
+                    meet(&arrived, round, || false);
+
+                    // Poll spuriously while the expiry runs, then only after
+                    // a wake. A wake counted before a poll began must make
+                    // that poll ready, since no later wake comes.
+                    let mut polls = 0;
+                    loop {
+                        let seen = count.get();
+                        if let Poll::Ready(outcome) = poll_with(&mut sleeper, &waker) {
+                            assert_eq!(outcome, Outcome::Fired);
+                            break;
+                        }
+                        polls += 1;
+                        if polls < 256 {
+                            continue;
+                        }
+                        let start = Instant::now();
+                        while count.get() == seen {
+                            assert!(
+                                start.elapsed() < Duration::from_secs(10),
+                                "lost a wake in round {round}"
+                            );
+                            thread::yield_now();
+                        }
+                    }
+                }
+            }
+        });
+
+        // Expire each registration at a varying point among the polls. A
+        // poller that exited early failed, which joining it reports.
+        for round in 0..2000 {
+            let deadline = later();
+            let (count, waker) = counter();
+            let mut sleeper = register(&shard, deadline, &waker);
+            assert!(poll_with(&mut sleeper, &waker).is_pending());
+            sender.send((sleeper, count, waker)).unwrap();
+            if !meet(&arrived, round, || poller.is_finished()) {
+                break;
+            }
+            for _ in 0..round % 256 {
+                std::hint::spin_loop();
+            }
+            let mut deferred = Deferred::default();
+            shard.expire(deadline + RES, &mut deferred);
+            run(&mut deferred);
+        }
+        drop(sender);
+        poller.join().unwrap();
+        assert_eq!(shard.live(), 0);
+    }
+
+    #[test]
+    fn test_emptying_drop_publishes_no_bound() {
+        // Two registrations, so dropping the earlier leaves the later one.
+        let shard = Arc::new(TimerShard::new());
+        let deadline = later();
+        let mut early = register(&shard, deadline, Waker::noop());
+        let mut late = register(&shard, deadline + 1_000_000, Waker::noop());
+
+        // A drop that leaves a registration keeps the published bound, which
+        // is then early.
+        early.cancel();
+        assert_eq!(shard.published(), Wheel::<RES>::rounded(deadline));
+
+        // A drop that empties the wheel publishes none.
+        late.cancel();
+        assert_eq!(shard.published(), u64::MAX);
+    }
+
     /// A waker that fails if its clone, wake, or drop runs while its shard is locked.
     struct LockCheck {
         /// The shard whose lock must be free during every callback.
@@ -956,7 +1602,7 @@ mod tests {
         /// Count a callback, failing if the shard is locked.
         fn check(&self) {
             assert!(
-                self.shard.registrations.try_lock().is_some(),
+                self.shard.try_guard().is_some(),
                 "waker callback under the shard lock"
             );
             self.callbacks.fetch_add(1, Ordering::SeqCst);
@@ -1009,9 +1655,12 @@ mod tests {
         let wakers: Vec<_> = checks.iter().map(LockCheck::waker).collect();
         let deadline = later();
 
-        // Register, refresh (a clone and a displaced drop), expire and wake.
+        // Register, refresh (a clone and a displaced drop), hold a clone,
+        // expire and wake, and release the held clone.
         let mut fired = register(&shard, deadline, &wakers[0]);
         assert!(poll_with(&mut fired, &wakers[1]).is_pending());
+        assert!(poll_with(&mut fired, &wakers[1]).is_pending());
+        assert!(fired.holds_clone());
         let mut deferred = Deferred::default();
         shard.expire(deadline + RES, &mut deferred);
         run(&mut deferred);
@@ -1433,6 +2082,296 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_first_poll_compares_with_the_service_time() {
+        Runner::default().start(|context| async move {
+            context
+                .spawn(|_| async {
+                    // A deadline after the worker's latest service time
+                    // passes during synchronous work before the first poll.
+                    let deadline = Instant::now() + Duration::from_millis(1);
+                    let mut sleep = Sleep::at(deadline);
+                    assert!(clock::nanos(deadline) > clock::turn());
+                    while Instant::now() < deadline {
+                        std::hint::spin_loop();
+                    }
+
+                    // The first poll registers without reading the clock, and
+                    // the worker's cached bound covers the registration.
+                    assert!(poll!(&mut sleep).is_pending());
+                    let (shard, id) = registration(&sleep);
+                    let firing = Wheel::<RES>::rounded(clock::nanos(deadline));
+                    assert!(Local::current().unwrap().borrow().timers_next <= firing);
+
+                    // Until a service pass, polls with the task's waker stay
+                    // pending without the lock.
+                    let before = locks();
+                    assert!(poll!(&mut sleep).is_pending());
+                    assert_eq!(locks(), before);
+
+                    // A later service pass completes it.
+                    sleep.await;
+                    assert!(!shard.holds(id));
+
+                    // A deadline that a service pass has reached completes at
+                    // the first poll, without registering.
+                    let deadline = Instant::now() + Duration::from_micros(100);
+                    let mut sleep = Sleep::at(deadline);
+                    while clock::turn() < clock::nanos(deadline) {
+                        reschedule().await;
+                    }
+                    assert!(poll!(&mut sleep).is_ready());
+                    assert!(matches!(sleep.state, State::Done));
+                })
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_task_wakers_poll_without_the_lock_from_the_first_repoll() {
+        Runner::default().start(|context| async move {
+            // The root's waker is not a task waker, so its first repoll locks
+            // once to hold a clone, and later ones take no lock.
+            let mut sleep = Sleep::new(Duration::from_secs(60));
+            assert!(poll!(&mut sleep).is_pending());
+            let before = locks();
+            assert!(poll!(&mut sleep).is_pending());
+            assert!(poll!(&mut sleep).is_pending());
+            assert_eq!(locks() - before, 1);
+            let State::Registered(sleeper) = &sleep.state else {
+                panic!("sleep did not register");
+            };
+            assert!(sleeper.holds_clone());
+
+            // A task's waker needs no clone, so no repoll takes the lock.
+            context
+                .spawn(|_| async {
+                    let mut sleep = Sleep::new(Duration::from_secs(60));
+                    assert!(poll!(&mut sleep).is_pending());
+                    let before = locks();
+                    assert!(poll!(&mut sleep).is_pending());
+                    assert!(poll!(&mut sleep).is_pending());
+                    assert_eq!(locks(), before);
+                    let State::Registered(sleeper) = &sleep.state else {
+                        panic!("sleep did not register");
+                    };
+                    assert!(!sleeper.holds_clone());
+                })
+                .await
+                .unwrap();
+        });
+    }
+
+    /// What [`FirstPolls`] found when woken.
+    struct FirstPoll {
+        /// Whether its thread's worker was closing.
+        closing: bool,
+        /// Whether a first poll completed a deadline that passed after the
+        /// worker's latest service time.
+        passed: bool,
+        /// The panic message of a first poll of a deadline still ahead.
+        ahead: String,
+    }
+
+    /// A waker that, when woken, polls new sleeps for the first time.
+    #[derive(Default)]
+    struct FirstPolls(
+        /// What the polls found.
+        OnceLock<FirstPoll>,
+    );
+
+    impl Wake for FirstPolls {
+        fn wake(self: Arc<Self>) {
+            let closing = Local::current().is_some_and(|local| local.borrow().closing);
+            let mut cx = Context::from_waker(Waker::noop());
+
+            // A deadline after the latest service time that has passed.
+            let deadline = loop {
+                let now = Instant::now();
+                if clock::nanos(now) > clock::turn() {
+                    break now;
+                }
+            };
+            let passed = Sleep::at(deadline).poll_unpin(&mut cx).is_ready();
+
+            // A deadline well ahead.
+            let ahead = catch_unwind(AssertUnwindSafe(|| {
+                let _ = Sleep::new(Duration::from_secs(60)).poll_unpin(&mut cx);
+            }))
+            .expect_err("a sleep registered on a closing worker");
+            let ahead = extract_panic_message(&*ahead);
+            assert!(
+                self.0
+                    .set(FirstPoll {
+                        closing,
+                        passed,
+                        ahead
+                    })
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn test_first_poll_on_a_closing_worker_reads_the_clock() {
+        // A pending sleep escapes its runner with a waker that polls new
+        // sleeps when the closing worker wakes it.
+        let polls = Arc::new(FirstPolls::default());
+        let (sleep,) = Runner::default().start(|_| async {
+            let mut sleep = Sleep::new(Duration::from_secs(60));
+            let waker = Waker::from(polls.clone());
+            assert!(
+                sleep
+                    .poll_unpin(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            (sleep,)
+        });
+        drop(sleep);
+
+        // On the closing worker, a deadline that passed after its service
+        // time completed, and one ahead was rejected.
+        let FirstPoll {
+            closing,
+            passed,
+            ahead,
+        } = polls.0.get().expect("closure did not wake the sleep");
+        assert!(*closing);
+        assert!(*passed);
+        assert_eq!(ahead, "io_uring sleep polled after its worker closed");
+    }
+
+    #[test]
+    fn test_first_poll_without_a_worker_rejects_a_deadline_ahead() {
+        let mut sleep = Sleep::new(Duration::from_secs(60));
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            sleep.poll_unpin(&mut Context::from_waker(Waker::noop()))
+        }))
+        .expect_err("a sleep registered without a worker");
+        assert_eq!(
+            extract_panic_message(&*panic),
+            "io_uring sleep requires a current worker"
+        );
+    }
+
+    #[test]
+    fn test_owner_drop_of_the_last_registration_clears_both_bounds() {
+        Runner::default().start(|context| async move {
+            // A dedicated worker's shard is private, so this is its only
+            // registration, whose firing time the worker caches and publishes.
+            context
+                .dedicated()
+                .spawn(|_| async {
+                    let mut sleep = Sleep::new(Duration::from_secs(60));
+                    assert!(poll!(&mut sleep).is_pending());
+                    let (shard, _) = registration(&sleep);
+                    let local = Local::current().unwrap();
+                    let firing = shard.bound();
+                    assert_eq!(shard.published(), firing);
+                    assert_eq!(local.borrow().timers_next, firing);
+
+                    // Dropping it on the owner leaves no firing time, so the
+                    // worker takes no timed wake for it.
+                    drop(sleep);
+                    assert_eq!(shard.published(), u64::MAX);
+                    assert_eq!(local.borrow().timers_next, u64::MAX);
+                })
+                .await
+                .unwrap();
+        });
+    }
+
+    /// A waker whose destructor panics while armed, after releasing its
+    /// reference.
+    #[derive(Default)]
+    struct PanicDrop {
+        /// Whether destructors panic.
+        armed: AtomicBool,
+        /// Number of destructors run.
+        drops: AtomicUsize,
+    }
+
+    /// The vtable of every [`PanicDrop`] waker, which is not a task waker.
+    static PANIC_DROP_VTABLE: RawWakerVTable = RawWakerVTable::new(
+        PanicDrop::clone,
+        PanicDrop::wake,
+        PanicDrop::wake_by_ref,
+        PanicDrop::drop,
+    );
+
+    impl PanicDrop {
+        /// A waker of `this`.
+        fn waker(this: &Arc<Self>) -> Waker {
+            let data = Arc::into_raw(this.clone()).cast::<()>();
+            // SAFETY: The vtable's functions treat `data` as one Arc reference.
+            unsafe { Waker::from_raw(RawWaker::new(data, &PANIC_DROP_VTABLE)) }
+        }
+
+        /// Clone the waker, as one more Arc reference.
+        unsafe fn clone(data: *const ()) -> RawWaker {
+            // SAFETY: `data` is one live Arc reference.
+            unsafe { Arc::increment_strong_count(data.cast::<Self>()) };
+            RawWaker::new(data, &PANIC_DROP_VTABLE)
+        }
+
+        /// Consume the waker without panicking.
+        unsafe fn wake(data: *const ()) {
+            // SAFETY: `data` is one Arc reference, consumed here.
+            drop(unsafe { Arc::from_raw(data.cast::<Self>()) });
+        }
+
+        /// Wake nothing.
+        const unsafe fn wake_by_ref(_: *const ()) {}
+
+        /// Release the waker's Arc reference, then panic if armed.
+        unsafe fn drop(data: *const ()) {
+            // SAFETY: `data` is one Arc reference, consumed here.
+            let this = unsafe { Arc::from_raw(data.cast::<Self>()) };
+            this.drops.fetch_add(1, Ordering::SeqCst);
+            let armed = this.armed.load(Ordering::SeqCst);
+            drop(this);
+            assert!(!armed, "waker destructor panic");
+        }
+    }
+
+    #[test]
+    fn test_foreign_drop_survives_two_panicking_waker_destructors() {
+        let check = Arc::new(PanicDrop::default());
+        Runner::default().start(|_| async {
+            // Register with a waker that is not a task waker, and repoll
+            // once, so the sleeper holds a clone besides the stored one.
+            let waker = PanicDrop::waker(&check);
+            let mut cx = Context::from_waker(&waker);
+            let mut sleep = Sleep::new(Duration::from_secs(60));
+            assert!(sleep.poll_unpin(&mut cx).is_pending());
+            assert!(sleep.poll_unpin(&mut cx).is_pending());
+            let State::Registered(sleeper) = &sleep.state else {
+                panic!("sleep did not register");
+            };
+            assert!(sleeper.holds_clone());
+            assert_eq!(Arc::strong_count(&check), 4);
+
+            // Dropping the sleep on a thread without a worker, while the shard
+            // is open, releases both clones there. Both destructors panic,
+            // and one panic reaches the caller instead of an abort.
+            check.armed.store(true, Ordering::SeqCst);
+            let dropped = thread::spawn(move || catch_unwind(AssertUnwindSafe(|| drop(sleep))))
+                .join()
+                .unwrap();
+            check.armed.store(false, Ordering::SeqCst);
+            let panic = dropped.expect_err("the panicking destructors were not reported");
+            assert_eq!(extract_panic_message(&*panic), "waker destructor panic");
+
+            // Both references were released, and only the test's own waker
+            // remains.
+            assert_eq!(check.drops.load(Ordering::SeqCst), 2);
+            assert_eq!(Arc::strong_count(&check), 2);
+            drop(waker);
+        });
+        assert_eq!(Arc::strong_count(&check), 1);
+    }
+
     /// A self-waking task, as busy load that needs no service of its own.
     struct Busy {
         /// Set to complete the task.
@@ -1565,5 +2504,232 @@ mod tests {
             late < Duration::from_millis(50),
             "completed {late:?} after the deadline"
         );
+    }
+}
+
+#[cfg(all(test, feature = "loom"))]
+mod loom_tests {
+    use super::*;
+    use loom::{
+        sync::atomic::{AtomicBool, AtomicUsize},
+        thread,
+    };
+    use std::task::{RawWaker, RawWakerVTable};
+
+    /// One waker slot of an executor that hands the slot to a new task once
+    /// every waker of its previous task is gone, using only relaxed atomics,
+    /// as a waker implementation may. The state packs a reference count, in
+    /// units of [`Slot::REF`], above the bit of the task the slot serves.
+    struct Slot {
+        /// Reference count and task bit.
+        state: AtomicUsize,
+        /// Whether a wake reached each task, indexed by its bit.
+        woken: [AtomicBool; 2],
+    }
+
+    impl Slot {
+        /// One reference in the state.
+        const REF: usize = 2;
+
+        /// The bit of the slot's second task. The first task's is zero.
+        const SECOND: usize = 1;
+
+        /// A slot serving its first task, with the reference of one waker.
+        fn new() -> Self {
+            Self {
+                state: AtomicUsize::new(Self::REF),
+                woken: [AtomicBool::new(false), AtomicBool::new(false)],
+            }
+        }
+
+        /// A waker carrying a reference the caller counted.
+        fn waker(this: &Arc<Self>) -> Waker {
+            let data = Arc::as_ptr(this).cast::<()>();
+            // SAFETY: The vtable's functions treat `data` as a slot that the
+            // test keeps alive while any of its wakers exists, and the caller
+            // counted the waker's reference.
+            unsafe { Waker::from_raw(RawWaker::new(data, &SLOT_VTABLE)) }
+        }
+
+        /// Hand the slot to its second task once no waker of the first
+        /// remains, returning that task's first waker.
+        fn reuse(this: &Arc<Self>) -> Option<Waker> {
+            this.state
+                .compare_exchange(
+                    0,
+                    Self::REF | Self::SECOND,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .ok()?;
+            Some(Self::waker(this))
+        }
+
+        /// Whether a wake has reached the task with bit `task`. A load rather
+        /// than a swap, so that loom lets a waiting thread see the wake once
+        /// it yields.
+        fn woke(&self, task: usize) -> bool {
+            self.woken[task].load(Ordering::Acquire)
+        }
+
+        /// The slot behind a waker's data.
+        ///
+        /// # Safety
+        ///
+        /// `data` must come from [`Slot::waker`], and its slot must be alive.
+        const unsafe fn of<'a>(data: *const ()) -> &'a Self {
+            // SAFETY: Per the contract.
+            unsafe { &*data.cast::<Self>() }
+        }
+
+        /// Count one more reference.
+        unsafe fn clone(data: *const ()) -> RawWaker {
+            // SAFETY: A live waker's slot is alive.
+            unsafe { Self::of(data) }
+                .state
+                .fetch_add(Self::REF, Ordering::Relaxed);
+            RawWaker::new(data, &SLOT_VTABLE)
+        }
+
+        /// Notify the task the slot serves, keeping the reference.
+        unsafe fn wake_by_ref(data: *const ()) {
+            // SAFETY: A live waker's slot is alive, and its task cannot change
+            // while the waker counts a reference.
+            let slot = unsafe { Self::of(data) };
+            let task = slot.state.load(Ordering::Relaxed) & Self::SECOND;
+            slot.woken[task].store(true, Ordering::Release);
+        }
+
+        /// Release the reference, without ordering, which lets the slot serve
+        /// another task with no happens-before edge from this release.
+        unsafe fn drop(data: *const ()) {
+            // SAFETY: A live waker's slot is alive.
+            unsafe { Self::of(data) }
+                .state
+                .fetch_sub(Self::REF, Ordering::Relaxed);
+        }
+
+        /// Notify the task the slot serves and release the reference.
+        unsafe fn wake(data: *const ()) {
+            // SAFETY: The waker is live until this call consumes it.
+            unsafe {
+                Self::wake_by_ref(data);
+                Self::drop(data);
+            }
+        }
+    }
+
+    /// The vtable of every [`Slot`] waker, which is not a task waker.
+    static SLOT_VTABLE: RawWakerVTable =
+        RawWakerVTable::new(Slot::clone, Slot::wake, Slot::wake_by_ref, Slot::drop);
+
+    /// Fire every registration of `shard` on another thread, waking their
+    /// wakers after the lock as a worker's callback batch does.
+    fn fire(shard: &Arc<TimerShard>) -> thread::JoinHandle<()> {
+        let shard = shard.clone();
+        thread::spawn(move || {
+            let mut deferred = Deferred::default();
+            shard.expire(u64::MAX, &mut deferred);
+            for waker in deferred.wakes.drain(..) {
+                waker.wake();
+            }
+        })
+    }
+
+    /// A deadline well after the current time.
+    fn later() -> u64 {
+        clock::now() + 1_000_000_000
+    }
+
+    #[test]
+    fn recycled_identity_of_a_consumed_waker_takes_the_lock() {
+        loom::model(|| {
+            // A finished task handed its registered sleep to the slot's next
+            // task. The registration holds the first task's last waker, and
+            // the sleeper holds no clone.
+            let slot = Arc::new(Slot::new());
+            let shard = Arc::new(TimerShard::new());
+            let (mut sleeper, _) = shard.register(Slot::waker(&slot), later());
+            let firing = fire(&shard);
+
+            // Once the firing consumes that waker, the next task can take
+            // over the slot without synchronizing with the firing, and poll
+            // with the same identity. That poll must observe the firing, since
+            // the firing woke the finished task.
+            if let Some(waker) = Slot::reuse(&slot) {
+                assert!(
+                    sleeper.poll(&Context::from_waker(&waker)).is_ready(),
+                    "a poll with a recycled identity missed the firing"
+                );
+            }
+            firing.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn held_clone_polls_never_lose_the_firing() {
+        loom::model(|| {
+            // A task registers and repolls, so its sleeper holds a clone.
+            let slot = Arc::new(Slot::new());
+            let shard = Arc::new(TimerShard::new());
+            let waker = Slot::waker(&slot);
+            let cx = Context::from_waker(&waker);
+            let (mut sleeper, _) = shard.register(waker.clone(), later());
+            assert!(sleeper.poll(&cx).is_pending());
+            assert!(sleeper.holds_clone());
+
+            // While the firing runs, the task polls without the lock. A
+            // pending poll, which may have missed the firing, is followed by
+            // the task's wake, after which a poll observes the firing.
+            let firing = fire(&shard);
+            if sleeper.poll(&cx).is_pending() {
+                while !slot.woke(0) {
+                    thread::yield_now();
+                }
+                assert!(
+                    sleeper.poll(&cx).is_ready(),
+                    "a poll after the wake missed the firing"
+                );
+            }
+            firing.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn held_clone_keeps_its_identity_from_reuse() {
+        loom::model(|| {
+            // A task registers and repolls, so its sleeper holds a clone, and
+            // finishes after handing the sleep to another task.
+            let slot = Arc::new(Slot::new());
+            let other = Arc::new(Slot::new());
+            let shard = Arc::new(TimerShard::new());
+            let waker = Slot::waker(&slot);
+            let (mut sleeper, _) = shard.register(waker.clone(), later());
+            assert!(sleeper.poll(&Context::from_waker(&waker)).is_pending());
+            drop(waker);
+            let firing = fire(&shard);
+
+            // The held clone keeps the slot from serving another task, so the
+            // new owner polls with a waker of another slot. A pending poll is
+            // followed by that waker's wake, after which a poll observes the
+            // firing.
+            assert!(Slot::reuse(&slot).is_none());
+            let waker = Slot::waker(&other);
+            let cx = Context::from_waker(&waker);
+            if sleeper.poll(&cx).is_pending() {
+                while !other.woke(0) {
+                    thread::yield_now();
+                }
+                assert!(
+                    sleeper.poll(&cx).is_ready(),
+                    "a poll after the wake missed the firing"
+                );
+            }
+
+            // Completion released the held clone, so the slot is free once
+            // the firing has consumed the registered waker.
+            firing.join().unwrap();
+            assert!(Slot::reuse(&slot).is_some());
+        });
     }
 }
