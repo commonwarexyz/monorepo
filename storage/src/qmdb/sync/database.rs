@@ -185,6 +185,7 @@ mod tests {
     use commonware_utils::{
         NZU16, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sequence::U64,
     };
+    use std::sync::Arc;
 
     type Op = Operation<MmrFamily, U64>;
     type Ops = fixed::Journal<deterministic::Context, Op>;
@@ -379,6 +380,93 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(reopened.root(), root);
+        });
+    }
+
+    /// When the local operations end before the target's start, opening the sync resets them, so
+    /// a sync interrupted before it records its boundary leaves a database that can't be opened.
+    /// Retrying the sync completes it.
+    #[test]
+    fn interrupted_sync_after_reset_is_retried() {
+        deterministic::Runner::default().start(|context| async move {
+            type Db =
+                keyless::fixed::Db<MmrFamily, deterministic::Context, U64, Sha256, Sequential>;
+            let local_config = keyless::Config {
+                merkle: merkle_config(),
+                log: journal_config(),
+            };
+            let mut source_config = local_config.clone();
+            source_config.merkle.metadata_partition.push_str("-source");
+            source_config.log.partition.push_str("-source");
+
+            // The local database ends at 3, before the target's start at 30.
+            let populate = |label: &'static str, config, values: u64| {
+                let context = context.child(label);
+                async move {
+                    let db = Db::init(context, config, None).await.unwrap();
+                    let mut batch = db.new_batch();
+                    for value in 0..values {
+                        batch = batch.append(U64::new(value));
+                    }
+                    let batch = batch
+                        .with_inactivity_floor(Location::new(0))
+                        .merkleize(&db)
+                        .await
+                        .unwrap();
+                    db.apply_batch(batch).await.unwrap().sync().await.unwrap()
+                }
+            };
+            drop(populate("local", local_config.clone(), 1).await);
+            let source_db = Arc::new(populate("source", source_config, 39).await);
+            let target = Target {
+                root: source_db.root(),
+                range: non_empty_range!(Location::new(30), Location::new(41)),
+            };
+            // A source that fails every request interrupts the sync after the reset.
+            assert!(matches!(
+                sync::sync::<Db, _>(Config {
+                    context: context.child("failed"),
+                    source: FailSource::<MmrFamily, Op, Digest>::new(),
+                    target: target.clone(),
+                    max_outstanding_requests: NZUsize!(1),
+                    fetch_batch_size: NZU64!(4),
+                    apply_batch_size: NZU64!(4),
+                    db_config: local_config.clone(),
+                    update_rx: None,
+                    finish_rx: None,
+                    reached_target_tx: None,
+                })
+                .await,
+                Err(sync::Error::Source(_))
+            ));
+            assert!(
+                Db::init(context.child("reopen"), local_config.clone(), None)
+                    .await
+                    .is_err()
+            );
+
+            // Retrying the sync records the target's boundary, and the database opens again.
+            let db = sync::sync::<Db, _>(Config {
+                context: context.child("retry"),
+                source: source_db,
+                target: target.clone(),
+                max_outstanding_requests: NZUsize!(1),
+                fetch_batch_size: NZU64!(4),
+                apply_batch_size: NZU64!(4),
+                db_config: local_config.clone(),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await
+            .unwrap();
+            assert_eq!(db.root(), target.root);
+            drop(db);
+            let db = Db::init(context.child("after_retry"), local_config, None)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), target.root);
+            assert_eq!(db.bounds(), Location::new(30)..Location::new(41));
         });
     }
 
