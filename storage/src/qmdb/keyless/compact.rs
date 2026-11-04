@@ -875,11 +875,8 @@ mod tests {
 
         let child = parent.new_batch::<Sha256>().append(U64::new(3));
         let db = db.apply_batch(parent).await.unwrap();
-        let child = child
-            .with_inactivity_floor(Location::new(0))
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let child = child.with_inactivity_floor(Location::new(0));
+        let child = child.merkleize(&db).await.unwrap();
         assert_eq!(pending.root(), child.root());
         let expected_root = child.root();
         let db = db.apply_batch(child).await.unwrap();
@@ -929,11 +926,8 @@ mod tests {
         for value in 1..=6 {
             seed = seed.append(U64::new(value));
         }
-        let seed = seed
-            .with_inactivity_floor(Location::new(0))
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let seed = seed.with_inactivity_floor(Location::new(0));
+        let seed = seed.merkleize(&db).await.unwrap();
         let db = db.apply_batch(seed).await.unwrap();
         let db = db.sync().await.unwrap();
         let batch = db
@@ -967,11 +961,8 @@ mod tests {
         for value in 11..=16 {
             other = other.append(U64::new(value));
         }
-        let other = other
-            .with_inactivity_floor(Location::new(0))
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let other = other.with_inactivity_floor(Location::new(0));
+        let other = other.merkleize(&db).await.unwrap();
         let db = db.apply_batch(other).await.unwrap();
         assert_eq!(db.size(), start);
         assert!(matches!(

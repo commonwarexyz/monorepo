@@ -199,11 +199,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             // Set the floor to at least safe_loc so the prune succeeds,
                             // but never below the current floor (monotonicity).
                             let floor = safe_loc.max(db.inactivity_floor_loc());
-                            let merkleized = batch
-                                .with_inactivity_floor(floor)
-                                .merkleize(&db)
-                                .await
-                                .unwrap();
+                            let merkleized = batch.with_inactivity_floor(floor);
+                            let merkleized = merkleized.merkleize(&db).await.unwrap();
                             let db = db.apply_batch(merkleized).await.unwrap();
                             let db = db.commit().await.unwrap();
                             last_commit_loc = Some(db.bounds().end - 1);

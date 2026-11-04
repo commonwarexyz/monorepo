@@ -101,19 +101,15 @@ mod tests {
                         .new_batch()
                         .set(Digest::from([1; 32]), Digest::from([9; 32]))
                         .with_metadata(Digest::from([9; 32]))
-                        .with_inactivity_floor(Location::new(1))
-                        .merkleize(&db)
-                        .await
-                        .unwrap();
+                        .with_inactivity_floor(Location::new(1));
+                    let parent = parent.merkleize(&db).await.unwrap();
                     let child = parent.new_batch::<Sha256>().merkleize(&db).await.unwrap();
                     let explicit = parent
                         .new_batch::<Sha256>()
                         .with_metadata(Digest::from([9; 32]))
                         .with_metadata(None)
-                        .with_inactivity_floor(Location::new(1))
-                        .merkleize(&db)
-                        .await
-                        .unwrap();
+                        .with_inactivity_floor(Location::new(1));
+                    let explicit = explicit.merkleize(&db).await.unwrap();
                     assert_eq!(child.root(), explicit.root());
                     assert_eq!(child.bounds().inactivity_floor, Location::new(1));
                     let regressed = parent

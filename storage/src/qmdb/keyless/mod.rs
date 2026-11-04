@@ -848,11 +848,8 @@ pub(crate) mod tests {
             batch = batch.append(V::Value::make(i));
         }
         let floor = db.bounds().end + 12;
-        let batch = batch
-            .with_inactivity_floor(floor)
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let batch = batch.with_inactivity_floor(floor);
+        let batch = batch.merkleize(&db).await.unwrap();
         db = db.apply_batch(batch).await.unwrap();
         db = db.commit().await.unwrap();
         db = db.prune(floor).await.unwrap();
@@ -918,11 +915,8 @@ pub(crate) mod tests {
         assert!(*db.bounds().start > 0, "the prune must remove history");
 
         // The child built before the apply still merkleizes to the same root.
-        let merkleized = child
-            .with_inactivity_floor(parent_floor)
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let merkleized = child.with_inactivity_floor(parent_floor);
+        let merkleized = merkleized.merkleize(&db).await.unwrap();
         assert_eq!(merkleized.root(), expected);
         db.destroy().await.unwrap();
     }
@@ -1231,11 +1225,8 @@ pub(crate) mod tests {
         // afterward.
         let child = parent.new_batch::<Sha256>().append(V::Value::make(3));
         let db = db.apply_batch(parent).await.unwrap();
-        let child = child
-            .with_inactivity_floor(Location::new(0))
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let child = child.with_inactivity_floor(Location::new(0));
+        let child = child.merkleize(&db).await.unwrap();
         assert_eq!(pending.root(), child.root());
         let db = db.apply_batch(child).await.unwrap();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
@@ -2252,11 +2243,8 @@ pub(crate) mod tests {
                 batch = batch.append(V::Value::make(i));
             }
             let new_commit = db.bounds().end + ELEMENTS;
-            let merkleized = batch
-                .with_inactivity_floor(new_commit)
-                .merkleize(&db)
-                .await
-                .unwrap();
+            let merkleized = batch.with_inactivity_floor(new_commit);
+            let merkleized = merkleized.merkleize(&db).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
         }
         let db = db.commit().await.unwrap();
@@ -2414,11 +2402,8 @@ pub(crate) mod tests {
                 batch = batch.append(V::Value::make(i));
             }
             let new_commit = db.bounds().end + ELEMENTS;
-            let merkleized = batch
-                .with_inactivity_floor(new_commit)
-                .merkleize(&db)
-                .await
-                .unwrap();
+            let merkleized = batch.with_inactivity_floor(new_commit);
+            let merkleized = merkleized.merkleize(&db).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
         }
 
@@ -2428,11 +2413,8 @@ pub(crate) mod tests {
                 batch = batch.append(V::Value::make(i));
             }
             let new_commit = db.bounds().end + ELEMENTS;
-            let merkleized = batch
-                .with_inactivity_floor(new_commit)
-                .merkleize(&db)
-                .await
-                .unwrap();
+            let merkleized = batch.with_inactivity_floor(new_commit);
+            let merkleized = merkleized.merkleize(&db).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
         }
         let root = db.root();

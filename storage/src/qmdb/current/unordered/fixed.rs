@@ -151,10 +151,8 @@ pub mod test {
             let sibling = staged
                 .new_batch::<Sha256>()
                 .with_metadata(metadata)
-                .with_metadata(None)
-                .merkleize(&db)
-                .await
-                .unwrap();
+                .with_metadata(None);
+            let sibling = sibling.merkleize(&db).await.unwrap();
             assert_eq!(child.root(), sibling.root());
             let (_, cleared) = staged
                 .new_batch::<Sha256>()

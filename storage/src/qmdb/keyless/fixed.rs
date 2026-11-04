@@ -119,19 +119,15 @@ mod tests {
                         .new_batch()
                         .append(U64::new(9))
                         .with_metadata(U64::new(9))
-                        .with_inactivity_floor(Location::new(1))
-                        .merkleize(&db)
-                        .await
-                        .unwrap();
+                        .with_inactivity_floor(Location::new(1));
+                    let parent = parent.merkleize(&db).await.unwrap();
                     let child = parent.new_batch::<Sha256>().merkleize(&db).await.unwrap();
                     let explicit = parent
                         .new_batch::<Sha256>()
                         .with_metadata(U64::new(9))
                         .with_metadata(None)
-                        .with_inactivity_floor(Location::new(1))
-                        .merkleize(&db)
-                        .await
-                        .unwrap();
+                        .with_inactivity_floor(Location::new(1));
+                    let explicit = explicit.merkleize(&db).await.unwrap();
                     assert_eq!(child.root(), explicit.root());
                     assert_eq!(child.bounds().inactivity_floor, Location::new(1));
                     let regressed = parent
@@ -188,11 +184,8 @@ mod tests {
         for value in 1..=6 {
             seed = seed.append(U64::new(value));
         }
-        let seed = seed
-            .with_inactivity_floor(Location::new(0))
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let seed = seed.with_inactivity_floor(Location::new(0));
+        let seed = seed.merkleize(&db).await.unwrap();
         let db = db.apply_batch(seed).await.unwrap();
         let db = db.sync().await.unwrap();
         let batch = db
@@ -222,11 +215,8 @@ mod tests {
         for value in 11..=16 {
             other = other.append(U64::new(value));
         }
-        let other = other
-            .with_inactivity_floor(Location::new(0))
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let other = other.with_inactivity_floor(Location::new(0));
+        let other = other.merkleize(&db).await.unwrap();
         let db = db.apply_batch(other).await.unwrap();
         assert_eq!(db.bounds().end, start);
         assert!(matches!(
@@ -272,11 +262,8 @@ mod tests {
                 for value in 0..count {
                     batch = batch.append(U64::new(value));
                 }
-                let batch = batch
-                    .with_inactivity_floor(Location::new(0))
-                    .merkleize(&db)
-                    .await
-                    .unwrap();
+                let batch = batch.with_inactivity_floor(Location::new(0));
+                let batch = batch.merkleize(&db).await.unwrap();
                 db = db.apply_batch(batch).await.unwrap();
                 commits.push((db.bounds().end, db.root()));
             }
@@ -357,11 +344,8 @@ mod tests {
                 for value in 0..count {
                     batch = batch.append(U64::new(value));
                 }
-                let batch = batch
-                    .with_inactivity_floor(Location::new(0))
-                    .merkleize(&db)
-                    .await
-                    .unwrap();
+                let batch = batch.with_inactivity_floor(Location::new(0));
+                let batch = batch.merkleize(&db).await.unwrap();
                 db = db.apply_batch(batch).await.unwrap();
                 commits.push((db.size(), db.root()));
             }
@@ -452,13 +436,8 @@ mod tests {
                             batch = batch.append(value);
                         }
                         expected.push((batch.size(), None));
-                        held.push(
-                            batch
-                                .with_inactivity_floor(Location::new(0))
-                                .merkleize(&db)
-                                .await
-                                .unwrap(),
-                        );
+                        let batch = batch.with_inactivity_floor(Location::new(0));
+                        held.push(batch.merkleize(&db).await.unwrap());
                     }
 
                     // Apply the oldest batch and keep only a detached clone. The clone holds its
@@ -473,11 +452,8 @@ mod tests {
                     };
                     let batch = held.last().unwrap().new_batch::<Sha256>();
                     expected.push((batch.size(), None));
-                    let leaf = batch
-                        .with_inactivity_floor(Location::new(0))
-                        .merkleize(&db)
-                        .await
-                        .unwrap();
+                    let leaf = batch.with_inactivity_floor(Location::new(0));
+                    let leaf = leaf.merkleize(&db).await.unwrap();
                     if detach_oldest {
                         assert!(
                             leaf.journal_batch.ancestor_items.len() > leaf.bounds.ancestors.len(),
@@ -1160,11 +1136,8 @@ mod tests {
                 batch = batch.append(U64::new(i * 10 + 1));
             }
             let floor = target_db.inactivity_floor_loc();
-            let merkleized = batch
-                .with_inactivity_floor(floor)
-                .merkleize(&target_db)
-                .await
-                .unwrap();
+            let merkleized = batch.with_inactivity_floor(floor);
+            let merkleized = merkleized.merkleize(&target_db).await.unwrap();
             let target_db = target_db.apply_batch(merkleized).await.unwrap();
 
             let target_root = target_db.root();

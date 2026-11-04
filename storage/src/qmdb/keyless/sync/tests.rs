@@ -713,12 +713,8 @@ pub(crate) mod harnesses {
                 }
             }
         }
-        let merkleized = batch
-            .with_metadata(metadata)
-            .with_inactivity_floor(floor)
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let merkleized = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let merkleized = merkleized.merkleize(&db).await.unwrap();
         db.apply_batch(merkleized).await.unwrap()
     }
 
@@ -782,12 +778,8 @@ pub(crate) mod harnesses {
             let db = if db.inactivity_floor_loc() > loc {
                 db
             } else {
-                let merkleized = db
-                    .new_batch()
-                    .with_inactivity_floor(loc)
-                    .merkleize(&db)
-                    .await
-                    .unwrap();
+                let merkleized = db.new_batch().with_inactivity_floor(loc);
+                let merkleized = merkleized.merkleize(&db).await.unwrap();
                 let db = db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap()
             };
@@ -919,12 +911,8 @@ pub(crate) mod harnesses {
         for value in values {
             batch = batch.append(value.clone());
         }
-        let batch = batch
-            .with_metadata(metadata)
-            .with_inactivity_floor(floor)
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let batch = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let batch = batch.merkleize(&db).await.unwrap();
         db.apply_batch(batch).await.unwrap()
     }
 
@@ -944,12 +932,8 @@ pub(crate) mod harnesses {
         for value in values {
             batch = batch.append(value.clone());
         }
-        let batch = batch
-            .with_metadata(metadata)
-            .with_inactivity_floor(floor)
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let batch = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let batch = batch.merkleize(&db).await.unwrap();
         db.apply_batch(batch).await.unwrap()
     }
 

@@ -889,11 +889,8 @@ mod tests {
             .new_batch::<Sha256>()
             .set(Sha256::fill(3), Sha256::fill(33));
         let db = db.apply_batch(parent).await.unwrap();
-        let child = child
-            .with_inactivity_floor(Location::new(0))
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let child = child.with_inactivity_floor(Location::new(0));
+        let child = child.merkleize(&db).await.unwrap();
         assert_eq!(pending.root(), child.root());
         let expected_root = child.root();
         let db = db.apply_batch(child).await.unwrap();
@@ -956,11 +953,8 @@ mod tests {
         for value in 1..=6 {
             seed = seed.set(Sha256::fill(value), Sha256::fill(value));
         }
-        let seed = seed
-            .with_inactivity_floor(Location::new(0))
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let seed = seed.with_inactivity_floor(Location::new(0));
+        let seed = seed.merkleize(&db).await.unwrap();
         let db = db.apply_batch(seed).await.unwrap();
         let db = db.sync().await.unwrap();
         let batch = db
@@ -994,11 +988,8 @@ mod tests {
         for value in 11..=16 {
             other = other.set(Sha256::fill(value), Sha256::fill(value));
         }
-        let other = other
-            .with_inactivity_floor(Location::new(0))
-            .merkleize(&db)
-            .await
-            .unwrap();
+        let other = other.with_inactivity_floor(Location::new(0));
+        let other = other.merkleize(&db).await.unwrap();
         let db = db.apply_batch(other).await.unwrap();
         assert_eq!(db.size(), start);
         assert!(matches!(
@@ -1442,11 +1433,8 @@ mod tests {
             let c = b.new_batch::<Sha256>().set(key3, value3);
 
             let db = db.apply_batch(a).await.unwrap();
-            let c = c
-                .with_inactivity_floor(Location::new(0))
-                .merkleize(&db)
-                .await
-                .unwrap();
+            let c = c.with_inactivity_floor(Location::new(0));
+            let c = c.merkleize(&db).await.unwrap();
             let expected_root = c.root();
             let db = db.apply_batch(c).await.unwrap();
 
@@ -2733,11 +2721,8 @@ mod tests {
             for key in 1..=6u8 {
                 batch = batch.set(Sha256::fill(key), Sha256::fill(key));
             }
-            let batch = batch
-                .with_inactivity_floor(Location::new(0))
-                .merkleize(&db)
-                .await
-                .unwrap();
+            let batch = batch.with_inactivity_floor(Location::new(0));
+            let batch = batch.merkleize(&db).await.unwrap();
             db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let first_retained_size = db.size();
             assert!(first_retained_size > cap);
