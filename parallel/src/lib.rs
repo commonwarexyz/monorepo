@@ -1445,8 +1445,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     ///
     /// # Cache Affinity
     ///
-    /// A strategy built with [`Rayon::new`] or [`Rayon::grouped`] splits its pool's workers into
-    /// groups sized to the host's last-level cache domains. A strategy built with
+    /// A strategy built with [`Rayon::new`] or [`Rayon::with_stack_size`] splits its pool's
+    /// workers into groups sized to the host's last-level cache domains. A strategy built with
     /// [`Rayon::with_pool`] is one group that is never homed.
     ///
     /// A group's home is the domain it requests its workers to run in. An unhomed group can take a
@@ -1537,20 +1537,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     }
 
     impl Rayon {
-        /// Creates a strategy with the given number of workers, grouped automatically by the
-        /// host's last-level cache topology as described by [`Self::grouped`].
-        pub fn new(num_threads: NonZeroUsize) -> Result<Self, ThreadPoolBuildError> {
-            Self::grouped(num_threads, None)
-        }
-
-        /// Creates a [`Rayon`] strategy that treats the given [`ThreadPool`] as one group.
-        /// The strategy does not change the pool's worker affinity.
-        pub fn with_pool(thread_pool: ThreadPool) -> Self {
-            Self::with_groups(Arc::new(topology::Groups::new(thread_pool)))
-        }
-
-        /// Creates a [`Rayon`] strategy on one pool of `parallelism` threads, with `stack_size` per
-        /// worker when one is given, grouped by last-level cache domain as described on [`Rayon`].
+        /// Creates a strategy with `num_threads` workers, grouped by last-level cache domain as
+        /// described on [`Rayon`].
         ///
         /// A group is as wide as the most CPUs the calling thread may use in any one domain, less
         /// one when that number is at least six to leave room for the caller and other threads.
@@ -1559,14 +1547,27 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         ///
         /// When the pool fills all allowed CPUs across two or more equally sized domains of at
         /// least two CPUs each, groups use the full domain width and get fixed homes at startup. A
-        /// `parallelism` of at most the group width gives one group. Workers past a multiple of the
-        /// group width form a narrower last group that takes only work placed on the whole pool.
-        pub fn grouped(
-            parallelism: NonZeroUsize,
-            stack_size: Option<usize>,
-        ) -> Result<Self, ThreadPoolBuildError> {
-            let groups = topology::Groups::build(parallelism.get(), stack_size)?;
+        /// `num_threads` of at most the group width gives one group, and workers past a multiple of
+        /// it form a narrower last group that takes only whole-pool work.
+        pub fn new(num_threads: NonZeroUsize) -> Result<Self, ThreadPoolBuildError> {
+            let groups = topology::Groups::build(num_threads.get(), None)?;
             Ok(Self::with_groups(Arc::new(groups)))
+        }
+
+        /// Creates a strategy like [`Self::new`] whose workers each have a stack of `stack_size`
+        /// bytes.
+        pub fn with_stack_size(
+            num_threads: NonZeroUsize,
+            stack_size: usize,
+        ) -> Result<Self, ThreadPoolBuildError> {
+            let groups = topology::Groups::build(num_threads.get(), Some(stack_size))?;
+            Ok(Self::with_groups(Arc::new(groups)))
+        }
+
+        /// Creates a [`Rayon`] strategy that treats the given [`ThreadPool`] as one group.
+        /// The strategy does not change the pool's worker affinity.
+        pub fn with_pool(thread_pool: ThreadPool) -> Self {
+            Self::with_groups(Arc::new(topology::Groups::new(thread_pool)))
         }
 
         /// Creates a strategy over `groups` that plans with the pool's thread count, decides

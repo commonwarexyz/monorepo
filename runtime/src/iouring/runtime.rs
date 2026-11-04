@@ -851,7 +851,7 @@ impl crate::Spawner for Context {
 
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
-        Rayon::grouped(parallelism, Some(self.shared.cfg.thread_stack_size))
+        Rayon::with_stack_size(parallelism, self.shared.cfg.thread_stack_size)
             .expect("Rayon thread pool creation must succeed")
     }
 }
