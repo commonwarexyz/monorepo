@@ -1106,6 +1106,7 @@ fn certificate(
 ) -> Certificate<ed25519::Scheme, Digest> {
     let Fixture { schemes, .. } = ed25519::fixture(context, b"ordered-checkpoints", 4);
     let item = Item {
+        epoch: Epoch::zero(),
         position: Height::zero(),
         digest,
     };
@@ -1113,13 +1114,7 @@ fn certificate(
         .iter()
         .map(|scheme| Ack::sign(scheme, item.clone()).unwrap())
         .collect::<Vec<_>>();
-    Certificate::from_acks(
-        &schemes[0],
-        Epoch::zero(),
-        non_empty![@acks.iter()],
-        &Sequential,
-    )
-    .unwrap()
+    Certificate::from_acks(&schemes[0], non_empty![@acks.iter()], &Sequential).unwrap()
 }
 
 /// Returns the oldest operation a node's databases retain.

@@ -2,7 +2,7 @@ use super::{
     CertificateOutcome, Config, Consumer, Engine, EngineOutcome, Fetcher, Mailbox, Recoverer,
     Recovery, RecoveryCoordinator, RegistrationError,
     scheme::{self, Scheme},
-    types::{Ack, Certificate, Item, RecoveryKey, RecoveryNamespace},
+    types::{Ack, Certificate, Item, RecoveryKey, RecoveryNamespace, Scope},
 };
 use crate::{
     Automaton, Reporter,
@@ -392,9 +392,7 @@ where
     Z: Reporter<Activity = Certificate<S, Sha256Digest>>,
 {
     Config {
-        epoch: scope.epoch,
-        first: scope.first,
-        last: scope.last,
+        scope: Scope::new(scope.epoch, scope.first, scope.last).unwrap(),
         scheme,
         automaton,
         reporter,
@@ -407,7 +405,7 @@ where
         journal_partition: scope.partition,
         journal_write_buffer: NZUsize!(4096),
         journal_replay_buffer: NZUsize!(4096),
-        journal_heights_per_section: NonZeroU64::new(4).unwrap(),
+        journal_positions_per_section: NonZeroU64::new(4).unwrap(),
         journal_compression: None,
         journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
@@ -421,7 +419,7 @@ fn key_for<S: Scheme<Sha256Digest>>(
 ) -> RecoveryKey {
     RecoveryKey {
         namespace: fixture.schemes[0].recovery_namespace(),
-        epoch: certificate.epoch,
+        epoch: certificate.item.epoch,
         position: certificate.item.position,
     }
 }
@@ -445,6 +443,7 @@ where
     S: Scheme<Sha256Digest, PublicKey = PublicKey>,
 {
     let item = Item {
+        epoch,
         position,
         digest: digest(position),
     };
@@ -456,13 +455,7 @@ where
         .take(quorum)
         .map(|scheme| Ack::sign(scheme, item.clone()).unwrap())
         .collect();
-    Certificate::from_acks(
-        &fixture.schemes[0],
-        epoch,
-        non_empty![@acks.iter()],
-        &Sequential,
-    )
-    .unwrap()
+    Certificate::from_acks(&fixture.schemes[0], non_empty![@acks.iter()], &Sequential).unwrap()
 }
 
 /// Runs the first `online` validators of a `participants`-validator committee over a fixed range.
@@ -536,9 +529,7 @@ where
                 assert!(certificate.verify_for(
                     &mut context,
                     &fixture.verifier,
-                    epoch,
-                    first,
-                    last,
+                    Scope::new(epoch, first, last).unwrap(),
                     &Sequential,
                 ));
             }
@@ -767,6 +758,7 @@ fn test_ack_validation_ignores_non_blockable_inputs() {
         let outside = Ack::sign(
             &fixture.schemes[1],
             Item {
+                epoch,
                 position: position.next(),
                 digest: digest(position.next()),
             },
@@ -782,9 +774,25 @@ fn test_ack_validation_ignores_non_blockable_inputs() {
             context.sleep(Duration::from_millis(1)).await;
         }
 
+        // A share validly signed for another epoch is ignored without blocking its sender.
+        let wrong_epoch = Ack::sign(
+            &fixture.schemes[1],
+            Item {
+                epoch: epoch.next(),
+                position,
+                digest: digest(position),
+            },
+        )
+        .unwrap();
+        first_sender.send(Recipients::One(victim.clone()), wrong_epoch.encode(), false);
+        while *processed.lock() < 2 {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+
         let first_valid = Ack::sign(
             &fixture.schemes[1],
             Item {
+                epoch,
                 position,
                 digest: digest(position),
             },
@@ -795,7 +803,7 @@ fn test_ack_validation_ignores_non_blockable_inputs() {
             first_valid.clone().encode(),
             false,
         );
-        while *processed.lock() < 2 {
+        while *processed.lock() < 3 {
             context.sleep(Duration::from_millis(1)).await;
         }
         first_sender.send(
@@ -803,17 +811,18 @@ fn test_ack_validation_ignores_non_blockable_inputs() {
             first_valid.clone().encode(),
             false,
         );
-        while *processed.lock() < 3 {
+        while *processed.lock() < 4 {
             context.sleep(Duration::from_millis(1)).await;
         }
         first_sender.send(Recipients::One(victim.clone()), first_valid.encode(), false);
-        while *processed.lock() < 4 {
+        while *processed.lock() < 5 {
             context.sleep(Duration::from_millis(1)).await;
         }
 
         let wrong_digest = Ack::sign(
             &fixture.schemes[2],
             Item {
+                epoch,
                 position,
                 digest: Sha256::hash(&[b"wrong ack digest"]),
             },
@@ -824,7 +833,7 @@ fn test_ack_validation_ignores_non_blockable_inputs() {
             wrong_digest.clone().encode(),
             false,
         );
-        while *processed.lock() < 5 {
+        while *processed.lock() < 6 {
             context.sleep(Duration::from_millis(1)).await;
         }
         second_sender.send(
@@ -832,20 +841,21 @@ fn test_ack_validation_ignores_non_blockable_inputs() {
             wrong_digest.encode(),
             false,
         );
-        while *processed.lock() < 6 {
+        while *processed.lock() < 7 {
             context.sleep(Duration::from_millis(1)).await;
         }
 
         let second_valid = Ack::sign(
             &fixture.schemes[2],
             Item {
+                epoch,
                 position,
                 digest: digest(position),
             },
         )
         .unwrap();
         second_sender.send(Recipients::One(victim), second_valid.encode(), false);
-        while *processed.lock() < 7 {
+        while *processed.lock() < 8 {
             context.sleep(Duration::from_millis(1)).await;
         }
 
@@ -856,6 +866,7 @@ fn test_ack_validation_ignores_non_blockable_inputs() {
         );
         let certificates = certificates.lock();
         assert_eq!(certificates.len(), 1);
+        assert_eq!(certificates[0].item.epoch, epoch);
         assert_eq!(certificates[0].item.position, position);
         assert_eq!(certificates[0].item.digest, digest(position));
     });
@@ -914,6 +925,7 @@ fn test_ack_validation_blocks_hostile_peers() {
         let mismatched = Ack::sign(
             &fixture.schemes[1],
             Item {
+                epoch,
                 position,
                 digest: digest(position),
             },
@@ -949,6 +961,7 @@ fn test_ack_validation_blocks_hostile_peers() {
         let mut forged = Ack::sign(
             &fixture.schemes[3],
             Item {
+                epoch,
                 position,
                 digest: digest(position),
             },
@@ -1021,6 +1034,7 @@ where
         }
 
         let item = Item {
+            epoch,
             position,
             digest: digest(position),
         };
@@ -1032,18 +1046,27 @@ where
             .take(quorum)
             .map(|scheme| Ack::sign(scheme, item.clone()).unwrap())
             .collect();
-        let certificate = Certificate::from_acks(
-            &fixture.schemes[0],
-            epoch,
-            non_empty![@acks.iter()],
-            &Sequential,
-        )
-        .unwrap();
+        let certificate =
+            Certificate::from_acks(&fixture.schemes[0], non_empty![@acks.iter()], &Sequential)
+                .unwrap();
 
-        let mut wrong_epoch = certificate.clone();
-        wrong_epoch.epoch = epoch.next();
+        // A certificate signed for another epoch fails under its own key and the requested key.
+        let wrong_epoch = self::certificate(&fixture, epoch.next(), position);
         assert_eq!(
-            submit(&mut mailbox, &fixture, wrong_epoch).await,
+            submit(&mut mailbox, &fixture, wrong_epoch.clone()).await,
+            CertificateOutcome::Invalid
+        );
+        assert_eq!(
+            mailbox
+                .submit(key_for(&fixture, &certificate), wrong_epoch.encode())
+                .await,
+            CertificateOutcome::Invalid
+        );
+        // The epoch is signed, so relabeling it fails verification.
+        let mut relabeled = wrong_epoch;
+        relabeled.item.epoch = epoch;
+        assert_eq!(
+            submit(&mut mailbox, &fixture, relabeled).await,
             CertificateOutcome::Invalid
         );
 
@@ -1157,10 +1180,30 @@ fn test_external_certificate_outcomes_and_recovery_window() {
             CertificateOutcome::Invalid
         );
 
-        let mut wrong_epoch = certificate(&fixture, epoch, second);
-        wrong_epoch.epoch = epoch.next();
+        // Another epoch's certificate is invalid under its own key and the requested key, before
+        // the active position check.
+        let wrong_epoch = certificate(&fixture, epoch.next(), second);
         assert_eq!(
-            submit(&mut mailbox, &fixture, wrong_epoch).await,
+            submit(&mut mailbox, &fixture, wrong_epoch.clone()).await,
+            CertificateOutcome::Invalid
+        );
+        assert_eq!(
+            mailbox.submit(second_key, wrong_epoch.encode()).await,
+            CertificateOutcome::Invalid
+        );
+        assert_eq!(
+            mailbox
+                .submit(
+                    third_key,
+                    certificate(&fixture, epoch.next(), third).encode()
+                )
+                .await,
+            CertificateOutcome::Invalid
+        );
+        let mut relabeled = wrong_epoch;
+        relabeled.item.epoch = epoch;
+        assert_eq!(
+            submit(&mut mailbox, &fixture, relabeled).await,
             CertificateOutcome::Invalid
         );
         assert_eq!(
@@ -1481,6 +1524,66 @@ fn test_recovery_retries_rejected_admission() {
 }
 
 #[test_traced("INFO")]
+fn test_rejected_recovery_is_not_canceled() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 4);
+        let epoch = Epoch::new(95);
+        let position = Height::new(550);
+        let participant = fixture.participants[0].clone();
+        let (oracle, mut registrations) =
+            simulation(context.child("simulation"), &fixture, false).await;
+        let recoverer = RecordingRecoverer::rejecting_once();
+        let events = recoverer.events.clone();
+        let mut cfg = config(
+            &context,
+            fixture.schemes[0].clone(),
+            PendingApplication::default(),
+            RecordingReporter::default(),
+            oracle.control(participant.clone()),
+            EngineScope {
+                partition: "aggregation-recovery-rejected-not-canceled".into(),
+                epoch,
+                first: position,
+                last: position,
+                window: 1,
+            },
+        );
+        cfg.recovery_after_rebroadcasts = NonZeroU64::new(1).unwrap();
+        cfg.recoverer = recoverer;
+        let timeout = cfg.rebroadcast_timeout.get();
+        let engine = Engine::new(context.child("engine"), cfg).unwrap();
+        let mut mailbox = engine.mailbox();
+        let start = context.current();
+        let handle = engine.start(registrations.remove(&participant).unwrap());
+
+        // The first tick reaches the threshold and its fetch is rejected.
+        context.sleep_until(start + timeout + timeout / 2).await;
+        let key = RecoveryKey {
+            namespace: RecoveryNamespace::derive(NAMESPACE),
+            epoch,
+            position,
+        };
+        assert_eq!(events.lock().as_slice(), &[(true, key)]);
+
+        // Accepting the position before the retry must not cancel a request never admitted.
+        assert_eq!(
+            submit(
+                &mut mailbox,
+                &fixture,
+                certificate(&fixture, epoch, position)
+            )
+            .await,
+            CertificateOutcome::Accepted
+        );
+        assert_eq!(
+            handle.await.expect("aggregation engine failed"),
+            EngineOutcome::Completed
+        );
+        assert_eq!(events.lock().as_slice(), &[(true, key)]);
+    });
+}
+
+#[test_traced("INFO")]
 fn test_locally_assembled_certificate_cancels_recovery() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
         let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 4);
@@ -1514,6 +1617,7 @@ fn test_locally_assembled_certificate_cancels_recovery() {
             context.sleep(Duration::from_millis(1)).await;
         }
         let item = Item {
+            epoch,
             position,
             digest: digest(position),
         };
@@ -1623,6 +1727,7 @@ fn test_certificate_ingress_is_bounded() {
         let mut mailbox = engine.mailbox();
 
         let item = Item {
+            epoch,
             position,
             digest: digest(position),
         };
@@ -1640,7 +1745,6 @@ fn test_certificate_ingress_is_bounded() {
             .collect();
         let certificate = Certificate::from_acks(
             &fixture.schemes[0],
-            epoch,
             non_empty![@acks.iter()],
             &Sequential,
         )
@@ -1862,13 +1966,11 @@ fn test_restart_reproposes_uncertified_position() {
     });
 }
 
-#[test_traced("INFO")]
-fn test_restart_after_completion_replays_without_proposing() {
-    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+fn restart_after_completion_replays_without_proposing(position: Height) {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(move |mut context| async move {
         let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 1);
         let participant = fixture.participants[0].clone();
         let epoch = Epoch::new(11);
-        let position = Height::new(80);
         let partition = "aggregation-replay";
 
         let (first_oracle, mut first_registrations) =
@@ -1930,6 +2032,13 @@ fn test_restart_after_completion_replays_without_proposing() {
         assert!(replay_requests.lock().is_empty());
         assert_eq!(replay_certificates.lock().len(), 1);
     });
+}
+
+#[test_traced("INFO")]
+fn test_restart_after_completion_replays_without_proposing() {
+    for position in [Height::new(80), Height::new(u64::MAX)] {
+        restart_after_completion_replays_without_proposing(position);
+    }
 }
 
 fn journal_replay_resumes_partial_mid_range(replay_window: u64, replayed: &'static [u64]) {
@@ -2279,7 +2388,7 @@ impl Reporter for ArchiveReporter {
     fn report(&mut self, certificate: Self::Activity) -> Feedback {
         let key = RecoveryKey {
             namespace: self.namespace,
-            epoch: certificate.epoch,
+            epoch: certificate.item.epoch,
             position: certificate.item.position,
         };
         self.archive.lock().insert(key, certificate);
@@ -2378,9 +2487,7 @@ where
     let engine = Engine::new(
         context.child("engine"),
         Config {
-            epoch: scope.epoch,
-            first: scope.first,
-            last: scope.last,
+            scope: Scope::new(scope.epoch, scope.first, scope.last).unwrap(),
             scheme,
             automaton: application,
             reporter: ArchiveReporter { namespace, archive },
@@ -2393,7 +2500,7 @@ where
             journal_partition: scope.partition,
             journal_write_buffer: NZUsize!(4096),
             journal_replay_buffer: NZUsize!(4096),
-            journal_heights_per_section: NonZeroU64::new(4).unwrap(),
+            journal_positions_per_section: NonZeroU64::new(4).unwrap(),
             journal_compression: None,
             journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
@@ -2543,9 +2650,7 @@ where
     R: Recoverer,
 {
     Config {
-        epoch: cfg.epoch,
-        first: cfg.first,
-        last: cfg.last,
+        scope: cfg.scope,
         scheme: cfg.scheme,
         automaton: cfg.automaton,
         reporter: cfg.reporter,
@@ -2558,7 +2663,7 @@ where
         journal_partition: cfg.journal_partition,
         journal_write_buffer: cfg.journal_write_buffer,
         journal_replay_buffer: cfg.journal_replay_buffer,
-        journal_heights_per_section: cfg.journal_heights_per_section,
+        journal_positions_per_section: cfg.journal_positions_per_section,
         journal_compression: cfg.journal_compression,
         journal_page_cache: cfg.journal_page_cache,
         strategy: cfg.strategy,

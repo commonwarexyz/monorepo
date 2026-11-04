@@ -17,7 +17,7 @@ mod tests {
             scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
             types::{Ack, Item},
         },
-        types::{Height, Participant},
+        types::{Epoch, Height, Participant},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
@@ -37,6 +37,7 @@ mod tests {
 
         // Widen every varint.
         let item = Item {
+            epoch: Epoch::new(u64::MAX),
             position: Height::new(u64::MAX),
             digest: Sha256Digest::random(test_rng()),
         };

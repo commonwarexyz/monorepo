@@ -13,12 +13,12 @@
 //! its block expires. Fetches persist until pruned, fulfilled, or reported as no longer needed by
 //! the `Consumer`.
 //!
-//! The `Consumer` returns a [`crate::Outcome`], checking data integrity and authenticity unless it
-//! no longer needs the key. A [`Resolved`](crate::Outcome::Resolved) outcome retires its delivered
+//! The `Consumer` returns a [`crate::Outcome`]. It checks data integrity and authenticity before
+//! accepting a response. A [`Resolved`](crate::Outcome::Resolved) outcome retires its delivered
 //! subscribers when all are satisfied, and otherwise retries without penalizing the peer.
-//! [`Unresolved`](crate::Outcome::Unresolved) also retries without changing the peer's score. An
-//! invalid response retries after blocking the peer, and an ignored response retires the key
-//! without scoring its peer.
+//! [`Unresolved`](crate::Outcome::Unresolved) can defer validation and retries without changing
+//! the peer's score. An invalid response retries after blocking the peer. An ignored response
+//! retires the key without scoring its peer.
 //!
 //! The peer also serves data to other peers, forwarding network requests to the `Producer`. The
 //! `Producer` provides data asynchronously (e.g., from storage). If it fails, the peer sends an

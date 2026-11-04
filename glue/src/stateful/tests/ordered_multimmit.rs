@@ -38,7 +38,7 @@ use commonware_consensus::{
     Application, Automaton, Epochable as _, Heightable as _,
     aggregation::{
         self,
-        types::{Ack, Certificate, RecoveryKey},
+        types::{Ack, Certificate, RecoveryKey, Scope},
     },
     ancestry::Ancestry,
     multimmit::{
@@ -52,7 +52,7 @@ use commonware_consensus::{
         mocks::{Committee, MockBody},
         types::{Context as Producing, TransactionBlock},
     },
-    types::{Epoch, Height, Participant, ViewDelta},
+    types::{Height, Participant, ViewDelta},
 };
 use commonware_cryptography::{
     Digested, Digestible as _, Hasher as _, Sha256,
@@ -141,12 +141,13 @@ type Op = <Qmdb<deterministic::Context> as Source>::Op;
 type SyncResponse = Response<mmr::Family, Op, Digest>;
 
 /// Returns the epoch and the inclusive position range of the executed chain's checkpoints.
-fn checkpoint_scope(committee: &Committee<MinPk>) -> (Epoch, Height, Height) {
-    (
+fn checkpoint_scope(committee: &Committee<MinPk>) -> Scope {
+    Scope::new(
         committee.config.epoch(),
         Height::zero(),
         Height::new(u64::MAX / INTERVAL.get() - 1),
     )
+    .unwrap()
 }
 
 /// What the sync engine did with a request whose response was corrupted.
@@ -1004,9 +1005,7 @@ impl Cluster {
         let aggregation = aggregation::Engine::new(
             context.child("aggregation"),
             aggregation::Config {
-                epoch: checkpoint_scope.0,
-                first: checkpoint_scope.1,
-                last: checkpoint_scope.2,
+                scope: checkpoint_scope,
                 scheme: scheme.clone(),
                 automaton: Gated {
                     inner: checkpoints.clone(),
@@ -1022,7 +1021,7 @@ impl Cluster {
                 journal_partition: format!("{prefix}_aggregation"),
                 journal_write_buffer: NZUsize!(4_096),
                 journal_replay_buffer: NZUsize!(4_096),
-                journal_heights_per_section: NZU64!(8),
+                journal_positions_per_section: NZU64!(8),
                 journal_compression: None,
                 journal_page_cache: page_cache.clone(),
                 strategy: Sequential,
@@ -1048,9 +1047,7 @@ impl Cluster {
         // Every validator serves its newest checkpoint; a joining one also samples its peers'.
         let (probe, sampler) = Probe::new(probe::Config {
             context: context.child("probe"),
-            epoch: checkpoint_scope.0,
-            first: checkpoint_scope.1,
-            last: checkpoint_scope.2,
+            scope: checkpoint_scope,
             scheme,
             strategy: Sequential,
             blocker: control.clone(),
@@ -1377,10 +1374,10 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
             .committee
             .verifier
             .checkpoint(CHECKPOINT_NAMESPACE);
-        let (epoch, lowest, highest) = checkpoint_scope(&committee.committee);
+        let scope = checkpoint_scope(&committee.committee);
         let key = RecoveryKey {
             namespace: aggregation::scheme::Scheme::<Digest>::recovery_namespace(&trusted),
-            epoch,
+            epoch: scope.epoch(),
             position: Height::new(base_position),
         };
         let encoded = loop {
@@ -1392,14 +1389,7 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
         let certificate =
             Certificate::<Scheme, Digest>::decode_cfg(encoded, &trusted.certificate_codec_config())
                 .expect("archived certificate decodes");
-        assert!(certificate.verify_for(
-            &mut context,
-            &trusted,
-            epoch,
-            lowest,
-            highest,
-            &Sequential
-        ));
+        assert!(certificate.verify_for(&mut context, &trusted, scope, &Sequential));
         assert_eq!(
             late.checkpoints.height(certificate.item.position),
             Some(Height::new(base))
@@ -1410,14 +1400,12 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
             .build()
             .verifier
             .checkpoint(CHECKPOINT_NAMESPACE);
-        assert!(!certificate.verify_for(&mut context, &other, epoch, lowest, highest, &Sequential));
+        assert!(!certificate.verify_for(&mut context, &other, scope, &Sequential));
         let above = Height::new(base_position + 1);
         assert!(!certificate.verify_for(
             &mut context,
             &trusted,
-            epoch,
-            above,
-            highest,
+            Scope::new(scope.epoch(), above, scope.last()).unwrap(),
             &Sequential
         ));
 
@@ -1492,10 +1480,10 @@ async fn sign_new_checkpoint(
     assert_eq!(ack.item.digest, block.digest());
 
     // No peer signed the position, so it has no certificate yet. Releasing the peers certifies it.
-    let (epoch, lowest, highest) = checkpoint_scope(&committee.committee);
+    let scope = checkpoint_scope(&committee.committee);
     let key = RecoveryKey {
         namespace: aggregation::scheme::Scheme::<Digest>::recovery_namespace(&trusted),
-        epoch,
+        epoch: scope.epoch(),
         position: Height::new(position),
     };
     assert_eq!(committee.gate.held(position), joiner);
@@ -1510,7 +1498,7 @@ async fn sign_new_checkpoint(
     let certificate =
         Certificate::<Scheme, Digest>::decode_cfg(encoded, &trusted.certificate_codec_config())
             .expect("archived certificate decodes");
-    assert!(certificate.verify_for(context, &trusted, epoch, lowest, highest, &Sequential));
+    assert!(certificate.verify_for(context, &trusted, scope, &Sequential));
     assert_eq!(certificate.item.position, Height::new(position));
     assert_eq!(certificate.item.digest, ack.item.digest);
 }
@@ -1677,10 +1665,10 @@ fn a_late_validator_resumes_state_sync_after_a_crash(#[case] cut: Cut) {
             .committee
             .verifier
             .checkpoint(CHECKPOINT_NAMESPACE);
-        let (epoch, lowest, highest) = checkpoint_scope(&committee.committee);
+        let scope = checkpoint_scope(&committee.committee);
         let key = RecoveryKey {
             namespace: aggregation::scheme::Scheme::<Digest>::recovery_namespace(&trusted),
-            epoch,
+            epoch: scope.epoch(),
             position: Height::new(position),
         };
         let encoded = loop {
@@ -1692,14 +1680,7 @@ fn a_late_validator_resumes_state_sync_after_a_crash(#[case] cut: Cut) {
         let certificate =
             Certificate::<Scheme, Digest>::decode_cfg(encoded, &trusted.certificate_codec_config())
                 .expect("archived certificate decodes");
-        assert!(certificate.verify_for(
-            &mut context,
-            &trusted,
-            epoch,
-            lowest,
-            highest,
-            &Sequential
-        ));
+        assert!(certificate.verify_for(&mut context, &trusted, scope, &Sequential));
         assert_eq!(certificate.item.digest, base.digest());
 
         // The late validator signs new checkpoints after the restart.

@@ -44,7 +44,10 @@ pub(crate) enum Error {
     InvalidAckSignature,
 
     // Ignorable Message Errors
-    /// The acknowledgment's position is outside the accepted bounds or is not useful
+    /// The acknowledgment's epoch or position is outside the engine's scope
+    #[error("Ack outside scope: epoch {0}, position {1}")]
+    AckScope(Epoch, Height),
+    /// The acknowledgment's position is not pending
     #[error("Non-useful ack position {0}")]
     AckPosition(Height),
     /// The acknowledgment's digest is incorrect
@@ -97,13 +100,57 @@ impl Namespace {
 }
 
 /// Item represents a single element being aggregated in the protocol.
-/// Each item has a unique position and contains a digest that validators sign.
+/// Validators sign the epoch, position, and digest together.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Item<D: Digest> {
+    /// Epoch whose scheme signs this item
+    pub epoch: Epoch,
     /// Sequential position of this item in the aggregated sequence
     pub position: Height,
     /// Cryptographic digest of the data being aggregated
     pub digest: D,
+}
+
+/// Authenticated epoch and inclusive range of global positions certified by one engine.
+///
+/// Consumers derive a scope from authenticated history, never from a certificate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Scope {
+    epoch: Epoch,
+    first: Height,
+    last: Height,
+}
+
+impl Scope {
+    /// Returns the scope covering positions `first..=last` in `epoch`.
+    ///
+    /// Returns `None` if the range is empty.
+    pub const fn new(epoch: Epoch, first: Height, last: Height) -> Option<Self> {
+        if first.get() > last.get() {
+            return None;
+        }
+        Some(Self { epoch, first, last })
+    }
+
+    /// Returns the epoch whose scheme verifies certificates in this scope.
+    pub const fn epoch(self) -> Epoch {
+        self.epoch
+    }
+
+    /// Returns the first position, inclusive.
+    pub const fn first(self) -> Height {
+        self.first
+    }
+
+    /// Returns the last position, inclusive.
+    pub const fn last(self) -> Height {
+        self.last
+    }
+
+    /// Returns whether `item` names this scope's epoch and a position in its range.
+    pub fn contains<D: Digest>(self, item: &Item<D>) -> bool {
+        item.epoch == self.epoch && item.position >= self.first && item.position <= self.last
+    }
 }
 
 /// Canonical peer-visible key for an aggregation certificate.
@@ -226,6 +273,7 @@ impl<D: Digest> Heightable for Item<D> {
 
 impl<D: Digest> Write for Item<D> {
     fn write(&self, writer: &mut impl BufMut) {
+        self.epoch.write(writer);
         self.position.write(writer);
         self.digest.write(writer);
     }
@@ -235,24 +283,28 @@ impl<D: Digest> Read for Item<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let epoch = Epoch::read(reader)?;
         let position = Height::read(reader)?;
         let digest = D::read(reader)?;
-        Ok(Self { position, digest })
+        Ok(Self {
+            epoch,
+            position,
+            digest,
+        })
     }
 }
 
 impl<D: Digest> EncodeSize for Item<D> {
     fn encode_size(&self) -> usize {
-        self.position.encode_size() + self.digest.encode_size()
+        self.epoch.encode_size() + self.position.encode_size() + self.digest.encode_size()
     }
 }
 
 impl<D: Digest> MaxEncodeSize for Item<D> {
-    const MAX_ENCODE_SIZE: usize = Height::MAX_ENCODE_SIZE + D::SIZE;
+    const MAX_ENCODE_SIZE: usize = Epoch::MAX_ENCODE_SIZE + Height::MAX_ENCODE_SIZE + D::SIZE;
 }
 
-/// The signed message covers only the position and digest, intentionally excluding the epoch.
-/// See the [module docs](super#epoch-independent-signatures).
+/// The signed message is the encoded item, including its epoch.
 impl<D: Digest> Subject for &Item<D> {
     type Namespace = Namespace;
 
@@ -271,9 +323,14 @@ where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let epoch = u.arbitrary::<Epoch>()?;
         let position = u.arbitrary::<Height>()?;
         let digest = u.arbitrary::<D>()?;
-        Ok(Self { position, digest })
+        Ok(Self {
+            epoch,
+            position,
+            digest,
+        })
     }
 }
 
@@ -359,10 +416,6 @@ where
 /// A recovered certificate for some [Item].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate<S: Scheme, D: Digest> {
-    /// The epoch whose scheme can verify this certificate.
-    ///
-    /// This lookup metadata is not part of the signed message.
-    pub epoch: Epoch,
     /// The item that was recovered.
     pub item: Item<D>,
     /// The recovered certificate.
@@ -372,11 +425,9 @@ pub struct Certificate<S: Scheme, D: Digest> {
 impl<S: Scheme, D: Digest> Certificate<S, D> {
     /// Recovers a certificate for the first item represented by `acks`.
     ///
-    /// Acknowledgments for other items are ignored. The ambient `epoch` is attached as unsigned
-    /// lookup metadata and is not included in the recovered certificate's signed subject.
+    /// Acknowledgments for other items are ignored.
     pub fn from_acks<'a, I>(
         scheme: &S,
-        epoch: Epoch,
         acks: NonEmpty<I>,
         strategy: &impl Strategy,
     ) -> Result<Self, AssemblyError>
@@ -393,41 +444,32 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
         );
         let certificate = scheme.assemble(attestations, strategy)?;
 
-        Ok(Self {
-            epoch,
-            item,
-            certificate,
-        })
+        Ok(Self { item, certificate })
     }
 
-    /// Verifies that this certificate belongs to an engine and has a valid signature.
+    /// Verifies that this certificate belongs to `scope` and has a valid signature.
     ///
-    /// The epoch and range checks happen before cryptographic verification because epoch is
-    /// unsigned lookup metadata. Active engines and historical certificate verification use this
-    /// function.
+    /// `scheme` must be the authenticated scheme for `scope`'s epoch. The scope check runs
+    /// before cryptographic verification. Active engines and historical certificate verification
+    /// use this function.
     pub fn verify_for<R>(
         &self,
         rng: &mut R,
         scheme: &S,
-        epoch: Epoch,
-        first: Height,
-        last: Height,
+        scope: Scope,
         strategy: &impl Strategy,
     ) -> bool
     where
         R: CryptoRng,
         S: scheme::Scheme<D>,
     {
-        self.epoch == epoch
-            && self.item.position >= first
-            && self.item.position <= last
+        scope.contains(&self.item)
             && scheme.verify_certificate::<_, D>(rng, &self.item, &self.certificate, strategy)
     }
 }
 
 impl<S: Scheme, D: Digest> Write for Certificate<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.epoch.write(writer);
         self.item.write(writer);
         self.certificate.write(writer);
     }
@@ -437,20 +479,15 @@ impl<S: Scheme, D: Digest> Read for Certificate<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let epoch = Epoch::read(reader)?;
         let item = Item::read(reader)?;
         let certificate = S::Certificate::read_cfg(reader, cfg)?;
-        Ok(Self {
-            epoch,
-            item,
-            certificate,
-        })
+        Ok(Self { item, certificate })
     }
 }
 
 impl<S: Scheme, D: Digest> EncodeSize for Certificate<S, D> {
     fn encode_size(&self) -> usize {
-        self.epoch.encode_size() + self.item.encode_size() + self.certificate.encode_size()
+        self.item.encode_size() + self.certificate.encode_size()
     }
 }
 
@@ -461,14 +498,9 @@ where
     S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let epoch = u.arbitrary::<Epoch>()?;
         let item = u.arbitrary::<Item<D>>()?;
         let certificate = u.arbitrary::<S::Certificate>()?;
-        Ok(Self {
-            epoch,
-            item,
-            certificate,
-        })
+        Ok(Self { item, certificate })
     }
 }
 
@@ -478,7 +510,7 @@ mod tests {
     use crate::aggregation::scheme::{
         Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1,
     };
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{Decode as _, DecodeExt, Encode};
     use commonware_cryptography::{
         Hasher, Sha256,
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -511,6 +543,7 @@ mod tests {
             RecoveryNamespace::derive(NAMESPACE)
         );
         let item = Item {
+            epoch: Epoch::new(1),
             position: Height::new(100),
             digest: Sha256::hash(&[b"test_item"]),
         };
@@ -560,33 +593,26 @@ mod tests {
         let expected = schemes[0].participants().quorum::<S::Faults>();
         let found = u32::try_from(insufficient.len()).expect("ack count exceeds u32::MAX");
         assert!(matches!(
-            Certificate::from_acks(
-                &schemes[0],
-                Epoch::new(1),
-                non_empty![@insufficient],
-                &Sequential,
-            ),
+            Certificate::from_acks(&schemes[0], non_empty![@insufficient], &Sequential),
             Err(AssemblyError::InsufficientAttestations(
                 actual_expected,
                 actual_found,
             )) if actual_expected == expected && actual_found == found
         ));
 
-        let certificate = Certificate::from_acks(
-            &schemes[0],
-            Epoch::new(1),
-            non_empty![@acks.iter()],
-            &Sequential,
+        let certificate =
+            Certificate::from_acks(&schemes[0], non_empty![@acks.iter()], &Sequential).unwrap();
+        let decoded = Certificate::<S, Sha256Digest>::decode_cfg(
+            certificate.encode(),
+            &schemes[0].certificate_codec_config(),
         )
         .unwrap();
-        assert!(certificate.verify_for(
-            &mut rng,
-            &schemes[0],
-            Epoch::new(1),
-            Height::new(100),
-            Height::new(100),
-            &Sequential,
-        ));
+        assert_eq!(decoded.item, item);
+        assert_eq!(decoded.encode(), certificate.encode());
+        let scope = |epoch, first, last| {
+            Scope::new(Epoch::new(epoch), Height::new(first), Height::new(last)).unwrap()
+        };
+        assert!(certificate.verify_for(&mut rng, &schemes[0], scope(1, 100, 100), &Sequential,));
 
         // Keep the signed item fixed while varying each authenticated range bound.
         for (first, last, expected) in [
@@ -596,29 +622,56 @@ mod tests {
             (101, 101, false),
         ] {
             assert_eq!(
-                certificate.verify_for(
-                    &mut rng,
-                    &schemes[0],
-                    Epoch::new(1),
-                    Height::new(first),
-                    Height::new(last),
-                    &Sequential,
-                ),
+                certificate.verify_for(&mut rng, &schemes[0], scope(1, first, last), &Sequential,),
                 expected,
                 "certificate at position 100 in range {first}..={last}",
             );
         }
 
-        let mut wrong_epoch = certificate.clone();
-        wrong_epoch.epoch = Epoch::new(2);
-        assert!(!wrong_epoch.verify_for(
-            &mut rng,
-            &schemes[0],
-            Epoch::new(1),
-            Height::new(100),
-            Height::new(100),
-            &Sequential,
-        ));
+        // The epoch is signed: a relabeled certificate fails the scope check for its original
+        // epoch and the signature check for its new epoch.
+        let mut relabeled = certificate.clone();
+        relabeled.item.epoch = Epoch::new(2);
+        for epoch in [1, 2] {
+            assert!(!relabeled.verify_for(
+                &mut rng,
+                &schemes[0],
+                scope(epoch, 100, 100),
+                &Sequential,
+            ));
+        }
+    }
+
+    #[test]
+    fn test_scope() {
+        let epoch = Epoch::new(5);
+        assert!(Scope::new(epoch, Height::new(11), Height::new(10)).is_none());
+        let scope = Scope::new(epoch, Height::new(10), Height::new(12)).unwrap();
+        assert_eq!(scope.epoch(), epoch);
+        assert_eq!(scope.first(), Height::new(10));
+        assert_eq!(scope.last(), Height::new(12));
+        let single = Scope::new(epoch, Height::new(10), Height::new(10)).unwrap();
+        assert_eq!(single.first(), single.last());
+
+        let item = |epoch: u64, position: u64| Item {
+            epoch: Epoch::new(epoch),
+            position: Height::new(position),
+            digest: Sha256::hash(&[b"scope"]),
+        };
+        for (epoch, position, expected) in [
+            (5, 9, false),
+            (5, 10, true),
+            (5, 12, true),
+            (5, 13, false),
+            (4, 11, false),
+            (6, 11, false),
+        ] {
+            assert_eq!(
+                scope.contains(&item(epoch, position)),
+                expected,
+                "epoch {epoch}, position {position}"
+            );
+        }
     }
 
     #[test]

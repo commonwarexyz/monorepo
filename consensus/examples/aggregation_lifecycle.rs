@@ -28,7 +28,7 @@ use commonware_consensus::{
     Automaton, Reporter,
     aggregation::{
         Config, Engine, EngineOutcome, Recovery, RecoveryCoordinator, Stopper, scheme,
-        types::{Certificate, RecoveryKey, RecoveryNamespace},
+        types::{Certificate, RecoveryKey, RecoveryNamespace, Scope},
     },
     types::{Epoch, Height},
 };
@@ -73,39 +73,19 @@ const LATE: usize = 3;
 const RESOLVER_CHANNEL: u64 = 0;
 const QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-/// Trusted scope of one epoch.
+/// Trusted scopes of both epochs.
 ///
-/// A real node derives the epoch, range, and scheme from authenticated history. It never takes
-/// them from the unsigned epoch field of a certificate.
-#[derive(Clone, Copy)]
-struct Scope {
-    epoch: Epoch,
-    first: Height,
-    last: Height,
+/// A real node derives each scope and scheme from authenticated history. It never takes them
+/// from a certificate.
+const fn scopes() -> [Scope; 2] {
+    [
+        Scope::new(Epoch::new(1), Height::new(0), Height::new(9)).unwrap(),
+        Scope::new(Epoch::new(2), Height::new(10), Height::new(19)).unwrap(),
+    ]
 }
 
-/// Trusted scopes. Ranges are finite and their global positions do not overlap.
-const SCOPES: [Scope; 2] = [
-    Scope {
-        epoch: Epoch::new(1),
-        first: Height::new(0),
-        last: Height::new(9),
-    },
-    Scope {
-        epoch: Epoch::new(2),
-        first: Height::new(10),
-        last: Height::new(19),
-    },
-];
-
-impl Scope {
-    fn positions(self) -> impl Iterator<Item = Height> {
-        (self.first.get()..=self.last.get()).map(Height::new)
-    }
-
-    fn size(self) -> usize {
-        self.positions().count()
-    }
+fn positions(scope: Scope) -> impl Iterator<Item = Height> {
+    (scope.first().get()..=scope.last().get()).map(Height::new)
 }
 
 /// Returns the stable digest for a position. Every clone and restart must agree on it.
@@ -261,11 +241,9 @@ impl Validator {
         let engine = Engine::new(
             self.context
                 .child("engine")
-                .with_attribute("epoch", scope.epoch),
+                .with_attribute("epoch", scope.epoch()),
             Config {
-                epoch: scope.epoch,
-                first: scope.first,
-                last: scope.last,
+                scope,
                 scheme: self.scheme.clone(),
                 automaton: Application { online },
                 reporter: Stager(staged.clone()),
@@ -275,10 +253,10 @@ impl Validator {
                 recovery_after_rebroadcasts: NonZeroU64::new(3).unwrap(),
                 recoverer: self.recovery.clone(),
                 window: NonZeroU64::new(4).unwrap(),
-                journal_partition: journal_partition(self.index, scope.epoch),
+                journal_partition: journal_partition(self.index, scope.epoch()),
                 journal_write_buffer: NZUsize!(4096),
                 journal_replay_buffer: NZUsize!(4096),
-                journal_heights_per_section: NonZeroU64::new(4).unwrap(),
+                journal_positions_per_section: NonZeroU64::new(4).unwrap(),
                 journal_compression: None,
                 journal_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 strategy: Sequential,
@@ -288,7 +266,7 @@ impl Validator {
         // Each epoch uses its own channel, so the engine sees only its own epoch.
         let network = oracle
             .control(self.participant.clone())
-            .register(scope.epoch.get(), QUOTA)
+            .register(scope.epoch().get(), QUOTA)
             .await
             .unwrap();
         let (handle, stopper) = engine.start_stoppable(network);
@@ -314,14 +292,14 @@ impl Validator {
 
         // Completed means the journal holds the range. It does not mean the archive does.
         let staged = std::mem::take(&mut *staged.lock());
-        assert!(staged.keys().copied().eq(scope.positions()));
+        assert!(staged.keys().copied().eq(positions(scope)));
         let mut archive = self.archive.take().unwrap();
         let mut encoded = Vec::with_capacity(staged.len());
         for (position, certificate) in staged {
             assert_eq!(certificate.item.digest, digest(position));
             let key = RecoveryKey {
                 namespace,
-                epoch: scope.epoch,
+                epoch: scope.epoch(),
                 position,
             };
             encoded.push((key, certificate.encode()));
@@ -333,14 +311,14 @@ impl Validator {
         // Serve only synced certificates, then delete the journal.
         self.served.lock().extend(encoded);
         self.context
-            .remove(&journal_partition(self.index, scope.epoch), None)
+            .remove(&journal_partition(self.index, scope.epoch()), None)
             .await
             .unwrap();
         println!(
             "validator {} archived epoch {} ({} certificates) and deleted its journal",
             self.index,
-            scope.epoch,
-            scope.size()
+            scope.epoch(),
+            positions(scope).count()
         );
     }
 }
@@ -400,7 +378,7 @@ fn main() {
         }
 
         // Epoch 1: three of four validators form a quorum.
-        let scope = SCOPES[0];
+        let scope = scopes()[0];
         let mut running = Vec::new();
         for validator in &validators[..LATE] {
             running.push(validator.start_engine(&oracle, scope, true).await);
@@ -417,7 +395,7 @@ fn main() {
 
         // Epoch 2: the late validator stops its first engine. It awaits the handle before it
         // starts a successor for the same scope. The successor opens the same journal.
-        let scope = SCOPES[1];
+        let scope = scopes()[1];
         let first = late.start_engine(&oracle, scope, true).await;
         context.sleep(Duration::from_millis(100)).await;
         first.stopper.stop();
@@ -439,49 +417,36 @@ fn main() {
             let mut context = context.child("validator").with_attribute("index", index);
             let archive = open_archive(context.child("archive"), &verifier, index).await;
             let namespace = recovery_namespace(&verifier);
-            for scope in SCOPES {
-                for position in scope.positions() {
+            for scope in scopes() {
+                for position in positions(scope) {
                     let key = RecoveryKey {
                         namespace,
-                        epoch: scope.epoch,
+                        epoch: scope.epoch(),
                         position,
                     };
                     let certificate = archive.get(&key).expect("archived certificate");
                     assert_eq!(certificate.item.digest, digest(position));
-                    assert!(certificate.verify_for(
-                        &mut context,
-                        &verifier,
-                        scope.epoch,
-                        scope.first,
-                        scope.last,
-                        &Sequential,
-                    ));
+                    assert!(certificate.verify_for(&mut context, &verifier, scope, &Sequential));
                 }
-                match context.scan(&journal_partition(index, scope.epoch)).await {
+                match context.scan(&journal_partition(index, scope.epoch())).await {
                     Ok(blobs) => assert!(blobs.is_empty()),
                     Err(Error::PartitionMissing(_)) => {}
                     Err(error) => panic!("journal scan failed: {error}"),
                 }
             }
 
-            // The epoch field is not signed. A certificate relabeled with another epoch does not
-            // verify against either trusted scope.
+            // The epoch is signed. A certificate relabeled with another epoch does not verify
+            // against either trusted scope.
+            let [first_scope, second_scope] = scopes();
             let key = RecoveryKey {
                 namespace,
-                epoch: SCOPES[0].epoch,
-                position: SCOPES[0].first,
+                epoch: first_scope.epoch(),
+                position: first_scope.first(),
             };
             let mut relabeled = archive.get(&key).unwrap().clone();
-            relabeled.epoch = SCOPES[1].epoch;
-            for scope in SCOPES {
-                assert!(!relabeled.verify_for(
-                    &mut context,
-                    &verifier,
-                    scope.epoch,
-                    scope.first,
-                    scope.last,
-                    &Sequential,
-                ));
+            relabeled.item.epoch = second_scope.epoch();
+            for scope in [first_scope, second_scope] {
+                assert!(!relabeled.verify_for(&mut context, &verifier, scope, &Sequential));
             }
             println!("validator {index} holds both epochs after restart");
         }

@@ -30,7 +30,8 @@ use commonware_codec::{
     Buf, Encode as _, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
-    Application, Block, Heightable, aggregation,
+    Application, Block, Heightable,
+    aggregation::{self, types::Scope},
     ancestry::Ancestry,
     simplex::{
         self,
@@ -434,11 +435,12 @@ impl Cluster {
             self.fixture.private_keys[index].clone(),
         )
         .expect("validator is a participant");
-        let checkpoint_scope = (
+        let checkpoint_scope = Scope::new(
             Epoch::zero(),
             Height::zero(),
             Height::new(u64::MAX / INTERVAL.get() - 1),
-        );
+        )
+        .unwrap();
         let checkpoints = Checkpoints::<CheckpointScheme, State>::new(chain.clone(), INTERVAL);
         let (reporter, archive, writer) = checkpoint_archive(
             context.child("checkpoint_archive"),
@@ -474,9 +476,7 @@ impl Cluster {
         let aggregation = aggregation::Engine::new(
             context.child("aggregation"),
             aggregation::Config {
-                epoch: checkpoint_scope.0,
-                first: checkpoint_scope.1,
-                last: checkpoint_scope.2,
+                scope: checkpoint_scope,
                 scheme: checkpoint_scheme.clone(),
                 automaton: checkpoints.clone(),
                 reporter,
@@ -489,7 +489,7 @@ impl Cluster {
                 journal_partition: format!("{prefix}_aggregation"),
                 journal_write_buffer: NZUsize!(4_096),
                 journal_replay_buffer: NZUsize!(4_096),
-                journal_heights_per_section: NZU64!(8),
+                journal_positions_per_section: NZU64!(8),
                 journal_compression: None,
                 journal_page_cache: page_cache.clone(),
                 strategy: Sequential,
@@ -509,9 +509,7 @@ impl Cluster {
         // Every validator serves its newest checkpoint; a joining one also samples its peers'.
         let (probe, sampler) = Probe::new(probe::Config {
             context: context.child("probe"),
-            epoch: checkpoint_scope.0,
-            first: checkpoint_scope.1,
-            last: checkpoint_scope.2,
+            scope: checkpoint_scope,
             scheme: checkpoint_scheme,
             strategy: Sequential,
             blocker: control.clone(),

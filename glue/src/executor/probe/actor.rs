@@ -11,8 +11,8 @@ use commonware_actor::mailbox::{self as actor_mailbox, Policy, Receiver as Mailb
 use commonware_codec::{Codec, Copying, Decode as _, Encode as _, Read, ReadExt as _};
 use commonware_consensus::{
     Block, Heightable as _, Roundable,
-    aggregation::scheme::Scheme,
-    types::{Epoch, Height},
+    aggregation::{scheme::Scheme, types::Scope},
+    types::Height,
 };
 use commonware_cryptography::{Digested, Digestible as _};
 use commonware_macros::select_loop;
@@ -48,12 +48,8 @@ where
     pub context: E,
     /// Verifies checkpoint certificates. Its participants are the validators a sample asks.
     pub scheme: S,
-    /// Authenticated epoch verified by this probe.
-    pub epoch: Epoch,
-    /// First mandatory checkpoint position in the authenticated epoch, inclusive.
-    pub first: Height,
-    /// Last mandatory checkpoint position in the authenticated epoch, inclusive.
-    pub last: Height,
+    /// Authenticated epoch and inclusive checkpoint position range verified by this probe.
+    pub scope: Scope,
     /// Strategy for verifying certificates.
     pub strategy: T,
     /// Blocks peers that send invalid messages.
@@ -94,9 +90,7 @@ where
     /// Requests for samples, until every [`Mailbox`] is dropped.
     mailbox: Option<MailboxReceiver<Message<S, B, F>>>,
     scheme: S,
-    epoch: Epoch,
-    first: Height,
-    last: Height,
+    scope: Scope,
     strategy: T,
     blocker: K,
     codec: <wire::Message<S, B, F> as Read>::Cfg,
@@ -164,9 +158,7 @@ where
                 context: ContextCell::new(config.context),
                 mailbox: Some(mailbox),
                 scheme: config.scheme,
-                epoch: config.epoch,
-                first: config.first,
-                last: config.last,
+                scope: config.scope,
                 strategy: config.strategy,
                 blocker: config.blocker,
                 codec,
@@ -335,7 +327,7 @@ where
                         self.sample.reserve(peer.clone());
                         let scheme = self.scheme.clone();
                         let strategy = self.strategy.clone();
-                        let (epoch, first, last) = (self.epoch, self.first, self.last);
+                        let scope = self.scope;
                         let verification = self
                             .context
                             .child("verify")
@@ -343,14 +335,7 @@ where
                             .spawn(move |mut context| async move {
                                 checkpoint
                                     .certificate
-                                    .verify_for(
-                                        &mut context,
-                                        &scheme,
-                                        epoch,
-                                        first,
-                                        last,
-                                        &strategy,
-                                    )
+                                    .verify_for(&mut context, &scheme, scope, &strategy)
                                     .then_some(checkpoint)
                             })
                             .abort_on_drop();
@@ -537,9 +522,12 @@ mod tests {
             let (mut probe, _mailbox) = Probe::new(Config {
                 context: context.child("backlogged"),
                 scheme: validators.schemes[0].clone(),
-                epoch: commonware_consensus::types::Epoch::zero(),
-                first: Height::zero(),
-                last: Height::new(u64::MAX),
+                scope: Scope::new(
+                    commonware_consensus::types::Epoch::zero(),
+                    Height::zero(),
+                    Height::new(u64::MAX),
+                )
+                .unwrap(),
                 strategy: Sequential,
                 blocker: validators
                     .oracle

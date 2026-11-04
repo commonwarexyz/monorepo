@@ -1,8 +1,8 @@
-use super::{Recoverer, scheme, types::Certificate};
-use crate::{
-    Automaton, Reporter,
-    types::{Epoch, Height},
+use super::{
+    Recoverer, scheme,
+    types::{Certificate, Scope},
 };
+use crate::{Automaton, Reporter, types::Height};
 use commonware_cryptography::{Digest, certificate::Verifier};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
@@ -20,13 +20,9 @@ pub struct Config<
     T: Strategy,
     R: Recoverer,
 > {
-    /// Epoch represented by this engine.
-    pub epoch: Epoch,
-    /// First mandatory global position, inclusive.
-    pub first: Height,
-    /// Last mandatory global position, inclusive.
-    pub last: Height,
-    /// Fixed signing scheme for `epoch`.
+    /// Epoch and inclusive range of mandatory global positions represented by this engine.
+    pub scope: Scope,
+    /// Fixed signing scheme for the scope's epoch.
     pub scheme: S,
     /// Provides the canonical digest for each position.
     ///
@@ -70,7 +66,7 @@ pub struct Config<
     /// Journal replay-buffer size.
     pub journal_replay_buffer: NonZeroUsize,
     /// Number of positions assigned to each journal section.
-    pub journal_heights_per_section: NonZeroU64,
+    pub journal_positions_per_section: NonZeroU64,
     /// Journal compression level.
     pub journal_compression: Option<u8>,
     /// Journal page cache.

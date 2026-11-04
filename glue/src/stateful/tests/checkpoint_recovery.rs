@@ -7,9 +7,8 @@ use commonware_consensus::{
     Reporter,
     aggregation::{
         scheme::Scheme,
-        types::{Certificate, RecoveryKey},
+        types::{Certificate, RecoveryKey, Scope},
     },
-    types::{Epoch, Height},
 };
 use commonware_cryptography::Digest;
 use commonware_parallel::Sequential;
@@ -95,7 +94,7 @@ pub(super) async fn archive<S, D, R>(
     partition: String,
     page_cache: CacheRef,
     scheme: &S,
-    scope: (Epoch, Height, Height),
+    scope: Scope,
     reporter: R,
 ) -> (ArchiveReporter<S, D, R>, Archive, Handle<()>)
 where
@@ -124,12 +123,12 @@ where
     while let Some(record) = replay.next().await {
         let (_, _, _, certificate) = record.expect("certificate archive record decodes");
         assert!(
-            certificate.verify_for(&mut context, scheme, scope.0, scope.1, scope.2, &Sequential),
+            certificate.verify_for(&mut context, scheme, scope, &Sequential),
             "archived certificate belongs to the configured checkpoint scope"
         );
         let key = RecoveryKey {
             namespace,
-            epoch: certificate.epoch,
+            epoch: certificate.item.epoch,
             position: certificate.item.position,
         };
         recovered.insert(key, certificate.encode());
@@ -147,7 +146,7 @@ where
         while let Some(certificate) = receiver.recv().await {
             let key = RecoveryKey {
                 namespace,
-                epoch: certificate.epoch,
+                epoch: certificate.item.epoch,
                 position: certificate.item.position,
             };
             if certificates.lock().contains_key(&key) {
@@ -192,11 +191,12 @@ mod tests {
 
     fn certificates(
         schemes: &[ed25519::Scheme],
-        scope: (Epoch, Height, Height),
+        scope: Scope,
     ) -> Vec<Certificate<ed25519::Scheme, Digest>> {
         (0..2)
             .map(|position| {
                 let item = Item {
+                    epoch: scope.epoch(),
                     position: Height::new(position),
                     digest: Sha256::hash(&[&position.to_be_bytes()]),
                 };
@@ -204,8 +204,7 @@ mod tests {
                     .iter()
                     .map(|scheme| Ack::sign(scheme, item.clone()).unwrap())
                     .collect();
-                Certificate::from_acks(&schemes[0], scope.0, non_empty![@acks.iter()], &Sequential)
-                    .unwrap()
+                Certificate::from_acks(&schemes[0], non_empty![@acks.iter()], &Sequential).unwrap()
             })
             .collect()
     }
@@ -228,7 +227,7 @@ mod tests {
             let fixture =
                 ed25519::fixture(&mut context, b"_COMMONWARE_GLUE_CHECKPOINT_ARCHIVE_TEST", 4);
             let scheme = &fixture.schemes[0];
-            let scope = (Epoch::new(7), Height::zero(), Height::new(1));
+            let scope = Scope::new(Epoch::new(7), Height::zero(), Height::new(1)).unwrap();
             let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(10));
             let certificates = certificates(&fixture.schemes, scope);
             let (mut reporter, served, writer) = archive(
@@ -260,7 +259,7 @@ mod tests {
             )
             .await;
             for certificate in certificates {
-                let key = key(scheme, scope.0, &certificate);
+                let key = key(scheme, scope.epoch(), &certificate);
                 assert_eq!(served.produce(key).await.unwrap(), certificate.encode());
             }
             drop(reporter);
@@ -273,7 +272,7 @@ mod tests {
     /// run an aggregation engine.
     #[test]
     fn archive_catches_up_from_replayed_reports_after_crash() {
-        let scope = (Epoch::new(7), Height::zero(), Height::new(1));
+        let scope = Scope::new(Epoch::new(7), Height::zero(), Height::new(1)).unwrap();
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         let (state, checkpoint) = runner.start_and_recover(|mut context| async move {
             let fixture =
@@ -296,7 +295,7 @@ mod tests {
             }
             // The queue accepts the report synchronously, so no writer step can have synced it.
             reporter.report(certificates[1].clone());
-            let key = key(scheme, scope.0, &certificates[1]);
+            let key = key(scheme, scope.epoch(), &certificates[1]);
             assert!(served.get(&key).is_none());
             // A missing key drops the response sender immediately, so this does not yield.
             assert!(served.produce(key).await.is_err());
@@ -318,12 +317,12 @@ mod tests {
             )
             .await;
             // The first was synced. The second was still queued when the runtime crashed.
-            let first = key(scheme, scope.0, &certificates[0]);
+            let first = key(scheme, scope.epoch(), &certificates[0]);
             assert_eq!(
                 served.produce(first).await.unwrap(),
                 certificates[0].encode()
             );
-            let second = key(scheme, scope.0, &certificates[1]);
+            let second = key(scheme, scope.epoch(), &certificates[1]);
             assert!(served.get(&second).is_none());
             // Simulated engine replay reports the full journaled range, including duplicates.
             // Serving must be idempotent.
@@ -333,7 +332,7 @@ mod tests {
             drop(reporter);
             writer.await.unwrap();
             for certificate in &certificates {
-                let key = key(scheme, scope.0, certificate);
+                let key = key(scheme, scope.epoch(), certificate);
                 assert_eq!(served.produce(key).await.unwrap(), certificate.encode());
             }
             drop(served);
@@ -350,7 +349,7 @@ mod tests {
             .await;
             assert_eq!(served.certificates.lock().len(), 2);
             for certificate in &certificates {
-                let key = key(scheme, scope.0, certificate);
+                let key = key(scheme, scope.epoch(), certificate);
                 assert_eq!(served.produce(key).await.unwrap(), certificate.encode());
             }
             drop(reporter);

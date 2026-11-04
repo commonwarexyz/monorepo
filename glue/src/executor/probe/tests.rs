@@ -15,7 +15,7 @@ use commonware_consensus::{
     Block, Epochable, Heightable, Viewable,
     aggregation::{
         scheme::ed25519,
-        types::{Ack, Certificate, Item},
+        types::{Ack, Certificate, Item, Scope},
     },
     marshal::{Floors, Ledger},
     types::{Epoch, Height, OutputIndex, View},
@@ -258,9 +258,7 @@ impl Validators {
             let (probe, mailbox) = Probe::new(Config {
                 context: context.child("probe"),
                 scheme: schemes[index].clone(),
-                epoch: Epoch::zero(),
-                first: Height::zero(),
-                last: Height::new(u64::MAX),
+                scope: Scope::new(Epoch::zero(), Height::zero(), Height::new(u64::MAX)).unwrap(),
                 strategy: Sequential,
                 blocker: control,
                 block_codec: (),
@@ -299,6 +297,7 @@ impl Validators {
             value,
         });
         let item = Item {
+            epoch: Epoch::zero(),
             position: Height::new(checkpoint),
             digest: block.digest(),
         };
@@ -310,7 +309,6 @@ impl Validators {
         TestCheckpoint {
             certificate: Certificate::from_acks(
                 &self.schemes[0],
-                Epoch::zero(),
                 non_empty![@acks.iter()],
                 &Sequential,
             )
@@ -531,7 +529,22 @@ fn certificates_relabelled_as_another_epoch_are_ignored() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
         let validators = Validators::start(&mut context, 4).await;
         let mut relabelled = validators.checkpoint(4, 40, None);
-        relabelled.certificate.epoch = Epoch::new(1);
+        let scope = Scope::new(Epoch::zero(), Height::zero(), Height::new(u64::MAX)).unwrap();
+        assert!(relabelled.certificate.verify_for(
+            &mut context,
+            &validators.schemes[0],
+            scope,
+            &Sequential,
+        ));
+        // Reuse the same key and signature under the relabelled scope to exercise epoch binding.
+        relabelled.certificate.item.epoch = Epoch::new(1);
+        let other_scope = Scope::new(Epoch::new(1), scope.first(), scope.last()).unwrap();
+        assert!(!relabelled.certificate.verify_for(
+            &mut context,
+            &validators.schemes[0],
+            other_scope,
+            &Sequential,
+        ));
         validators.sources[1].set(relabelled);
         validators.sources[2].set(validators.checkpoint(1, 10, None));
         let sample = validators.sampler.sample();
@@ -835,6 +848,7 @@ async fn join_with(
                 value: checkpoint,
             });
             let item = Item {
+                epoch: Epoch::zero(),
                 position: Height::new(checkpoint),
                 digest: block.digest(),
             };
@@ -845,7 +859,6 @@ async fn join_with(
             Sampled {
                 certificate: Certificate::from_acks(
                     &schemes[0],
-                    Epoch::zero(),
                     non_empty![@acks.iter()],
                     &Sequential,
                 )
