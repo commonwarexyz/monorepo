@@ -202,28 +202,36 @@ impl<F> Fp12<F> {
     }
 
     /// Returns one in every lane.
+    ///
+    /// Runs as its own kernel, so that callers outside kernels build it with the backend's
+    /// instructions.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn one<S: Simd>(simd: S) -> Self
     where
         F: Field<S>,
     {
-        let zero = F::load(simd, &[], &[0; FP_BYTES]);
-        let mut one = [0; FP_BYTES];
-        one[FP_BYTES - 1] = 1;
-        let one = F::load(simd, &[], &one);
-        let zero2 = Fp2 { c0: zero, c1: zero };
-        Self {
-            c0: Fp6 {
-                c0: Fp2 { c0: one, c1: zero },
-                c1: zero2,
-                c2: zero2,
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| {
+                let zero = F::load(simd, &[], &[0; FP_BYTES]);
+                let mut one = [0; FP_BYTES];
+                one[FP_BYTES - 1] = 1;
+                let one = F::load(simd, &[], &one);
+                let zero2 = Fp2 { c0: zero, c1: zero };
+                Self {
+                    c0: Fp6 {
+                        c0: Fp2 { c0: one, c1: zero },
+                        c1: zero2,
+                        c2: zero2,
+                    },
+                    c1: Fp6 {
+                        c0: zero2,
+                        c1: zero2,
+                        c2: zero2,
+                    },
+                }
             },
-            c1: Fp6 {
-                c0: zero2,
-                c1: zero2,
-                c2: zero2,
-            },
-        }
+        )
     }
 
     /// Stores the canonical value of each lane, dropping lanes beyond `elements`.
@@ -376,12 +384,17 @@ impl<F> Fp12<F> {
     /// Loads the factors `(1 + i)^(j (p - 1) / 6)` for `j` from `1` to `5` in every lane.
     ///
     /// Components have the base field's initial bounds.
+    /// Runs as its own kernel, so that callers outside kernels load them with the backend's
+    /// instructions.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn frobenius_coefficients<S: Simd>(simd: S) -> [Fp2<F>; 5]
     where
         F: Field<S>,
     {
-        core::array::from_fn(|j| Fp2::load(simd, &[], &FROBENIUS[j]))
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| core::array::from_fn(|j| Fp2::load(simd, &[], &FROBENIUS[j])),
+        )
     }
 
     /// Returns the Frobenius image `self^p`.
@@ -455,23 +468,32 @@ impl<F> Fp12<F> {
     /// Returns the product of every lane's element, in every lane.
     ///
     /// Multiplies halves of the lanes together until one remains, moving elements between lanes
-    /// through their encodings.
+    /// through their encodings. A representation holding one element returns it as is.
+    /// Runs as its own kernel, so callers share one copy.
     pub fn product_of_lanes<S: Simd>(self, simd: S) -> Self
     where
         F: Field<S>,
     {
         const { assert!(F::LANES <= MAX_LANES) };
-        let mut lanes = [[0; BYTES]; MAX_LANES];
-        self.store(simd, &mut lanes);
-        let mut count = F::LANES;
-        while count > 1 {
-            let half = count.div_ceil(2);
-            let low = Self::load(simd, &lanes[..half], &ONE);
-            let high = Self::load(simd, &lanes[half..count], &ONE);
-            low.mul(simd, &high).store(simd, &mut lanes[..half]);
-            count = half;
+        if F::LANES == 1 {
+            return self;
         }
-        Self::load(simd, &[], &lanes[0])
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| {
+                let mut lanes = [[0; BYTES]; MAX_LANES];
+                self.store(simd, &mut lanes);
+                let mut count = F::LANES;
+                while count > 1 {
+                    let half = count.div_ceil(2);
+                    let low = Self::load(simd, &lanes[..half], &ONE);
+                    let high = Self::load(simd, &lanes[half..count], &ONE);
+                    low.mul(simd, &high).store(simd, &mut lanes[..half]);
+                    count = half;
+                }
+                Self::load(simd, &[], &lanes[0])
+            },
+        )
     }
 }
 
