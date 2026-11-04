@@ -229,7 +229,11 @@ mod tests {
             for value in 0..49 {
                 batch = batch.append(U64::new(value));
             }
-            let batch = batch.merkleize(&db, None, Location::new(30)).await.unwrap();
+            let batch = batch
+                .with_inactivity_floor(Location::new(30))
+                .merkleize(&db)
+                .await
+                .unwrap();
             db = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root = db.root();
@@ -322,7 +326,8 @@ mod tests {
                     let batch = db
                         .new_batch()
                         .append(U64::new(value))
-                        .merkleize(&db, None, Location::new(0))
+                        .with_inactivity_floor(Location::new(0))
+                        .merkleize(&db)
                         .await
                         .unwrap();
                     db.apply_batch(batch).await.unwrap().sync().await.unwrap()

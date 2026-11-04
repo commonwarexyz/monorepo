@@ -49,8 +49,6 @@ where
 {
     batch: UnmerkleizedBatch<F, H, V, S>,
     db: Shared<Keyless<F, E, V, C, H, S>>,
-    metadata: Option<V::Value>,
-    inactivity_floor: Option<Location<F>>,
 }
 
 impl<F, E, V, C, H, S> Deref for KeylessUnmerkleized<F, E, V, C, H, S>
@@ -80,16 +78,17 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
-    pub fn with_metadata(mut self, metadata: V::Value) -> Self {
-        self.metadata = Some(metadata);
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize). `None` clears
+    /// it.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<V::Value>>) -> Self {
+        self.batch = self.batch.with_metadata(metadata);
         self
     }
 
     /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
-    /// (location 0 when unset).
-    pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.inactivity_floor = Some(floor);
+    /// (inherited from the database or parent batch when unset).
+    pub fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
+        self.batch = self.batch.with_inactivity_floor(floor);
         self
     }
 
@@ -242,14 +241,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self
-            .batch
-            .merkleize(
-                &db,
-                self.metadata,
-                self.inactivity_floor.unwrap_or_default(),
-            )
-            .await?;
+        let merkleized = self.batch.merkleize(&db).await?;
         Ok(KeylessMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -278,8 +270,6 @@ where
         KeylessUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             db: self.db.clone(),
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 }
@@ -327,8 +317,6 @@ where
         KeylessUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 
@@ -414,8 +402,6 @@ where
         KeylessUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 
@@ -566,6 +552,70 @@ mod tests {
     where
         T: StateSyncDb<deterministic::Context, R>,
     {
+    }
+
+    #[test]
+    fn unset_inactivity_floor_inherits_parent_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("stateful-keyless-inherit-parent-floor");
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            let parent = db
+                .new_batch_for_test::<_>()
+                .await
+                .append(U64::new(7))
+                .with_inactivity_floor(mmr::Location::new(1));
+            let parent = crate::stateful::db::Unmerkleized::merkleize(parent)
+                .await
+                .unwrap();
+            let child = MerkleizedTrait::new_batch(&parent).append(U64::new(8));
+            let child = crate::stateful::db::Unmerkleized::merkleize(child)
+                .await
+                .unwrap();
+            assert_eq!(child.bounds().inactivity_floor, mmr::Location::new(1));
+        });
+    }
+
+    #[test]
+    fn unset_inactivity_floor_inherits_applied_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("stateful-keyless-inherit-applied-floor");
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            let first = db
+                .new_batch_for_test::<_>()
+                .await
+                .append(U64::new(7))
+                .with_inactivity_floor(mmr::Location::new(1));
+            let first = crate::stateful::db::Unmerkleized::merkleize(first)
+                .await
+                .unwrap();
+            {
+                let (slot, database) = db.write().await;
+                let database = <FixedDb as ManagedDb<_>>::apply(database, first)
+                    .await
+                    .unwrap();
+                slot.put(database);
+            }
+
+            let next = db.new_batch_for_test::<_>().await.append(U64::new(9));
+            let next = crate::stateful::db::Unmerkleized::merkleize(next)
+                .await
+                .unwrap();
+            assert_eq!(next.bounds().inactivity_floor, mmr::Location::new(1));
+            let (slot, database) = db.write().await;
+            let database = <FixedDb as ManagedDb<_>>::apply(database, next)
+                .await
+                .unwrap();
+            assert_eq!(database.inactivity_floor_loc(), mmr::Location::new(1));
+            slot.put(database);
+        });
     }
 
     #[test]

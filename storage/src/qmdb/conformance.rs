@@ -18,9 +18,7 @@ use crate::{
             self,
             traits::{DbAny, UnmerkleizedBatch as _},
         },
-        current,
-        floor::Proportional,
-        immutable,
+        current, immutable,
     },
     translator::{OneCap, TwoCap},
 };
@@ -283,7 +281,7 @@ async fn apply_writes<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
     for (k, v) in writes {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+    let merkleized = batch.merkleize(&db).await.unwrap();
     db.apply_batch(merkleized).await.unwrap()
 }
 
@@ -291,7 +289,7 @@ async fn apply_writes<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
 mod tests {
     use super::*;
     use crate::qmdb::{
-        floor::{Bounded, Decision, Entry, Hold, Limits, Policy},
+        floor::{Bounded, Decision, Entry, Hold, Limits, Policy, Proportional},
         keyless, store,
     };
     use commonware_conformance::{Conformance, conformance_tests};
@@ -379,7 +377,11 @@ mod tests {
             for (k, v) in $ops {
                 batch = batch.set(k, v);
             }
-            let merkleized = batch.merkleize(&$db, None, floor).await.unwrap();
+            let merkleized = batch
+                .with_inactivity_floor(floor)
+                .merkleize(&$db)
+                .await
+                .unwrap();
             $db = $db.apply_batch(merkleized).await.unwrap();
         }};
     }
@@ -392,7 +394,11 @@ mod tests {
             for v in $vals {
                 batch = batch.append(v);
             }
-            let merkleized = batch.merkleize(&$db, None, floor).await.unwrap();
+            let merkleized = batch
+                .with_inactivity_floor(floor)
+                .merkleize(&$db)
+                .await
+                .unwrap();
             $db = $db.apply_batch(merkleized).await.unwrap();
         }};
     }
@@ -785,7 +791,7 @@ mod tests {
                 .fold(db.new_batch(), |batch, (key, value)| {
                     batch.write(key, value)
                 });
-            let merkleized = batch.merkleize(&db, None, &mut policy(rule)).await.unwrap();
+            let merkleized = batch.merkleize_with(&db, &mut policy(rule)).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
         }
         let root = db.root().to_vec();
@@ -1641,20 +1647,18 @@ macro_rules! assert_immutable_order_independent {
             ops.push((colliding_digest(0xCD, i), to_val(i, 100)));
         }
 
-        let fwd_floor = $fwd.inactivity_floor_loc();
         let mut batch = $fwd.new_batch();
         for &(k, v) in &ops {
             batch = batch.set(k, v);
         }
-        let merkleized = batch.merkleize(&$fwd, None, fwd_floor).await.unwrap();
+        let merkleized = batch.merkleize(&$fwd).await.unwrap();
         $fwd = $fwd.apply_batch(merkleized).await.unwrap();
 
-        let rev_floor = $rev.inactivity_floor_loc();
         let mut batch = $rev.new_batch();
         for &(k, v) in ops.iter().rev() {
             batch = batch.set(k, v);
         }
-        let merkleized = batch.merkleize(&$rev, None, rev_floor).await.unwrap();
+        let merkleized = batch.merkleize(&$rev).await.unwrap();
         $rev = $rev.apply_batch(merkleized).await.unwrap();
 
         assert_eq!(

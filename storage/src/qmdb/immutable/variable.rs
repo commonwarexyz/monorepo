@@ -288,19 +288,20 @@ mod tests {
         let v2 = Sha256::fill(22u8);
         let metadata = Sha256::fill(99u8);
 
-        let floor = db.inactivity_floor_loc();
         let retained = db
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
-            .merkleize(&db, Some(metadata), floor)
+            .with_metadata(Some(metadata))
+            .merkleize(&db)
             .await
             .unwrap();
         let compact_batch = compact
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
-            .merkleize(&compact, Some(metadata), floor)
+            .with_metadata(Some(metadata))
+            .merkleize(&compact)
             .await
             .unwrap();
 

@@ -32,7 +32,6 @@ use commonware_storage::{
             ordered, unordered,
             value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
         },
-        floor::Proportional,
         operation::Key,
         sync::{self, Target as AnySyncTarget},
     },
@@ -65,7 +64,6 @@ where
 {
     batch: UnmerkleizedBatch<F, H, U, S>,
     db: Shared<Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>>,
-    metadata: Option<U::Value>,
 }
 
 /// A staged batch returned by [`AnyUnmerkleized::stage`].
@@ -86,7 +84,6 @@ where
 {
     staged: Staged<F, H, U, S>,
     db: Shared<Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>>,
-    metadata: Option<U::Value>,
 }
 
 impl<F, E, C, I, H, U, S> AnyUnmerkleized<F, E, C, I, H, U, S>
@@ -100,11 +97,12 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize). `None` clears
+    /// it.
     ///
     /// The metadata carries over to a batch returned by [`Self::stage`].
-    pub fn with_metadata(mut self, metadata: U::Value) -> Self {
-        self.metadata = Some(metadata);
+    pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
+        self.batch = self.batch.with_metadata(metadata);
         self
     }
 
@@ -129,23 +127,12 @@ where
         self,
         keys: &[&U::Key],
     ) -> Result<(Vec<Option<U::Value>>, AnyStaged<F, E, C, I, H, U, S>), Error<F>> {
-        let Self {
-            batch,
-            db,
-            metadata,
-        } = self;
+        let Self { batch, db } = self;
         let (values, staged) = {
             let guard = db.read().await;
             batch.stage(keys, &guard).await?
         };
-        Ok((
-            values,
-            AnyStaged {
-                staged,
-                db,
-                metadata,
-            },
-        ))
+        Ok((values, AnyStaged { staged, db }))
     }
 
     /// Records an upsert (`Some`) or a delete (`None`) of `key`.
@@ -238,9 +225,9 @@ where
     Operation<F, U>: Codec,
 {
     /// Sets the metadata committed by [`merkleize`](Self::merkleize), replacing any metadata set
-    /// before staging.
-    pub fn with_metadata(mut self, metadata: U::Value) -> Self {
-        self.metadata = Some(metadata);
+    /// before staging. `None` clears it.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
+        self.staged = self.staged.with_metadata(metadata);
         self
     }
 
@@ -266,24 +253,12 @@ where
         self,
         keys: &[&U::Key],
     ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>> {
-        let Self {
-            staged,
-            db,
-            metadata,
-        } = self;
+        let Self { staged, db } = self;
         let (range, values, staged) = {
             let guard = db.read().await;
             staged.expand(keys, &guard).await?
         };
-        Ok((
-            range,
-            values,
-            Self {
-                staged,
-                db,
-                metadata,
-            },
-        ))
+        Ok((range, values, Self { staged, db }))
     }
 }
 
@@ -314,16 +289,10 @@ where
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
     ) -> Result<AnyMerkleized<F, E, C, I, H, unordered::Update<K, V>, S>, Error<F>> {
-        let Self {
-            staged,
-            db,
-            metadata,
-        } = self;
+        let Self { staged, db } = self;
         let inner = {
             let guard = db.read().await;
-            staged
-                .merkleize(slots, unstaged, metadata, &guard, &mut Proportional)
-                .await?
+            staged.merkleize(slots, unstaged, &guard).await?
         };
         Ok(AnyMerkleized { inner, db })
     }
@@ -356,16 +325,10 @@ where
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
     ) -> Result<AnyMerkleized<F, E, C, I, H, ordered::Update<K, V>, S>, Error<F>> {
-        let Self {
-            staged,
-            db,
-            metadata,
-        } = self;
+        let Self { staged, db } = self;
         let inner = {
             let guard = db.read().await;
-            staged
-                .merkleize(slots, unstaged, metadata, &guard, &mut Proportional)
-                .await?
+            staged.merkleize(slots, unstaged, &guard).await?
         };
         Ok(AnyMerkleized { inner, db })
     }
@@ -415,10 +378,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self
-            .batch
-            .merkleize(&db, self.metadata, &mut Proportional)
-            .await?;
+        let merkleized = self.batch.merkleize(&db).await?;
         Ok(AnyMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -444,10 +404,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self
-            .batch
-            .merkleize(&db, self.metadata, &mut Proportional)
-            .await?;
+        let merkleized = self.batch.merkleize(&db).await?;
         Ok(AnyMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -478,7 +435,6 @@ where
         AnyUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             db: self.db.clone(),
-            metadata: None,
         }
     }
 }
@@ -552,7 +508,6 @@ where
         AnyUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
         }
     }
 
@@ -656,7 +611,6 @@ where
         AnyUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
         }
     }
 

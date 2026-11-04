@@ -2,7 +2,11 @@
 
 use crate::{
     merkle::{Family, Location, Proof},
-    qmdb::{Error, floor::Policy, operation::Key},
+    qmdb::{
+        Error,
+        floor::{Policy, Proportional},
+        operation::Key,
+    },
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
@@ -21,12 +25,22 @@ pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
     fn write(self, key: Self::K, value: Option<Self::V>) -> Self;
 
-    /// Resolve mutations, advance the inactivity floor with [`Policy`], compute the new root, and
-    /// return a merkleized batch.
-    fn merkleize<P: Policy<Self::Family, Self::K, Self::V> + Send>(
+    /// Set the metadata recorded in this batch's commit. Defaults to `None`.
+    fn with_metadata(self, metadata: impl Into<Option<Self::Metadata>>) -> Self;
+
+    /// Merkleize, advancing the inactivity floor with [`Proportional`].
+    fn merkleize(
         self,
         db: &Db,
-        metadata: Option<Self::Metadata>,
+    ) -> impl Future<Output = Result<Self::Merkleized, Error<Self::Family>>> {
+        async move { self.merkleize_with(db, &mut Proportional).await }
+    }
+
+    /// Resolve mutations, advance the inactivity floor with [`Policy`], compute the new root, and
+    /// return a merkleized batch.
+    fn merkleize_with<P: Policy<Self::Family, Self::K, Self::V> + Send>(
+        self,
+        db: &Db,
         policy: &mut P,
     ) -> impl Future<Output = Result<Self::Merkleized, Error<Self::Family>>>;
 }
