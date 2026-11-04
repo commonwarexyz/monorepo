@@ -10,7 +10,8 @@ use commonware_consensus::{
     types::{Epoch, Height, Participant, ViewDelta},
 };
 use commonware_cryptography::{
-    Hasher as _, Sha256, Signer as _, bls12381::primitives::variant::MinPk, ed25519, sha256::Digest,
+    Hasher as _, Sha256, Signer as _, bls12381::primitives::variant::MinSig, ed25519,
+    sha256::Digest,
 };
 use commonware_utils::{TestRng, ordered::Set};
 use std::time::Duration;
@@ -44,9 +45,9 @@ pub struct Committee {
     /// Network private keys in participant order.
     pub network_keys: Vec<ed25519::PrivateKey>,
     /// One signing scheme per participant, in participant order.
-    pub signers: Vec<Scheme<ed25519::PublicKey, MinPk>>,
+    pub signers: Vec<Scheme<ed25519::PublicKey, MinSig>>,
     /// A keyless verification scheme.
-    pub verifier: Scheme<ed25519::PublicKey, MinPk>,
+    pub verifier: Scheme<ed25519::PublicKey, MinSig>,
 }
 
 impl Committee {
@@ -71,7 +72,7 @@ impl Committee {
         )
         .expect("validated committee configuration");
         // A deterministic generator is what lets every node derive the same keys from the seed.
-        let dealt = deal::<_, MinPk>(
+        let dealt = deal::<_, MinSig>(
             &mut TestRng::new(seed),
             config.parameters(),
             &Set::try_from(identities.clone()).expect("identities are unique"),
@@ -185,7 +186,7 @@ mod tests {
             );
             assert!(
                 tuning()
-                    .validate::<Sha256, MinPk>(&committee.config)
+                    .validate::<Sha256, MinSig>(&committee.config)
                     .is_ok()
             );
         }
