@@ -2006,8 +2006,8 @@ mod tests {
     fn verifies_under<F: Family, V: Family>(
         proof: &Proof<F, D>,
         bagging: Bagging,
-        elements: &[[u8; 8]],
         start: u64,
+        elements: &[[u8; 8]],
         root: &D,
     ) -> bool {
         let proof = Proof::<V, D> {
@@ -2035,12 +2035,12 @@ mod tests {
                 let element = [loc.to_be_bytes()];
                 for verifier in [ForwardFold, BackwardFold] {
                     assert_eq!(
-                        verifies_under::<F, F>(&proof, verifier, &element, loc, &root),
+                        verifies_under::<F, F>(&proof, verifier, loc, &element, &root),
                         verifier == bagging,
                         "n={n} loc={loc} inactive={inactive} prover={bagging:?} verifier={verifier:?}"
                     );
                     assert!(
-                        !verifies_under::<F, G>(&proof, verifier, &element, loc, &root),
+                        !verifies_under::<F, G>(&proof, verifier, loc, &element, &root),
                         "n={n} loc={loc} inactive={inactive} prover={bagging:?} verifier={verifier:?}"
                     );
                 }
@@ -2065,12 +2065,12 @@ mod tests {
             let root = mem.root(&H::new(bagging), 0).unwrap();
             for verifier in [ForwardFold, BackwardFold] {
                 assert_eq!(
-                    verifies_under::<F, F>(&proof, verifier, &[], 0, &root),
+                    verifies_under::<F, F>(&proof, verifier, 0, &[], &root),
                     verifier == bagging,
                     "prover={bagging:?} verifier={verifier:?}"
                 );
                 assert!(
-                    !verifies_under::<F, G>(&proof, verifier, &[], 0, &root),
+                    !verifies_under::<F, G>(&proof, verifier, 0, &[], &root),
                     "prover={bagging:?} verifier={verifier:?}"
                 );
             }

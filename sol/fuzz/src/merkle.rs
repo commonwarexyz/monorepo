@@ -215,7 +215,7 @@ fn generate<F: Family, H: Hasher>(
     }
 
     if check_mutated {
-        check_rejections::<F, H>(&hasher, &proof, &elements, start, root)?;
+        check_rejections::<F, H>(&hasher, &proof, start, &elements, root)?;
     }
 
     Ok(Output {
@@ -254,8 +254,8 @@ fn materialize<F: Family, H: Hasher>(
 fn check_rejections<F: Family, H: Hasher>(
     hasher: &MerkleHasher<H>,
     proof: &Proof<F, H::Digest>,
-    elements: &[[u8; 32]],
     start: u64,
+    elements: &[[u8; 32]],
     root: H::Digest,
 ) -> Result<(), String> {
     let mut bytes = root.as_ref().to_vec();
@@ -311,7 +311,7 @@ fn synthetic<F: Family, H: Hasher>(
             if !proof.verify_range_inclusion(&hasher, Location::new(start), &elements, &root) {
                 return Err("Commonware rejected reconstructed proof".into());
             }
-            check_rejections::<F, H>(&hasher, &proof, &elements, start, root)?;
+            check_rejections::<F, H>(&hasher, &proof, start, &elements, root)?;
             return Ok(Output {
                 root: root.as_ref().try_into().unwrap(),
                 elements,

@@ -2,7 +2,7 @@
 use crate::{
     merkle::{Family, Location},
     qmdb::{
-        self,
+        self, ProofExt as _,
         sync::{
             Database, Error as SyncError, Journal, Metrics, SourceFor, Target,
             database::Config as _,
@@ -78,7 +78,6 @@ where
         return false;
     }
 
-    let hasher = qmdb::hasher::<H>();
     match (&request, response) {
         (
             Request::Operations { start, max_ops, .. },
@@ -88,8 +87,7 @@ where
             if operations_len == 0 || operations_len > max_ops.get() {
                 false
             } else {
-                let elements = operations.iter().map(Encode::encode).collect::<Vec<_>>();
-                proof.verify_range_inclusion(&hasher, *start, &elements, root)
+                proof.verify::<H, _>(*start, operations, root)
             }
         }
         (
@@ -99,10 +97,9 @@ where
                 op,
                 pinned_nodes,
             },
-        ) => proof.verify_range_inclusion_with_pinned_nodes(
-            &hasher,
+        ) => proof.verify_with_pinned_nodes::<H, _>(
             *start,
-            &[op.encode()],
+            core::slice::from_ref(op),
             pinned_nodes,
             root,
         ),
