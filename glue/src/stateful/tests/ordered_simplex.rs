@@ -617,7 +617,7 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
         until_applied(&context, [&late.tally, &validators[0].tally], target).await;
         let first = late.tally.applied.lock()[0];
         assert!(
-            first > INTERVAL.get() && first % INTERVAL.get() == 0,
+            first > INTERVAL.get() && first % INTERVAL == 0,
             "the late validator executed from height {first}, not after a checkpoint"
         );
         let reference = validators[0]
