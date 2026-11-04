@@ -11,7 +11,7 @@ use crate::{
         machine::{
             Generation, Issued, JobId, Observation, VerificationItem, VerificationTicket, VerifyJob,
         },
-        mocks::Committee,
+        mocks::{Bls, Committee},
         types::{Artifact, ChainId},
     },
     types::{Participant, Round, View},
@@ -26,10 +26,9 @@ use tracing_subscriber::prelude::*;
 
 type Digest = <Sha256 as Hasher>::Digest;
 
-type TestVerifier =
-    Verifier<deterministic::Context, Sha256, ed25519::PublicKey, MinPk, Sequential, Sequential>;
+type TestVerifier = Verifier<deterministic::Context, Sha256, Bls<MinPk>, Sequential, Sequential>;
 
-fn verifier(context: deterministic::Context, committee: &Committee<MinPk>) -> TestVerifier {
+fn verifier(context: deterministic::Context, committee: &Committee<Bls<MinPk>>) -> TestVerifier {
     Verifier::new(
         context,
         Config {
@@ -70,7 +69,7 @@ where
 #[test]
 fn verification_dispatch_wait_is_observed_when_first_polled() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(40, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(40, 6).build();
         let verifier = verifier(context.child("batcher"), &committee);
         let artifact = Artifact::Vqc(committee.vqc(View::new(1)));
         let id = JobId::new(0);
@@ -127,7 +126,7 @@ fn verification_trace_levels_preserve_round_prerequisites() {
             .with(tracing_subscriber::filter::LevelFilter::from_level(level));
         tracing::subscriber::with_default(subscriber, || {
             deterministic::Runner::default().start(|context| async move {
-                let committee = Committee::<MinPk>::builder(40, 6).build();
+                let committee = Committee::<Bls<MinPk>>::builder(40, 6).build();
                 let verifier = verifier(context.child("batcher"), &committee);
                 let proposal = committee.leader_block(View::new(1));
                 let bulk = Artifact::TransactionBlock(
@@ -198,14 +197,14 @@ fn verification_trace_levels_preserve_round_prerequisites() {
 
 #[test]
 fn verified_votes_retain_a_bounded_window_per_view() {
-    let committee = Committee::<MinPk>::builder(7, 6).build();
+    let committee = Committee::<Bls<MinPk>>::builder(7, 6).build();
     let vote = |view: u64, signer: usize| {
-        Arc::new(Artifact::<MinPk, Digest>::Vote(committee.vote(
+        Arc::new(Artifact::<Bls<MinPk>, Digest>::Vote(committee.vote(
             Participant::from_usize(signer),
             &committee.leader_block(View::new(view)),
         )))
     };
-    let mut cache = VerifiedVotes::<MinPk, Digest>::new(2);
+    let mut cache = VerifiedVotes::<Bls<MinPk>, Digest>::new(2);
 
     // Distinct votes accumulate up to the per-view bound of one vote and one novote each.
     for signer in 0..5 {
@@ -226,7 +225,7 @@ fn verified_votes_retain_a_bounded_window_per_view() {
 fn a_panicked_worker_is_fatal() {
     deterministic::Runner::default().start(|context| async move {
         let voter_context = context.child("voter");
-        let (voter, _inbox) = voter::Mailbox::<ed25519::PublicKey, MinPk, Digest>::new(
+        let (voter, _inbox) = voter::Mailbox::<ed25519::PublicKey, Bls<MinPk>, Digest>::new(
             &voter_context,
             &context,
             NonZeroUsize::MIN,

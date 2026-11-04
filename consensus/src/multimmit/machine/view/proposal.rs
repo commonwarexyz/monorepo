@@ -15,31 +15,32 @@ use crate::{
             util::Drive,
             vote_body::{VoteBodyPass, VoteBodyProgress, VoteBuild, VoteBuilds},
         },
+        scheme::Scheme,
         types::{
             Anchor, BlockRef, ChainProposal, CodecConfig, LeaderBlock, SignedLeaderBlock, VoteBody,
         },
     },
     types::{Round, View},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::{mem::take, sync::Arc};
 
 /// The in-flight construction of this node's regular signing request for one view.
-pub(super) enum RegularSignPass<V: Variant, D: Digest> {
+pub(super) enum RegularSignPass<S: Scheme, D: Digest> {
     Vote {
         view: View,
-        pass: VoteBodyPass<V, D>,
+        pass: VoteBodyPass<S, D>,
         ready: Option<VoteBody<D>>,
     },
     Proposal {
         view: View,
-        parent: ParentRecord<V, D>,
+        parent: ParentRecord<S, D>,
         attach_parent: bool,
-        proposals: Vec<ChainProposal<V, D>>,
+        proposals: Vec<ChainProposal<S, D>>,
     },
 }
 
-impl<V: Variant, D: Digest> RegularSignPass<V, D> {
+impl<S: Scheme, D: Digest> RegularSignPass<S, D> {
     const fn view(&self) -> View {
         match self {
             Self::Vote { view, .. } | Self::Proposal { view, .. } => *view,
@@ -48,7 +49,7 @@ impl<V: Variant, D: Digest> RegularSignPass<V, D> {
 }
 
 /// A bounded prefix of the regular signing pass and the request it produced, if any.
-pub(crate) type RegularSignDrive<V, D> = Drive<Option<SignRequest<V, D>>>;
+pub(crate) type RegularSignDrive<S, D> = Drive<Option<SignRequest<S, D>>>;
 
 /// Header-triggered restarts consumed by one view's proposal pass.
 #[derive(Copy, Clone, Debug)]
@@ -77,7 +78,7 @@ pub(crate) enum TimeoutCutoff<D: Digest> {
     Timeout,
 }
 
-impl<V: Variant, D: Digest> ViewState<V, D> {
+impl<S: Scheme, D: Digest> ViewState<S, D> {
     /// Advances this node's proposal or vote pass for `view` by at most `budget` steps.
     ///
     /// The drive produces the signing request once the pass completes; a pass for another view is
@@ -86,9 +87,9 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         &mut self,
         profile: &Profile<H::Digest>,
         view: View,
-        chain: &ChainState<V, D>,
+        chain: &ChainState<S, D>,
         budget: usize,
-    ) -> Result<RegularSignDrive<V, D>, ViewError> {
+    ) -> Result<RegularSignDrive<S, D>, ViewError> {
         if !self.can_sign_regular(view) {
             self.discard_regular_sign_pass();
             return Ok(Drive::idle());
@@ -166,12 +167,12 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     ///
     /// A completed body is kept, so later drives return it again without further work.
     fn step_vote<H: Hasher<Digest = D>>(
-        chain: &ChainState<V, D>,
-        pass: &mut VoteBodyPass<V, D>,
+        chain: &ChainState<S, D>,
+        pass: &mut VoteBodyPass<S, D>,
         ready: &mut Option<VoteBody<D>>,
         builds: &mut VoteBuilds,
         budget: usize,
-    ) -> Result<RegularSignDrive<V, D>, ViewError> {
+    ) -> Result<RegularSignDrive<S, D>, ViewError> {
         if let Some(body) = ready {
             return Ok(Drive::done(0, Some(SignRequest::Vote(body.clone()))));
         }
@@ -190,14 +191,14 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     /// Advances a proposal pass one chain per unit of `budget`, then seals the leader block.
     fn step_proposal(
-        chain: &ChainState<V, D>,
+        chain: &ChainState<S, D>,
         round: Round,
         config: CodecConfig,
-        parent: &ParentRecord<V, D>,
+        parent: &ParentRecord<S, D>,
         attach_parent: bool,
-        proposals: &mut Vec<ChainProposal<V, D>>,
+        proposals: &mut Vec<ChainProposal<S, D>>,
         budget: usize,
-    ) -> Result<RegularSignDrive<V, D>, ViewError> {
+    ) -> Result<RegularSignDrive<S, D>, ViewError> {
         for processed in 1..=budget {
             match parent.tips.blocks().get(proposals.len()).copied() {
                 Some(tip) => {
@@ -288,8 +289,8 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         &self,
         profile: &Profile<H::Digest>,
         view: View,
-        chain: &ChainState<V, D>,
-    ) -> Result<Option<RegularSignPass<V, D>>, ViewError> {
+        chain: &ChainState<S, D>,
+    ) -> Result<Option<RegularSignPass<S, D>>, ViewError> {
         let Some(me) = self.me else {
             return Ok(None);
         };
@@ -331,10 +332,10 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     fn finish_proposal_request(
         round: Round,
         config: CodecConfig,
-        parent: &ParentRecord<V, D>,
+        parent: &ParentRecord<S, D>,
         attach_parent: bool,
-        proposals: &[ChainProposal<V, D>],
-    ) -> Result<SignRequest<V, D>, ViewError> {
+        proposals: &[ChainProposal<S, D>],
+    ) -> Result<SignRequest<S, D>, ViewError> {
         let parent_proof = match &parent.proof {
             ParentProof::Genesis => ProposalParent::Genesis,
             ParentProof::Vqc(certificate) => {
@@ -358,7 +359,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     /// Returns the no-vote and nullify requests owed once `view` timed out without a valid
     /// proposal.
-    pub(crate) fn timeout_requests(&self, view: View) -> Option<Arc<[SignRequest<V, D>]>> {
+    pub(crate) fn timeout_requests(&self, view: View) -> Option<Arc<[SignRequest<S, D>]>> {
         self.me?;
         if !matches!(self.timeout_cutoff(view), Some(TimeoutCutoff::Timeout))
             || !self.can_vote(view)
@@ -374,7 +375,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     /// Returns the vote frozen when `view` timed out while holding a valid proposal, if this node
     /// can still cast it.
-    pub(crate) fn cutoff_vote(&self, view: View) -> Option<SignRequest<V, D>> {
+    pub(crate) fn cutoff_vote(&self, view: View) -> Option<SignRequest<S, D>> {
         if !self.can_vote(view) {
             return None;
         }
@@ -390,7 +391,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     }
 
     /// Returns a nullify request once enough signers opposed this node's vote in `view`.
-    pub(crate) fn post_vote_nullify(&self, view: View) -> Option<SignRequest<V, D>> {
+    pub(crate) fn post_vote_nullify(&self, view: View) -> Option<SignRequest<S, D>> {
         self.me?;
         let entry = self.entry(view)?;
         if !entry.slot.has_voted() || entry.slot.nullified() {
@@ -408,7 +409,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     pub(crate) fn fire_timer<H: Hasher<Digest = D>>(
         &mut self,
         view: View,
-        chain: &ChainState<V, D>,
+        chain: &ChainState<S, D>,
     ) -> Result<(), ViewError> {
         if self.timeout_cutoff(view).is_some() || !self.can_vote(view) {
             return Ok(());
@@ -425,7 +426,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         Ok(())
     }
 
-    fn valid_proposal(&self, view: View) -> Result<Option<&SignedLeaderBlock<V, D>>, ViewError> {
+    fn valid_proposal(&self, view: View) -> Result<Option<&SignedLeaderBlock<S, D>>, ViewError> {
         let Some(records) = self.entry(view).map(|entry| &entry.proposals) else {
             return Ok(None);
         };
@@ -461,8 +462,8 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     fn proposal_extends(
         &self,
-        block: &LeaderBlock<V, D>,
-        parent: &ParentRecord<V, D>,
+        block: &LeaderBlock<S, D>,
+        parent: &ParentRecord<S, D>,
     ) -> Result<bool, ViewError> {
         if block.proposals().len() != parent.tips.blocks().len() {
             return Ok(false);
@@ -542,7 +543,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         self.select_anchor(view).map(|parent| parent.tips.blocks())
     }
 
-    fn select_anchor(&self, view: View) -> Option<&ParentRecord<V, D>> {
+    fn select_anchor(&self, view: View) -> Option<&ParentRecord<S, D>> {
         let (_, ids) = self.parents_by_view.range(..view).next_back()?;
         ids.iter()
             .filter_map(|id| self.parents.get(id))

@@ -1,49 +1,53 @@
 //! Threshold recovery: DA certificates and nullifications from a quorum of shares.
 
 use super::common::{Fixture, MultimmitScheme, PARTICIPANTS, Workload, bench_strategies};
-use commonware_consensus::multimmit::types::{DaVote, Nullify};
+use commonware_consensus::multimmit::{
+    mocks::{Bls, Fixture as Suite},
+    types::{DaVote, Nullify},
+};
 use commonware_cryptography::{
-    bls12381::primitives::variant::{MinPk, MinSig, Variant},
+    bls12381::primitives::variant::{MinPk, MinSig},
     sha256::Digest,
 };
 use commonware_parallel::Strategy;
+use commonware_utils::test_rng;
 use criterion::{Criterion, criterion_group};
 use std::hint::black_box;
 
 /// Recovers a DA certificate from a quorum of shares.
-struct AssembleDaCertificate<'a, V: Variant> {
-    verifier: &'a MultimmitScheme<V>,
-    votes: &'a [DaVote<V, Digest>],
+struct AssembleDaCertificate<'a, S: Suite> {
+    verifier: &'a MultimmitScheme<S>,
+    votes: &'a [DaVote<S, Digest>],
 }
 
-impl<V: Variant> Workload for AssembleDaCertificate<'_, V> {
-    fn run<S: Strategy>(&mut self, strategy: &S) {
+impl<S: Suite> Workload for AssembleDaCertificate<'_, S> {
+    fn run<St: Strategy>(&mut self, strategy: &St) {
         black_box(
             self.verifier
-                .assemble_da_certificate(self.votes, strategy)
+                .assemble_da_certificate(&mut test_rng(), self.votes, strategy)
                 .unwrap(),
         );
     }
 }
 
 /// Recovers a nullification from a quorum of shares.
-struct AssembleNullification<'a, V: Variant> {
-    verifier: &'a MultimmitScheme<V>,
-    nullifies: &'a [Nullify<V>],
+struct AssembleNullification<'a, S: Suite> {
+    verifier: &'a MultimmitScheme<S>,
+    nullifies: &'a [Nullify<S>],
 }
 
-impl<V: Variant> Workload for AssembleNullification<'_, V> {
-    fn run<S: Strategy>(&mut self, strategy: &S) {
+impl<S: Suite> Workload for AssembleNullification<'_, S> {
+    fn run<St: Strategy>(&mut self, strategy: &St) {
         black_box(
             self.verifier
-                .assemble_nullification(self.nullifies, strategy)
+                .assemble_nullification(&mut test_rng(), self.nullifies, strategy)
                 .unwrap(),
         );
     }
 }
 
-fn register<V: Variant>(c: &mut Criterion, variant: &str) {
-    let fixture = Fixture::<V>::new();
+fn register<S: Suite>(c: &mut Criterion, variant: &str) {
+    let fixture = Fixture::<S>::new();
     let header = fixture.header(0, 1);
     let da_votes = fixture
         .signers
@@ -82,8 +86,8 @@ fn register<V: Variant>(c: &mut Criterion, variant: &str) {
 }
 
 fn bench_recover(c: &mut Criterion) {
-    register::<MinPk>(c, "minpk");
-    register::<MinSig>(c, "minsig");
+    register::<Bls<MinPk>>(c, "minpk");
+    register::<Bls<MinSig>>(c, "minsig");
 }
 
 criterion_group! {

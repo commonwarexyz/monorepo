@@ -1,16 +1,15 @@
 //! Resolver actor configuration.
 
-use crate::multimmit::scheme::bls12381_threshold::Scheme;
-use commonware_cryptography::{PublicKey, bls12381::primitives::variant::Variant};
+use crate::multimmit::scheme::{Generic, Scheme};
 use commonware_utils::NonZeroDuration;
 use std::num::NonZeroUsize;
 
 /// Configuration for the resolver.
-pub(crate) struct Config<P: PublicKey, V: Variant, B, T> {
+pub(crate) struct Config<S: Scheme, B, T> {
     /// Scheme of the epoch committee.
     ///
     /// The resolver takes its serving peers, local identity, epoch, and decode bounds from it.
-    pub(crate) scheme: Scheme<P, V>,
+    pub(crate) scheme: Generic<S>,
     /// Peer blocker shared with the engine.
     ///
     /// Resolver response rejection never invokes it because a bad response is not portable proof

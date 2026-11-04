@@ -15,13 +15,14 @@ use crate::{
     multimmit::{
         actors::voter::tasks::TaskReservations,
         machine::CoreState,
+        scheme::Scheme,
         types::{BlockRef, TransactionBlockHeader},
     },
     types::{Epoch, Round, View},
 };
 pub(crate) use activity::PeerActivity;
 use arrivals::BlockArrivals;
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::telemetry::{
     metrics::{GaugeExt as _, Histogram, HistogramExt as _},
     traces::TracedExt as _,
@@ -149,9 +150,9 @@ impl<D: Digest> Telemetry<D> {
     }
 
     /// Exports the machine's progress gauges and returns its current view.
-    pub(crate) fn update_progress<H: Hasher<Digest = D>, V: Variant>(
+    pub(crate) fn update_progress<H: Hasher<Digest = D>, S: Scheme>(
         &mut self,
-        machine: &CoreState<H, V>,
+        machine: &CoreState<H, S>,
         tasks: &TaskReservations,
         now: SystemTime,
     ) -> View {
@@ -211,9 +212,9 @@ impl<D: Digest> Telemetry<D> {
     /// The per-chain family scales with the validator count, so only the value that localizes a
     /// single stalled chain stays per chain. Certification, DA, and dissemination report their
     /// slowest chain instead.
-    pub(crate) fn update_chains<H: Hasher<Digest = D>, V: Variant>(
+    pub(crate) fn update_chains<H: Hasher<Digest = D>, S: Scheme>(
         &self,
-        machine: &CoreState<H, V>,
+        machine: &CoreState<H, S>,
     ) {
         let metrics = &self.metrics;
         let progress = machine.machine().chain_progress();
@@ -250,9 +251,9 @@ impl<D: Digest> Telemetry<D> {
     }
 
     /// Exports the retention profile behind the durable floors.
-    pub(crate) fn update_retention<H: Hasher<Digest = D>, V: Variant>(
+    pub(crate) fn update_retention<H: Hasher<Digest = D>, S: Scheme>(
         &self,
-        machine: &CoreState<H, V>,
+        machine: &CoreState<H, S>,
         events_since_checkpoint: u64,
     ) {
         let metrics = &self.metrics;

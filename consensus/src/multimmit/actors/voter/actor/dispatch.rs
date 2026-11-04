@@ -44,7 +44,7 @@ where
     /// Executes core capabilities in order.
     pub(crate) fn execute_capabilities(
         &mut self,
-        capabilities: Capabilities<T::Variant, DigestOf<T>>,
+        capabilities: Capabilities<T::Scheme, DigestOf<T>>,
         root: &Span,
     ) -> Result<(), Failure> {
         for capability in capabilities {
@@ -88,7 +88,7 @@ where
     /// Schedules the verification of one machine-issued job.
     fn verify(
         &mut self,
-        job: VerifyJob<T::Variant, DigestOf<T>>,
+        job: VerifyJob<T::Scheme, DigestOf<T>>,
         root: &Span,
     ) -> Result<(), Failure> {
         let view = self.telemetry.round_view();
@@ -113,7 +113,7 @@ where
     /// Installs resolver custody and accounting released by one durable acknowledgement.
     fn acknowledged(
         &mut self,
-        retention: Vec<Arc<Artifact<T::Variant, DigestOf<T>>>>,
+        retention: Vec<Arc<Artifact<T::Scheme, DigestOf<T>>>>,
         forwarded_nullifications: usize,
     ) -> Result<(), Fatal> {
         for artifact in retention {
@@ -140,7 +140,7 @@ where
     /// Executes one durable effect the machine released for execution.
     pub(crate) fn execute_released(
         &mut self,
-        job: DurableJob<T::Variant, DigestOf<T>>,
+        job: DurableJob<T::Scheme, DigestOf<T>>,
         root: &Span,
     ) -> Result<(), Fatal> {
         let (issued, effect) = job.into_parts();
@@ -224,7 +224,7 @@ where
         &mut self,
         id: EffectId,
         generation: Generation,
-        artifacts: &[Arc<Artifact<T::Variant, DigestOf<T>>>],
+        artifacts: &[Arc<Artifact<T::Scheme, DigestOf<T>>>],
     ) -> Result<(), Fatal> {
         let mut transmissions = Vec::with_capacity(artifacts.len());
         for artifact in artifacts {
@@ -243,7 +243,7 @@ where
         &mut self,
         id: EffectId,
         generation: Generation,
-        requests: &[SendRequest<T::Variant, DigestOf<T>>],
+        requests: &[SendRequest<T::Scheme, DigestOf<T>>],
     ) -> Result<(), Fatal> {
         let mut transmissions = Vec::with_capacity(requests.len());
         for request in requests {
@@ -262,7 +262,7 @@ where
     }
 
     /// Sends each request's artifact once to its recipient, outside the durable outbox.
-    fn forward(&mut self, requests: &[SendRequest<T::Variant, DigestOf<T>>]) -> Result<(), Fatal> {
+    fn forward(&mut self, requests: &[SendRequest<T::Scheme, DigestOf<T>>]) -> Result<(), Fatal> {
         for request in requests {
             let recipient = self.recipient(request.recipient())?;
             let transmission = self.frame(request.artifact(), Some(recipient))?;
@@ -367,7 +367,7 @@ where
 
     fn execute_crypto(
         &mut self,
-        job: CryptoJob<T::Variant, DigestOf<T>>,
+        job: CryptoJob<T::Scheme, DigestOf<T>>,
         root: &Span,
     ) -> Result<(), Fatal> {
         match job {
@@ -525,7 +525,7 @@ where
     /// Makes one authenticated proof available after its local signature exposure floor.
     pub(crate) fn retain_served(
         &mut self,
-        artifact: &Artifact<T::Variant, DigestOf<T>>,
+        artifact: &Artifact<T::Scheme, DigestOf<T>>,
         boundary: RetentionBoundary,
     ) -> Result<(), Fatal> {
         let Some(proof) = ViewProof::from_artifact(artifact) else {
@@ -548,7 +548,7 @@ where
 
     fn retain(
         &mut self,
-        proof: ViewProof<T::Variant, DigestOf<T>>,
+        proof: ViewProof<T::Scheme, DigestOf<T>>,
         boundary: RetentionBoundary,
     ) -> Result<(), Fatal> {
         self.hooks.retained(&proof, boundary);
@@ -561,11 +561,11 @@ where
     /// Frames one artifact publication.
     fn frame(
         &self,
-        artifact: &Arc<Artifact<T::Variant, DigestOf<T>>>,
+        artifact: &Arc<Artifact<T::Scheme, DigestOf<T>>>,
         recipient: Option<T::PublicKey>,
     ) -> Result<Transmission<T::PublicKey, DigestOf<T>>, Fatal> {
         self.egress
-            .frame::<T::Hasher, T::Variant>(artifact, recipient)
+            .frame::<T::Hasher, T::Scheme>(artifact, recipient)
             .ok_or(Fatal::Step(StepError::UnauthorizedEffect))
     }
 }

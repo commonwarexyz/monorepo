@@ -3,9 +3,10 @@
 use super::{BackfillSubscriber, Error, mailbox::DeliveryReply, waiter::Resolved};
 use crate::multimmit::{
     marshal::{actors::catalog, wire::BackfillKey},
+    scheme::Scheme,
     types::{Body, TransactionBlock},
 };
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use commonware_resolver::Delivery;
 use commonware_runtime::telemetry::metrics::histogram::Timer;
 use commonware_utils::futures::Pool;
@@ -16,15 +17,15 @@ use std::{
 use tracing::{Instrument as _, Span};
 
 /// A validated delivery waiting for its outcome.
-pub(super) struct Ready<H: Hasher, V: Variant, B: Body<H>> {
+pub(super) struct Ready<H: Hasher, S: Scheme, B: Body<H>> {
     pub delivery: Delivery<BackfillKey<H::Digest>, BackfillSubscriber>,
-    pub resolved: Resolved<H, V, B>,
+    pub resolved: Resolved<H, S, B>,
     pub response: DeliveryReply,
 }
 
 /// Ready deliveries whose blocks are staged in temporary custody with one catalog request.
-pub(super) struct StagingJob<H: Hasher, V: Variant, B: Body<H>> {
-    pub ready: Vec<Ready<H, V, B>>,
+pub(super) struct StagingJob<H: Hasher, S: Scheme, B: Body<H>> {
+    pub ready: Vec<Ready<H, S, B>>,
     /// Blocks to stage, in delivery order.
     pub blocks: Vec<Arc<TransactionBlock<H, B>>>,
     /// Keys reserved by the job until it completes.
@@ -33,7 +34,7 @@ pub(super) struct StagingJob<H: Hasher, V: Variant, B: Body<H>> {
     pub bytes: u64,
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> StagingJob<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> StagingJob<H, S, B> {
     pub(super) const fn new() -> Self {
         Self {
             ready: Vec::new(),
@@ -44,7 +45,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> StagingJob<H, V, B> {
     }
 
     /// Adds a ready delivery whose blocks must be staged, counting `bytes` encoded bytes.
-    pub(super) fn push(&mut self, ready: Ready<H, V, B>, bytes: u64) {
+    pub(super) fn push(&mut self, ready: Ready<H, S, B>, bytes: u64) {
         self.blocks.extend(ready.resolved.blocks().iter().cloned());
         self.keys.insert(ready.delivery.key);
         self.bytes = self.bytes.saturating_add(bytes);
@@ -58,15 +59,15 @@ impl<H: Hasher, V: Variant, B: Body<H>> StagingJob<H, V, B> {
 }
 
 /// A finished staging request.
-pub(super) struct StagingCompletion<H: Hasher, V: Variant, B: Body<H>> {
-    pub job: StagingJob<H, V, B>,
+pub(super) struct StagingCompletion<H: Hasher, S: Scheme, B: Body<H>> {
+    pub job: StagingJob<H, S, B>,
     pub timer: Timer,
     pub result: Result<(), Error>,
 }
 
 /// A staging job waiting for a free slot, with the span its request runs under.
-struct Queued<H: Hasher, V: Variant, B: Body<H>> {
-    job: StagingJob<H, V, B>,
+struct Queued<H: Hasher, S: Scheme, B: Body<H>> {
+    job: StagingJob<H, S, B>,
     span: Span,
 }
 
@@ -74,17 +75,17 @@ struct Queued<H: Hasher, V: Variant, B: Body<H>> {
 ///
 /// A key stays reserved from admission until its job completes, so a duplicate delivery for it is
 /// ignored instead of staged twice. At most `max_reserved` keys are reserved at once.
-pub(super) struct Staging<H: Hasher, V: Variant, B: Body<H>> {
-    queued: VecDeque<Queued<H, V, B>>,
+pub(super) struct Staging<H: Hasher, S: Scheme, B: Body<H>> {
+    queued: VecDeque<Queued<H, S, B>>,
     queued_bytes: u64,
-    active: Pool<'static, StagingCompletion<H, V, B>>,
+    active: Pool<'static, StagingCompletion<H, S, B>>,
     active_bytes: u64,
     reserved: BTreeSet<BackfillKey<H::Digest>>,
     max_active: usize,
     max_reserved: usize,
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> Staging<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> Staging<H, S, B> {
     pub(super) fn new(max_active: usize, max_reserved: usize) -> Self {
         Self {
             queued: VecDeque::new(),
@@ -113,7 +114,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Staging<H, V, B> {
     }
 
     /// Queues `job`, whose staging request runs under `span`.
-    pub(super) fn queue(&mut self, job: StagingJob<H, V, B>, span: Span) {
+    pub(super) fn queue(&mut self, job: StagingJob<H, S, B>, span: Span) {
         self.queued_bytes = self.queued_bytes.saturating_add(job.bytes);
         self.queued.push_back(Queued { job, span });
     }
@@ -121,7 +122,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Staging<H, V, B> {
     /// Starts queued jobs while slots are free; `timer` starts each job's latency timer.
     pub(super) fn schedule(
         &mut self,
-        catalog: &catalog::Mailbox<H, V, B>,
+        catalog: &catalog::Mailbox<H, S, B>,
         mut timer: impl FnMut() -> Timer,
     ) {
         while self.active.len() < self.max_active {
@@ -146,7 +147,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Staging<H, V, B> {
     }
 
     /// Releases the accounting and reservations of a finished job.
-    pub(super) fn finish(&mut self, job: &StagingJob<H, V, B>) -> Result<(), Error> {
+    pub(super) fn finish(&mut self, job: &StagingJob<H, S, B>) -> Result<(), Error> {
         self.active_bytes = self
             .active_bytes
             .checked_sub(job.bytes)
@@ -175,7 +176,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Staging<H, V, B> {
     }
 
     /// Resolves to the next finished job.
-    pub(super) async fn next_completed(&mut self) -> StagingCompletion<H, V, B> {
+    pub(super) async fn next_completed(&mut self) -> StagingCompletion<H, S, B> {
         self.active.next_completed().await
     }
 }

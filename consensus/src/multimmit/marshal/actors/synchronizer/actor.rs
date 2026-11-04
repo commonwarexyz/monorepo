@@ -19,12 +19,13 @@ use crate::{
             types::LqcVerifier,
             wire::max_block_segment_items,
         },
+        scheme::Scheme,
         types::{BlockRef, Body, CertificateId, CodecConfig, TransactionBlockHeader},
     },
     types::{Epoch, View},
 };
 use commonware_actor::mailbox;
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use commonware_macros::select_loop;
 use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_utils::{
@@ -36,13 +37,13 @@ use std::{collections::BTreeMap, future::ready, marker::PhantomData, num::NonZer
 use tracing::{Instrument as _, Span, debug, debug_span, info_span};
 
 /// Configuration for the synchronization actor.
-pub(crate) struct Config<C, F, S, K, Q> {
+pub(crate) struct Config<C, F, Hs, K, Q> {
     /// Catalog that holds the durable cut and receives commits.
     pub catalog: C,
     /// Fetches of history, headers and blocks missing from the catalog.
     pub fetcher: F,
     /// Scratch stack of tip-history records staged for one pass.
-    pub history_stack: S,
+    pub history_stack: Hs,
     /// Scratch stack of producer references staged for one walk.
     pub block_stack: K,
     /// Verifier for floor anchors.
@@ -82,7 +83,7 @@ pub(super) struct SyncBounds {
 }
 
 impl SyncBounds {
-    fn new<C, F, S, K, Q>(config: &Config<C, F, S, K, Q>) -> Result<Self, Error> {
+    fn new<C, F, Hs, K, Q>(config: &Config<C, F, Hs, K, Q>) -> Result<Self, Error> {
         let backfill_concurrency = config.backfill_concurrency.get();
         let max_commit_outputs = config.max_commit_outputs.get();
         let max_block_bytes = config.max_block_bytes.get();
@@ -107,8 +108,8 @@ impl SyncBounds {
 }
 
 /// Synchronization state of the running actor, which takes in its mailbox.
-pub(super) type RunningCore<C, F, S, K, Q, H, V, B> =
-    Core<Inbox<V, <H as Hasher>::Digest>, C, F, S, K, Q, H, V, B>;
+pub(super) type RunningCore<C, F, Hs, K, Q, H, S, B> =
+    Core<Inbox<S, <H as Hasher>::Digest>, C, F, Hs, K, Q, H, S, B>;
 
 /// Synchronization state, with the input `I` a pass takes in while it waits.
 ///
@@ -117,10 +118,10 @@ pub(super) type RunningCore<C, F, S, K, Q, H, V, B> =
 /// The durable cut is the catalog checkpoint. `floor`, `history_index`, `committed` and `state`
 /// run ahead of it while a pass plans outputs, and each started commit carries them as its
 /// checkpoint.
-pub(super) struct Core<I, C, F, S, K, Q, H, V, B>
+pub(super) struct Core<I, C, F, Hs, K, Q, H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Input taken in while a pass waits.
@@ -128,7 +129,7 @@ where
     pub(super) catalog: C,
     pub(super) fetcher: F,
     /// Tip-history records of the current pass, fetched newest first and opened oldest first.
-    pub(super) history_stack: S,
+    pub(super) history_stack: Hs,
     /// Producer references staged by the current walk for its custody window.
     pub(super) block_stack: K,
     /// Verifier for floor anchors.
@@ -161,13 +162,13 @@ where
     /// Durability of the started commits, in start order.
     pub(super) pending_commits: Pool<'static, Result<(), Error>>,
     pub(super) metrics: metrics::Synchronizer,
-    _types: PhantomData<(V, B)>,
+    _types: PhantomData<(S, B)>,
 }
 
-impl<I, C, F, S, K, Q, H, V, B> Core<I, C, F, S, K, Q, H, V, B>
+impl<I, C, F, Hs, K, Q, H, S, B> Core<I, C, F, Hs, K, Q, H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     pub(super) fn insert_header(&mut self, header: TransactionBlockHeader<H::Digest>) {
@@ -194,7 +195,7 @@ where
     }
 
     /// Replaces the input a pass takes in.
-    fn with_inbox<J>(self, inbox: J) -> Core<J, C, F, S, K, Q, H, V, B> {
+    fn with_inbox<J>(self, inbox: J) -> Core<J, C, F, Hs, K, Q, H, S, B> {
         let Self {
             inbox: _,
             catalog,
@@ -248,21 +249,21 @@ where
     }
 }
 
-impl<C, F, S, K, Q, H, V, B> Core<Idle, C, F, S, K, Q, H, V, B>
+impl<C, F, Hs, K, Q, H, S, B> Core<Idle, C, F, Hs, K, Q, H, S, B>
 where
-    C: CatalogPort<H, V, B>,
-    F: Fetcher<H, V, B>,
-    S: HistoryStack<H>,
+    C: CatalogPort<H, S, B>,
+    F: Fetcher<H, S, B>,
+    Hs: HistoryStack<H>,
     K: BlockStack<H::Digest>,
-    Q: LqcVerifier<H, V>,
+    Q: LqcVerifier<H, S>,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
-    Error: From<C::Error> + From<F::Error> + From<S::Error> + From<K::Error>,
+    Error: From<C::Error> + From<F::Error> + From<Hs::Error> + From<K::Error>,
 {
     /// Restores the durable cut and finishes synchronizing to the latest retained L-QC.
     pub(super) async fn recover(
-        config: Config<C, F, S, K, Q>,
+        config: Config<C, F, Hs, K, Q>,
         metrics: metrics::Synchronizer,
     ) -> Result<Self, Error> {
         let bounds = SyncBounds::new(&config)?;
@@ -329,23 +330,23 @@ where
     /// Starts taking in `receiver`.
     pub(super) fn into_running(
         self,
-        receiver: mailbox::Receiver<Message<V, H::Digest>>,
-    ) -> RunningCore<C, F, S, K, Q, H, V, B> {
+        receiver: mailbox::Receiver<Message<S, H::Digest>>,
+    ) -> RunningCore<C, F, Hs, K, Q, H, S, B> {
         self.with_inbox(Inbox::new(receiver))
     }
 }
 
-impl<C, F, S, K, Q, H, V, B> RunningCore<C, F, S, K, Q, H, V, B>
+impl<C, F, Hs, K, Q, H, S, B> RunningCore<C, F, Hs, K, Q, H, S, B>
 where
-    C: CatalogPort<H, V, B>,
-    F: Fetcher<H, V, B>,
-    S: HistoryStack<H>,
+    C: CatalogPort<H, S, B>,
+    F: Fetcher<H, S, B>,
+    Hs: HistoryStack<H>,
     K: BlockStack<H::Digest>,
-    Q: LqcVerifier<H, V>,
+    Q: LqcVerifier<H, S>,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
-    Error: From<C::Error> + From<F::Error> + From<S::Error> + From<K::Error>,
+    Error: From<C::Error> + From<F::Error> + From<Hs::Error> + From<K::Error>,
 {
     /// Serves commands until the mailbox closes or `context` stops.
     ///
@@ -376,7 +377,7 @@ where
         Ok(())
     }
 
-    async fn handle(&mut self, message: Message<V, H::Digest>) -> Result<(), Error> {
+    async fn handle(&mut self, message: Message<S, H::Digest>) -> Result<(), Error> {
         match message {
             Message::Commitments { commitments } => self.commitments.insert(&commitments),
             Message::Header { span, header } => {
@@ -435,7 +436,7 @@ where
     async fn synchronize(
         &mut self,
         span: Span,
-        batch: FinalityBatch<V, H::Digest>,
+        batch: FinalityBatch<S, H::Digest>,
     ) -> Result<(), Error> {
         let mut sync = DeferredSync { span, batch };
         // Classify each drained hint against the pass view, which a merged target can raise, so a
@@ -482,7 +483,7 @@ where
     async fn yield_to_floor(
         &mut self,
         result: Result<(), Error>,
-        sync: Option<DeferredSync<V, H::Digest>>,
+        sync: Option<DeferredSync<S, H::Digest>>,
     ) -> Result<(), Error> {
         let Err(Error::Preempted) = result else {
             return result;
@@ -514,35 +515,38 @@ where
 /// Synchronizes finalized Multimmit targets into a durable, dense output prefix.
 ///
 /// See the [module documentation](super) for the synchronization model.
-pub(crate) struct Actor<E, C, F, S, K, Q, H, V, B>
+pub(crate) struct Actor<E, C, F, Hs, K, Q, H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
 {
     context: ContextCell<E>,
-    config: Config<C, F, S, K, Q>,
-    receiver: mailbox::Receiver<Message<V, H::Digest>>,
+    config: Config<C, F, Hs, K, Q>,
+    receiver: mailbox::Receiver<Message<S, H::Digest>>,
     metrics: metrics::Synchronizer,
     _body: PhantomData<B>,
 }
 
-impl<E, C, F, S, K, Q, H, V, B> Actor<E, C, F, S, K, Q, H, V, B>
+impl<E, C, F, Hs, K, Q, H, S, B> Actor<E, C, F, Hs, K, Q, H, S, B>
 where
     E: Spawner + Metrics,
-    C: CatalogPort<H, V, B>,
-    F: Fetcher<H, V, B>,
-    S: HistoryStack<H>,
+    C: CatalogPort<H, S, B>,
+    F: Fetcher<H, S, B>,
+    Hs: HistoryStack<H>,
     K: BlockStack<H::Digest>,
-    Q: LqcVerifier<H, V>,
+    Q: LqcVerifier<H, S>,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
-    Error: From<C::Error> + From<F::Error> + From<S::Error> + From<K::Error>,
+    Error: From<C::Error> + From<F::Error> + From<Hs::Error> + From<K::Error>,
 {
     /// Creates the actor and its mailbox.
     ///
     /// `context` is marshal's: the actor registers its metrics under `synchronizer`.
-    pub(crate) fn new(context: &E, config: Config<C, F, S, K, Q>) -> (Self, Mailbox<V, H::Digest>) {
+    pub(crate) fn new(
+        context: &E,
+        config: Config<C, F, Hs, K, Q>,
+    ) -> (Self, Mailbox<S, H::Digest>) {
         let context = context.child("synchronizer");
         let (sender, receiver) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let metrics = metrics::Synchronizer::new(&context);

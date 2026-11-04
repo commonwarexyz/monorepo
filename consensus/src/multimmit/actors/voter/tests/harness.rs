@@ -17,7 +17,7 @@ use crate::{
         engine::{ActorLimits, Overrides, derive_profile, wire_actors},
         machine::{DurableEffect, EffectId, Inspection, testing::EffectExt},
         mocks::{
-            Committee, MockApplication, RecordingBlocker, RecordingRelay, RecordingReporter,
+            Bls, Committee, MockApplication, RecordingBlocker, RecordingRelay, RecordingReporter,
             cluster::{QUOTA, start_network},
         },
         storage::{RecoveryConfig, recover},
@@ -49,12 +49,12 @@ use commonware_runtime::{
     mocks::{DelayedSyncContext, PendingSyncs},
     telemetry::metrics::count_running_tasks,
 };
-use commonware_utils::{NZU64, NZUsize, channel::oneshot, probability};
+use commonware_utils::{NZU64, NZUsize, channel::oneshot, probability, test_rng};
 use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
 
 pub(super) type TestRelay = RecordingRelay<Sha256Digest, Ed25519PublicKey>;
 
-pub(super) type TestReporter = RecordingReporter<MinPk, Sha256Digest>;
+pub(super) type TestReporter = RecordingReporter<Bls<MinPk>, Sha256Digest>;
 
 /// A resolve request the scripted resolver forwarded to the test.
 pub(super) struct Requested(pub(super) ResolveRequest);
@@ -91,7 +91,7 @@ pub(super) struct Attachments {
     /// The reporter the voter sends activity to.
     pub(super) reporter: TestReporter,
     /// Hooks that observe the voter's typed boundaries and gate its journal.
-    pub(super) hooks: TestHooks<MinPk, Sha256Digest>,
+    pub(super) hooks: TestHooks<Bls<MinPk>, Sha256Digest>,
     /// Durability syncs of the node's storage; released at once unless a test holds them.
     pub(super) checkpoint_syncs: PendingSyncs,
 }
@@ -111,15 +111,15 @@ impl Default for Attachments {
 }
 
 pub(super) fn da_certificate(
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     header: &TransactionBlockHeader<Sha256Digest>,
-) -> DaCertificate<MinPk, Sha256Digest> {
+) -> DaCertificate<Bls<MinPk>, Sha256Digest> {
     let votes = (0..committee.codec().da_quorum())
         .map(|signer| committee.da_vote(Participant::from_usize(signer), header.clone()))
         .collect::<Vec<_>>();
     committee
         .verifier
-        .assemble_da_certificate(&votes, &Sequential)
+        .assemble_da_certificate(&mut test_rng(), &votes, &Sequential)
         .expect("a quorum of shares recovers the supplied header certificate")
 }
 
@@ -130,8 +130,8 @@ pub(super) fn tuning() -> Tuning {
     }
 }
 
-pub(super) fn profile(committee: &Committee<MinPk>, role: Role) -> Profile<Sha256Digest> {
-    Profile::new::<MinPk>(committee.config.clone(), role, tuning()).unwrap()
+pub(super) fn profile(committee: &Committee<Bls<MinPk>>, role: Role) -> Profile<Sha256Digest> {
+    Profile::new::<Bls<MinPk>>(committee.config.clone(), role, tuning()).unwrap()
 }
 
 /// The voter policy test nodes run with: fast publication retries, no heartbeat or early
@@ -149,7 +149,7 @@ pub(super) fn voter_limits() -> VoterLimits {
 
 /// The committee, network, and identity a node joins.
 struct Network {
-    committee: Committee<MinPk>,
+    committee: Committee<Bls<MinPk>>,
     oracle: Oracle<Ed25519PublicKey, DeterministicContext>,
     index: usize,
 }
@@ -203,7 +203,7 @@ impl NodeBuilder {
     /// Joins `committee`'s existing network as the participant at `index`.
     pub(super) fn network(
         mut self,
-        committee: Committee<MinPk>,
+        committee: Committee<Bls<MinPk>>,
         oracle: Oracle<Ed25519PublicKey, DeterministicContext>,
         index: usize,
     ) -> Self {
@@ -253,7 +253,7 @@ impl NodeBuilder {
         } = match network {
             Some(network) => network,
             None => {
-                let committee = Committee::<MinPk>::builder(seed, 6).build();
+                let committee = Committee::<Bls<MinPk>>::builder(seed, 6).build();
                 let oracle =
                     start_network(context, committee.identities.clone(), 1024 * 1024).await;
                 Network {
@@ -316,7 +316,7 @@ impl NodeBuilder {
         };
         let profile: Profile<Sha256Digest> =
             derive_profile(&config).expect("test configuration is valid");
-        let mut limits = ActorLimits::from_profile::<MinPk, _>(&profile, Overrides::default());
+        let mut limits = ActorLimits::from_profile::<Bls<MinPk>, _>(&profile, Overrides::default());
         limits.voter = voter_limits();
         for override_limits in overrides {
             override_limits(&mut limits);
@@ -325,7 +325,7 @@ impl NodeBuilder {
         // Durable recovery, application custody, and any due compaction all complete before an
         // actor exists or can accept ingress.
         let mut store_context = root.child("stores");
-        let recovered = Box::pin(recover::<_, Sha256, _, _, _, _>(
+        let recovered = Box::pin(recover::<_, Sha256, _, _, _>(
             &mut store_context,
             RecoveryConfig {
                 profile: profile.clone(),
@@ -428,9 +428,9 @@ impl NodeBuilder {
 
 /// One attached node: its committee, network identity, and running actors.
 pub(super) struct Node {
-    pub(super) committee: Committee<MinPk>,
+    pub(super) committee: Committee<Bls<MinPk>>,
     pub(super) blocker: RecordingBlocker,
-    voter: Mailbox<Ed25519PublicKey, MinPk, Sha256Digest>,
+    voter: Mailbox<Ed25519PublicKey, Bls<MinPk>, Sha256Digest>,
     /// Demands durability for every append the voter's persistence actor admitted.
     pub(super) flusher: Flusher,
     /// Resolve requests the scripted resolver forwarded; never receives with the production
@@ -495,7 +495,7 @@ impl Node {
     }
 
     /// Returns the endpoint that delivers resolution completions to the voter.
-    pub(super) fn resolutions(&self) -> Resolutions<MinPk, Sha256Digest> {
+    pub(super) fn resolutions(&self) -> Resolutions<Bls<MinPk>, Sha256Digest> {
         self.voter.clone().into_endpoints().resolutions
     }
 
@@ -526,7 +526,7 @@ pub(super) async fn next_block(
 ) -> TransactionBlockHeader<Sha256Digest> {
     loop {
         let (_, bytes) = receiver.recv().await.expect("network stays up");
-        let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+        let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
             bytes,
             &node.envelope_cfg(node.committee.codec()),
         )
@@ -537,20 +537,25 @@ pub(super) async fn next_block(
     }
 }
 
-pub(super) type DurableLedger = BTreeMap<EffectId, Vec<TestDurableAttempt<MinPk, Sha256Digest>>>;
+pub(super) type DurableLedger =
+    BTreeMap<EffectId, Vec<TestDurableAttempt<Bls<MinPk>, Sha256Digest>>>;
 
 #[derive(Default)]
 pub(super) struct ExposureLedger {
     pub(super) blocks:
-        BTreeMap<(ChainId, Height, Participant), SignedTransactionBlock<MinPk, Sha256Digest>>,
-    votes: BTreeMap<(ChainId, Height, Participant), DaVote<MinPk, Sha256Digest>>,
+        BTreeMap<(ChainId, Height, Participant), SignedTransactionBlock<Bls<MinPk>, Sha256Digest>>,
+    votes: BTreeMap<(ChainId, Height, Participant), DaVote<Bls<MinPk>, Sha256Digest>>,
 }
 
 impl ExposureLedger {
-    pub(super) fn record(&mut self, node: &Node, message: DataMessage<MinPk, Sha256Digest>) {
+    pub(super) fn record(&mut self, node: &Node, message: DataMessage<Bls<MinPk>, Sha256Digest>) {
         match message {
             DataMessage::Block(block) => {
-                assert!(node.committee.verifier.verify_transaction_block(&block));
+                assert!(node.committee.verifier.verify_transaction_block(
+                    &mut test_rng(),
+                    &block,
+                    &Sequential
+                ));
                 let key = (
                     block.header().chain(),
                     block.header().height(),
@@ -561,14 +566,22 @@ impl ExposureLedger {
                 }
             }
             DataMessage::DaVote(vote) => {
-                assert!(node.committee.verifier.verify_da_vote(&vote));
+                assert!(node.committee.verifier.verify_da_vote(
+                    &mut test_rng(),
+                    &vote,
+                    &Sequential
+                ));
                 let key = (vote.header().chain(), vote.header().height(), vote.signer());
                 if let Some(previous) = self.votes.insert(key, vote.clone()) {
                     assert_eq!(previous, vote, "one signing slot exposed two DA votes");
                 }
             }
             DataMessage::DaCertificate(certificate) => {
-                assert!(node.committee.verifier.verify_da_certificate(&certificate));
+                assert!(node.committee.verifier.verify_da_certificate(
+                    &mut test_rng(),
+                    &certificate,
+                    &Sequential
+                ));
             }
         }
     }
@@ -578,7 +591,7 @@ impl ExposureLedger {
         chain: ChainId,
         height: Height,
         signer: Participant,
-    ) -> Option<&SignedTransactionBlock<MinPk, Sha256Digest>> {
+    ) -> Option<&SignedTransactionBlock<Bls<MinPk>, Sha256Digest>> {
         self.blocks.get(&(chain, height, signer))
     }
 }
@@ -591,13 +604,13 @@ pub(super) async fn wait_for_slot_block(
     chain: ChainId,
     height: Height,
     signer: Participant,
-) -> SignedTransactionBlock<MinPk, Sha256Digest> {
+) -> SignedTransactionBlock<Bls<MinPk>, Sha256Digest> {
     let deadline = context.current() + Duration::from_secs(1);
     loop {
         select! {
             result = receiver.recv() => {
                 let (_, bytes) = result.expect("network stays up");
-                let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+                let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                     bytes,
                     &node.envelope_cfg(node.committee.codec()),
                 )
@@ -662,7 +675,7 @@ pub(super) async fn wait_for_da_certificate(
         select! {
             result = receiver.recv() => {
                 let (_, bytes) = result.expect("network stays up");
-                let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+                let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                     bytes,
                     &node.envelope_cfg(node.committee.codec()),
                 )
@@ -671,7 +684,7 @@ pub(super) async fn wait_for_da_certificate(
                     continue;
                 };
                 assert!(
-                    node.committee.verifier.verify_da_certificate(&certificate),
+                    node.committee.verifier.verify_da_certificate(&mut test_rng(), &certificate, &Sequential),
                     "the observed DA successor is cryptographically invalid"
                 );
                 if certificate.header() == expected {
@@ -687,9 +700,9 @@ pub(super) async fn wait_for_da_certificate(
 
 pub(super) async fn wait_for_live_publication(
     context: &DeterministicContext,
-    hooks: &TestHooks<MinPk, Sha256Digest>,
-    mut matches: impl FnMut(&DurableEffect<MinPk, Sha256Digest>) -> bool,
-) -> (EffectId, TestDurableAttempt<MinPk, Sha256Digest>) {
+    hooks: &TestHooks<Bls<MinPk>, Sha256Digest>,
+    mut matches: impl FnMut(&DurableEffect<Bls<MinPk>, Sha256Digest>) -> bool,
+) -> (EffectId, TestDurableAttempt<Bls<MinPk>, Sha256Digest>) {
     let deadline = context.current() + Duration::from_secs(2);
     loop {
         let live = hooks.live_publications();

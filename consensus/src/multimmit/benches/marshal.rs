@@ -22,7 +22,7 @@ use commonware_consensus::{
     multimmit::{
         marshal::{ArchiveConfig, Config, LqcVerifier, Start, Update, open},
         mocks::{
-            Committee,
+            Bls, Committee,
             cluster::{BOUNDED_QUOTA, start_network},
         },
         types::{ChainId, Lqc, PathLimits, TransactionBlock},
@@ -118,10 +118,10 @@ impl Digestible for Body {
 #[derive(Clone)]
 struct AcceptAll;
 
-impl LqcVerifier<Sha256, MinPk> for AcceptAll {
+impl LqcVerifier<Sha256, Bls<MinPk>> for AcceptAll {
     type Error = Infallible;
 
-    async fn verify(&mut self, _: &Lqc<MinPk, Sha256Digest>) -> Result<(), Self::Error> {
+    async fn verify(&mut self, _: &Lqc<Bls<MinPk>, Sha256Digest>) -> Result<(), Self::Error> {
         Ok(())
     }
 }
@@ -151,7 +151,7 @@ fn stage_blocks() -> Duration {
             .with_timeout(Some(Duration::from_secs(60))),
     );
     runtime.start(|context| async move {
-        let committee = Committee::<MinPk>::builder(RUNTIME_SEED, PARTICIPANTS)
+        let committee = Committee::<Bls<MinPk>>::builder(RUNTIME_SEED, PARTICIPANTS)
             .namespace(NAMESPACE)
             .producers((0..CHAINS).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -201,10 +201,13 @@ fn stage_blocks() -> Duration {
             archive,
         )
         .with_pending_segment_items(NZU64!(4096));
-        let (service, bridge) =
-            open::<_, TwoCap, Sha256, MinPk, Body, _>(context.child("marshal"), config, buffer)
-                .await
-                .unwrap();
+        let (service, bridge) = open::<_, TwoCap, Sha256, Bls<MinPk>, Body, _>(
+            context.child("marshal"),
+            config,
+            buffer,
+        )
+        .await
+        .unwrap();
         let (resolver_engine, resolver) = p2p::Engine::new(
             context.child("resolver"),
             p2p::Config {

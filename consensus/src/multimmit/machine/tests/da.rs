@@ -34,6 +34,7 @@ use crate::{
             },
             verification::{Verdict, VerificationCompletion},
         },
+        mocks::Bls,
         types::{
             Activity, Anchor, Artifact, ChainId, ChainProposal, DaVote, DigestedLeader, Extension,
             LeaderBlock, Position, SignedLeaderBlock, SignedTransactionBlock,
@@ -52,7 +53,7 @@ use std::sync::Arc;
 fn da_choices_below_a_newer_certificate_still_endorse_proposed_positions() {
     // Pipelining depth 2: the retained window below the certified floor is two heights.
     let profile = Harness::validator(0).participants(6).profile();
-    let mut chain = ChainState::<MinPk, Digest>::new(&profile);
+    let mut chain = ChainState::<Bls<MinPk>, Digest>::new(&profile);
     let protocol = profile.protocol();
     let genesis = protocol.genesis().tips()[0];
     let mut parent = genesis.digest();
@@ -276,7 +277,7 @@ fn remote_da_certificate_retires_vote_without_rebroadcast_and_replays() {
         Err(StepError::UnauthorizedEffect)
     ));
 
-    let mut restored = Machine::<Sha256, MinPk>::restore(profile, checkpoint).unwrap();
+    let mut restored = Machine::<Sha256, Bls<MinPk>>::restore(profile, checkpoint).unwrap();
     for event in replacement_job.events() {
         restored.replay(event.clone()).unwrap();
     }
@@ -298,7 +299,7 @@ fn remote_da_certificate_retires_vote_without_rebroadcast_and_replays() {
 }
 
 /// Returns every durable certificate record `activities` reports, as `(chain, height, released)`.
-fn recorded(activities: &[Activity<MinPk, Digest>]) -> Vec<(u32, u64, u64)> {
+fn recorded(activities: &[Activity<Bls<MinPk>, Digest>]) -> Vec<(u32, u64, u64)> {
     activities
         .iter()
         .filter_map(|activity| match activity {
@@ -322,7 +323,7 @@ fn durable_da_certificates_release_what_the_engine_no_longer_verifies() {
         .producers(vec![Participant::new(1), Participant::new(4)])
         .profile();
     // Starting reports every chain's record, which releases nothing at genesis.
-    let starting = Machine::<Sha256, MinPk>::new(profile.clone())
+    let starting = Machine::<Sha256, Bls<MinPk>>::new(profile.clone())
         .step(Input::Start)
         .unwrap();
     assert_eq!(recorded(starting.activities()), vec![(0, 0, 0), (1, 0, 0)]);
@@ -356,7 +357,7 @@ fn durable_da_certificates_release_what_the_engine_no_longer_verifies() {
 
     // A restart reports each chain's newest durable record again.
     let mut restored =
-        Machine::<Sha256, MinPk>::restore(profile, machine.live_snapshot_for_test()).unwrap();
+        Machine::<Sha256, Bls<MinPk>>::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     assert_eq!(
         recorded(recovery.activities()),
@@ -553,7 +554,7 @@ fn certified_items_in_mixed_da_batches_do_not_exhaust_live_obligations() {
             let certified = machine.verify(&verification, true, Until::CursorAdvance);
             machine.persist(&certified.persist_job(), Until::CursorAdvance);
         }
-        Machine::<Sha256, MinPk>::restore(profile.clone(), machine.live_snapshot_for_test())
+        Machine::<Sha256, Bls<MinPk>>::restore(profile.clone(), machine.live_snapshot_for_test())
             .expect("partially certified batches remain recoverable");
     }
 
@@ -704,7 +705,7 @@ fn higher_da_certificate_replacement_replays_atomically() {
     assert!(matches!(artifact.as_ref(), Artifact::DaCertificate(actual)
         if actual == &third_certificate));
 
-    let mut restored = Machine::<Sha256, MinPk>::restore(profile, checkpoint).unwrap();
+    let mut restored = Machine::<Sha256, Bls<MinPk>>::restore(profile, checkpoint).unwrap();
     for event in replacement_job.events() {
         restored.replay(event.clone()).unwrap();
     }
@@ -825,8 +826,8 @@ fn producer_subset_snapshots_restore_for_every_validator_role() {
             .participants(6)
             .producers(producers.clone())
             .profile();
-        let machine = Machine::<Sha256, MinPk>::new(profile.clone());
-        Machine::<Sha256, MinPk>::restore(profile, machine.live_snapshot_for_test())
+        let machine = Machine::<Sha256, Bls<MinPk>>::new(profile.clone());
+        Machine::<Sha256, Bls<MinPk>>::restore(profile, machine.live_snapshot_for_test())
             .expect("K<n snapshot restores");
     }
 }
@@ -988,7 +989,8 @@ fn da_vote_batch_stops_at_the_per_chain_run_limit() {
         let encoded = event.encode();
         assert!(encoded.len() <= config.max_encoded_size());
         // Fixture signatures are the identity, which decoding rejects, so compare encodings.
-        let decoded = DomainEvent::<MinPk, Digest>::decode_cfg(encoded.clone(), &config).unwrap();
+        let decoded =
+            DomainEvent::<Bls<MinPk>, Digest>::decode_cfg(encoded.clone(), &config).unwrap();
         assert_eq!(decoded.encode(), encoded);
     }
 
@@ -1056,9 +1058,9 @@ fn wide_da_vote_publication_survives_the_snapshot_codec() {
 
     let snapshot = machine.live_snapshot_for_test();
     let config = SnapshotCodecConfig::from_profile(&profile);
-    let decoded = Snapshot::<MinPk, Digest>::decode_cfg(snapshot.encode(), &config)
+    let decoded = Snapshot::<Bls<MinPk>, Digest>::decode_cfg(snapshot.encode(), &config)
         .expect("a wide directed publication stays decodable");
-    Machine::<Sha256, MinPk>::restore(profile, decoded)
+    Machine::<Sha256, Bls<MinPk>>::restore(profile, decoded)
         .expect("recovery restores the wide publication");
 }
 
@@ -1490,7 +1492,7 @@ fn recovery_reissues_the_exact_durable_da_vote() {
     let reserved = validate_block(&mut machine, header.clone(), 1);
     machine.persist(&reserved.persist_job(), Until::CursorAdvance);
 
-    let mut restored = Machine::<Sha256, MinPk>::restore(
+    let mut restored = Machine::<Sha256, Bls<MinPk>>::restore(
         Harness::builder(role).participants(6).profile(),
         machine.live_snapshot_for_test(),
     )
@@ -1662,7 +1664,7 @@ fn attested_headers_restart_an_in_flight_proposal_pass() {
     let signer = LeaderSchedule::round_robin(participants)
         .unwrap()
         .leader(view);
-    let profile: Profile<Digest> = Profile::new::<MinPk>(
+    let profile: Profile<Digest> = Profile::new::<Bls<MinPk>>(
         TestConfig::new(participants).depth(2).build(),
         Role::Validator(signer),
         Tuning {
@@ -1929,7 +1931,7 @@ fn a_certified_base_allows_voting_for_its_child_after_a_gap() {
     machine.persist(&reserved.persist_job(), Until::CursorAdvance);
 
     let mut restored =
-        Machine::<Sha256, MinPk>::restore(profile, machine.live_snapshot_for_test()).unwrap();
+        Machine::<Sha256, Bls<MinPk>>::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     restored.persist(&recovery.persist_job(), Until::CursorAdvance);
     assert_eq!(

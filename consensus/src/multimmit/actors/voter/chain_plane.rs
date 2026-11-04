@@ -33,6 +33,7 @@ use crate::{
             BlockValidity, ChainEligibility, DaChoice, DaVotesOffer, EligibleRun, Generation,
             ObservedBlock, ValidationCompletion, ValidationId, ValidationOutcome, ValidatorCommand,
         },
+        scheme::Scheme,
         types::{BlockRef, ChainId, Context},
     },
     types::Height,
@@ -41,7 +42,7 @@ use commonware_actor::{
     Feedback,
     mailbox::{self, Overflow, Policy},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
@@ -60,9 +61,9 @@ use std::{
 ///
 /// The machine authenticates, orders, and identity-stamps every block before it crosses this
 /// boundary, so the plane never re-derives a protocol fact.
-enum ChainPlaneCommand<V: Variant, D: Digest> {
+enum ChainPlaneCommand<S: Scheme, D: Digest> {
     /// A command the machine issued for this chain.
-    Validator(ValidatorCommand<V, D>),
+    Validator(ValidatorCommand<S, D>),
     /// A new process generation began; drop volatile state and re-seed the anchor.
     Reconfigure(Reconfiguration<D>),
     /// A block at or below the latest anchor sent, which the plane settles on arrival.
@@ -79,8 +80,8 @@ struct Reconfiguration<D: Digest> {
     anchor: BlockRef<D>,
 }
 
-impl<V: Variant, D: Digest> Policy for ChainPlaneCommand<V, D> {
-    type Overflow = PlaneOverflow<V, D>;
+impl<S: Scheme, D: Digest> Policy for ChainPlaneCommand<S, D> {
+    type Overflow = PlaneOverflow<S, D>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         overflow.push(message);
@@ -118,7 +119,7 @@ impl<V: Variant, D: Digest> Policy for ChainPlaneCommand<V, D> {
 /// the chain's certified anchor passes it, reporting that advance in the same step. The retained
 /// blocks are therefore blocks the machine still holds, at most its retained blocks for the chain,
 /// which the machine's artifact cache bounds however long the plane stalls.
-pub(crate) struct PlaneOverflow<V: Variant, D: Digest> {
+pub(crate) struct PlaneOverflow<S: Scheme, D: Digest> {
     reconfiguration: Option<Reconfiguration<D>>,
     /// The highest anchor queued before the queued choices, or with no choices queued.
     anchor: Option<BlockRef<D>>,
@@ -126,10 +127,10 @@ pub(crate) struct PlaneOverflow<V: Variant, D: Digest> {
     /// The highest anchor queued after the queued choices.
     anchor_after_choices: Option<BlockRef<D>>,
     /// Observed blocks above every queued anchor, in arrival order.
-    observed: VecDeque<ObservedBlock<V, D>>,
+    observed: VecDeque<ObservedBlock<S, D>>,
 }
 
-impl<V: Variant, D: Digest> Default for PlaneOverflow<V, D> {
+impl<S: Scheme, D: Digest> Default for PlaneOverflow<S, D> {
     fn default() -> Self {
         Self {
             reconfiguration: None,
@@ -141,9 +142,9 @@ impl<V: Variant, D: Digest> Default for PlaneOverflow<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> PlaneOverflow<V, D> {
+impl<S: Scheme, D: Digest> PlaneOverflow<S, D> {
     /// Retains `command` unless the plane would ignore it, dropping what it supersedes.
-    fn push(&mut self, command: ChainPlaneCommand<V, D>) {
+    fn push(&mut self, command: ChainPlaneCommand<S, D>) {
         match command {
             ChainPlaneCommand::Reconfigure(reconfiguration) => {
                 *self = Self::default();
@@ -191,7 +192,7 @@ impl<V: Variant, D: Digest> PlaneOverflow<V, D> {
     }
 
     /// Removes the next command in delivery order.
-    fn pop(&mut self) -> Option<ChainPlaneCommand<V, D>> {
+    fn pop(&mut self) -> Option<ChainPlaneCommand<S, D>> {
         if let Some(reconfiguration) = self.reconfiguration.take() {
             return Some(ChainPlaneCommand::Reconfigure(reconfiguration));
         }
@@ -219,7 +220,7 @@ impl<V: Variant, D: Digest> PlaneOverflow<V, D> {
     ///
     /// Every slot ahead of the one it came from is already empty, and a returned anchor is
     /// delivered ahead of any choices still queued, which is the slot it left.
-    fn unpop(&mut self, command: ChainPlaneCommand<V, D>) {
+    fn unpop(&mut self, command: ChainPlaneCommand<S, D>) {
         match command {
             ChainPlaneCommand::Reconfigure(reconfiguration) => {
                 self.reconfiguration = Some(reconfiguration);
@@ -239,7 +240,7 @@ impl<V: Variant, D: Digest> PlaneOverflow<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Overflow<ChainPlaneCommand<V, D>> for PlaneOverflow<V, D> {
+impl<S: Scheme, D: Digest> Overflow<ChainPlaneCommand<S, D>> for PlaneOverflow<S, D> {
     fn is_empty(&self) -> bool {
         self.reconfiguration.is_none()
             && self.anchor.is_none()
@@ -250,7 +251,7 @@ impl<V: Variant, D: Digest> Overflow<ChainPlaneCommand<V, D>> for PlaneOverflow<
 
     fn drain<F>(&mut self, mut push: F)
     where
-        F: FnMut(ChainPlaneCommand<V, D>) -> Option<ChainPlaneCommand<V, D>>,
+        F: FnMut(ChainPlaneCommand<S, D>) -> Option<ChainPlaneCommand<S, D>>,
     {
         while let Some(command) = self.pop() {
             if let Some(command) = push(command) {
@@ -262,7 +263,7 @@ impl<V: Variant, D: Digest> Overflow<ChainPlaneCommand<V, D>> for PlaneOverflow<
 }
 
 /// Configuration for one chain plane.
-pub(crate) struct Config<A, V: Variant, D: Digest> {
+pub(crate) struct Config<A, S: Scheme, D: Digest> {
     /// The producer chain this plane serves.
     pub(crate) chain: ChainId,
     /// Validates block payloads.
@@ -275,7 +276,7 @@ pub(crate) struct Config<A, V: Variant, D: Digest> {
     /// Most block bytes under validation at once.
     pub(crate) validation_bytes: usize,
     /// Receives eligible-run offers.
-    pub(crate) updates: mailbox::Sender<ChainUpdate<V, D>>,
+    pub(crate) updates: mailbox::Sender<ChainUpdate<S, D>>,
     /// Observes application validation latency.
     pub(crate) latency: Histogram,
     /// Counts blocks the application rejected.
@@ -287,13 +288,13 @@ pub(crate) struct Config<A, V: Variant, D: Digest> {
 }
 
 /// Commands to one chain plane.
-pub(crate) struct Mailbox<V: Variant, D: Digest> {
+pub(crate) struct Mailbox<S: Scheme, D: Digest> {
     chain: ChainId,
-    commands: mailbox::Sender<ChainPlaneCommand<V, D>>,
+    commands: mailbox::Sender<ChainPlaneCommand<S, D>>,
     sent: SentAnchor,
 }
 
-impl<V: Variant, D: Digest> Mailbox<V, D> {
+impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Returns the producer chain the plane serves.
     pub(crate) const fn chain(&self) -> ChainId {
         self.chain
@@ -306,7 +307,7 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
 
     /// Delivers one command the machine issued for this chain; a block the plane would settle on
     /// arrival goes as [`ChainPlaneCommand::Settled`].
-    pub(crate) fn command(&mut self, command: ValidatorCommand<V, D>) -> Feedback {
+    pub(crate) fn command(&mut self, command: ValidatorCommand<S, D>) -> Feedback {
         self.send(ChainPlaneCommand::Validator(command))
     }
 
@@ -318,7 +319,7 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
         }))
     }
 
-    fn send(&mut self, command: ChainPlaneCommand<V, D>) -> Feedback {
+    fn send(&mut self, command: ChainPlaneCommand<S, D>) -> Feedback {
         self.commands.enqueue(self.sent.mark(command))
     }
 }
@@ -334,10 +335,10 @@ struct SentAnchor(Height);
 impl SentAnchor {
     /// Returns `command`, or [`ChainPlaneCommand::Settled`] for a block the plane would settle on
     /// arrival, recording the anchor the command sets.
-    fn mark<V: Variant, D: Digest>(
+    fn mark<S: Scheme, D: Digest>(
         &mut self,
-        command: ChainPlaneCommand<V, D>,
-    ) -> ChainPlaneCommand<V, D> {
+        command: ChainPlaneCommand<S, D>,
+    ) -> ChainPlaneCommand<S, D> {
         match &command {
             ChainPlaneCommand::Validator(ValidatorCommand::Observe(observed))
                 if observed.block.header().height() <= self.0 =>
@@ -370,30 +371,30 @@ enum Verified {
 }
 
 /// One chain plane before it starts.
-pub(crate) struct Actor<E, H, A, V>
+pub(crate) struct Actor<E, H, A, S>
 where
     E: Clock + Spawner + Metrics,
     H: Hasher,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest>,
-    V: Variant,
+    S: Scheme,
 {
     context: E,
-    config: Config<A, V, H::Digest>,
-    commands: mailbox::Receiver<ChainPlaneCommand<V, H::Digest>>,
+    config: Config<A, S, H::Digest>,
+    commands: mailbox::Receiver<ChainPlaneCommand<S, H::Digest>>,
 }
 
-impl<E, H, A, V> Actor<E, H, A, V>
+impl<E, H, A, S> Actor<E, H, A, S>
 where
     E: Clock + Spawner + Metrics,
     H: Hasher,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest>,
-    V: Variant,
+    S: Scheme,
 {
     /// Creates the plane and its command mailbox.
     pub(crate) fn new(
         context: E,
-        config: Config<A, V, H::Digest>,
-    ) -> (Self, Mailbox<V, H::Digest>) {
+        config: Config<A, S, H::Digest>,
+    ) -> (Self, Mailbox<S, H::Digest>) {
         let (commands, receiver) = mailbox::new(context.child("commands"), config.mailbox_size);
         let chain = config.chain;
         (
@@ -440,27 +441,27 @@ where
 }
 
 /// One running chain plane.
-struct Running<E, H, A, V>
+struct Running<E, H, A, S>
 where
     E: Clock + Spawner + Metrics,
     H: Hasher,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest>,
-    V: Variant,
+    S: Scheme,
 {
     context: ContextCell<E>,
-    config: Config<A, V, H::Digest>,
-    commands: mailbox::Receiver<ChainPlaneCommand<V, H::Digest>>,
-    eligibility: ChainEligibility<V, H::Digest>,
+    config: Config<A, S, H::Digest>,
+    commands: mailbox::Receiver<ChainPlaneCommand<S, H::Digest>>,
+    eligibility: ChainEligibility<S, H::Digest>,
     /// The last run offered to the voter, to suppress redundant offers.
     last_offer: Vec<BlockRef<H::Digest>>,
 }
 
-impl<E, H, A, V> Running<E, H, A, V>
+impl<E, H, A, S> Running<E, H, A, S>
 where
     E: Clock + Spawner + Metrics,
     H: Hasher,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest>,
-    V: Variant,
+    S: Scheme,
 {
     /// Drains commands and validation completions until the voter drops the mailbox or the runtime
     /// stops.
@@ -489,7 +490,7 @@ where
 
     fn handle_command(
         &mut self,
-        command: ChainPlaneCommand<V, H::Digest>,
+        command: ChainPlaneCommand<S, H::Digest>,
         verifies: &mut Pool<'static, Verified>,
         cancels: &mut BTreeMap<ValidationId, oneshot::Sender<()>>,
     ) {
@@ -617,20 +618,23 @@ mod tests {
     use crate::{
         multimmit::{
             machine::Observation,
+            mocks::Bls,
             types::{ArtifactId, Attestation, SignedTransactionBlock, TransactionBlockHeader},
         },
         types::{Epoch, Participant},
     };
     use commonware_codec::types::lazy::Lazy;
     use commonware_cryptography::{
-        Sha256, bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest,
+        Sha256,
+        bls12381::primitives::variant::{MinPk, Variant},
+        sha256::Digest as Sha256Digest,
     };
     use commonware_math::algebra::Additive as _;
     use commonware_utils::TestRng;
     use rand::TryRng as _;
 
-    type Command = ChainPlaneCommand<MinPk, Sha256Digest>;
-    type Overflowed = PlaneOverflow<MinPk, Sha256Digest>;
+    type Command = ChainPlaneCommand<Bls<MinPk>, Sha256Digest>;
+    type Overflowed = PlaneOverflow<Bls<MinPk>, Sha256Digest>;
 
     const CHAIN: ChainId = ChainId::new(0);
     const PIPELINE: u64 = 4;
@@ -657,10 +661,10 @@ mod tests {
             observation: Observation::new(0, index),
             block: Arc::new(SignedTransactionBlock::new(
                 header,
-                Attestation::new(
-                    Participant::new(0),
-                    Lazy::from(<MinPk as Variant>::Signature::zero()),
-                ),
+                Attestation::<Bls<MinPk>> {
+                    signer: Participant::new(0),
+                    signature: Lazy::from(<MinPk as Variant>::Signature::zero()),
+                },
             )),
             custodied: false,
         }))
@@ -695,7 +699,7 @@ mod tests {
     }
 
     /// Applies `command` to `eligibility` exactly as the running plane does.
-    fn apply(eligibility: &mut ChainEligibility<MinPk, Sha256Digest>, command: Command) {
+    fn apply(eligibility: &mut ChainEligibility<Bls<MinPk>, Sha256Digest>, command: Command) {
         match command {
             ChainPlaneCommand::Validator(ValidatorCommand::Observe(observed)) => eligibility
                 .observe::<Sha256>(
@@ -717,7 +721,7 @@ mod tests {
         }
     }
 
-    fn eligibility() -> ChainEligibility<MinPk, Sha256Digest> {
+    fn eligibility() -> ChainEligibility<Bls<MinPk>, Sha256Digest> {
         ChainEligibility::new(
             CHAIN,
             PIPELINE,
@@ -963,7 +967,7 @@ mod tests {
         let mut stalled = eligibility();
         // Applies the command to the reference plane and sends an identical copy.
         let send = |queue: &mut Queue,
-                    expected: &mut ChainEligibility<MinPk, Sha256Digest>,
+                    expected: &mut ChainEligibility<Bls<MinPk>, Sha256Digest>,
                     command: &dyn Fn() -> Command| {
             apply(expected, command());
             queue.send(command());

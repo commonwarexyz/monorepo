@@ -21,6 +21,7 @@ use crate::{
             reducer::machine::Machine,
             testing::{CapabilitiesExt as _, Drive as _, EffectExt as _, Until, cohort},
         },
+        mocks::Bls,
         types::{
             Anchor, Artifact, ChainId, ChainProposal, DaQuorum, DaVote, LeaderBlock, PathLimits,
             SignedTransactionBlock, TransactionBlockHeader,
@@ -104,7 +105,7 @@ fn certified_only_chain_proposes_only_its_highest_certificate() {
 fn vote_bodies_extend_each_chain_to_its_own_bound() {
     let profile = profile(0);
     let protocol = profile.protocol();
-    let mut chain = ChainState::<MinPk, Digest>::new(&profile);
+    let mut chain = ChainState::<Bls<MinPk>, Digest>::new(&profile);
     let headers = [ChainId::new(0), RECEIPTS]
         .into_iter()
         .map(|id| {
@@ -154,8 +155,8 @@ fn unplaced_certificates_are_forwarded_after_a_full_view() {
     let profile = profile(0);
     let protocol = profile.protocol();
     let genesis = protocol.genesis().tips().to_vec();
-    let mut chain = ChainState::<MinPk, Digest>::new(&profile);
-    let certify = |chain_state: &mut ChainState<MinPk, Digest>, id: ChainId| {
+    let mut chain = ChainState::<Bls<MinPk>, Digest>::new(&profile);
+    let certify = |chain_state: &mut ChainState<Bls<MinPk>, Digest>, id: ChainId| {
         let header = header(&profile, id, 1, genesis[id.get() as usize].digest());
         let certificate = symbolic_da_certificate(header, u64::from(id.get()));
         chain_state
@@ -187,7 +188,7 @@ fn unplaced_certificates_are_forwarded_after_a_full_view() {
 }
 
 /// Exits the current view by a nullification and returns every capability the exit released.
-fn nullify(machine: &mut TestMachine, view: u64) -> Vec<Capability<MinPk, Digest>> {
+fn nullify(machine: &mut TestMachine, view: u64) -> Vec<Capability<Bls<MinPk>, Digest>> {
     let artifact = Artifact::Nullification(symbolic_nullification(machine, View::new(view), view));
     let verification = observe(machine, artifact);
     let mut step = machine.verify(&verification, true, Until::CursorAdvance);
@@ -206,7 +207,9 @@ fn nullify(machine: &mut TestMachine, view: u64) -> Vec<Capability<MinPk, Digest
 }
 
 /// Returns the forwarding requests among `capabilities`.
-fn forwarded(capabilities: &[Capability<MinPk, Digest>]) -> Vec<SendRequest<MinPk, Digest>> {
+fn forwarded(
+    capabilities: &[Capability<Bls<MinPk>, Digest>],
+) -> Vec<SendRequest<Bls<MinPk>, Digest>> {
     capabilities
         .iter()
         .filter_map(|capability| match capability {
@@ -224,7 +227,7 @@ fn view_entry_forwards_an_unplaced_certificate_to_the_next_leader() {
     let certificate =
         symbolic_da_certificate(header(machine.profile(), RECEIPTS, 1, genesis.digest()), 0);
     let verification = observe(&mut machine, Artifact::DaCertificate(certificate.clone()));
-    let held: Step<MinPk, Digest> = machine.verify(&verification, true, Until::CursorAdvance);
+    let held: Step<Bls<MinPk>, Digest> = machine.verify(&verification, true, Until::CursorAdvance);
     machine.persist(&held.persist_job(), Until::CursorAdvance);
 
     // Entering view 2 records the unplaced certificate; entering view 3 forwards it to the
@@ -292,7 +295,7 @@ fn forwarding_resumes_after_restart() {
     let certificate =
         symbolic_da_certificate(header(machine.profile(), RECEIPTS, 1, genesis.digest()), 0);
     let verification = observe(&mut machine, Artifact::DaCertificate(certificate.clone()));
-    let held: Step<MinPk, Digest> = machine.verify(&verification, true, Until::CursorAdvance);
+    let held: Step<Bls<MinPk>, Digest> = machine.verify(&verification, true, Until::CursorAdvance);
     machine.persist(&held.persist_job(), Until::CursorAdvance);
 
     // The durable certificate survives the restart, so the restored node forwards it once it has
@@ -353,14 +356,14 @@ fn a_widened_window_snapshot_restores() {
         snapshot.da_safety_heights()[RECEIPTS.get() as usize],
         Height::new(safe)
     );
-    Machine::<Sha256, MinPk>::restore(profile.clone(), snapshot).unwrap();
+    Machine::<Sha256, Bls<MinPk>>::restore(profile.clone(), snapshot).unwrap();
 
     // A safety height one beyond the window is rejected.
     let mut state = machine.durable.state.clone();
     state.da_safety_heights[RECEIPTS.get() as usize] = Height::new(safe + 1);
     let snapshot = Snapshot::new(profile.protocol().epoch(), profile.role(), state);
     assert_eq!(
-        snapshot_reason(Machine::<Sha256, MinPk>::restore(profile, snapshot)),
+        snapshot_reason(Machine::<Sha256, Bls<MinPk>>::restore(profile, snapshot)),
         SnapshotReason::CertifiedTip
     );
 }
@@ -428,7 +431,8 @@ fn only_the_views_forwarders_send_an_unplaced_certificate() {
         let certificate =
             symbolic_da_certificate(header(machine.profile(), RECEIPTS, 1, genesis.digest()), 0);
         let verification = observe(&mut machine, Artifact::DaCertificate(certificate.clone()));
-        let held: Step<MinPk, Digest> = machine.verify(&verification, true, Until::CursorAdvance);
+        let held: Step<Bls<MinPk>, Digest> =
+            machine.verify(&verification, true, Until::CursorAdvance);
         machine.persist(&held.persist_job(), Until::CursorAdvance);
         for view in 1..=10u64 {
             let entered = view + 1;
@@ -479,7 +483,10 @@ fn receipt_profile(participant: u32, receipt: PathLimits, quorum: DaQuorum) -> P
 }
 
 /// Returns the status of observing `artifact`.
-fn observation(machine: &mut TestMachine, artifact: Artifact<MinPk, Digest>) -> ObservationStatus {
+fn observation(
+    machine: &mut TestMachine,
+    artifact: Artifact<Bls<MinPk>, Digest>,
+) -> ObservationStatus {
     let step = machine.step(cohort::<Sha256, _>(vec![artifact])).unwrap();
     let StepStatus::Observed(results) = step.status() else {
         panic!("one observed artifact must return an observation result");
@@ -665,7 +672,7 @@ fn a_validator_pools_its_own_receipt_chain_share() {
         )))
         .unwrap();
     let completed = machine.settle(completed, Until::CursorAdvance);
-    let pooled = |step: &Step<MinPk, Digest>| {
+    let pooled = |step: &Step<Bls<MinPk>, Digest>| {
         step.has(|capability| {
             matches!(
                 capability,
@@ -684,7 +691,7 @@ fn a_validator_pools_its_own_receipt_chain_share() {
 fn a_producer_drops_a_recovered_certificate_for_a_header_it_did_not_sign() {
     // The default route: validator 0 produces chain 0, and there are no receipt chains.
     let mut machine =
-        Machine::<Sha256, MinPk>::new(Harness::validator(0).participants(6).profile());
+        Machine::<Sha256, Bls<MinPk>>::new(Harness::validator(0).participants(6).profile());
     let start = machine.step(Input::Start).unwrap();
     machine.persist(&start.persist_job(), Until::CursorAdvance);
     let own = ChainId::new(0);

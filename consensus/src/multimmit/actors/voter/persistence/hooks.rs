@@ -1,7 +1,7 @@
 //! Points around the persistence actor's storage operations where a test can observe or pause it.
 
-use crate::multimmit::machine::PersistJob;
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use crate::multimmit::{machine::PersistJob, scheme::Scheme};
+use commonware_cryptography::Digest;
 use commonware_runtime::Clock;
 use std::{
     future::{Future, ready},
@@ -14,7 +14,7 @@ pub(crate) trait Hooks: Clone + Send + Sync + 'static {
     type Point: Copy + Send + Sync + 'static;
 
     /// Observes one append before it is written.
-    fn appending<V: Variant, D: Digest>(&self, job: &PersistJob<V, D>) -> Self::Point;
+    fn appending<S: Scheme, D: Digest>(&self, job: &PersistJob<S, D>) -> Self::Point;
 
     /// Runs immediately before the append at `point` is written.
     fn before_append(
@@ -75,5 +75,5 @@ pub(crate) struct NoHooks;
 impl Hooks for NoHooks {
     type Point = ();
 
-    fn appending<V: Variant, D: Digest>(&self, _job: &PersistJob<V, D>) {}
+    fn appending<S: Scheme, D: Digest>(&self, _job: &PersistJob<S, D>) {}
 }

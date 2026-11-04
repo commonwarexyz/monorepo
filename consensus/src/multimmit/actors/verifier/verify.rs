@@ -10,15 +10,12 @@ use crate::{
     multimmit::{
         algebra::{ValidatedLqc, ValidatedVqc, validate_lqc, validate_vqc_with_votes},
         machine::{Verdict, VerificationCompletion, VerificationItem, VerifyJob},
-        scheme::{
-            Verified,
-            bls12381_threshold::{CertificateVotes, Scheme},
-        },
+        scheme::{CertificateVotes, Generic, Scheme, Verified},
         types::{Artifact, CodecConfig, DaVote},
     },
     types::{Attributable as _, Participant},
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_parallel::Strategy;
 use rand_core::CryptoRng;
 use std::sync::Arc;
@@ -28,33 +25,33 @@ use std::sync::Arc;
 type Authentication<H> = Result<Option<CertificateVotes<<H as Hasher>::Digest>>, ()>;
 
 /// Derivations a job returns with its verdicts, each keyed by item index.
-struct Derivations<V: Variant, H: Hasher> {
+struct Derivations<S: Scheme, H: Hasher> {
     vqcs: Vec<(usize, ValidatedVqc<H::Digest>)>,
-    lqcs: Vec<(usize, ValidatedLqc<V, H::Digest>)>,
+    lqcs: Vec<(usize, ValidatedLqc<S, H::Digest>)>,
     da_equivocators: Vec<(usize, Participant)>,
 }
 
 /// Executes `job` and returns its completion.
 ///
 /// V-QC and L-QC verdicts also require a coherent application-block ancestry transcript.
-pub(crate) fn verify<H, P, V>(
-    job: &VerifyJob<V, H::Digest>,
+pub(crate) fn verify<H, P, S>(
+    job: &VerifyJob<S, H::Digest>,
     rng: &mut impl CryptoRng,
-    scheme: &Scheme<P, V>,
+    scheme: &Generic<S>,
     strategy: &impl Strategy,
-) -> VerificationCompletion<V, H::Digest>
+) -> VerificationCompletion<S, H::Digest>
 where
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
 {
     let items = job.items();
-    let mut derivations = Derivations::<V, H> {
+    let mut derivations = Derivations::<S, H> {
         vqcs: Vec::new(),
         lqcs: Vec::new(),
         da_equivocators: Vec::new(),
     };
-    let verdicts = batch_verdicts::<H, P, V>(items, rng, scheme, strategy)
+    let verdicts = batch_verdicts::<H, P, S>(items, rng, scheme, strategy)
         .into_iter()
         .zip(items)
         .enumerate()
@@ -64,9 +61,14 @@ where
             };
             let valid = match item.artifact() {
                 Artifact::DaVote(vote) => {
-                    if let Some(signer) =
-                        da_equivocator(scheme, vote, item.known(), &items[..index])
-                    {
+                    if let Some(signer) = da_equivocator(
+                        &mut *rng,
+                        scheme,
+                        vote,
+                        item.known(),
+                        &items[..index],
+                        strategy,
+                    ) {
                         derivations.da_equivocators.push((index, signer));
                     }
                     true
@@ -98,16 +100,16 @@ where
 /// establish the same fact once per signer, so shares are admitted on their structural checks
 /// alone and recovery attributes them if that check ever fails. Every other item joins one scheme
 /// batch together with the messages its item already knew.
-fn batch_verdicts<H, P, V>(
-    items: &[VerificationItem<V, H::Digest>],
+fn batch_verdicts<H, P, S>(
+    items: &[VerificationItem<S, H::Digest>],
     rng: &mut impl CryptoRng,
-    scheme: &Scheme<P, V>,
+    scheme: &Generic<S>,
     strategy: &impl Strategy,
 ) -> Vec<Authentication<H>>
 where
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
 {
     let mut valid = Vec::with_capacity(items.len());
     let mut batched = Vec::with_capacity(items.len());
@@ -152,15 +154,17 @@ where
 ///
 /// A conflicting share has the same signer, chain, and height but another header. Candidates are
 /// the shares `vote`'s item already knew, then the shares of `earlier` items in job order.
-fn da_equivocator<P, V, D>(
-    scheme: &Scheme<P, V>,
-    vote: &DaVote<V, D>,
-    known: &[Arc<Artifact<V, D>>],
-    earlier: &[VerificationItem<V, D>],
+fn da_equivocator<P, S, D>(
+    rng: &mut impl CryptoRng,
+    scheme: &Generic<S>,
+    vote: &DaVote<S, D>,
+    known: &[Arc<Artifact<S, D>>],
+    earlier: &[VerificationItem<S, D>],
+    strategy: &impl Strategy,
 ) -> Option<Participant>
 where
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     D: Digest,
 {
     let prior = known
@@ -177,17 +181,20 @@ where
             }
             _ => None,
         });
-    proves_da_equivocation(vote, prior, |vote| scheme.verify_da_vote(vote)).then_some(vote.signer())
+    proves_da_equivocation(vote, prior, |vote| {
+        scheme.verify_da_vote(&mut *rng, vote, strategy)
+    })
+    .then_some(vote.signer())
 }
 
 /// Returns whether `vote` and a conflicting share in `prior` are both authentic, proving the
 /// signer equivocated.
 ///
 /// `verify` costs a pairing, so it runs only once a conflicting share exists.
-fn proves_da_equivocation<'a, V: Variant, D: Digest>(
-    vote: &DaVote<V, D>,
-    prior: impl IntoIterator<Item = &'a DaVote<V, D>>,
-    mut verify: impl FnMut(&DaVote<V, D>) -> bool,
+fn proves_da_equivocation<'a, S: Scheme, D: Digest>(
+    vote: &DaVote<S, D>,
+    prior: impl IntoIterator<Item = &'a DaVote<S, D>>,
+    mut verify: impl FnMut(&DaVote<S, D>) -> bool,
 ) -> bool {
     let mut prior = prior.into_iter().peekable();
     prior.peek().is_some() && verify(vote) && prior.any(verify)
@@ -197,18 +204,18 @@ fn proves_da_equivocation<'a, V: Variant, D: Digest>(
 /// derivation, returning whether the item is valid.
 ///
 /// Items other than certificates carry no transcript and stay valid.
-fn validate_certificate<V: Variant, H: Hasher>(
+fn validate_certificate<S: Scheme, H: Hasher>(
     config: CodecConfig,
     index: usize,
-    artifact: &Artifact<V, H::Digest>,
+    artifact: &Artifact<S, H::Digest>,
     votes: Option<CertificateVotes<H::Digest>>,
-    derivations: &mut Derivations<V, H>,
+    derivations: &mut Derivations<S, H>,
 ) -> bool {
     match artifact {
         Artifact::Vqc(certificate) => {
             let votes = votes.expect("authenticated V-QC expansion");
             let Ok(validated) =
-                validate_vqc_with_votes::<H, V, H::Digest>(certificate, config, votes)
+                validate_vqc_with_votes::<H, S, H::Digest>(certificate, config, votes)
             else {
                 return false;
             };
@@ -217,7 +224,7 @@ fn validate_certificate<V: Variant, H: Hasher>(
         }
         Artifact::Lqc(certificate) => {
             let votes = votes.expect("authenticated L-QC expansion");
-            let Ok(validated) = validate_lqc::<H, V, H::Digest>(certificate, config, votes) else {
+            let Ok(validated) = validate_lqc::<H, S, H::Digest>(certificate, config, votes) else {
                 return false;
             };
             derivations.lqcs.push((index, validated));
@@ -232,7 +239,7 @@ mod tests {
     use super::*;
     use crate::multimmit::{
         machine::{Generation, Issued, JobId, Observation, VerificationTicket},
-        mocks::Committee,
+        mocks::{Bls, Committee},
         types::ChainId,
     };
     use commonware_cryptography::{
@@ -242,14 +249,14 @@ mod tests {
     use commonware_utils::test_rng;
     use std::cell::Cell;
 
-    type Vote = DaVote<MinPk, Sha256Digest>;
+    type Vote = DaVote<Bls<MinPk>, Sha256Digest>;
 
-    fn committee() -> Committee<MinPk> {
+    fn committee() -> Committee<Bls<MinPk>> {
         Committee::builder(11, 6).build()
     }
 
     /// Returns `signer`'s share for a height-one header on chain zero committing to `label`.
-    fn share(committee: &Committee<MinPk>, signer: u32, label: &[u8]) -> Vote {
+    fn share(committee: &Committee<Bls<MinPk>>, signer: u32, label: &[u8]) -> Vote {
         committee.da_vote(
             Participant::new(signer),
             committee.transaction_header(ChainId::new(0), Sha256::hash(&[label])),
@@ -257,7 +264,7 @@ mod tests {
     }
 
     /// Returns a job over `shares`, each item knowing the shares paired with it.
-    fn job(shares: Vec<(Vote, Vec<Vote>)>) -> VerifyJob<MinPk, Sha256Digest> {
+    fn job(shares: Vec<(Vote, Vec<Vote>)>) -> VerifyJob<Bls<MinPk>, Sha256Digest> {
         let job = JobId::new(1);
         let items = shares
             .into_iter()
@@ -279,7 +286,7 @@ mod tests {
         VerifyJob::new(Issued::new(job, Generation::new(0)), items)
     }
 
-    fn equivocators(job: &VerifyJob<MinPk, Sha256Digest>) -> Vec<Option<Participant>> {
+    fn equivocators(job: &VerifyJob<Bls<MinPk>, Sha256Digest>) -> Vec<Option<Participant>> {
         let committee = committee();
         let mut completion =
             verify::<Sha256, _, _>(job, &mut test_rng(), &committee.verifier, &Sequential);

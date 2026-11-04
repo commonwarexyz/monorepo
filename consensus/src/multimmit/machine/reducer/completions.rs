@@ -25,11 +25,12 @@ use crate::{
             verification::{JobId, Observation, VerificationTicket},
             view::{NullificationRecoveryCompletion, ViewTimer, VqcAggregateCompletion},
         },
+        scheme::Scheme,
         types::{Activity, Artifact, ArtifactBatch, ArtifactId, BlockRef, DaCertificate},
     },
     types::{Round, View},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
@@ -37,19 +38,19 @@ use std::{
 
 /// A validated local signing completion awaiting its durability turn.
 #[derive(Clone, Debug)]
-pub(crate) enum PendingSigningCompletion<V: Variant, D: Digest> {
+pub(crate) enum PendingSigningCompletion<S: Scheme, D: Digest> {
     One {
-        artifact: Arc<Artifact<V, D>>,
+        artifact: Arc<Artifact<S, D>>,
         id: ArtifactId<D>,
     },
     Batch {
-        artifacts: ArtifactBatch<V, D>,
+        artifacts: ArtifactBatch<S, D>,
         ids: Vec<ArtifactId<D>>,
     },
 }
 
 /// Work the machine issued whose completions are outstanding or parked.
-pub(crate) struct Completions<V: Variant, D: Digest> {
+pub(crate) struct Completions<S: Scheme, D: Digest> {
     /// Outstanding verification jobs with their tickets, in verdict order.
     pub(in crate::multimmit::machine) verification_jobs:
         BTreeMap<JobId, Vec<VerificationTicket<D>>>,
@@ -57,17 +58,17 @@ pub(crate) struct Completions<V: Variant, D: Digest> {
     pub(in crate::multimmit::machine) next_job: u64,
     /// Signing completions awaiting their durability turn, by effect.
     pub(in crate::multimmit::machine) pending_signing:
-        BTreeMap<EffectId, PendingSigningCompletion<V, D>>,
+        BTreeMap<EffectId, PendingSigningCompletion<S, D>>,
     /// Recovery and aggregation completions parked while a persistence barrier is outstanding.
     ///
     /// Together with `prepared_lqc`, these entries are bounded by the machine's own crypto-task
     /// reservations, so retained completions never exceed the in-flight jobs.
-    pub(in crate::multimmit::machine) pending_crypto: VecDeque<CryptoCompletion<V, D>>,
+    pub(in crate::multimmit::machine) pending_crypto: VecDeque<CryptoCompletion<S, D>>,
     /// The validated head L-QC completion moved out of the FIFO across its forwarding yield.
-    pub(in crate::multimmit::machine) prepared_lqc: Option<PreparedLqc<V, D>>,
+    pub(in crate::multimmit::machine) prepared_lqc: Option<PreparedLqc<S, D>>,
 }
 
-impl<V: Variant, D: Digest> Completions<V, D> {
+impl<S: Scheme, D: Digest> Completions<S, D> {
     pub(super) const fn new() -> Self {
         Self {
             verification_jobs: BTreeMap::new(),
@@ -79,8 +80,8 @@ impl<V: Variant, D: Digest> Completions<V, D> {
     }
 }
 
-impl<H: Hasher, V: Variant> Machine<H, V> {
-    pub(super) fn wake_producer(&mut self) -> Result<Step<V, H::Digest>, StepError> {
+impl<H: Hasher, S: Scheme> Machine<H, S> {
+    pub(super) fn wake_producer(&mut self) -> Result<Step<S, H::Digest>, StepError> {
         self.chain.wake_producer();
         self.wake_components();
         Ok(Step::from(StepStatus::Accepted))
@@ -89,7 +90,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(super) fn complete_block_build(
         &mut self,
         completion: BuildCompletion<H::Digest>,
-    ) -> Result<Step<V, H::Digest>, StepError> {
+    ) -> Result<Step<S, H::Digest>, StepError> {
         let outcome = self.chain.complete_build::<H>(completion)?;
         let status = match outcome {
             BuildOutcome::Stale => return Ok(Step::stale()),
@@ -105,7 +106,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(super) fn complete_block_custody(
         &mut self,
         completion: CustodyCompletion<H::Digest>,
-    ) -> Result<Step<V, H::Digest>, StepError> {
+    ) -> Result<Step<S, H::Digest>, StepError> {
         if !self.chain.complete_custody(completion)? {
             return Ok(Step::stale());
         }
@@ -116,7 +117,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(super) fn complete_custody_cancellation(
         &mut self,
         cancellation: CustodyCancellation,
-    ) -> Result<Step<V, H::Digest>, StepError> {
+    ) -> Result<Step<S, H::Digest>, StepError> {
         if !self
             .chain
             .complete_custody_cancellation(cancellation, self.durable.state.generation)?
@@ -129,8 +130,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     pub(super) fn complete_resolution(
         &mut self,
-        completion: ResolutionCompletion<V, H::Digest>,
-    ) -> Result<Step<V, H::Digest>, StepError> {
+        completion: ResolutionCompletion<S, H::Digest>,
+    ) -> Result<Step<S, H::Digest>, StepError> {
         if !self.resolution.matches(&completion) {
             return Ok(Step::stale());
         }
@@ -145,8 +146,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn observe_resolution(
         &mut self,
         view: View,
-        artifact: Artifact<V, H::Digest>,
-    ) -> Result<Step<V, H::Digest>, StepError> {
+        artifact: Artifact<S, H::Digest>,
+    ) -> Result<Step<S, H::Digest>, StepError> {
         let artifact = artifact.identify::<H>(&mut self.store.id_scratch);
         let id = artifact.id;
         let step = self.observe_artifacts([artifact].into_iter())?;
@@ -191,7 +192,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(super) fn fire_production_timer(
         &mut self,
         timer: ProductionTimer<H::Digest>,
-    ) -> Result<Step<V, H::Digest>, StepError> {
+    ) -> Result<Step<S, H::Digest>, StepError> {
         if !self.chain.fire_timer(timer) {
             return Ok(Step::stale());
         }
@@ -211,8 +212,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(super) fn recovered_certificate(
         &mut self,
         block: BlockRef<H::Digest>,
-        certificate: &DaCertificate<V, H::Digest>,
-    ) -> Result<Capabilities<V, H::Digest>, StepError> {
+        certificate: &DaCertificate<S, H::Digest>,
+    ) -> Result<Capabilities<S, H::Digest>, StepError> {
         let chain = block.chain().get() as usize;
         let above_tip = self
             .durable
@@ -258,8 +259,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn complete_nullification_recovery(
         &mut self,
-        completion: &NullificationRecoveryCompletion<V>,
-    ) -> Result<Capabilities<V, H::Digest>, StepError> {
+        completion: &NullificationRecoveryCompletion<S>,
+    ) -> Result<Capabilities<S, H::Digest>, StepError> {
         let Some(prepared) = self
             .views
             .prepare_nullification(completion, self.durable.state.generation)?
@@ -283,8 +284,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn complete_vqc_aggregation(
         &mut self,
-        completion: &mut VqcAggregateCompletion<V, H::Digest>,
-    ) -> Result<Capabilities<V, H::Digest>, StepError> {
+        completion: &mut VqcAggregateCompletion<S, H::Digest>,
+    ) -> Result<Capabilities<S, H::Digest>, StepError> {
         let Some(prepared) = self
             .views
             .prepare_vqc(completion, self.durable.state.generation)?
@@ -318,8 +319,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn complete_lqc_aggregation(
         &mut self,
-        prepared: &mut PreparedLqc<V, H::Digest>,
-    ) -> Result<Capabilities<V, H::Digest>, StepError> {
+        prepared: &mut PreparedLqc<S, H::Digest>,
+    ) -> Result<Capabilities<S, H::Digest>, StepError> {
         self.validate_self_admission(
             &prepared.artifact,
             Some(DerivedIdentity {
@@ -345,11 +346,11 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn reserve_view_certificate(
         &mut self,
-        artifact: Arc<Artifact<V, H::Digest>>,
+        artifact: Arc<Artifact<S, H::Digest>>,
         id: ArtifactId<H::Digest>,
         observation: Observation,
-        validated: Option<ValidatedLqc<V, H::Digest>>,
-    ) -> Result<Capabilities<V, H::Digest>, StepError> {
+        validated: Option<ValidatedLqc<S, H::Digest>>,
+    ) -> Result<Capabilities<S, H::Digest>, StepError> {
         let capabilities = self.reserve_change(Change::ViewCertificateCreated {
             artifact: Arc::clone(&artifact),
         })?;
@@ -365,8 +366,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     pub(super) fn complete_effect(
         &mut self,
-        completion: EffectCompletion<V, H::Digest>,
-    ) -> Result<Step<V, H::Digest>, StepError> {
+        completion: EffectCompletion<S, H::Digest>,
+    ) -> Result<Step<S, H::Digest>, StepError> {
         let id = completion.issued.id();
         if !self.is_current(completion.issued)
             || self.completions.pending_signing.contains_key(&id)
@@ -410,9 +411,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn prepare_signing_completion(
         &mut self,
-        effect: DurableEffect<V, H::Digest>,
-        completion: EffectCompletion<V, H::Digest>,
-    ) -> Result<PendingSigningCompletion<V, H::Digest>, StepError> {
+        effect: DurableEffect<S, H::Digest>,
+        completion: EffectCompletion<S, H::Digest>,
+    ) -> Result<PendingSigningCompletion<S, H::Digest>, StepError> {
         let (DurableEffect::Sign(effect), EffectResult::Signed(artifacts)) =
             (effect, completion.result)
         else {
@@ -437,8 +438,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn stage_signing_completion(
         &mut self,
         id: EffectId,
-        completion: PendingSigningCompletion<V, H::Digest>,
-    ) -> Result<Capabilities<V, H::Digest>, StepError> {
+        completion: PendingSigningCompletion<S, H::Digest>,
+    ) -> Result<Capabilities<S, H::Digest>, StepError> {
         if !self.durable.state.signing_reservations.contains_key(&id) {
             return Ok(Capabilities::new());
         }
@@ -468,7 +469,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         Ok(capabilities)
     }
 
-    pub(super) fn drive_signing_completion(&mut self, id: EffectId) -> WorkResult<V, H::Digest> {
+    pub(super) fn drive_signing_completion(&mut self, id: EffectId) -> WorkResult<S, H::Digest> {
         let Some(completion) = self.completions.pending_signing.get(&id).cloned() else {
             return Ok((WorkStatus::Complete, Capabilities::new()));
         };
@@ -477,7 +478,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         Ok((WorkStatus::Complete, capabilities))
     }
 
-    pub(super) fn drive_crypto_completion(&mut self) -> WorkResult<V, H::Digest> {
+    pub(super) fn drive_crypto_completion(&mut self) -> WorkResult<S, H::Digest> {
         if let Some(prepared) = self.completions.prepared_lqc.take() {
             return self.drive_prepared_lqc(prepared);
         }
@@ -535,8 +536,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn drive_prepared_lqc(
         &mut self,
-        mut prepared: PreparedLqc<V, H::Digest>,
-    ) -> WorkResult<V, H::Digest> {
+        mut prepared: PreparedLqc<S, H::Digest>,
+    ) -> WorkResult<S, H::Digest> {
         if !self.finality.lqc_aggregation_is_current(prepared.issued) {
             // The prepared certificate can no longer commit; return the reservation to its pool
             // so aggregation re-derives instead of waiting behind a consumed completion.
@@ -588,8 +589,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn forward_before_lqc_completion(
         &mut self,
-        prepared: &PreparedLqc<V, H::Digest>,
-    ) -> Result<Option<Capabilities<V, H::Digest>>, StepError> {
+        prepared: &PreparedLqc<S, H::Digest>,
+    ) -> Result<Option<Capabilities<S, H::Digest>>, StepError> {
         let Artifact::Lqc(certificate) = prepared.artifact.as_ref() else {
             unreachable!("L-QC preparation returns an L-QC")
         };
@@ -599,7 +600,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         self.reserve_change(change).map(Some)
     }
 
-    pub(super) fn fire_timer(&mut self, timer: ViewTimer) -> Result<Step<V, H::Digest>, StepError> {
+    pub(super) fn fire_timer(&mut self, timer: ViewTimer) -> Result<Step<S, H::Digest>, StepError> {
         let current = timer.generation() == self.durable.state.generation
             && timer.round()
                 == Round::new(self.profile.protocol().epoch(), self.durable.state.view);

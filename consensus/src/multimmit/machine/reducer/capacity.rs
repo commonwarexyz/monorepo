@@ -8,10 +8,11 @@ use crate::{
             durability::{DurableEffect, EffectId, Publication},
             input::StepError,
         },
+        scheme::Scheme,
         types::{Artifact, ArtifactId},
     },
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::{collections::BTreeMap, sync::Arc};
 
 /// Per-artifact durable reference changes: references released and references added.
@@ -61,14 +62,14 @@ impl Occupancy {
     }
 }
 
-impl<H: Hasher, V: Variant> Machine<H, V> {
+impl<H: Hasher, S: Scheme> Machine<H, S> {
     /// Returns whether `effect` fits every capacity bound once the effects `retired` release their
     /// references and `consumed_build_credits` volatile build reservations turn into it.
     ///
     /// Capacity pressure reports `false`; any other rejection is an error.
     pub(super) fn effect_fits(
         &self,
-        effect: &DurableEffect<V, H::Digest>,
+        effect: &DurableEffect<S, H::Digest>,
         consumed_build_credits: usize,
         retired: &[EffectId],
     ) -> Result<bool, StepError> {
@@ -83,7 +84,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// references and `consumed_build_credits` volatile build reservations turn into it.
     pub(super) fn check_effect_capacity(
         &self,
-        effect: &DurableEffect<V, H::Digest>,
+        effect: &DurableEffect<S, H::Digest>,
         consumed_build_credits: usize,
         retired: &[EffectId],
     ) -> Result<(), StepError> {
@@ -127,7 +128,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         Ok(())
     }
 
-    fn effect_artifact_capacity(&self, effect: &DurableEffect<V, H::Digest>) -> usize {
+    fn effect_artifact_capacity(&self, effect: &DurableEffect<S, H::Digest>) -> usize {
         let resources = self.profile.resources();
         match effect {
             DurableEffect::Publish(Publication::Broadcast(artifacts)) if matches!(artifacts.as_ref(), [artifact] if artifact.self_certifying_view()) => {
@@ -201,7 +202,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     }
 
     /// Returns an owned copy of the outstanding effect `id`, sharing its payload.
-    pub(super) fn durable_effect(&self, id: EffectId) -> Option<DurableEffect<V, H::Digest>> {
+    pub(super) fn durable_effect(&self, id: EffectId) -> Option<DurableEffect<S, H::Digest>> {
         self.durable
             .state
             .signing(&id)
@@ -303,7 +304,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// `retired_signing`.
     pub(super) fn finality_floor_fits(
         &self,
-        proof: &Arc<Artifact<V, H::Digest>>,
+        proof: &Arc<Artifact<S, H::Digest>>,
         retired_signing: &[EffectId],
     ) -> Result<bool, StepError> {
         let Artifact::Lqc(certificate) = proof.as_ref() else {

@@ -17,33 +17,34 @@ use crate::{
             },
             types::{Floor, LqcVerifier},
         },
+        scheme::Scheme,
         types::{Body, Lqc, TipRecord},
     },
     types::View,
 };
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use std::sync::Arc;
 
 /// A floor checkpoint that passed verification, ready for catalog installation.
-struct VerifiedFloor<H: Hasher, V: Variant> {
+struct VerifiedFloor<H: Hasher, S: Scheme> {
     checkpoint: Checkpoint<H::Digest>,
     prune: PendingFloors,
-    proof: Arc<Lqc<V, H::Digest>>,
+    proof: Arc<Lqc<S, H::Digest>>,
     history: Arc<TipRecord<H::Digest>>,
 }
 
-impl<I, C, F, S, K, Q, H, V, B> Core<I, C, F, S, K, Q, H, V, B>
+impl<I, C, F, Hs, K, Q, H, S, B> Core<I, C, F, Hs, K, Q, H, S, B>
 where
-    I: Absorb<V, H::Digest>,
-    C: CatalogPort<H, V, B>,
-    F: Fetcher<H, V, B>,
-    S: HistoryStack<H>,
+    I: Absorb<S, H::Digest>,
+    C: CatalogPort<H, S, B>,
+    F: Fetcher<H, S, B>,
+    Hs: HistoryStack<H>,
     K: BlockStack<H::Digest>,
-    Q: LqcVerifier<H, V>,
+    Q: LqcVerifier<H, S>,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
-    Error: From<C::Error> + From<F::Error> + From<S::Error> + From<K::Error>,
+    Error: From<C::Error> + From<F::Error> + From<Hs::Error> + From<K::Error>,
 {
     /// Verifies `candidate` and installs it as the next floor generation.
     #[tracing::instrument(
@@ -53,7 +54,7 @@ where
     )]
     pub(super) async fn install_floor(
         &mut self,
-        candidate: Floor<V, H::Digest>,
+        candidate: Floor<S, H::Digest>,
     ) -> Result<(), Error> {
         let floor_generation = self
             .floor_generation
@@ -68,8 +69,8 @@ where
     async fn verify_floor(
         &mut self,
         floor_generation: u64,
-        candidate: Floor<V, H::Digest>,
-    ) -> Result<VerifiedFloor<H, V>, Error> {
+        candidate: Floor<S, H::Digest>,
+    ) -> Result<VerifiedFloor<H, S>, Error> {
         let anchor_id = candidate.anchor.id::<H>();
         if candidate.anchor.epoch() != self.epoch || candidate.anchor.view() <= self.floor_view {
             return Err(Error::Invalid(
@@ -81,7 +82,7 @@ where
             history,
             ordered,
             target,
-        } = floor::validate::<H, V>(
+        } = floor::validate::<H, S>(
             &self.state,
             &candidate.anchor,
             &candidate.history,
@@ -134,7 +135,7 @@ where
 
     /// Installs `verified` once every started commit is durable, then adopts the installed
     /// checkpoint.
-    async fn install_verified(&mut self, verified: VerifiedFloor<H, V>) -> Result<(), Error> {
+    async fn install_verified(&mut self, verified: VerifiedFloor<H, S>) -> Result<(), Error> {
         self.finish_commits().await?;
         let view = verified.proof.view();
         self.catalog

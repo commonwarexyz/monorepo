@@ -15,6 +15,7 @@ use crate::{
     multimmit::{
         actors::util::ask_unreliable,
         marshal::OutputIndex,
+        scheme::Scheme,
         types::{Activity, Artifact, BlockRef, Body, CertificateId, Lqc, TransactionBlock},
     },
     types::View,
@@ -23,31 +24,31 @@ use commonware_actor::{
     Feedback, Unreliable,
     mailbox::{self as actor_mailbox, UnreliablePolicy},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::sync::{Mutex, Notify};
 use std::{collections::VecDeque, num::NonZeroUsize, pin::pin, sync::Arc};
 use tracing::Span;
 
 /// A router request, processed under the caller's span.
-pub(super) struct Message<H, V, B>
+pub(super) struct Message<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     pub(super) span: Span,
-    pub(super) request: Request<H, V, B>,
+    pub(super) request: Request<H, S, B>,
 }
 
 /// Work the router runs on the caller's behalf.
-pub(super) enum Request<H, V, B>
+pub(super) enum Request<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Advisory consensus activity.
-    Hint { activity: Activity<V, H::Digest> },
+    Hint { activity: Activity<S, H::Digest> },
     /// Stages a producer block and replies with the completion of its durable custody.
     StageBlock {
         block: Arc<TransactionBlock<H, B>>,
@@ -62,18 +63,18 @@ where
     },
     /// Verifies and installs a state-sync floor.
     InstallFloor {
-        floor: Floor<V, H::Digest>,
+        floor: Floor<S, H::Digest>,
         reply: Reply<(), Error>,
     },
 }
 
-impl<H, V, B> Message<H, V, B>
+impl<H, S, B> Message<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
-    pub(super) fn new(request: Request<H, V, B>) -> Self {
+    pub(super) fn new(request: Request<H, S, B>) -> Self {
         Self {
             span: Span::current(),
             request,
@@ -81,10 +82,10 @@ where
     }
 }
 
-impl<H, V, B> Request<H, V, B>
+impl<H, S, B> Request<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Returns the stable request label for the request that triggered a router drain.
@@ -104,10 +105,10 @@ where
 ///
 /// Retained subscriptions stay bounded because each holds one of its mailbox's
 /// [`SubscriptionSlots`].
-impl<H, V, B> UnreliablePolicy for Message<H, V, B>
+impl<H, S, B> UnreliablePolicy for Message<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     type Overflow = VecDeque<Self>;
@@ -168,7 +169,7 @@ struct FinalityHint {
 
 impl FinalityHint {
     /// Classifies `activity`, returning `None` for hints that do not advance finality.
-    fn classify<V: Variant, D: Digest>(activity: &Activity<V, D>) -> Option<Self> {
+    fn classify<S: Scheme, D: Digest>(activity: &Activity<S, D>) -> Option<Self> {
         match activity {
             Activity::LeaderFinalized { fact } | Activity::LeaderFinalityUpdated { fact } => {
                 Some(Self {
@@ -244,26 +245,26 @@ impl Drop for SubscriptionSlot {
 }
 
 /// Cloneable public ingress for a Multimmit marshal service.
-pub struct Mailbox<H, V, B>
+pub struct Mailbox<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
-    router: actor_mailbox::UnreliableSender<Message<H, V, B>>,
-    catalog: catalog::Mailbox<H, V, B>,
-    bodies: Bodies<H, V, B>,
-    backfill: backfill::Mailbox<H, V, B>,
+    router: actor_mailbox::UnreliableSender<Message<H, S, B>>,
+    catalog: catalog::Mailbox<H, S, B>,
+    bodies: Bodies<H, S, B>,
+    backfill: backfill::Mailbox<H, S, B>,
     subscriptions: Arc<SubscriptionSlots>,
     /// Blocks staged through this mailbox, kept for the [`Relay`](super::Relay) when one exists.
     staged: Option<Arc<Mutex<Staged<H, B>>>>,
     max_pending_acks: NonZeroUsize,
 }
 
-impl<H, V, B> Clone for Mailbox<H, V, B>
+impl<H, S, B> Clone for Mailbox<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     fn clone(&self) -> Self {
@@ -279,17 +280,17 @@ where
     }
 }
 
-impl<H, V, B> Mailbox<H, V, B>
+impl<H, S, B> Mailbox<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     pub(super) const fn new(
-        router: actor_mailbox::UnreliableSender<Message<H, V, B>>,
-        catalog: catalog::Mailbox<H, V, B>,
-        bodies: Bodies<H, V, B>,
-        backfill: backfill::Mailbox<H, V, B>,
+        router: actor_mailbox::UnreliableSender<Message<H, S, B>>,
+        catalog: catalog::Mailbox<H, S, B>,
+        bodies: Bodies<H, S, B>,
+        backfill: backfill::Mailbox<H, S, B>,
         subscriptions: Arc<SubscriptionSlots>,
         staged: Option<Arc<Mutex<Staged<H, B>>>>,
         max_pending_acks: NonZeroUsize,
@@ -313,7 +314,7 @@ where
     /// Sends a request to the router, failing with [`Error::Busy`] when its queue rejects it.
     async fn route<T>(
         &self,
-        request: impl FnOnce(Reply<T, Error>) -> Request<H, V, B>,
+        request: impl FnOnce(Reply<T, Error>) -> Request<H, S, B>,
     ) -> Result<T, Error> {
         ask_unreliable(
             |request| self.router.enqueue(Message::new(request)),
@@ -367,7 +368,7 @@ where
     pub async fn get_certificate(
         &self,
         id: CertificateId<H::Digest>,
-    ) -> Result<MaybeLqc<V, H::Digest>, Error> {
+    ) -> Result<MaybeLqc<S, H::Digest>, Error> {
         self.catalog.lqc(id).await.map_err(Error::from)
     }
 
@@ -380,7 +381,7 @@ where
     pub async fn fetch_certificate(
         &self,
         id: CertificateId<H::Digest>,
-    ) -> Result<Arc<Lqc<V, H::Digest>>, Error> {
+    ) -> Result<Arc<Lqc<S, H::Digest>>, Error> {
         self.backfill
             .lqc(FetchReason::Explicit, id)
             .await
@@ -452,7 +453,7 @@ where
     /// [`Self::install_floor`], which verifies it, and then receives the outputs after its
     /// index. Returns `None` if no floor at or below `at` is retained.
     #[tracing::instrument(name = "multimmit.marshal.mailbox.floor_at", level = "debug", skip_all)]
-    pub async fn floor_at(&self, at: OutputIndex) -> Result<MaybeFloor<V, H::Digest>, Error> {
+    pub async fn floor_at(&self, at: OutputIndex) -> Result<MaybeFloor<S, H::Digest>, Error> {
         self.catalog.floor_at(at).await.map_err(Error::from)
     }
 
@@ -462,7 +463,7 @@ where
         level = "info",
         skip_all
     )]
-    pub async fn install_floor(&self, floor: Floor<V, H::Digest>) -> Result<(), Error> {
+    pub async fn install_floor(&self, floor: Floor<S, H::Digest>) -> Result<(), Error> {
         self.route(|reply| Request::InstallFloor { floor, reply })
             .await
     }
@@ -489,13 +490,13 @@ where
     }
 }
 
-impl<H, V, B> Reporter for Mailbox<H, V, B>
+impl<H, S, B> Reporter for Mailbox<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
-    type Activity = Activity<V, H::Digest>;
+    type Activity = Activity<S, H::Digest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         // A release bounds pruning, so it goes straight to the catalog's coalescing cursor lane
@@ -524,7 +525,7 @@ mod tests {
     use super::*;
     use crate::{
         multimmit::{
-            mocks::Committee,
+            mocks::{Bls, Committee},
             types::{ArtifactId, ChainId, Context, FinalityFact, FinalityId, PathLimits},
         },
         simplex::marshal::mocks::block::EmptyBlock,
@@ -540,7 +541,7 @@ mod tests {
     use futures::FutureExt as _;
     use std::time::Duration;
 
-    type TestCommand = Message<Sha256, MinPk, EmptyBlock<Sha256>>;
+    type TestCommand = Message<Sha256, Bls<MinPk>, EmptyBlock<Sha256>>;
 
     fn fact(view: u64, votes: usize) -> FinalityFact<Sha256Digest> {
         FinalityFact::new(
@@ -559,7 +560,7 @@ mod tests {
     /// Offers a hint to the overflow, returning whether the policy handled it.
     fn offer(
         overflow: &mut VecDeque<TestCommand>,
-        activity: Activity<MinPk, Sha256Digest>,
+        activity: Activity<Bls<MinPk>, Sha256Digest>,
     ) -> bool {
         <TestCommand as UnreliablePolicy>::handle(
             overflow,
@@ -568,7 +569,7 @@ mod tests {
     }
 
     /// Returns the activity of a retained hint.
-    fn retained(command: &TestCommand) -> &Activity<MinPk, Sha256Digest> {
+    fn retained(command: &TestCommand) -> &Activity<Bls<MinPk>, Sha256Digest> {
         let Request::Hint { activity } = &command.request else {
             panic!("only hints are retained");
         };
@@ -630,7 +631,7 @@ mod tests {
 
     #[test]
     fn pressure_retains_one_hint_per_finality_kind() {
-        let committee = Committee::<MinPk>::builder(8, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(8, 6)
             .limits(PathLimits::new(4, 0))
             .build();
         let lqc = |view| {

@@ -31,11 +31,11 @@ use crate::{
             CoreBootstrapError, CoreError, CoreState, Cursor, ReplayError, Snapshot,
             SnapshotCodecConfig,
         },
-        scheme::bls12381_threshold::Scheme,
+        scheme::{Generic, Scheme},
         types::{Artifact, Context},
     },
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::{buffer::paged::CacheRef, telemetry::traces::TracedExt as _};
 use commonware_storage::Context as StorageContext;
@@ -123,13 +123,13 @@ impl From<CoreBootstrapError> for OpenError {
 }
 
 /// Configuration for [`recover`].
-pub(crate) struct RecoveryConfig<'a, H: Hasher, P: PublicKey, V: Variant, T: Strategy> {
+pub(crate) struct RecoveryConfig<'a, H: Hasher, S: Scheme, T: Strategy> {
     /// The immutable local machine profile.
     pub profile: Profile<H::Digest>,
     /// Storage partition prefix owned exclusively by this engine.
     pub partition_prefix: &'a str,
     /// Scheme that verifies the recovered machine's retained artifacts.
-    pub scheme: &'a Scheme<P, V>,
+    pub scheme: &'a Generic<S>,
     /// Execution strategy for the retained-artifact check.
     pub strategy: &'a T,
     /// Page cache for the safety journal.
@@ -141,22 +141,22 @@ pub(crate) struct RecoveryConfig<'a, H: Hasher, P: PublicKey, V: Variant, T: Str
 }
 
 /// The machine and stores rebuilt from durable state, before any actor starts.
-pub(crate) struct Recovered<E: StorageContext, H: Hasher, V: Variant> {
+pub(crate) struct Recovered<E: StorageContext, H: Hasher, S: Scheme> {
     /// The protocol owner: fresh, or restored from the checkpoint and replayed journal suffix.
-    pub core: CoreState<H, V>,
+    pub core: CoreState<H, S>,
     /// The safety journal, open for appends after the replayed suffix.
-    pub journal: SafetyJournal<E, V, H::Digest>,
+    pub journal: SafetyJournal<E, S, H::Digest>,
     /// Durable machine checkpoints.
-    pub checkpoints: SnapshotStore<E, V, H::Digest>,
+    pub checkpoints: SnapshotStore<E, S, H::Digest>,
     /// Journal events replayed after the newest checkpoint, or `None` for a fresh start.
     pub replayed: Option<u64>,
 }
 
-impl<E, H, V> Recovered<E, H, V>
+impl<E, H, S> Recovered<E, H, S>
 where
     E: StorageContext,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
 {
     /// Replaces a replayed suffix of at least `interval` events with a new checkpoint.
     ///
@@ -208,16 +208,15 @@ where
 ///
 /// Runs the steps in the module documentation in order. `context` labels the stores and seeds the
 /// retained-artifact check.
-pub(crate) async fn recover<E, H, P, V, T, A>(
+pub(crate) async fn recover<E, H, S, T, A>(
     context: &mut E,
-    config: RecoveryConfig<'_, H, P, V, T>,
+    config: RecoveryConfig<'_, H, S, T>,
     automaton: &A,
-) -> Result<Recovered<E, H, V>, OpenError>
+) -> Result<Recovered<E, H, S>, OpenError>
 where
     E: CryptoRng + StorageContext,
     H: Hasher,
-    P: PublicKey,
-    V: Variant,
+    S: Scheme,
     T: Strategy,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest>,
 {
@@ -242,15 +241,14 @@ where
     skip_all,
     fields(epoch = config.profile.protocol().epoch().get().traced())
 )]
-async fn open_stores<E, H, P, V, T>(
+async fn open_stores<E, H, S, T>(
     context: &mut E,
-    config: RecoveryConfig<'_, H, P, V, T>,
-) -> Result<Recovered<E, H, V>, OpenError>
+    config: RecoveryConfig<'_, H, S, T>,
+) -> Result<Recovered<E, H, S>, OpenError>
 where
     E: CryptoRng + StorageContext,
     H: Hasher,
-    P: PublicKey,
-    V: Variant,
+    S: Scheme,
     T: Strategy,
 {
     let RecoveryConfig {
@@ -273,7 +271,7 @@ where
     let has_checkpoint = checkpoint.is_some();
     let covered = checkpoint.as_ref().map_or(Cursor::zero(), Snapshot::cursor);
     let mut suffix =
-        open_journal::<_, H, V>(context, &profile, partitions.journal, page_cache, covered).await?;
+        open_journal::<_, H, S>(context, &profile, partitions.journal, page_cache, covered).await?;
     let restored = replay_journal(&mut suffix, profile, checkpoint).await?;
     let suffix_section = suffix.suffix_section();
     let journal = suffix.finish()?;
@@ -295,17 +293,17 @@ where
 }
 
 /// Opens the safety journal for a replay of the suffix after `covered`.
-async fn open_journal<E, H, V>(
+async fn open_journal<E, H, S>(
     context: &E,
     profile: &Profile<H::Digest>,
     partition: String,
     page_cache: CacheRef,
     covered: Cursor,
-) -> Result<SuffixReplay<E, V, H::Digest>, JournalError>
+) -> Result<SuffixReplay<E, S, H::Digest>, JournalError>
 where
     E: StorageContext,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
 {
     let config = JournalConfig::from_profile(profile, partition, page_cache);
     SafetyJournal::open(context.child("journal"), config, covered)
@@ -314,9 +312,9 @@ where
 }
 
 /// The machine rebuilt from the checkpoint and journal suffix.
-struct Restored<H: Hasher, V: Variant> {
+struct Restored<H: Hasher, S: Scheme> {
     /// The fresh or restored protocol owner.
-    core: CoreState<H, V>,
+    core: CoreState<H, S>,
     /// Journal events replayed after the checkpoint, or `None` for a fresh start.
     replayed: Option<u64>,
 }
@@ -326,15 +324,15 @@ struct Restored<H: Hasher, V: Variant> {
 /// Without a checkpoint the suffix replays over the genesis cut, which puts the machine in
 /// recovery mode the same way a checkpoint does. With neither a checkpoint nor a journal record,
 /// the machine starts fresh.
-async fn replay_journal<E, H, V>(
-    suffix: &mut SuffixReplay<E, V, H::Digest>,
+async fn replay_journal<E, H, S>(
+    suffix: &mut SuffixReplay<E, S, H::Digest>,
     profile: Profile<H::Digest>,
-    checkpoint: Option<Snapshot<V, H::Digest>>,
-) -> Result<Restored<H, V>, OpenError>
+    checkpoint: Option<Snapshot<S, H::Digest>>,
+) -> Result<Restored<H, S>, OpenError>
 where
     E: StorageContext,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
 {
     let span = info_span!(
         "multimmit.engine.open_stores.replay",
@@ -351,7 +349,7 @@ where
         }
         let snapshot = match checkpoint {
             Some(snapshot) => snapshot,
-            None => CoreState::<H, V>::fresh(profile.clone())?
+            None => CoreState::<H, S>::fresh(profile.clone())?
                 .machine()
                 .checkpoint_cut()
                 .ok_or(OpenError::NoCheckpointCut)?,
@@ -388,9 +386,9 @@ where
 ///
 /// An artifact with several durable holders, such as a certificate that is both forwarded and a
 /// view's exit proof, appears once, so recovery verifies it once.
-fn retained_once<H: Hasher, V: Variant>(
-    snapshot: &Snapshot<V, H::Digest>,
-) -> Vec<Arc<Artifact<V, H::Digest>>> {
+fn retained_once<H: Hasher, S: Scheme>(
+    snapshot: &Snapshot<S, H::Digest>,
+) -> Vec<Arc<Artifact<S, H::Digest>>> {
     let mut ids = HashSet::new();
     snapshot
         .retained_artifacts()
@@ -399,23 +397,22 @@ fn retained_once<H: Hasher, V: Variant>(
 }
 
 /// Verifies every artifact the recovered machine retains on a `strategy` worker.
-async fn verify_retained_artifacts<H, P, V, T>(
-    scheme: &Scheme<P, V>,
+async fn verify_retained_artifacts<H, S, T>(
+    scheme: &Generic<S>,
     strategy: &T,
     rng: &mut impl CryptoRng,
-    core: &CoreState<H, V>,
+    core: &CoreState<H, S>,
 ) -> Result<(), OpenError>
 where
     H: Hasher,
-    P: PublicKey,
-    V: Variant,
+    S: Scheme,
     T: Strategy,
 {
     let snapshot = core
         .machine()
         .checkpoint_cut()
         .ok_or(OpenError::NoCheckpointCut)?;
-    let artifacts = retained_once::<H, V>(&snapshot);
+    let artifacts = retained_once::<H, S>(&snapshot);
     let scheme = scheme.clone();
     let mut rng = StdRng::from_rng(rng);
     let span = info_span!(
@@ -442,13 +439,13 @@ where
 ///
 /// The restored machine accepted the checkpoint and suffix, so every section below the first
 /// uncovered one is obsolete. With no uncovered record, the journal rolls past every section.
-async fn prune_covered<E, V, D>(
-    journal: SafetyJournal<E, V, D>,
+async fn prune_covered<E, S, D>(
+    journal: SafetyJournal<E, S, D>,
     suffix_section: Option<u64>,
-) -> Result<SafetyJournal<E, V, D>, JournalError>
+) -> Result<SafetyJournal<E, S, D>, JournalError>
 where
     E: StorageContext,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     let journal = if suffix_section.is_some() {
@@ -507,7 +504,7 @@ mod tests {
                 Capability, CoreTurn, DomainEventCodecConfig, Input, MAX_BATCH_BYTES,
                 MAX_BATCH_EVENTS, PersistDirective,
             },
-            mocks::{Committee, MockApplication},
+            mocks::{Bls, Committee, MockApplication},
             types::ChainId,
         },
         types::{Epoch, Height, View},
@@ -526,16 +523,17 @@ mod tests {
     use commonware_utils::{NZU64, NZUsize};
     use std::{collections::BTreeSet, time::Duration};
 
-    fn observer(committee: &Committee<MinPk>) -> Profile<Sha256Digest> {
-        Profile::new::<MinPk>(committee.config.clone(), Role::Observer, Tuning::default()).unwrap()
+    fn observer(committee: &Committee<Bls<MinPk>>) -> Profile<Sha256Digest> {
+        Profile::new::<Bls<MinPk>>(committee.config.clone(), Role::Observer, Tuning::default())
+            .unwrap()
     }
 
     /// Drives `core` until it is idle, acknowledging every barrier and verifying every job, after
     /// observing `artifacts` once it is live.
     fn drive(
-        core: &mut CoreState<Sha256, MinPk>,
-        committee: &Committee<MinPk>,
-        artifacts: Vec<Artifact<MinPk, Sha256Digest>>,
+        core: &mut CoreState<Sha256, Bls<MinPk>>,
+        committee: &Committee<Bls<MinPk>>,
+        artifacts: Vec<Artifact<Bls<MinPk>, Sha256Digest>>,
     ) {
         let observed = artifacts
             .into_iter()
@@ -584,7 +582,7 @@ mod tests {
 
     #[test]
     fn recovery_verifies_a_forwarded_exit_certificate_once() {
-        let committee = Committee::<MinPk>::builder(83, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(83, 6).build();
         let mut core = CoreState::fresh(observer(&committee)).unwrap();
         core.enqueue(Input::Start).unwrap();
         let nullification = Artifact::Nullification(committee.nullification(View::new(1)));
@@ -606,7 +604,7 @@ mod tests {
         );
 
         // The verified set holds the certificate once and every other retained artifact once.
-        let verified = retained_once::<Sha256, MinPk>(&snapshot);
+        let verified = retained_once::<Sha256, Bls<MinPk>>(&snapshot);
         let verified_ids = verified
             .iter()
             .map(|artifact| artifact.id::<Sha256>())
@@ -622,10 +620,10 @@ mod tests {
     #[test_traced]
     fn empty_stores_start_fresh_without_custody_checks() {
         DeterministicRunner::default().start(|context| async move {
-            let committee = Committee::<MinPk>::builder(79, 6).build();
+            let committee = Committee::<Bls<MinPk>>::builder(79, 6).build();
             let application = MockApplication::new();
             let mut store_context: DeterministicContext = context.child("stores");
-            let recovered = Box::pin(recover::<_, Sha256, _, _, _, _>(
+            let recovered = Box::pin(recover::<_, Sha256, _, _, _>(
                 &mut store_context,
                 RecoveryConfig {
                     profile: observer(&committee),
@@ -650,7 +648,7 @@ mod tests {
 
     #[test]
     fn journal_sizing_covers_every_machine_batch() {
-        let committee = Committee::<MinPk>::builder(79, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(79, 6).build();
         let profile = observer(&committee);
         let page_cache = CacheRef::new(paged::page_size(4_096), NZUsize!(8));
         let journal = JournalConfig::from_profile(&profile, "journal".into(), page_cache);

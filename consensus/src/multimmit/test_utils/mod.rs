@@ -7,7 +7,8 @@ use super::{
     Inspection,
     config::{Error as ConfigError, Profile, Protocol, Role, Tuning},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use crate::multimmit::scheme::Scheme;
+use commonware_cryptography::{Digest, Hasher};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod bench;
@@ -76,9 +77,9 @@ pub const fn inspection_generation<D: Digest>(inspection: &Inspection<D>) -> u64
 /// # Errors
 ///
 /// Returns an error when `tuning` is invalid for `protocol`.
-pub fn resource_limits<H: Hasher, V: Variant>(
+pub fn resource_limits<H: Hasher, S: Scheme>(
     protocol: Protocol<H::Digest>,
     tuning: Tuning,
 ) -> Result<ResourceLimits, ConfigError> {
-    Ok(Profile::new::<V>(protocol, Role::Observer, tuning)?.resources())
+    Ok(Profile::new::<S>(protocol, Role::Observer, tuning)?.resources())
 }

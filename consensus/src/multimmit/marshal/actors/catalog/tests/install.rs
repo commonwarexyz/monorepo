@@ -2,11 +2,12 @@
 
 use super::*;
 use crate::multimmit::{marshal::OutputIndex, testing::expect_within};
+use commonware_utils::test_rng;
 
 #[test]
 fn delivery_reset_preempts_cold_materialization() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(84, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(84, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_COLD_RESET")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -90,7 +91,7 @@ fn delivery_reset_preempts_cold_materialization() {
 #[test]
 fn floor_install_supersedes_queued_committed_body_read() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(85, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(85, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_READ_INSTALL")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -173,7 +174,12 @@ fn floor_install_supersedes_queued_committed_body_read() {
         let proof = Arc::new(
             committee
                 .verifier
-                .assemble_lqc::<Sha256, _>(leader.block().clone(), &votes, &Sequential)
+                .assemble_lqc::<_, Sha256, _>(
+                    &mut test_rng(),
+                    leader.block().clone(),
+                    &votes,
+                    &Sequential,
+                )
                 .unwrap(),
         );
         let target = checkpoint(
@@ -231,7 +237,7 @@ fn floor_install_supersedes_queued_committed_body_read() {
 #[test]
 fn queued_generation_reset_preempts_acknowledgement_refill() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(64, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(64, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_DELIVERY_RESET_PREEMPTION")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -280,7 +286,7 @@ fn oversized_install_intent_is_rejected_before_archive_mutation() {
     deterministic::Runner::default().start(|context| async move {
         let limits = PathLimits::new(2, 2);
         let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
-        let committee = Committee::<MinPk>::builder(7, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(7, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_INSTALL_BOUND")
             .producers(producers)
             .limits(limits)
@@ -300,7 +306,12 @@ fn oversized_install_intent_is_rejected_before_archive_mutation() {
         let proof = Arc::new(
             committee
                 .verifier
-                .assemble_lqc::<Sha256, _>(leader.block().clone(), &votes, &Sequential)
+                .assemble_lqc::<_, Sha256, _>(
+                    &mut test_rng(),
+                    leader.block().clone(),
+                    &votes,
+                    &Sequential,
+                )
                 .unwrap(),
         );
         assert_eq!(proof.leader().history(), history);
@@ -403,7 +414,12 @@ fn floor_install_resets_delivery_then_prunes_the_old_generation() {
         let floor_proof = Arc::new(
             committee
                 .verifier
-                .assemble_lqc::<Sha256, _>(leader.block().clone(), &votes, &Sequential)
+                .assemble_lqc::<_, Sha256, _>(
+                    &mut test_rng(),
+                    leader.block().clone(),
+                    &votes,
+                    &Sequential,
+                )
                 .unwrap(),
         );
         let floor_id = floor_proof.id::<Sha256>();

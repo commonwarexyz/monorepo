@@ -2,18 +2,19 @@
 
 use crate::multimmit::{
     machine::durability::{DurableState, EffectId},
+    scheme::Scheme,
     types::ArtifactId,
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use std::collections::BTreeMap;
 
 /// Applied durable state with the artifact references and signing reservations it holds.
 ///
 /// The ledgers are derived from the state and kept in step with every applied transition, so
 /// occupancy checks read them instead of re-deriving references from the state.
-pub(crate) struct DurableLedger<V: Variant, D: Digest> {
+pub(crate) struct DurableLedger<S: Scheme, D: Digest> {
     /// The durable state as of the newest staged event.
-    pub(in crate::multimmit::machine) state: DurableState<V, D>,
+    pub(in crate::multimmit::machine) state: DurableState<S, D>,
     /// Durable references held per artifact.
     pub(in crate::multimmit::machine) artifact_references: BTreeMap<ArtifactId<D>, usize>,
     /// Artifact identifiers carried by every live outbox effect.
@@ -26,8 +27,8 @@ pub(crate) struct DurableLedger<V: Variant, D: Digest> {
     pub(in crate::multimmit::machine) signing_reservations: usize,
 }
 
-impl<V: Variant, D: Digest> DurableLedger<V, D> {
-    pub(super) const fn new(state: DurableState<V, D>) -> Self {
+impl<S: Scheme, D: Digest> DurableLedger<S, D> {
+    pub(super) const fn new(state: DurableState<S, D>) -> Self {
         Self {
             state,
             artifact_references: BTreeMap::new(),

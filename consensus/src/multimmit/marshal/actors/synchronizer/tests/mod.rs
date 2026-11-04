@@ -31,7 +31,7 @@ use crate::{
             types::{CustodyValues, Floor, LqcVerifier},
             wire::max_block_segment_items,
         },
-        mocks::Committee,
+        mocks::{Bls, Committee},
         testing::{SpanRecorder, TestBody},
         types::{
             Anchor, BlockRef, CertificateId, ChainId, ChainProposal, CodecConfig, DigestedLeader,
@@ -53,7 +53,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Clock as _, Runner as _, Spawner as _, Supervisor as _, deterministic};
-use commonware_utils::{channel::oneshot, sync::Mutex};
+use commonware_utils::{channel::oneshot, sync::Mutex, test_rng};
 use rstest::rstest;
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -92,19 +92,19 @@ type TestCore<I> = Core<
     MockBlockStack,
     MockVerifier,
     Sha256,
-    MinPk,
+    Bls<MinPk>,
     TestBody,
 >;
 
 type TestSynchronizer = TestCore<Idle>;
 
-type TestInbox = Inbox<MinPk, Sha256Digest>;
+type TestInbox = Inbox<Bls<MinPk>, Sha256Digest>;
 
 fn digest(label: &[u8], value: u64) -> Sha256Digest {
     Sha256::hash(&[label, &value.to_be_bytes()])
 }
 
-fn committee(seed: u64, chains: u32, limits: PathLimits) -> Committee<MinPk> {
+fn committee(seed: u64, chains: u32, limits: PathLimits) -> Committee<Bls<MinPk>> {
     Committee::builder(seed, 6)
         .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_MARSHAL_SYNCHRONIZER")
         .producers((0..chains).map(Participant::new).collect())
@@ -112,7 +112,7 @@ fn committee(seed: u64, chains: u32, limits: PathLimits) -> Committee<MinPk> {
         .build()
 }
 
-fn genesis_record(committee: &Committee<MinPk>) -> Arc<TipRecord<Sha256Digest>> {
+fn genesis_record(committee: &Committee<Bls<MinPk>>) -> Arc<TipRecord<Sha256Digest>> {
     let genesis = committee.config.genesis();
     Arc::new(
         TipRecord::at_tips(genesis_history::<Sha256>(genesis), genesis.tips().to_vec()).unwrap(),
@@ -120,10 +120,10 @@ fn genesis_record(committee: &Committee<MinPk>) -> Arc<TipRecord<Sha256Digest>> 
 }
 
 fn lqc(
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     view: u64,
     signers: impl IntoIterator<Item = usize>,
-) -> Arc<Lqc<MinPk, Sha256Digest>> {
+) -> Arc<Lqc<Bls<MinPk>, Sha256Digest>> {
     let leader = committee.leader_block(View::new(view));
     let votes = signers
         .into_iter()
@@ -132,17 +132,22 @@ fn lqc(
     Arc::new(
         committee
             .verifier
-            .assemble_lqc::<Sha256, _>(leader.block().clone(), &votes, &Sequential)
+            .assemble_lqc::<_, Sha256, _>(
+                &mut test_rng(),
+                leader.block().clone(),
+                &votes,
+                &Sequential,
+            )
             .unwrap(),
     )
 }
 
 fn lqc_with_history(
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     view: u64,
     history: Sha256Digest,
     tip: BlockRef<Sha256Digest>,
-) -> Arc<Lqc<MinPk, Sha256Digest>> {
+) -> Arc<Lqc<Bls<MinPk>, Sha256Digest>> {
     let leader = LeaderBlock::new(
         Round::new(committee.config.epoch(), View::new(view)),
         committee.config.genesis().vqc(),
@@ -172,7 +177,7 @@ fn lqc_with_history(
     Arc::new(
         committee
             .verifier
-            .assemble_lqc::<Sha256, _>(leader, &votes, &Sequential)
+            .assemble_lqc::<_, Sha256, _>(&mut test_rng(), leader, &votes, &Sequential)
             .unwrap(),
     )
 }
@@ -180,8 +185,8 @@ fn lqc_with_history(
 /// Returns the direct-pool finality fact for `proof`'s leader proposal, supported by a view
 /// quorum, that finalizes `tips` with every chain settled at position zero.
 fn pool_fact(
-    committee: &Committee<MinPk>,
-    proof: &Lqc<MinPk, Sha256Digest>,
+    committee: &Committee<Bls<MinPk>>,
+    proof: &Lqc<Bls<MinPk>, Sha256Digest>,
     tips: Vec<BlockRef<Sha256Digest>>,
 ) -> FinalityFact<Sha256Digest> {
     let leader = proof.leader();
@@ -404,7 +409,7 @@ async fn recover(
 
 async fn genesis_actor(
     context: &deterministic::Context,
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     max: usize,
 ) -> TestSynchronizer {
     let genesis = committee.config.genesis();
@@ -429,7 +434,7 @@ async fn genesis_actor(
     actor
 }
 
-async fn commit_opening<I: Absorb<MinPk, Sha256Digest>>(
+async fn commit_opening<I: Absorb<Bls<MinPk>, Sha256Digest>>(
     actor: &mut TestCore<I>,
     link: HistoryLink<Sha256>,
 ) {
@@ -448,7 +453,7 @@ fn planned(index: u64, block: &Arc<TestBlock>) -> PlannedOutput<Sha256, TestBody
 
 fn publication(
     outputs: Vec<PlannedOutput<Sha256, TestBody>>,
-) -> PublicationBatch<Sha256, MinPk, TestBody> {
+) -> PublicationBatch<Sha256, Bls<MinPk>, TestBody> {
     let output_bytes = outputs
         .iter()
         .map(|output| output.custody.meta().encoded_len())

@@ -24,12 +24,12 @@ use crate::{
         },
         config::{Error as ConfigError, Profile, Protocol, Role, Tuning},
         machine::Inspection,
-        scheme::bls12381_threshold::Scheme,
+        scheme::{Generic, Scheme},
         storage::{OpenError, Recovered, RecoveryConfig, recover, valid_partition_prefix},
         types::{Activity, Context, EpochGenesis},
     },
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
@@ -70,13 +70,13 @@ fn inflight_application<D: Digest>(profile: &Profile<D>) -> NonZeroUsize {
 }
 
 /// Configuration for one Multimmit engine.
-pub struct Config<H: Hasher, P: PublicKey, V: Variant, A, R, F, T, C, B> {
+pub struct Config<H: Hasher, S: Scheme, A, R, F, T, C, B> {
     /// Cryptographic material for the epoch, holding the
     /// [`Parameters`](crate::multimmit::config::Parameters) the engine runs under.
     ///
     /// A signer runs the engine as the validator it holds keys for; a verifier runs it as an
     /// observer.
-    pub scheme: Scheme<P, V>,
+    pub scheme: Generic<S>,
     /// The epoch's genesis facts, checked against the scheme's parameters.
     pub genesis: EpochGenesis<H::Digest>,
     /// The operator's tuning, from which every internal bound is derived.
@@ -114,28 +114,28 @@ pub struct Config<H: Hasher, P: PublicKey, V: Variant, A, R, F, T, C, B> {
 /// The four network channels one engine runs over, as `(sender, receiver)` pairs.
 ///
 /// Every participant must register the same four distinct channels.
-pub struct Planes<S, R> {
+pub struct Planes<Sn, R> {
     /// Carries transaction-block headers, data-availability votes, and data-availability
     /// certificates.
     ///
     /// Producers publish their blocks here and validators answer with the votes that certify a
     /// block's availability. This is the bulk plane: its traffic scales with application
     /// throughput, so it is kept apart from the messages a round waits on.
-    pub data: (S, R),
+    pub data: (Sn, R),
     /// Carries leader proposals, votes, novotes, and nullify shares.
     ///
     /// The ingress actor batches these for verification before the voter tallies them.
-    pub consensus: (S, R),
+    pub consensus: (Sn, R),
     /// Carries nullifications, V-QCs, and L-QCs.
     ///
     /// Certificates travel apart from individual votes so a node that receives a certificate can
     /// skip the votes it covers.
-    pub certificates: (S, R),
+    pub certificates: (Sn, R),
     /// Carries view-proof requests and responses.
     ///
     /// A node that missed a view fetches the certificate or covering L-QC that crosses it from
     /// its peers here.
-    pub resolver: (S, R),
+    pub resolver: (Sn, R),
 }
 
 /// The engine stopped before it became ready.
@@ -252,13 +252,13 @@ pub(crate) struct ActorLimits {
 
 impl ActorLimits {
     /// Derives every actor setting from `profile`, with `overrides` applied.
-    pub(crate) fn from_profile<V: Variant, D: Digest>(
+    pub(crate) fn from_profile<S: Scheme, D: Digest>(
         profile: &Profile<D>,
         overrides: Overrides,
     ) -> Self {
         let resources = profile.resources();
         Self {
-            ingress: IngressLimits::from_profile::<V, D>(profile),
+            ingress: IngressLimits::from_profile::<S, D>(profile),
             observation_capacity: NonZeroUsize::new(resources.max_verification_batch())
                 .expect("verification batch is non-zero"),
             inflight_verifications: NonZeroUsize::new(resources.max_inflight_verifications())
@@ -273,24 +273,24 @@ impl ActorLimits {
 }
 
 /// Multimmit's actors for one epoch, wired over recovered state but not yet started.
-pub(crate) struct Actors<E, H, P, V, T, C, B, W>
+pub(crate) struct Actors<E, H, P, S, T, C, B, W>
 where
     E: CryptoRng + Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     T: Strategy,
     C: Strategy,
     B: Blocker<PublicKey = P>,
 {
-    pub(crate) ingress: ingress::Actor<E, H, P, V, T, C>,
+    pub(crate) ingress: ingress::Actor<E, H, P, S, T, C>,
     pub(crate) ingress_mailbox: ingress::Mailbox,
-    pub(crate) verifier: verifier::Verifier<E, H, P, V, T, C>,
-    pub(crate) verifier_mailbox: verifier::Mailbox<V, H::Digest>,
-    pub(crate) resolver: resolver::Actor<E, H, P, V, B, T>,
-    pub(crate) resolver_mailbox: resolver::Mailbox<V, H::Digest>,
+    pub(crate) verifier: verifier::Verifier<E, H, S, T, C>,
+    pub(crate) verifier_mailbox: verifier::Mailbox<S, H::Digest>,
+    pub(crate) resolver: resolver::Actor<E, H, P, S, B, T>,
+    pub(crate) resolver_mailbox: resolver::Mailbox<S, H::Digest>,
     pub(crate) voter: W,
-    pub(crate) voter_mailbox: voter::Mailbox<P, V, H::Digest>,
+    pub(crate) voter_mailbox: voter::Mailbox<P, S, H::Digest>,
 }
 
 /// Wires the ingress, verifier, resolver, and voter over `recovered` under `root`, without
@@ -298,26 +298,26 @@ where
 ///
 /// `new_voter` builds the voter from its context, the context that labels its queues, and its
 /// configuration, which lets tests attach hooks.
-pub(crate) fn wire_actors<E, H, P, V, A, R, F, T, C, B, K>(
+pub(crate) fn wire_actors<E, H, P, S, A, R, F, T, C, B, K>(
     root: &E,
-    config: Config<H, P, V, A, R, F, T, C, B>,
+    config: Config<H, S, A, R, F, T, C, B>,
     profile: &Profile<H::Digest>,
-    recovered: Recovered<E, H, V>,
+    recovered: Recovered<E, H, S>,
     limits: ActorLimits,
     new_voter: impl FnOnce(
         E,
         &E,
-        voter::Config<E, H, P, V, A, R, F, T, C, B>,
-    ) -> (voter::Actor<K>, voter::Mailbox<P, V, H::Digest>),
-) -> Actors<E, H, P, V, T, C, B, voter::Actor<K>>
+        voter::Config<E, H, P, S, A, R, F, T, C, B>,
+    ) -> (voter::Actor<K>, voter::Mailbox<P, S, H::Digest>),
+) -> Actors<E, H, P, S, T, C, B, voter::Actor<K>>
 where
     E: CryptoRng + Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest>,
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
-    F: Reporter<Activity = Activity<V, H::Digest>>,
+    F: Reporter<Activity = Activity<S, H::Digest>>,
     T: Strategy,
     C: Strategy,
     B: Blocker<PublicKey = P>,
@@ -334,7 +334,7 @@ where
             critical_strategy: config.critical_strategy.clone(),
             codec,
             bounds: codec
-                .encoded_bounds::<V, H::Digest>()
+                .encoded_bounds::<S, H::Digest>()
                 .expect("profile validated encoded protocol bounds"),
             limits: limits.ingress,
             mailbox_size: config.mailbox_size,
@@ -397,39 +397,39 @@ where
 }
 
 /// The voter the engine runs, with no test hooks.
-type Voter<E, H, P, V, A, R, F, T, C, B> = voter::Actor<(E, H, P, V, A, R, F, T, C, B)>;
+type Voter<E, H, P, S, A, R, F, T, C, B> = voter::Actor<(E, H, P, S, A, R, F, T, C, B)>;
 
 /// The actors the engine runs.
-type EngineActors<E, H, P, V, A, R, F, T, C, B> =
-    Actors<E, H, P, V, T, C, B, Voter<E, H, P, V, A, R, F, T, C, B>>;
+type EngineActors<E, H, P, S, A, R, F, T, C, B> =
+    Actors<E, H, P, S, T, C, B, Voter<E, H, P, S, A, R, F, T, C, B>>;
 
 /// Multimmit's actors for one epoch, recovered and wired but not yet running.
-pub struct Engine<E, H, P, V, A, R, F, T, C, B>
+pub struct Engine<E, H, P, S, A, R, F, T, C, B>
 where
     E: CryptoRng + Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest>,
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
-    F: Reporter<Activity = Activity<V, H::Digest>>,
+    F: Reporter<Activity = Activity<S, H::Digest>>,
     T: Strategy,
     C: Strategy,
     B: Blocker<PublicKey = P>,
 {
     context: ContextCell<E>,
-    actors: EngineActors<E, H, P, V, A, R, F, T, C, B>,
+    actors: EngineActors<E, H, P, S, A, R, F, T, C, B>,
 }
 
-impl<E, H, P, V, A, R, F, T, C, B> Engine<E, H, P, V, A, R, F, T, C, B>
+impl<E, H, P, S, A, R, F, T, C, B> Engine<E, H, P, S, A, R, F, T, C, B>
 where
     E: CryptoRng + Spawner + StorageContext,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest>,
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
-    F: Reporter<Activity = Activity<V, H::Digest>>,
+    F: Reporter<Activity = Activity<S, H::Digest>>,
     T: Strategy,
     C: Strategy,
     B: Blocker<PublicKey = P>,
@@ -445,7 +445,7 @@ where
     /// and another [`OpenError`] when durable state cannot be opened or recovered.
     pub async fn open(
         context: E,
-        config: Config<H, P, V, A, R, F, T, C, B>,
+        config: Config<H, S, A, R, F, T, C, B>,
     ) -> Result<Self, OpenError> {
         // Boxed so callers can await `open` without boxing a large future themselves.
         Box::pin(Self::open_with(context, config, Overrides::default())).await
@@ -464,12 +464,12 @@ where
     )]
     pub(crate) async fn open_with(
         context: E,
-        config: Config<H, P, V, A, R, F, T, C, B>,
+        config: Config<H, S, A, R, F, T, C, B>,
         overrides: Overrides,
     ) -> Result<Self, OpenError> {
         let profile = derive_profile(&config)?;
         let mut context = ContextCell::new(context);
-        let limits = ActorLimits::from_profile::<V, _>(&profile, overrides);
+        let limits = ActorLimits::from_profile::<S, _>(&profile, overrides);
 
         // Gated startup: recover durable state before any actor exists.
         let recovered = Box::pin(recover(
@@ -499,7 +499,7 @@ where
 
     /// Returns the handle tests use to read the view proofs this engine serves to peers.
     #[cfg(any(test, feature = "mocks"))]
-    pub(crate) fn proofs(&self) -> resolver::Server<V, H::Digest> {
+    pub(crate) fn proofs(&self) -> resolver::Server<S, H::Digest> {
         self.actors.resolver_mailbox.server()
     }
 
@@ -514,9 +514,9 @@ where
     ///
     /// The returned handle's [`Running::ready`] resolves after startup or recovery is durable and
     /// the initial producer wake is submitted.
-    pub fn start<S, Rx>(self, planes: Planes<S, Rx>) -> Running<H::Digest>
+    pub fn start<Sn, Rx>(self, planes: Planes<Sn, Rx>) -> Running<H::Digest>
     where
-        S: Sender<PublicKey = P>,
+        Sn: Sender<PublicKey = P>,
         Rx: Receiver<PublicKey = P>,
     {
         let (ready_sender, ready_receiver) = oneshot::channel();
@@ -599,13 +599,13 @@ where
 ///
 /// The protocol pairs the scheme's parameters with the genesis, and the role follows from the
 /// scheme's key material, so the scheme, protocol, and role cannot disagree.
-pub(crate) fn derive_profile<H, P, V, A, R, F, T, C, B>(
-    config: &Config<H, P, V, A, R, F, T, C, B>,
+pub(crate) fn derive_profile<H, P, S, A, R, F, T, C, B>(
+    config: &Config<H, S, A, R, F, T, C, B>,
 ) -> Result<Profile<H::Digest>, ConfigError>
 where
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
 {
     if !valid_partition_prefix(&config.partition_prefix) {
         return Err(ConfigError::InvalidPartitionPrefix);
@@ -613,7 +613,7 @@ where
     let protocol =
         Protocol::from_parameters(config.scheme.parameters().clone(), config.genesis.clone())?;
     let role = config.scheme.me().map_or(Role::Observer, Role::Validator);
-    Profile::new::<V>(protocol, role, config.tuning)
+    Profile::new::<S>(protocol, role, config.tuning)
 }
 
 #[cfg(test)]

@@ -8,11 +8,12 @@ use super::{
 use crate::{
     multimmit::{
         machine::verification::Observation,
+        scheme::Scheme,
         types::{Artifact, LeaderBlock},
     },
     types::View,
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use std::{collections::BTreeSet, sync::Arc};
 
 /// The certificate kind that exits a view.
@@ -50,15 +51,15 @@ impl ExitKey {
 
 /// A certificate that exits the current view.
 #[derive(Clone, Debug)]
-pub(crate) struct Exit<V: Variant, D: Digest> {
-    pub(crate) proof: Arc<Artifact<V, D>>,
-    pub(crate) rescue: Option<LeaderBlock<V, D>>,
+pub(crate) struct Exit<S: Scheme, D: Digest> {
+    pub(crate) proof: Arc<Artifact<S, D>>,
+    pub(crate) rescue: Option<LeaderBlock<S, D>>,
 }
 
 /// The earliest unforwarded V-QC and nullification of one view, with their observations.
-pub(super) struct ForwardCandidates<V: Variant, D: Digest> {
-    pub(super) vqc: Option<(Observation, Arc<Artifact<V, D>>)>,
-    pub(super) nullification: Option<(Observation, Arc<Artifact<V, D>>)>,
+pub(super) struct ForwardCandidates<S: Scheme, D: Digest> {
+    pub(super) vqc: Option<(Observation, Arc<Artifact<S, D>>)>,
+    pub(super) nullification: Option<(Observation, Arc<Artifact<S, D>>)>,
 }
 
 /// Inserts `view` into `set` when `member` holds and removes it otherwise.
@@ -70,12 +71,12 @@ pub(super) fn set_member(set: &mut BTreeSet<View>, view: View, member: bool) {
     }
 }
 
-impl<V: Variant, D: Digest> ViewState<V, D> {
+impl<S: Scheme, D: Digest> ViewState<S, D> {
     /// Returns the exit `proof` provides for `view`, or `None` if it certifies another view.
     ///
     /// A V-QC exit carries its leader when this validator can still vote in the view, so the node
     /// votes for it before leaving.
-    pub(crate) fn exit(&self, view: View, proof: Arc<Artifact<V, D>>) -> Option<Exit<V, D>> {
+    pub(crate) fn exit(&self, view: View, proof: Arc<Artifact<S, D>>) -> Option<Exit<S, D>> {
         if proof.view() != Some(view) {
             return None;
         }
@@ -90,7 +91,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     /// Returns the next certificate to forward: the earliest unforwarded V-QC or nullification of
     /// the lowest forwardable view, by cohort.
-    pub(crate) fn next_forward(&self) -> Option<Arc<Artifact<V, D>>> {
+    pub(crate) fn next_forward(&self) -> Option<Arc<Artifact<S, D>>> {
         let vqc_view = self.forwardable_vqcs.first().copied();
         let nullification_view = self.forwardable_nullifications.first().copied();
         let ForwardCandidates { vqc, nullification } = match (vqc_view, nullification_view) {
@@ -112,7 +113,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     }
 
     /// Returns the forwarding candidates of `view`.
-    pub(super) fn forward_candidates(&self, view: View) -> ForwardCandidates<V, D> {
+    pub(super) fn forward_candidates(&self, view: View) -> ForwardCandidates<S, D> {
         let mut vqc = (!self.vqc_forwarded(view))
             .then(|| {
                 let (_, record) = self.entry(view)?.vqc.records.first()?;
@@ -168,7 +169,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     fn local_exit_blocks(
         &self,
-        scan: &CertificateScan<V, D>,
+        scan: &CertificateScan<S, D>,
         candidate: ExitKey,
         wait_for_vqc: bool,
         wait_for_nullification: bool,

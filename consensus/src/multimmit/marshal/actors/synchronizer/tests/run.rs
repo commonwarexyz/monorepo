@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::types::Participant;
+use commonware_utils::test_rng;
 
 #[rstest]
 #[case(true, true)]
@@ -135,7 +136,12 @@ fn run_coalesces_finality_before_fetching_history() {
         let higher = Arc::new(
             committee
                 .verifier
-                .assemble_lqc::<Sha256, _>(leader.block().clone(), &votes, &Sequential)
+                .assemble_lqc::<_, Sha256, _>(
+                    &mut test_rng(),
+                    leader.block().clone(),
+                    &votes,
+                    &Sequential,
+                )
                 .unwrap(),
         );
         let parent_record = Arc::new(
@@ -397,7 +403,7 @@ fn synchronization_overflow_coalesces_to_the_highest_view() {
         let id = CertificateId::new(digest(b"overflow target", value));
         let mut batch = FinalityBatch::new(id, Arc::clone(&proof), 1);
         batch.view = View::new(value);
-        Message::<MinPk, Sha256Digest>::handle(
+        Message::<Bls<MinPk>, Sha256Digest>::handle(
             &mut overflow,
             Message::Synchronize {
                 span: Span::none(),
@@ -424,7 +430,7 @@ fn synchronization_overflow_bounds_adversarial_same_view_proofs() {
     let proof = Arc::new(committee.lqc(View::new(1)));
     let mut overflow = VecDeque::new();
     for value in 0..1_000 {
-        Message::<MinPk, Sha256Digest>::handle(
+        Message::<Bls<MinPk>, Sha256Digest>::handle(
             &mut overflow,
             Message::Synchronize {
                 span: Span::none(),
