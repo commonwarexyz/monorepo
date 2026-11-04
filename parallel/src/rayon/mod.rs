@@ -228,7 +228,8 @@ pub struct WorkerPosition {
 }
 
 impl ThreadPoolBuilder {
-    /// Creates a builder for a pool of `num_threads` workers.
+    /// Creates a builder for a pool of `num_threads` workers. The pool spawns one thread per
+    /// worker, or one fewer with [`Self::use_current_thread`].
     pub const fn new(num_threads: NonZeroUsize) -> Self {
         Self {
             num_threads,
@@ -294,8 +295,9 @@ impl ThreadPoolBuilder {
 
     /// Use the current thread as one of the threads in the pool.
     ///
-    /// The current thread is guaranteed to be at index 0, and since the thread is not managed by
-    /// the pool, the start handler does not run for that thread.
+    /// The current thread is worker 0 and counts toward the pool's worker count, so a pool of one
+    /// worker spawns no thread at all. Since the thread is not managed by the pool, the start
+    /// handler does not run for it.
     ///
     /// Note that the current thread won't run the main work-stealing loop, so jobs spawned into
     /// the thread pool will generally not be picked up automatically by this thread unless you
