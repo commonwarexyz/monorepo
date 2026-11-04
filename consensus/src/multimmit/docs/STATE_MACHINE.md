@@ -35,7 +35,9 @@ Protocol terms follow the specification.
 - **Pipeline window (`d_DA`):** set per chain, the most blocks a producer chain may extend above
   its DA-certified anchor, and the most a validator DA-votes there. It defaults to `d`, or one when
   `d = 0`, and may be set wider so a certified-only chain's producer keeps sending blocks ahead of
-  their certificates.
+  their certificates. On a chain with `d = 0` and `e = 0` the producer also counts the window from
+  a block it signed that the current view's anchor places, even when it holds no certificate for
+  it, since such a chain places only certified blocks.
 - **e:** extension bound (`extension_bound`), set per chain, the most blocks a vote may carry for
   the chain above its proposal position. `e = 0` disables extensions.
 - **W:** view retention (`Tuning::view_retention`), the number of views retained below the current
@@ -384,13 +386,15 @@ claims do not enter it.
    of distinct shares it assembles the certificate on the shared strategy; a failed group check
    excludes the attributed signers and waits for a fresh quorum. The certificate returns to Core as
    `CryptoCompletion::DaCertificate`.
-8. Core admits the certificate durably (`Change::DaCertificateAdvanced`) and, on the chain it
-   produces, publishes it. A validator that recovered a receipt chain's certificate admits it
-   without a publication: every correct validator recovers a correct producer's certificate
-   itself, and forwarding hands an unplaced one to upcoming leaders. Core advances the certified
+8. Core admits the certificate durably (`Change::DaCertificateAdvanced`), advances the certified
    anchor monotonically, retires covered block and share publications and obsolete validation work,
    sends the new anchor and choices to the chain plane, and then re-evaluates the next contiguous
-   suffix.
+   suffix. On the chain it produces, it publishes the certificate only once that record is durable:
+   peers retire their share publications when they hold the certificate, so a producer that crashed
+   after publishing it but before its own record was durable could never collect the shares to
+   rebuild it. A validator that recovered a receipt chain's certificate admits it without a
+   publication: every correct validator recovers a correct producer's certificate itself, and
+   forwarding hands an unplaced one to upcoming leaders.
 
 These rules implement the specification's one-vote-per-height, contiguous-path, and depth-`d` DA
 conditions without moving signing authority into the chain plane.
@@ -574,7 +578,8 @@ sweep, dense output, and durable delivery.
    `start_sync`, but an acknowledgement always names the greatest contiguous durable cursor.
 3. A forwarded certificate is structurally paired with its persistence directive. The voter submits
    the directive, installs resolver custody, and only then releases that independently verifiable
-   publication; it does not wait for fsync.
+   publication; it does not wait for fsync. A DA certificate has no resolver custody and waits for
+   the acknowledgement of its own record, like a publication carrying a fresh local signature.
 4. Core accepts only an acknowledgement covering its next expected staged prefix. Old duplicates are
    no-ops; a gap, wrong generation, wrong range, or mismatched live completion is an invariant error.
 5. The acknowledgement (`Input::Persisted`) returns the signing releases, publication installations,
@@ -734,8 +739,9 @@ derives every remaining ceiling before startup.
 - Exactly `W + 1` current/past views are retained, plus the configured bounded future-view distance.
   Advancing a view runs one reference-safe retirement pass even if leader finality is stalled.
 - Each producer has at most its chain's pipeline window of authority-bearing uncertified headers
-  above its certified anchor, and each vote has at most the chain's `e` extension headers per
-  chain. Speculative validation is separately permit bounded.
+  above its certified anchor (on a chain with `d = 0` and `e = 0`, the higher of that anchor and
+  its own block placed by the current view's anchor), and each vote has at most the chain's `e`
+  extension headers per chain. Speculative validation is separately permit bounded.
 - Remote producer blocks and DA votes are admitted only within twice their own chain's pipeline
   window `w` of heights of the chain's certified frontier, the higher of the durable certified tip
   and the newest held DA certificate. A chain position keeps at most two verified blocks, and the

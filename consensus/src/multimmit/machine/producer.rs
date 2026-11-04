@@ -180,7 +180,7 @@ pub struct ProducerProgress {
     chain: ChainId,
     produced: Height,
     certified: Height,
-    window: Height,
+    window_base: Height,
     da_quorum: usize,
     pipeline_window: u64,
     prepared: usize,
@@ -207,10 +207,12 @@ impl ProducerProgress {
         self.certified
     }
 
-    /// Returns the height the pipeline window starts from: the latest locally held DA-certified
-    /// height, or a higher height finality reported for the chain.
-    pub const fn window(self) -> Height {
-        self.window
+    /// Returns the height the pipeline window starts from: the chain's newest certified block,
+    /// which may be its genesis tip or a restored durable tip held without a certificate. On a
+    /// chain with `d = 0` and `e = 0`, a higher placed block the producer signed counts as
+    /// certified.
+    pub const fn window_base(self) -> Height {
+        self.window_base
     }
 
     /// Returns the DA share quorum.
@@ -218,7 +220,7 @@ impl ProducerProgress {
         self.da_quorum
     }
 
-    /// Returns how many blocks the producer builds above its chain's DA-certified anchor (see
+    /// Returns how many blocks the producer builds above [`Self::window_base`] (see
     /// [`PathLimits::pipeline_window`](crate::multimmit::types::PathLimits::pipeline_window)).
     pub const fn pipeline_window(self) -> u64 {
         self.pipeline_window
@@ -316,22 +318,22 @@ impl<D: Digest> ProducerState<D> {
 }
 
 impl<S: Scheme, D: Digest> ChainState<S, D> {
-    /// Returns the own chain's production state, if this node produces. `finalized` is the
-    /// highest final block height finality reported, by chain index.
+    /// Returns the own chain's production state, if this node produces. `placed` is the own
+    /// chain's placed tip, if known (see [`Self::window_base`]).
     pub(crate) fn producer_status<H: Hasher<Digest = D>>(
         &self,
-        finalized: &[Height],
+        placed: Option<BlockRef<D>>,
     ) -> Option<ProducerProgress> {
         let producer = self.producer.as_ref()?;
         let certified = self.da.chains[producer.chain.index()].certified_height();
-        let window = window_base(certified, finalized, producer.chain);
+        let window_base = self.window_base::<H>(producer.chain, placed)?;
         let pipeline_window = self.pipeline_window(producer.chain);
 
         Some(ProducerProgress {
             chain: producer.chain,
             produced: producer.produced.height(),
             certified,
-            window,
+            window_base,
             da_quorum: self.da_quorum,
             pipeline_window,
             prepared: producer.prepared.len(),
@@ -339,13 +341,60 @@ impl<S: Scheme, D: Digest> ChainState<S, D> {
                 .planned_tip::<H>()
                 .height()
                 .get()
-                .saturating_sub(window.get())
+                .saturating_sub(window_base.get())
                 >= pipeline_window,
             wake: producer.wake,
             timer_armed: producer.deadline.is_some(),
             build_pending: producer.pending_build.is_some(),
             production_credit: producer.production_credit,
         })
+    }
+
+    /// Returns the local producer's chain when it has `d = 0` and `e = 0`, so a placement of its
+    /// blocks certifies them (see [`Self::window_base`]).
+    ///
+    /// With `e > 0`, vote extensions can make an uncertified block a V-QC's safe tip.
+    pub(crate) fn certified_only_producer_chain(&self) -> Option<ChainId> {
+        let chain = self.producer.as_ref()?.chain;
+        let limits = self.chain_limits(chain).ok()?;
+        (limits.certified_only() && limits.extension_bound() == 0).then_some(chain)
+    }
+
+    /// Returns the height `chain`'s pipeline window starts from: its newest certified block, which
+    /// may be its genesis tip or a restored durable tip held without a certificate.
+    ///
+    /// On a chain with `d = 0` and `e = 0`, a higher `placed` tip counts as certified when it is a
+    /// block this producer signed, since such a chain places only certified blocks. The producer
+    /// may hold no certificate for it: on a receipt chain peers recover certificates themselves and
+    /// retire their shares once they record one, and leaders anchor a placed tip without carrying
+    /// its certificate again, so a producer that lost its own record before it was durable would
+    /// otherwise never build again.
+    fn window_base<H: Hasher<Digest = D>>(
+        &self,
+        chain: ChainId,
+        placed: Option<BlockRef<D>>,
+    ) -> Option<Height> {
+        let certified = self
+            .da
+            .chains
+            .get(chain.index())?
+            .certified
+            .last_key_value()
+            .map(|(height, _)| *height)?;
+        let Some(placed) = placed.filter(|placed| {
+            placed.chain() == chain
+                && placed.height() > certified
+                && self.certified_only_producer_chain() == Some(chain)
+        }) else {
+            return Some(certified);
+        };
+        let signed = self.producer.as_ref().is_some_and(|producer| {
+            producer
+                .headers
+                .get(&placed.height())
+                .is_some_and(|header| header.block_ref::<H>() == placed)
+        });
+        Some(if signed { placed.height() } else { certified })
     }
 
     /// Latches one coalescible opportunity for the producer to build.
@@ -652,17 +701,18 @@ impl<S: Scheme, D: Digest> ChainState<S, D> {
     }
 
     /// Issues the next build when production credit, the pipeline window and the producer's
-    /// state all allow one. `finalized` is the highest final block height finality reported, by
-    /// chain index.
+    /// state all allow one. `placed` is the own chain's placed tip, if known (see
+    /// [`Self::window_base`]).
     pub(crate) fn drive<H: Hasher<Digest = D>>(
         &mut self,
         generation: Generation,
-        finalized: &[Height],
+        placed: Option<BlockRef<D>>,
     ) -> Result<(), ChainError> {
         let Some(chain) = self.producer.as_ref().map(|producer| producer.chain) else {
             return Ok(());
         };
         let window = self.pipeline_window(chain);
+        let base = self.window_base::<H>(chain, placed);
         let Some(producer) = &mut self.producer else {
             return Ok(());
         };
@@ -675,18 +725,13 @@ impl<S: Scheme, D: Digest> ChainState<S, D> {
         {
             return Ok(());
         }
-        let certified = self.da.chains[parent.chain().index()]
-            .certified
-            .last_key_value()
-            .map(|(height, _)| *height)
-            .ok_or(ChainError::Context)?;
-        let certified = window_base(certified, finalized, parent.chain());
+        let base = base.ok_or(ChainError::Context)?;
         let next = parent
             .height()
             .get()
             .checked_add(1)
             .ok_or(ChainError::HeightOverflow)?;
-        if next.saturating_sub(certified.get()) > window {
+        if next.saturating_sub(base.get()) > window {
             return Ok(());
         }
         let id = producer
@@ -703,16 +748,4 @@ impl<S: Scheme, D: Digest> ChainState<S, D> {
             .push(Capability::Application(AppJob::Build(job)));
         Ok(())
     }
-}
-
-/// Returns the height the own chain's pipeline window starts from: the newest locally held
-/// certificate, or a higher finalized height.
-///
-/// Finality orders only certified blocks, but a leader anchors an already ordered tip without
-/// carrying its certificate again. A producer that lost its own certificates before they became
-/// durable would otherwise never regain them, and its window would stay full.
-fn window_base(certified: Height, finalized: &[Height], chain: ChainId) -> Height {
-    finalized
-        .get(chain.index())
-        .map_or(certified, |finalized| certified.max(*finalized))
 }
