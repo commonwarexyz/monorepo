@@ -2,10 +2,14 @@
 //!
 //! Every scenario runs complete production engines through [`mocks::cluster::Cluster`]. Schedules
 //! are deterministic per seed; failures replay exactly.
+//!
+//! Protocol scenarios run on the ledger-backed [`Mock`] suite (see [`Suite`]). The cluster smoke
+//! tests and [`n7_f1_cluster_survives_crash_and_recovery`] run complete engines on every real
+//! suite.
 
 use super::{
     mocks::{
-        Bls, Fixture, MockApplication,
+        Bls, Ed25519, Fixture, Mock, MockApplication, Sas,
         cluster::{Cluster, ClusterOptions, Plane},
     },
     test_utils::benchmarks::{
@@ -45,12 +49,19 @@ use std::{
     time::Duration,
 };
 
+/// The suite protocol scenarios run on.
+///
+/// Real signing and verification would dominate these scenarios without changing the protocol
+/// behaviour they check, and none of them asserts encoded sizes or signature semantics beyond what
+/// [`Mock`] models.
+type Suite = Mock;
+
 #[test_traced]
 fn producer_subset_progresses_with_validator_only_nodes() {
     let executor = DeterministicRunner::timed(Duration::from_secs(300));
     executor.start(|context| async move {
         let producers = vec![Participant::new(4), Participant::new(1)];
-        let mut cluster = Cluster::<Bls<MinPk>>::new_with_producers(
+        let mut cluster = Cluster::<Suite>::new_with_producers(
             &context,
             ClusterOptions::new(898, 6),
             producers.clone(),
@@ -130,7 +141,7 @@ fn assert_profile_resource_bounds(
 fn storage_sync_releaser_stops_across_restart() {
     let executor = DeterministicRunner::timed(Duration::from_secs(60));
     executor.start(|context| async move {
-        let mut cluster = Cluster::<Bls<MinPk>>::new(&context, ClusterOptions::new(899, 6)).await;
+        let mut cluster = Cluster::<Suite>::new(&context, ClusterOptions::new(899, 6)).await;
         cluster.set_storage_sync_interval(Duration::from_millis(20));
         cluster.start_one(0).await;
         cluster.await_ready(&[0]).await;
@@ -155,7 +166,7 @@ fn checkpoint_compaction_soak_survives_a_bounded_restart() {
         const MAX_POLLS: usize = 12_000;
 
         let peers = [0usize, 1, 2, 3, 4];
-        let mut cluster = Cluster::<Bls<MinPk>>::new(
+        let mut cluster = Cluster::<Suite>::new(
             &context,
             ClusterOptions {
                 latency: Duration::from_millis(15),
@@ -326,7 +337,7 @@ fn retained_artifacts_plateau_across_retention_windows() {
     executor.start(|context| async move {
         const NODES: usize = 6;
         const RETENTION: u64 = 16;
-        let mut cluster = Cluster::<Bls<MinPk>>::new(
+        let mut cluster = Cluster::<Suite>::new(
             &context,
             ClusterOptions {
                 latency: Duration::from_millis(10),
@@ -340,7 +351,7 @@ fn retained_artifacts_plateau_across_retention_windows() {
             NonZeroU64::new(RETENTION * 4).expect("checkpoint interval is non-zero"),
         );
         let fixture = cluster.fixture();
-        let bounds = Profile::new::<Bls<MinPk>>(
+        let bounds = Profile::new::<Suite>(
             fixture.config.clone(),
             Role::Validator(Participant::new(0)),
             Tuning {
@@ -356,7 +367,7 @@ fn retained_artifacts_plateau_across_retention_windows() {
 
         // Advance every node past `target` while checking every variable-size Inspection field
         // against the same profile-derived ceilings used by the engines.
-        let advance_past = async |cluster: &mut Cluster<Bls<MinPk>>, target: u64| {
+        let advance_past = async |cluster: &mut Cluster<Suite>, target: u64| {
             for _ in 0..4000 {
                 cluster.refresh();
                 context.sleep(Duration::from_millis(50)).await;
@@ -398,6 +409,7 @@ fn retained_artifacts_plateau_across_retention_windows() {
     });
 }
 
+/// Runs on real BLS12-381 keys, so recovery replays persisted real signatures and certificates.
 #[test_traced]
 fn n7_f1_cluster_survives_crash_and_recovery() {
     let executor = DeterministicRunner::timed(Duration::from_secs(600));
@@ -439,7 +451,7 @@ fn run_hailstorm(seed: u64) -> String {
             .with_timeout(Some(Duration::from_secs(900))),
     );
     executor.start(|context| async move {
-        let mut cluster = Cluster::<Bls<MinPk>>::new(
+        let mut cluster = Cluster::<Suite>::new(
             &context,
             ClusterOptions {
                 latency: Duration::from_millis(15),
@@ -522,7 +534,7 @@ fn staggered_startup_recovers_after_initial_asynchrony() {
     let executor = DeterministicRunner::timed(Duration::from_secs(600));
     executor.start(|context| async move {
         const NODES: usize = 6;
-        let mut cluster = Cluster::<Bls<MinPk>>::new(
+        let mut cluster = Cluster::<Suite>::new(
             &context,
             ClusterOptions {
                 latency: Duration::from_millis(40),
@@ -563,7 +575,7 @@ fn staggered_startup_recovers_after_initial_asynchrony() {
 fn n11_f2_finalizes_under_partition_and_heal() {
     let executor = DeterministicRunner::timed(Duration::from_secs(900));
     executor.start(|context| async move {
-        let mut cluster = Cluster::<Bls<MinPk>>::new(
+        let mut cluster = Cluster::<Suite>::new(
             &context,
             ClusterOptions {
                 view_retention: ViewDelta::new(64),
@@ -612,10 +624,9 @@ async fn receipt_chain_finality_without_votes_at_its_producer(
             chain_limits: Some(chain_limits),
             ..ClusterOptions::new(94, 6)
         };
-        finality_without_votes_at_producer::<Bls<MinPk, Binding>>(context, options, target, timeout)
-            .await
+        finality_without_votes_at_producer::<Mock<Binding>>(context, options, target, timeout).await
     } else {
-        finality_without_votes_at_producer::<Bls<MinPk>>(
+        finality_without_votes_at_producer::<Suite>(
             context,
             ClusterOptions::new(94, 6),
             target,
@@ -719,7 +730,7 @@ fn certified_only_chain_without_binding_certificates_stays_live() {
     executor.start(|context| async move {
         let mut chain_limits = vec![PathLimits::new(2, 1); 6];
         chain_limits[CHAIN as usize] = PathLimits::new(0, 0);
-        let mut cluster = Cluster::<Bls<MinPk>>::new(
+        let mut cluster = Cluster::<Suite>::new(
             &context,
             ClusterOptions {
                 chain_limits: Some(chain_limits),
@@ -740,9 +751,9 @@ fn certified_only_chain_without_binding_certificates_stays_live() {
 fn stalled_producer_does_not_block_other_chains() {
     let executor = DeterministicRunner::timed(Duration::from_secs(600));
     executor.start(|context| async move {
-        let mut cluster = Cluster::<Bls<MinPk>>::new(&context, ClusterOptions::new(92, 6)).await;
+        let mut cluster = Cluster::<Suite>::new(&context, ClusterOptions::new(92, 6)).await;
         let fixture = cluster.fixture();
-        let bounds = Profile::new::<Bls<MinPk>>(
+        let bounds = Profile::new::<Suite>(
             fixture.config.clone(),
             Role::Validator(Participant::new(0)),
             Tuning {
@@ -796,7 +807,7 @@ fn stalled_producer_does_not_block_other_chains() {
 fn lossy_jittered_network_converges_after_healing() {
     let executor = DeterministicRunner::timed(Duration::from_secs(900));
     executor.start(|context| async move {
-        let mut cluster = Cluster::<Bls<MinPk>>::new(&context, ClusterOptions::new(93, 6)).await;
+        let mut cluster = Cluster::<Suite>::new(&context, ClusterOptions::new(93, 6)).await;
         cluster.start_all().await;
         cluster.produce_every(5);
 
@@ -827,11 +838,11 @@ fn lossy_jittered_network_converges_after_healing() {
 
 async fn wait_served(
     context: &impl commonware_runtime::Clock,
-    cluster: &Cluster<Bls<MinPk>>,
+    cluster: &Cluster<Suite>,
     node: usize,
     view: View,
     rounds: usize,
-    accepts: impl Fn(&ViewProof<Bls<MinPk>, Sha256Digest>) -> bool,
+    accepts: impl Fn(&ViewProof<Suite, Sha256Digest>) -> bool,
 ) -> bool {
     for _ in 0..rounds {
         if cluster
@@ -857,7 +868,7 @@ fn duplicated_reordered_certificates_converge_after_healing() {
     executor.start(|context| async move {
         const EXTRA: usize = 6;
         const TARGET: usize = 5;
-        let mut cluster = Cluster::<Bls<MinPk>>::new(
+        let mut cluster = Cluster::<Suite>::new(
             &context,
             ClusterOptions {
                 extras: 1,
@@ -1018,7 +1029,7 @@ fn validator_recovers_durable_state_within_retention_window() {
     let executor = DeterministicRunner::timed(Duration::from_secs(900));
     executor.start(|context| async move {
         const RETENTION: u64 = 16;
-        let mut cluster = Cluster::<Bls<MinPk>>::new(
+        let mut cluster = Cluster::<Suite>::new(
             &context,
             ClusterOptions {
                 view_retention: ViewDelta::new(RETENTION),
@@ -1099,7 +1110,7 @@ fn all_validators_recover_durable_timeout_batch_before_certificate() {
         const NODES: usize = 6;
         const EXTRA: usize = NODES;
         let stalled = View::new(1);
-        let mut cluster = Cluster::<Bls<MinPk>>::new(
+        let mut cluster = Cluster::<Suite>::new(
             &context,
             ClusterOptions {
                 extras: 1,
@@ -1127,7 +1138,7 @@ fn all_validators_recover_durable_timeout_batch_before_certificate() {
 
         let bounds = fixture
             .codec()
-            .encoded_bounds::<Bls<MinPk>, Sha256Digest>()
+            .encoded_bounds::<Suite, Sha256Digest>()
             .expect("wire bounds are valid");
         let wire = EnvelopeConfig {
             max_frame_bytes: bounds.max_consensus_frame_bytes(),
@@ -1147,7 +1158,7 @@ fn all_validators_recover_durable_timeout_batch_before_certificate() {
                 },
             };
             let message =
-                Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(message, &wire)
+                Envelope::<ConsensusMessage<Suite, Sha256Digest>>::decode_cfg(message, &wire)
                     .expect("engine emits canonical consensus traffic")
                     .into_payload();
             match message {
@@ -1272,7 +1283,7 @@ fn validator_beyond_retention_resumes_from_covering_lqc_before_new_epoch_bootstr
         const CHECKPOINT_INTERVAL: u64 = 64;
         let peers = [0usize, 1, 2, 3, 4];
 
-        let mut old = Cluster::<Bls<MinPk>>::new(
+        let mut old = Cluster::<Suite>::new(
             &context,
             ClusterOptions {
                 view_retention: ViewDelta::new(RETENTION),
@@ -1389,7 +1400,7 @@ fn validator_beyond_retention_resumes_from_covering_lqc_before_new_epoch_bootstr
         }
         drop(old);
 
-        let mut new = Cluster::<Bls<MinPk>>::new(
+        let mut new = Cluster::<Suite>::new(
             &context,
             ClusterOptions {
                 view_retention: ViewDelta::new(RETENTION),
@@ -1430,7 +1441,7 @@ fn resolver_recovers_exact_view_proof_after_rearmed_restart() {
         const SERVER: usize = 0;
         const TARGET: usize = 5;
         const EXTRA: usize = 6;
-        let mut cluster = Cluster::<Bls<MinPk>>::new(
+        let mut cluster = Cluster::<Suite>::new(
             &context,
             ClusterOptions {
                 extras: 1,
@@ -1512,7 +1523,7 @@ fn authenticated_flood_services_engine_control_and_every_da_chain() {
         const TARGET: usize = 5;
         const EXTRA: usize = 6;
 
-        let mut cluster = Cluster::<Bls<MinPk>>::new(
+        let mut cluster = Cluster::<Suite>::new(
             &context,
             ClusterOptions {
                 extras: 1,
@@ -1624,7 +1635,7 @@ fn finality_keeps_pace_with_production() {
         // Deployment-shaped links: real one-way latency and a per-plane rate limit. Multimmit
         // exits a view as soon as its V-QC forms, so its message rate follows the network rather
         // than a timer, and both of these bound how fast finality can advance.
-        let mut cluster = Cluster::<Bls<MinPk>>::new(
+        let mut cluster = Cluster::<Suite>::new(
             &context,
             ClusterOptions {
                 quota: Quota::per_second(
@@ -1740,7 +1751,7 @@ fn seed_swept_jittered_cluster_stays_live() {
                 .with_timeout(Some(Duration::from_secs(600))),
         );
         executor.start(|context| async move {
-            let mut cluster = Cluster::<Bls<MinPk>>::new(
+            let mut cluster = Cluster::<Suite>::new(
                 &context,
                 ClusterOptions {
                     latency: Duration::from_millis(200),
@@ -1751,7 +1762,7 @@ fn seed_swept_jittered_cluster_stays_live() {
             )
             .await;
             let fixture = cluster.fixture();
-            let bounds = Profile::new::<Bls<MinPk>>(
+            let bounds = Profile::new::<Suite>(
                 fixture.config.clone(),
                 Role::Validator(Participant::new(0)),
                 Tuning {
@@ -1777,11 +1788,12 @@ fn seed_swept_jittered_cluster_stays_live() {
     }
 }
 
-#[test_traced]
-fn minsig_cluster_smoke() {
+/// Starts a six-node cluster on suite `S` and waits until every node finalizes height one on
+/// every chain.
+fn cluster_smoke<S: Fixture>(seed: u64) {
     let executor = DeterministicRunner::timed(Duration::from_secs(600));
     executor.start(|context| async move {
-        let mut cluster = Cluster::<Bls<MinSig>>::new(&context, ClusterOptions::new(83, 6)).await;
+        let mut cluster = Cluster::<S>::new(&context, ClusterOptions::new(seed, 6)).await;
         cluster.start_all().await;
         cluster.produce();
         cluster
@@ -1790,12 +1802,32 @@ fn minsig_cluster_smoke() {
     });
 }
 
+#[test_traced]
+fn minpk_cluster_smoke() {
+    cluster_smoke::<Bls<MinPk>>(82);
+}
+
+#[test_traced]
+fn minsig_cluster_smoke() {
+    cluster_smoke::<Bls<MinSig>>(83);
+}
+
+#[test_traced]
+fn sas_cluster_smoke() {
+    cluster_smoke::<Sas<MinPk>>(85);
+}
+
+#[test_traced]
+fn ed25519_cluster_smoke() {
+    cluster_smoke::<Ed25519>(87);
+}
+
 #[test_group("slow")]
 #[test_traced]
 fn larger_smoke_topology_reaches_finality() {
     let executor = DeterministicRunner::timed(Duration::from_secs(1200));
     executor.start(|context| async move {
-        let mut cluster = Cluster::<Bls<MinPk>>::new(&context, ClusterOptions::new(84, 16)).await;
+        let mut cluster = Cluster::<Suite>::new(&context, ClusterOptions::new(84, 16)).await;
         cluster.start_all().await;
         cluster.produce_once();
         cluster
@@ -1815,7 +1847,7 @@ fn three_sequential_committees_rotate() {
         for epoch_index in 0..3u64 {
             let seed = 86 + epoch_index;
             let options = ClusterOptions::new(seed, 6);
-            let mut cluster = Cluster::<Bls<MinPk>>::new(&context, options).await;
+            let mut cluster = Cluster::<Suite>::new(&context, options).await;
             cluster.start_all().await;
             cluster.produce();
 
@@ -1839,7 +1871,7 @@ fn node_with_hung_verifications_keeps_following_finality() {
     // frontier past its stuck views, and retire the dead work.
     let executor = DeterministicRunner::timed(Duration::from_secs(1800));
     executor.start(|context| async move {
-        let mut cluster = Cluster::<Bls<MinPk>>::new(
+        let mut cluster = Cluster::<Suite>::new(
             &context,
             ClusterOptions {
                 view_retention: ViewDelta::new(16),
@@ -1903,7 +1935,7 @@ fn late_first_start_catches_up_beyond_retention() {
     let executor = DeterministicRunner::timed(Duration::from_secs(1800));
     executor.start(|context| async move {
         let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
-        let mut cluster = Cluster::<Bls<MinPk>>::new_with_producers(
+        let mut cluster = Cluster::<Suite>::new_with_producers(
             &context,
             ClusterOptions {
                 view_retention: ViewDelta::new(16),
@@ -1961,7 +1993,7 @@ fn early_crash_long_gap_restart_catches_up() {
     let executor = DeterministicRunner::timed(Duration::from_secs(1800));
     executor.start(|context| async move {
         let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
-        let mut cluster = Cluster::<Bls<MinPk>>::new_with_producers(
+        let mut cluster = Cluster::<Suite>::new_with_producers(
             &context,
             ClusterOptions {
                 view_retention: ViewDelta::new(16),
@@ -2012,7 +2044,7 @@ fn stranded_follower_with_hung_verifications_rejoins() {
     let executor = DeterministicRunner::timed(Duration::from_secs(1800));
     executor.start(|context| async move {
         let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
-        let mut cluster = Cluster::<Bls<MinPk>>::new_with_producers(
+        let mut cluster = Cluster::<Suite>::new_with_producers(
             &context,
             ClusterOptions {
                 view_retention: ViewDelta::new(16),
