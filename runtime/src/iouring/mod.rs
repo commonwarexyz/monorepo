@@ -92,6 +92,7 @@
 //! ```
 
 mod clock;
+mod deadlines;
 mod driver;
 mod idle;
 mod mailbox;
@@ -107,7 +108,6 @@ pub(crate) mod sockaddr;
 mod spinner;
 mod task;
 mod tasks;
-mod timeout;
 mod waiter;
 mod waker;
 mod wheel;

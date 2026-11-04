@@ -268,10 +268,7 @@ pub mod tests {
 
     /// Limit the driver to one in-flight request.
     fn runner() -> Runner {
-        Runner::new(Config::default().with_ring_config(RingConfig {
-            size: 1,
-            ..Default::default()
-        }))
+        Runner::new(Config::default().with_ring_config(RingConfig { size: 1 }))
     }
 
     /// Connected sockets whose local endpoint can be shared by requests.

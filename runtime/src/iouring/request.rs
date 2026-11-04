@@ -1089,7 +1089,7 @@ mod tests {
     };
 
     /// Waiter state before any deadline or orphan cancellation.
-    const ACTIVE: WaiterState = WaiterState::Active { target_tick: None };
+    const ACTIVE: WaiterState = WaiterState::Active { scheduled: false };
 
     /// Create a socket owner for SQE construction without submitting kernel I/O.
     fn make_socket_fd() -> Arc<OwnedFd> {

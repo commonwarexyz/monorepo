@@ -176,7 +176,6 @@ use super::{
     spinner::{Config as SpinnerConfig, Spinner},
     task::{AfterPoll, Ready, RootWaker, Runnable},
     tasks::Tasks,
-    timeout::TimeoutWheel,
     waker::SUBMISSION_SEQ_MASK,
 };
 #[cfg(feature = "external")]
@@ -233,15 +232,19 @@ use std::{
 /// Maximum task polls or mailbox messages processed before yielding to other work.
 const BATCH_SIZE: usize = 64;
 
+/// Largest network timeout, 30 years of 365 days, which keeps every request
+/// deadline representable.
+const MAX_TIMEOUT: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
+
 /// Pinned future polled as a dedicated worker's root, or the runner's service
 /// task before it becomes a [`Task`](super::task::Task).
 type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-/// Configuration of each worker's io_uring instance and operation timing wheel.
+/// Configuration of each worker's io_uring instance.
 ///
 /// The runtime requires Linux 6.1 or newer and always uses single-issuer mode
 /// with deferred task work. The same configuration applies to pool and
-/// dedicated workers. The wheel horizon is derived from network timeout policy.
+/// dedicated workers.
 #[derive(Clone, Debug)]
 pub struct RingConfig {
     /// SQ size and maximum outstanding operation SQEs, rounded up to a power of two.
@@ -255,19 +258,11 @@ pub struct RingConfig {
     /// all pending CQEs. The runtime relies on the kernel's CQ overflow backlog
     /// (`IORING_FEAT_NODROP`), drained by subsequent completion-service enters.
     pub size: u32,
-    /// Nonzero operation deadline granularity, defaulting to 5 milliseconds.
-    ///
-    /// Smaller ticks improve precision but increase wheel storage and service
-    /// frequency. Configuration must fit within 1,048,576 wheel slots.
-    pub timeout_wheel_tick: Duration,
 }
 
 impl Default for RingConfig {
     fn default() -> Self {
-        Self {
-            size: 128,
-            timeout_wheel_tick: Duration::from_millis(5),
-        }
+        Self { size: 128 }
     }
 }
 
@@ -284,7 +279,7 @@ pub struct Config {
     /// Every Nth poll of a busy pool worker looks at the global queue first,
     /// defaulting to 31.
     global_queue_interval: u32,
-    /// Per-worker io_uring ring capacity and operation wheel tick.
+    /// Per-worker io_uring ring capacity.
     ring_config: RingConfig,
     /// Idle spinning policy, shared by all workers.
     idle_spinner: SpinnerConfig,
@@ -314,7 +309,6 @@ impl Config {
     pub fn new() -> Self {
         let ring_config = RingConfig {
             size: if cfg!(test) { 128 } else { 1024 },
-            ..RingConfig::default()
         };
         let suffix = sys_rng().next_u64();
 
@@ -357,7 +351,7 @@ impl Config {
         self
     }
 
-    /// Set io_uring ring capacity and deadline granularity. See [`RingConfig`].
+    /// Set io_uring ring capacity. See [`RingConfig`].
     pub const fn with_ring_config(mut self, config: RingConfig) -> Self {
         self.ring_config = config;
         self
@@ -401,8 +395,8 @@ impl Config {
 
     /// Set the outbound connection timeout, including queueing and retries.
     ///
-    /// Must be nonzero and no greater than 30 years. The maximum configured
-    /// network timeout must fit the wheel slot limit in [`RingConfig`].
+    /// Must be nonzero and no greater than 30 years. Expiry requires the
+    /// owning worker to serve the connection attempt.
     pub const fn with_connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = timeout;
         self
@@ -410,8 +404,8 @@ impl Config {
 
     /// Set the send and receive timeout, including queueing and partial progress.
     ///
-    /// Must be nonzero and no greater than 30 years. The maximum configured
-    /// network timeout must fit the wheel slot limit in [`RingConfig`].
+    /// Must be nonzero and no greater than 30 years. Expiry requires the
+    /// owning worker to serve the operation.
     pub const fn with_read_write_timeout(mut self, timeout: Duration) -> Self {
         self.read_write_timeout = timeout;
         self
@@ -561,13 +555,10 @@ impl Config {
             !self.read_write_timeout.is_zero(),
             "read/write timeout must be nonzero"
         );
-        TimeoutWheel::validate_layout(self.max_timeout(), self.ring_config.timeout_wheel_tick)
-            .expect("invalid io_uring operation deadline layout");
-    }
-
-    /// Largest network timeout supported by every worker's operation wheel.
-    fn max_timeout(&self) -> Duration {
-        self.connect_timeout.max(self.read_write_timeout)
+        assert!(
+            self.connect_timeout.max(self.read_write_timeout) <= MAX_TIMEOUT,
+            "network timeouts must be at most 30 years"
+        );
     }
 }
 
@@ -1121,12 +1112,7 @@ impl Local {
             Role::Dedicated => (Arc::new(Mailbox::new()?), Arc::new(TimerShard::new())),
         };
         let now = Instant::now();
-        let driver = Driver::new(
-            &shared.cfg.ring_config,
-            shared.cfg.max_timeout(),
-            mailbox.waker.clone(),
-            now,
-        )?;
+        let driver = Driver::new(&shared.cfg.ring_config, mailbox.waker.clone(), now)?;
 
         // Only this worker pushes and pops, while the pool keeps the shared
         // end for thieves.
@@ -2154,13 +2140,12 @@ impl Worker {
 
             // Callbacks and messages can submit I/O or make tasks runnable, so
             // the pre-service idle decision alone is not enough to permit parking.
-            let (ready, needs_kernel, pending_submissions, deadline) = {
-                let mut local = self.local.borrow_mut();
+            let (ready, needs_kernel, pending_submissions) = {
+                let local = self.local.borrow();
                 (
                     local.is_ready(),
                     !local.driver.as_ref().unwrap().is_empty(),
                     local.driver.as_ref().unwrap().has_pending_submissions(),
-                    local.next_deadline(),
                 )
             };
 
@@ -2191,6 +2176,7 @@ impl Worker {
             // at this actual idle boundary after any elapsed callback time.
             // Waiting for an expired deadline would not block, so this ends a
             // search as well, and the catch-up's callbacks run user code.
+            let deadline = self.local.borrow_mut().next_deadline();
             let now = Instant::now();
             if deadline.is_some_and(|deadline| deadline <= now) {
                 if let Some(searcher) = &mut searcher {

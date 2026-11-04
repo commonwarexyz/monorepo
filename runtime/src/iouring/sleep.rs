@@ -47,7 +47,7 @@ use super::{
     clock,
     runtime::{Deferred, Local},
     slab::{Id, Slab},
-    wheel::Wheel,
+    wheel::{BUDGET, Wheel},
 };
 use commonware_utils::sync::Mutex;
 use crossbeam_utils::CachePadded;
@@ -66,13 +66,6 @@ use std::{
 /// Resolution of the sleep wheel in nanoseconds. Rounding a deadline up to it
 /// adds less than the latency of one wake.
 const RES: u64 = 1024;
-
-/// Registrations fired or refiled by one expiry pass of a shard, by its owner
-/// or a rescuing peer. Bounds the work between two task polls, so a storm of
-/// simultaneous deadlines delays other tasks by about one budget of wakes.
-/// Refiles count too, so when expiry reaches a wheel bucket of N later
-/// registrations, other due registrations can wait about N / BUDGET passes.
-pub const BUDGET: u32 = 256;
 
 /// How long a shard's published bound must be overdue before a busy peer
 /// expires its due registrations. An owner whose turns stay short serves a
