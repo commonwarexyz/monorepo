@@ -33,7 +33,7 @@ use commonware_consensus::{
         marshal::{
             self as marshal, Inline, SchemeVerifier, ServiceHandle,
         },
-        mocks::{Committee, MockBody},
+        mocks::{Bls, Committee, MockBody},
         types::{Context as Producing, TransactionBlock},
     },
     types::{EpochDelta, Height, HeightDelta, Participant, ViewDelta},
@@ -84,7 +84,7 @@ const PROBE: u64 = 7;
 const QMDB: u64 = 8;
 
 type Input = TransactionBlock<Sha256, MockBody>;
-type Marshal = marshal::Mailbox<Sha256, MinPk, MockBody>;
+type Marshal = marshal::Mailbox<Sha256, Bls<MinPk>, MockBody>;
 type Scheme = CheckpointScheme<ed25519::PublicKey, MinPk>;
 type Chain = executor::Mailbox<State>;
 type Resolver = qmdb_resolver::Mailbox<Qmdb<deterministic::Context>, mmr::Family, Op, Digest>;
@@ -155,13 +155,13 @@ impl Validator {
 /// A Multimmit committee on a simulated network.
 struct Cluster {
     context: deterministic::Context,
-    committee: Committee<MinPk>,
+    committee: Committee<Bls<MinPk>>,
     oracle: Oracle<ed25519::PublicKey, deterministic::Context>,
 }
 
 impl Cluster {
     async fn new(context: deterministic::Context) -> Self {
-        let committee = Committee::<MinPk>::builder(7, VALIDATORS)
+        let committee = Committee::<Bls<MinPk>>::builder(7, VALIDATORS)
             .namespace(NAMESPACE)
             .build();
         let (network, oracle) = Network::new_with_peers(
@@ -258,7 +258,10 @@ impl Cluster {
                 producer: bridge,
                 mailbox_size: NZUsize!(256),
                 me: Some(identity.clone()),
-                fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                // Far above the link's round trip. A validator that starts behind fetches what it
+                // missed before peers prune it, so an attempt sent to the validator that never
+                // starts must not use up that window.
+                fetch_timeout: NZDuration!(Duration::from_millis(500)),
                 fetch_retry_delay: Duration::from_millis(100),
                 priority_requests: false,
                 priority_responses: false,
@@ -303,10 +306,13 @@ impl Cluster {
                 },
                 mailbox_size: NZUsize!(256),
                 // Multimmit finalizes several blocks a view, so peers must retain a checkpoint's
-                // state for longer than a joining validator waits between sampled targets.
+                // state for longer than a joining validator waits between sampled targets. Marshal
+                // prunes exactly to a floor, so peers also keep enough inputs for a validator that
+                // starts behind to fetch what it missed, even after a few attempts time out
+                // against the validator that never starts.
                 prune_config: Some(PruneConfig {
                     maintenance_interval: NZUsize!(4),
-                    retained_marshal_blocks: 64,
+                    retained_marshal_blocks: 512,
                     retained_qmdb_blocks: 64,
                 }),
                 strategy: Sequential,
@@ -397,7 +403,7 @@ impl Cluster {
         // The engine orders the blocks the inline producer builds.
         let engine = multimmit::Engine::open(
             context.child("engine"),
-            multimmit::Config::<Sha256, _, _, _, _, _, _, _, _> {
+            multimmit::Config::<Sha256, _, _, _, _, _, _, _> {
                 scheme: self.committee.signers[index].clone(),
                 genesis: self.committee.config.genesis().clone(),
                 tuning: Tuning {
@@ -466,16 +472,16 @@ fn validators_execute_certify_and_prune_one_chain() {
         }
         // The run is long enough for pruning to reach blocks the engine still verifies: pruning
         // those would stall the chain.
-        until_applied(&context, validators.iter().map(|v| &v.tally), 300).await;
+        until_applied(&context, validators.iter().map(|v| &v.tally), 1_000).await;
 
         // Every validator executed the same chain, and certified checkpoints of it.
         let reference = validators[0]
             .chain
-            .block_at(Height::new(300))
+            .block_at(Height::new(1_000))
             .await
             .unwrap();
         for validator in &validators {
-            let block = validator.chain.block_at(Height::new(300)).await.unwrap();
+            let block = validator.chain.block_at(Height::new(1_000)).await.unwrap();
             assert_eq!(block, reference);
             let latest = validator
                 .checkpoints
