@@ -7,7 +7,7 @@
 //! continuation remain covered by the native tests. A Local idle exit starts after that choice,
 //! before the idle count is decremented. Running job bodies are outside the model.
 //!
-//! The models use two or three groups, at most four threads, one wide job, and a preemption
+//! The models use two or three groups, at most four threads, one Wide job, and a preemption
 //! bound of three. They check finite wake handoffs under eventual scheduling of runnable workers.
 //! They do not model unbounded job streams or progress through blocking job bodies.
 
@@ -104,7 +104,7 @@ impl Injector {
     }
 }
 
-/// Per-worker wide queue exposed to the shared registry code.
+/// Per-worker Wide queue exposed to the shared registry code.
 struct ThreadInfo {
     wide: Queue,
 }
@@ -223,7 +223,7 @@ fn select_local(registry: &Registry, group: usize, offset: usize) -> IdleState {
     idle
 }
 
-/// A wide injection cannot leave its only available worker asleep.
+/// A Wide injection cannot leave its only available worker asleep.
 #[test]
 fn injection_races_sleep() {
     for groups in [2, 3] {
@@ -251,19 +251,19 @@ fn injection_races_sleep() {
     }
 }
 
-/// A Local idle exit transfers concurrent wide work to an available group.
+/// A Local idle exit transfers concurrent Wide work to an available group.
 #[test]
 fn injection_races_local_idle_exit() {
     for groups in [2, 3] {
         model(move || {
             // Park the last group's worker, then stop group 0's worker between selecting
-            // Local work and leaving idle. No other worker can take the wide job.
+            // Local work and leaving idle. No other worker can take the Wide job.
             let registry = Registry::new(&vec![1; groups]);
             let remote = worker(&registry, groups - 1, 0);
             wait_for_sleep(&registry, groups - 1);
             let _idle = select_local(&registry, 0, 0);
 
-            // Race the idle decrement and wide-queue check against publication.
+            // Race the idle decrement and Wide queue check against publication.
             let leaving = {
                 let registry = Arc::clone(&registry);
                 loom_thread::spawn(move || registry.work_found(0, Tag::Local))
@@ -285,12 +285,12 @@ fn injection_races_local_idle_exit() {
     }
 }
 
-/// A woken peer that chooses Local work still passes wide work to another group.
+/// A woken peer that chooses Local work still passes Wide work to another group.
 #[test]
 fn injection_races_local_wake_handoff() {
     model(|| {
         // Park group 0's second worker and the last group's worker. The middle group
-        // stays occupied, so wide coverage may need to pass through two Local exits.
+        // stays occupied, so Wide coverage may need to pass through two Local exits.
         let registry = Registry::new(&[2, 1, 1]);
         let local = worker(&registry, 0, 1);
         let remote = worker(&registry, 2, 0);
@@ -310,7 +310,7 @@ fn injection_races_local_wake_handoff() {
         registry.inject_wide(0);
         leaving.join().unwrap();
 
-        // Completing Local work cannot discharge the wide job, so the last group's sleeper
+        // Completing Local work cannot discharge the Wide job, so the last group's sleeper
         // must also be woken and consume it.
         assert_eq!(local.join().unwrap(), Tag::Local);
         assert_eq!(

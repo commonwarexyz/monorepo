@@ -1710,7 +1710,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     self.resolve_placement()
                 }
                 None => {
-                    // A local body first tries to use or establish a home in the caller's domain,
+                    // A Local body first tries to use or establish a home in the caller's domain,
                     // then falls back to the least loaded full-width group. Only a strategy with
                     // several groups places a body on the whole pool.
                     if plan.placement == policy::Placement::Local {
@@ -1883,7 +1883,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         let job_start = worker_recorder.is_some().then(Instant::now);
 
                         // Local descendants stay in the group of the worker that claimed the root.
-                        // A root that starts on a group not preferred for local work, such as a
+                        // A root that starts on a group not preferred for Local work, such as a
                         // narrower one that cannot supply the learned width, executes Wide without
                         // training the descendant-placement estimate.
                         let mut plan = plan;
@@ -2449,8 +2449,8 @@ mod test {
     }
 
     /// A placed call from a thread whose domain has no home, or is unknown, still compares one
-    /// group with the whole pool. Its local runs take the least loaded full-width group, even
-    /// while every full-width group is busy, never the narrower final group, and record local
+    /// group with the whole pool. Its Local runs take the least loaded full-width group, even
+    /// while every full-width group is busy, never the narrower final group, and record Local
     /// samples. No group moves or gains a home.
     #[test]
     fn unhomed_calls_compare_remote_group() {
@@ -2486,7 +2486,7 @@ mod test {
                 "{caller:?}: local runs must use a full-width group: {local:?}"
             );
 
-            // The local run was recorded.
+            // The Local run was recorded.
             let (_, local_ns) = strategy
                 .policy
                 .as_ref()
@@ -2613,7 +2613,7 @@ mod test {
     }
 
     /// A worker's sort, stable or unstable, with or without a policy, compares under the placement
-    /// of the job the worker runs, whether that placement is local or wide.
+    /// of the job the worker runs, whether that placement is Local or Wide.
     #[test]
     fn sort_inherits_worker_placement() {
         let grouped = synthetic(&[2, 2]);
@@ -2866,7 +2866,7 @@ mod test {
 
         let strategy = synthetic(&[2, 2]);
 
-        // A lease from domain 0 homes the first group and holds it, so a local join from domain 1
+        // A lease from domain 0 homes the first group and holds it, so a Local join from domain 1
         // homes the second.
         crate::topology::Groups::fake_domain(Some(0));
         let held = strategy.groups.local().unwrap();
@@ -2956,7 +2956,7 @@ mod test {
     }
 
     /// On a strategy with one group, a collection operation from a thread outside the pool runs
-    /// every item on the pool's workers and none on the calling thread, since its local and wide
+    /// every item on the pool's workers and none on the calling thread, since its Local and Wide
     /// placements name the same workers.
     #[test]
     fn single_group_calls_use_pool_workers() {
@@ -2976,7 +2976,7 @@ mod test {
         assert_eq!(on_caller.into_inner(), 0);
     }
 
-    /// An external root whose preferred group is busy with wide work starts on a worker of the
+    /// An external root whose preferred group is busy with Wide work starts on a worker of the
     /// other group and runs Local there, as does its nested job. Dropping its result future
     /// leaves its claim on that group in place until the root finishes.
     #[commonware_macros::test_group("miri")]
@@ -3298,7 +3298,7 @@ mod test {
     }
 
     /// A job a worker spawns runs under the placement of the job the worker runs: on the worker's
-    /// group under a local placement, and anywhere in the pool under a wide one.
+    /// group under a Local placement, and anywhere in the pool under a Wide one.
     #[test]
     fn spawn_inherits_worker_placement() {
         // Without a policy, every job is handed off to the pool rather than run inline.
@@ -3311,11 +3311,11 @@ mod test {
             })
         };
 
-        // A job spawned under a local placement stays on the worker's group.
+        // A job spawned under a Local placement stays on the worker's group.
         let local = Placement::Local(1);
         assert_eq!(spawn_under(local), Some(local));
 
-        // A job spawned under a wide placement stays on the whole pool.
+        // A job spawned under a Wide placement stays on the whole pool.
         assert!(matches!(
             spawn_under(Placement::Wide { near: 0 }),
             Some(Placement::Wide { .. })

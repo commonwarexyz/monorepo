@@ -52,7 +52,7 @@ pub(crate) enum Placement {
 /// `Local` always means the worker's own group.
 ///
 /// Each queue stamps the jobs it receives with its tag, and a worker runs a job it takes under that
-/// tag. Local deques, group injectors, and broadcast deques stamp `Local`. Wide deques and the wide
+/// tag. Local deques, group injectors, and broadcast deques stamp `Local`. Wide deques and the Wide
 /// injector stamp `Wide`.
 ///
 /// ```text
@@ -71,21 +71,21 @@ pub(crate) enum Placement {
 /// A job placed [`Placement::Local`] on group `g` runs only on a worker of `g`, because every path
 /// that moves it between threads keeps it there:
 ///
-/// - Only workers of `g` pop `g`'s injector or steal from its workers' local deques, so jobs
+/// - Only workers of `g` pop `g`'s injector or steal from its workers' Local deques, so jobs
 ///   injected into `g`, and the jobs their `Local` descendants push, run as `Local` in `g`. A
 ///   worker of `g` that installs or spawns such a job runs or pushes it itself.
 /// - Join's inline pop runs job b on the worker that pushed it, under the tag b was pushed under,
 ///   since every later tag change is undone before the pop, also by unwinding.
 /// - A broadcast job runs as `Local` on the worker whose broadcast deque holds it.
-/// - Wide deques and the wide injector receive only jobs placed [`Placement::Wide`] and the jobs
+/// - Wide deques and the Wide injector receive only jobs placed [`Placement::Wide`] and the jobs
 ///   that `Wide` jobs push.
 /// - An install on `g` from a thread outside `g` injects into `g`'s injector. While it waits,
 ///   that thread helps only with jobs of its own pool that its own group may take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Tag {
-    /// Pushes go to the worker's local deque, which only its group-mates steal from.
+    /// Pushes go to the worker's Local deque, which only its group-mates steal from.
     Local,
-    /// Pushes go to the worker's wide deque, which any worker steals from.
+    /// Pushes go to the worker's Wide deque, which any worker steals from.
     Wide,
 }
 
@@ -154,7 +154,7 @@ pub(super) struct Registry {
 /// notification reaches only the group's sleep protocol. That protocol runs upstream's code over
 /// exactly those workers, so upstream's argument that no wakeup is lost holds for such a job.
 ///
-/// Every worker of the group searches its group-mates' local deques and its group's incoming queue,
+/// Every worker of the group searches its group-mates' Local deques and its group's incoming queue,
 /// and a sleeper's final check reads that queue.
 struct Group {
     /// Governs when the group's workers sleep and wake, indexed by their offset in the group.
@@ -429,6 +429,11 @@ impl Registry {
         }
     }
 
+    /// Injects `op` under `placement` and blocks until a worker has run it.
+    ///
+    /// # Safety
+    ///
+    /// The calling thread must not be a worker of any pool.
     #[cold]
     unsafe fn in_worker_cold<OP, R>(&self, placement: Placement, op: OP) -> R
     where
@@ -460,6 +465,12 @@ impl Registry {
         })
     }
 
+    /// Injects `op` under `placement` and runs other eligible work on `current_thread` until a
+    /// worker has run it.
+    ///
+    /// # Safety
+    ///
+    /// `current_thread` must be the calling thread's worker state.
     #[cold]
     unsafe fn in_worker_cross<OP, R>(
         &self,
@@ -552,10 +563,10 @@ struct ThreadInfo {
     /// reaches zero.
     terminate: OnceLatch,
 
-    /// The end of the worker's local deque that its group-mates steal from.
+    /// The end of the worker's Local deque that its group-mates steal from.
     local: Stealer<JobRef>,
 
-    /// The end of the worker's wide deque that any worker can steal from.
+    /// The end of the worker's Wide deque that any worker can steal from.
     wide: Stealer<JobRef>,
 }
 
@@ -571,10 +582,10 @@ impl ThreadInfo {
 }
 
 pub(super) struct WorkerThread {
-    /// The local deque this worker pushes to, which only its group-mates steal from.
+    /// The Local deque this worker pushes to, which only its group-mates steal from.
     local: Worker<JobRef>,
 
-    /// The wide deque this worker pushes to, which any worker can steal from.
+    /// The Wide deque this worker pushes to, which any worker can steal from.
     wide: Worker<JobRef>,
 
     /// The end of this worker's broadcast deque that it takes jobs from.
@@ -728,6 +739,10 @@ impl WorkerThread {
     }
 
     /// Pushes a job onto the deque for the current tag.
+    ///
+    /// # Safety
+    ///
+    /// `job` must stay valid until it executes.
     #[inline]
     pub(super) unsafe fn push(&self, job: JobRef) {
         // SAFETY: the caller keeps the job valid until it executes.
@@ -735,6 +750,10 @@ impl WorkerThread {
     }
 
     /// Pushes a job onto the deque of `tag` and notifies the workers that may steal it.
+    ///
+    /// # Safety
+    ///
+    /// `job` must stay valid until it executes.
     #[inline]
     pub(super) unsafe fn push_as(&self, tag: Tag, job: JobRef) {
         match tag {
@@ -887,9 +906,9 @@ impl WorkerThread {
     /// The waiting worker's placement only orders its own two deques, and each descendant is queued
     /// where an eligible searching worker reaches it:
     ///
-    /// - A `Local` descendant sits in a local deque or the injector of our group, where our group's
+    /// - A `Local` descendant sits in a Local deque or the injector of our group, where our group's
     ///   searches reach it.
-    /// - A `Wide` descendant sits in a wide deque or the wide injector, where every search reaches
+    /// - A `Wide` descendant sits in a Wide deque or the Wide injector, where every search reaches
     ///   it.
     /// - A descendant placed on another group `h` sits where the searches of `h`'s workers reach
     ///   it, and each of them is running a job or searching. The waiting ancestor meanwhile helps
@@ -922,10 +941,10 @@ impl WorkerThread {
         });
     }
 
-    /// Try to steal a single job from the local deque of one of our group-mates and return it.
+    /// Try to steal a single job from the Local deque of one of our group-mates and return it.
     ///
     /// This should only be done as a last resort, when there is no
-    /// local work to do.
+    /// Local work to do.
     fn steal_local(&self) -> Option<JobRef> {
         // we only steal when we don't have any work to do locally
         debug_assert!(self.deques_are_empty());
@@ -962,7 +981,7 @@ impl WorkerThread {
         }
     }
 
-    /// Try to steal a single job from the wide deque of another worker and return it, trying our
+    /// Try to steal a single job from the Wide deque of another worker and return it, trying our
     /// group-mates first and then the rest of the pool.
     ///
     /// This should only be done as a last resort, when there is no

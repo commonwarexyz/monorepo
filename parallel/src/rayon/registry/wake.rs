@@ -1,6 +1,6 @@
-//! Routes wakeups for wide work between the worker groups of a registry.
+//! Routes wakeups for Wide work between the worker groups of a registry.
 //!
-//! Each group runs the sleep protocol on its own counters. A wide job is offered to one group first
+//! Each group runs the sleep protocol on its own counters. A Wide job is offered to one group first
 //! and then to the others in cyclic order. A worker that leaves the idle state can pass the wakeup
 //! on to the next group. Paired fences keep an injected job visible to every worker the walk
 //! counted as idle or sleeping.
@@ -29,12 +29,12 @@ impl Registry {
     ///
     /// Coverage reserves no worker, so a covering worker may take other work. On either exit from
     /// the idle loop, `work_found` wakes local sleepers first. If none wake, starting or resuming
-    /// wide work continues the chain in other groups, and so does local work while wide work
-    /// remains queued. A worker that stays idle searches every wide queue before sleeping.
+    /// Wide work continues the chain in other groups, and so does Local work while Wide work
+    /// remains queued. A worker that stays idle searches every Wide queue before sleeping.
     ///
     /// [`Self::new_injected_wide_job`] fences once before the walk reads any group's counters. That
     /// fence pairs with a sleeper's fence between registering as asleep and checking its queues,
-    /// and with an idle exit's fence between decrementing the idle count and checking wide queues.
+    /// and with an idle exit's fence between decrementing the idle count and checking Wide queues.
     ///
     /// Together they keep a queued injection visible to every worker its publisher counted idle.
     /// Internal pushes use upstream's lighter protocol, since the publishing worker can pop its own
@@ -52,7 +52,7 @@ impl Registry {
         }
     }
 
-    /// Signals that a job was pushed into the wide injector, then offers it as
+    /// Signals that a job was pushed into the Wide injector, then offers it as
     /// [`Self::new_wide_job`] does.
     #[inline]
     pub(super) fn new_injected_wide_job(&self, near: usize, queue_was_empty: bool) {
@@ -62,7 +62,7 @@ impl Registry {
         self.new_wide_job(near, queue_was_empty);
     }
 
-    /// Leaves the idle state and continues the wake chain for wide work.
+    /// Leaves the idle state and continues the wake chain for Wide work.
     #[inline]
     pub(super) fn work_found(&self, group: usize, tag: Tag) {
         if self.groups[group].sleep.work_found() || self.groups.len() == 1 {

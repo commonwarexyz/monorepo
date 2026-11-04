@@ -4,8 +4,8 @@
 //! threads in one domain, and the scheduler does not know which threads share data.
 //!
 //! A strategy therefore splits its pool's workers into groups sized from the domain with the most
-//! allowed CPUs (the CPUs the building thread may use). A call runs its work on one group as local
-//! work, or on the whole pool as wide work.
+//! allowed CPUs (the CPUs the building thread may use). A call runs its work on one group as Local
+//! work, or on the whole pool as Wide work.
 //!
 //! # Homes
 //!
@@ -15,7 +15,7 @@
 //! reject it, so placement is advisory.
 //!
 //! When the parallelism is not a multiple of the group width, the last group is narrower. It is
-//! never homed or leased for local work, so local work always has the width the policy planned.
+//! never homed or leased for Local work, so Local work always has the width the policy planned.
 //!
 //! ```text
 //! host: three eight-CPU LLCs     strategy(16): one pool, groups of 7 + 7 + 2
@@ -34,7 +34,7 @@
 //! Wide: any worker in groups 0, 1, or 2
 //! ```
 //!
-//! Without fixed homes (below), groups start unhomed. The first local call from a domain can
+//! Without fixed homes (below), groups start unhomed. The first Local call from a domain can
 //! permanently home an idle group there, if the pool's initial mask is known and allows a CPU in
 //! that domain for each of the group's workers. Those workers apply the request asynchronously.
 //!
@@ -82,7 +82,7 @@
 //!
 //! In a pool with several groups, each group admits at most one such job per worker to learn
 //! whether its descendants run on the starting worker's group or on the whole pool. Excess jobs,
-//! and jobs that start on the narrower group, run wide.
+//! and jobs that start on the narrower group, run Wide.
 //!
 //! ```text
 //! job from thread T in domain D
@@ -565,8 +565,8 @@ pub(crate) struct Group {
     /// The number of workers in the group.
     width: usize,
 
-    /// Whether the group can be homed and is preferred for local work. It must be as wide as the
-    /// first group and have more than one worker. Another group takes local work only when no
+    /// Whether the group can be homed and is preferred for Local work. It must be as wide as the
+    /// first group and have more than one worker. Another group takes Local work only when no
     /// group qualifies, as in a pool of one worker.
     placeable: bool,
 
@@ -612,7 +612,7 @@ impl Group {
         self.width
     }
 
-    /// Whether the group can be homed and is preferred for local work.
+    /// Whether the group can be homed and is preferred for Local work.
     pub(crate) const fn placeable(&self) -> bool {
         self.placeable
     }
@@ -648,14 +648,14 @@ impl std::fmt::Debug for Groups {
     }
 }
 
-/// Counts one call or job against a group, or against every group for a wide claim, until the
+/// Counts one call or job against a group, or against every group for a Wide claim, until the
 /// lease is dropped. An unhomed group with work in flight cannot acquire a home.
 #[derive(Debug)]
 pub(crate) struct Lease {
     /// The groups the claim counts against.
     groups: Arc<Groups>,
 
-    /// The leased group, or for a wide claim the group its work is offered to first.
+    /// The leased group, or for a Wide claim the group its work is offered to first.
     index: usize,
 
     /// Whether the claim counts against every group.
@@ -880,8 +880,8 @@ impl Groups {
         }
     }
 
-    /// Claims a group for a local call from the calling thread. The call takes the group homed in
-    /// the thread's domain, or homes the first idle, unhomed group that can take local work. A new
+    /// Claims a group for a Local call from the calling thread. The call takes the group homed in
+    /// the thread's domain, or homes the first idle, unhomed group that can take Local work. A new
     /// home requires enough allowed CPUs for every worker in the group. Returns `None` when the
     /// thread's domain is unknown or no group can serve it.
     pub(crate) fn local(self: &Arc<Self>) -> Option<Lease> {
@@ -929,7 +929,7 @@ impl Groups {
 
         // Home the first idle, unhomed placeable group and queue its mask requests before releasing
         // the homing lock. Each worker applies them after its own deques drain, so a worker that is
-        // already searching may take local work before its new mask applies.
+        // already searching may take Local work before its new mask applies.
         for (index, group) in self
             .groups
             .iter()
@@ -1028,7 +1028,7 @@ impl Groups {
         }
     }
 
-    /// Claims a group for a caller without a usable home, preferring groups that can take local
+    /// Claims a group for a caller without a usable home, preferring groups that can take Local
     /// work, then fewer calls and jobs in flight to limit contention, then the least recent claim.
     /// Recency steers fallback work away from groups whose callers were recently active.
     pub(crate) fn least_loaded(self: &Arc<Self>) -> Lease {
@@ -1172,7 +1172,7 @@ mod tests {
         }
     }
 
-    /// The first local call from a domain homes an idle group there, a second call from the same
+    /// The first Local call from a domain homes an idle group there, a second call from the same
     /// domain reuses it while the first is in flight, and both leases release their claims.
     #[test]
     fn local_homes_and_reuses_idle_group() {
@@ -1264,7 +1264,7 @@ mod tests {
     fn local_homes_only_idle_groups() {
         let groups = synthetic(&[2, 2]);
 
-        // Group 0 takes a home, and a wide call keeps group 1 busy while domain 1 looks for one.
+        // Group 0 takes a home, and a Wide call keeps group 1 busy while domain 1 looks for one.
         Groups::fake_domain(Some(0));
         drop(groups.local().unwrap());
         let work = groups.wide();
@@ -1273,7 +1273,7 @@ mod tests {
         assert_eq!(groups.groups()[1].home.get().copied(), None);
         assert_eq!(groups.groups()[1].state.lock().in_flight(), 1);
 
-        // Once the wide call finishes, domain 1 homes group 1.
+        // Once the Wide call finishes, domain 1 homes group 1.
         drop(work);
         let lease = groups.local().unwrap();
         assert_eq!(lease.group(), 1);
@@ -1318,7 +1318,7 @@ mod tests {
         assert_eq!(homes, 1, "the domain must have one home group");
     }
 
-    /// A wide claim counts against every group and names the group homed in the caller's domain, or
+    /// A Wide claim counts against every group and names the group homed in the caller's domain, or
     /// the first group when the domain has no home, as the one to offer the work first.
     #[test]
     fn wide_claims_groups_and_prefers_home() {
@@ -1329,13 +1329,13 @@ mod tests {
         Groups::fake_domain(Some(2));
         drop(groups.local().unwrap());
 
-        // The caller's own local call homes the second group in its domain.
+        // The caller's own Local call homes the second group in its domain.
         Groups::fake_domain(Some(0));
         let local = groups.local().unwrap();
         let homed = local.index;
         assert_eq!(homed, 1);
 
-        // A wide claim from that domain counts once against every group and names the home first.
+        // A Wide claim from that domain counts once against every group and names the home first.
         let wide = groups.wide();
         assert!(
             groups
@@ -1380,7 +1380,7 @@ mod tests {
     fn root_avoids_home_leased_by_others() {
         let groups = synthetic(&[2, 2]);
 
-        // The submitter's own local call keeps its root's wakeup preference at home.
+        // The submitter's own Local call keeps its root's wakeup preference at home.
         Groups::fake_domain(Some(0));
         let own = groups.local().unwrap();
         let home = own.index;
@@ -1392,7 +1392,7 @@ mod tests {
         drop(job);
 
         // Another thread in the same domain finds the home group occupied by this thread's work,
-        // so its root prefers waking another group. It then leaves a local call on its home.
+        // so its root prefers waking another group. It then leaves a Local call on its home.
         let other = std::thread::scope(|scope| {
             scope
                 .spawn(|| {
@@ -1411,7 +1411,7 @@ mod tests {
                 .unwrap()
         });
 
-        // The other thread's local call redirects this thread's root until it finishes.
+        // The other thread's Local call redirects this thread's root until it finishes.
         let (job, _) = groups.root();
         assert_ne!(
             job.index, home,
@@ -1435,7 +1435,7 @@ mod tests {
         Groups::fake_domain(None);
     }
 
-    /// Without a home group a job homes an idle group like a local call, and without a known
+    /// Without a home group a job homes an idle group like a Local call, and without a known
     /// domain it takes the least loaded group.
     #[test]
     fn root_homes_or_takes_least_loaded() {
@@ -1481,7 +1481,7 @@ mod tests {
         assert_eq!(groups.least_loaded().group(), 0);
     }
 
-    /// Only external roots use up a group's admissions. Descendant leases and wide calls leave
+    /// Only external roots use up a group's admissions. Descendant leases and Wide calls leave
     /// them free, and a root's admission ends when its own lease drops.
     #[test]
     fn root_admission_excludes_placement_claims() {
@@ -1497,7 +1497,7 @@ mod tests {
             assert_eq!(group.state.lock().in_flight(), 1);
         }
 
-        // Descendant leases and wide calls claim groups without occupying root admissions, and
+        // Descendant leases and Wide calls claim groups without occupying root admissions, and
         // widening an overflowing root takes no admission.
         let child_claims: Vec<_> = (0..3).map(|_| groups.lease(0)).collect();
         let wide_call = groups.wide();
@@ -1587,7 +1587,7 @@ mod tests {
         assert_eq!(groups.groups[0].state.lock().in_flight(), 0);
     }
 
-    /// A group narrower than the first is never homed or leased for local work, while a call on
+    /// A group narrower than the first is never homed or leased for Local work, while a call on
     /// the whole pool still leases it.
     #[test]
     fn narrow_group_takes_only_wide_calls() {
@@ -1600,7 +1600,7 @@ mod tests {
             assert_eq!(held.group(), 0);
 
             // With the full group busy, another domain gets no home group, and neither
-            // `least_loaded` nor a job picks the narrower group. A wide call still leases both.
+            // `least_loaded` nor a job picks the narrower group. A Wide call still leases both.
             Groups::fake_domain(Some(1));
             assert!(groups.local().is_none());
             assert_eq!(groups.least_loaded().group(), 0);
@@ -2221,7 +2221,7 @@ mod tests {
                 .collect()
         }
 
-        /// A local strategy call waits in its group's home domain, and a panicking call still
+        /// A Local strategy call waits in its group's home domain, and a panicking call still
         /// restores the caller's mask. A sort from outside the pool is placed on one group, and
         /// the first call at a call site runs in parallel.
         #[test]
