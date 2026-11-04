@@ -515,6 +515,14 @@ impl<V: Variant> KeyTable<V> {
     }
 }
 
+impl<V: Variant> core::fmt::Debug for KeyTable<V> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("KeyTable")
+            .field("len", &self.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Source of precomputed key multiples for one batch.
 trait Table<V: Variant> {
     /// Returns the row of `key`, if the table holds it.
