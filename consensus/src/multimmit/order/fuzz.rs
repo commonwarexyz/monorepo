@@ -1,6 +1,6 @@
 //! Differential ordering histories with partial iteration and acknowledged-frontier replay.
 
-use super::order::{FinalSweep, HistoryState, Reconciliation, Slot, SlotStream};
+use super::{FinalSweep, HistoryState, Reconciliation, Slot, SlotStream};
 use crate::{
     multimmit::{
         fuzz::ByteSchedule,
