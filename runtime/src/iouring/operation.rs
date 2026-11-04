@@ -505,6 +505,10 @@ pub mod tests {
             assert!(queued.poll_unpin(&mut cx).is_pending());
             assert!(sleep.poll_unpin(&mut cx).is_pending());
 
+            // The sleep's first repoll keeps one clone of a waker that is not
+            // a task waker, so that later repolls can skip its lock.
+            assert!(sleep.poll_unpin(&mut cx).is_pending());
+
             // Equivalent wakers need no replacement for an in-flight request,
             // a queued request, or a registered sleep.
             let clones = callbacks.clones.load(Ordering::Relaxed);
