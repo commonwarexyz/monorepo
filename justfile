@@ -58,10 +58,14 @@ fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 test-benches crate test_flags='' lint_flags='':
     #!/usr/bin/env bash
     set -euo pipefail
-    # Color codes would split the `Running` lines parsed below.
-    list=$(RUSTFLAGS="{{ lint_flags }}" cargo test --color never --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
-    echo "$list" | python3 .github/scripts/lint_benchmark_names.py -
-    all=$(echo "$list" | sed -n 's|.*Running .*/deps/\(.*\)-[a-f0-9]*).*|\1|p')
+    # Listing benchmark names is its own build when lint_flags differ from the run's flags,
+    # so only the first partition lints them.
+    if [[ "{{ partition }}" == 1/* ]]; then
+        # Color codes would break the lines the lint parses.
+        list=$(RUSTFLAGS="{{ lint_flags }}" cargo test --color never --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
+        echo "$list" | python3 .github/scripts/lint_benchmark_names.py -
+    fi
+    all=$(cargo metadata --no-deps --format-version 1 | python3 .github/scripts/bench_targets.py {{ crate }} {{ test_flags }})
     if [ -z "$all" ]; then
         echo "error: no benchmark binaries found for {{ crate }}" >&2
         exit 1
