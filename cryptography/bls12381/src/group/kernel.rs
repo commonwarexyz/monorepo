@@ -57,6 +57,11 @@ const NEGATE_COST: usize = 2;
 /// additions of their own.
 const SUM_BATCH: usize = MAX_LANES;
 
+/// Fewest elements for which [`MultiplyEach`] and [`Msm`] favor the wide representations, whose
+/// pass over every lane costs as much whether the lanes are full or not: below the lane count of
+/// the widest 64-bit representation, a single-element representation finishes sooner.
+const MULTIPLY_BATCH: usize = 8;
+
 /// An operation written once over every base field representation.
 pub trait Kernel: Sized {
     /// The result of the operation.
@@ -429,7 +434,7 @@ impl<G: Group> Kernel for MultiplyEach<'_, G> {
     type Output = ();
 
     fn batch(&self) -> bool {
-        true
+        self.elements.len().min(self.scalars.len()) > MULTIPLY_BATCH
     }
 
     // Debug builds keep this a call so that each representation's frame stays separate.
@@ -767,7 +772,7 @@ impl<G: Group> Kernel for Msm<'_, G> {
     type Output = G;
 
     fn batch(&self) -> bool {
-        true
+        self.elements.len().min(self.scalars.len()) > MULTIPLY_BATCH
     }
 
     // Debug builds keep this a call so that each representation's frame stays separate.
