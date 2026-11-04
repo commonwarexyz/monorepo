@@ -508,6 +508,11 @@ where
         {
             return self.catalog.release(certified.chain(), released);
         }
+        // Marshal orders its output from portable proofs, so placement would only crowd the
+        // hint queue.
+        if matches!(activity, Activity::Placed { .. }) {
+            return Feedback::Ok;
+        }
         // No span here: hints are fire-and-forget, the enqueue never awaits, and `Message::new`
         // already snapshots `Span::current()` so the router can link back to the caller.
         match self

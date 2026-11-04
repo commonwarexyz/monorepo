@@ -25,7 +25,7 @@ type TestArtifact = Artifact<Bls<MinPk>, Digest>;
 type TestLeader = LeaderBlock<Bls<MinPk>, Digest>;
 
 /// Observes, verifies, and settles `artifact`, returning every activity the machine reported.
-fn admit(
+pub(super) fn admit(
     machine: &mut impl Drive<Bls<MinPk>, Digest>,
     artifact: TestArtifact,
 ) -> Vec<TestActivity> {
