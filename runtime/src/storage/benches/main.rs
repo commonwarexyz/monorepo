@@ -72,7 +72,6 @@ fn run_iouring(cfg: &Config) -> Result<Report> {
         .with_storage_directory(cfg.root.clone())
         .with_ring_config(iouring::RingConfig {
             size: cfg.effective_ring_size().unwrap(),
-            ..Default::default()
         });
     if let Some(global_queue_interval) = cfg.global_queue_interval {
         runtime_cfg = runtime_cfg.with_global_queue_interval(global_queue_interval);

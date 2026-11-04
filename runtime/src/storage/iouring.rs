@@ -2138,10 +2138,7 @@ mod tests {
     #[test]
     fn test_queued_write_and_start_sync_finish_through_shutdown() {
         let (blob, handle, directory) = iouring::Runner::new(
-            iouring::Config::default().with_ring_config(iouring::RingConfig {
-                size: 1,
-                ..Default::default()
-            }),
+            iouring::Config::default().with_ring_config(iouring::RingConfig { size: 1 }),
         )
         .start(|_| async {
             let (storage, directory) = create_test_storage();
@@ -3600,10 +3597,7 @@ mod tests {
     #[rstest::rstest]
     fn test_read_many_serves_more_ranges_than_the_ring_holds(#[values(1, 2, 128)] size: u32) {
         // Every ring size here holds fewer entries than the batch has ranges.
-        let config = iouring::Config::default().with_ring_config(iouring::RingConfig {
-            size,
-            ..Default::default()
-        });
+        let config = iouring::Config::default().with_ring_config(iouring::RingConfig { size });
         iouring::Runner::new(config).start(|context| async move {
             // Sixteen 2048-byte chunks, read as 257 ranges cycling through them.
             let data: Vec<u8> = (0..16 * 2048).map(|i| (i % 251) as u8).collect();

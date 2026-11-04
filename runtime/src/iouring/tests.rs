@@ -1004,28 +1004,19 @@ fn test_config_validation_before_startup() {
     assert_eq!(defaults.global_queue_interval(), 31);
     defaults.validate();
 
-    let mut rounded = config().with_ring_config(RingConfig {
-        size: 3,
-        ..RingConfig::default()
-    });
+    let mut rounded = config().with_ring_config(RingConfig { size: 3 });
     rounded.validate();
     assert_eq!(rounded.ring_config.size, 4);
 
     // Rounding must not admit zero or exceed the configured ring-size limit.
     for size in [0, 32_769, u32::MAX] {
-        let mut invalid = config().with_ring_config(RingConfig {
-            size,
-            ..RingConfig::default()
-        });
+        let mut invalid = config().with_ring_config(RingConfig { size });
 
         assert!(catch_unwind(AssertUnwindSafe(|| invalid.validate())).is_err());
     }
 
     // Check both timeout settings at the unsupported ends of the range.
-    for timeout in [
-        Duration::ZERO,
-        TimeoutWheel::MAX_TIMEOUT + Duration::from_nanos(1),
-    ] {
+    for timeout in [Duration::ZERO, MAX_TIMEOUT + Duration::from_nanos(1)] {
         for mut invalid in [
             config().with_connect_timeout(timeout),
             config().with_read_write_timeout(timeout),
@@ -1034,12 +1025,8 @@ fn test_config_validation_before_startup() {
         }
     }
 
-    let invalid_layouts = [Duration::ZERO, Duration::from_nanos(1), Duration::MAX].map(|tick| {
-        config().with_ring_config(RingConfig {
-            timeout_wheel_tick: tick,
-            ..RingConfig::default()
-        })
-    });
+    let invalid_timeouts = [Duration::ZERO, MAX_TIMEOUT + Duration::from_nanos(1)]
+        .map(|timeout| config().with_read_write_timeout(timeout));
     let invalid_spinner = config().with_idle_spinner(SpinnerConfig {
         budget_us: 2,
         max_budget_us: 1,
@@ -1048,7 +1035,7 @@ fn test_config_validation_before_startup() {
     let invalid_workers = [0, MAX_WORKERS + 1].map(|workers| config().with_worker_threads(workers));
     let invalid_interval = config().with_global_queue_interval(0);
 
-    for invalid in invalid_layouts
+    for invalid in invalid_timeouts
         .into_iter()
         .chain([invalid_spinner, invalid_interval])
         .chain(invalid_workers)
@@ -1068,19 +1055,15 @@ fn test_config_validation_before_startup() {
         );
 
         // Invalid settings must fail before acquiring storage resources or
-        // invoking user code, including layouts whose slot arithmetic overflows.
+        // invoking user code.
         assert!(!called.load(Ordering::SeqCst));
         assert!(!directory.exists());
     }
 
-    // The maximum supported timeout remains valid with a representable wheel.
+    // The maximum supported timeout remains valid.
     let mut boundary = config()
-        .with_connect_timeout(TimeoutWheel::MAX_TIMEOUT)
-        .with_read_write_timeout(TimeoutWheel::MAX_TIMEOUT)
-        .with_ring_config(RingConfig {
-            timeout_wheel_tick: Duration::from_secs(3600),
-            ..RingConfig::default()
-        });
+        .with_connect_timeout(MAX_TIMEOUT)
+        .with_read_write_timeout(MAX_TIMEOUT);
     boundary.validate();
 }
 
@@ -3891,10 +3874,7 @@ fn test_remote_task_panic_respects_policy() {
 fn test_shutdown_drains_queued_writes_on_every_ring() {
     let cfg = config()
         .with_worker_threads(2)
-        .with_ring_config(RingConfig {
-            size: 1,
-            ..Default::default()
-        });
+        .with_ring_config(RingConfig { size: 1 });
     Runner::new(cfg.clone()).start(|context| async move {
         for actor in 0_u8..4 {
             let write = {

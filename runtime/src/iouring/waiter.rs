@@ -18,7 +18,6 @@ use super::{
     request::{Request, RequestOutput},
     runtime::Deferred,
     slab::{Id, Slab},
-    timeout::Tick,
 };
 use crate::Error;
 use commonware_utils::{channel::oneshot, sync::OwnedAsyncMutexGuard};
@@ -58,12 +57,13 @@ impl WaiterId {
 pub enum WaiterState {
     /// Request is still tracked and has not transitioned to cancellation.
     Active {
-        /// Absolute wheel tick by which the request must complete.
+        /// Whether the driver installed this request's deadline, which then
+        /// stays installed until completion, cancellation, or expiry.
         ///
-        /// If completion has not been observed by this tick, cancellation is
-        /// requested. `None` means no wheel deadline has been installed yet,
+        /// If completion has not been observed by the deadline, cancellation
+        /// is requested. `false` means no deadline has been installed yet,
         /// including requests that have no timeout.
-        target_tick: Option<Tick>,
+        scheduled: bool,
     },
     /// Cancellation was requested.
     ///
@@ -168,7 +168,7 @@ impl Waiters {
             // Reserve the maximum index for cancellation and mailbox wake tokens.
             assert!(id.index < u32::MAX, "waiter slot index overflow");
             Entry::Pending(Waiter {
-                state: WaiterState::Active { target_tick: None },
+                state: WaiterState::Active { scheduled: false },
                 in_flight: false,
                 observer,
                 request,
@@ -218,32 +218,30 @@ impl Waiters {
     /// Original absolute deadline of an unfinished request, if it has one.
     ///
     /// Stale IDs and retained results return `None`. Cancellation does not
-    /// erase this deadline. Use [`Self::target_tick`] for active wheel tracking.
+    /// erase this deadline. Use [`Self::is_scheduled`] for installed deadlines.
     pub fn deadline(&self, id: WaiterId) -> Option<Instant> {
         self.get(id).and_then(|waiter| waiter.request.deadline())
     }
 
-    /// Deadline that still contributes to the wheel's active counts.
+    /// Whether the request's deadline is installed in the driver.
     ///
-    /// Returns `None` before scheduling, after cancellation or completion, and
-    /// for stale IDs. The driver removes the previous tick when cancelling.
-    pub fn target_tick(&self, id: WaiterId) -> Option<Tick> {
-        match self.get(id)?.state {
-            WaiterState::Active { target_tick } => target_tick,
-            WaiterState::CancelRequested => None,
-        }
+    /// Returns `false` before installation, after cancellation or completion,
+    /// and for stale IDs. The driver removes the deadline when cancelling.
+    pub fn is_scheduled(&self, id: WaiterId) -> bool {
+        self.get(id)
+            .is_some_and(|waiter| matches!(waiter.state, WaiterState::Active { scheduled: true }))
     }
 
-    /// Record the tick after the driver schedules this request on its wheel.
+    /// Record that the driver installed this request's deadline.
     ///
-    /// Panics unless the request is pending, active, and has no installed tick.
-    pub fn set_deadline(&mut self, id: WaiterId, tick: Tick) {
+    /// Panics unless the request is pending, active, and has no installed deadline.
+    pub fn set_deadline(&mut self, id: WaiterId) {
         let waiter = self.get_mut(id).expect("deadline waiter missing");
-        let WaiterState::Active { target_tick } = &mut waiter.state else {
+        let WaiterState::Active { scheduled } = &mut waiter.state else {
             panic!("deadline installed on cancelled waiter");
         };
-        assert!(target_tick.is_none(), "deadline installed twice");
-        *target_tick = Some(tick);
+        assert!(!*scheduled, "deadline installed twice");
+        *scheduled = true;
     }
 
     /// Inspect or consume a result without running observer callbacks.
@@ -382,7 +380,7 @@ impl Waiters {
     /// Request cancellation for an active waiter.
     ///
     /// Returns `true` only when it first records a cancellation request.
-    /// The driver must remove the old wheel tick and arrange local completion
+    /// The driver must remove an installed deadline and arrange local completion
     /// or a cancellation SQE. Stale IDs and completed results return `false`.
     pub fn cancel(&mut self, id: WaiterId) -> bool {
         let Some(waiter) = self.get_mut(id) else {
@@ -403,25 +401,26 @@ impl Waiters {
     /// Local output replaces the pending request. Forwarded, detached, and
     /// orphaned output leaves the slab, freeing its slot immediately.
     ///
-    /// Returns any active tick the driver must remove from the wheel. Waking,
-    /// detached publication, and resource destruction are deferred. Panics if
-    /// the request is missing, already completed, or still has an SQE in flight.
+    /// Returns whether the request had an installed deadline that the driver
+    /// must remove. Waking, detached publication, and resource destruction are
+    /// deferred. Panics if the request is missing, already completed, or still
+    /// has an SQE in flight.
     pub fn finish(
         &mut self,
         id: WaiterId,
         result: Result<(), Error>,
         deferred: &mut Deferred,
-    ) -> Option<Tick> {
+    ) -> bool {
         // The kernel must be done with the request before we move or release
         // the resources referenced by its SQE.
-        assert!(
-            !self.get(id).expect("finished waiter missing").in_flight,
-            "cannot finish kernel-visible request"
-        );
+        let entry = self.entries.get_mut(id.0).expect("finished waiter missing");
+        let Entry::Pending(waiter) = entry else {
+            panic!("finished waiter not pending");
+        };
+        assert!(!waiter.in_flight, "cannot finish kernel-visible request");
 
         // Keep the identity occupied while separating the output from the
         // resources whose destruction must wait for the worker borrow to end.
-        let entry = self.entries.get_mut(id.0).unwrap();
         let Entry::Pending(waiter) = mem::replace(entry, Entry::Retiring) else {
             unreachable!()
         };
@@ -429,12 +428,9 @@ impl Waiters {
         // A retained result must not keep the request counted as pending.
         self.pending -= 1;
 
-        // The driver removes the wheel tick when cancelling. Other completions
+        // The driver removes the deadline when cancelling. Other completions
         // still need to report it for removal.
-        let tick = match waiter.state {
-            WaiterState::Active { target_tick } => target_tick,
-            WaiterState::CancelRequested => None,
-        };
+        let scheduled = matches!(waiter.state, WaiterState::Active { scheduled: true });
 
         // Permit waiters use only the driver's native wake source. Accounting
         // precedes their release. File and buffer owners remain deferred.
@@ -469,7 +465,7 @@ impl Waiters {
                 deferred.outputs.push(output);
             }
         }
-        tick
+        scheduled
     }
 
     /// Stage the next SQE for a waiter.
@@ -691,12 +687,7 @@ pub mod tests {
     }
 
     /// Apply a terminal simulated CQE and finish its request.
-    fn complete(
-        waiters: &mut Waiters,
-        id: WaiterId,
-        result: i32,
-        deferred: &mut Deferred,
-    ) -> Option<Tick> {
+    fn complete(waiters: &mut Waiters, id: WaiterId, result: i32, deferred: &mut Deferred) -> bool {
         let CompletionOutcome::Complete(current, result) =
             waiters.on_completion(id.user_data(), result)
         else {
@@ -787,16 +778,16 @@ pub mod tests {
         assert!(waiters.is_empty());
 
         let first = waiters.insert(make_sync_request(), observer());
-        waiters.set_deadline(first, 5);
+        waiters.set_deadline(first);
         assert_eq!(waiters.len(), 1);
         stage(&mut waiters, first);
-        assert_eq!(complete(&mut waiters, first, 0, &mut deferred), Some(5));
+        assert!(complete(&mut waiters, first, 0, &mut deferred));
 
         // The live result keeps its ID but must disappear from all I/O queries.
         assert!(waiters.is_empty());
         assert!(!waiters.is_pending(first));
         assert!(!waiters.is_in_flight(first));
-        assert_eq!(waiters.target_tick(first), None);
+        assert!(!waiters.is_scheduled(first));
         assert_eq!(waiters.deadline(first), None);
         assert!(!waiters.cancel(first));
         assert!(catch_unwind(AssertUnwindSafe(|| waiters.stage(first))).is_err());
@@ -879,7 +870,7 @@ pub mod tests {
         let mut waiters = Waiters::new(1);
         let mut deferred = Deferred::default();
         let id = waiters.insert(make_sync_request(), observer());
-        waiters.set_deadline(id, 2);
+        waiters.set_deadline(id);
         stage(&mut waiters, id);
         assert!(waiters.cancel(id));
         assert!(!waiters.cancel(id));
@@ -894,7 +885,7 @@ pub mod tests {
         );
         assert_eq!(waiters.in_flight(), 1);
 
-        assert_eq!(complete(&mut waiters, id, 0, &mut deferred), None);
+        assert!(!complete(&mut waiters, id, 0, &mut deferred));
         assert_eq!(waiters.in_flight(), 0);
         assert!(matches!(
             output(&mut waiters, id),
@@ -1036,7 +1027,7 @@ pub mod tests {
             assert!(waiters.cancel(id));
 
             // The driver retires queued cancellations without staging an SQE.
-            assert_eq!(waiters.finish(id, Err(Error::Timeout), &mut deferred), None);
+            assert!(!waiters.finish(id, Err(Error::Timeout), &mut deferred));
             assert!(waiters.is_empty());
 
             for result in [-libc::EAGAIN, 2] {
@@ -1048,7 +1039,7 @@ pub mod tests {
 
                 // Partial progress and retryable errors cannot revive a
                 // request whose observer already requested cancellation.
-                assert_eq!(complete(&mut waiters, id, result, &mut deferred), None);
+                assert!(!complete(&mut waiters, id, result, &mut deferred));
                 assert!(waiters.is_empty());
             }
         }
@@ -1066,17 +1057,17 @@ pub mod tests {
         recv.deadline = Some(deadline);
         let id = waiters.insert(request, observer());
         assert_eq!(waiters.deadline(id), Some(deadline));
-        assert_eq!(waiters.target_tick(id), None);
+        assert!(!waiters.is_scheduled(id));
 
-        // The driver installs a wheel tick separately from the request deadline.
-        waiters.set_deadline(id, 7);
-        assert_eq!(waiters.target_tick(id), Some(7));
+        // The driver installs the deadline separately from the request's own.
+        waiters.set_deadline(id);
+        assert!(waiters.is_scheduled(id));
         assert!(waiters.cancel(id));
-        assert_eq!(waiters.target_tick(id), None);
+        assert!(!waiters.is_scheduled(id));
         assert_eq!(waiters.deadline(id), Some(deadline));
         assert!(catch_unwind(AssertUnwindSafe(|| waiters.stage(id))).is_err());
         assert!(!waiters.is_in_flight(id));
-        assert_eq!(waiters.finish(id, Err(Error::Timeout), &mut deferred), None);
+        assert!(!waiters.finish(id, Err(Error::Timeout), &mut deferred));
         assert!(waiters.is_empty());
         assert!(!waiters.is_pending(id));
 

@@ -28,7 +28,17 @@
 //! budget's worth per pass.
 //!
 //! The wheel holds no payload. Its owner keys slots by a stable index of its
-//! own, such as a slab index, and keeps the state behind them.
+//! own, such as a slab index, and keeps the state behind them. Each worker's
+//! sleep timers ([`super::sleep::TimerShard`], 1024 ns ticks) and each
+//! driver's request deadlines ([`super::deadlines::Deadlines`], 2^20 ns ticks)
+//! own an instance.
+
+/// Slots fired or refiled per expiry pass, by every owner. Bounds the work
+/// between two task polls, so a storm of simultaneous deadlines delays other
+/// tasks by about one budget of wakes or cancellations.
+/// Refiles count too, so when expiry reaches a bucket of N later slots, other
+/// due slots can wait about N / BUDGET passes.
+pub const BUDGET: u32 = 256;
 
 /// Number of wheel levels.
 const LEVELS: usize = 9;
@@ -150,9 +160,16 @@ impl<const RES: u64> Wheel<RES> {
     }
 
     /// Whether no slot is resident.
-    #[cfg(test)]
     pub const fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    /// Whether `slot` is resident.
+    #[cfg(test)]
+    pub fn contains(&self, slot: u32) -> bool {
+        self.links
+            .get(slot as usize)
+            .is_some_and(|link| link.bucket != NONE)
     }
 
     /// Tick of `deadline`, rounded up, below `2^54`.
