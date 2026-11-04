@@ -44,55 +44,55 @@ const _: () = crate::core::assert_lane_relation::<NativeX86V3>();
 impl Simd for NativeX86V3 {
     type U32x4 = __m128i;
 
-    #[inline]
+    #[inline(always)]
     fn u32x4_load(self, input: &[u32]) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
         unsafe { x86_u32x4::load(input) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32x4_store(self, value: __m128i, output: &mut [u32]) {
         // SAFETY: Token construction established the entry's required features.
         unsafe { x86_u32x4::store(value, output) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32x4_add(self, a: __m128i, b: __m128i) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
         unsafe { x86_u32x4::add(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32x4_shuffle<const MASK: i32>(self, value: __m128i) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
         unsafe { x86_u32x4::shuffle::<MASK>(value) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32x4_load_be(self, input: &[u8]) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
         unsafe { x86_u32x4::load_be(input) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32x4_load_be2(self, input: &[u8]) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
         unsafe { x86_u32x4::load_be2(input) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32x4_store_be(self, value: __m128i, output: &mut [u8]) {
         // SAFETY: Token construction established the entry's required features.
         unsafe { x86_u32x4::store_be(value, output) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32x4_align<const N: i32>(self, a: __m128i, b: __m128i) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
         unsafe { x86_u32x4::align::<N>(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32x4_blend<const MASK: i32>(self, a: __m128i, b: __m128i) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
         unsafe { x86_u32x4::blend::<MASK>(a, b) }
@@ -105,7 +105,7 @@ impl Simd for NativeX86V3 {
     const U32_LANES: usize = 8;
     const U64_LANES: usize = 4;
 
-    #[inline]
+    #[inline(always)]
     fn u8_load(self, input: &[u8]) -> __m256i {
         assert!(input.len() >= 32);
         // SAFETY: The token guarantees AVX2 and the slice has 32 readable bytes.
@@ -113,7 +113,7 @@ impl Simd for NativeX86V3 {
         unsafe { _mm256_loadu_si256(input.as_ptr().cast()) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_store(self, value: __m256i, output: &mut [u8]) {
         assert!(output.len() >= 32);
         // SAFETY: The token guarantees AVX2 and the slice has 32 writable bytes.
@@ -121,19 +121,19 @@ impl Simd for NativeX86V3 {
         unsafe { _mm256_storeu_si256(output.as_mut_ptr().cast(), value) };
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_splat(self, value: u8) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_set1_epi8(value as i8) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_xor(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_xor_si256(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_load_partial(self, input: &[u8]) -> __m256i {
         assert!(input.len() <= 32);
         if let Some(full) = input.first_chunk::<32>() {
@@ -164,7 +164,7 @@ impl Simd for NativeX86V3 {
         unsafe { _mm256_set_epi64x(w3 as i64, w2 as i64, w1 as i64, w0 as i64) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_store_partial(self, value: __m256i, output: &mut [u8]) {
         assert!(output.len() <= 32);
         if let Some(full) = output.first_chunk_mut::<32>() {
@@ -209,7 +209,7 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_and(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_and_si256(a, b) }
@@ -217,7 +217,7 @@ impl Simd for NativeX86V3 {
 
     type U8Table = __m256i;
 
-    #[inline]
+    #[inline(always)]
     fn u8_table_load(self, table: &[u8; 16]) -> __m256i {
         // The broadcast copies the table into both 128-bit lanes.
         // SAFETY: The token guarantees AVX2. The table holds 16 readable bytes, and the
@@ -225,7 +225,7 @@ impl Simd for NativeX86V3 {
         unsafe { _mm256_broadcastsi128_si256(_mm_loadu_si128(table.as_ptr().cast())) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_table_lookup(self, table: __m256i, indices: __m256i) -> __m256i {
         // Saturating addition of 0x70 maps indices 0..16 to 0x70..0x80, so the low nibble
         // is unchanged and the top bit is clear. It maps 16..256 to 0x80..=0xff, and
@@ -235,55 +235,55 @@ impl Simd for NativeX86V3 {
         unsafe { _mm256_shuffle_epi8(table, _mm256_adds_epu8(indices, _mm256_set1_epi8(0x70))) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_or(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_or_si256(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_add(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_add_epi8(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_sub(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_sub_epi8(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_add_saturating(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_adds_epu8(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_sub_saturating(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_subs_epu8(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_min(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_min_epu8(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_max(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_max_epu8(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_eq(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_cmpeq_epi8(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_gt(self, a: __m256i, b: __m256i) -> __m256i {
         // AVX2 compares bytes as signed values only. min(a, b) = a exactly when a <= b,
         // so the complement of that unsigned comparison is a > b.
@@ -296,7 +296,7 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_movemask(self, value: __m256i) -> u64 {
         // VPMOVMSKB sets bit i of its 32-bit result to bit 7 of byte i. Widening through u32
         // keeps bits 32 to 63 zero.
@@ -304,13 +304,13 @@ impl Simd for NativeX86V3 {
         unsafe { u64::from(_mm256_movemask_epi8(value) as u32) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_any(self, value: __m256i) -> bool {
         // SAFETY: Token construction established AVX2 support. AVX2 implies AVX.
         unsafe { _mm256_testz_si256(value, value) == 0 }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_all(self, value: __m256i) -> bool {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(value, _mm256_setzero_si256())) == 0 }
@@ -320,7 +320,7 @@ impl Simd for NativeX86V3 {
     // halves of each 128-bit lane to give [Z0, Z2], and VPUNPCKHBW interleaves the high
     // halves to give [Z1, Z3]. VPERM2I128 then takes lane 0 of each for zip_lo = [Z0, Z1]
     // (immediate 0x20) and lane 1 of each for zip_hi = [Z2, Z3] (immediate 0x31).
-    #[inline]
+    #[inline(always)]
     fn u8_zip_lo(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe {
@@ -331,7 +331,7 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_zip_hi(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe {
@@ -348,7 +348,7 @@ impl Simd for NativeX86V3 {
     // because each is below 256. The packed qwords are [a0, b0, a1, b1] and the output
     // needs [a0, a1, b0, b1], so output qword k is packed qword [0, 2, 1, 3][k]. VPERMQ
     // encodes that order as immediate 0 | 2 << 2 | 1 << 4 | 3 << 6 = 0xd8.
-    #[inline]
+    #[inline(always)]
     fn u8_unzip_even(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe {
@@ -360,7 +360,7 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_unzip_odd(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe {
@@ -371,7 +371,7 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_shl<const N: u32>(self, value: __m256i) -> __m256i {
         assert!(N < 8);
 
@@ -385,7 +385,7 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_shr<const N: u32>(self, value: __m256i) -> __m256i {
         assert!(N < 8);
 
@@ -399,7 +399,7 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_xor_fold(self, value: __m256i) -> u8 {
         // SAFETY: Token construction established AVX2 support.
         unsafe {
@@ -415,7 +415,7 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_load(self, input: &[u32]) -> __m256i {
         assert!(input.len() >= 8);
         // SAFETY: The token guarantees AVX2 and the slice has 32 readable bytes.
@@ -423,7 +423,7 @@ impl Simd for NativeX86V3 {
         unsafe { _mm256_loadu_si256(input.as_ptr().cast()) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_store(self, value: __m256i, output: &mut [u32]) {
         assert!(output.len() >= 8);
         // SAFETY: The token guarantees AVX2 and the slice has 32 writable bytes.
@@ -431,25 +431,25 @@ impl Simd for NativeX86V3 {
         unsafe { _mm256_storeu_si256(output.as_mut_ptr().cast(), value) };
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_splat(self, value: u32) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_set1_epi32(value as i32) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_xor(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_xor_si256(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_add(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_add_epi32(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_rotate_right<const N: u32>(self, value: __m256i) -> __m256i {
         assert!(N < 32);
 
@@ -464,45 +464,45 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_sub(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_sub_epi32(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_and(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_and_si256(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_or(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_or_si256(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_shl<const N: u32>(self, value: __m256i) -> __m256i {
         assert!(N < 32);
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_sllv_epi32(value, _mm256_set1_epi32(N as i32)) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_shr<const N: u32>(self, value: __m256i) -> __m256i {
         assert!(N < 32);
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_srlv_epi32(value, _mm256_set1_epi32(N as i32)) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_select(self, mask: __m256i, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_or_si256(_mm256_and_si256(mask, a), _mm256_andnot_si256(mask, b)) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_permute(self, value: __m256i, indices: __m256i) -> __m256i {
         // VPERMD reads only the low 3 bits of each index lane, so it reduces the index
         // modulo 8.
@@ -510,7 +510,7 @@ impl Simd for NativeX86V3 {
         unsafe { _mm256_permutevar8x32_epi32(value, indices) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_permute2(self, a: __m256i, b: __m256i, indices: __m256i) -> __m256i {
         // Each VPERMD reads the low 3 bits of an index, and bit 3 selects b. Ignoring the
         // higher bits reduces the index modulo 16. Shifting bit 3 up to bit 31 and
@@ -526,7 +526,7 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_load(self, input: &[u64]) -> __m256i {
         assert!(input.len() >= 4);
         // SAFETY: The token guarantees AVX2 and the slice has 32 readable bytes.
@@ -534,7 +534,7 @@ impl Simd for NativeX86V3 {
         unsafe { _mm256_loadu_si256(input.as_ptr().cast()) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_store(self, value: __m256i, output: &mut [u64]) {
         assert!(output.len() >= 4);
         // SAFETY: The token guarantees AVX2 and the slice has 32 writable bytes.
@@ -542,57 +542,57 @@ impl Simd for NativeX86V3 {
         unsafe { _mm256_storeu_si256(output.as_mut_ptr().cast(), value) };
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_splat(self, value: u64) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_set1_epi64x(value as i64) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_add(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_add_epi64(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_shl<const N: u32>(self, value: __m256i) -> __m256i {
         assert!(N < 64);
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_sllv_epi64(value, _mm256_set1_epi64x(N as i64)) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_shr<const N: u32>(self, value: __m256i) -> __m256i {
         assert!(N < 64);
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_srlv_epi64(value, _mm256_set1_epi64x(N as i64)) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_and(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_and_si256(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_or(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_or_si256(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_sub(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_sub_epi64(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_xor(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_xor_si256(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_rotate_left<const N: u32>(self, value: __m256i) -> __m256i {
         assert!(N < 64);
 
@@ -607,7 +607,7 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_rotate_right<const N: u32>(self, value: __m256i) -> __m256i {
         assert!(N < 64);
 
@@ -622,26 +622,26 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_andnot(self, a: __m256i, b: __m256i) -> __m256i {
         // VPANDN complements its first operand.
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_andnot_si256(b, a) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_xor3(self, a: __m256i, b: __m256i, c: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_xor_si256(_mm256_xor_si256(a, b), c) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_select(self, mask: __m256i, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_or_si256(_mm256_and_si256(mask, a), _mm256_andnot_si256(mask, b)) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_min(self, a: __m256i, b: __m256i) -> __m256i {
         // AVX2 compares signed lanes only, so flipping the sign bits orders them as unsigned.
         // SAFETY: Token construction established AVX2 support.
@@ -652,7 +652,7 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_rotate_lanes<const N: usize>(self, value: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe {
@@ -665,7 +665,7 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_extract<const N: usize>(self, value: __m256i) -> u64 {
         assert!(N < 4);
         // SAFETY: Token construction established AVX2 support.
@@ -680,7 +680,7 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_insert<const N: usize>(self, value: __m256i, lane: u64) -> __m256i {
         assert!(N < 4);
         let lane = lane as i64;
@@ -696,67 +696,67 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_as_u32(self, value: __m256i) -> __m256i {
         value
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_as_u8(self, value: __m256i) -> __m256i {
         value
     }
 
-    #[inline]
+    #[inline(always)]
     fn u8_as_u64(self, value: __m256i) -> __m256i {
         value
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_as_u8(self, value: __m256i) -> __m256i {
         value
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_as_u64(self, value: __m256i) -> __m256i {
         value
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_as_u32(self, value: __m256i) -> __m256i {
         value
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_madd52lo(self, acc: __m256i, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_add_epi64(acc, mul52(a, b).0) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_madd52hi(self, acc: __m256i, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_add_epi64(acc, mul52(a, b).1) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_widen_mul_first(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_mul_epu32(a, b) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_widen_mul_second(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_mul_epu32(_mm256_srli_epi64::<32>(a), _mm256_srli_epi64::<32>(b)) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_narrow_pair(self, first: __m256i, second: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_blend_epi32::<0b1010_1010>(first, _mm256_slli_epi64::<32>(second)) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u32_mul_lo(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_mullo_epi32(a, b) }
@@ -764,7 +764,7 @@ impl Simd for NativeX86V3 {
 
     // AVX2 multiplies only the low 32-bit halves of 64-bit lanes, so the 64-bit products
     // are assembled from the partial products of those halves.
-    #[inline]
+    #[inline(always)]
     fn u64_mul_lo(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe {
@@ -776,7 +776,7 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_mul_hi(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe {
