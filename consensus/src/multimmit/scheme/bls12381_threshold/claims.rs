@@ -223,17 +223,19 @@ impl<'c, V: Variant> Batch<'c, V> {
         }
     }
 
-    /// Verifies every claim and returns the positions of the invalid ones, in no particular
-    /// order.
+    /// Verifies every claim, multiplying ordinary keys through `table`, and returns the
+    /// positions of the invalid ones, in no particular order.
     pub(super) fn invalid<R: CryptoRng>(
         &self,
         rng: &mut R,
+        table: &sas::KeyTable<V>,
         strategy: &impl Strategy,
     ) -> Vec<usize> {
-        let mut invalid: Vec<_> = sas::verify_claims(rng, &self.ordinary, strategy)
-            .into_iter()
-            .map(|index| self.ordinary_positions[index])
-            .collect();
+        let mut invalid: Vec<_> =
+            sas::verify_claims_with_table(rng, &self.ordinary, table, strategy)
+                .into_iter()
+                .map(|index| self.ordinary_positions[index])
+                .collect();
         invalid.extend(
             batch::verify_claims(rng, &self.threshold, strategy)
                 .into_iter()
@@ -243,17 +245,19 @@ impl<'c, V: Variant> Batch<'c, V> {
     }
 }
 
-/// Returns whether every claim holds, checked as randomly scaled batches.
+/// Returns whether every claim holds, checked as randomly scaled batches with ordinary keys
+/// multiplied through `table`.
 pub(super) fn verify_claims<R: CryptoRng, V: Variant>(
     rng: &mut R,
     claims: &[Claim<'_, V>],
+    table: &sas::KeyTable<V>,
     strategy: &impl Strategy,
 ) -> bool {
     let mut batch = Batch::default();
     for (position, claim) in claims.iter().enumerate() {
         batch.push(position, claim);
     }
-    batch.invalid(rng, strategy).is_empty()
+    batch.invalid(rng, table, strategy).is_empty()
 }
 
 impl<P: PublicKey, V: Variant> Scheme<P, V> {
@@ -333,7 +337,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         strategy: &impl Strategy,
     ) -> Option<CertificateId<D>> {
         let claims = self.vqc_claims::<H, D>(certificate, &[])?;
-        verify_claims(rng, &claims.claims, strategy).then(|| certificate.id::<H>())
+        verify_claims(rng, &claims.claims, &self.table, strategy).then(|| certificate.id::<H>())
     }
 
     /// Verifies every ordinary vote signature represented by an L-QC's tally.
@@ -344,7 +348,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         strategy: &impl Strategy,
     ) -> Option<CertificateId<D>> {
         let claims = self.lqc_claims::<H, D>(certificate, &[])?;
-        verify_claims(rng, &claims.claims, strategy).then(|| certificate.id::<H>())
+        verify_claims(rng, &claims.claims, &self.table, strategy).then(|| certificate.id::<H>())
     }
 
     /// Builds the claim for a producer's attestation, checking chain ownership.
