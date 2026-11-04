@@ -1300,7 +1300,7 @@ mod tests {
                 strategy: Sequential,
             },
         );
-        let journal = Journal::init(
+        let mut replay = Journal::init(
             context.child("journal"),
             JConfig {
                 partition: "aggregation-engine".to_string(),
@@ -1308,11 +1308,14 @@ mod tests {
                 codec_config: S::certificate_codec_config_unbounded(),
                 page_cache,
                 write_buffer: NZUsize!(4096),
+                replay_buffer: NZUsize!(4096),
             },
+            ReadOptions::default(),
         )
         .await
         .unwrap();
-        engine.journal = Some(journal);
+        assert!(replay.next().await.is_none());
+        engine.journal = Some(replay.finish().unwrap());
         engine.epoch = EPOCH;
         engine
     }
