@@ -7,10 +7,13 @@ use super::{
     tips::{FinalTips, PoolExtractor, PreparedVotes, Tips},
 };
 use crate::{
-    multimmit::types::{
-        Anchor, BlockRef, CertificateId, ChainId, ChainProposal, CodecConfig, DaCertificate,
-        DigestedLeader, Extension, LeaderBlock, PathLimits, Position, TransactionBlockHeader,
-        VoteBody,
+    multimmit::{
+        mocks::Bls,
+        types::{
+            Anchor, BlockRef, CertificateId, ChainId, ChainProposal, CodecConfig, DaCertificate,
+            DigestedLeader, Extension, LeaderBlock, PathLimits, Position, TransactionBlockHeader,
+            VoteBody,
+        },
     },
     types::{Epoch, Height, Participant, Round, View},
 };
@@ -44,7 +47,7 @@ pub(super) fn config(participants: usize) -> CodecConfig {
     CodecConfig::new(participants, participants, PathLimits::new(2, 2)).unwrap()
 }
 
-pub(super) fn leader(participants: usize) -> LeaderBlock<MinSig, Digest> {
+pub(super) fn leader(participants: usize) -> LeaderBlock<Bls<MinSig>, Digest> {
     let config = config(participants);
     let proposals = (0..participants)
         .map(|index| {
@@ -71,7 +74,7 @@ pub(super) fn leader(participants: usize) -> LeaderBlock<MinSig, Digest> {
 }
 
 fn vote(
-    leader: &LeaderBlock<MinSig, Digest>,
+    leader: &LeaderBlock<Bls<MinSig>, Digest>,
     position: u32,
     extension: &[&[u8]],
     config: CodecConfig,
@@ -85,7 +88,7 @@ fn vote(
 }
 
 fn vote_with_digests(
-    leader: &LeaderBlock<MinSig, Digest>,
+    leader: &LeaderBlock<Bls<MinSig>, Digest>,
     position: u32,
     extension: Vec<Digest>,
     config: CodecConfig,
@@ -104,12 +107,12 @@ fn vote_with_digests(
 }
 
 fn application_digests(
-    leader: &LeaderBlock<MinSig, Digest>,
+    leader: &LeaderBlock<Bls<MinSig>, Digest>,
     position: u32,
     payloads: Vec<u8>,
 ) -> Vec<Digest> {
     let chain = ChainId::new(0);
-    let proposals = ProposalPaths::new::<Sha256, MinSig>(leader).unwrap();
+    let proposals = ProposalPaths::new::<Sha256, Bls<MinSig>>(leader).unwrap();
     let mut parent = proposals.block(chain, Position::new(position)).unwrap();
     payloads
         .into_iter()
@@ -134,7 +137,7 @@ fn application_digests(
 }
 
 fn reference_safe(
-    leader: &LeaderBlock<MinSig, Digest>,
+    leader: &LeaderBlock<Bls<MinSig>, Digest>,
     votes: &[VoteBody<Digest>],
     config: CodecConfig,
 ) -> Vec<BlockRef<Digest>> {
@@ -143,7 +146,7 @@ fn reference_safe(
 }
 
 fn reference_votes(
-    leader: &LeaderBlock<MinSig, Digest>,
+    leader: &LeaderBlock<Bls<MinSig>, Digest>,
     votes: &[VoteBody<Digest>],
 ) -> (ReferenceOrdering, Vec<ReferenceVote>) {
     let anchors = leader
@@ -160,7 +163,7 @@ fn reference_votes(
 }
 
 fn reference_final(
-    leader: &LeaderBlock<MinSig, Digest>,
+    leader: &LeaderBlock<Bls<MinSig>, Digest>,
     votes: &[VoteBody<Digest>],
     config: CodecConfig,
 ) -> (Vec<BlockRef<Digest>>, Vec<Position>, Vec<bool>) {
@@ -215,7 +218,7 @@ fn selected_commitments_follow_only_known_selected_edges() {
 #[test]
 fn selected_commitments_certificate_anchor_opens_only_its_parent_edge() {
     let fixture = cross_certificate_leader(6, 0, false);
-    let proposals = ProposalPaths::new::<Sha256, MinSig>(&fixture.leader).unwrap();
+    let proposals = ProposalPaths::new::<Sha256, Bls<MinSig>>(&fixture.leader).unwrap();
     let mut ancestry = PathIndex::default();
     proposals.index(&mut ancestry).unwrap();
     let commitments = ancestry.selected(
@@ -237,11 +240,14 @@ fn selected_commitments_certificate_anchor_opens_only_its_parent_edge() {
 fn proposal_and_vote_paths_reconstruct_exact_headers() {
     let config = config(6);
     let leader = leader(6);
-    let proposals = ProposalPaths::new::<Sha256, MinSig>(&leader).unwrap();
+    let proposals = ProposalPaths::new::<Sha256, Bls<MinSig>>(&leader).unwrap();
     let body = vote(&leader, 1, &[b"extension"], config);
-    let paths =
-        VotePaths::new::<Sha256, MinSig>(DigestedLeader::new::<Sha256>(&leader), &proposals, &body)
-            .unwrap();
+    let paths = VotePaths::new::<Sha256, Bls<MinSig>>(
+        DigestedLeader::new::<Sha256>(&leader),
+        &proposals,
+        &body,
+    )
+    .unwrap();
     let mut ancestry = PathIndex::default();
     proposals.index(&mut ancestry).unwrap();
     paths.index_extensions(&mut ancestry).unwrap();
@@ -263,7 +269,7 @@ fn proposal_and_vote_paths_reconstruct_exact_headers() {
 fn extension_ancestry_matches_full_vote_paths() {
     let config = config(6);
     for leader in [leader(6), cross_certificate_leader(6, 0, false).leader] {
-        let proposals = ProposalPaths::new::<Sha256, MinSig>(&leader).unwrap();
+        let proposals = ProposalPaths::new::<Sha256, Bls<MinSig>>(&leader).unwrap();
         for position in 0..=2 {
             let bodies = [
                 vote(&leader, position, &[], config),
@@ -276,7 +282,7 @@ fn extension_ancestry_matches_full_vote_paths() {
             let mut extensions = full.clone();
             let (_, reference) = reference_votes(&leader, &bodies);
             for (body, reference) in bodies.iter().zip(&reference) {
-                let paths = VotePaths::new::<Sha256, MinSig>(
+                let paths = VotePaths::new::<Sha256, Bls<MinSig>>(
                     DigestedLeader::new::<Sha256>(&leader),
                     &proposals,
                     body,
@@ -289,7 +295,7 @@ fn extension_ancestry_matches_full_vote_paths() {
                 paths.index_extensions(&mut extensions).unwrap();
                 assert_eq!(extensions, full);
             }
-            let prepared = PreparedVotes::new::<Sha256, MinSig, _>(
+            let prepared = PreparedVotes::new::<Sha256, Bls<MinSig>, _>(
                 &leader,
                 bodies
                     .iter()
@@ -307,7 +313,7 @@ fn extension_ancestry_matches_full_vote_paths() {
 fn conflicting_extension_prevalidation_does_not_mutate_ancestry() {
     let config = config(6);
     let leader = leader(6);
-    let proposals = ProposalPaths::new::<Sha256, MinSig>(&leader).unwrap();
+    let proposals = ProposalPaths::new::<Sha256, Bls<MinSig>>(&leader).unwrap();
     let positions = vec![Position::new(1); config.chains()];
     let mut extensions = vec![Extension::empty(); config.chains()];
     extensions[0] = Extension::new(vec![digest(b"valid")], config.extension_bound()).unwrap();
@@ -323,9 +329,12 @@ fn conflicting_extension_prevalidation_does_not_mutate_ancestry() {
         config,
     )
     .unwrap();
-    let paths =
-        VotePaths::new::<Sha256, MinSig>(DigestedLeader::new::<Sha256>(&leader), &proposals, &body)
-            .unwrap();
+    let paths = VotePaths::new::<Sha256, Bls<MinSig>>(
+        DigestedLeader::new::<Sha256>(&leader),
+        &proposals,
+        &body,
+    )
+    .unwrap();
     let suffix = paths.extension(ChainId::new(1)).unwrap();
     let mut ancestry = PathIndex::default();
     proposals.index(&mut ancestry).unwrap();
@@ -388,16 +397,17 @@ fn safe_tips_apply_position_rank_and_branch_aware_carry() {
         vote(&leader, 2, &[b"b"], config),
         vote(&leader, 2, &[b"b"], config),
     ];
-    let tips = Tips::from_votes::<Sha256, MinSig, _>(&leader, indexed(&votes), config).unwrap();
-    let proposals = ProposalPaths::new::<Sha256, MinSig>(&leader).unwrap();
+    let tips =
+        Tips::from_votes::<Sha256, Bls<MinSig>, _>(&leader, indexed(&votes), config).unwrap();
+    let proposals = ProposalPaths::new::<Sha256, Bls<MinSig>>(&leader).unwrap();
     let leader_digest = leader.digest::<Sha256>();
-    let left = VotePaths::new::<Sha256, MinSig>(
+    let left = VotePaths::new::<Sha256, Bls<MinSig>>(
         DigestedLeader::with_digest(&leader, leader_digest),
         &proposals,
         &votes[0],
     )
     .unwrap();
-    let right = VotePaths::new::<Sha256, MinSig>(
+    let right = VotePaths::new::<Sha256, Bls<MinSig>>(
         DigestedLeader::with_digest(&leader, leader_digest),
         &proposals,
         &votes[3],
@@ -423,13 +433,14 @@ fn safe_tips_use_every_designated_vote_in_a_larger_vqc() {
         vote(&leader, 2, &[], config),
     ];
 
-    let quorum = Tips::from_votes::<Sha256, MinSig, _>(
+    let quorum = Tips::from_votes::<Sha256, Bls<MinSig>, _>(
         &leader,
         indexed(&votes[..config.view_quorum()]),
         config,
     )
     .unwrap();
-    let complete = Tips::from_votes::<Sha256, MinSig, _>(&leader, indexed(&votes), config).unwrap();
+    let complete =
+        Tips::from_votes::<Sha256, Bls<MinSig>, _>(&leader, indexed(&votes), config).unwrap();
 
     assert_ne!(quorum, complete);
     assert_eq!(
@@ -451,9 +462,10 @@ fn final_tips_use_pool_support_and_generalized_settlement() {
         vote(&leader, 2, &[b"x", b"y"], config),
         vote(&leader, 2, &[b"x", b"y"], config),
     ];
-    let tips = FinalTips::from_pool::<Sha256, MinSig, _>(&leader, indexed(&votes), config).unwrap();
-    let proposals = ProposalPaths::new::<Sha256, MinSig>(&leader).unwrap();
-    let path = VotePaths::new::<Sha256, MinSig>(
+    let tips =
+        FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(&leader, indexed(&votes), config).unwrap();
+    let proposals = ProposalPaths::new::<Sha256, Bls<MinSig>>(&leader).unwrap();
+    let path = VotePaths::new::<Sha256, Bls<MinSig>>(
         DigestedLeader::new::<Sha256>(&leader),
         &proposals,
         &votes[0],
@@ -495,7 +507,8 @@ fn branch_settlement_tracks_exact_children_of_the_current_final_tip() {
             })
             .collect::<Vec<_>>();
         let expected =
-            FinalTips::from_pool::<Sha256, MinSig, _>(&leader, indexed(&votes), config).unwrap();
+            FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(&leader, indexed(&votes), config)
+                .unwrap();
         assert_eq!(expected.get(chain).unwrap().height(), Height::new(height));
         assert_eq!(expected.settled(chain), Some(settled));
         for reverse in [false, true] {
@@ -505,25 +518,25 @@ fn branch_settlement_tracks_exact_children_of_the_current_final_tip() {
                 if reverse {
                     order.reverse();
                 }
-                let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+                let mut pool = PoolExtractor::new::<Sha256, Bls<MinSig>>(&leader, config).unwrap();
                 let mut retained = Vec::new();
                 for signer in order {
                     let participant = Participant::new(signer as u32);
                     assert!(
-                        pool.insert::<Sha256, MinSig>(&leader, participant, &votes[signer])
+                        pool.insert::<Sha256, Bls<MinSig>>(&leader, participant, &votes[signer])
                             .unwrap()
                     );
                     retained.push((participant, &votes[signer]));
                     let equivocation = vote(&leader, 2, &[b"equivocation"], config);
                     assert!(
                         !pool
-                            .insert::<Sha256, MinSig>(&leader, participant, &equivocation)
+                            .insert::<Sha256, Bls<MinSig>>(&leader, participant, &equivocation)
                             .unwrap()
                     );
                     if pool.len() >= config.view_quorum() {
                         assert_eq!(
                             pool.final_tips().unwrap(),
-                            FinalTips::from_pool::<Sha256, MinSig, _>(
+                            FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(
                                 &leader,
                                 retained.iter().copied(),
                                 config
@@ -555,7 +568,8 @@ fn branch_settlement_excludes_adversarial_future_carry() {
                 .map(|index| options[*index].clone())
                 .collect::<Vec<_>>();
             let final_tips =
-                FinalTips::from_pool::<Sha256, MinSig, _>(&leader, indexed(&pool), config).unwrap();
+                FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(&leader, indexed(&pool), config)
+                    .unwrap();
             if final_tips.settled(ChainId::new(0)) != Some(true) {
                 continue;
             }
@@ -574,7 +588,7 @@ fn branch_settlement_excludes_adversarial_future_carry() {
                                 (Participant::new(signer as u32), body)
                             });
                             let safe =
-                                Tips::from_votes::<Sha256, MinSig, _>(&leader, future, config)
+                                Tips::from_votes::<Sha256, Bls<MinSig>, _>(&leader, future, config)
                                     .unwrap();
                             assert_eq!(safe.get(ChainId::new(0)), final_tips.get(ChainId::new(0)));
                         }
@@ -593,7 +607,7 @@ fn pool_rejects_duplicate_participants() {
     let duplicate = (0..config.view_quorum()).map(|_| (Participant::new(0), &body));
 
     assert_eq!(
-        FinalTips::from_pool::<Sha256, MinSig, _>(&leader, duplicate, config),
+        FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(&leader, duplicate, config),
         Err(Error::Quorum)
     );
 }
@@ -607,11 +621,11 @@ fn extraction_errors_name_the_rejected_input() {
 
     // A leader proposing for six chains does not fit a seven-chain epoch.
     assert!(matches!(
-        PoolExtractor::new::<Sha256, MinSig>(&leader, self::config(7)),
+        PoolExtractor::new::<Sha256, Bls<MinSig>>(&leader, self::config(7)),
         Err(Error::Leader)
     ));
     assert_eq!(
-        FinalTips::from_pool::<Sha256, MinSig, _>(
+        FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(
             &leader,
             Vec::<(Participant, &VoteBody<Digest>)>::new(),
             self::config(7)
@@ -619,13 +633,13 @@ fn extraction_errors_name_the_rejected_input() {
         Err(Error::Leader)
     );
 
-    let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+    let mut pool = PoolExtractor::new::<Sha256, Bls<MinSig>>(&leader, config).unwrap();
     assert_eq!(
-        pool.insert::<Sha256, MinSig>(&leader, outsider, &body),
+        pool.insert::<Sha256, Bls<MinSig>>(&leader, outsider, &body),
         Err(Error::Signer)
     );
     assert_eq!(
-        FinalTips::from_pool::<Sha256, MinSig, _>(&leader, [(outsider, &body)], config),
+        FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(&leader, [(outsider, &body)], config),
         Err(Error::Signer)
     );
 
@@ -651,15 +665,15 @@ fn incremental_pool_retains_the_first_vote_per_participant() {
     let leader = leader(6);
     let first = vote(&leader, 2, &[b"first"], config);
     let second = vote(&leader, 1, &[b"second"], config);
-    let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+    let mut pool = PoolExtractor::new::<Sha256, Bls<MinSig>>(&leader, config).unwrap();
 
     assert!(
-        pool.insert::<Sha256, MinSig>(&leader, Participant::new(0), &first)
+        pool.insert::<Sha256, Bls<MinSig>>(&leader, Participant::new(0), &first)
             .unwrap()
     );
     assert!(
         !pool
-            .insert::<Sha256, MinSig>(&leader, Participant::new(0), &second)
+            .insert::<Sha256, Bls<MinSig>>(&leader, Participant::new(0), &second)
             .unwrap()
     );
     assert_eq!(pool.len(), 1);
@@ -669,8 +683,8 @@ fn incremental_pool_retains_the_first_vote_per_participant() {
 fn final_tip_index_excludes_subquorum_branches() {
     let config = config(6);
     let leader = leader(6);
-    let proposals = ProposalPaths::new::<Sha256, MinSig>(&leader).unwrap();
-    let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+    let proposals = ProposalPaths::new::<Sha256, Bls<MinSig>>(&leader).unwrap();
+    let mut pool = PoolExtractor::new::<Sha256, Bls<MinSig>>(&leader, config).unwrap();
 
     for signer in 0..config.view_quorum() {
         let body = vote_with_digests(
@@ -683,7 +697,7 @@ fn final_tip_index_excludes_subquorum_branches() {
             config,
         );
         assert!(
-            pool.insert::<Sha256, MinSig>(&leader, Participant::new(signer as u32), &body,)
+            pool.insert::<Sha256, Bls<MinSig>>(&leader, Participant::new(signer as u32), &body,)
                 .unwrap()
         );
     }
@@ -722,7 +736,7 @@ fn partial_position_extensions_share_proposal_ancestry_and_support() {
             .collect::<Vec<_>>();
         let (ordering, reference) = reference_votes(&leader, &votes);
         let prepared =
-            PreparedVotes::new::<Sha256, MinSig, _>(&leader, indexed(&votes), config).unwrap();
+            PreparedVotes::new::<Sha256, Bls<MinSig>, _>(&leader, indexed(&votes), config).unwrap();
         let ancestry = prepared.ancestry().unwrap();
         let mut expected_ancestry = PathIndex::default();
         for (child, parent) in &ordering.parents {
@@ -730,8 +744,8 @@ fn partial_position_extensions_share_proposal_ancestry_and_support() {
         }
         assert_eq!(ancestry, expected_ancestry);
         let designated = &votes[..config.vqc_max_messages()];
-        let safe =
-            Tips::from_votes::<Sha256, MinSig, _>(&leader, indexed(designated), config).unwrap();
+        let safe = Tips::from_votes::<Sha256, Bls<MinSig>, _>(&leader, indexed(designated), config)
+            .unwrap();
         assert_eq!(safe.blocks(), reference_safe(&leader, designated, config));
         assert_eq!(safe.get(chain).unwrap().height(), Height::new(3));
         for reverse in [false, true] {
@@ -739,10 +753,10 @@ fn partial_position_extensions_share_proposal_ancestry_and_support() {
             if reverse {
                 order.reverse();
             }
-            let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+            let mut pool = PoolExtractor::new::<Sha256, Bls<MinSig>>(&leader, config).unwrap();
             let mut retained = Vec::new();
             for signer in order {
-                pool.insert::<Sha256, MinSig>(
+                pool.insert::<Sha256, Bls<MinSig>>(
                     &leader,
                     Participant::new(signer as u32),
                     &votes[signer],
@@ -757,7 +771,7 @@ fn partial_position_extensions_share_proposal_ancestry_and_support() {
                     FinalTips::new(expected.blocks, expected.positions, expected.settled).unwrap();
                 assert_eq!(pool.final_tips().unwrap(), expected);
                 assert_eq!(
-                    FinalTips::from_pool::<Sha256, MinSig, _>(
+                    FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(
                         &leader,
                         retained
                             .iter()
@@ -816,19 +830,24 @@ fn cached_final_tip_matches_every_branch_prefix() {
                     if reverse {
                         order.reverse();
                     }
-                    let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+                    let mut pool =
+                        PoolExtractor::new::<Sha256, Bls<MinSig>>(&leader, config).unwrap();
                     let mut retained = Vec::new();
                     for signer in order {
                         let participant = Participant::new(signer as u32);
                         assert!(
-                            pool.insert::<Sha256, MinSig>(&leader, participant, &votes[signer])
-                                .unwrap()
+                            pool.insert::<Sha256, Bls<MinSig>>(
+                                &leader,
+                                participant,
+                                &votes[signer]
+                            )
+                            .unwrap()
                         );
                         retained.push((participant, &votes[signer]));
                         if pool.len() >= config.view_quorum() {
                             assert_eq!(
                                 pool.final_tips().unwrap(),
-                                FinalTips::from_pool::<Sha256, MinSig, _>(
+                                FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(
                                     &leader,
                                     retained.iter().copied(),
                                     config,
@@ -864,9 +883,9 @@ fn cached_final_tip_extraction_performs_no_ancestry_walks() {
             (0..depth).map(|i| digest(&i.to_le_bytes())).collect(),
             config,
         );
-        let proposals = ProposalPaths::new::<Sha256, MinSig>(&leader).unwrap();
+        let proposals = ProposalPaths::new::<Sha256, Bls<MinSig>>(&leader).unwrap();
         let base = proposals.block(ChainId::new(0), Position::new(2)).unwrap();
-        let paths = VotePaths::new::<Sha256, MinSig>(
+        let paths = VotePaths::new::<Sha256, Bls<MinSig>>(
             DigestedLeader::new::<Sha256>(&leader),
             &proposals,
             &body,
@@ -875,15 +894,15 @@ fn cached_final_tip_extraction_performs_no_ancestry_walks() {
         let mut ancestry = PathIndex::default();
         proposals.index(&mut ancestry).unwrap();
         paths.index_extensions(&mut ancestry).unwrap();
-        let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+        let mut pool = PoolExtractor::new::<Sha256, Bls<MinSig>>(&leader, config).unwrap();
         let votes = vec![body; config.participants()];
         for (signer, body) in indexed(&votes) {
-            pool.insert::<Sha256, MinSig>(&leader, signer, body)
+            pool.insert::<Sha256, Bls<MinSig>>(&leader, signer, body)
                 .unwrap();
             if pool.len() < config.view_quorum() {
                 continue;
             }
-            let expected = FinalTips::from_pool::<Sha256, MinSig, _>(
+            let expected = FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(
                 &leader,
                 indexed(&votes[..pool.len()]),
                 config,
@@ -912,10 +931,10 @@ fn empty_extensions_retain_no_proposal_support() {
     let config = config(6);
     let leader = leader(6);
     let votes = vec![vote(&leader, 2, &[], config); config.participants()];
-    let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+    let mut pool = PoolExtractor::new::<Sha256, Bls<MinSig>>(&leader, config).unwrap();
     for (signer, body) in indexed(&votes) {
         assert!(
-            pool.insert::<Sha256, MinSig>(&leader, signer, body)
+            pool.insert::<Sha256, Bls<MinSig>>(&leader, signer, body)
                 .unwrap()
         );
         assert_eq!(pool.retained_support_entries(), 0);
@@ -1016,7 +1035,7 @@ fn paired_vqc_messages(
 }
 
 struct CrossLeader {
-    leader: LeaderBlock<MinSig, Digest>,
+    leader: LeaderBlock<Bls<MinSig>, Digest>,
     parent_tips: Vec<BlockRef<Digest>>,
     certificate_history: Vec<BlockRef<Digest>>,
     certificate_chain: usize,
@@ -1137,7 +1156,7 @@ fn cross_pattern(participants: usize, certificate_chain: usize, forked: bool) ->
 /// Builds the votes of one cross-certificate scenario. Each field is one independent axis of the
 /// vote matrix that every vote in the scenario shares.
 struct CrossVotes<'a> {
-    leader: &'a LeaderBlock<MinSig, Digest>,
+    leader: &'a LeaderBlock<Bls<MinSig>, Digest>,
     pattern: CrossPattern,
     config: CodecConfig,
     /// Signers that extend the forked chain on branch `a` rather than branch `b`.
@@ -1261,7 +1280,7 @@ fn cross_certificate_safe_tips_match_reference_across_designated_tallies() {
             for tally in &tallies {
                 let reference_votes = reference.materialize(&fixture.leader, tally);
                 let expected = reference.safe(&reference_votes, config);
-                let actual = Tips::from_votes::<Sha256, MinSig, _>(
+                let actual = Tips::from_votes::<Sha256, Bls<MinSig>, _>(
                     &fixture.leader,
                     attributed(tally),
                     config,
@@ -1441,18 +1460,24 @@ fn cross_certificate_safe_and_final_tips_match_reference() {
                     let expected_final = reference.final_tips(&reference_pool, config);
                     let expected_first = reference.safe(&reference_first, config);
                     let expected_second = reference.safe(&reference_second, config);
-                    let final_tips = FinalTips::from_pool::<Sha256, MinSig, _>(
+                    let final_tips = FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(
                         leader,
                         attributed(&pool),
                         config,
                     )
                     .unwrap();
-                    let first_tips =
-                        Tips::from_votes::<Sha256, MinSig, _>(leader, attributed(&first), config)
-                            .unwrap();
-                    let second_tips =
-                        Tips::from_votes::<Sha256, MinSig, _>(leader, attributed(&second), config)
-                            .unwrap();
+                    let first_tips = Tips::from_votes::<Sha256, Bls<MinSig>, _>(
+                        leader,
+                        attributed(&first),
+                        config,
+                    )
+                    .unwrap();
+                    let second_tips = Tips::from_votes::<Sha256, Bls<MinSig>, _>(
+                        leader,
+                        attributed(&second),
+                        config,
+                    )
+                    .unwrap();
 
                     assert_eq!(final_tips.blocks(), expected_final.blocks);
                     assert_eq!(first_tips.blocks(), expected_first);
@@ -1585,7 +1610,7 @@ proptest! {
                 vote_with_digests(&leader, position, extension, config)
             })
             .collect::<Vec<_>>();
-        let production = Tips::from_votes::<Sha256, MinSig, _>(
+        let production = Tips::from_votes::<Sha256, Bls<MinSig>, _>(
             &leader,
             indexed(&votes),
             config,
@@ -1608,20 +1633,20 @@ proptest! {
                 vote_with_digests(&leader, position, extension, config)
             })
             .collect::<Vec<_>>();
-        let production = FinalTips::from_pool::<Sha256, MinSig, _>(
+        let production = FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(
             &leader,
             indexed(&votes),
             config,
         )
         .unwrap();
         let (blocks, positions, settled) = reference_final(&leader, &votes, config);
-        let mut incremental = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+        let mut incremental = PoolExtractor::new::<Sha256, Bls<MinSig>>(&leader, config).unwrap();
         for (index, vote) in votes.iter().enumerate() {
             incremental
-                .insert::<Sha256, MinSig>(&leader, Participant::new(index as u32), vote)
+                .insert::<Sha256, Bls<MinSig>>(&leader, Participant::new(index as u32), vote)
                 .unwrap();
             if index + 1 >= config.view_quorum() {
-                let expected = FinalTips::from_pool::<Sha256, MinSig, _>(
+                let expected = FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(
                     &leader,
                     indexed(&votes[..=index]),
                     config,

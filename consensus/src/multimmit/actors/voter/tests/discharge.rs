@@ -16,7 +16,7 @@ use crate::{
             BarrierAck, Cursor, DurableEffect, EffectId, Generation,
             testing::{EffectExt, fixtures::DischargeFamily},
         },
-        mocks::MockApplication,
+        mocks::{Bls, MockApplication},
         testing::expect_before,
         types::{Artifact, ChainId, TransactionBlockHeader, ViewProof},
         wire::{CertificateMessage, ConsensusMessage, DataMessage, Envelope},
@@ -90,7 +90,7 @@ fn successor_barrier_retains_installs_then_retires() {
             let certificate = da_certificate(&node.committee, &header);
             data_tx.send(
                 Recipients::One(node.me.clone()),
-                node.envelope(DataMessage::<MinPk, Sha256Digest>::DaCertificate(
+                node.envelope(DataMessage::<Bls<MinPk>, Sha256Digest>::DaCertificate(
                     certificate,
                 ))
                 .encode(),
@@ -196,7 +196,7 @@ struct PreparedActorDischarge {
 
 async fn wait_for_publication_ack(
     context: &DeterministicContext,
-    hooks: &TestHooks<MinPk, Sha256Digest>,
+    hooks: &TestHooks<Bls<MinPk>, Sha256Digest>,
     publication: EffectId,
 ) -> BarrierAck {
     let deadline = context.current() + Duration::from_secs(2);
@@ -220,7 +220,7 @@ async fn wait_for_publication_ack(
 
 async fn wait_for_later_ack(
     context: &DeterministicContext,
-    hooks: &TestHooks<MinPk, Sha256Digest>,
+    hooks: &TestHooks<Bls<MinPk>, Sha256Digest>,
     cursor: Cursor,
 ) {
     let deadline = context.current() + Duration::from_secs(2);
@@ -243,7 +243,7 @@ async fn wait_for_later_ack(
 
 async fn wait_for_retirement_ack(
     context: &DeterministicContext,
-    hooks: &TestHooks<MinPk, Sha256Digest>,
+    hooks: &TestHooks<Bls<MinPk>, Sha256Digest>,
     predecessor: EffectId,
 ) -> BarrierAck {
     let deadline = context.current() + Duration::from_secs(2);
@@ -293,7 +293,7 @@ async fn prepare_actor_discharge(
     context: &DeterministicContext,
     node: &Node,
     application: &MockApplication,
-    hooks: &TestHooks<MinPk, Sha256Digest>,
+    hooks: &TestHooks<Bls<MinPk>, Sha256Digest>,
     family: DischargeFamily,
 ) -> PreparedActorDischarge {
     match family {
@@ -344,7 +344,7 @@ async fn prepare_actor_discharge(
             let certificate = da_certificate(&node.committee, &header);
             data_tx.send(
                 Recipients::One(node.me.clone()),
-                node.envelope(DataMessage::<MinPk, Sha256Digest>::DaCertificate(
+                node.envelope(DataMessage::<Bls<MinPk>, Sha256Digest>::DaCertificate(
                     certificate,
                 ))
                 .encode(),
@@ -382,7 +382,7 @@ async fn prepare_actor_discharge(
                 .expect("the producer signs its height-two block");
             data_tx.send(
                 Recipients::One(node.me.clone()),
-                node.envelope(DataMessage::<MinPk, Sha256Digest>::Block(next_block))
+                node.envelope(DataMessage::<Bls<MinPk>, Sha256Digest>::Block(next_block))
                     .encode(),
                 false,
             );
@@ -404,9 +404,11 @@ async fn prepare_actor_discharge(
             let view = View::new(1);
             certificates_tx.send(
                 Recipients::One(node.me.clone()),
-                node.envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
-                    node.committee.nullification(view),
-                ))
+                node.envelope(
+                    CertificateMessage::<Bls<MinPk>, Sha256Digest>::Nullification(
+                        node.committee.nullification(view),
+                    ),
+                )
                 .encode(),
                 true,
             );
@@ -436,7 +438,7 @@ async fn prepare_actor_discharge(
                 )
                 .await
                 .expect("network stays up");
-                let envelope = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+                let envelope = Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                     bytes,
                     &node.envelope_cfg(node.committee.codec()),
                 )
@@ -472,7 +474,7 @@ async fn submit_actor_discharge_successor(node: &Node, successor: &ActorDischarg
             let certificate = da_certificate(&node.committee, header);
             data_tx.send(
                 Recipients::One(node.me.clone()),
-                node.envelope(DataMessage::<MinPk, Sha256Digest>::DaCertificate(
+                node.envelope(DataMessage::<Bls<MinPk>, Sha256Digest>::DaCertificate(
                     certificate,
                 ))
                 .encode(),
@@ -483,9 +485,11 @@ async fn submit_actor_discharge_successor(node: &Node, successor: &ActorDischarg
             let (mut certificates_tx, _) = node.peer(2, 2).await;
             certificates_tx.send(
                 Recipients::One(node.me.clone()),
-                node.envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
-                    node.committee.nullification(*view),
-                ))
+                node.envelope(
+                    CertificateMessage::<Bls<MinPk>, Sha256Digest>::Nullification(
+                        node.committee.nullification(*view),
+                    ),
+                )
                 .encode(),
                 true,
             );
@@ -504,7 +508,7 @@ async fn submit_actor_discharge_successor(node: &Node, successor: &ActorDischarg
 
 async fn wait_for_successor_publication(
     context: &DeterministicContext,
-    hooks: &TestHooks<MinPk, Sha256Digest>,
+    hooks: &TestHooks<Bls<MinPk>, Sha256Digest>,
     successor: &ActorDischargeSuccessor,
 ) -> Option<EffectId> {
     match successor {
@@ -531,7 +535,7 @@ async fn wait_for_successor_publication(
 }
 
 fn assert_pre_ack_publications(
-    hooks: &TestHooks<MinPk, Sha256Digest>,
+    hooks: &TestHooks<Bls<MinPk>, Sha256Digest>,
     predecessor: EffectId,
     successor: Option<EffectId>,
 ) {
@@ -628,9 +632,11 @@ fn resolver_retention_obeys_its_signature_exposure_boundary() {
         let first_view = View::new(1);
         certificates_tx.send(
             Recipients::One(node.me.clone()),
-            node.envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
-                node.committee.nullification(first_view),
-            ))
+            node.envelope(
+                CertificateMessage::<Bls<MinPk>, Sha256Digest>::Nullification(
+                    node.committee.nullification(first_view),
+                ),
+            )
             .encode(),
             true,
         );

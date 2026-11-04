@@ -20,6 +20,7 @@ use crate::{
                 },
             },
         },
+        mocks::Bls,
         types::{
             Anchor, Artifact, ChainId, ChainProposal, DaVote, DigestedLeader, Extension,
             LeaderBlock, Position, SignedLeaderBlock, SignedTransactionBlock,
@@ -43,7 +44,7 @@ const PIPELINE_DEPTH: u32 = 64;
 /// Committee size of the obligation-discharge fixture.
 const DISCHARGE_PARTICIPANTS: usize = 6;
 
-fn empty_leader(protocol: &Protocol<Digest>) -> SignedLeaderBlock<MinPk, Digest> {
+fn empty_leader(protocol: &Protocol<Digest>) -> SignedLeaderBlock<Bls<MinPk>, Digest> {
     let view = View::new(1);
     SignedLeaderBlock::new(
         genesis_leader(protocol, view),
@@ -54,7 +55,9 @@ fn empty_leader(protocol: &Protocol<Digest>) -> SignedLeaderBlock<MinPk, Digest>
 fn drain_validator(
     machine: &mut fabric::BenchMachine,
     effects: fabric::BenchCapabilities,
-    mut signed: impl FnMut(EffectCompletion<MinPk, Digest>) -> Option<EffectCompletion<MinPk, Digest>>,
+    mut signed: impl FnMut(
+        EffectCompletion<Bls<MinPk>, Digest>,
+    ) -> Option<EffectCompletion<Bls<MinPk>, Digest>>,
 ) {
     let mut effects: VecDeque<_> = effects.into_iter().collect();
     loop {
@@ -126,9 +129,9 @@ fn add_vote_obligation(machine: &mut fabric::BenchMachine, header: TransactionBl
     drain_validator(machine, effects, Some);
 }
 
-fn local_sign_completion_fixture() -> (fabric::BenchMachine, EffectCompletion<MinPk, Digest>) {
+fn local_sign_completion_fixture() -> (fabric::BenchMachine, EffectCompletion<Bls<MinPk>, Digest>) {
     let protocol = fabric::protocol(DISCHARGE_PARTICIPANTS, PIPELINE_DEPTH);
-    let profile = Profile::new::<MinPk>(
+    let profile = Profile::new::<Bls<MinPk>>(
         protocol.clone(),
         Role::Validator(Participant::new(0)),
         Tuning::default(),
@@ -161,7 +164,7 @@ fn local_sign_completion_fixture() -> (fabric::BenchMachine, EffectCompletion<Mi
 fn next_persist(
     machine: &mut fabric::BenchMachine,
     effects: fabric::BenchCapabilities,
-) -> PersistJob<MinPk, Digest> {
+) -> PersistJob<Bls<MinPk>, Digest> {
     let mut effects: VecDeque<_> = effects.into_iter().collect();
     loop {
         while let Some(effect) = effects.pop_front() {
@@ -191,14 +194,14 @@ fn next_persist(
 
 struct DischargeFixture {
     profile: Profile<Digest>,
-    snapshot: Snapshot<MinPk, Digest>,
-    certificate: Artifact<MinPk, Digest>,
+    snapshot: Snapshot<Bls<MinPk>, Digest>,
+    certificate: Artifact<Bls<MinPk>, Digest>,
     retired: EffectId,
 }
 
 fn discharge_fixture(obligations: usize) -> DischargeFixture {
     let protocol = fabric::protocol(DISCHARGE_PARTICIPANTS, PIPELINE_DEPTH);
-    let profile = Profile::new::<MinPk>(
+    let profile = Profile::new::<Bls<MinPk>>(
         protocol.clone(),
         Role::Validator(Participant::new(0)),
         Tuning::default(),
@@ -254,7 +257,11 @@ fn discharge_fixture(obligations: usize) -> DischargeFixture {
 
 fn stage_discharge(
     fixture: &DischargeFixture,
-) -> (fabric::BenchMachine, Capabilities<MinPk, Digest>, Duration) {
+) -> (
+    fabric::BenchMachine,
+    Capabilities<Bls<MinPk>, Digest>,
+    Duration,
+) {
     let mut machine = Machine::restore(fixture.profile.clone(), fixture.snapshot.clone()).unwrap();
     let recovery = machine.step(Input::RecoveryComplete).unwrap();
     drain_validator(&mut machine, recovery.into_capabilities(), Some);
@@ -406,12 +413,12 @@ impl fmt::Display for MachineScenario {
 /// Hot-path machine operations, each prepared to run once, whose allocations a test counts.
 pub struct HotPathOperations {
     duplicate_machine: fabric::BenchMachine,
-    duplicate_input: Option<Input<MinPk, Digest>>,
+    duplicate_input: Option<Input<Bls<MinPk>, Digest>>,
     sign_machine: fabric::BenchMachine,
-    sign_completion: Option<EffectCompletion<MinPk, Digest>>,
+    sign_completion: Option<EffectCompletion<Bls<MinPk>, Digest>>,
     release_machine: fabric::BenchMachine,
     release_acknowledgement: Option<BarrierAck>,
-    reference_effect: DurableEffect<MinPk, Digest>,
+    reference_effect: DurableEffect<Bls<MinPk>, Digest>,
 }
 
 impl HotPathOperations {
@@ -824,7 +831,7 @@ fn run_vqc_completion(payloads: u32, extensions: u32) -> Duration {
 fn drain_to_aggregation(
     machine: &mut fabric::BenchMachine,
     effects: fabric::BenchCapabilities,
-) -> Option<VqcAggregateJob<MinPk, Digest>> {
+) -> Option<VqcAggregateJob<Bls<MinPk>, Digest>> {
     let mut aggregation = None;
     let mut effects: VecDeque<_> = effects.into_iter().collect();
     loop {

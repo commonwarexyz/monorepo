@@ -10,12 +10,12 @@ use crate::{
             actors::catalog, open, storage::catalog::StoredRef,
         },
         mocks::{
-            Committee,
+            Bls, Committee,
             cluster::{
                 BOUNDED_QUOTA, Cluster, ClusterOptions, LaunchSpec, link_all, start_network,
             },
         },
-        scheme::bls12381_threshold::Scheme,
+        scheme::Generic,
         testing::{SpanRecorder, TestBody, metric_total},
         types::{
             Activity, Anchor, Artifact, ArtifactId, BlockRef, Body, CertificateId, ChainId,
@@ -44,6 +44,7 @@ use commonware_runtime::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{
     Acknowledgement as _, NZDuration, NZU16, NZU64, NZUsize, Widen, channel::oneshot, sync::Mutex,
+    test_rng,
 };
 use futures::{StreamExt as _, stream::FuturesUnordered};
 use std::{
@@ -83,8 +84,8 @@ const NODE_LABELS: [[&str; 3]; 2] = [
     ],
 ];
 type TestBlock = TransactionBlock<Sha256, TestBody>;
-type TestScheme = Scheme<ed25519::PublicKey, MinPk>;
-type TestMailbox = Mailbox<Sha256, MinPk, TestBody>;
+type TestScheme = Generic<Bls<MinPk>>;
+type TestMailbox = Mailbox<Sha256, Bls<MinPk>, TestBody>;
 type TestBuffer = buffered::Mailbox<ed25519::PublicKey, TestBlock>;
 type TestRelay = Relay<Sha256, TestBody, ed25519::PublicKey>;
 
@@ -133,17 +134,17 @@ struct Wiring<'a, B: Body<Sha256>> {
     oracle: &'a simulated::Oracle<ed25519::PublicKey, deterministic::Context>,
     identity: ed25519::PublicKey,
     channels: Channels,
-    config: Config<TwoCap, MinPk, B>,
+    config: Config<TwoCap, Bls<MinPk>, B>,
     /// Whether the node exposes a staged-block relay.
     relay: bool,
 }
 
 /// One node's running marshal, with the broadcast and resolver engines it runs over.
 struct Node<B: Body<Sha256>> {
-    mailbox: Mailbox<Sha256, MinPk, B>,
+    mailbox: Mailbox<Sha256, Bls<MinPk>, B>,
     buffer: buffered::Mailbox<ed25519::PublicKey, TransactionBlock<Sha256, B>>,
     relay: Option<Relay<Sha256, B, ed25519::PublicKey>>,
-    catalog: catalog::Mailbox<Sha256, MinPk, B>,
+    catalog: catalog::Mailbox<Sha256, Bls<MinPk>, B>,
     marshal: ServiceHandle,
     resolver: Handle<()>,
     broadcast: Handle<()>,
@@ -215,7 +216,7 @@ where
         },
     );
     let broadcast = broadcast_engine.start(broadcast_network);
-    let (mut service, bridge) = open::<_, TwoCap, Sha256, MinPk, B, ed25519::PublicKey>(
+    let (mut service, bridge) = open::<_, TwoCap, Sha256, Bls<MinPk>, B, ed25519::PublicKey>(
         context.child("marshal"),
         config,
         buffer.clone(),
@@ -258,7 +259,7 @@ where
 async fn start_attached_marshal(
     context: &deterministic::Context,
     oracle: &simulated::Oracle<ed25519::PublicKey, deterministic::Context>,
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     reporter: ApplicationReporter<DigestBody>,
     launch: u64,
 ) -> Node<DigestBody> {
@@ -322,12 +323,12 @@ enum VerifyError {
     GateClosed,
 }
 
-impl LqcVerifier<Sha256, MinPk> for CommitteeVerifier {
+impl LqcVerifier<Sha256, Bls<MinPk>> for CommitteeVerifier {
     type Error = VerifyError;
 
     fn verify(
         &mut self,
-        proof: &Lqc<MinPk, Sha256Digest>,
+        proof: &Lqc<Bls<MinPk>, Sha256Digest>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send {
         let valid = self
             .scheme
@@ -509,7 +510,7 @@ fn digested(block: &Arc<TestBlock>) -> Digested<TestBlock> {
 struct Harness {
     context: deterministic::Context,
     oracle: simulated::Oracle<ed25519::PublicKey, deterministic::Context>,
-    committee: Committee<MinPk>,
+    committee: Committee<Bls<MinPk>>,
     reporters: [ApplicationReporter<TestBody>; 2],
     nodes: [Option<Node<TestBody>>; 2],
     launches: [u64; 2],
@@ -560,7 +561,7 @@ impl Harness {
         }
     }
 
-    fn config(&self, index: usize) -> Config<TwoCap, MinPk, TestBody> {
+    fn config(&self, index: usize) -> Config<TwoCap, Bls<MinPk>, TestBody> {
         let mut archive = ArchiveConfig::new(TwoCap, CacheRef::new(NZU16!(1024), NZUsize!(8)));
         archive.items_per_section = NZU64!(2);
         Config::new(
@@ -648,7 +649,7 @@ impl Harness {
         self.reporters[index].clone()
     }
 
-    fn catalog(&self, index: usize) -> catalog::Mailbox<Sha256, MinPk, TestBody> {
+    fn catalog(&self, index: usize) -> catalog::Mailbox<Sha256, Bls<MinPk>, TestBody> {
         self.nodes[index]
             .as_ref()
             .expect("node is running")
@@ -721,7 +722,7 @@ impl Harness {
 }
 
 struct Certified {
-    proof: Arc<Lqc<MinPk, Sha256Digest>>,
+    proof: Arc<Lqc<Bls<MinPk>, Sha256Digest>>,
     history: Arc<TipRecord<Sha256Digest>>,
     blocks: Vec<Vec<Arc<TestBlock>>>,
 }
@@ -806,7 +807,7 @@ fn body(marker: u64) -> TestBody {
     )
 }
 
-fn initial_history(committee: &Committee<MinPk>) -> Arc<TipRecord<Sha256Digest>> {
+fn initial_history(committee: &Committee<Bls<MinPk>>) -> Arc<TipRecord<Sha256Digest>> {
     let genesis = committee.config.genesis();
     Arc::new(
         TipRecord::at_tips(
@@ -818,7 +819,7 @@ fn initial_history(committee: &Committee<MinPk>) -> Arc<TipRecord<Sha256Digest>>
 }
 
 fn certify(
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     view: u64,
     history: Arc<TipRecord<Sha256Digest>>,
     bases: &[BlockRef<Sha256Digest>],
@@ -883,7 +884,7 @@ fn certify(
         .collect::<Vec<_>>();
     let proof = committee
         .verifier
-        .assemble_lqc::<Sha256, _>(leader, &votes, &Sequential)
+        .assemble_lqc::<_, Sha256, _>(&mut test_rng(), leader, &votes, &Sequential)
         .unwrap();
     assert!(
         committee
@@ -1085,7 +1086,7 @@ fn pool_finality_update_emits_suffix_truncated_by_first_lqc() {
             harness
                 .committee
                 .verifier
-                .assemble_lqc::<Sha256, _>(leader.clone(), &votes, &Sequential)
+                .assemble_lqc::<_, Sha256, _>(&mut test_rng(), leader.clone(), &votes, &Sequential)
                 .unwrap(),
         );
 
@@ -1289,7 +1290,7 @@ fn accepted_da_certificate_backfills_an_existing_block_subscription() {
         let certificate = harness
             .committee
             .verifier
-            .assemble_da_certificate(&votes, &Sequential)
+            .assemble_da_certificate(&mut test_rng(), &votes, &Sequential)
             .unwrap();
         let artifact = Arc::new(Artifact::DaCertificate(certificate));
         let mut reporter = target.clone();
@@ -1828,7 +1829,7 @@ fn canceled_certified_subscription_stops_resolver_retries() {
         let certificate = harness
             .committee
             .verifier
-            .assemble_da_certificate(&votes, &Sequential)
+            .assemble_da_certificate(&mut test_rng(), &votes, &Sequential)
             .unwrap();
         let artifact = Arc::new(Artifact::DaCertificate(certificate));
         let mut reporter = target.clone();
@@ -2224,7 +2225,7 @@ fn production_engine_reporter_survives_engine_and_marshal_restart() {
     )
     .start(|context| async move {
         let mut cluster =
-            Cluster::<MinPk>::new(&context, ClusterOptions::new(108, PARTICIPANTS)).await;
+            Cluster::<Bls<MinPk>>::new(&context, ClusterOptions::new(108, PARTICIPANTS)).await;
         let committee = cluster.fixture();
         let reporter = ApplicationReporter::<DigestBody>::new(true);
         let mut attached =
@@ -2847,7 +2848,7 @@ fn canceled_floor_install_still_retires_certified_requests() {
         let certificate = harness
             .committee
             .verifier
-            .assemble_da_certificate(&votes, &Sequential)
+            .assemble_da_certificate(&mut test_rng(), &votes, &Sequential)
             .unwrap();
         let artifact = Arc::new(Artifact::DaCertificate(certificate));
         let mailbox = harness.mailbox(0);

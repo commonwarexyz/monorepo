@@ -36,6 +36,7 @@ use crate::{
             view::{ViewTimer, VqcAggregateCompletion},
             vote_body::VoteBuild,
         },
+        mocks::Bls,
         types::{
             Anchor, Artifact, ArtifactId, BlockRef, CertificateId, ChainId, ChainProposal, DaVote,
             EpochGenesis, FinalityFact, LeaderBlock, NoVote, Nullify, SignedLeaderBlock,
@@ -184,7 +185,7 @@ impl ReplayPlan {
 
 struct Fixture {
     profiles: Vec<Profile<Digest>>,
-    artifacts: Vec<Artifact<MinPk, Digest>>,
+    artifacts: Vec<Artifact<Bls<MinPk>, Digest>>,
 }
 
 impl Fixture {
@@ -217,7 +218,7 @@ impl Fixture {
 
         let profiles = (0..REPLICAS)
             .map(|replica| {
-                Profile::new::<MinPk>(
+                Profile::new::<Bls<MinPk>>(
                     protocol.clone(),
                     Role::Validator(Participant::from_usize(REPLICA_PARTICIPANTS[replica])),
                     Tuning {
@@ -376,7 +377,7 @@ impl Fixture {
         }
     }
 
-    fn resolution(&self, view: View) -> Option<ViewProof<MinPk, Digest>> {
+    fn resolution(&self, view: View) -> Option<ViewProof<Bls<MinPk>, Digest>> {
         Some(ViewProof::Nullification(Box::new(unsigned_nullification(
             Round::new(self.profiles[0].protocol().epoch(), view),
         ))))
@@ -385,7 +386,7 @@ impl Fixture {
 
 /// Builds one deterministic DA-eligibility state per producer chain, anchored at genesis, each
 /// within its chain's own pipeline window.
-fn build_eligibility(profile: &Profile<Digest>) -> Vec<ChainEligibility<MinPk, Digest>> {
+fn build_eligibility(profile: &Profile<Digest>) -> Vec<ChainEligibility<Bls<MinPk>, Digest>> {
     let items = validation_parallelism(profile);
     let bytes = items.saturating_mul(profile.resources().max_artifact_bytes());
     profile
@@ -418,11 +419,11 @@ struct Replica {
 
 /// The replica's machine, its simulated chain planes, and the effects awaiting execution.
 struct ReplicaDriver {
-    runner: Driver<Sha256, MinPk>,
+    runner: Driver<Sha256, Bls<MinPk>>,
     // The per-chain remote chain planes the runtime tasks own, simulated inline here so the
     // pure-Core world drives the same DA-vote offers the tasks would.
-    validators: Vec<ChainEligibility<MinPk, Digest>>,
-    pending: VecDeque<Capability<MinPk, Digest>>,
+    validators: Vec<ChainEligibility<Bls<MinPk>, Digest>>,
+    pending: VecDeque<Capability<Bls<MinPk>, Digest>>,
     view_timer: Option<ViewTimer>,
     production_timer: Option<ProductionTimer<Digest>>,
     appended_cursor: Cursor,
@@ -442,7 +443,7 @@ struct PublicationOracle {
     publications: BTreeMap<EffectId, ObservedPublication>,
     publication_attempts: BTreeSet<(EffectId, Generation)>,
     delivered_attempts: BTreeSet<(EffectId, Generation)>,
-    recovery_expected: Option<BTreeMap<EffectId, Publication<MinPk, Digest>>>,
+    recovery_expected: Option<BTreeMap<EffectId, Publication<Bls<MinPk>, Digest>>>,
     discharged_publications: BTreeSet<EffectId>,
 }
 
@@ -471,28 +472,31 @@ struct Counters {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ObservedPublication {
-    publication: Publication<MinPk, Digest>,
+    publication: Publication<Bls<MinPk>, Digest>,
     rules: Vec<PublicationRule>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SigningOrigin {
     sign: EffectId,
-    subject: SignRequest<MinPk, Digest>,
+    subject: SignRequest<Bls<MinPk>, Digest>,
     event_cursor: Cursor,
     covering_cursor: Cursor,
 }
 
+/// Artifacts a signing effect produces, each with its signing request.
+type SignedArtifacts = Vec<(ArtifactId<Digest>, SignRequest<Bls<MinPk>, Digest>)>;
+
 #[derive(Clone, Debug)]
 struct PendingSigning {
     sign: EffectId,
-    artifacts: Vec<(ArtifactId<Digest>, SignRequest<MinPk, Digest>)>,
-    publication: Publication<MinPk, Digest>,
+    artifacts: SignedArtifacts,
+    publication: Publication<Bls<MinPk>, Digest>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SuccessorCandidate {
-    artifact: Artifact<MinPk, Digest>,
+    artifact: Artifact<Bls<MinPk>, Digest>,
     event: OracleEvent,
     followups: Vec<OracleEvent>,
 }
@@ -531,8 +535,8 @@ enum SignatureSlot {
 
 #[derive(Debug, PartialEq, Eq)]
 struct DurableOutcome {
-    journals: [Vec<DomainEvent<MinPk, Digest>>; REPLICAS],
-    snapshots: [Snapshot<MinPk, Digest>; REPLICAS],
+    journals: [Vec<DomainEvent<Bls<MinPk>, Digest>>; REPLICAS],
+    snapshots: [Snapshot<Bls<MinPk>, Digest>; REPLICAS],
     inspections: [Inspection<Digest>; REPLICAS],
     finality: [Vec<FinalityFact<Digest>>; REPLICAS],
     publications: [BTreeMap<EffectId, ObservedPublication>; REPLICAS],
@@ -1025,7 +1029,7 @@ impl<'a> World<'a> {
         let state = &self.replicas[replica];
         let runner = &state.driver.runner;
         runner.machine().assert_artifact_indices();
-        let mut replayed = Machine::<Sha256, MinPk>::restore(
+        let mut replayed = Machine::<Sha256, Bls<MinPk>>::restore(
             runner.profile().clone(),
             runner.checkpoint().clone(),
         )
@@ -1130,7 +1134,7 @@ impl<'a> World<'a> {
     fn register_authenticated_successor(
         &mut self,
         replica: usize,
-        artifact: Artifact<MinPk, Digest>,
+        artifact: Artifact<Bls<MinPk>, Digest>,
     ) {
         let candidate = match artifact {
             Artifact::DaCertificate(certificate) => SuccessorCandidate {
@@ -1228,8 +1232,8 @@ impl<'a> World<'a> {
         &mut self,
         replica: usize,
         sign: EffectId,
-        artifacts: Vec<(ArtifactId<Digest>, SignRequest<MinPk, Digest>)>,
-        publication: Publication<MinPk, Digest>,
+        artifacts: SignedArtifacts,
+        publication: Publication<Bls<MinPk>, Digest>,
     ) {
         let state = &mut self.replicas[replica];
         state
@@ -1339,7 +1343,7 @@ impl<'a> World<'a> {
         ));
     }
 
-    fn append(&mut self, replica: usize, job: &PersistJob<MinPk, Digest>) {
+    fn append(&mut self, replica: usize, job: &PersistJob<Bls<MinPk>, Digest>) {
         self.replicas[replica]
             .driver.runner
             .append(job)
@@ -1358,8 +1362,8 @@ impl<'a> World<'a> {
     fn acknowledge(
         &mut self,
         replica: usize,
-        job: &PersistJob<MinPk, Digest>,
-    ) -> Step<MinPk, Digest> {
+        job: &PersistJob<Bls<MinPk>, Digest>,
+    ) -> Step<Bls<MinPk>, Digest> {
         let step = self.replicas[replica]
             .driver.runner
             .acknowledge(job)
@@ -1386,8 +1390,8 @@ impl<'a> World<'a> {
     }
 
     fn assert_staged_custody(
-        staged: &[Arc<Artifact<MinPk, Digest>>],
-        released: &[DurableJob<MinPk, Digest>],
+        staged: &[Arc<Artifact<Bls<MinPk>, Digest>>],
+        released: &[DurableJob<Bls<MinPk>, Digest>],
     ) {
         let staged = staged
             .iter()
@@ -1436,7 +1440,7 @@ impl<'a> World<'a> {
         }
     }
 
-    fn bind_pending_successor(&mut self, replica: usize, job: &PersistJob<MinPk, Digest>) {
+    fn bind_pending_successor(&mut self, replica: usize, job: &PersistJob<Bls<MinPk>, Digest>) {
         let Some(pending) = self.replicas[replica]
             .publication_oracle
             .pending_successors
@@ -1456,7 +1460,7 @@ impl<'a> World<'a> {
         self.record_protocol_event(replica, job.last_cursor(), pending.event);
     }
 
-    fn crash_and_restore(&mut self, replica: usize) -> Step<MinPk, Digest> {
+    fn crash_and_restore(&mut self, replica: usize) -> Step<Bls<MinPk>, Digest> {
         let durable = self.replicas[replica].driver.appended_cursor;
         let expected = self.expected_publications(replica, durable);
         let state = &mut self.replicas[replica];
@@ -1501,7 +1505,7 @@ impl<'a> World<'a> {
 
     fn assert_staging_matches_replay(&self, replica: usize) {
         let runner = &self.replicas[replica].driver.runner;
-        let mut replayed = Machine::<Sha256, MinPk>::restore(
+        let mut replayed = Machine::<Sha256, Bls<MinPk>>::restore(
             runner.profile().clone(),
             runner.checkpoint().clone(),
         )
@@ -1517,7 +1521,7 @@ impl<'a> World<'a> {
         );
     }
 
-    fn record_persist_job(&mut self, replica: usize, job: &PersistJob<MinPk, Digest>) {
+    fn record_persist_job(&mut self, replica: usize, job: &PersistJob<Bls<MinPk>, Digest>) {
         for event in job.events() {
             match event.change() {
                 Change::SignedArtifacts {
@@ -1607,7 +1611,7 @@ impl<'a> World<'a> {
         &mut self,
         replica: usize,
         id: EffectId,
-        publication: Publication<MinPk, Digest>,
+        publication: Publication<Bls<MinPk>, Digest>,
     ) {
         let observed = ObservedPublication {
             rules: publication_rules(&publication),
@@ -1624,7 +1628,7 @@ impl<'a> World<'a> {
         &self,
         replica: usize,
         cursor: Cursor,
-    ) -> BTreeMap<EffectId, Publication<MinPk, Digest>> {
+    ) -> BTreeMap<EffectId, Publication<Bls<MinPk>, Digest>> {
         let state = successor_state(
             self.replicas[replica]
                 .publication_oracle
@@ -1657,7 +1661,7 @@ impl<'a> World<'a> {
     fn assert_publication_state(&mut self, replica: usize, cursor: Cursor) {
         let expected = self.expected_publications(replica, cursor);
         let runner = &self.replicas[replica].driver.runner;
-        let mut durable = Machine::<Sha256, MinPk>::restore(
+        let mut durable = Machine::<Sha256, Bls<MinPk>>::restore(
             runner.profile().clone(),
             runner.checkpoint().clone(),
         )
@@ -1710,7 +1714,7 @@ impl<'a> World<'a> {
     fn record_publication_payloads(
         &mut self,
         replica: usize,
-        effects: &[Capability<MinPk, Digest>],
+        effects: &[Capability<Bls<MinPk>, Digest>],
     ) {
         for effect in effects {
             let Capability::Released(job) = effect else {
@@ -1722,7 +1726,11 @@ impl<'a> World<'a> {
         }
     }
 
-    fn assert_recovery_releases(&mut self, replica: usize, effects: &[Capability<MinPk, Digest>]) {
+    fn assert_recovery_releases(
+        &mut self,
+        replica: usize,
+        effects: &[Capability<Bls<MinPk>, Digest>],
+    ) {
         let Some(expected) = self.replicas[replica]
             .publication_oracle
             .recovery_expected
@@ -1773,7 +1781,7 @@ impl<'a> World<'a> {
         replica: usize,
         id: ArtifactId<Digest>,
         observation: Observation,
-        block: Arc<SignedTransactionBlock<MinPk, Digest>>,
+        block: Arc<SignedTransactionBlock<Bls<MinPk>, Digest>>,
         custodied: bool,
     ) {
         let chain = block.header().chain();
@@ -1813,7 +1821,7 @@ impl<'a> World<'a> {
     fn queue_effects(
         &mut self,
         replica: usize,
-        effects: impl IntoIterator<Item = Capability<MinPk, Digest>>,
+        effects: impl IntoIterator<Item = Capability<Bls<MinPk>, Digest>>,
     ) {
         for effect in effects {
             if let Capability::Journal(directive) = &effect {
@@ -1884,7 +1892,11 @@ impl<'a> World<'a> {
             .max(self.replicas[replica].driver.pending.len());
     }
 
-    fn record_publication_attempt(&mut self, replica: usize, effect: &Capability<MinPk, Digest>) {
+    fn record_publication_attempt(
+        &mut self,
+        replica: usize,
+        effect: &Capability<Bls<MinPk>, Digest>,
+    ) {
         let Capability::Released(job) = effect else {
             unreachable!()
         };
@@ -1977,8 +1989,8 @@ impl<'a> World<'a> {
         &mut self,
         replica: usize,
         order: CompletionOrder,
-        predicate: fn(&Capability<MinPk, Digest>) -> bool,
-    ) -> Capability<MinPk, Digest> {
+        predicate: fn(&Capability<Bls<MinPk>, Digest>) -> bool,
+    ) -> Capability<Bls<MinPk>, Digest> {
         let pending = &mut self.replicas[replica].driver.pending;
         let index = match order {
             CompletionOrder::Oldest => pending.iter().position(predicate),
@@ -1988,7 +2000,7 @@ impl<'a> World<'a> {
         pending.remove(index).unwrap()
     }
 
-    fn has(&self, replica: usize, predicate: fn(&Capability<MinPk, Digest>) -> bool) -> bool {
+    fn has(&self, replica: usize, predicate: fn(&Capability<Bls<MinPk>, Digest>) -> bool) -> bool {
         self.replicas[replica].driver.pending.iter().any(predicate)
     }
 
@@ -2245,7 +2257,7 @@ impl PublicationRule {
     }
 }
 
-fn publication_rules(publication: &Publication<MinPk, Digest>) -> Vec<PublicationRule> {
+fn publication_rules(publication: &Publication<Bls<MinPk>, Digest>) -> Vec<PublicationRule> {
     match publication {
         Publication::Propose(proposal) => {
             vec![PublicationRule::OwnMessage(proposal.block().view())]
@@ -2257,7 +2269,7 @@ fn publication_rules(publication: &Publication<MinPk, Digest>) -> Vec<Publicatio
     }
 }
 
-fn publication_rule(artifact: &Artifact<MinPk, Digest>) -> PublicationRule {
+fn publication_rule(artifact: &Artifact<Bls<MinPk>, Digest>) -> PublicationRule {
     match artifact {
         Artifact::TransactionBlock(block) => {
             PublicationRule::Block(block.header().chain(), block.header().height())
@@ -2280,7 +2292,7 @@ fn publication_rule(artifact: &Artifact<MinPk, Digest>) -> PublicationRule {
 }
 
 fn exposed_local_signatures(
-    effect: &Capability<MinPk, Digest>,
+    effect: &Capability<Bls<MinPk>, Digest>,
     local: Participant,
 ) -> Vec<(SignatureSlot, ArtifactId<Digest>)> {
     let Capability::Released(job) = effect else {
@@ -2299,7 +2311,7 @@ fn exposed_local_signatures(
 
 fn record_local_signature(
     exposed: &mut Vec<(SignatureSlot, ArtifactId<Digest>)>,
-    artifact: &Artifact<MinPk, Digest>,
+    artifact: &Artifact<Bls<MinPk>, Digest>,
     local: Participant,
 ) {
     if artifact.signer() != Some(local) {
@@ -2353,7 +2365,7 @@ impl Action {
     }
 }
 
-fn sign(request: &SignRequest<MinPk, Digest>, replica: usize) -> Artifact<MinPk, Digest> {
+fn sign(request: &SignRequest<Bls<MinPk>, Digest>, replica: usize) -> Artifact<Bls<MinPk>, Digest> {
     match request {
         SignRequest::TransactionBlock(header) => Artifact::TransactionBlock(
             SignedTransactionBlock::new(header.clone(), attestation(replica as u32)),
@@ -2378,7 +2390,7 @@ fn sign(request: &SignRequest<MinPk, Digest>, replica: usize) -> Artifact<MinPk,
     }
 }
 
-fn delivery_correlation(effect: &Capability<MinPk, Digest>) -> (EffectId, Generation) {
+fn delivery_correlation(effect: &Capability<Bls<MinPk>, Digest>) -> (EffectId, Generation) {
     let Capability::Released(job) = effect else {
         unreachable!("delivery actions only consume publication effects")
     };

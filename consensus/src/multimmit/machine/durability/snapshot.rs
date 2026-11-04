@@ -12,25 +12,26 @@ use crate::{
     multimmit::{
         config::{Profile, Role},
         machine::view::{ViewSlotSnapshot, ViewStance, ViewTransition},
+        scheme::Scheme,
         types::{Artifact, ArtifactKind},
     },
     types::{Epoch, Height, View},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::{collections::BTreeMap, sync::Arc};
 
 /// A projection of the last acknowledged durable cursor.
 ///
 /// Verification jobs, unsynced reservations, and other volatile work are intentionally absent.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Snapshot<V: Variant, D: Digest> {
+pub(crate) struct Snapshot<S: Scheme, D: Digest> {
     pub(super) epoch: Epoch,
     pub(super) role: Role,
-    pub(super) state: DurableState<V, D>,
+    pub(super) state: DurableState<S, D>,
 }
 
-impl<V: Variant, D: Digest> Snapshot<V, D> {
-    pub(crate) const fn new(epoch: Epoch, role: Role, state: DurableState<V, D>) -> Self {
+impl<S: Scheme, D: Digest> Snapshot<S, D> {
+    pub(crate) const fn new(epoch: Epoch, role: Role, state: DurableState<S, D>) -> Self {
         Self { epoch, role, state }
     }
 
@@ -65,19 +66,19 @@ impl<V: Variant, D: Digest> Snapshot<V, D> {
 
     /// Returns network publications that remain durably outstanding, with their discharges.
     #[cfg(any(test, feature = "mocks"))]
-    pub(crate) const fn outbox(&self) -> &BTreeMap<EffectId, OutboxEntry<V, D>> {
+    pub(crate) const fn outbox(&self) -> &BTreeMap<EffectId, OutboxEntry<S, D>> {
         &self.state.outbox
     }
 
     /// Returns local signing requests that remain durably authorized.
     #[cfg(test)]
-    pub(crate) const fn signing_reservations(&self) -> &BTreeMap<EffectId, SignEffect<V, D>> {
+    pub(crate) const fn signing_reservations(&self) -> &BTreeMap<EffectId, SignEffect<S, D>> {
         &self.state.signing_reservations
     }
 
     /// Returns locally created artifacts retained independently of publication lifetime.
     #[cfg(test)]
-    pub(crate) const fn local_artifacts(&self) -> &BTreeMap<ArtifactId<D>, Arc<Artifact<V, D>>> {
+    pub(crate) const fn local_artifacts(&self) -> &BTreeMap<ArtifactId<D>, Arc<Artifact<S, D>>> {
         &self.state.local
     }
 
@@ -87,14 +88,14 @@ impl<V: Variant, D: Digest> Snapshot<V, D> {
     /// proofs it exited views with, the artifacts its outbox publishes (including a proposal's
     /// block and parent), and the blocks and parents its signing reservations reference are
     /// equally relevant to recovery validation.
-    pub(crate) fn retained_artifacts(&self) -> impl Iterator<Item = Arc<Artifact<V, D>>> {
+    pub(crate) fn retained_artifacts(&self) -> impl Iterator<Item = Arc<Artifact<S, D>>> {
         let mut artifacts = Vec::new();
         self.state
             .visit_retained(|_, retained| artifacts.push(retained.to_artifact()));
         artifacts.into_iter()
     }
 
-    pub(crate) fn into_state(self) -> DurableState<V, D> {
+    pub(crate) fn into_state(self) -> DurableState<S, D> {
         self.state
     }
 
@@ -109,7 +110,7 @@ impl<V: Variant, D: Digest> Snapshot<V, D> {
     pub(crate) fn validate<H: Hasher<Digest = D>>(
         &self,
         profile: &Profile<H::Digest>,
-    ) -> Result<ViewSnapshot<V, D>, ReplayError> {
+    ) -> Result<ViewSnapshot<S, D>, ReplayError> {
         if self.epoch != profile.protocol().epoch() || self.role != profile.role() {
             return Err(ReplayError::Context);
         }
@@ -263,7 +264,7 @@ impl<V: Variant, D: Digest> Snapshot<V, D> {
     ) -> Result<(), ReplayError> {
         let state = &self.state;
         let minted = |id: &EffectId| id.get() != 0 && id.get() <= state.cursor.get();
-        let safe = |request: &SignRequest<V, D>| match request {
+        let safe = |request: &SignRequest<S, D>| match request {
             SignRequest::DaVote(request) => state
                 .da_safety_heights
                 .get(request.header().chain().index())
@@ -455,11 +456,11 @@ const fn invalid(reason: SnapshotReason) -> ReplayError {
 
 /// Canonical stable View state at one acknowledged checkpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ViewSnapshot<V: Variant, D: Digest> {
-    pub(crate) slots: BTreeMap<View, ViewSlotSnapshot<V, D>>,
+pub(crate) struct ViewSnapshot<S: Scheme, D: Digest> {
+    pub(crate) slots: BTreeMap<View, ViewSlotSnapshot<S, D>>,
 }
 
-impl<V: Variant, D: Digest> Default for ViewSnapshot<V, D> {
+impl<S: Scheme, D: Digest> Default for ViewSnapshot<S, D> {
     fn default() -> Self {
         Self {
             slots: BTreeMap::new(),
@@ -467,7 +468,7 @@ impl<V: Variant, D: Digest> Default for ViewSnapshot<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> ViewSnapshot<V, D> {
+impl<S: Scheme, D: Digest> ViewSnapshot<S, D> {
     fn structurally_valid(&self, epoch: Epoch) -> bool {
         self.slots.iter().all(|(view, slot)| {
             !view.is_zero()
@@ -481,7 +482,7 @@ impl<V: Variant, D: Digest> ViewSnapshot<V, D> {
         })
     }
 
-    fn slot_mut(&mut self, view: View) -> Result<&mut ViewSlotSnapshot<V, D>, ReplayError> {
+    fn slot_mut(&mut self, view: View) -> Result<&mut ViewSlotSnapshot<S, D>, ReplayError> {
         if view.is_zero() {
             return Err(ReplayError::Transition(TransitionReason::ViewState));
         }
@@ -490,7 +491,7 @@ impl<V: Variant, D: Digest> ViewSnapshot<V, D> {
 
     fn observe_request(
         &mut self,
-        request: &SignRequest<V, D>,
+        request: &SignRequest<S, D>,
         retired: View,
     ) -> Result<(), ReplayError> {
         let Some(view) = request.consensus_view() else {
@@ -507,7 +508,7 @@ impl<V: Variant, D: Digest> ViewSnapshot<V, D> {
 
     fn observe_artifact(
         &mut self,
-        artifact: &Artifact<V, D>,
+        artifact: &Artifact<S, D>,
         role: Role,
         retired: View,
     ) -> Result<(), ReplayError> {
@@ -532,7 +533,7 @@ impl<V: Variant, D: Digest> ViewSnapshot<V, D> {
     fn from_durable<H: Hasher<Digest = D>>(
         epoch: Epoch,
         role: Role,
-        state: &DurableState<V, D>,
+        state: &DurableState<S, D>,
     ) -> Result<Self, ReplayError> {
         // Reservations carry issue order, but signed artifacts in `local` do not, and a signature
         // may complete while an older reservation is still pending. Observing signed choices

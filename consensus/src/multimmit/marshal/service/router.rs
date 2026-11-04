@@ -18,12 +18,13 @@ use crate::{
             relay::Staged,
             types::{Custody, Error, Floor, Reply},
         },
+        scheme::Scheme,
         types::{Activity, Artifact, BlockRef, Body, TransactionBlock},
     },
 };
 use commonware_actor::mailbox::{self as actor_mailbox, UnreliableReceiver};
 use commonware_broadcast::buffered;
-use commonware_cryptography::{Hasher, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Hasher, PublicKey};
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell,
@@ -38,23 +39,23 @@ use tracing::{Instrument as _, Span, debug_span, info_span};
 type JobResult = Result<(), Error>;
 
 /// Router configuration.
-pub(super) struct Config<E, H, V, B, P>
+pub(super) struct Config<E, H, S, B, P>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     B: Body<H>,
     P: PublicKey,
 {
     /// Runtime context of the router task.
     pub(super) context: E,
     /// Stages blocks, hint artifacts and subscribed blocks; also answers the public mailbox.
-    pub(super) catalog: catalog::Mailbox<H, V, B>,
+    pub(super) catalog: catalog::Mailbox<H, S, B>,
     /// Body lookups for the public mailbox.
-    pub(super) bodies: Bodies<H, V, B>,
+    pub(super) bodies: Bodies<H, S, B>,
     /// Resolves subscribed blocks and hears of admitted ones; also answers the public mailbox.
-    pub(super) backfill: backfill::Mailbox<H, V, B>,
+    pub(super) backfill: backfill::Mailbox<H, S, B>,
     /// Receives consensus hints and floor installations.
-    pub(super) synchronizer: synchronizer::Mailbox<V, H::Digest>,
+    pub(super) synchronizer: synchronizer::Mailbox<S, H::Digest>,
     /// Buffered broadcast ingress, raced against backfill by block subscriptions.
     pub(super) broadcast: buffered::Mailbox<P, TransactionBlock<H, B>>,
     /// Capacity of the router's request queue.
@@ -70,36 +71,36 @@ where
 }
 
 /// Runs routed requests as bounded jobs and coalesced subscriptions.
-pub(super) struct Actor<E, H, V, B, P>
+pub(super) struct Actor<E, H, S, B, P>
 where
     E: Spawner + RuntimeMetrics,
     H: Hasher,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     B: Body<H>,
     P: PublicKey,
 {
     context: ContextCell<E>,
-    catalog: catalog::Mailbox<H, V, B>,
-    backfill: backfill::Mailbox<H, V, B>,
-    synchronizer: synchronizer::Mailbox<V, H::Digest>,
+    catalog: catalog::Mailbox<H, S, B>,
+    backfill: backfill::Mailbox<H, S, B>,
+    synchronizer: synchronizer::Mailbox<S, H::Digest>,
     broadcast: buffered::Mailbox<P, TransactionBlock<H, B>>,
-    mailbox: UnreliableReceiver<Message<H, V, B>>,
+    mailbox: UnreliableReceiver<Message<H, S, B>>,
     jobs: Pool<'static, JobResult>,
     subscriptions: Subscriptions<H, B>,
     max_jobs: usize,
     metrics: Metrics,
 }
 
-impl<E, H, V, B, P> Actor<E, H, V, B, P>
+impl<E, H, S, B, P> Actor<E, H, S, B, P>
 where
     E: Spawner + RuntimeMetrics,
     H: Hasher,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     B: Body<H>,
     P: PublicKey,
 {
     /// Creates the router and the public mailbox that feeds it.
-    pub(super) fn new(config: Config<E, H, V, B, P>) -> (Self, Mailbox<H, V, B>) {
+    pub(super) fn new(config: Config<E, H, S, B, P>) -> (Self, Mailbox<H, S, B>) {
         let Config {
             context,
             catalog,
@@ -178,7 +179,7 @@ where
     /// Dispatches a burst of requests bounded by the remaining job capacity.
     ///
     /// Dispatched work runs in its caller's span when the drain span is disabled.
-    fn drain(&mut self, first: Message<H, V, B>) {
+    fn drain(&mut self, first: Message<H, S, B>) {
         let capacity = self.max_jobs.saturating_sub(self.jobs.len()).max(1);
         let drain = debug_span!(
             parent: None,
@@ -208,7 +209,7 @@ where
         self.metrics.hints(hints);
     }
 
-    fn dispatch(&mut self, request: Request<H, V, B>) {
+    fn dispatch(&mut self, request: Request<H, S, B>) {
         match request {
             Request::Hint { activity } => self.on_hint(activity),
             Request::StageBlock { block, reply } => self.on_stage(block, reply),
@@ -225,7 +226,7 @@ where
     ///
     /// Hints are advisory: a full child mailbox may drop them and a closed child is reported by
     /// the supervisor, so enqueue results are ignored.
-    fn on_hint(&mut self, activity: Activity<V, H::Digest>) {
+    fn on_hint(&mut self, activity: Activity<S, H::Digest>) {
         match activity {
             // The public mailbox hands certificate records to the catalog directly.
             Activity::TransactionProposed { .. } | Activity::CertificateRecorded { .. } => {}
@@ -409,7 +410,7 @@ where
     }
 
     /// Installs a floor and, once installed, lets backfill retire certified blocks below it.
-    fn on_install_floor(&mut self, floor: Floor<V, H::Digest>, reply: Reply<(), Error>) {
+    fn on_install_floor(&mut self, floor: Floor<S, H::Digest>, reply: Reply<(), Error>) {
         let synchronizer = self.synchronizer.clone();
         let backfill = self.backfill.clone();
         let frontiers = floor.emitted.clone();

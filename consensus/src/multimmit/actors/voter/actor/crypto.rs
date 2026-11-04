@@ -16,12 +16,12 @@ use crate::{
             NullificationRecoveryCompletion, NullificationRecoveryJob, SignRequest,
             VqcAggregateCompletion, VqcAggregateJob,
         },
-        scheme::bls12381_threshold::{Error as SchemeError, Scheme, SignatureVerification},
+        scheme::{Error as SchemeError, Generic, Scheme, SignatureVerification},
         types::Artifact,
     },
     types::View,
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     Clock,
@@ -29,6 +29,8 @@ use commonware_runtime::{
 };
 use commonware_utils::futures::Pool;
 use futures::FutureExt as _;
+use rand::{SeedableRng as _, rngs::StdRng};
+use rand_core::CryptoRng;
 use std::{
     sync::Arc,
     task::{Context, Poll},
@@ -37,60 +39,63 @@ use std::{
 use tracing::Span;
 
 /// One completed signature, certificate assembly, or recovery.
-pub(crate) enum CryptoOutcome<V: Variant, D: Digest> {
+pub(crate) enum CryptoOutcome<S: Scheme, D: Digest> {
     Signed {
         id: EffectId,
         generation: Generation,
-        artifact: Arc<Artifact<V, D>>,
+        artifact: Arc<Artifact<S, D>>,
     },
     SignedBatch {
         id: EffectId,
         generation: Generation,
-        artifacts: Vec<Artifact<V, D>>,
+        artifacts: Vec<Artifact<S, D>>,
     },
     NullificationRecovered {
         started_at: SystemTime,
-        completion: NullificationRecoveryCompletion<V>,
+        completion: NullificationRecoveryCompletion<S>,
     },
     VqcAggregated {
         view: View,
-        completion: Box<VqcAggregateCompletion<V, D>>,
+        completion: Box<VqcAggregateCompletion<S, D>>,
     },
     LqcAggregated {
         view: View,
-        completion: Box<LqcAggregateCompletion<V, D>>,
+        completion: Box<LqcAggregateCompletion<S, D>>,
     },
 }
 
 /// An operation's result as it returns from the pool: its outcome, or a worker panic.
-pub(crate) type CryptoResult<V, D> =
-    Result<Result<CryptoOutcome<V, D>, SchemeError>, WorkerPanicked>;
+pub(crate) type CryptoResult<S, D> =
+    Result<Result<CryptoOutcome<S, D>, SchemeError>, WorkerPanicked>;
 
 /// A leader-path certificate assembled from a machine-selected, preverified quorum.
-pub(crate) trait QuorumJob<H: Hasher, P: PublicKey, V: Variant>: Send + 'static {
+pub(crate) trait QuorumJob<H: Hasher, P: PublicKey, S: Scheme>: Send + 'static {
     /// Returns the view whose leader the certificate names.
     fn view(&self) -> View;
 
     /// Assembles the certificate on `strategy`, checks it against this job, and wraps it.
-    fn assemble<S: Strategy>(
+    fn assemble<St: Strategy>(
         &self,
-        scheme: &Scheme<P, V>,
-        strategy: &S,
-    ) -> Result<CryptoOutcome<V, H::Digest>, SchemeError>;
+        rng: &mut impl CryptoRng,
+        scheme: &Generic<S>,
+        strategy: &St,
+    ) -> Result<CryptoOutcome<S, H::Digest>, SchemeError>;
 }
 
-impl<H: Hasher, P: PublicKey, V: Variant> QuorumJob<H, P, V> for VqcAggregateJob<V, H::Digest> {
+impl<H: Hasher, P: PublicKey, S: Scheme> QuorumJob<H, P, S> for VqcAggregateJob<S, H::Digest> {
     fn view(&self) -> View {
         self.leader().view()
     }
 
-    fn assemble<S: Strategy>(
+    fn assemble<St: Strategy>(
         &self,
-        scheme: &Scheme<P, V>,
-        strategy: &S,
-    ) -> Result<CryptoOutcome<V, H::Digest>, SchemeError> {
+        rng: &mut impl CryptoRng,
+        scheme: &Generic<S>,
+        strategy: &St,
+    ) -> Result<CryptoOutcome<S, H::Digest>, SchemeError> {
         let messages = self.messages().collect::<Vec<_>>();
-        let certificate = scheme.assemble_vqc_with::<H, _>(
+        let certificate = scheme.assemble_vqc_with::<_, H, _>(
+            rng,
             self.leader().clone(),
             &messages,
             SignatureVerification::Preverified,
@@ -99,24 +104,26 @@ impl<H: Hasher, P: PublicKey, V: Variant> QuorumJob<H, P, V> for VqcAggregateJob
         let completion =
             VqcAggregateCompletion::prepare::<H>(self, certificate, scheme.codec_config())?;
         Ok(CryptoOutcome::VqcAggregated {
-            view: QuorumJob::<H, P, V>::view(self),
+            view: QuorumJob::<H, P, S>::view(self),
             completion: Box::new(completion),
         })
     }
 }
 
-impl<H: Hasher, P: PublicKey, V: Variant> QuorumJob<H, P, V> for LqcAggregateJob<V, H::Digest> {
+impl<H: Hasher, P: PublicKey, S: Scheme> QuorumJob<H, P, S> for LqcAggregateJob<S, H::Digest> {
     fn view(&self) -> View {
         self.leader().view()
     }
 
-    fn assemble<S: Strategy>(
+    fn assemble<St: Strategy>(
         &self,
-        scheme: &Scheme<P, V>,
-        strategy: &S,
-    ) -> Result<CryptoOutcome<V, H::Digest>, SchemeError> {
+        rng: &mut impl CryptoRng,
+        scheme: &Generic<S>,
+        strategy: &St,
+    ) -> Result<CryptoOutcome<S, H::Digest>, SchemeError> {
         let votes = self.votes().cloned().collect::<Vec<_>>();
-        let certificate = scheme.assemble_lqc_with::<H, _>(
+        let certificate = scheme.assemble_lqc_with::<_, H, _>(
+            rng,
             self.leader().clone(),
             &votes,
             SignatureVerification::Preverified,
@@ -125,7 +132,7 @@ impl<H: Hasher, P: PublicKey, V: Variant> QuorumJob<H, P, V> for LqcAggregateJob
         let completion =
             LqcAggregateCompletion::prepare::<H>(self, certificate, scheme.codec_config())?;
         Ok(CryptoOutcome::LqcAggregated {
-            view: QuorumJob::<H, P, V>::view(self),
+            view: QuorumJob::<H, P, S>::view(self),
             completion: Box::new(completion),
         })
     }
@@ -133,22 +140,26 @@ impl<H: Hasher, P: PublicKey, V: Variant> QuorumJob<H, P, V> for LqcAggregateJob
 
 /// Runs local cryptography on the critical pool and collects the results.
 pub(crate) struct CryptoExecutor<T: VoterTypes> {
-    scheme: Arc<Scheme<T::PublicKey, T::Variant>>,
+    scheme: Arc<Generic<T::Scheme>>,
     critical: T::CriticalStrategy,
     clock: Arc<T::Context>,
-    pool: Pool<'static, Finished<CryptoResult<T::Variant, DigestOf<T>>>>,
+    /// Seeds the batch randomness of each operation.
+    rng: StdRng,
+    pool: Pool<'static, Finished<CryptoResult<T::Scheme, DigestOf<T>>>>,
     signing_wait: Histogram,
     aggregation_wait: Histogram,
 }
 
 impl<T: VoterTypes> CryptoExecutor<T> {
     pub(crate) fn new(
-        scheme: Arc<Scheme<T::PublicKey, T::Variant>>,
+        scheme: Arc<Generic<T::Scheme>>,
         critical: T::CriticalStrategy,
-        clock: T::Context,
+        mut clock: T::Context,
         metrics: &Metrics,
     ) -> Self {
+        let rng = StdRng::from_rng(&mut clock);
         Self {
+            rng,
             scheme,
             critical,
             clock: Arc::new(clock),
@@ -159,7 +170,7 @@ impl<T: VoterTypes> CryptoExecutor<T> {
     }
 
     /// Returns the scheme the executor signs and assembles with.
-    pub(crate) const fn scheme(&self) -> &Arc<Scheme<T::PublicKey, T::Variant>> {
+    pub(crate) const fn scheme(&self) -> &Arc<Generic<T::Scheme>> {
         &self.scheme
     }
 
@@ -169,7 +180,7 @@ impl<T: VoterTypes> CryptoExecutor<T> {
         permit: TaskPermit,
         id: EffectId,
         generation: Generation,
-        requests: Arc<[SignRequest<T::Variant, DigestOf<T>>]>,
+        requests: Arc<[SignRequest<T::Scheme, DigestOf<T>>]>,
         span: Span,
         root: &Span,
     ) {
@@ -192,7 +203,7 @@ impl<T: VoterTypes> CryptoExecutor<T> {
         permit: TaskPermit,
         id: EffectId,
         generation: Generation,
-        requests: Arc<[SignRequest<T::Variant, DigestOf<T>>]>,
+        requests: Arc<[SignRequest<T::Scheme, DigestOf<T>>]>,
         span: Span,
         root: &Span,
     ) {
@@ -210,17 +221,18 @@ impl<T: VoterTypes> CryptoExecutor<T> {
     }
 
     /// Assembles one V-QC or L-QC from its preverified quorum.
-    pub(crate) fn aggregate<Q: QuorumJob<T::Hasher, T::PublicKey, T::Variant>>(
+    pub(crate) fn aggregate<Q: QuorumJob<T::Hasher, T::PublicKey, T::Scheme>>(
         &mut self,
         permit: TaskPermit,
         job: Q,
         span: Span,
         root: &Span,
     ) {
+        let mut rng = StdRng::from_rng(&mut self.rng);
         let scheme = Arc::clone(&self.scheme);
         let wait = self.aggregation_wait.clone();
         self.submit(permit, wait, span, root, move |strategy| {
-            job.assemble(&scheme, &strategy)
+            job.assemble(&mut rng, &scheme, &strategy)
         });
     }
 
@@ -228,7 +240,7 @@ impl<T: VoterTypes> CryptoExecutor<T> {
     pub(crate) fn recover_nullification(
         &mut self,
         permit: TaskPermit,
-        job: NullificationRecoveryJob<T::Variant>,
+        job: NullificationRecoveryJob<T::Scheme>,
         span: Span,
         root: &Span,
     ) {
@@ -236,9 +248,11 @@ impl<T: VoterTypes> CryptoExecutor<T> {
         let wait = self.aggregation_wait.clone();
         let started_at = self.clock.current();
         let (id, generation) = (job.issued().id(), job.issued().generation());
+        let mut rng = StdRng::from_rng(&mut self.rng);
         self.submit(permit, wait, span, root, move |strategy| {
             scheme
                 .assemble_nullification_with(
+                    &mut rng,
                     job.shares(),
                     SignatureVerification::Preverified,
                     &strategy,
@@ -265,7 +279,7 @@ impl<T: VoterTypes> CryptoExecutor<T> {
         root: &Span,
         operation: impl FnOnce(
             T::CriticalStrategy,
-        ) -> Result<CryptoOutcome<T::Variant, DigestOf<T>>, SchemeError>
+        ) -> Result<CryptoOutcome<T::Scheme, DigestOf<T>>, SchemeError>
         + Send
         + 'static,
     ) {
@@ -290,7 +304,7 @@ impl<T: VoterTypes> CryptoExecutor<T> {
     pub(crate) fn poll_completed(
         &mut self,
         cx: &mut Context<'_>,
-    ) -> Poll<Finished<CryptoResult<T::Variant, DigestOf<T>>>> {
+    ) -> Poll<Finished<CryptoResult<T::Scheme, DigestOf<T>>>> {
         self.pool.next_completed().poll_unpin(cx)
     }
 

@@ -5,11 +5,12 @@ use crate::{
     Viewable,
     multimmit::{
         machine::job::Generation,
+        scheme::Scheme,
         types::{Artifact, ArtifactId, BlockRef, ChainId, ViewProof},
     },
     types::{Height, View},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::{collections::BTreeMap, sync::Arc};
 
 /// The part of durable state that holds a retained artifact.
@@ -33,7 +34,7 @@ pub(crate) enum Holder {
 
 /// The acknowledged protocol state, retained artifacts, and outstanding effects.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DurableState<V: Variant, D: Digest> {
+pub(crate) struct DurableState<S: Scheme, D: Digest> {
     /// The current view.
     pub(in crate::multimmit::machine) view: View,
     /// Blocks this node signed for its own chain.
@@ -55,27 +56,27 @@ pub(crate) struct DurableState<V: Variant, D: Digest> {
     pub(in crate::multimmit::machine) retired_view: View,
     /// The L-QC proving finality through the signing floor, which retires consensus signing at
     /// or below its view.
-    pub(in crate::multimmit::machine) signing_floor: Option<Arc<Artifact<V, D>>>,
+    pub(in crate::multimmit::machine) signing_floor: Option<Arc<Artifact<S, D>>>,
     /// The V-QC this node's next proposal builds on.
-    pub(in crate::multimmit::machine) proposal_anchor: Option<Arc<Artifact<V, D>>>,
+    pub(in crate::multimmit::machine) proposal_anchor: Option<Arc<Artifact<S, D>>>,
     /// Every view above the proposal anchor's view and at or below this one is nullified, so a
     /// leader of the next view may build on the anchor.
     pub(in crate::multimmit::machine) proposal_nullified_through: View,
     /// Artifacts this node signed, retained until their view retires.
-    pub(in crate::multimmit::machine) local: BTreeMap<ArtifactId<D>, Arc<Artifact<V, D>>>,
+    pub(in crate::multimmit::machine) local: BTreeMap<ArtifactId<D>, Arc<Artifact<S, D>>>,
     /// Signing requests reserved but not yet completed.
-    pub(in crate::multimmit::machine) signing_reservations: BTreeMap<EffectId, SignEffect<V, D>>,
+    pub(in crate::multimmit::machine) signing_reservations: BTreeMap<EffectId, SignEffect<S, D>>,
     /// Publications waiting for the durable fact that discharges them.
-    pub(in crate::multimmit::machine) outbox: BTreeMap<EffectId, OutboxEntry<V, D>>,
+    pub(in crate::multimmit::machine) outbox: BTreeMap<EffectId, OutboxEntry<S, D>>,
     /// The V-QC forwarded for each view.
-    pub(in crate::multimmit::machine) forwarded_vqcs: BTreeMap<View, Arc<Artifact<V, D>>>,
+    pub(in crate::multimmit::machine) forwarded_vqcs: BTreeMap<View, Arc<Artifact<S, D>>>,
     /// The nullification forwarded for each view.
-    pub(in crate::multimmit::machine) forwarded_nullifications: BTreeMap<View, Arc<Artifact<V, D>>>,
+    pub(in crate::multimmit::machine) forwarded_nullifications: BTreeMap<View, Arc<Artifact<S, D>>>,
     /// The certificate each view was exited with.
-    pub(in crate::multimmit::machine) exits: BTreeMap<View, Arc<Artifact<V, D>>>,
+    pub(in crate::multimmit::machine) exits: BTreeMap<View, Arc<Artifact<S, D>>>,
 }
 
-impl<V: Variant, D: Digest> DurableState<V, D> {
+impl<S: Scheme, D: Digest> DurableState<S, D> {
     /// Creates the state of a fresh node at view one, certified at `certified_tips`.
     pub(crate) fn new(certified_tips: Vec<BlockRef<D>>, produced_height: Height) -> Self {
         let da_safety_heights = certified_tips.iter().map(BlockRef::height).collect();
@@ -103,7 +104,7 @@ impl<V: Variant, D: Digest> DurableState<V, D> {
     /// Visits every artifact, or artifact part, durable state retains, with its holder.
     ///
     /// An artifact held in several places is visited once per holder.
-    pub(crate) fn visit_retained(&self, mut visit: impl FnMut(Holder, Retained<'_, V, D>)) {
+    pub(crate) fn visit_retained(&self, mut visit: impl FnMut(Holder, Retained<'_, S, D>)) {
         for artifact in self.local.values() {
             visit(Holder::Local, Retained::Artifact(artifact));
         }
@@ -134,7 +135,7 @@ impl<V: Variant, D: Digest> DurableState<V, D> {
     }
 
     /// Projects resolver evidence directly from durable custody.
-    pub(crate) fn resolver_proofs(&self) -> Vec<ViewProof<V, D>> {
+    pub(crate) fn resolver_proofs(&self) -> Vec<ViewProof<S, D>> {
         let mut proofs = Vec::new();
         self.visit_retained(|_, retained| proofs.extend(retained.view_proof()));
         proofs
@@ -200,19 +201,19 @@ impl<V: Variant, D: Digest> DurableState<V, D> {
     }
 
     /// Returns every reserved signing request, in reservation and request order.
-    pub(crate) fn sign_requests(&self) -> impl Iterator<Item = &SignRequest<V, D>> {
+    pub(crate) fn sign_requests(&self) -> impl Iterator<Item = &SignRequest<S, D>> {
         self.signing_reservations
             .values()
             .flat_map(SignEffect::requests)
     }
 
     /// Returns the outstanding signing choice `id`, if any.
-    pub(crate) fn signing(&self, id: &EffectId) -> Option<&SignEffect<V, D>> {
+    pub(crate) fn signing(&self, id: &EffectId) -> Option<&SignEffect<S, D>> {
         self.signing_reservations.get(id)
     }
 
     /// Returns the queued publication `id`, if any.
-    pub(crate) fn publication(&self, id: &EffectId) -> Option<&Publication<V, D>> {
+    pub(crate) fn publication(&self, id: &EffectId) -> Option<&Publication<S, D>> {
         self.outbox.get(id).map(OutboxEntry::publication)
     }
 

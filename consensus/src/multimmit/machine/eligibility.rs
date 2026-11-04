@@ -11,13 +11,14 @@ use super::{
     verification::Observation,
 };
 use crate::{
-    multimmit::types::{
-        ArtifactId, BlockRef, ChainId, SignedTransactionBlock, TransactionBlockHeader,
+    multimmit::{
+        scheme::Scheme,
+        types::{ArtifactId, BlockRef, ChainId, SignedTransactionBlock, TransactionBlockHeader},
     },
     types::Height,
 };
 use commonware_codec::EncodeSize as _;
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::{collections::BTreeMap, ops::Bound, sync::Arc};
 
 /// Identifies one deterministic block-validation request.
@@ -32,12 +33,12 @@ impl SequenceId for ValidationId {
 
 /// Immutable block metadata whose payload must be validated.
 #[derive(Clone, Debug)]
-pub(crate) struct ValidationJob<V: Variant, D: Digest> {
+pub(crate) struct ValidationJob<S: Scheme, D: Digest> {
     issued: Issued<ValidationId>,
-    block: Arc<SignedTransactionBlock<V, D>>,
+    block: Arc<SignedTransactionBlock<S, D>>,
 }
 
-impl<V: Variant, D: Digest> ValidationJob<V, D> {
+impl<S: Scheme, D: Digest> ValidationJob<S, D> {
     /// Returns the job's identity and issuing generation.
     pub(crate) const fn issued(&self) -> Issued<ValidationId> {
         self.issued
@@ -46,13 +47,13 @@ impl<V: Variant, D: Digest> ValidationJob<V, D> {
     /// Creates a validation job.
     pub(crate) const fn new(
         issued: Issued<ValidationId>,
-        block: Arc<SignedTransactionBlock<V, D>>,
+        block: Arc<SignedTransactionBlock<S, D>>,
     ) -> Self {
         Self { issued, block }
     }
 
     /// Returns the shared authenticated block.
-    pub(crate) const fn block_arc(&self) -> &Arc<SignedTransactionBlock<V, D>> {
+    pub(crate) const fn block_arc(&self) -> &Arc<SignedTransactionBlock<S, D>> {
         &self.block
     }
 }
@@ -105,10 +106,10 @@ pub(crate) enum ValidationState {
 }
 
 /// One producer-authenticated block retained for validation and DA-vote eligibility.
-struct BlockRecord<V: Variant, D: Digest> {
+struct BlockRecord<S: Scheme, D: Digest> {
     artifact: ArtifactId<D>,
     observation: Observation,
-    block: Arc<SignedTransactionBlock<V, D>>,
+    block: Arc<SignedTransactionBlock<S, D>>,
     block_ref: BlockRef<D>,
     state: ValidationState,
 }
@@ -118,14 +119,14 @@ struct BlockRecord<V: Variant, D: Digest> {
 /// `ready_through` is the greatest height the run covers, or the certified anchor when the run is
 /// empty. The machine keeps a copy of it that can only lag this plane by an in-flight message and
 /// is therefore a safe lower bound.
-pub(crate) struct EligibleRun<V: Variant, D: Digest> {
-    pub(crate) run: Vec<Arc<SignedTransactionBlock<V, D>>>,
+pub(crate) struct EligibleRun<S: Scheme, D: Digest> {
+    pub(crate) run: Vec<Arc<SignedTransactionBlock<S, D>>>,
     pub(crate) ready_through: Height,
 }
 
 /// DA-eligibility state for one producer chain: its block copies, application validations, and
 /// contiguous eligible DA-vote run.
-pub(crate) struct ChainEligibility<V: Variant, D: Digest> {
+pub(crate) struct ChainEligibility<S: Scheme, D: Digest> {
     chain: ChainId,
     pipeline_depth: u64,
     /// The most in-flight application validations this chain keeps at once.
@@ -134,7 +135,7 @@ pub(crate) struct ChainEligibility<V: Variant, D: Digest> {
     validation_bytes_limit: usize,
     /// Producer-authenticated blocks above the certified anchor, keyed by height and kept in
     /// observation order within a height so an equivocating producer resolves deterministically.
-    blocks: BTreeMap<Height, Vec<BlockRecord<V, D>>>,
+    blocks: BTreeMap<Height, Vec<BlockRecord<S, D>>>,
     /// In-flight application validations issued by this plane.
     validations: BTreeMap<ValidationId, ValidationRecord<D>>,
     validation_items: usize,
@@ -179,7 +180,7 @@ pub(crate) enum ValidationOutcome<D: Digest> {
     Invalid(ArtifactId<D>),
 }
 
-impl<V: Variant, D: Digest> ChainEligibility<V, D> {
+impl<S: Scheme, D: Digest> ChainEligibility<S, D> {
     /// Builds a plane for one chain bound to one process generation.
     pub(crate) const fn new(
         chain: ChainId,
@@ -222,7 +223,7 @@ impl<V: Variant, D: Digest> ChainEligibility<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        block: Arc<SignedTransactionBlock<V, D>>,
+        block: Arc<SignedTransactionBlock<S, D>>,
         custodied: bool,
     ) {
         let header = block.header();
@@ -262,7 +263,7 @@ impl<V: Variant, D: Digest> ChainEligibility<V, D> {
     /// A block is dispatched only once its parent is certified at the anchor or is itself
     /// pending or valid here, so descendants that arrive first never occupy the slots their missing
     /// parent needs. Lower heights dispatch first.
-    pub(crate) fn ready_validation(&mut self) -> Option<ValidationJob<V, D>> {
+    pub(crate) fn ready_validation(&mut self) -> Option<ValidationJob<S, D>> {
         if self.validation_items >= self.validation_items_limit {
             return None;
         }
@@ -439,7 +440,7 @@ impl<V: Variant, D: Digest> ChainEligibility<V, D> {
     /// The run starts at the lowest unvoted height above the anchor whose path from the anchor is
     /// fully DA-voted and validated, and extends with consecutive valid children while they stay
     /// within `pipeline_depth` of the anchor.
-    pub(crate) fn eligible_run(&self, cap: usize) -> EligibleRun<V, D> {
+    pub(crate) fn eligible_run(&self, cap: usize) -> EligibleRun<S, D> {
         let empty = EligibleRun {
             run: Vec::new(),
             ready_through: self.anchor.height(),
@@ -492,7 +493,7 @@ impl<V: Variant, D: Digest> ChainEligibility<V, D> {
     }
 
     /// Returns the first valid block among one height's `records` that extends `parent`.
-    fn valid_child(records: &[BlockRecord<V, D>], parent: D) -> Option<&BlockRecord<V, D>> {
+    fn valid_child(records: &[BlockRecord<S, D>], parent: D) -> Option<&BlockRecord<S, D>> {
         records.iter().find(|record| {
             record.state == ValidationState::Valid && record.block.header().parent() == parent
         })
@@ -538,7 +539,7 @@ pub(crate) struct EligibilitySnapshot<D: Digest> {
 }
 
 #[cfg(test)]
-impl<V: Variant, D: Digest> ChainEligibility<V, D> {
+impl<S: Scheme, D: Digest> ChainEligibility<S, D> {
     /// Returns the generation, anchor, retained blocks, and DA-choice read-copy and cursor.
     pub(crate) fn snapshot_for_test(&self) -> EligibilitySnapshot<D> {
         EligibilitySnapshot {
@@ -629,6 +630,7 @@ mod tests {
     use crate::{
         multimmit::{
             machine::testing::fixtures::CountingHasher,
+            mocks::Bls,
             types::{
                 Attestation, BlockRef, ChainId, SignedTransactionBlock, TransactionBlockHeader,
             },
@@ -639,6 +641,7 @@ mod tests {
     use commonware_cryptography::{
         Hasher, Sha256,
         bls12381::primitives::variant::{MinPk, Variant},
+        certificate,
         sha256::Digest,
     };
     use commonware_math::algebra::Additive as _;
@@ -655,11 +658,11 @@ mod tests {
         Sha256::hash(&[bytes])
     }
 
-    fn attestation() -> Attestation<MinPk> {
-        Attestation::new(
-            Participant::new(0),
-            Lazy::from(<MinPk as Variant>::Signature::zero()),
-        )
+    fn attestation() -> Attestation<Bls<MinPk>> {
+        certificate::Attestation {
+            signer: Participant::new(0),
+            signature: Lazy::from(<MinPk as Variant>::Signature::zero()),
+        }
     }
 
     fn header(
@@ -680,7 +683,7 @@ mod tests {
 
     fn block(
         header: &TransactionBlockHeader<Digest>,
-    ) -> Arc<SignedTransactionBlock<MinPk, Digest>> {
+    ) -> Arc<SignedTransactionBlock<Bls<MinPk>, Digest>> {
         Arc::new(SignedTransactionBlock::new(header.clone(), attestation()))
     }
 
@@ -692,7 +695,7 @@ mod tests {
         BlockRef::new(ChainId::new(chain), Height::new(0), hash(b"chain genesis"))
     }
 
-    fn eligibility(anchor: BlockRef<Digest>) -> ChainEligibility<MinPk, Digest> {
+    fn eligibility(anchor: BlockRef<Digest>) -> ChainEligibility<Bls<MinPk>, Digest> {
         ChainEligibility::new(
             anchor.chain(),
             PIPELINE,
@@ -704,7 +707,7 @@ mod tests {
     }
 
     fn observe(
-        v: &mut ChainEligibility<MinPk, Digest>,
+        v: &mut ChainEligibility<Bls<MinPk>, Digest>,
         order: u32,
         header: &TransactionBlockHeader<Digest>,
         custodied: bool,
@@ -718,8 +721,8 @@ mod tests {
     }
 
     fn complete(
-        v: &mut ChainEligibility<MinPk, Digest>,
-        job: &ValidationJob<MinPk, Digest>,
+        v: &mut ChainEligibility<Bls<MinPk>, Digest>,
+        job: &ValidationJob<Bls<MinPk>, Digest>,
         validity: BlockValidity,
     ) -> ValidationOutcome<Digest> {
         v.complete_validation(ValidationCompletion::new(job.issued(), validity))
@@ -750,13 +753,13 @@ mod tests {
             .collect()
     }
 
-    fn validate_all(v: &mut ChainEligibility<MinPk, Digest>) {
+    fn validate_all(v: &mut ChainEligibility<Bls<MinPk>, Digest>) {
         while let Some(job) = v.ready_validation() {
             complete(v, &job, BlockValidity::Valid);
         }
     }
 
-    fn heights(headers: &[Arc<SignedTransactionBlock<MinPk, Digest>>]) -> Vec<Height> {
+    fn heights(headers: &[Arc<SignedTransactionBlock<Bls<MinPk>, Digest>>]) -> Vec<Height> {
         headers
             .iter()
             .map(|block| block.header().height())
@@ -893,7 +896,7 @@ mod tests {
     #[test]
     fn in_flight_validations_are_bounded_and_resume_on_release() {
         let a = anchor(1);
-        let mut v = ChainEligibility::<MinPk, Digest>::new(
+        let mut v = ChainEligibility::<Bls<MinPk>, Digest>::new(
             a.chain(),
             PIPELINE,
             1,

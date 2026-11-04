@@ -9,6 +9,7 @@ use crate::{
     multimmit::{
         actors::util::reliable_policy,
         machine::{IdentifiedArtifact, Inspection, ResolutionCompletion, VerificationCompletion},
+        scheme::Scheme,
         wire::Plane,
     },
     types::Round,
@@ -17,14 +18,14 @@ use commonware_actor::{
     Feedback, Unreliable,
     mailbox::{self, UnreliablePolicy},
 };
-use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_runtime::Metrics;
 use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, num::NonZeroUsize, time::SystemTime};
 use tracing::Span;
 
 /// Resolver completions delivered to the voter.
-pub(crate) enum Message<V: Variant, D: Digest> {
+pub(crate) enum Message<S: Scheme, D: Digest> {
     /// One completion for a machine-issued resolution request.
     Resolution {
         /// The root span that owns terminal failures from this request.
@@ -34,11 +35,11 @@ pub(crate) enum Message<V: Variant, D: Digest> {
         /// The round that issued the request.
         round: Round,
         /// The completion for the machine-issued request.
-        completion: ResolutionCompletion<V, D>,
+        completion: ResolutionCompletion<S, D>,
     },
 }
 
-reliable_policy!(impl<V: Variant, D: Digest> for Message<V, D>);
+reliable_policy!(impl<S: Scheme, D: Digest> for Message<S, D>);
 
 /// Best-effort diagnostic queries accepted by the voter.
 pub(crate) enum Query<D: Digest> {
@@ -61,9 +62,9 @@ impl<D: Digest> UnreliablePolicy for Query<D> {
 ///
 /// The ingress actor bounds these with explicit credits and stops admitting network traffic before
 /// the queue can saturate, so an admitted artifact is not lost.
-pub(crate) struct Observed<P: PublicKey, V: Variant, D: Digest> {
+pub(crate) struct Observed<P: PublicKey, S: Scheme, D: Digest> {
     /// Decoded, identified artifacts in observation order, each with its authenticated source.
-    pub(crate) artifacts: Vec<(P, IdentifiedArtifact<V, D>)>,
+    pub(crate) artifacts: Vec<(P, IdentifiedArtifact<S, D>)>,
     /// Total canonical encoded length of the artifacts.
     pub(crate) bytes: usize,
     /// The plane every artifact in the cohort arrived on.
@@ -74,7 +75,7 @@ pub(crate) struct Observed<P: PublicKey, V: Variant, D: Digest> {
     pub(crate) forwarded_at: SystemTime,
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> UnreliablePolicy for Observed<P, V, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> UnreliablePolicy for Observed<P, S, D> {
     type Overflow = VecDeque<Self>;
 
     fn handle(_: &mut Self::Overflow, _: Self) -> bool {
@@ -84,25 +85,25 @@ impl<P: PublicKey, V: Variant, D: Digest> UnreliablePolicy for Observed<P, V, D>
 }
 
 /// One verification completion.
-pub(crate) struct Completed<V: Variant, D: Digest> {
+pub(crate) struct Completed<S: Scheme, D: Digest> {
     /// The issuing job's tracing span.
     pub(crate) span: Span,
     /// The per-item verdicts.
-    pub(crate) completion: VerificationCompletion<V, D>,
+    pub(crate) completion: VerificationCompletion<S, D>,
 }
 
 // Completions are bounded by the in-flight verification job ceiling and must not be lost.
-reliable_policy!(impl<V: Variant, D: Digest> for Completed<V, D>);
+reliable_policy!(impl<S: Scheme, D: Digest> for Completed<S, D>);
 
 /// Typed endpoints for every queue the voter receives.
-pub(crate) struct Mailbox<P: PublicKey, V: Variant, D: Digest> {
-    resolutions: Resolutions<V, D>,
-    observations: Observations<P, V, D>,
-    completions: Completions<V, D>,
+pub(crate) struct Mailbox<P: PublicKey, S: Scheme, D: Digest> {
+    resolutions: Resolutions<S, D>,
+    observations: Observations<P, S, D>,
+    completions: Completions<S, D>,
     inspector: Inspector<D>,
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Clone for Mailbox<P, V, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Clone for Mailbox<P, S, D> {
     fn clone(&self) -> Self {
         Self {
             resolutions: self.resolutions.clone(),
@@ -114,23 +115,23 @@ impl<P: PublicKey, V: Variant, D: Digest> Clone for Mailbox<P, V, D> {
 }
 
 /// The voter's endpoints split by producer.
-pub(crate) struct Endpoints<P: PublicKey, V: Variant, D: Digest> {
+pub(crate) struct Endpoints<P: PublicKey, S: Scheme, D: Digest> {
     /// Resolution completions, sent by the resolver.
-    pub(crate) resolutions: Resolutions<V, D>,
+    pub(crate) resolutions: Resolutions<S, D>,
     /// Observation cohorts, offered by the ingress actor.
-    pub(crate) observations: Observations<P, V, D>,
+    pub(crate) observations: Observations<P, S, D>,
     /// Verification completions, sent by the verifier.
-    pub(crate) completions: Completions<V, D>,
+    pub(crate) completions: Completions<S, D>,
     /// Diagnostic queries.
     pub(crate) inspector: Inspector<D>,
 }
 
 /// The resolver's endpoint into the voter.
-pub(crate) struct Resolutions<V: Variant, D: Digest> {
-    sender: mailbox::Sender<Message<V, D>>,
+pub(crate) struct Resolutions<S: Scheme, D: Digest> {
+    sender: mailbox::Sender<Message<S, D>>,
 }
 
-impl<V: Variant, D: Digest> Clone for Resolutions<V, D> {
+impl<S: Scheme, D: Digest> Clone for Resolutions<S, D> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -138,14 +139,14 @@ impl<V: Variant, D: Digest> Clone for Resolutions<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Resolutions<V, D> {
+impl<S: Scheme, D: Digest> Resolutions<S, D> {
     /// Delivers one resolution completion.
     pub(crate) fn resolved(
         &self,
         root: Span,
         span: Span,
         round: Round,
-        completion: ResolutionCompletion<V, D>,
+        completion: ResolutionCompletion<S, D>,
     ) -> Feedback {
         self.sender.enqueue(Message::Resolution {
             root,
@@ -157,11 +158,11 @@ impl<V: Variant, D: Digest> Resolutions<V, D> {
 }
 
 /// The ingress actor's endpoint into the voter.
-pub(crate) struct Observations<P: PublicKey, V: Variant, D: Digest> {
-    sender: mailbox::UnreliableSender<Observed<P, V, D>>,
+pub(crate) struct Observations<P: PublicKey, S: Scheme, D: Digest> {
+    sender: mailbox::UnreliableSender<Observed<P, S, D>>,
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Clone for Observations<P, V, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Clone for Observations<P, S, D> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -169,19 +170,19 @@ impl<P: PublicKey, V: Variant, D: Digest> Clone for Observations<P, V, D> {
     }
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Observations<P, V, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Observations<P, S, D> {
     /// Offers one observation cohort; the voter rejects it when the queue is full.
-    pub(crate) fn observed(&self, observed: Observed<P, V, D>) -> Unreliable<Feedback> {
+    pub(crate) fn observed(&self, observed: Observed<P, S, D>) -> Unreliable<Feedback> {
         self.sender.enqueue(observed)
     }
 }
 
 /// The verifier's endpoint into the voter.
-pub(crate) struct Completions<V: Variant, D: Digest> {
-    sender: mailbox::Sender<Completed<V, D>>,
+pub(crate) struct Completions<S: Scheme, D: Digest> {
+    sender: mailbox::Sender<Completed<S, D>>,
 }
 
-impl<V: Variant, D: Digest> Clone for Completions<V, D> {
+impl<S: Scheme, D: Digest> Clone for Completions<S, D> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -189,14 +190,14 @@ impl<V: Variant, D: Digest> Clone for Completions<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Completions<V, D> {
+impl<S: Scheme, D: Digest> Completions<S, D> {
     /// Delivers one verification completion.
-    pub(crate) fn completed(&self, completed: Completed<V, D>) -> Feedback {
+    pub(crate) fn completed(&self, completed: Completed<S, D>) -> Feedback {
         self.sender.enqueue(completed)
     }
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Mailbox<P, V, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Mailbox<P, S, D> {
     /// Creates the voter's four inbound queues, each bounded by `capacity`.
     ///
     /// `queues` labels the observation and completion queues; `context` labels the others.
@@ -204,7 +205,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Mailbox<P, V, D> {
         context: &E,
         queues: &E,
         capacity: NonZeroUsize,
-    ) -> (Self, Inbox<P, V, D>) {
+    ) -> (Self, Inbox<P, S, D>) {
         let (resolutions, resolution_receiver) = mailbox::new(context.child("mailbox"), capacity);
         let (observations, observation_receiver) =
             mailbox::new_unreliable(queues.child("observations"), capacity);
@@ -236,7 +237,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Mailbox<P, V, D> {
     /// Splits the mailbox into one endpoint per producer.
     ///
     /// Handing each producer only its own endpoint lets the voter observe that producer stopping.
-    pub(crate) fn into_endpoints(self) -> Endpoints<P, V, D> {
+    pub(crate) fn into_endpoints(self) -> Endpoints<P, S, D> {
         Endpoints {
             resolutions: self.resolutions,
             observations: self.observations,
@@ -277,13 +278,13 @@ impl<D: Digest> Inspector<D> {
 }
 
 /// The receiving side of the voter's inbound queues.
-pub(crate) struct Inbox<P: PublicKey, V: Variant, D: Digest> {
+pub(crate) struct Inbox<P: PublicKey, S: Scheme, D: Digest> {
     /// Resolution completions from the resolver.
-    pub(crate) resolutions: mailbox::Receiver<Message<V, D>>,
+    pub(crate) resolutions: mailbox::Receiver<Message<S, D>>,
     /// Observation cohorts from the ingress actor.
-    pub(crate) observations: mailbox::UnreliableReceiver<Observed<P, V, D>>,
+    pub(crate) observations: mailbox::UnreliableReceiver<Observed<P, S, D>>,
     /// Verification completions from the verifier.
-    pub(crate) completions: mailbox::Receiver<Completed<V, D>>,
+    pub(crate) completions: mailbox::Receiver<Completed<S, D>>,
     /// Diagnostic queries.
     pub(crate) queries: mailbox::UnreliableReceiver<Query<D>>,
 }
@@ -291,6 +292,7 @@ pub(crate) struct Inbox<P: PublicKey, V: Variant, D: Digest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::multimmit::mocks::Bls;
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk, ed25519, sha256::Digest as Sha256Digest,
     };
@@ -301,7 +303,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let engine = context.child("engine");
             let voter_context = engine.child("voter");
-            let (_mailbox, _inbox) = Mailbox::<ed25519::PublicKey, MinPk, Sha256Digest>::new(
+            let (_mailbox, _inbox) = Mailbox::<ed25519::PublicKey, Bls<MinPk>, Sha256Digest>::new(
                 &voter_context,
                 &engine,
                 NonZeroUsize::MIN,

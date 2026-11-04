@@ -26,6 +26,7 @@ use crate::{
             verification::Observation,
             vote_body::VoteBuilds,
         },
+        scheme::Scheme,
         types::{
             Artifact, ArtifactId, CertificateId, CodecConfig, LeaderBlock, SelectedCommitments,
             TipRecord, genesis_history,
@@ -34,7 +35,7 @@ use crate::{
     types::{Epoch, Participant, Round, View},
 };
 use bytes::Bytes;
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use core::time::Duration;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -91,7 +92,7 @@ pub(crate) struct RetireFloors<D: Digest> {
 /// It owns each retained view's entry, the proposal parents later views may build on, the claims
 /// of unverified view-scoped artifacts, certificate jobs and the certificate scan, forwarding
 /// marks, the in-flight proposal or vote pass, and the proposal frontier.
-pub(crate) struct ViewState<V: Variant, D: Digest> {
+pub(crate) struct ViewState<S: Scheme, D: Digest> {
     pub(super) config: CodecConfig,
     /// This node's participant when it validates, or `None` when it observes.
     pub(super) me: Option<Participant>,
@@ -103,17 +104,17 @@ pub(crate) struct ViewState<V: Variant, D: Digest> {
     /// Every view above the anchor's view and at or below this one is nullified.
     pub(super) proposal_nullified_through: View,
     /// Proposal parents by certificate identifier.
-    pub(super) parents: BTreeMap<CertificateId<D>, ParentRecord<V, D>>,
+    pub(super) parents: BTreeMap<CertificateId<D>, ParentRecord<S, D>>,
     /// Proposal parent identifiers by the view their V-QC certified.
     pub(super) parents_by_view: BTreeMap<View, Vec<CertificateId<D>>>,
     /// Everything retained for each view.
-    pub(super) views: BTreeMap<View, ViewEntry<V, D>>,
+    pub(super) views: BTreeMap<View, ViewEntry<S, D>>,
     /// The view and signer of every retained view message.
     pub(super) message_locations: BTreeMap<ArtifactId<D>, (View, Participant)>,
     /// Slots claimed by artifacts awaiting verification.
     pub(super) claims: ClaimIndex<D>,
     /// Certificate jobs in flight.
-    pub(super) certificate_jobs: JobTable<ViewCertificateId, ViewCertificateJob<V, D>>,
+    pub(super) certificate_jobs: JobTable<ViewCertificateId, ViewCertificateJob<S, D>>,
     /// Views whose nullification was forwarded.
     pub(super) forwarded_nullifications: BTreeSet<View>,
     /// The V-QC forwarded for each view.
@@ -125,9 +126,9 @@ pub(crate) struct ViewState<V: Variant, D: Digest> {
     /// Views with enough settled messages or nullify shares for certificate work.
     pub(super) ready_certificate_views: BTreeSet<View>,
     /// The certificate scan in progress, if any.
-    pub(super) certificate_scan: Option<CertificateScan<V, D>>,
+    pub(super) certificate_scan: Option<CertificateScan<S, D>>,
     /// This node's proposal or vote pass in progress, if any.
-    pub(super) regular_sign_pass: Option<RegularSignPass<V, D>>,
+    pub(super) regular_sign_pass: Option<RegularSignPass<S, D>>,
     /// Vote-pass lifecycle events not yet drained for tracing.
     pub(super) vote_builds: VoteBuilds,
     /// Header-triggered restarts consumed by the in-flight proposal pass.
@@ -139,20 +140,20 @@ pub(crate) struct ViewState<V: Variant, D: Digest> {
     /// Identifiers for certificate jobs.
     pub(super) certificate_ids: IdSequence<ViewCertificateId>,
     /// Certificate work issued and not yet taken.
-    pub(super) capabilities: Capabilities<V, D>,
+    pub(super) capabilities: Capabilities<S, D>,
 }
 
 /// Everything retained for one view.
-pub(super) struct ViewEntry<V: Variant, D: Digest> {
+pub(super) struct ViewEntry<S: Scheme, D: Digest> {
     /// This node's local choices in the view.
-    pub(super) slot: ViewSlotSnapshot<V, D>,
+    pub(super) slot: ViewSlotSnapshot<S, D>,
     /// The earliest proposal or certificate designating each leader block, by digest.
-    pub(super) leaders: BTreeMap<D, LeaderRecord<V, D>>,
-    pub(super) proposals: ProposalRecords<V, D>,
-    pub(super) messages: BTreeMap<Participant, MessageRecords<V, D>>,
+    pub(super) leaders: BTreeMap<D, LeaderRecord<S, D>>,
+    pub(super) proposals: ProposalRecords<S, D>,
+    pub(super) messages: BTreeMap<Participant, MessageRecords<S, D>>,
     /// The view message settled for each signer once no earlier claim can displace it.
-    pub(super) sticky: BTreeMap<Participant, StickyMessage<V, D>>,
-    pub(super) nullifies: BTreeMap<Participant, NullifyRecord<V, D>>,
+    pub(super) sticky: BTreeMap<Participant, StickyMessage<S, D>>,
+    pub(super) nullifies: BTreeMap<Participant, NullifyRecord<S, D>>,
     /// Signers whose messages or nullify shares oppose this node's vote.
     pub(super) post_vote_evidence: BTreeSet<Participant>,
     /// The choice frozen when the view's timer fired.
@@ -160,12 +161,12 @@ pub(super) struct ViewEntry<V: Variant, D: Digest> {
     /// V-QCs, with the latest strictly extending transcript assembled for each target. Per-view
     /// aggregation is serialized, and completing a job invalidates the view's scan before
     /// another candidate is selected.
-    pub(super) vqc: VqcTrack<V, D>,
+    pub(super) vqc: VqcTrack<S, D>,
     /// Nullifications, and whether this node assembled one.
-    pub(super) nullification: NullificationTrack<V, D>,
+    pub(super) nullification: NullificationTrack<S, D>,
 }
 
-impl<V: Variant, D: Digest> Default for ViewEntry<V, D> {
+impl<S: Scheme, D: Digest> Default for ViewEntry<S, D> {
     fn default() -> Self {
         Self {
             slot: ViewSlotSnapshot::default(),
@@ -183,11 +184,11 @@ impl<V: Variant, D: Digest> Default for ViewEntry<V, D> {
 }
 
 /// V-QCs for a view, with the latest strictly extending transcript assembled for each target.
-pub(super) type VqcTrack<V, D> =
-    CertificateTrack<VqcRecords<V, D>, BTreeMap<D, Vec<ArtifactId<D>>>>;
+pub(super) type VqcTrack<S, D> =
+    CertificateTrack<VqcRecords<S, D>, BTreeMap<D, Vec<ArtifactId<D>>>>;
 
 /// Nullifications for a view, and whether this node assembled one.
-pub(super) type NullificationTrack<V, D> = CertificateTrack<NullificationRecords<V, D>, bool>;
+pub(super) type NullificationTrack<S, D> = CertificateTrack<NullificationRecords<S, D>, bool>;
 
 /// One exit kind's certificates for a view.
 #[derive(Default)]
@@ -219,7 +220,7 @@ pub(crate) enum ViewError {
     IdentifierExhausted,
 }
 
-impl<V: Variant, D: Digest> ViewState<V, D> {
+impl<S: Scheme, D: Digest> ViewState<S, D> {
     /// Creates the view state for the profile's epoch, with the genesis anchor as the only
     /// proposal parent.
     pub(crate) fn new<H: Hasher<Digest = D>>(profile: &Profile<H::Digest>) -> Self {
@@ -284,7 +285,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     /// Returns selected paths owned by this V-QC or the leader's retained parent.
     pub(crate) fn selected_commitments(
         &self,
-        artifact: &Arc<Artifact<V, D>>,
+        artifact: &Arc<Artifact<S, D>>,
     ) -> Option<&SelectedCommitments<D>> {
         match artifact.as_ref() {
             Artifact::Vqc(certificate) => self
@@ -310,7 +311,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     /// Reconstructs the safe-tip opening committed by a leader from its retained parent.
     pub(crate) fn leader_history<H: Hasher<Digest = D>>(
         &self,
-        leader: &LeaderBlock<V, D>,
+        leader: &LeaderBlock<S, D>,
     ) -> Result<Arc<TipRecord<D>>, ViewError> {
         let parent = self
             .parents
@@ -341,17 +342,17 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         self.entry(view).is_some_and(|entry| entry.slot.has_voted())
     }
 
-    fn slot_mut(&mut self, view: View) -> &mut ViewSlotSnapshot<V, D> {
+    fn slot_mut(&mut self, view: View) -> &mut ViewSlotSnapshot<S, D> {
         &mut self.entry_mut(view).slot
     }
 
     /// Returns the entry retained for `view`, if any.
-    pub(super) fn entry(&self, view: View) -> Option<&ViewEntry<V, D>> {
+    pub(super) fn entry(&self, view: View) -> Option<&ViewEntry<S, D>> {
         self.views.get(&view)
     }
 
     /// Returns the entry for `view`, creating an empty one if none is retained.
-    pub(super) fn entry_mut(&mut self, view: View) -> &mut ViewEntry<V, D> {
+    pub(super) fn entry_mut(&mut self, view: View) -> &mut ViewEntry<S, D> {
         self.views.entry(view).or_default()
     }
 
@@ -453,7 +454,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     }
 
     /// Installs the local view choices of a restored snapshot.
-    pub(crate) fn restore_slots(&mut self, slots: BTreeMap<View, ViewSlotSnapshot<V, D>>) {
+    pub(crate) fn restore_slots(&mut self, slots: BTreeMap<View, ViewSlotSnapshot<S, D>>) {
         for entry in self.views.values_mut() {
             entry.slot = ViewSlotSnapshot::default();
         }
@@ -482,7 +483,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     /// Certificates at or below the retired transition floor still feed exits and forwarding: a
     /// V-QC always does, and a nullification does until its view has been forwarded. Any other
     /// view-scoped artifact is ignored strictly below the floor.
-    fn ignores_retired(&self, artifact: &Artifact<V, D>) -> bool {
+    fn ignores_retired(&self, artifact: &Artifact<S, D>) -> bool {
         let Some(view) = artifact.view() else {
             return false;
         };
@@ -502,7 +503,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        artifact: &Artifact<V, D>,
+        artifact: &Artifact<S, D>,
     ) {
         let Some(claim) = Claim::for_artifact(artifact) else {
             return;
@@ -513,7 +514,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     /// Releases the claim of an artifact that failed verification, and re-settles its signer's
     /// view message.
-    pub(crate) fn reject(&mut self, id: ArtifactId<D>, artifact: &Artifact<V, D>) {
+    pub(crate) fn reject(&mut self, id: ArtifactId<D>, artifact: &Artifact<S, D>) {
         let Some(claim) = Claim::for_artifact(artifact) else {
             return;
         };
@@ -536,7 +537,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        artifact: &Arc<Artifact<V, D>>,
+        artifact: &Arc<Artifact<S, D>>,
         validated_vqc: Option<ValidatedVqc<D>>,
     ) -> Result<(), ViewError> {
         let claim = Claim::for_artifact(artifact);
@@ -546,17 +547,17 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         if self.ignores_retired(artifact) {
             return Ok(());
         }
-        if let Some(block) = Held::<LeaderBlockKind, V, D>::try_new(artifact) {
+        if let Some(block) = Held::<LeaderBlockKind, S, D>::try_new(artifact) {
             self.observe_proposal::<H>(id, observation, block);
-        } else if let Some(message) = Held::<ViewMessageKind, V, D>::try_new(artifact) {
+        } else if let Some(message) = Held::<ViewMessageKind, S, D>::try_new(artifact) {
             let (view, signer) = message.author();
             self.observe_message(id, observation, message);
             self.settle_message(view, signer);
-        } else if let Some(share) = Held::<NullifyKind, V, D>::try_new(artifact) {
+        } else if let Some(share) = Held::<NullifyKind, S, D>::try_new(artifact) {
             self.observe_nullify(observation, share);
-        } else if let Some(certificate) = Held::<NullificationKind, V, D>::try_new(artifact) {
+        } else if let Some(certificate) = Held::<NullificationKind, S, D>::try_new(artifact) {
             self.observe_nullification(id, observation, certificate);
-        } else if let Some(certificate) = Held::<VqcKind, V, D>::try_new(artifact) {
+        } else if let Some(certificate) = Held::<VqcKind, S, D>::try_new(artifact) {
             self.observe_vqc::<H>(id, observation, certificate, validated_vqc)?;
         }
         if let Some(claim) = claim {
@@ -568,7 +569,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     /// Applies a durably reserved signing request to the slot of its view.
     pub(crate) fn observe_sign_request(
         &mut self,
-        request: &SignRequest<V, D>,
+        request: &SignRequest<S, D>,
     ) -> Result<(), ViewError> {
         if matches!(request, SignRequest::DaVote(_))
             && matches!(
@@ -592,7 +593,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     /// a locally assembled certificate marks its view.
     pub(crate) fn observe_durable_artifact(
         &mut self,
-        artifact: &Artifact<V, D>,
+        artifact: &Artifact<S, D>,
     ) -> Result<(), ViewError> {
         match artifact {
             Artifact::LeaderBlock(_)
@@ -626,7 +627,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     /// Records that a V-QC or nullification was forwarded, dropping the records of a retired view
     /// that only forwarding still needed.
-    pub(crate) fn observe_forwarded<H: Hasher<Digest = D>>(&mut self, artifact: &Artifact<V, D>) {
+    pub(crate) fn observe_forwarded<H: Hasher<Digest = D>>(&mut self, artifact: &Artifact<S, D>) {
         let view = match artifact {
             Artifact::Vqc(certificate) => {
                 self.forwarded_vqcs
@@ -656,7 +657,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 }
 
 #[cfg(test)]
-impl<V: Variant, D: Digest> ViewState<V, D> {
+impl<S: Scheme, D: Digest> ViewState<S, D> {
     /// Returns the number of assembled V-QC transcripts retained.
     pub(crate) fn retained_vqc_transcripts(&self) -> usize {
         self.views

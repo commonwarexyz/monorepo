@@ -6,6 +6,7 @@ use crate::{
     multimmit::{
         actors::voter::VoterLimits,
         config::Role,
+        mocks::Bls,
         testing::expect_before,
         types::ChainId,
         wire::{CertificateMessage, ConsensusMessage, DataMessage, Envelope},
@@ -18,11 +19,13 @@ use commonware_cryptography::{
 };
 use commonware_macros::test_traced;
 use commonware_p2p::{Receiver as _, Recipients, Sender as _};
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock as _, Metrics as _, Runner as _,
     deterministic::{Context as DeterministicContext, Runner as DeterministicRunner},
     telemetry::metrics::metric_sum,
 };
+use commonware_utils::test_rng;
 use std::time::Duration;
 async fn inactivity_timeout_scenario(
     context: &DeterministicContext,
@@ -60,7 +63,7 @@ async fn inactivity_timeout_scenario(
         // Every payload names participant two; only transport identities count as activity.
         sender.send(
             Recipients::One(node.me.clone()),
-            node.envelope(ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+            node.envelope(ConsensusMessage::<Bls<MinPk>, Sha256Digest>::NoVote(
                 node.committee.novote(Participant::new(2), View::new(1)),
             ))
             .encode(),
@@ -75,9 +78,11 @@ async fn inactivity_timeout_scenario(
     for view in 1..target_view {
         certificates.send(
             Recipients::One(node.me.clone()),
-            node.envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
-                node.committee.nullification(View::new(view)),
-            ))
+            node.envelope(
+                CertificateMessage::<Bls<MinPk>, Sha256Digest>::Nullification(
+                    node.committee.nullification(View::new(view)),
+                ),
+            )
             .encode(),
             true,
         );
@@ -104,18 +109,26 @@ async fn inactivity_timeout_scenario(
             )
             .await
             .unwrap();
-            let envelope = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 bytes,
                 &node.envelope_cfg(node.committee.codec()),
             )
             .unwrap();
             match envelope.into_payload() {
                 ConsensusMessage::NoVote(vote) if vote.view() == View::new(target_view) => {
-                    assert!(node.committee.verifier.verify_novote(&vote));
+                    assert!(node.committee.verifier.verify_novote(
+                        &mut test_rng(),
+                        &vote,
+                        &Sequential
+                    ));
                     novote = true;
                 }
                 ConsensusMessage::Nullify(vote) if vote.view() == View::new(target_view) => {
-                    assert!(node.committee.verifier.verify_nullify(&vote));
+                    assert!(node.committee.verifier.verify_nullify(
+                        &mut test_rng(),
+                        &vote,
+                        &Sequential
+                    ));
                     nullify = true;
                 }
                 _ => {}
@@ -166,9 +179,11 @@ fn inactivity_timeout_revived_leader_keeps_its_next_deadline() {
         for view in 2..8 {
             certificates.send(
                 Recipients::One(node.me.clone()),
-                node.envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
-                    node.committee.nullification(View::new(view)),
-                ))
+                node.envelope(
+                    CertificateMessage::<Bls<MinPk>, Sha256Digest>::Nullification(
+                        node.committee.nullification(View::new(view)),
+                    ),
+                )
                 .encode(),
                 true,
             );
@@ -247,18 +262,26 @@ fn timeout_signs_and_broadcasts_an_atomic_novote_nullify_batch() {
             )
             .await
             .expect("network stays up");
-            let envelope = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 bytes,
                 &node.envelope_cfg(node.committee.codec()),
             )
             .expect("canonical envelope");
             match envelope.into_payload() {
                 ConsensusMessage::NoVote(vote) => {
-                    assert!(node.committee.verifier.verify_novote(&vote));
+                    assert!(node.committee.verifier.verify_novote(
+                        &mut test_rng(),
+                        &vote,
+                        &Sequential
+                    ));
                     saw_novote = true;
                 }
                 ConsensusMessage::Nullify(nullify) => {
-                    assert!(node.committee.verifier.verify_nullify(&nullify));
+                    assert!(node.committee.verifier.verify_nullify(
+                        &mut test_rng(),
+                        &nullify,
+                        &Sequential
+                    ));
                     nullified_view = Some(nullify.view().get());
                     saw_nullify = true;
                 }
@@ -271,7 +294,7 @@ fn timeout_signs_and_broadcasts_an_atomic_novote_nullify_batch() {
         for signer in 1..node.committee.codec().nullification_quorum() {
             consensus_tx.send(
                 Recipients::One(node.me.clone()),
-                node.envelope(ConsensusMessage::<MinPk, Sha256Digest>::Nullify(
+                node.envelope(ConsensusMessage::<Bls<MinPk>, Sha256Digest>::Nullify(
                     node.committee
                         .nullify(Participant::from_usize(signer), View::new(view)),
                 ))
@@ -289,7 +312,7 @@ fn timeout_signs_and_broadcasts_an_atomic_novote_nullify_batch() {
             )
             .await
             .expect("network stays up");
-            let envelope = Envelope::<CertificateMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<CertificateMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 bytes,
                 &node.envelope_cfg(node.committee.codec()),
             )

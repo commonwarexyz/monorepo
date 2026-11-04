@@ -3,10 +3,13 @@
 use super::Publication;
 use crate::{
     Viewable,
-    multimmit::types::{Artifact, ChainId},
+    multimmit::{
+        scheme::Scheme,
+        types::{Artifact, ChainId},
+    },
     types::{Height, View},
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use std::sync::Arc;
 
 /// The protocol fact that ends the duty to publish one item.
@@ -47,7 +50,7 @@ pub(crate) enum DischargeKind {
 
 impl DischargeKind {
     /// Returns whether this fact can end the publication of `artifact`.
-    fn matches<V: Variant, D: Digest>(self, artifact: &Artifact<V, D>) -> bool {
+    fn matches<S: Scheme, D: Digest>(self, artifact: &Artifact<S, D>) -> bool {
         match (self, artifact) {
             (Self::BlockCertifiedAtLeast { chain, height }, Artifact::TransactionBlock(block)) => {
                 block.header().chain() == chain && block.header().height() == height
@@ -100,13 +103,13 @@ impl Discharge {
 ///
 /// The publication retires once every discharge holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OutboxEntry<V: Variant, D: Digest> {
-    pub(super) publication: Publication<V, D>,
+pub(crate) struct OutboxEntry<S: Scheme, D: Digest> {
+    pub(super) publication: Publication<S, D>,
     pub(super) discharges: Arc<[Discharge]>,
 }
 
-impl<V: Variant, D: Digest> OutboxEntry<V, D> {
-    pub(crate) fn new(publication: Publication<V, D>, discharges: Vec<Discharge>) -> Self {
+impl<S: Scheme, D: Digest> OutboxEntry<S, D> {
+    pub(crate) fn new(publication: Publication<S, D>, discharges: Vec<Discharge>) -> Self {
         Self {
             publication,
             discharges: discharges.into(),
@@ -114,12 +117,12 @@ impl<V: Variant, D: Digest> OutboxEntry<V, D> {
     }
 
     /// Returns the queued publication.
-    pub(crate) const fn publication(&self) -> &Publication<V, D> {
+    pub(crate) const fn publication(&self) -> &Publication<S, D> {
         &self.publication
     }
 
     /// Consumes the entry and returns its publication.
-    pub(crate) fn into_publication(self) -> Publication<V, D> {
+    pub(crate) fn into_publication(self) -> Publication<S, D> {
         self.publication
     }
 

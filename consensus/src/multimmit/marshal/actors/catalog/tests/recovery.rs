@@ -8,7 +8,7 @@ fn distinct_same_view_lqcs_reopen_and_prune_by_ordinal() {
     deterministic::Runner::default().start(|context| async move {
         let limits = PathLimits::new(2, 2);
         let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
-        let committee = Committee::<MinPk>::builder(9, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(9, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_SAME_VIEW")
             .producers(producers)
             .limits(limits)
@@ -95,7 +95,7 @@ fn archive_durable_checkpoint_volatile_commit_replays_exactly(#[case] all_archiv
     let subscriber = tracing_subscriber::registry().with(paths.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(44, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(44, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_CHECKPOINT_CRASH")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -222,7 +222,7 @@ fn archive_ahead_lqc_ordinal_is_skipped_after_reopen() {
     let subscriber = tracing_subscriber::registry().with(paths.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(68, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(68, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_LQC_ORDINAL_CRASH")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -352,7 +352,7 @@ fn archive_ahead_lqc_ordinal_is_skipped_after_reopen() {
 #[test]
 fn immutable_commit_recovers_canonical_body_and_reclaims_losing_candidates() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(31, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(31, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_IMMUTABLE_CLEANUP")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -491,7 +491,7 @@ fn immutable_commit_recovers_canonical_body_and_reclaims_losing_candidates() {
 #[test]
 fn promotion_advances_under_steady_lookups() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(32, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(32, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_PROMOTION_LOOKUPS")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))

@@ -72,7 +72,7 @@ pub(crate) enum Disposition {
 /// All state owned by one running voter.
 pub(crate) struct Live<T: VoterTypes, S> {
     pub(crate) context: T::Context,
-    pub(crate) machine: CoreState<T::Hasher, T::Variant>,
+    pub(crate) machine: CoreState<T::Hasher, T::Scheme>,
     /// Worker and completion permits of every task the voter runs.
     pub(crate) tasks: TaskReservations,
     pub(crate) epoch: Epoch,
@@ -80,14 +80,14 @@ pub(crate) struct Live<T: VoterTypes, S> {
     pub(crate) participant: Option<Participant>,
     pub(crate) limits: VoterLimits,
 
-    pub(crate) inbox: Inbox<T::PublicKey, T::Variant, DigestOf<T>>,
+    pub(crate) inbox: Inbox<T::PublicKey, T::Scheme, DigestOf<T>>,
     /// A queued cohort that did not fit the last merged step; it leads the next one.
-    pub(crate) carried_observation: Option<Observed<T::PublicKey, T::Variant, DigestOf<T>>>,
+    pub(crate) carried_observation: Option<Observed<T::PublicKey, T::Scheme, DigestOf<T>>>,
     /// Most artifacts one merged observation step may carry: the machine's verification batch.
     pub(crate) observation_batch: usize,
     pub(crate) pending_inspection: Option<PendingInspection<DigestOf<T>>>,
 
-    pub(crate) persistence: Persistence<T::Hasher, T::Variant>,
+    pub(crate) persistence: Persistence<T::Hasher, T::Scheme>,
 
     pub(crate) crypto: CryptoExecutor<T>,
     pub(crate) app: AppExecutor<T>,
@@ -100,8 +100,8 @@ pub(crate) struct Live<T: VoterTypes, S> {
     pub(crate) relay: T::Relay,
     pub(crate) planes: Planes<S>,
     pub(crate) ingress: ingress::Mailbox,
-    pub(crate) verifier: verifier::Mailbox<T::Variant, DigestOf<T>>,
-    pub(crate) resolver: resolver::Mailbox<T::Variant, DigestOf<T>>,
+    pub(crate) verifier: verifier::Mailbox<T::Scheme, DigestOf<T>>,
+    pub(crate) resolver: resolver::Mailbox<T::Scheme, DigestOf<T>>,
     /// Blocks participants the machine proves equivocated.
     pub(crate) blocker: T::Blocker,
     /// Peers blocked for authenticated equivocation.
@@ -160,7 +160,7 @@ where
     /// busy lane cannot keep the core from seeing the others before it runs.
     pub(crate) fn handle_runtime_burst(
         &mut self,
-        first: RuntimeEvent<T::PublicKey, T::Variant, DigestOf<T>>,
+        first: RuntimeEvent<T::PublicKey, T::Scheme, DigestOf<T>>,
         cursor: &mut ReadinessCursor,
     ) -> Result<Disposition, Failure> {
         let mut next = Some(first);
@@ -191,7 +191,7 @@ where
     /// Applies one runtime input to the core.
     pub(crate) fn handle_runtime_event(
         &mut self,
-        event: RuntimeEvent<T::PublicKey, T::Variant, DigestOf<T>>,
+        event: RuntimeEvent<T::PublicKey, T::Scheme, DigestOf<T>>,
     ) -> Result<Disposition, Failure> {
         match event {
             RuntimeEvent::Persistence(output) => self.persisted(output)?,
@@ -337,7 +337,7 @@ where
 
     fn dispatch_work(
         &mut self,
-        work: PollResult<T::Variant, DigestOf<T>>,
+        work: PollResult<T::Scheme, DigestOf<T>>,
         root: &Span,
     ) -> Result<(), Failure> {
         self.hooks.working(root, self.telemetry.round_view());
@@ -355,8 +355,8 @@ where
     /// Executes one core step's capabilities, reports its activities, and refreshes progress.
     fn apply(
         &mut self,
-        capabilities: Capabilities<T::Variant, DigestOf<T>>,
-        activities: Vec<Activity<T::Variant, DigestOf<T>>>,
+        capabilities: Capabilities<T::Scheme, DigestOf<T>>,
+        activities: Vec<Activity<T::Scheme, DigestOf<T>>>,
         root: &Span,
     ) -> Result<(), Failure> {
         self.execute_capabilities(capabilities, root)?;
@@ -381,7 +381,7 @@ where
         self.telemetry.refresh_round(view, now);
     }
 
-    fn report_activities(&mut self, activities: Vec<Activity<T::Variant, DigestOf<T>>>) {
+    fn report_activities(&mut self, activities: Vec<Activity<T::Scheme, DigestOf<T>>>) {
         for activity in activities {
             if let Activity::LeaderFinalized { fact } | Activity::LeaderFinalityUpdated { fact } =
                 &activity
@@ -416,7 +416,7 @@ where
     /// Stages one transition in the core and records the trace context that owns it.
     pub(crate) fn track_transition(
         &mut self,
-        transition: impl FnOnce(&mut CoreState<T::Hasher, T::Variant>) -> Result<InputTicket, CoreError>,
+        transition: impl FnOnce(&mut CoreState<T::Hasher, T::Scheme>) -> Result<InputTicket, CoreError>,
         root: &Span,
     ) -> Result<InputTicket, Fatal> {
         let ticket = transition(&mut self.machine)?;
@@ -428,7 +428,7 @@ where
     /// Stages one transition whose terminal errors belong to the round.
     pub(crate) fn track_in_round(
         &mut self,
-        transition: impl FnOnce(&mut CoreState<T::Hasher, T::Variant>) -> Result<InputTicket, CoreError>,
+        transition: impl FnOnce(&mut CoreState<T::Hasher, T::Scheme>) -> Result<InputTicket, CoreError>,
     ) -> Result<InputTicket, Fatal> {
         let root = self.round_span();
         self.track_transition(transition, &root)
@@ -632,7 +632,7 @@ where
     /// Reconciles one finished cryptographic operation and admits its result.
     fn crypto_completed(
         &mut self,
-        finished: Finished<CryptoResult<T::Variant, DigestOf<T>>>,
+        finished: Finished<CryptoResult<T::Scheme, DigestOf<T>>>,
     ) -> Result<(), Failure> {
         let Finished {
             permit,
@@ -745,7 +745,7 @@ where
     /// Ingests one verification completion from the verifier.
     fn ingest_completed(
         &mut self,
-        completed: Completed<T::Variant, DigestOf<T>>,
+        completed: Completed<T::Scheme, DigestOf<T>>,
     ) -> Result<(), Failure> {
         let Completed { span, completion } = completed;
         let _process = info_span!(parent: &span, "multimmit.voter.verify.process").entered();
@@ -770,7 +770,7 @@ where
     /// Stages one observed batch in the core and binds the view-proof kinds it carries.
     fn observe_network(
         &mut self,
-        artifacts: Vec<IdentifiedArtifact<T::Variant, DigestOf<T>>>,
+        artifacts: Vec<IdentifiedArtifact<T::Scheme, DigestOf<T>>>,
         artifact_bytes: usize,
     ) -> Result<(), Fatal> {
         let arrived_at = self.context.current();
@@ -809,7 +809,7 @@ where
     /// Ingests one peer observation batch.
     fn ingest_observed(
         &mut self,
-        batch: ObservedBatch<T::PublicKey, T::Variant, DigestOf<T>>,
+        batch: ObservedBatch<T::PublicKey, T::Scheme, DigestOf<T>>,
     ) -> Result<(), Fatal> {
         let ObservedBatch {
             artifacts,
@@ -850,7 +850,7 @@ where
     }
 
     /// Ingests one resolver completion.
-    fn ingest_message(&mut self, message: Message<T::Variant, DigestOf<T>>) -> Result<(), Failure> {
+    fn ingest_message(&mut self, message: Message<T::Scheme, DigestOf<T>>) -> Result<(), Failure> {
         let Message::Resolution {
             span,
             root,

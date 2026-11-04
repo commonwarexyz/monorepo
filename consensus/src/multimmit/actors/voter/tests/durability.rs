@@ -16,7 +16,7 @@ use crate::{
             Cursor, DurableEffect, EffectId, Generation, MAX_STAGED_BARRIERS, Publication,
             SendRequest, SignRequest, testing::EffectExt,
         },
-        mocks::{Committee, MockApplication},
+        mocks::{Bls, Committee, MockApplication},
         storage::partitions,
         testing::expect_within,
         types::{Artifact, ChainId, Context, SignedTransactionBlock, ViewMessage},
@@ -37,7 +37,7 @@ use commonware_runtime::{
     deterministic::{Context as DeterministicContext, Runner as DeterministicRunner},
     telemetry::metrics::metric_sum,
 };
-use commonware_utils::NZU64;
+use commonware_utils::{NZU64, test_rng};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 #[derive(Copy, Clone)]
 enum JournalStall {
@@ -210,12 +210,12 @@ fn stalled_journal_sync_bounds_staged_persistence() {
             let lqc = node
                 .committee
                 .verifier
-                .assemble_lqc::<Sha256, _>(block.block().clone(), &votes, &Sequential)
+                .assemble_lqc::<_, Sha256, _>(&mut test_rng(), block.block().clone(), &votes, &Sequential)
                 .expect("quorum of chained votes aggregates");
             parent = node
                 .committee
                 .verifier
-                .assemble_vqc::<Sha256, _>(block.block().clone(), &messages, &Sequential)
+                .assemble_vqc::<_, Sha256, _>(&mut test_rng(), block.block().clone(), &messages, &Sequential)
                 .expect("quorum of chained view messages aggregates");
             certificates_tx.send(
                 Recipients::One(node.me.clone()),
@@ -396,7 +396,7 @@ impl DurabilityCut {
 struct DurableScenario {
     publication: EffectId,
     generation: u64,
-    block: SignedTransactionBlock<MinPk, Sha256Digest>,
+    block: SignedTransactionBlock<Bls<MinPk>, Sha256Digest>,
     before_publication: DurableLedger,
 }
 
@@ -412,7 +412,7 @@ async fn collect_data_exposure(
         select! {
             result = receiver.recv() => {
                 let (_, bytes) = result.expect("network stays up");
-                let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+                let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                     bytes,
                     &node.envelope_cfg(node.committee.codec()),
                 )
@@ -427,7 +427,7 @@ async fn collect_data_exposure(
 fn exact_block_publication(
     id: EffectId,
     generation: u64,
-    block: SignedTransactionBlock<MinPk, Sha256Digest>,
+    block: SignedTransactionBlock<Bls<MinPk>, Sha256Digest>,
 ) -> DurableLedger {
     BTreeMap::from([(
         id,
@@ -439,8 +439,8 @@ fn exact_block_publication(
 }
 
 fn exact_durable_ledger(
-    committee: &Committee<MinPk>,
-    block: &SignedTransactionBlock<MinPk, Sha256Digest>,
+    committee: &Committee<Bls<MinPk>>,
+    block: &SignedTransactionBlock<Bls<MinPk>, Sha256Digest>,
     generation: u64,
 ) -> DurableLedger {
     let attempt = |effect| {
@@ -478,8 +478,8 @@ fn exact_durable_ledger(
 }
 
 fn exact_private_ledger(
-    committee: &Committee<MinPk>,
-    block: &SignedTransactionBlock<MinPk, Sha256Digest>,
+    committee: &Committee<Bls<MinPk>>,
+    block: &SignedTransactionBlock<Bls<MinPk>, Sha256Digest>,
     generation: u64,
 ) -> DurableLedger {
     exact_durable_ledger(committee, block, generation)
@@ -498,7 +498,7 @@ fn calibrate_durable_scenario(seed: u64) -> DurableScenario {
     application.pause_building();
     let gates = TestGates::default();
     let hooks = TestHooks::default();
-    let committee = Committee::<MinPk>::builder(seed, 6).build();
+    let committee = Committee::<Bls<MinPk>>::builder(seed, 6).build();
     let context =
         Context::from(&committee.transaction_header(ChainId::new(0), Sha256::hash(&[b"context"])));
     let expected_block = committee.signed_block(

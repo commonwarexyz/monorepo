@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::multimmit::testing::expect_within;
+use commonware_utils::test_rng;
 use proptest::{collection::vec as proptest_vec, prelude::*};
 
 #[test]
@@ -298,7 +299,11 @@ fn authenticated_header_wakes_active_producer_walk(#[case] local: bool, #[case] 
         .unwrap();
         let [mismatched, matching] = [mismatched, blocks[0][0].header().clone()].map(|header| {
             let signed = committee.signers[0].sign_transaction_block(header).unwrap();
-            assert!(committee.verifier.verify_transaction_block(&signed));
+            assert!(committee.verifier.verify_transaction_block(
+                &mut test_rng(),
+                &signed,
+                &Sequential
+            ));
             signed.header().clone()
         });
         assert_ne!(mismatched.block_ref::<Sha256>(), reference);
@@ -382,7 +387,11 @@ fn ready_ancestry_completions_precede_optional_hints() {
         let signed = committee.signers[0]
             .sign_transaction_block(blocks[1].header().clone())
             .unwrap();
-        assert!(committee.verifier.verify_transaction_block(&signed));
+        assert!(
+            committee
+                .verifier
+                .verify_transaction_block(&mut test_rng(), &signed, &Sequential)
+        );
         let (commands, receiver) = mailbox::new(context.child("commands"), NonZeroUsize::MIN);
         let mut actor = actor.into_running(receiver);
         assert_eq!(
@@ -614,7 +623,7 @@ fn anchor_jump_cannot_replace_blocks_emitted_past_the_ordered_tip() {
 /// Returns the custody windows started: one per walk, plus one for the final sweep.
 async fn synchronize_two_openings(
     actor: &mut TestSynchronizer,
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     history: Sha256Digest,
     tips: [BlockRef<Sha256Digest>; 2],
 ) -> (Result<(), Error>, u64) {

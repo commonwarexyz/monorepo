@@ -4,17 +4,19 @@ use super::common::{Fixture, MultimmitScheme, PARTICIPANTS, Workload, bench_stra
 use commonware_codec::Encode as _;
 use commonware_consensus::{
     multimmit::{
-        scheme::bls12381_threshold::SignatureVerification,
+        mocks::{Bls, Fixture as Suite},
+        scheme::SignatureVerification,
         types::{DigestedLeader, LeaderBlock, Tally, ViewMessage, Vote},
     },
     types::Attributable as _,
 };
 use commonware_cryptography::{
     Sha256,
-    bls12381::primitives::variant::{MinPk, MinSig, Variant},
+    bls12381::primitives::variant::{MinPk, MinSig},
     sha256::Digest,
 };
 use commonware_parallel::Strategy;
+use commonware_utils::test_rng;
 use criterion::{Criterion, criterion_group};
 use std::hint::black_box;
 
@@ -22,17 +24,18 @@ use std::hint::black_box;
 const SIZES: [u32; 2] = [PARTICIPANTS, 50];
 
 /// Assembles a V-QC from verified view messages.
-struct AssembleVqc<'a, V: Variant> {
-    verifier: &'a MultimmitScheme<V>,
-    leader: &'a LeaderBlock<V, Digest>,
-    messages: &'a [ViewMessage<V, Digest>],
+struct AssembleVqc<'a, S: Suite> {
+    verifier: &'a MultimmitScheme<S>,
+    leader: &'a LeaderBlock<S, Digest>,
+    messages: &'a [ViewMessage<S, Digest>],
 }
 
-impl<V: Variant> Workload for AssembleVqc<'_, V> {
-    fn run<S: Strategy>(&mut self, strategy: &S) {
+impl<S: Suite> Workload for AssembleVqc<'_, S> {
+    fn run<St: Strategy>(&mut self, strategy: &St) {
         black_box(
             self.verifier
-                .assemble_vqc_with::<Sha256, _>(
+                .assemble_vqc_with::<_, Sha256, _>(
+                    &mut test_rng(),
                     self.leader.clone(),
                     self.messages,
                     SignatureVerification::Preverified,
@@ -44,17 +47,18 @@ impl<V: Variant> Workload for AssembleVqc<'_, V> {
 }
 
 /// Assembles an L-QC from verified votes.
-struct AssembleLqc<'a, V: Variant> {
-    verifier: &'a MultimmitScheme<V>,
-    leader: &'a LeaderBlock<V, Digest>,
-    votes: &'a [Vote<V, Digest>],
+struct AssembleLqc<'a, S: Suite> {
+    verifier: &'a MultimmitScheme<S>,
+    leader: &'a LeaderBlock<S, Digest>,
+    votes: &'a [Vote<S, Digest>],
 }
 
-impl<V: Variant> Workload for AssembleLqc<'_, V> {
-    fn run<S: Strategy>(&mut self, strategy: &S) {
+impl<S: Suite> Workload for AssembleLqc<'_, S> {
+    fn run<St: Strategy>(&mut self, strategy: &St) {
         black_box(
             self.verifier
-                .assemble_lqc_with::<Sha256, _>(
+                .assemble_lqc_with::<_, Sha256, _>(
+                    &mut test_rng(),
                     self.leader.clone(),
                     self.votes,
                     SignatureVerification::Preverified,
@@ -65,9 +69,9 @@ impl<V: Variant> Workload for AssembleLqc<'_, V> {
     }
 }
 
-fn register<V: Variant>(c: &mut Criterion, variant: &str) {
+fn register<S: Suite>(c: &mut Criterion, variant: &str) {
     for participants in SIZES {
-        let fixture = Fixture::<V>::new_sized(participants);
+        let fixture = Fixture::<S>::new_sized(participants);
         let leader = fixture.leader();
         let messages = fixture.view_messages(&leader);
         let votes = fixture.votes(&leader);
@@ -166,8 +170,8 @@ fn register<V: Variant>(c: &mut Criterion, variant: &str) {
 }
 
 fn bench_assemble(c: &mut Criterion) {
-    register::<MinPk>(c, "minpk");
-    register::<MinSig>(c, "minsig");
+    register::<Bls<MinPk>>(c, "minpk");
+    register::<Bls<MinSig>>(c, "minsig");
 }
 
 criterion_group! {

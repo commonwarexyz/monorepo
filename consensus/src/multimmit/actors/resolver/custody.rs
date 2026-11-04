@@ -1,7 +1,10 @@
 //! Retention rules for the view proofs the resolver serves.
 
-use crate::{multimmit::types::ViewProof, types::View};
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use crate::{
+    multimmit::{scheme::Scheme, types::ViewProof},
+    types::View,
+};
+use commonware_cryptography::Digest;
 use std::{borrow::Borrow, collections::BTreeMap, marker::PhantomData};
 
 /// Retained view proofs: an L-QC floor covering every view at or below it, and the exit proofs of
@@ -13,14 +16,14 @@ use std::{borrow::Borrow, collections::BTreeMap, marker::PhantomData};
 /// 3. Pruning through a view removes the exits at or below it and refuses later ones.
 ///
 /// `T` is the stored value, which borrows as its [`ViewProof`].
-pub(super) struct Custody<V: Variant, D: Digest, T> {
+pub(super) struct Custody<S: Scheme, D: Digest, T> {
     /// The highest retained L-QC.
     floor: Option<T>,
     /// Retained V-QCs and nullifications by view, all above `floor` and `pruned`.
     exits: BTreeMap<View, T>,
     /// The highest view pruned through.
     pruned: Option<View>,
-    _proof: PhantomData<fn() -> ViewProof<V, D>>,
+    _proof: PhantomData<fn() -> ViewProof<S, D>>,
 }
 
 /// One retention change a [`Custody::drain`] forwards.
@@ -31,7 +34,7 @@ pub(super) enum Change<T> {
     Retain(T),
 }
 
-impl<V: Variant, D: Digest, T: Borrow<ViewProof<V, D>>> Custody<V, D, T> {
+impl<S: Scheme, D: Digest, T: Borrow<ViewProof<S, D>>> Custody<S, D, T> {
     /// Returns a custody with nothing retained or pruned.
     pub(super) const fn empty() -> Self {
         Self {
@@ -45,9 +48,9 @@ impl<V: Variant, D: Digest, T: Borrow<ViewProof<V, D>>> Custody<V, D, T> {
     /// Retains `proof`, converted to `T`, if the rules keep it.
     pub(super) fn retain<P>(&mut self, proof: P)
     where
-        P: Borrow<ViewProof<V, D>> + Into<T>,
+        P: Borrow<ViewProof<S, D>> + Into<T>,
     {
-        let retained: &ViewProof<V, D> = proof.borrow();
+        let retained: &ViewProof<S, D> = proof.borrow();
         let view = retained.view();
         match retained {
             ViewProof::Lqc(_) => {
@@ -124,7 +127,7 @@ impl<V: Variant, D: Digest, T: Borrow<ViewProof<V, D>>> Custody<V, D, T> {
     }
 
     /// Returns the view proof a stored value holds.
-    fn proof_of(value: &T) -> &ViewProof<V, D> {
+    fn proof_of(value: &T) -> &ViewProof<S, D> {
         value.borrow()
     }
 
@@ -149,12 +152,12 @@ impl<V: Variant, D: Digest, T: Borrow<ViewProof<V, D>>> Custody<V, D, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::multimmit::mocks::Committee;
+    use crate::multimmit::mocks::{Bls, Committee};
     use commonware_cryptography::{bls12381::primitives::variant::MinPk, sha256::Digest as Sha256};
 
-    type TestCustody = Custody<MinPk, Sha256, ViewProof<MinPk, Sha256>>;
+    type TestCustody = Custody<Bls<MinPk>, Sha256, ViewProof<Bls<MinPk>, Sha256>>;
 
-    fn committee() -> Committee<MinPk> {
+    fn committee() -> Committee<Bls<MinPk>> {
         Committee::builder(7, 6).build()
     }
 

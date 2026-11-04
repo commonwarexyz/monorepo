@@ -3,11 +3,12 @@
 use crate::{
     multimmit::{
         algebra::{self, FinalTips},
+        scheme::Scheme,
         types::{BlockRef, ChainId, CodecConfig, Frontier, FrontierError, Lqc, TipRecord},
     },
     types::Height,
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 
 /// A malformed or non-monotone ordering input.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -167,17 +168,17 @@ impl<D: Digest> HistoryState<D> {
     }
 
     /// Extracts one verified L-QC's final sweep without reproducing protocol thresholds.
-    pub(crate) fn final_sweep<H, V>(
+    pub(crate) fn final_sweep<H, S>(
         &self,
-        certificate: &Lqc<V, D>,
+        certificate: &Lqc<S, D>,
         config: CodecConfig,
         common: &[BlockRef<D>],
     ) -> Result<FinalSweep<D>, Error>
     where
         H: Hasher<Digest = D>,
-        V: Variant,
+        S: Scheme,
     {
-        let sweep = FinalSweep::from_lqc::<H, V>(self.ordered.references(), certificate, config)?;
+        let sweep = FinalSweep::from_lqc::<H, S>(self.ordered.references(), certificate, config)?;
         self.validate_reconciliation(sweep.stream.target(), common)?;
         Ok(sweep)
     }
@@ -442,16 +443,16 @@ impl<D: Digest> FinalSweep<D> {
         })
     }
 
-    fn from_lqc<H, V>(
+    fn from_lqc<H, S>(
         base: &[BlockRef<D>],
-        certificate: &Lqc<V, D>,
+        certificate: &Lqc<S, D>,
         config: CodecConfig,
     ) -> Result<Self, Error>
     where
         H: Hasher<Digest = D>,
-        V: Variant,
+        S: Scheme,
     {
-        let tips = FinalTips::from_lqc::<H, V>(certificate, config)?;
+        let tips = FinalTips::from_lqc::<H, S>(certificate, config)?;
         let settled = (0..config.chains())
             .map(|chain| {
                 let chain = u32::try_from(chain).map_err(|_| Error::Frontier)?;
@@ -620,7 +621,7 @@ mod tests {
     use crate::{
         multimmit::{
             algebra::{FinalTips, PoolExtractor},
-            mocks::Committee,
+            mocks::{Bls, Committee},
             types::{DigestedLeader, Extension, Position, VoteBody},
         },
         types::View,
@@ -629,7 +630,7 @@ mod tests {
         Sha256, bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::Participant;
+    use commonware_utils::{Participant, test_rng};
     use proptest::{collection::vec, prelude::*};
 
     fn heights(heights: &[u64]) -> Vec<Height> {
@@ -927,7 +928,7 @@ mod tests {
 
     #[test]
     fn final_sweep_continues_after_branch_settlement() {
-        let committee = Committee::<MinPk>::builder(17, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(17, 6).build();
         let codec = committee.codec();
         let signed = committee.leader_block(View::new(1));
         let leader = signed.block();
@@ -958,24 +959,28 @@ mod tests {
         .unwrap();
         let lqc = committee
             .verifier
-            .assemble_lqc::<Sha256, _>(leader.clone(), &votes[..5], &Sequential)
+            .assemble_lqc::<_, Sha256, _>(&mut test_rng(), leader.clone(), &votes[..5], &Sequential)
             .unwrap();
-        let certified = FinalTips::from_lqc::<Sha256, MinPk>(&lqc, codec).unwrap();
+        let certified = FinalTips::from_lqc::<Sha256, Bls<MinPk>>(&lqc, codec).unwrap();
         assert_eq!(certified.settled(ChainId::new(0)), Some(false));
         assert!(
             coordinates(
                 state
-                    .final_sweep::<Sha256, MinPk>(&lqc, codec, &genesis)
+                    .final_sweep::<Sha256, Bls<MinPk>>(&lqc, codec, &genesis)
                     .unwrap()
                     .into_stream()
             )
             .is_empty()
         );
         for (size, expected) in [(5, vec![]), (6, vec![(1, 1)])] {
-            let mut pool = PoolExtractor::new::<Sha256, MinPk>(leader, codec).unwrap();
+            let mut pool = PoolExtractor::new::<Sha256, Bls<MinPk>>(leader, codec).unwrap();
             for (signer, vote) in votes[..size].iter().enumerate() {
-                pool.insert::<Sha256, MinPk>(leader, Participant::new(signer as u32), vote.body())
-                    .unwrap();
+                pool.insert::<Sha256, Bls<MinPk>>(
+                    leader,
+                    Participant::new(signer as u32),
+                    vote.body(),
+                )
+                .unwrap();
             }
             let tips = pool.final_tips().unwrap();
             assert_eq!(tips.settled(ChainId::new(0)), Some(size == 6));
@@ -998,7 +1003,7 @@ mod tests {
 
     #[test]
     fn final_sweep_reuses_authenticated_lqc_algebra() {
-        let committee = Committee::<MinPk>::builder(17, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(17, 6).build();
         let lqc = committee.lqc(View::new(1));
         let genesis = committee.config.genesis().tips().to_vec();
         let state = HistoryState::new(
@@ -1008,7 +1013,7 @@ mod tests {
         )
         .unwrap();
         let sweep = state
-            .final_sweep::<Sha256, MinPk>(&lqc, committee.codec(), &genesis)
+            .final_sweep::<Sha256, Bls<MinPk>>(&lqc, committee.codec(), &genesis)
             .unwrap();
 
         assert_eq!(

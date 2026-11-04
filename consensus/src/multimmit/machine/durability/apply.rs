@@ -17,11 +17,12 @@ use crate::{
             job::{Generation, Issued},
             reducer::machine::{Lifecycle, Machine},
         },
+        scheme::Scheme,
         types::{Artifact, ArtifactBatch, ArtifactId, BlockRef},
     },
     types::View,
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::{collections::BTreeSet, sync::Arc};
 
 /// Rejects the transition with `$reason` unless `$cond` holds.
@@ -34,17 +35,17 @@ macro_rules! ensure {
 }
 
 /// The parent V-QC a signed leader block retains.
-struct SignedParent<V: Variant, D: Digest> {
+struct SignedParent<S: Scheme, D: Digest> {
     id: ArtifactId<D>,
     view: View,
-    artifact: Arc<Artifact<V, D>>,
+    artifact: Arc<Artifact<S, D>>,
     /// Whether the proposal attaches the parent, which forwards it for its view.
     attached: bool,
 }
 
-impl<V: Variant, D: Digest> SignedParent<V, D> {
+impl<S: Scheme, D: Digest> SignedParent<S, D> {
     /// Returns the parent a leader-block signing request retains, if any.
-    fn of<H: Hasher<Digest = D>>(request: &SignRequest<V, D>) -> Option<Self> {
+    fn of<H: Hasher<Digest = D>>(request: &SignRequest<S, D>) -> Option<Self> {
         let SignRequest::LeaderBlock(request) = request else {
             return None;
         };
@@ -64,11 +65,11 @@ const fn reject(reason: TransitionReason) -> ReplayError {
     ReplayError::Transition(reason)
 }
 
-impl<H: Hasher, V: Variant> Machine<H, V> {
+impl<H: Hasher, S: Scheme> Machine<H, S> {
     /// Applies one durable event: the single transition function for staging and replay.
     pub(crate) fn apply_event(
         &mut self,
-        event: &DomainEvent<V, H::Digest>,
+        event: &DomainEvent<S, H::Digest>,
     ) -> Result<(), ReplayError> {
         self.check_position(event)?;
         let minted = EffectId::from_cursor(event.cursor());
@@ -115,7 +116,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         Ok(())
     }
 
-    fn check_position(&self, event: &DomainEvent<V, H::Digest>) -> Result<(), ReplayError> {
+    fn check_position(&self, event: &DomainEvent<S, H::Digest>) -> Result<(), ReplayError> {
         if event.epoch() != self.profile.protocol().epoch() {
             return Err(ReplayError::Context);
         }
@@ -138,7 +139,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         &mut self,
         minted: EffectId,
         id: EffectId,
-        effect: &DurableEffect<V, H::Digest>,
+        effect: &DurableEffect<S, H::Digest>,
     ) -> Result<(), ReplayError> {
         let ids = Self::effect_artifact_ids(effect);
         ensure!(id == minted, EffectCursor);
@@ -167,7 +168,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn apply_signing_queued(
         &mut self,
         id: EffectId,
-        sign: &SignEffect<V, H::Digest>,
+        sign: &SignEffect<S, H::Digest>,
         ids: Vec<ArtifactId<H::Digest>>,
     ) -> Result<(), ReplayError> {
         let requests = sign.requests();
@@ -224,7 +225,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// Advances each DA-vote request's chain to the request's height, which must be the next one.
     fn observe_da_votes(
         &mut self,
-        requests: &[SignRequest<V, H::Digest>],
+        requests: &[SignRequest<S, H::Digest>],
     ) -> Result<(), ReplayError> {
         for request in requests {
             let SignRequest::DaVote(block) = request else {
@@ -254,7 +255,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         minted: EffectId,
         sign: EffectId,
         publication: EffectId,
-        artifacts: &ArtifactBatch<V, H::Digest>,
+        artifacts: &ArtifactBatch<S, H::Digest>,
     ) -> Result<(), ReplayError> {
         let Role::Validator(signer) = self.profile.role() else {
             return Err(reject(TransitionReason::Signing));
@@ -340,7 +341,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// attached parent fits the forwarding history.
     fn check_signed_parent(
         &self,
-        parent: Option<&SignedParent<V, H::Digest>>,
+        parent: Option<&SignedParent<S, H::Digest>>,
     ) -> Result<(), ReplayError> {
         let Some(parent) = parent else {
             return Ok(());
@@ -367,7 +368,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// Records a signed proposal's attached parent as its view's forwarded V-QC.
     fn forward_proposal_parent(
         &mut self,
-        parent: SignedParent<V, H::Digest>,
+        parent: SignedParent<S, H::Digest>,
     ) -> Result<(), ReplayError> {
         if let Some(replaced) = self
             .durable
@@ -387,7 +388,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         minted: EffectId,
         publication: Option<EffectId>,
         retired: &[EffectId],
-        artifact: &Arc<Artifact<V, H::Digest>>,
+        artifact: &Arc<Artifact<S, H::Digest>>,
     ) -> Result<(), ReplayError> {
         let Artifact::DaCertificate(certificate) = artifact.as_ref() else {
             return Err(reject(TransitionReason::ArtifactKind));
@@ -486,7 +487,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn apply_view_certificate_created(
         &mut self,
-        artifact: &Arc<Artifact<V, H::Digest>>,
+        artifact: &Arc<Artifact<S, H::Digest>>,
     ) -> Result<(), ReplayError> {
         ensure!(
             matches!(
@@ -516,7 +517,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         minted: EffectId,
         publication: EffectId,
         retired: &[EffectId],
-        artifact: &Arc<Artifact<V, H::Digest>>,
+        artifact: &Arc<Artifact<S, H::Digest>>,
     ) -> Result<(), ReplayError> {
         let (is_vqc, view) = match artifact.as_ref() {
             Artifact::Vqc(certificate) => (true, certificate.view()),
@@ -628,7 +629,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn apply_finality_floor_advanced(
         &mut self,
-        proof: &Arc<Artifact<V, H::Digest>>,
+        proof: &Arc<Artifact<S, H::Digest>>,
         retired_signing: &[EffectId],
         retired_publications: &[EffectId],
     ) -> Result<(), ReplayError> {
@@ -710,7 +711,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     }
 
     /// Checks a durable artifact's epoch and encoded size.
-    fn check_artifact_bounds(&self, artifact: &Artifact<V, H::Digest>) -> Result<(), ReplayError> {
+    fn check_artifact_bounds(&self, artifact: &Artifact<S, H::Digest>) -> Result<(), ReplayError> {
         ensure!(artifact.epoch() == self.profile.protocol().epoch(), Epoch);
         ensure!(
             artifact.encoded_len() <= self.profile.resources().max_artifact_bytes(),
@@ -722,7 +723,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// Checks a durable artifact's epoch and encoded size, then returns its identifier.
     fn check_local_artifact(
         &self,
-        artifact: &Artifact<V, H::Digest>,
+        artifact: &Artifact<S, H::Digest>,
     ) -> Result<ArtifactId<H::Digest>, ReplayError> {
         self.check_artifact_bounds(artifact)?;
         Ok(artifact.id::<H>())
@@ -754,7 +755,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn insert_local(
         &mut self,
         id: ArtifactId<H::Digest>,
-        artifact: &Arc<Artifact<V, H::Digest>>,
+        artifact: &Arc<Artifact<S, H::Digest>>,
     ) -> Result<(), ReplayError> {
         self.durable.state.local.insert(id, Arc::clone(artifact));
         self.retain_durable_artifact(id)
@@ -764,7 +765,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn queue_publication(
         &mut self,
         id: EffectId,
-        publication: Publication<V, H::Digest>,
+        publication: Publication<S, H::Digest>,
         ids: Vec<ArtifactId<H::Digest>>,
     ) -> Result<(), ReplayError> {
         self.admit_durable_effect(id, 0, ids)?;
@@ -776,7 +777,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn finish_signing(
         &mut self,
         sign: EffectId,
-        effect: &SignEffect<V, H::Digest>,
+        effect: &SignEffect<S, H::Digest>,
     ) -> Result<(), ReplayError> {
         let signed = if self.lifecycle == Lifecycle::Recovering {
             self.chain.replay_signing(sign, effect)

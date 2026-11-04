@@ -11,7 +11,7 @@ use crate::{
         },
         config::{Profile, Role, Tuning},
         machine::{CoreState, CoreTurn, Input, StepStatus, VerifyJob},
-        mocks::Committee,
+        mocks::{Bls, Committee},
         testing::expect_within,
         types::{Artifact, ChainId, DaVote, SignedTransactionBlock},
     },
@@ -31,6 +31,9 @@ use commonware_runtime::{
 };
 use std::{convert::Infallible, future::pending, num::NonZeroUsize, sync::Arc, time::Duration};
 use tracing::Span;
+
+/// The suite these tests run on.
+type Suite = Bls<MinPk>;
 
 mod unit;
 
@@ -52,9 +55,9 @@ impl Receiver for Silent {
 }
 
 struct Harness {
-    committee: Committee<MinPk>,
-    mailbox: Mailbox<MinPk, Sha256Digest>,
-    completions: mailbox::Receiver<Completed<MinPk, Sha256Digest>>,
+    committee: Committee<Bls<MinPk>>,
+    mailbox: Mailbox<Bls<MinPk>, Sha256Digest>,
+    completions: mailbox::Receiver<Completed<Bls<MinPk>, Sha256Digest>>,
     task: Handle<()>,
     _credits: ingress::Mailbox,
 }
@@ -68,18 +71,17 @@ impl Harness {
         strategy: T,
         critical_strategy: C,
     ) -> Self {
-        let committee = Committee::<MinPk>::builder(seed, 6).build();
-        let (verifier, mailbox): (Verifier<_, Sha256, Ed25519PublicKey, MinPk, T, C>, _) =
-            Verifier::new(
-                context.child("batcher"),
-                Config {
-                    scheme: committee.verifier.clone(),
-                    strategy: strategy.clone(),
-                    critical_strategy: critical_strategy.clone(),
-                    inflight_jobs: NonZeroUsize::new(2).unwrap(),
-                    mailbox_size: NonZeroUsize::new(16).unwrap(),
-                },
-            );
+        let committee = Committee::<Bls<MinPk>>::builder(seed, 6).build();
+        let (verifier, mailbox): (Verifier<_, Sha256, Bls<MinPk>, T, C>, _) = Verifier::new(
+            context.child("batcher"),
+            Config {
+                scheme: committee.verifier.clone(),
+                strategy: strategy.clone(),
+                critical_strategy: critical_strategy.clone(),
+                inflight_jobs: NonZeroUsize::new(2).unwrap(),
+                mailbox_size: NonZeroUsize::new(16).unwrap(),
+            },
+        );
         let (ingress, credits) = ingress::Actor::new(
             context.child("batcher"),
             ingress::Config {
@@ -90,9 +92,9 @@ impl Harness {
                 codec: committee.codec(),
                 bounds: committee
                     .codec()
-                    .encoded_bounds::<MinPk, Sha256Digest>()
+                    .encoded_bounds::<Bls<MinPk>, Sha256Digest>()
                     .unwrap(),
-                limits: IngressLimits::from_profile::<MinPk, _>(&observer_profile(&committee)),
+                limits: IngressLimits::from_profile::<Bls<MinPk>, _>(&observer_profile(&committee)),
                 mailbox_size: NonZeroUsize::new(16).unwrap(),
                 observation_capacity: NonZeroUsize::new(8).unwrap(),
             },
@@ -132,14 +134,14 @@ async fn stops(context: &DeterministicContext, mut task: Handle<()>) {
 
 /// Drives the production Core until it issues the verification jobs for `artifacts`.
 fn machine_issued_jobs(
-    committee: &Committee<MinPk>,
-    artifacts: Vec<Artifact<MinPk, Sha256Digest>>,
-) -> Vec<VerifyJob<MinPk, Sha256Digest>> {
+    committee: &Committee<Bls<MinPk>>,
+    artifacts: Vec<Artifact<Bls<MinPk>, Sha256Digest>>,
+) -> Vec<VerifyJob<Bls<MinPk>, Sha256Digest>> {
     machine_issued_jobs_for(committee, Role::Observer, Vec::new(), artifacts).1
 }
 
 /// Returns the role of `chain`'s producer, the one node that keeps the chain's DA votes.
-fn producer_role(committee: &Committee<MinPk>, chain: u32) -> Role {
+fn producer_role(committee: &Committee<Bls<MinPk>>, chain: u32) -> Role {
     Role::Validator(committee.config.producer(ChainId::new(chain)).unwrap())
 }
 
@@ -148,13 +150,13 @@ fn producer_role(committee: &Committee<MinPk>, chain: u32) -> Role {
 ///
 /// The Core first verifies `held` itself, such as the producer block a DA vote names.
 fn machine_issued_jobs_for(
-    committee: &Committee<MinPk>,
+    committee: &Committee<Suite>,
     role: Role,
-    held: Vec<Artifact<MinPk, Sha256Digest>>,
-    artifacts: Vec<Artifact<MinPk, Sha256Digest>>,
+    held: Vec<Artifact<Suite, Sha256Digest>>,
+    artifacts: Vec<Artifact<Suite, Sha256Digest>>,
 ) -> (
-    CoreState<Sha256, MinPk>,
-    Vec<VerifyJob<MinPk, Sha256Digest>>,
+    CoreState<Sha256, Suite>,
+    Vec<VerifyJob<Suite, Sha256Digest>>,
 ) {
     let mut core = CoreState::fresh(profile(committee, role)).unwrap();
     core.enqueue(Input::Start).unwrap();
@@ -265,7 +267,7 @@ fn executes_machine_issued_jobs_with_exact_tickets() {
 async fn verdicts_arrive(
     context: &DeterministicContext,
     harness: &mut Harness,
-    jobs: Vec<VerifyJob<MinPk, Sha256Digest>>,
+    jobs: Vec<VerifyJob<Bls<MinPk>, Sha256Digest>>,
     stalled: &str,
 ) {
     let round = Round::new(harness.committee.config.epoch(), View::new(1));
@@ -355,7 +357,7 @@ fn an_invalid_da_share_is_admitted_and_keeps_its_sender() {
         );
         let invalid = DaVote::new(
             committee.transaction_header(ChainId::new(0), Sha256::hash(&[b"subject"])),
-            elsewhere.share().clone(),
+            elsewhere.attestation().clone(),
         );
         let subject = committee.signed_block(ChainId::new(0), Sha256::hash(&[b"subject"]));
         let (_, jobs) = machine_issued_jobs_for(
@@ -435,12 +437,12 @@ fn a_closed_voter_completion_path_stops_the_shared_task() {
     });
 }
 
-fn observer_profile(committee: &Committee<MinPk>) -> Profile<Sha256Digest> {
+fn observer_profile(committee: &Committee<Bls<MinPk>>) -> Profile<Sha256Digest> {
     profile(committee, Role::Observer)
 }
 
-fn profile(committee: &Committee<MinPk>, role: Role) -> Profile<Sha256Digest> {
-    Profile::new::<MinPk>(
+fn profile(committee: &Committee<Bls<MinPk>>, role: Role) -> Profile<Sha256Digest> {
+    Profile::new::<Bls<MinPk>>(
         committee.config.clone(),
         role,
         Tuning {

@@ -16,7 +16,7 @@ use crate::{
                 fixtures::{self, TestConfig, attestation, genesis_tip_history, marked_digest},
             },
         },
-        mocks::Committee,
+        mocks::{Bls, Committee},
         types::{
             Anchor, Artifact, Attestation, BlockRef, CertificateId, ChainId, ChainProposal,
             EpochGenesis, LeaderBlock, SignedLeaderBlock, SignedTransactionBlock,
@@ -29,15 +29,16 @@ use commonware_codec::{Encode, types::lazy::Lazy};
 use commonware_cryptography::{
     Hasher, Sha256,
     bls12381::primitives::variant::{MinPk, Variant},
+    certificate,
     sha256::Digest,
 };
 use commonware_math::algebra::HashToGroup;
 use std::{collections::VecDeque, num::NonZeroUsize};
 
-pub(super) type BenchMachine = Machine<Sha256, MinPk>;
-pub(super) type BenchCapability = Capability<MinPk, Digest>;
-pub(super) type BenchCapabilities = Capabilities<MinPk, Digest>;
-pub(super) type BenchArtifact = Artifact<MinPk, Digest>;
+pub(super) type BenchMachine = Machine<Sha256, Bls<MinPk>>;
+pub(super) type BenchCapability = Capability<Bls<MinPk>, Digest>;
+pub(super) type BenchCapabilities = Capabilities<Bls<MinPk>, Digest>;
+pub(super) type BenchArtifact = Artifact<Bls<MinPk>, Digest>;
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_MACHINE_BENCH";
 
@@ -156,19 +157,19 @@ pub(super) fn protocol(participants: usize, pipeline_depth: u32) -> Protocol<Dig
 
 /// Builds an observer profile with production-derived resource bounds.
 pub(super) fn observer(protocol: Protocol<Digest>) -> Profile<Digest> {
-    Profile::new::<MinPk>(protocol, Role::Observer, Tuning::default()).unwrap()
+    Profile::new::<Bls<MinPk>>(protocol, Role::Observer, Tuning::default()).unwrap()
 }
 
 /// Fabricates an undecoded attributed signature whose encoding is a real group element.
 ///
 /// Forcing it pays the full point decompression and subgroup check, so a bench observing
 /// such an artifact measures what decoding a gossiped copy actually costs.
-pub(super) fn deferred_attestation(signer: u32) -> Attestation<MinPk> {
+pub(super) fn deferred_attestation(signer: u32) -> Attestation<Bls<MinPk>> {
     let point = <MinPk as Variant>::Signature::hash_to_group(NAMESPACE, &signer.to_be_bytes());
-    Attestation::new(
-        Participant::new(signer),
-        Lazy::deferred(&mut point.encode(), ()),
-    )
+    certificate::Attestation {
+        signer: Participant::new(signer),
+        signature: Lazy::deferred(&mut point.encode(), ()),
+    }
 }
 
 /// Fabricates the scheduled leader's signed proposal for `view`.
@@ -177,8 +178,8 @@ pub(super) fn leader_block(
     view: u64,
     parent: CertificateId<Digest>,
     history: Digest,
-    proposals: Vec<ChainProposal<MinPk, Digest>>,
-) -> SignedLeaderBlock<MinPk, Digest> {
+    proposals: Vec<ChainProposal<Bls<MinPk>, Digest>>,
+) -> SignedLeaderBlock<Bls<MinPk>, Digest> {
     let block = LeaderBlock::new(
         Round::new(protocol.epoch(), View::new(view)),
         parent,
@@ -194,16 +195,18 @@ pub(super) fn leader_block(
 /// Fabricates `signer`'s complete vote at `position` on every chain.
 pub(super) fn vote(
     protocol: &Protocol<Digest>,
-    leader: &LeaderBlock<MinPk, Digest>,
+    leader: &LeaderBlock<Bls<MinPk>, Digest>,
     signer: u32,
     position: u32,
-) -> Vote<MinPk, Digest> {
+) -> Vote<Bls<MinPk>, Digest> {
     let codec = protocol.codec_config();
     fixtures::vote(leader, signer, &vec![position; codec.chains()], codec)
 }
 
 /// Starts a fresh live machine, acknowledging its generation barrier.
-pub(super) fn start<H: Hasher<Digest = Digest>>(profile: Profile<H::Digest>) -> Machine<H, MinPk> {
+pub(super) fn start<H: Hasher<Digest = Digest>>(
+    profile: Profile<H::Digest>,
+) -> Machine<H, Bls<MinPk>> {
     let mut machine = Machine::new(profile);
     let step = machine.step(Input::Start).unwrap();
     drain(
@@ -238,8 +241,8 @@ pub(crate) fn absorb(machine: &mut BenchMachine, cohort: Vec<BenchArtifact>) -> 
 
 /// Completes one verification job with fabricated all-true verdicts.
 pub(super) fn verify_all_true<H: Hasher<Digest = Digest>>(
-    machine: &mut Machine<H, MinPk>,
-    job: &VerifyJob<MinPk, Digest>,
+    machine: &mut Machine<H, Bls<MinPk>>,
+    job: &VerifyJob<Bls<MinPk>, Digest>,
 ) -> BenchCapabilities {
     machine
         .step(Input::Verified(job.all_valid()))
@@ -277,26 +280,26 @@ pub(super) const fn inert(capability: &BenchCapability) -> bool {
 /// delivery feedback, and timers are dropped. Signing, building, validation, recovery, and
 /// aggregation must not appear for the observer machines these benches drive.
 pub(super) fn drain<H: Hasher<Digest = Digest>, F>(
-    machine: &mut Machine<H, MinPk>,
+    machine: &mut Machine<H, Bls<MinPk>>,
     capabilities: BenchCapabilities,
     budget: NonZeroUsize,
     resolve: &mut F,
 ) where
-    F: FnMut(&ResolutionJob) -> ViewProof<MinPk, Digest>,
+    F: FnMut(&ResolutionJob) -> ViewProof<Bls<MinPk>, Digest>,
 {
     drain_with(machine, capabilities, budget, resolve, &mut |_| {});
 }
 
 /// [`drain`] with a sink observing every acknowledged persistence job.
 pub(crate) fn drain_with<H: Hasher<Digest = Digest>, F, P>(
-    machine: &mut Machine<H, MinPk>,
+    machine: &mut Machine<H, Bls<MinPk>>,
     capabilities: BenchCapabilities,
     budget: NonZeroUsize,
     resolve: &mut F,
     on_persist: &mut P,
 ) where
-    F: FnMut(&ResolutionJob) -> ViewProof<MinPk, Digest>,
-    P: FnMut(&PersistJob<MinPk, Digest>),
+    F: FnMut(&ResolutionJob) -> ViewProof<Bls<MinPk>, Digest>,
+    P: FnMut(&PersistJob<Bls<MinPk>, Digest>),
 {
     let mut idle_polls = 0usize;
     let mut queue: VecDeque<_> = capabilities.into_iter().collect();
@@ -476,7 +479,7 @@ fn block_soak(profile: CompletionProfile) -> (LogicalRun, Vec<u64>, u64) {
 }
 
 fn view_soak(profile: CompletionProfile) -> (LogicalRun, Vec<u64>) {
-    let committee = Committee::<MinPk>::builder(91, MACHINE_SCALE_PARTICIPANTS as u32).build();
+    let committee = Committee::<Bls<MinPk>>::builder(91, MACHINE_SCALE_PARTICIPANTS as u32).build();
     let nullifications = (1..=MACHINE_SCALE_VIEWS)
         .map(|view| committee.nullification(View::new(view)))
         .collect::<Vec<_>>();
@@ -486,7 +489,7 @@ fn view_soak(profile: CompletionProfile) -> (LogicalRun, Vec<u64>) {
         .map(Artifact::Nullification)
         .collect::<Vec<_>>();
     let machine_profile =
-        Profile::new::<MinPk>(committee.config, Role::Observer, Tuning::default()).unwrap();
+        Profile::new::<Bls<MinPk>>(committee.config, Role::Observer, Tuning::default()).unwrap();
     let mut machine = start(machine_profile);
     let mut total = LogicalRun::default();
     let mut completion_tails = Vec::with_capacity(certificates.len());
@@ -518,7 +521,7 @@ fn observe_profiled<F>(
     resolve: &mut F,
 ) -> LogicalRun
 where
-    F: FnMut(&ResolutionJob) -> ViewProof<MinPk, Digest>,
+    F: FnMut(&ResolutionJob) -> ViewProof<Bls<MinPk>, Digest>,
 {
     let identified = cohort
         .into_iter()
@@ -546,7 +549,7 @@ fn drain_profiled<F>(
     resolve: &mut F,
     run: &mut LogicalRun,
 ) where
-    F: FnMut(&ResolutionJob) -> ViewProof<MinPk, Digest>,
+    F: FnMut(&ResolutionJob) -> ViewProof<Bls<MinPk>, Digest>,
 {
     let mut pending = Vec::new();
     let mut sequence = 0;
@@ -642,7 +645,7 @@ fn complete_profiled_capability<F>(
     resolve: &mut F,
 ) -> BenchCapabilities
 where
-    F: FnMut(&ResolutionJob) -> ViewProof<MinPk, Digest>,
+    F: FnMut(&ResolutionJob) -> ViewProof<Bls<MinPk>, Digest>,
 {
     let step = match capability {
         Capability::Journal(directive) => machine.step(Input::Persisted(directive.job.ack())),
@@ -680,7 +683,7 @@ fn percentile(samples: &mut [u64], percent: usize) -> u64 {
 }
 
 fn delivered<H: Hasher<Digest = Digest>>(
-    machine: &mut Machine<H, MinPk>,
+    machine: &mut Machine<H, Bls<MinPk>>,
     queue: &mut VecDeque<BenchCapability>,
     issued: Issued<EffectId>,
 ) {

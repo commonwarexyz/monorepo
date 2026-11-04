@@ -13,6 +13,7 @@ use crate::{
             bodies,
             wire::{BackfillKey, MAX_SEGMENT_ITEMS},
         },
+        scheme::Scheme,
         types::{BlockRef, Body, CertificateId, Lqc, TipRecord, TransactionBlock},
     },
     types::View,
@@ -22,7 +23,7 @@ use commonware_actor::{
     Feedback,
     mailbox::{self, Policy},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_resolver::{Consumer, Delivery, Outcome, p2p::Producer};
 use commonware_runtime::Error as RuntimeError;
 use commonware_utils::channel::{fallible::OneshotExt as _, oneshot};
@@ -94,14 +95,14 @@ pub(super) struct Incoming<D: Digest> {
 }
 
 /// A command for the backfill actor.
-pub(super) enum Message<H: Hasher, V: Variant, B: Body<H>> {
+pub(super) enum Message<H: Hasher, S: Scheme, B: Body<H>> {
     /// A peer response for one backfill key.
     Deliver(Incoming<H::Digest>),
     /// A caller waiting for `target`.
     Fetch {
         span: Span,
         target: Target<H::Digest>,
-        reply: Reply<H, V, B>,
+        reply: Reply<H, S, B>,
         reason: FetchReason,
     },
     /// A producer block now has a DA certificate.
@@ -125,7 +126,7 @@ pub(super) enum Message<H: Hasher, V: Variant, B: Body<H>> {
     },
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> Policy for Message<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> Policy for Message<H, S, B> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
@@ -154,21 +155,21 @@ impl<H: Hasher, V: Variant, B: Body<H>> Policy for Message<H, V, B> {
 
 /// Resolver-facing producer and consumer, created with the actor before the network
 /// `commonware_resolver` engine is built.
-pub struct BackfillBridge<H: Hasher, V: Variant, B: Body<H>> {
-    commands: mailbox::Sender<Message<H, V, B>>,
+pub struct BackfillBridge<H: Hasher, S: Scheme, B: Body<H>> {
+    commands: mailbox::Sender<Message<H, S, B>>,
     serve: serve::Mailbox<H::Digest>,
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> BackfillBridge<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> BackfillBridge<H, S, B> {
     pub(super) const fn new(
-        commands: mailbox::Sender<Message<H, V, B>>,
+        commands: mailbox::Sender<Message<H, S, B>>,
         serve: serve::Mailbox<H::Digest>,
     ) -> Self {
         Self { commands, serve }
     }
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> Clone for BackfillBridge<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> Clone for BackfillBridge<H, S, B> {
     fn clone(&self) -> Self {
         Self {
             commands: self.commands.clone(),
@@ -177,7 +178,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Clone for BackfillBridge<H, V, B> {
     }
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> Producer for BackfillBridge<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> Producer for BackfillBridge<H, S, B> {
     type Key = BackfillKey<H::Digest>;
 
     fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
@@ -185,7 +186,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Producer for BackfillBridge<H, V, B> {
     }
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> Consumer for BackfillBridge<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> Consumer for BackfillBridge<H, S, B> {
     type Key = BackfillKey<H::Digest>;
     type Value = Bytes;
     type Subscriber = BackfillSubscriber;
@@ -223,11 +224,11 @@ impl<H: Hasher, V: Variant, B: Body<H>> Consumer for BackfillBridge<H, V, B> {
 ///   catalog custody before returning it.
 /// - Wait ([`Self::subscribe_block`]): the actor never fetches until the block is DA-certified,
 ///   and returns a peer response without staging it; the caller admits it to establish custody.
-pub(crate) struct Mailbox<H: Hasher, V: Variant, B: Body<H>> {
-    pub(super) commands: mailbox::Sender<Message<H, V, B>>,
+pub(crate) struct Mailbox<H: Hasher, S: Scheme, B: Body<H>> {
+    pub(super) commands: mailbox::Sender<Message<H, S, B>>,
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> Clone for Mailbox<H, V, B> {
+impl<H: Hasher, S: Scheme, B: Body<H>> Clone for Mailbox<H, S, B> {
     fn clone(&self) -> Self {
         Self {
             commands: self.commands.clone(),
@@ -235,15 +236,15 @@ impl<H: Hasher, V: Variant, B: Body<H>> Clone for Mailbox<H, V, B> {
     }
 }
 
-impl<H: Hasher, V: Variant, B: Body<H>> Mailbox<H, V, B> {
-    pub(super) const fn new(commands: mailbox::Sender<Message<H, V, B>>) -> Self {
+impl<H: Hasher, S: Scheme, B: Body<H>> Mailbox<H, S, B> {
+    pub(super) const fn new(commands: mailbox::Sender<Message<H, S, B>>) -> Self {
         Self { commands }
     }
 
     /// Enqueues the message built by `make` and awaits its reply.
     async fn request<T>(
         &self,
-        make: impl FnOnce(oneshot::Sender<Result<T, Error>>) -> Message<H, V, B>,
+        make: impl FnOnce(oneshot::Sender<Result<T, Error>>) -> Message<H, S, B>,
     ) -> Result<T, Error> {
         ask(
             |message| self.commands.enqueue(message),
@@ -258,7 +259,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Mailbox<H, V, B> {
         &self,
         reason: FetchReason,
         target: Target<H::Digest>,
-        reply: impl FnOnce(oneshot::Sender<Result<T, Error>>) -> Reply<H, V, B>,
+        reply: impl FnOnce(oneshot::Sender<Result<T, Error>>) -> Reply<H, S, B>,
     ) -> Result<T, Error> {
         self.request(|sender| Message::Fetch {
             span: Span::current(),
@@ -282,7 +283,7 @@ impl<H: Hasher, V: Variant, B: Body<H>> Mailbox<H, V, B> {
         &self,
         reason: FetchReason,
         id: CertificateId<H::Digest>,
-    ) -> Result<Arc<Lqc<V, H::Digest>>, Error> {
+    ) -> Result<Arc<Lqc<S, H::Digest>>, Error> {
         self.fetch(reason, Target::Lqc(id), Reply::Lqc).await
     }
 

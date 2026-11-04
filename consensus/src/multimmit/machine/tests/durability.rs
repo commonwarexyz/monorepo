@@ -30,6 +30,7 @@ use crate::{
             },
             view::ViewTimer,
         },
+        mocks::Bls,
         types::{
             Artifact, BlockRef, ChainId, SignedLeaderBlock, SignedTransactionBlock,
             TransactionBlockHeader, ViewMessage, ViewProof,
@@ -46,13 +47,14 @@ use std::{collections::HashSet, sync::Arc};
 fn publication_signature_references_cover_every_shape() {
     let machine = Machine::new(Harness::validator(0).participants(6).profile());
     let view = View::new(1);
-    let own: Arc<Artifact<MinPk, Digest>> = Arc::new(Artifact::NoVote(no_vote(&machine, view, 0)));
-    let foreign: Arc<Artifact<MinPk, Digest>> =
+    let own: Arc<Artifact<Bls<MinPk>, Digest>> =
+        Arc::new(Artifact::NoVote(no_vote(&machine, view, 0)));
+    let foreign: Arc<Artifact<Bls<MinPk>, Digest>> =
         Arc::new(Artifact::NoVote(no_vote(&machine, view, 1)));
-    let aggregate: Arc<Artifact<MinPk, Digest>> = Arc::new(Artifact::Nullification(
+    let aggregate: Arc<Artifact<Bls<MinPk>, Digest>> = Arc::new(Artifact::Nullification(
         symbolic_nullification(&machine, view, 7),
     ));
-    let publications = |artifact: Arc<Artifact<MinPk, Digest>>| {
+    let publications = |artifact: Arc<Artifact<Bls<MinPk>, Digest>>| {
         [
             ("Broadcast", Publication::broadcast(Arc::clone(&artifact))),
             (
@@ -287,7 +289,7 @@ fn durable_broadcast_replays_with_stable_id() {
         Some(&Publication::broadcast(Arc::new(artifact.clone())))
     );
     let mut restored =
-        Machine::<Sha256, MinPk>::restore(Harness::observer().profile(), before).unwrap();
+        Machine::<Sha256, Bls<MinPk>>::restore(Harness::observer().profile(), before).unwrap();
     for event in job.events() {
         restored.replay(event.clone()).unwrap();
     }
@@ -326,7 +328,7 @@ fn durable_broadcast_replays_with_stable_id() {
     assert!(restored.live_snapshot_for_test().outbox().contains_key(&id));
     assert!(completion.capabilities().is_empty());
 
-    let mut restarted = Machine::<Sha256, MinPk>::restore(
+    let mut restarted = Machine::<Sha256, Bls<MinPk>>::restore(
         Harness::observer().profile(),
         restored.live_snapshot_for_test(),
     )
@@ -368,7 +370,7 @@ fn replayed_durable_prefix_advances_the_acknowledged_cursor() {
         .unwrap();
     let job = reserved.persist_job();
 
-    let mut replayed = Machine::<Sha256, MinPk>::restore(profile, before).unwrap();
+    let mut replayed = Machine::<Sha256, Bls<MinPk>>::restore(profile, before).unwrap();
     for event in job.events() {
         replayed.replay(event.clone()).unwrap();
     }
@@ -403,20 +405,21 @@ fn restore_rejects_mismatched_publication_obligation_rows() {
     let with_discharge =
         |until| OutboxEntry::new(publication.clone(), vec![Discharge::new(0, until)]);
     let mut wrong_family =
-        Machine::<Sha256, MinPk>::restore(profile.clone(), canonical.clone()).unwrap();
+        Machine::<Sha256, Bls<MinPk>>::restore(profile.clone(), canonical.clone()).unwrap();
     wrong_family.durable.state.outbox.insert(
         effect,
         with_discharge(DischargeKind::ExitReplacedAfter { view: View::new(1) }),
     );
     assert_eq!(
-        snapshot_reason(Machine::<Sha256, MinPk>::restore(
+        snapshot_reason(Machine::<Sha256, Bls<MinPk>>::restore(
             profile.clone(),
             wrong_family.live_snapshot_for_test()
         )),
         SnapshotReason::Obligation
     );
 
-    let mut wrong_object = Machine::<Sha256, MinPk>::restore(profile.clone(), canonical).unwrap();
+    let mut wrong_object =
+        Machine::<Sha256, Bls<MinPk>>::restore(profile.clone(), canonical).unwrap();
     wrong_object.durable.state.outbox.insert(
         effect,
         with_discharge(DischargeKind::BlockCertifiedAtLeast {
@@ -425,7 +428,7 @@ fn restore_rejects_mismatched_publication_obligation_rows() {
         }),
     );
     assert_eq!(
-        snapshot_reason(Machine::<Sha256, MinPk>::restore(
+        snapshot_reason(Machine::<Sha256, Bls<MinPk>>::restore(
             profile,
             wrong_object.live_snapshot_for_test()
         )),
@@ -893,7 +896,7 @@ fn observer_cannot_reserve_signing() {
 
 #[test]
 fn replay_rejects_forwarding_an_artifact_that_is_not_an_exit_certificate() {
-    let machine = Machine::<Sha256, MinPk>::new(Harness::observer().profile());
+    let machine = Machine::<Sha256, Bls<MinPk>>::new(Harness::observer().profile());
     let snapshot = machine.live_snapshot_for_test();
     let mut restored = Machine::restore(Harness::observer().profile(), snapshot).unwrap();
     let cursor = Cursor::zero().next().unwrap();
@@ -918,9 +921,10 @@ fn replay_rejects_forwarding_an_artifact_that_is_not_an_exit_certificate() {
 fn replay_rejects_unauthorized_local_da_certificates() {
     for role in [Role::Observer, Role::Validator(Participant::new(0))] {
         let profile = Harness::builder(role).participants(6).profile();
-        let machine = Machine::<Sha256, MinPk>::new(profile.clone());
+        let machine = Machine::<Sha256, Bls<MinPk>>::new(profile.clone());
         let mut restored =
-            Machine::<Sha256, MinPk>::restore(profile, machine.live_snapshot_for_test()).unwrap();
+            Machine::<Sha256, Bls<MinPk>>::restore(profile, machine.live_snapshot_for_test())
+                .unwrap();
         let epoch = restored.profile().protocol().epoch();
         let genesis = restored.profile().protocol().genesis().tips()[1];
         let header = TransactionBlockHeader::new(
@@ -953,9 +957,9 @@ fn replay_rejects_unauthorized_local_da_certificates() {
 #[test]
 fn replay_rejects_a_certificate_for_a_chain_outside_the_epoch() {
     let profile = Harness::observer().profile();
-    let machine = Machine::<Sha256, MinPk>::new(profile.clone());
+    let machine = Machine::<Sha256, Bls<MinPk>>::new(profile.clone());
     let mut restored =
-        Machine::<Sha256, MinPk>::restore(profile, machine.live_snapshot_for_test()).unwrap();
+        Machine::<Sha256, Bls<MinPk>>::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let epoch = restored.profile().protocol().epoch();
     let chains = restored.profile().codec().chains();
     let header = TransactionBlockHeader::new(
@@ -987,7 +991,7 @@ fn replay_rejects_a_certificate_for_a_chain_outside_the_epoch() {
 fn snapshot_bounds_every_reserved_da_vote_by_its_safety_height() {
     let role = Role::Validator(Participant::new(0));
     let profile = Harness::builder(role).participants(6).profile();
-    let machine = Machine::<Sha256, MinPk>::new(profile.clone());
+    let machine = Machine::<Sha256, Bls<MinPk>>::new(profile.clone());
     let epoch = machine.profile().protocol().epoch();
     let genesis = machine.profile().protocol().genesis().tips()[1];
     let first = TransactionBlockHeader::new(
@@ -1025,18 +1029,18 @@ fn snapshot_bounds_every_reserved_da_vote_by_its_safety_height() {
 
     // The later vote in the run is above the chain's durable safety height.
     assert_eq!(
-        snapshot_reason(Machine::<Sha256, MinPk>::restore(
+        snapshot_reason(Machine::<Sha256, Bls<MinPk>>::restore(
             profile.clone(),
             snapshot(1)
         )),
         SnapshotReason::Effect
     );
-    Machine::<Sha256, MinPk>::restore(profile, snapshot(2)).unwrap();
+    Machine::<Sha256, Bls<MinPk>>::restore(profile, snapshot(2)).unwrap();
 }
 
 #[test]
 fn observer_replay_rejects_queued_signing_authority() {
-    let machine = Machine::<Sha256, MinPk>::new(Harness::observer().profile());
+    let machine = Machine::<Sha256, Bls<MinPk>>::new(Harness::observer().profile());
     let snapshot = machine.live_snapshot_for_test();
     let mut restored = Machine::restore(Harness::observer().profile(), snapshot).unwrap();
     let proposed = leader(&restored, 1);
@@ -1063,7 +1067,7 @@ fn observer_replay_rejects_queued_signing_authority() {
 #[test]
 fn replay_requires_view_advance_proof_to_be_retained_and_forwarded() {
     let profile = Harness::observer().participants(6).profile();
-    let machine = Machine::<Sha256, MinPk>::new(profile.clone());
+    let machine = Machine::<Sha256, Bls<MinPk>>::new(profile.clone());
     let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let proof =
         Artifact::Nullification(symbolic_nullification(&restored, View::new(1), 0)).id::<Sha256>();
@@ -1108,7 +1112,7 @@ fn replay_requires_the_views_first_vqc_forwarding_before_a_current_lqc_floor() {
         },
     );
     let mut restored =
-        Machine::<Sha256, MinPk>::restore(profile, machine.live_snapshot_for_test()).unwrap();
+        Machine::<Sha256, Bls<MinPk>>::restore(profile, machine.live_snapshot_for_test()).unwrap();
 
     assert_eq!(
         transition_reason(restored.replay(floor)),
@@ -1162,7 +1166,7 @@ fn replay_requires_the_views_first_vqc_forwarding_before_a_current_lqc_floor() {
     let alternate_id = alternate.id::<Sha256>();
     assert_ne!(alternate_id, anchor_id);
 
-    let mut restored = Machine::<Sha256, MinPk>::restore(
+    let mut restored = Machine::<Sha256, Bls<MinPk>>::restore(
         machine.profile().clone(),
         machine.live_snapshot_for_test(),
     )
@@ -1207,8 +1211,11 @@ fn replay_requires_the_views_first_vqc_forwarding_before_a_current_lqc_floor() {
             .map(|artifact| artifact.id::<Sha256>()),
         Some(anchor_id),
     );
-    Machine::<Sha256, MinPk>::restore(machine.profile().clone(), restored.live_snapshot_for_test())
-        .unwrap();
+    Machine::<Sha256, Bls<MinPk>>::restore(
+        machine.profile().clone(),
+        restored.live_snapshot_for_test(),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -1221,7 +1228,7 @@ fn proposal_may_repeat_its_exact_parent_after_forwarding() {
     let parent = view_one_vqc(&machine);
     let request = proposal_request_with_parent(&machine, View::new(2), parent.clone());
     let mut restored =
-        Machine::<Sha256, MinPk>::restore(profile, machine.live_snapshot_for_test()).unwrap();
+        Machine::<Sha256, Bls<MinPk>>::restore(profile, machine.live_snapshot_for_test()).unwrap();
 
     let forwarding_cursor = Cursor::zero().next().unwrap();
     restored
@@ -1274,9 +1281,11 @@ fn proposal_parent_forwarding_provenance_survives_retirement() {
             assert_ne!(alternate.id::<Sha256>(), parent.id::<Sha256>());
             alternate
         };
-        let mut restored =
-            Machine::<Sha256, MinPk>::restore(profile.clone(), machine.live_snapshot_for_test())
-                .unwrap();
+        let mut restored = Machine::<Sha256, Bls<MinPk>>::restore(
+            profile.clone(),
+            machine.live_snapshot_for_test(),
+        )
+        .unwrap();
 
         let forwarding_cursor = Cursor::zero().next().unwrap();
         restored
@@ -1321,7 +1330,8 @@ fn proposal_parent_forwarding_provenance_survives_retirement() {
         )));
 
         // A snapshot retains the proof, but retired forwarding provenance is volatile.
-        let mut recovered = Machine::<Sha256, MinPk>::restore(profile.clone(), snapshot).unwrap();
+        let mut recovered =
+            Machine::<Sha256, Bls<MinPk>>::restore(profile.clone(), snapshot).unwrap();
         recovered.step(Input::RecoveryComplete).unwrap();
         let recovered_request = recovered
             .views
@@ -1346,7 +1356,7 @@ fn proposal_parent_forwarding_provenance_survives_retirement() {
                 },
             ))
             .unwrap();
-        Machine::<Sha256, MinPk>::restore(profile.clone(), restored.live_snapshot_for_test())
+        Machine::<Sha256, Bls<MinPk>>::restore(profile.clone(), restored.live_snapshot_for_test())
             .unwrap();
         let signed_cursor = proposal_cursor.next().unwrap();
         let publication = EffectId::from_cursor(signed_cursor);
@@ -1368,7 +1378,8 @@ fn proposal_parent_forwarding_provenance_survives_retirement() {
         );
         assert!(restored.durable.state.local.contains_key(&parent_id));
         let recovered =
-            Machine::<Sha256, MinPk>::restore(profile, restored.live_snapshot_for_test()).unwrap();
+            Machine::<Sha256, Bls<MinPk>>::restore(profile, restored.live_snapshot_for_test())
+                .unwrap();
         assert_eq!(recovered.durable.effect_ids, restored.durable.effect_ids);
         assert_eq!(
             recovered.durable.artifact_references,
@@ -1387,7 +1398,7 @@ fn replay_bounds_forwarded_certificate_outbox_growth() {
         .participants(6)
         .resources(limits)
         .profile();
-    let machine = Machine::<Sha256, MinPk>::new(profile.clone());
+    let machine = Machine::<Sha256, Bls<MinPk>>::new(profile.clone());
     let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let first = Arc::new(Artifact::Nullification(symbolic_nullification(
         &restored,
@@ -1439,7 +1450,7 @@ fn replay_accepts_reordered_future_exit_forwarding() {
         .participants(6)
         .resources(limits)
         .profile();
-    let machine = Machine::<Sha256, MinPk>::new(profile.clone());
+    let machine = Machine::<Sha256, Bls<MinPk>>::new(profile.clone());
     let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let mut cursor = Cursor::zero();
 
@@ -1534,14 +1545,15 @@ fn successor_forwarding_reuses_retired_artifact_capacity() {
     assert_eq!(machine.durable.state.outbox.len(), 8);
     assert_eq!(machine.durable.artifact_references.len(), 8);
 
-    let mut restored = Machine::<Sha256, MinPk>::restore(profile.clone(), acknowledged).unwrap();
+    let mut restored =
+        Machine::<Sha256, Bls<MinPk>>::restore(profile.clone(), acknowledged).unwrap();
     for event in forwarding.events().iter().cloned() {
         restored.replay(event).unwrap();
     }
     assert!(restored.durable.state.nullification_forwarded(View::new(2)));
     assert_eq!(restored.durable.state.outbox.len(), 8);
     assert_eq!(restored.durable.artifact_references.len(), 8);
-    Machine::<Sha256, MinPk>::restore(profile, restored.live_snapshot_for_test()).unwrap();
+    Machine::<Sha256, Bls<MinPk>>::restore(profile, restored.live_snapshot_for_test()).unwrap();
 }
 
 #[test]
@@ -1554,7 +1566,7 @@ fn replay_bounds_locally_created_view_certificates() {
         .participants(6)
         .resources(limits)
         .profile();
-    let machine = Machine::<Sha256, MinPk>::new(profile.clone());
+    let machine = Machine::<Sha256, Bls<MinPk>>::new(profile.clone());
     let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let mut cursor = Cursor::zero();
     for view in 1..=9 {
@@ -1595,7 +1607,7 @@ fn replay_bounds_locally_created_view_certificates() {
 fn checkpoint_cut_retained_artifacts_list_each_holder_and_dedupe_by_id() {
     let mut machine = Machine::new(Harness::validator(0).participants(6).profile());
     let view = View::new(2);
-    let nullification: Arc<Artifact<MinPk, Digest>> = Arc::new(Artifact::Nullification(
+    let nullification: Arc<Artifact<Bls<MinPk>, Digest>> = Arc::new(Artifact::Nullification(
         symbolic_nullification(&machine, view, 0),
     ));
     // The same certificate is both forwarded and the view's exit proof, held by separate
@@ -1641,7 +1653,7 @@ fn replay_and_restore_count_signing_reservations_with_retained_artifacts() {
         .participants(6)
         .resources(limits)
         .profile();
-    let machine = Machine::<Sha256, MinPk>::new(profile.clone());
+    let machine = Machine::<Sha256, Bls<MinPk>>::new(profile.clone());
     let mut restored = Machine::restore(profile.clone(), machine.live_snapshot_for_test()).unwrap();
     let mut forwarded_cursor = Cursor::zero();
     for view in 2..=9 {
@@ -1695,7 +1707,7 @@ fn replay_and_restore_count_signing_reservations_with_retained_artifacts() {
         applied,
     );
     assert_eq!(
-        snapshot_reason(Machine::<Sha256, MinPk>::restore(profile, snapshot)),
+        snapshot_reason(Machine::<Sha256, Bls<MinPk>>::restore(profile, snapshot)),
         SnapshotReason::Bounds
     );
 }
@@ -1714,7 +1726,7 @@ fn replay_rejects_a_vote_after_a_local_nullify() {
         round: Round::new(epoch, view),
     };
 
-    let queued = |cursor: Cursor, request: &SignRequest<MinPk, Digest>| {
+    let queued = |cursor: Cursor, request: &SignRequest<Bls<MinPk>, Digest>| {
         DomainEvent::new(
             epoch,
             cursor,
@@ -1726,7 +1738,7 @@ fn replay_rejects_a_vote_after_a_local_nullify() {
     };
     let first = Cursor::zero().next().unwrap();
     let mut restored =
-        Machine::<Sha256, MinPk>::restore(profile.clone(), machine.live_snapshot_for_test())
+        Machine::<Sha256, Bls<MinPk>>::restore(profile.clone(), machine.live_snapshot_for_test())
             .unwrap();
     restored.replay(queued(first, &vote_request)).unwrap();
     restored
@@ -1734,7 +1746,7 @@ fn replay_rejects_a_vote_after_a_local_nullify() {
         .unwrap();
 
     let mut restored =
-        Machine::<Sha256, MinPk>::restore(profile.clone(), machine.live_snapshot_for_test())
+        Machine::<Sha256, Bls<MinPk>>::restore(profile.clone(), machine.live_snapshot_for_test())
             .unwrap();
     restored.replay(queued(first, &nullify_request)).unwrap();
     assert_eq!(
@@ -1742,7 +1754,8 @@ fn replay_rejects_a_vote_after_a_local_nullify() {
         TransitionReason::ViewState
     );
 
-    let snapshot = |reserved: &[&SignRequest<MinPk, Digest>], local: &[Artifact<MinPk, Digest>]| {
+    let snapshot = |reserved: &[&SignRequest<Bls<MinPk>, Digest>],
+                    local: &[Artifact<Bls<MinPk>, Digest>]| {
         let mut applied = machine.durable.state.clone();
         for request in reserved {
             applied.cursor = applied.cursor.next().unwrap();
@@ -1759,7 +1772,7 @@ fn replay_rejects_a_vote_after_a_local_nullify() {
         Snapshot::new(epoch, role, applied)
     };
     assert_eq!(
-        snapshot_reason(Machine::<Sha256, MinPk>::restore(
+        snapshot_reason(Machine::<Sha256, Bls<MinPk>>::restore(
             profile.clone(),
             snapshot(&[&nullify_request, &vote_request], &[])
         )),
@@ -1769,22 +1782,22 @@ fn replay_rejects_a_vote_after_a_local_nullify() {
     // Every durable form of vote-then-nullify restores, whatever map order observes it in.
     let local_vote = Artifact::Vote(vote);
     let local_nullify = Artifact::Nullify(nullify(&machine, view, signer.get()));
-    Machine::<Sha256, MinPk>::restore(
+    Machine::<Sha256, Bls<MinPk>>::restore(
         profile.clone(),
         snapshot(&[&vote_request, &nullify_request], &[]),
     )
     .unwrap();
-    Machine::<Sha256, MinPk>::restore(
+    Machine::<Sha256, Bls<MinPk>>::restore(
         profile.clone(),
         snapshot(&[&nullify_request], core::slice::from_ref(&local_vote)),
     )
     .unwrap();
-    Machine::<Sha256, MinPk>::restore(
+    Machine::<Sha256, Bls<MinPk>>::restore(
         profile.clone(),
         snapshot(&[&vote_request], core::slice::from_ref(&local_nullify)),
     )
     .unwrap();
-    Machine::<Sha256, MinPk>::restore(
+    Machine::<Sha256, Bls<MinPk>>::restore(
         profile.clone(),
         snapshot(&[], &[local_vote.clone(), local_nullify.clone()]),
     )
@@ -1802,7 +1815,7 @@ fn replay_rejects_a_vote_after_a_local_nullify() {
         .insert(view, Arc::clone(&exit));
     exited.exits.insert(view, exit);
     exited.view = view.next();
-    Machine::<Sha256, MinPk>::restore(profile, Snapshot::new(epoch, role, exited)).unwrap();
+    Machine::<Sha256, Bls<MinPk>>::restore(profile, Snapshot::new(epoch, role, exited)).unwrap();
 }
 
 #[test]
@@ -1839,7 +1852,10 @@ fn recovered_timeout_publication_requires_the_exact_artifact_pair() {
             applied,
         );
         assert_eq!(
-            snapshot_reason(Machine::<Sha256, MinPk>::restore(profile.clone(), snapshot)),
+            snapshot_reason(Machine::<Sha256, Bls<MinPk>>::restore(
+                profile.clone(),
+                snapshot
+            )),
             SnapshotReason::Effect
         );
     }
@@ -1854,10 +1870,10 @@ fn observer_fixture() -> (Profile<Digest>, TestMachine) {
 /// Restores `state` as an observer snapshot and returns the snapshot check it fails.
 fn observer_restore_reason(
     profile: Profile<Digest>,
-    state: DurableState<MinPk, Digest>,
+    state: DurableState<Bls<MinPk>, Digest>,
 ) -> SnapshotReason {
     let snapshot = Snapshot::new(profile.protocol().epoch(), Role::Observer, state);
-    snapshot_reason(Machine::<Sha256, MinPk>::restore(profile, snapshot))
+    snapshot_reason(Machine::<Sha256, Bls<MinPk>>::restore(profile, snapshot))
 }
 
 #[test]
@@ -1997,9 +2013,9 @@ fn snapshot_written_under_a_larger_retention_restores_and_compacts_on_exit() {
 /// emission order and appending its events to `journal`. Returns every other capability.
 fn drive_journaled(
     machine: &mut TestMachine,
-    capabilities: Vec<Capability<MinPk, Digest>>,
-    journal: &mut Vec<DomainEvent<MinPk, Digest>>,
-) -> Vec<Capability<MinPk, Digest>> {
+    capabilities: Vec<Capability<Bls<MinPk>, Digest>>,
+    journal: &mut Vec<DomainEvent<Bls<MinPk>, Digest>>,
+) -> Vec<Capability<Bls<MinPk>, Digest>> {
     let mut sink = PersistSink::default();
     let emitted = machine.drain(&mut sink, capabilities, Until::Step);
     journal.extend(sink.events);
@@ -2007,7 +2023,7 @@ fn drive_journaled(
 }
 
 /// Returns the timer `effects` armed for `view`.
-fn view_timer(effects: &[Capability<MinPk, Digest>], view: View) -> ViewTimer {
+fn view_timer(effects: &[Capability<Bls<MinPk>, Digest>], view: View) -> ViewTimer {
     effects
         .iter()
         .rev()
@@ -2022,9 +2038,9 @@ fn view_timer(effects: &[Capability<MinPk, Digest>], view: View) -> ViewTimer {
 
 /// Returns the timeout signing choice `effects` released for `view`, if any.
 fn timeout_job(
-    effects: &[Capability<MinPk, Digest>],
+    effects: &[Capability<Bls<MinPk>, Digest>],
     view: View,
-) -> Option<DurableJob<MinPk, Digest>> {
+) -> Option<DurableJob<Bls<MinPk>, Digest>> {
     effects.iter().find_map(|effect| {
         durable_job(effect)
             .filter(|job| {
@@ -2041,11 +2057,11 @@ fn timeout_job(
 /// Completes the timeout signing choice `job` for `view` with `signer`'s no-vote and nullify.
 fn sign_timeout(
     machine: &mut TestMachine,
-    job: &DurableJob<MinPk, Digest>,
+    job: &DurableJob<Bls<MinPk>, Digest>,
     view: View,
     signer: u32,
-    journal: &mut Vec<DomainEvent<MinPk, Digest>>,
-) -> Vec<Capability<MinPk, Digest>> {
+    journal: &mut Vec<DomainEvent<Bls<MinPk>, Digest>>,
+) -> Vec<Capability<Bls<MinPk>, Digest>> {
     let artifacts = vec![
         Arc::new(Artifact::NoVote(no_vote(machine, view, signer))),
         Arc::new(Artifact::Nullify(nullify(machine, view, signer))),
@@ -2063,8 +2079,8 @@ fn sign_timeout(
 fn exit_view(
     machine: &mut TestMachine,
     view: View,
-    journal: &mut Vec<DomainEvent<MinPk, Digest>>,
-) -> Vec<Capability<MinPk, Digest>> {
+    journal: &mut Vec<DomainEvent<Bls<MinPk>, Digest>>,
+) -> Vec<Capability<Bls<MinPk>, Digest>> {
     let nullification = symbolic_nullification(machine, view, 0);
     let verification = observe(machine, Artifact::Nullification(nullification));
     let verified = machine.verify(&verification, true, Until::CursorAdvance);
@@ -2213,7 +2229,7 @@ fn validator_publishing_every_timeout_restores_under_a_smaller_retention() {
 
     // A retention of 8 keeps more own messages outstanding than a retention of 2 would hold.
     assert_eq!(machine.retired_view(), View::new(4));
-    let lowered_steady_state = Machine::<Sha256, MinPk>::new(lowered.clone())
+    let lowered_steady_state = Machine::<Sha256, Bls<MinPk>>::new(lowered.clone())
         .obligation_family_bounds()
         .own_messages;
     assert!(own_message_discharges(&machine) > lowered_steady_state);
@@ -2297,7 +2313,7 @@ fn replay_bounds_a_view_advance_floor_between_the_retired_and_exited_views() {
         (View::new(4), false),
     ] {
         let mut restored =
-            Machine::<Sha256, MinPk>::restore(profile.clone(), base.clone()).unwrap();
+            Machine::<Sha256, Bls<MinPk>>::restore(profile.clone(), base.clone()).unwrap();
         for event in &journal[..position] {
             restored.replay(event.clone()).unwrap();
         }
@@ -2338,13 +2354,13 @@ fn snapshot_requires_contiguous_completed_view_exits() {
     valid.exits.insert(View::new(1), proof);
     let snapshot =
         |state| Snapshot::new(machine.profile().protocol().epoch(), Role::Observer, state);
-    Machine::<Sha256, MinPk>::restore(profile.clone(), snapshot(valid.clone())).unwrap();
+    Machine::<Sha256, Bls<MinPk>>::restore(profile.clone(), snapshot(valid.clone())).unwrap();
 
     let mut zero = valid.clone();
     zero.view = View::zero();
     zero.exits.clear();
     assert_eq!(
-        snapshot_reason(Machine::<Sha256, MinPk>::restore(
+        snapshot_reason(Machine::<Sha256, Bls<MinPk>>::restore(
             profile.clone(),
             snapshot(zero)
         )),
@@ -2354,7 +2370,7 @@ fn snapshot_requires_contiguous_completed_view_exits() {
     let mut missing = valid.clone();
     missing.view = View::new(3);
     assert_eq!(
-        snapshot_reason(Machine::<Sha256, MinPk>::restore(
+        snapshot_reason(Machine::<Sha256, Bls<MinPk>>::restore(
             profile.clone(),
             snapshot(missing)
         )),
@@ -2364,7 +2380,7 @@ fn snapshot_requires_contiguous_completed_view_exits() {
     let mut sparse = valid.clone();
     sparse.exits.clear();
     assert_eq!(
-        snapshot_reason(Machine::<Sha256, MinPk>::restore(
+        snapshot_reason(Machine::<Sha256, Bls<MinPk>>::restore(
             profile.clone(),
             snapshot(sparse)
         )),
@@ -2381,7 +2397,10 @@ fn snapshot_requires_contiguous_completed_view_exits() {
         .insert(View::new(2), Arc::clone(&future_proof));
     valid.exits.insert(View::new(2), future_proof);
     assert_eq!(
-        snapshot_reason(Machine::<Sha256, MinPk>::restore(profile, snapshot(valid))),
+        snapshot_reason(Machine::<Sha256, Bls<MinPk>>::restore(
+            profile,
+            snapshot(valid)
+        )),
         SnapshotReason::View
     );
 }

@@ -5,7 +5,7 @@ use crate::{
     Epochable as _,
     multimmit::{
         config::Role,
-        mocks::{Committee, cluster::start_network},
+        mocks::{Bls, Committee, cluster::start_network},
         types::{ChainId, PathLimits, TransactionBlockHeader},
         wire::{CertificateMessage, DataMessage, Envelope},
     },
@@ -34,9 +34,11 @@ async fn exit_view(
 ) {
     certificates.send(
         Recipients::One(node.me.clone()),
-        node.envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
-            node.committee.nullification(View::new(view)),
-        ))
+        node.envelope(
+            CertificateMessage::<Bls<MinPk>, Sha256Digest>::Nullification(
+                node.committee.nullification(View::new(view)),
+            ),
+        )
         .encode(),
         true,
     );
@@ -60,7 +62,7 @@ async fn certificates_received(
         select! {
             result = receiver.recv() => {
                 let (sender, bytes) = result.expect("network stays up");
-                let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+                let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                     bytes,
                     &node.envelope_cfg(node.committee.codec()),
                 )
@@ -84,7 +86,7 @@ fn view_entry_forwards_an_unplaced_certificate_to_the_next_leader_on_the_wire() 
         let chain = ChainId::new(1);
         let mut limits = vec![PathLimits::new(2, 1); 6];
         limits[chain.get() as usize] = PathLimits::new(0, 0);
-        let committee = Committee::<MinPk>::builder(96, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(96, 6)
             .chain_limits(limits)
             .build();
         let oracle = start_network(&context, committee.identities.clone(), 1024 * 1024).await;
@@ -111,7 +113,7 @@ fn view_entry_forwards_an_unplaced_certificate_to_the_next_leader_on_the_wire() 
         .unwrap();
         data.send(
             Recipients::One(node.me.clone()),
-            node.envelope(DataMessage::<MinPk, Sha256Digest>::DaCertificate(
+            node.envelope(DataMessage::<Bls<MinPk>, Sha256Digest>::DaCertificate(
                 da_certificate(&node.committee, &header),
             ))
             .encode(),

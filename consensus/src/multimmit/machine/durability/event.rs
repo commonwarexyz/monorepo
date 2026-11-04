@@ -4,24 +4,25 @@ use super::{BatchId, Cursor, DurableEffect, DurableJob, EffectId, SnapshotReason
 use crate::{
     multimmit::{
         machine::job::Generation,
+        scheme::Scheme,
         types::{Artifact, ArtifactBatch, ArtifactId},
     },
     types::{Epoch, View},
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use core::fmt;
 use std::sync::Arc;
 
 /// One versioned state transition written to the safety journal.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DomainEvent<V: Variant, D: Digest> {
+pub(crate) struct DomainEvent<S: Scheme, D: Digest> {
     pub(super) epoch: Epoch,
     pub(super) cursor: Cursor,
-    pub(super) change: Change<V, D>,
+    pub(super) change: Change<S, D>,
 }
 
-impl<V: Variant, D: Digest> DomainEvent<V, D> {
-    pub(crate) const fn new(epoch: Epoch, cursor: Cursor, change: Change<V, D>) -> Self {
+impl<S: Scheme, D: Digest> DomainEvent<S, D> {
+    pub(crate) const fn new(epoch: Epoch, cursor: Cursor, change: Change<S, D>) -> Self {
         Self {
             epoch,
             cursor,
@@ -40,14 +41,14 @@ impl<V: Variant, D: Digest> DomainEvent<V, D> {
     }
 
     /// Returns the typed durable state change.
-    pub(crate) const fn change(&self) -> &Change<V, D> {
+    pub(crate) const fn change(&self) -> &Change<S, D> {
         &self.change
     }
 }
 
 /// A durable machine state change.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Change<V: Variant, D: Digest> {
+pub(crate) enum Change<S: Scheme, D: Digest> {
     /// Starts a new process generation after startup or recovery.
     GenerationAdvanced(Generation),
     /// Adds one stable external action to the durable outbox.
@@ -55,7 +56,7 @@ pub(crate) enum Change<V: Variant, D: Digest> {
         /// Stable action identifier.
         id: EffectId,
         /// Immutable action.
-        effect: Box<DurableEffect<V, D>>,
+        effect: Box<DurableEffect<S, D>>,
     },
     /// Atomically retains locally signed artifacts and replaces their signing job with
     /// publication.
@@ -66,7 +67,7 @@ pub(crate) enum Change<V: Variant, D: Digest> {
         publication: EffectId,
         /// Locally signed artifacts, in request order, retained across publication
         /// attempts.
-        artifacts: ArtifactBatch<V, D>,
+        artifacts: ArtifactBatch<S, D>,
     },
     /// Advances one chain's durable DA floor and atomically retires its obsolete live work.
     DaCertificateAdvanced {
@@ -75,7 +76,7 @@ pub(crate) enum Change<V: Variant, D: Digest> {
         /// Publications made obsolete by this certificate.
         retired_publications: Vec<EffectId>,
         /// Highest accepted certificate for the chain.
-        artifact: Arc<Artifact<V, D>>,
+        artifact: Arc<Artifact<S, D>>,
     },
     /// Retains one locally assembled view certificate without queuing a publication.
     ///
@@ -83,7 +84,7 @@ pub(crate) enum Change<V: Variant, D: Digest> {
     /// local finality evidence that lagging peers fetch through resolution.
     ViewCertificateCreated {
         /// Locally assembled V-QC, nullification, or L-QC.
-        artifact: Arc<Artifact<V, D>>,
+        artifact: Arc<Artifact<S, D>>,
     },
     /// Durably marks and broadcasts the selected first certificate for one view.
     ArtifactForwarded {
@@ -92,7 +93,7 @@ pub(crate) enum Change<V: Variant, D: Digest> {
         /// Older exit push obligations discharged by this durable successor.
         retired_publications: Vec<EffectId>,
         /// Authenticated certificate selected by observation order.
-        artifact: Arc<Artifact<V, D>>,
+        artifact: Arc<Artifact<S, D>>,
     },
     /// Advances exactly one view using an authenticated current-view exit proof.
     ViewAdvanced {
@@ -109,7 +110,7 @@ pub(crate) enum Change<V: Variant, D: Digest> {
     /// Raises the signing view through an independently authenticated finalization.
     FinalityFloorAdvanced {
         /// L-QC proving finality at the skipped-through view.
-        proof: Arc<Artifact<V, D>>,
+        proof: Arc<Artifact<S, D>>,
         /// Obsolete consensus signing requests retired by the floor.
         retired_signing: Vec<EffectId>,
         /// Own-message obligations ended by the new retention floor.
@@ -117,7 +118,7 @@ pub(crate) enum Change<V: Variant, D: Digest> {
     },
 }
 
-impl<V: Variant, D: Digest> Change<V, D> {
+impl<S: Scheme, D: Digest> Change<S, D> {
     /// Returns the outbox effect this change queues, if any.
     pub(crate) const fn queued_effect(&self) -> Option<EffectId> {
         match self {
@@ -193,15 +194,15 @@ impl fmt::Display for ChangeKind {
 
 /// Append-and-sync work for one safety-journal barrier.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PersistJob<V: Variant, D: Digest> {
+pub(crate) struct PersistJob<S: Scheme, D: Digest> {
     id: BatchId,
     generation: Generation,
     previous: Cursor,
-    events: Arc<Vec<DomainEvent<V, D>>>,
+    events: Arc<Vec<DomainEvent<S, D>>>,
     urgent: bool,
 }
 
-impl<V: Variant, D: Digest> PersistJob<V, D> {
+impl<S: Scheme, D: Digest> PersistJob<S, D> {
     /// Returns whether an external release is gated on this barrier's durability.
     ///
     /// The machine marks a barrier urgent when one of its events records a fresh local
@@ -216,7 +217,7 @@ impl<V: Variant, D: Digest> PersistJob<V, D> {
         id: BatchId,
         generation: Generation,
         previous: Cursor,
-        events: Vec<DomainEvent<V, D>>,
+        events: Vec<DomainEvent<S, D>>,
         urgent: bool,
     ) -> Self {
         Self {
@@ -244,17 +245,17 @@ impl<V: Variant, D: Digest> PersistJob<V, D> {
     }
 
     /// Extends this batch by one contiguous event.
-    pub(crate) fn push_event(&mut self, event: DomainEvent<V, D>, urgent: bool) {
+    pub(crate) fn push_event(&mut self, event: DomainEvent<S, D>, urgent: bool) {
         Arc::make_mut(&mut self.events).push(event);
         self.urgent |= urgent;
     }
 
-    pub(crate) fn shared_events(&self) -> Arc<Vec<DomainEvent<V, D>>> {
+    pub(crate) fn shared_events(&self) -> Arc<Vec<DomainEvent<S, D>>> {
         Arc::clone(&self.events)
     }
 
     /// Returns the ordered journal entries.
-    pub(crate) fn events(&self) -> &[DomainEvent<V, D>] {
+    pub(crate) fn events(&self) -> &[DomainEvent<S, D>] {
         self.events.as_slice()
     }
 
@@ -278,13 +279,13 @@ impl<V: Variant, D: Digest> PersistJob<V, D> {
 /// 1. installs `staged_retention` in resolver custody, then
 /// 2. releases `release_after_enqueue`, publications that peers can verify on their own.
 #[derive(Clone, Debug)]
-pub(crate) struct PersistDirective<V: Variant, D: Digest> {
+pub(crate) struct PersistDirective<S: Scheme, D: Digest> {
     /// The events to append and sync.
-    pub(crate) job: PersistJob<V, D>,
+    pub(crate) job: PersistJob<S, D>,
     /// Artifacts to install in resolver custody once the journal accepts the barrier.
-    pub(crate) staged_retention: Vec<Arc<Artifact<V, D>>>,
+    pub(crate) staged_retention: Vec<Arc<Artifact<S, D>>>,
     /// Publications released once the journal accepts the barrier.
-    pub(crate) release_after_enqueue: Vec<DurableJob<V, D>>,
+    pub(crate) release_after_enqueue: Vec<DurableJob<S, D>>,
 }
 
 /// Acknowledgement of one persistence barrier and covered journal prefix.

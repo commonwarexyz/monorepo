@@ -5,17 +5,16 @@ use commonware_consensus::{
     multimmit::{
         Artifact, FinalityFact, FinalityId, Inspection,
         mocks::{
-            RecordingReporter,
+            Fixture, RecordingReporter,
             cluster::{Cluster, ClusterOptions, Launch, LaunchSpec},
         },
+        scheme::{DaFaults as _, Scheme},
         test_utils::{ResourceLimits, inspection_cursor, inspection_generation, resource_limits},
-        types::{Activity, BlockRef, ChainId, PathLimits},
+        types::{Activity, BlockRef, ChainId, CodecConfig, DaQuorum, PathLimits},
     },
     types::{Attributable as _, Epoch, ViewDelta},
 };
-use commonware_cryptography::{
-    Sha256, bls12381::primitives::variant::Variant, sha256::Digest as Sha256Digest,
-};
+use commonware_cryptography::{Sha256, sha256::Digest as Sha256Digest};
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{Clock as _, Runner as _, deterministic};
 use commonware_utils::{FuzzRng, probability};
@@ -35,8 +34,8 @@ const RELOAD_DELAY: Duration = Duration::from_millis(20);
 const FINAL_TICKS: usize = 400;
 const RUNNER_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Runs one bounded production-engine campaign for a BLS12-381 signature variant.
-pub fn fuzz<V: Variant>(input: &[u8]) {
+/// Runs one bounded production-engine campaign for a signing suite.
+pub fn fuzz<S: Fixture>(input: &[u8]) {
     let input = bounded_input(input);
     let seed = seed(input);
     let input = input.to_vec();
@@ -47,7 +46,7 @@ pub fn fuzz<V: Variant>(input: &[u8]) {
     );
 
     runner.start(|context| async move {
-        let mut harness = Harness::<V>::new(context, seed).await;
+        let mut harness = Harness::<S>::new(context, seed).await;
         harness.start_all().await;
 
         let actions = input.as_slice();
@@ -146,17 +145,17 @@ fn signer_tally_is_valid(
     unique.len() >= threshold
 }
 
-struct Harness<V: Variant> {
+struct Harness<S: Fixture> {
     context: deterministic::Context,
-    cluster: Cluster<V>,
-    reporters: Vec<RecordingReporter<V, Sha256Digest>>,
+    cluster: Cluster<S>,
+    reporters: Vec<RecordingReporter<S, Sha256Digest>>,
     running: [bool; NODES],
     state: Invariants,
     resources: ResourceLimits,
     network: [NetworkState; NODES],
 }
 
-impl<V: Variant> Harness<V> {
+impl<S: Fixture> Harness<S> {
     async fn new(context: deterministic::Context, seed: u64) -> Self {
         let mut cluster = Cluster::new(
             &context,
@@ -176,9 +175,9 @@ impl<V: Variant> Harness<V> {
             );
         }
         let committee = cluster.fixture();
-        let resources = resource_limits::<Sha256, V>(committee.config.clone(), cluster.tuning())
+        let resources = resource_limits::<Sha256, S>(committee.config.clone(), cluster.tuning())
             .expect("fuzz tuning is valid");
-        let state = Invariants::new(committee.config.epoch(), committee.codec());
+        let state = Invariants::new::<S>(committee.config.epoch(), committee.codec());
 
         Self {
             context,
@@ -364,7 +363,7 @@ impl<V: Variant> Harness<V> {
                     continue;
                 };
                 self.state
-                    .observe_threshold_share(artifact_id.get(), artifact);
+                    .observe_threshold_share(artifact_id.get(), artifact.as_ref());
             }
         }
 
@@ -490,9 +489,12 @@ struct Invariants {
 }
 
 impl Invariants {
-    fn new(epoch: Epoch, codec: commonware_consensus::multimmit::types::CodecConfig) -> Self {
+    fn new<S: Scheme>(epoch: Epoch, codec: CodecConfig) -> Self {
         let faults = (NODES - 1) / 5;
-        let da_quorum = NODES - 2 * faults;
+        let da_quorum = match S::DaFaults::QUORUM {
+            DaQuorum::Available => NODES - 2 * faults,
+            DaQuorum::Binding => NODES - faults,
+        };
         let nullification_quorum = 2 * faults + 1;
         let view_quorum = NODES - faults;
         let designation_quorum = 2 * faults + 1;
@@ -529,10 +531,10 @@ impl Invariants {
         }
     }
 
-    fn observe_threshold_share<V: Variant>(
+    fn observe_threshold_share<S: Scheme>(
         &mut self,
         artifact_id: Sha256Digest,
-        artifact: &Artifact<V, Sha256Digest>,
+        artifact: &Artifact<S, Sha256Digest>,
     ) {
         let (tally, signer) = match artifact {
             Artifact::DaVote(vote) => (
@@ -561,10 +563,10 @@ impl Invariants {
         }
     }
 
-    fn observe_activities<V: Variant>(
+    fn observe_activities<S: Scheme>(
         &mut self,
         node: usize,
-        activities: Vec<Activity<V, Sha256Digest>>,
+        activities: Vec<Activity<S, Sha256Digest>>,
         resources: ResourceLimits,
     ) {
         for activity in activities {
@@ -582,7 +584,7 @@ impl Invariants {
         }
     }
 
-    fn observe_thresholds<V: Variant>(&self, artifact: &Artifact<V, Sha256Digest>) {
+    fn observe_thresholds<S: Scheme>(&self, artifact: &Artifact<S, Sha256Digest>) {
         match artifact {
             Artifact::Vqc(certificate) => {
                 let designated = certificate.tally().signers().count();
@@ -624,11 +626,11 @@ impl Invariants {
         }
     }
 
-    fn observe_signing<V: Variant>(
+    fn observe_signing<S: Scheme>(
         &mut self,
         node: usize,
         artifact_id: Sha256Digest,
-        artifact: &Artifact<V, Sha256Digest>,
+        artifact: &Artifact<S, Sha256Digest>,
     ) {
         let Some(signer) = artifact.signer() else {
             return;
@@ -808,6 +810,7 @@ impl Invariants {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_consensus::multimmit::mocks::{Bls, Ed25519};
     use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
 
     #[test]
@@ -815,9 +818,14 @@ mod tests {
         // Each input reloads or interrupts the recovery of a producer before every node
         // restarts, so the producer may lose certificates of its own blocks that finality
         // already ordered.
-        fuzz::<MinSig>(&[74]);
-        fuzz::<MinPk>(&[35]);
-        fuzz::<MinPk>(&[69, 5, 91]);
+        fuzz::<Bls<MinSig>>(&[110]);
+        fuzz::<Bls<MinPk>>(&[35]);
+        fuzz::<Bls<MinPk>>(&[69, 5, 91]);
+    }
+
+    #[test]
+    fn ed25519_suite_campaign_stops() {
+        fuzz::<Ed25519>(&[0, 7, 14, 21, 28, 35, 2, 9, 16, 23, 30, 5]);
     }
 
     #[test]
@@ -829,7 +837,7 @@ mod tests {
                 .with_timeout(Some(RUNNER_TIMEOUT)),
         )
         .start(|context| async move {
-            let mut harness = Harness::<MinPk>::new(context, SEED).await;
+            let mut harness = Harness::<Bls<MinPk>>::new(context, SEED).await;
             harness.cluster.app(0).pause_building();
             harness.start(0, false).await;
             for _ in 0..2 {
@@ -864,14 +872,14 @@ mod tests {
     fn partitioned_quiet_node_stops() {
         // Node one is cut off after voting in view one, leaving a reconstructible barrier that no
         // later input demands durability for when the checkpoint reopens every node.
-        fuzz::<MinPk>(&[7]);
+        fuzz::<Bls<MinPk>>(&[7]);
     }
 
     #[test]
     fn every_action_kind_campaign_stops() {
         // Every action kind on distinct nodes on both sides of the reopen checkpoint; this
         // campaign hung in stop before the harness demanded durability.
-        fuzz::<MinPk>(&[0, 7, 14, 21, 28, 35, 2, 9, 16, 23, 30, 5]);
+        fuzz::<Bls<MinPk>>(&[0, 7, 14, 21, 28, 35, 2, 9, 16, 23, 30, 5]);
     }
 
     #[test]

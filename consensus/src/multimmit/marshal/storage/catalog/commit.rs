@@ -9,9 +9,10 @@ use crate::multimmit::{
         commit::Commit,
         floors::FloorRecord,
     },
+    scheme::Scheme,
     types::Body,
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::Handle;
 use commonware_storage::{Context, translator::Translator};
 
@@ -29,16 +30,16 @@ struct CommitPlan<D: Digest> {
     state: CatalogState<D>,
 }
 
-impl<T, E, H, V, B> CatalogStore<T, E, H, V, B>
+impl<T, E, H, S, B> CatalogStore<T, E, H, S, B>
 where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Computes where `batch` writes and the record it publishes, without changing storage.
-    fn plan_commit(&self, batch: &Commit<H, V>) -> Result<CommitPlan<H::Digest>, Error> {
+    fn plan_commit(&self, batch: &Commit<H, S>) -> Result<CommitPlan<H::Digest>, Error> {
         let mut lqc_indices = Vec::with_capacity(batch.selected.len());
         let mut allocated = self.allocated_lqc_index;
         for selected in &batch.selected {
@@ -85,7 +86,7 @@ where
     /// Buffers one validated ordinary commit without starting durability or cleanup.
     pub(crate) async fn buffer_commit(
         &mut self,
-        batch: Commit<H, V>,
+        batch: Commit<H, S>,
     ) -> Result<CommitPublication<H::Digest>, Error> {
         let plan = self.plan_commit(&batch)?;
         let Commit {

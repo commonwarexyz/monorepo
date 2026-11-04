@@ -32,7 +32,7 @@ use crate::{
     multimmit::{
         actors::util::{WorkerPanicked, offload},
         machine::{ChainCommand, Generation},
-        scheme::bls12381_threshold::{DaRecoveryError, Scheme},
+        scheme::{DaRecoveryError, Generic, Scheme},
         types::{BlockRef, ChainId, DaCertificate, DaVote, TransactionBlockHeader},
     },
     types::{Attributable as _, Height, Participant},
@@ -41,7 +41,7 @@ use commonware_actor::{
     Feedback,
     mailbox::{self, Overflow, Policy},
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -52,6 +52,8 @@ use commonware_utils::{
     futures::Pool,
     sync::{AsyncMutex, Mutex, Notify},
 };
+use rand::{SeedableRng as _, rngs::StdRng};
+use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroUsize,
@@ -65,9 +67,9 @@ use tracing::Span;
 ///
 /// The machine orders and structurally checks every share before it crosses this boundary. Shares
 /// are not authenticated one by one; recovery authenticates the quorum it assembles.
-enum DaCommand<V: Variant, D: Digest> {
+enum DaCommand<S: Scheme, D: Digest> {
     /// A command the machine issued for the chain.
-    Chain(ChainCommand<V, D>),
+    Chain(ChainCommand<S, D>),
     /// A new process generation began; drop volatile pools and stamp later results with it.
     Reconfigure(Reconfiguration),
     /// A share at or below the latest certified height sent, which the task drops on arrival.
@@ -84,8 +86,8 @@ struct Reconfiguration {
     certified: Height,
 }
 
-impl<V: Variant, D: Digest> Policy for DaCommand<V, D> {
-    type Overflow = DaOverflow<V, D>;
+impl<S: Scheme, D: Digest> Policy for DaCommand<S, D> {
+    type Overflow = DaOverflow<S, D>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         overflow.push(message);
@@ -114,15 +116,15 @@ impl<V: Variant, D: Digest> Policy for DaCommand<V, D> {
 /// it settles. The machine forwards a share of the chain once while it retains it and retains it
 /// until the certified anchor passes it, so the retained shares are shares the machine still holds,
 /// which its artifact cache bounds however long the task stalls.
-pub(crate) struct DaOverflow<V: Variant, D: Digest> {
+pub(crate) struct DaOverflow<S: Scheme, D: Digest> {
     reconfiguration: Option<Reconfiguration>,
     /// The highest queued certified height.
     anchor: Option<Height>,
     /// Shares above every queued height, in arrival order.
-    shares: VecDeque<Arc<DaVote<V, D>>>,
+    shares: VecDeque<Arc<DaVote<S, D>>>,
 }
 
-impl<V: Variant, D: Digest> Default for DaOverflow<V, D> {
+impl<S: Scheme, D: Digest> Default for DaOverflow<S, D> {
     fn default() -> Self {
         Self {
             reconfiguration: None,
@@ -132,9 +134,9 @@ impl<V: Variant, D: Digest> Default for DaOverflow<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> DaOverflow<V, D> {
+impl<S: Scheme, D: Digest> DaOverflow<S, D> {
     /// Retains `command` unless the task would ignore it, dropping what it supersedes.
-    fn push(&mut self, command: DaCommand<V, D>) {
+    fn push(&mut self, command: DaCommand<S, D>) {
         match command {
             DaCommand::Reconfigure(reconfiguration) => {
                 *self = Self::default();
@@ -170,7 +172,7 @@ impl<V: Variant, D: Digest> DaOverflow<V, D> {
     }
 
     /// Removes the next command in delivery order.
-    fn pop(&mut self) -> Option<DaCommand<V, D>> {
+    fn pop(&mut self) -> Option<DaCommand<S, D>> {
         if let Some(reconfiguration) = self.reconfiguration.take() {
             return Some(DaCommand::Reconfigure(reconfiguration));
         }
@@ -183,7 +185,7 @@ impl<V: Variant, D: Digest> DaOverflow<V, D> {
     }
 
     /// Returns a command the queue could not take to the front of the delivery order.
-    fn unpop(&mut self, command: DaCommand<V, D>) {
+    fn unpop(&mut self, command: DaCommand<S, D>) {
         match command {
             DaCommand::Reconfigure(reconfiguration) => {
                 self.reconfiguration = Some(reconfiguration);
@@ -196,14 +198,14 @@ impl<V: Variant, D: Digest> DaOverflow<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Overflow<DaCommand<V, D>> for DaOverflow<V, D> {
+impl<S: Scheme, D: Digest> Overflow<DaCommand<S, D>> for DaOverflow<S, D> {
     fn is_empty(&self) -> bool {
         self.reconfiguration.is_none() && self.anchor.is_none() && self.shares.is_empty()
     }
 
     fn drain<F>(&mut self, mut push: F)
     where
-        F: FnMut(DaCommand<V, D>) -> Option<DaCommand<V, D>>,
+        F: FnMut(DaCommand<S, D>) -> Option<DaCommand<S, D>>,
     {
         while let Some(command) = self.pop() {
             if let Some(command) = push(command) {
@@ -219,19 +221,19 @@ impl<V: Variant, D: Digest> Overflow<DaCommand<V, D>> for DaOverflow<V, D> {
 /// It carries the task's process generation when the recovery finished, and the voter drops a
 /// result from a superseded generation. A recovery still running across a reconfiguration finishes
 /// under the new generation, and the machine rechecks it on admission.
-pub(crate) struct DaUpdate<V: Variant, D: Digest> {
+pub(crate) struct DaUpdate<S: Scheme, D: Digest> {
     /// The process generation the task ran under.
     pub(crate) generation: Generation,
     /// The certified block.
     pub(crate) block: BlockRef<D>,
     /// The recovered certificate.
-    pub(crate) certificate: DaCertificate<V, D>,
+    pub(crate) certificate: DaCertificate<S, D>,
 }
 
 /// Configuration for the DA recovery task.
-pub(crate) struct Config<P: PublicKey, V: Variant, D: Digest, T: Strategy> {
+pub(crate) struct Config<S: Scheme, D: Digest, T: Strategy> {
     /// Verifies and assembles shares.
-    pub(crate) scheme: Arc<Scheme<P, V>>,
+    pub(crate) scheme: Arc<Generic<S>>,
     /// Runs recovery cryptography.
     pub(crate) strategy: T,
     /// The chain whose certificates the task recovers.
@@ -251,7 +253,7 @@ pub(crate) struct Config<P: PublicKey, V: Variant, D: Digest, T: Strategy> {
     /// at most its size of assemblies on the strategy at once rather than a window per chain.
     pub(crate) permits: Option<RecoveryPermits>,
     /// Receives assembled certificates.
-    pub(crate) updates: mailbox::Sender<ChainUpdate<V, D>>,
+    pub(crate) updates: mailbox::Sender<ChainUpdate<S, D>>,
     /// Observes recovery latency.
     pub(crate) latency: Histogram,
     /// Counts recoveries that failed and re-armed.
@@ -330,13 +332,13 @@ impl Drop for RecoveryPermit {
 }
 
 /// Commands to the DA recovery task.
-pub(crate) struct Mailbox<V: Variant, D: Digest> {
+pub(crate) struct Mailbox<S: Scheme, D: Digest> {
     chain: ChainId,
-    commands: mailbox::Sender<DaCommand<V, D>>,
+    commands: mailbox::Sender<DaCommand<S, D>>,
     sent: SentHeight,
 }
 
-impl<V: Variant, D: Digest> Mailbox<V, D> {
+impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Returns the chain whose certificates the task recovers.
     pub(crate) const fn chain(&self) -> ChainId {
         self.chain
@@ -350,7 +352,7 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
 
     /// Delivers one command the machine issued for the chain; a share the task would drop on
     /// arrival goes as [`DaCommand::Settled`].
-    pub(crate) fn command(&mut self, command: ChainCommand<V, D>) -> Feedback {
+    pub(crate) fn command(&mut self, command: ChainCommand<S, D>) -> Feedback {
         self.send(DaCommand::Chain(command))
     }
 
@@ -362,7 +364,7 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
         }))
     }
 
-    fn send(&mut self, command: DaCommand<V, D>) -> Feedback {
+    fn send(&mut self, command: DaCommand<S, D>) -> Feedback {
         self.commands.enqueue(self.sent.mark(command))
     }
 }
@@ -378,7 +380,7 @@ struct SentHeight(Height);
 impl SentHeight {
     /// Returns `command`, or [`DaCommand::Settled`] for a share the task would drop on arrival,
     /// recording the height the command sets.
-    fn mark<V: Variant, D: Digest>(&mut self, command: DaCommand<V, D>) -> DaCommand<V, D> {
+    fn mark<S: Scheme, D: Digest>(&mut self, command: DaCommand<S, D>) -> DaCommand<S, D> {
         match &command {
             DaCommand::Chain(ChainCommand::Observe(share)) if share.header().height() <= self.0 => {
                 return DaCommand::Settled;
@@ -396,9 +398,9 @@ impl SentHeight {
 }
 
 /// One producer header's accumulated shares, keyed in the task by the header digest.
-struct VotePool<V: Variant, D: Digest> {
+struct VotePool<S: Scheme, D: Digest> {
     header: TransactionBlockHeader<D>,
-    shares: BTreeMap<Participant, Arc<DaVote<V, D>>>,
+    shares: BTreeMap<Participant, Arc<DaVote<S, D>>>,
     /// Signers a failed recovery attributed an invalid share for this header to.
     ///
     /// Shares enter on structural checks alone, so recovery is where an invalid one is discovered.
@@ -408,17 +410,17 @@ struct VotePool<V: Variant, D: Digest> {
 }
 
 /// One completed recovery dispatch, correlated to its header digest.
-struct Recovery<V: Variant, D: Digest> {
+struct Recovery<S: Scheme, D: Digest> {
     header: D,
     block: BlockRef<D>,
     started_at: SystemTime,
-    outcome: RecoveryOutcome<V, D>,
+    outcome: RecoveryOutcome<S, D>,
 }
 
 /// The outcome of one recovery dispatch.
-enum RecoveryOutcome<V: Variant, D: Digest> {
+enum RecoveryOutcome<S: Scheme, D: Digest> {
     /// The quorum assembled into a certificate.
-    Certificate(DaCertificate<V, D>),
+    Certificate(DaCertificate<S, D>),
     /// The group check failed and attributed these signers' shares.
     Invalid(Vec<Participant>),
     /// The recovery could not attribute a culprit; the block re-arms and retries.
@@ -426,9 +428,9 @@ enum RecoveryOutcome<V: Variant, D: Digest> {
 }
 
 /// The task's volatile recovery state for the current process generation.
-struct RecoveryState<V: Variant, D: Digest> {
+struct RecoveryState<S: Scheme, D: Digest> {
     /// Header digest -> accumulated shares.
-    pools: BTreeMap<D, VotePool<V, D>>,
+    pools: BTreeMap<D, VotePool<S, D>>,
     /// Header digests whose pool reached quorum and awaits a recovery slot.
     ready: BTreeSet<D>,
     /// Header digests with a recovery in flight or already returned to the voter.
@@ -443,7 +445,7 @@ struct RecoveryState<V: Variant, D: Digest> {
     generation: Generation,
 }
 
-impl<V: Variant, D: Digest> RecoveryState<V, D> {
+impl<S: Scheme, D: Digest> RecoveryState<S, D> {
     /// Returns empty state for process generation `generation` above `certified`.
     const fn new(generation: Generation, certified: Height) -> Self {
         Self {
@@ -461,7 +463,7 @@ impl<V: Variant, D: Digest> RecoveryState<V, D> {
     fn pool<H: Hasher<Digest = D>>(
         &mut self,
         chain: ChainId,
-        share: &Arc<DaVote<V, D>>,
+        share: &Arc<DaVote<S, D>>,
     ) -> Option<D> {
         let header = share.header();
         if header.chain() != chain || header.height() <= self.certified_through {
@@ -508,32 +510,30 @@ impl<V: Variant, D: Digest> RecoveryState<V, D> {
 }
 
 /// The DA recovery task before it starts.
-pub(crate) struct Actor<E, H, P, V, T>
+pub(crate) struct Actor<E, H, S, T>
 where
-    E: Clock + Spawner + Metrics,
+    E: Clock + CryptoRng + Spawner + Metrics,
     H: Hasher,
-    P: PublicKey,
-    V: Variant,
+    S: Scheme,
     T: Strategy,
 {
     context: E,
-    config: Config<P, V, H::Digest, T>,
-    commands: mailbox::Receiver<DaCommand<V, H::Digest>>,
+    config: Config<S, H::Digest, T>,
+    commands: mailbox::Receiver<DaCommand<S, H::Digest>>,
 }
 
-impl<E, H, P, V, T> Actor<E, H, P, V, T>
+impl<E, H, S, T> Actor<E, H, S, T>
 where
-    E: Clock + Spawner + Metrics,
+    E: Clock + CryptoRng + Spawner + Metrics,
     H: Hasher,
-    P: PublicKey,
-    V: Variant,
+    S: Scheme,
     T: Strategy,
 {
     /// Creates the task and its command mailbox.
     pub(crate) fn new(
         context: E,
-        config: Config<P, V, H::Digest, T>,
-    ) -> (Self, Mailbox<V, H::Digest>) {
+        config: Config<S, H::Digest, T>,
+    ) -> (Self, Mailbox<S, H::Digest>) {
         let (commands, receiver) = mailbox::new(context.child("commands"), config.mailbox_size);
         let chain = config.chain;
         (
@@ -561,7 +561,7 @@ where
             commands,
         } = self;
         // The task runs under a `task` child so it and its command queue keep distinct labels.
-        let mut running = Running::<_, H, _, _, _> {
+        let mut running = Running::<_, H, _, _> {
             context: ContextCell::new(context.child("task")),
             config,
             commands,
@@ -572,32 +572,30 @@ where
 }
 
 /// The running DA recovery task.
-struct Running<E, H, P, V, T>
+struct Running<E, H, S, T>
 where
-    E: Clock + Spawner + Metrics,
+    E: Clock + CryptoRng + Spawner + Metrics,
     H: Hasher,
-    P: PublicKey,
-    V: Variant,
+    S: Scheme,
     T: Strategy,
 {
     context: ContextCell<E>,
-    config: Config<P, V, H::Digest, T>,
-    commands: mailbox::Receiver<DaCommand<V, H::Digest>>,
-    state: RecoveryState<V, H::Digest>,
+    config: Config<S, H::Digest, T>,
+    commands: mailbox::Receiver<DaCommand<S, H::Digest>>,
+    state: RecoveryState<S, H::Digest>,
 }
 
-impl<E, H, P, V, T> Running<E, H, P, V, T>
+impl<E, H, S, T> Running<E, H, S, T>
 where
-    E: Clock + Spawner + Metrics,
+    E: Clock + CryptoRng + Spawner + Metrics,
     H: Hasher,
-    P: PublicKey,
-    V: Variant,
+    S: Scheme,
     T: Strategy,
 {
     /// Drains commands and recovery completions until the voter drops the mailbox or the runtime
     /// stops.
     async fn run(mut self) {
-        let mut recoveries: Pool<'static, Recovery<V, H::Digest>> = Pool::default();
+        let mut recoveries: Pool<'static, Recovery<S, H::Digest>> = Pool::default();
         select_loop! {
             self.context,
             on_stopped => {},
@@ -615,8 +613,8 @@ where
 
     fn handle_command(
         &mut self,
-        recoveries: &mut Pool<'static, Recovery<V, H::Digest>>,
-        command: DaCommand<V, H::Digest>,
+        recoveries: &mut Pool<'static, Recovery<S, H::Digest>>,
+        command: DaCommand<S, H::Digest>,
     ) {
         match command {
             DaCommand::Chain(ChainCommand::Observe(share)) => self.observe(recoveries, &share),
@@ -638,8 +636,8 @@ where
 
     fn observe(
         &mut self,
-        recoveries: &mut Pool<'static, Recovery<V, H::Digest>>,
-        share: &Arc<DaVote<V, H::Digest>>,
+        recoveries: &mut Pool<'static, Recovery<S, H::Digest>>,
+        share: &Arc<DaVote<S, H::Digest>>,
     ) {
         let Some(digest) = self.state.pool::<H>(self.config.chain, share) else {
             return;
@@ -650,7 +648,7 @@ where
 
     fn advance_anchor(
         &mut self,
-        recoveries: &mut Pool<'static, Recovery<V, H::Digest>>,
+        recoveries: &mut Pool<'static, Recovery<S, H::Digest>>,
         height: Height,
     ) {
         if self.state.settle(height) {
@@ -674,7 +672,7 @@ where
     }
 
     /// Dispatches ready recoveries up to the in-flight slot bound.
-    fn drive(&mut self, recoveries: &mut Pool<'static, Recovery<V, H::Digest>>) {
+    fn drive(&mut self, recoveries: &mut Pool<'static, Recovery<S, H::Digest>>) {
         let state = &mut self.state;
         while recoveries.len() < self.config.recovery_slots {
             let Some(digest) = state.ready.iter().next().copied() else {
@@ -698,6 +696,7 @@ where
             let scheme = Arc::clone(&self.config.scheme);
             let strategy = self.config.strategy.clone();
             let permits = self.config.permits.clone();
+            let mut rng = StdRng::from_rng(self.context.as_mut());
             let started_at = self.context.current();
             recoveries.push(async move {
                 let permit = match &permits {
@@ -710,7 +709,7 @@ where
                 let weight = votes.len();
                 let (_, outcome) = offload(strategy, weight, Span::none(), move |strategy| {
                     let _permit = permit;
-                    scheme.assemble_da_certificate_optimistic(&votes, &strategy)
+                    scheme.assemble_da_certificate_optimistic(&mut rng, &votes, &strategy)
                 })
                 .await;
                 let outcome = match outcome {
@@ -733,7 +732,7 @@ where
     }
 
     /// Applies one recovery completion; breaks once the voter stopped receiving results.
-    fn recovered(&mut self, done: Recovery<V, H::Digest>) -> ControlFlow<()> {
+    fn recovered(&mut self, done: Recovery<S, H::Digest>) -> ControlFlow<()> {
         self.config
             .latency
             .observe_between(done.started_at, self.context.current());
@@ -780,17 +779,19 @@ mod tests {
     use crate::{
         multimmit::{
             config::Protocol,
-            mocks::keys::keys,
-            scheme::bls12381_threshold::Scheme,
-            types::{CertificateId, EpochGenesis, PathLimits, ThresholdShare},
+            mocks::Bls,
+            scheme::Generic,
+            types::{CertificateId, DaAttestation, EpochGenesis, PathLimits},
         },
         simplex::marshal::mocks::strategy::GatedStrategy,
         types::{Epoch, Participant},
     };
     use commonware_codec::types::lazy::Lazy;
     use commonware_cryptography::{
-        Sha256, Signer as _, bls12381::primitives::variant::MinPk,
-        ed25519::PrivateKey as Ed25519PrivateKey, sha256::Digest,
+        Sha256, Signer as _,
+        bls12381::primitives::variant::{MinPk, Variant},
+        ed25519::PrivateKey as Ed25519PrivateKey,
+        sha256::Digest,
     };
     use commonware_macros::select;
     use commonware_math::algebra::Additive as _;
@@ -800,7 +801,7 @@ mod tests {
         deterministic::Runner,
         telemetry::metrics::{MetricsExt as _, histogram},
     };
-    use commonware_utils::{TestRng, channel::fallible::OneshotExt as _, ordered::Set};
+    use commonware_utils::{TestRng, channel::fallible::OneshotExt as _, ordered::Set, test_rng};
     use core::{task::Poll, time::Duration};
     use futures::poll;
     use rand::TryRng as _;
@@ -837,10 +838,7 @@ mod tests {
     }
 
     /// Builds signer schemes and a verifier over one deterministic threshold sharing.
-    fn fixture() -> (
-        Vec<Scheme<Ed25519PublicKey, MinPk>>,
-        Scheme<Ed25519PublicKey, MinPk>,
-    ) {
+    fn fixture() -> (Vec<Generic<Bls<MinPk>>>, Generic<Bls<MinPk>>) {
         let protocol = config();
         let identities = Set::try_from(
             (0..PARTICIPANTS)
@@ -848,11 +846,10 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .unwrap();
-        let keys = keys::<MinPk>(&mut TestRng::new(7), &protocol, &identities);
-        (keys.signers, keys.verifier)
+        let dealt =
+            Bls::<MinPk>::deal(&mut TestRng::new(7), protocol.parameters(), &identities).unwrap();
+        (dealt.signers, dealt.verifier)
     }
-
-    type Ed25519PublicKey = commonware_cryptography::ed25519::PublicKey;
 
     fn own_header() -> TransactionBlockHeader<Digest> {
         TransactionBlockHeader::new(
@@ -880,7 +877,7 @@ mod tests {
             let (updates, mut update_rx) =
                 mailbox::new(context.child("updates"), NonZeroUsize::new(64).unwrap());
             let verify = Arc::clone(&scheme);
-            let (actor, mut da) = Actor::<_, Sha256, _, MinPk, _>::new(
+            let (actor, mut da) = Actor::<_, Sha256, Bls<MinPk>, _>::new(
                 context.child("da"),
                 Config {
                     scheme,
@@ -908,7 +905,11 @@ mod tests {
                 }) => {
                     assert_eq!(generation, Generation::new(1));
                     assert_eq!(block, header.block_ref::<Sha256>());
-                    assert!(verify.verify_da_certificate(&certificate));
+                    assert!(verify.verify_da_certificate(
+                        &mut test_rng(),
+                        &certificate,
+                        &Sequential
+                    ));
                 }
                 ChainUpdate::DaVoteReady(_) => {
                     panic!("the recovery task never offers da-vote candidates")
@@ -928,7 +929,7 @@ mod tests {
             let (updates, mut update_rx) =
                 mailbox::new(context.child("updates"), NonZeroUsize::new(64).unwrap());
             let verify = Arc::clone(&scheme);
-            let (actor, mut da) = Actor::<_, Sha256, _, MinPk, _>::new(
+            let (actor, mut da) = Actor::<_, Sha256, Bls<MinPk>, _>::new(
                 context.child("da"),
                 Config {
                     scheme,
@@ -961,7 +962,7 @@ mod tests {
                     .unwrap(),
                 )
                 .unwrap();
-            let invalid = DaVote::new(header.clone(), wrong.share().clone());
+            let invalid = DaVote::new(header.clone(), wrong.attestation().clone());
             for signer in signers.iter().take(da_quorum - 1) {
                 let vote = signer.sign_da_vote(header.clone()).unwrap();
                 assert!(da.command(ChainCommand::Observe(Arc::new(vote))).accepted());
@@ -987,7 +988,11 @@ mod tests {
                     block, certificate, ..
                 }) => {
                     assert_eq!(block, header.block_ref::<Sha256>());
-                    assert!(verify.verify_da_certificate(&certificate));
+                    assert!(verify.verify_da_certificate(
+                        &mut test_rng(),
+                        &certificate,
+                        &Sequential
+                    ));
                 }
                 ChainUpdate::DaVoteReady(_) => {
                     panic!("the recovery task never offers da-vote candidates")
@@ -1013,7 +1018,7 @@ mod tests {
             let mut tasks = Vec::new();
             let mut headers = Vec::new();
             for chain in [1u32, 2] {
-                let (actor, mut da) = Actor::<_, Sha256, _, MinPk, _>::new(
+                let (actor, mut da) = Actor::<_, Sha256, Bls<MinPk>, _>::new(
                     context.child("da").with_attribute("chain", chain),
                     Config {
                         scheme: Arc::clone(&scheme),
@@ -1079,7 +1084,7 @@ mod tests {
             let strategy = GatedStrategy::new(context.child("strategy"));
             let gate = strategy.arm();
             let permits = RecoveryPermits::new(NonZeroUsize::new(1).unwrap());
-            let (actor, mut da) = Actor::<_, Sha256, _, MinPk, _>::new(
+            let (actor, mut da) = Actor::<_, Sha256, Bls<MinPk>, _>::new(
                 context.child("da"),
                 Config {
                     scheme: Arc::new(verifier),
@@ -1146,7 +1151,7 @@ mod tests {
         });
     }
 
-    fn share(height: u64, fork: u8, signer: u32) -> DaCommand<MinPk, Digest> {
+    fn share(height: u64, fork: u8, signer: u32) -> DaCommand<Bls<MinPk>, Digest> {
         let header = TransactionBlockHeader::new(
             Epoch::new(9),
             ChainId::new(0),
@@ -1157,18 +1162,18 @@ mod tests {
         .unwrap();
         DaCommand::Chain(ChainCommand::Observe(Arc::new(DaVote::new(
             header,
-            ThresholdShare::new(
-                Participant::new(signer),
-                Lazy::from(<MinPk as Variant>::Signature::zero()),
-            ),
+            DaAttestation::<Bls<MinPk>> {
+                signer: Participant::new(signer),
+                signature: Lazy::from(<MinPk as Variant>::Signature::zero()),
+            },
         ))))
     }
 
-    fn anchor(height: u64) -> DaCommand<MinPk, Digest> {
+    fn anchor(height: u64) -> DaCommand<Bls<MinPk>, Digest> {
         DaCommand::Chain(ChainCommand::AnchorAdvanced(Height::new(height)))
     }
 
-    fn reconfigure(generation: u64, certified: u64) -> DaCommand<MinPk, Digest> {
+    fn reconfigure(generation: u64, certified: u64) -> DaCommand<Bls<MinPk>, Digest> {
         DaCommand::Reconfigure(Reconfiguration {
             generation: Generation::new(generation),
             certified: Height::new(certified),
@@ -1184,7 +1189,7 @@ mod tests {
         Settled,
     }
 
-    fn drain_all(overflow: &mut DaOverflow<MinPk, Digest>) -> Vec<Delivered> {
+    fn drain_all(overflow: &mut DaOverflow<Bls<MinPk>, Digest>) -> Vec<Delivered> {
         let mut delivered = Vec::new();
         overflow.drain(|command| {
             delivered.push(match command {
@@ -1213,7 +1218,7 @@ mod tests {
         signers: BTreeMap<Digest, BTreeSet<Participant>>,
     }
 
-    fn pools(state: &RecoveryState<MinPk, Digest>) -> Pools {
+    fn pools(state: &RecoveryState<Bls<MinPk>, Digest>) -> Pools {
         Pools {
             generation: state.generation.get(),
             certified: state.certified_through.get(),
@@ -1225,12 +1230,15 @@ mod tests {
         }
     }
 
-    fn fresh_state() -> RecoveryState<MinPk, Digest> {
+    fn fresh_state() -> RecoveryState<Bls<MinPk>, Digest> {
         RecoveryState::new(Generation::new(0), Height::zero())
     }
 
     /// Applies `command` through the state transitions the running task calls.
-    fn apply(state: &mut RecoveryState<MinPk, Digest>, command: DaCommand<MinPk, Digest>) {
+    fn apply(
+        state: &mut RecoveryState<Bls<MinPk>, Digest>,
+        command: DaCommand<Bls<MinPk>, Digest>,
+    ) {
         match command {
             DaCommand::Chain(ChainCommand::Observe(share)) => {
                 state.pool::<Sha256>(ChainId::new(0), &share);

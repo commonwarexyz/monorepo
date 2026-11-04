@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     multimmit::{
         algebra::{FinalTips, VqcExtraction},
-        mocks::Committee,
+        mocks::{Bls, Committee, Fixture},
         types::{
             Anchor, BlockRef, CertificateId, ChainId, ChainProposal, DigestedLeader, Lqc,
             PathLimits, ViewMessage, Vqc,
@@ -31,7 +31,7 @@ fn config() -> CodecConfig {
     CodecConfig::new(6, 6, PathLimits::new(2, 1)).unwrap()
 }
 
-fn leader() -> LeaderBlock<MinSig, sha256::Digest> {
+fn leader() -> LeaderBlock<Bls<MinSig>, sha256::Digest> {
     let config = config();
     let proposals = (0..config.chains())
         .map(|index| {
@@ -333,9 +333,9 @@ fn decoding_bounds_extension_deviation_counts_and_indices() {
     ));
 }
 
-fn certificate_extension_deviations<V: Variant>() {
+fn certificate_extension_deviations<S: Fixture>() {
     for chains in [6, 128] {
-        let committee = Committee::<V>::builder(11, chains as u32)
+        let committee = Committee::<S>::builder(11, chains as u32)
             .namespace(b"_COMMONWARE_CONSENSUS_SPARSE_TALLY_TEST")
             .build();
         let config = committee.codec();
@@ -378,12 +378,17 @@ fn certificate_extension_deviations<V: Variant>() {
                     .collect::<Vec<_>>();
                 let certificate = committee
                     .verifier
-                    .assemble_lqc::<Sha256, _>(leader.clone(), &votes, &Sequential)
+                    .assemble_lqc::<_, Sha256, _>(
+                        &mut test_rng(),
+                        leader.clone(),
+                        &votes,
+                        &Sequential,
+                    )
                     .unwrap();
                 let encoded = certificate.encode();
                 assert_eq!(encoded.len(), certificate.encode_size());
                 let decoded =
-                    Lqc::<V, sha256::Digest>::decode_cfg(encoded.clone(), &config).unwrap();
+                    Lqc::<S, sha256::Digest>::decode_cfg(encoded.clone(), &config).unwrap();
                 assert_eq!(decoded, certificate);
                 assert!(
                     committee
@@ -412,7 +417,7 @@ fn certificate_extension_deviations<V: Variant>() {
                     let tampered = Lqc::new(
                         leader.clone(),
                         tampered,
-                        decoded.signature().unwrap().clone(),
+                        decoded.signature().clone(),
                         config,
                     )
                     .unwrap();
@@ -431,8 +436,8 @@ fn certificate_extension_deviations<V: Variant>() {
                     assert_eq!(expanded.encode(), vote.body().encode());
                 }
                 assert_eq!(
-                    FinalTips::from_lqc::<Sha256, V>(&decoded, config).unwrap(),
-                    FinalTips::from_pool::<Sha256, V, _>(
+                    FinalTips::from_lqc::<Sha256, S>(&decoded, config).unwrap(),
+                    FinalTips::from_pool::<Sha256, S, _>(
                         leader,
                         votes.iter().map(|vote| (vote.signer(), vote.body())),
                         config
@@ -446,10 +451,15 @@ fn certificate_extension_deviations<V: Variant>() {
                     .collect::<Vec<_>>();
                 let vqc = committee
                     .verifier
-                    .assemble_vqc::<Sha256, _>(leader.clone(), &messages, &Sequential)
+                    .assemble_vqc::<_, Sha256, _>(
+                        &mut test_rng(),
+                        leader.clone(),
+                        &messages,
+                        &Sequential,
+                    )
                     .unwrap();
                 let decoded_vqc =
-                    Vqc::<V, sha256::Digest>::decode_cfg(vqc.encode(), &config).unwrap();
+                    Vqc::<S, sha256::Digest>::decode_cfg(vqc.encode(), &config).unwrap();
                 assert_eq!(decoded_vqc, vqc);
                 assert!(
                     committee
@@ -458,11 +468,11 @@ fn certificate_extension_deviations<V: Variant>() {
                         .is_some()
                 );
                 assert_eq!(
-                    VqcExtraction::new::<Sha256, V>(&decoded_vqc, config)
+                    VqcExtraction::new::<Sha256, S>(&decoded_vqc, config)
                         .unwrap()
                         .into_parts()
                         .0,
-                    VqcExtraction::from_votes::<Sha256, V>(
+                    VqcExtraction::from_votes::<Sha256, S>(
                         DigestedLeader::new::<Sha256>(leader),
                         votes.iter().map(|vote| (vote.signer(), vote.body())),
                         config
@@ -501,7 +511,7 @@ fn certificate_extension_deviations<V: Variant>() {
                     _ if clear => assert_eq!(encoded.len(), dense_size + 2 * (chains - 1) + 1),
                     _ => assert!(encoded.len() < dense_size),
                 }
-                let bounds = config.encoded_bounds::<V, sha256::Digest>().unwrap();
+                let bounds = config.encoded_bounds::<S, sha256::Digest>().unwrap();
                 assert!(encoded.len() <= bounds.max_artifact_bytes());
                 assert!(vqc.encode_size() <= bounds.max_artifact_bytes());
             }
@@ -511,13 +521,13 @@ fn certificate_extension_deviations<V: Variant>() {
 
 #[test]
 fn sparse_certificates_preserve_signatures_tips_and_measure_sizes() {
-    certificate_extension_deviations::<MinPk>();
-    certificate_extension_deviations::<MinSig>();
+    certificate_extension_deviations::<Bls<MinPk>>();
+    certificate_extension_deviations::<Bls<MinSig>>();
 }
 
 #[test]
 fn certificate_decoding_matches_constructor_tally_validation() {
-    let committee = Committee::<MinSig>::builder(6, 6)
+    let committee = Committee::<Bls<MinSig>>::builder(6, 6)
         .namespace(b"_COMMONWARE_CONSENSUS_CERTIFICATE_TALLY_DECODE_TEST")
         .build();
     let config = committee.codec();
@@ -558,7 +568,7 @@ fn certificate_decoding_matches_constructor_tally_validation() {
         let lqc_result = Lqc::new(
             leader.clone(),
             tally.clone(),
-            lqc.signature().unwrap().clone(),
+            lqc.signature().clone(),
             config,
         );
         let vqc_result = Vqc::new(
@@ -566,7 +576,7 @@ fn certificate_decoding_matches_constructor_tally_validation() {
             tally.clone(),
             vqc.novoters().clone(),
             Vec::new(),
-            vqc.signature().unwrap().clone(),
+            vqc.signature().clone(),
             config,
         );
         assert_eq!(lqc_result.is_ok(), index == 0);
@@ -581,11 +591,13 @@ fn certificate_decoding_matches_constructor_tally_validation() {
             replaced.freeze()
         };
         assert_eq!(
-            Lqc::<MinSig, sha256::Digest>::decode_cfg(replace_tally(lqc.encode()), &config).is_ok(),
+            Lqc::<Bls<MinSig>, sha256::Digest>::decode_cfg(replace_tally(lqc.encode()), &config)
+                .is_ok(),
             lqc_result.is_ok(),
         );
         assert_eq!(
-            Vqc::<MinSig, sha256::Digest>::decode_cfg(replace_tally(vqc.encode()), &config).is_ok(),
+            Vqc::<Bls<MinSig>, sha256::Digest>::decode_cfg(replace_tally(vqc.encode()), &config)
+                .is_ok(),
             vqc_result.is_ok(),
         );
     }
@@ -633,7 +645,7 @@ fn validation_rejects_expanded_height_overflow() {
             };
             ChainProposal::new(
                 chain,
-                Anchor::<MinSig, _>::Tip(BlockRef::new(chain, height, digest(index as u64))),
+                Anchor::<Bls<MinSig>, _>::Tip(BlockRef::new(chain, height, digest(index as u64))),
                 Vec::new(),
                 config.pipeline_depth(),
             )

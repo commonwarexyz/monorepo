@@ -5,7 +5,10 @@
 //! measurements.
 
 use crate::{
-    multimmit::mocks::cluster::{Cluster, ClusterOptions},
+    multimmit::mocks::{
+        Bls,
+        cluster::{Cluster, ClusterOptions},
+    },
     types::{View, ViewDelta},
 };
 use commonware_cryptography::bls12381::primitives::variant::MinPk;
@@ -91,7 +94,7 @@ pub fn run_engine_profile(storage_delay: bool) -> EngineRun {
     runtime.start(|context| async move {
         let nodes = (0..ENGINE_NODES).collect::<Vec<_>>();
         let chains = (0..ENGINE_NODES as u32).collect::<Vec<_>>();
-        let mut cluster = Cluster::<MinPk>::new(
+        let mut cluster = Cluster::<Bls<MinPk>>::new(
             &context,
             ClusterOptions {
                 latency: NETWORK_LATENCY,
@@ -185,7 +188,7 @@ pub fn run_engine_profile(storage_delay: bool) -> EngineRun {
     })
 }
 
-async fn collect_views(cluster: &Cluster<MinPk>, nodes: &[usize]) -> Vec<u64> {
+async fn collect_views(cluster: &Cluster<Bls<MinPk>>, nodes: &[usize]) -> Vec<u64> {
     let mut views = Vec::with_capacity(nodes.len());
     for &node in nodes {
         let inspection = cluster.inspect(node).await.expect("engine remains live");

@@ -6,7 +6,7 @@ use crate::{
     multimmit::{
         actors::voter::{VoterLimits, actor::TestHooks, persistence::TestGates},
         config::Role,
-        mocks::{Committee, MockApplication},
+        mocks::{Bls, Committee, MockApplication},
         storage::partitions,
         testing::{expect_before, expect_within},
         types::{ChainId, Context},
@@ -149,13 +149,13 @@ fn checkpoint_roll_and_prune_keep_control_live() {
         // Certify every produced block through the real peer/ingress path. Each certificate
         // reopens the bounded producer window, so authority-producing work remains continuously
         // available until the checkpoint fence deliberately pauses its admission.
-        let feeder_committee = Committee::<MinPk>::builder(SEED, 6).build();
+        let feeder_committee = Committee::<Bls<MinPk>>::builder(SEED, 6).build();
         let feeder_me = node.me.clone();
         let feeder = context
             .child("checkpoint_feeder")
             .spawn(move |_| async move {
                 while let Ok((_, bytes)) = data_rx.recv().await {
-                    let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+                    let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                         bytes,
                         &EnvelopeConfig {
                             max_frame_bytes: usize::MAX,
@@ -173,7 +173,7 @@ fn checkpoint_roll_and_prune_keep_control_live() {
                         Recipients::One(feeder_me.clone()),
                         Envelope::new(
                             feeder_committee.config.epoch(),
-                            DataMessage::<MinPk, Sha256Digest>::DaCertificate(certificate),
+                            DataMessage::<Bls<MinPk>, Sha256Digest>::DaCertificate(certificate),
                         )
                         .encode(),
                         false,
@@ -378,9 +378,11 @@ fn delayed_custody_failure_is_recorded_once_on_its_original_root(traces: TraceSt
         let (mut certificates, _) = node.peer(1, 2).await;
         certificates.send(
             Recipients::One(node.me.clone()),
-            node.envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
-                node.committee.nullification(View::new(1)),
-            ))
+            node.envelope(
+                CertificateMessage::<Bls<MinPk>, Sha256Digest>::Nullification(
+                    node.committee.nullification(View::new(1)),
+                ),
+            )
             .encode(),
             true,
         );
@@ -496,7 +498,7 @@ fn verified_block_signing_reaches_wire_without_application_correlation() {
             )
             .await
             .expect("network stays up");
-            let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 bytes,
                 &node.envelope_cfg(node.committee.codec()),
             )

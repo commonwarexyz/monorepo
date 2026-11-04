@@ -3,7 +3,7 @@
 use crate::{
     multimmit::{
         fuzz::ByteSchedule,
-        mocks::Committee,
+        mocks::{Bls, Committee, Ed25519, Fixture, Sas},
         scheme::Verified,
         types::{
             Artifact, DigestedLeader, Extension, LeaderBlock, Lqc, PathLimits, Position,
@@ -14,42 +14,50 @@ use crate::{
 };
 use commonware_cryptography::{
     Hasher, Sha256,
-    bls12381::primitives::variant::{MinPk, MinSig, Variant},
+    bls12381::primitives::variant::{MinPk, MinSig},
     sha256::Digest,
 };
 use commonware_parallel::Sequential;
-use commonware_utils::TestRng;
+use commonware_utils::{TestRng, test_rng};
 use std::collections::BTreeSet;
 
-thread_local! {
-    static MIN_PK: Committee<MinPk> = Committee::builder(914, 6)
+fn committee<S: Fixture>() -> Committee<S> {
+    Committee::builder(914, 6)
         .limits(PathLimits::new(2, 2))
-        .build();
-    static MIN_SIG: Committee<MinSig> = Committee::builder(914, 6)
-        .limits(PathLimits::new(2, 2))
-        .build();
+        .build()
 }
 
+thread_local! {
+    static BLS_MIN_PK: Committee<Bls<MinPk>> = committee();
+    static BLS_MIN_SIG: Committee<Bls<MinSig>> = committee();
+    static SAS_MIN_PK: Committee<Sas<MinPk>> = committee();
+    static SAS_MIN_SIG: Committee<Sas<MinSig>> = committee();
+    static ED25519: Committee<Ed25519> = committee();
+}
+
+/// Runs one campaign against the suite the first input byte selects.
 pub(crate) fn exercise(input: &[u8]) {
-    if input.first().copied().unwrap_or(0) & 1 == 0 {
-        MIN_PK.with(|committee| campaign(committee, input));
-    } else {
-        MIN_SIG.with(|committee| campaign(committee, input));
+    match input.first().copied().unwrap_or(0) % 5 {
+        0 => BLS_MIN_PK.with(|committee| campaign(committee, input)),
+        1 => BLS_MIN_SIG.with(|committee| campaign(committee, input)),
+        2 => SAS_MIN_PK.with(|committee| campaign(committee, input)),
+        3 => SAS_MIN_SIG.with(|committee| campaign(committee, input)),
+        _ => ED25519.with(|committee| campaign(committee, input)),
     }
 }
 
 // The oracle tracks generation facts, independently of compact tally reconstruction and
 // signature verification. Identity, context, and designation are separate quorum conditions.
 #[derive(Clone)]
-struct Term<V: Variant> {
-    message: ViewMessage<V, Digest>,
+struct Term<S: Fixture> {
+    message: ViewMessage<S, Digest>,
     identity: usize,
     designated: bool,
     same_round: bool,
     authentic: bool,
 }
 
-fn acceptable<V: Variant>(terms: &[Term<V>], quorum: usize, designation: usize, n: usize) -> bool {
+fn acceptable<S: Fixture>(terms: &[Term<S>], quorum: usize, designation: usize, n: usize) -> bool {
     let identities: BTreeSet<_> = terms.iter().map(|term| term.identity).collect();
     (quorum..=n).contains(&terms.len())
         && identities.len() == terms.len()
@@ -57,9 +65,9 @@ fn acceptable<V: Variant>(terms: &[Term<V>], quorum: usize, designation: usize, 
         && terms.iter().all(|term| term.same_round && term.authentic)
 }
 
-fn body<V: Variant>(
-    committee: &Committee<V>,
-    leader: &LeaderBlock<V, Digest>,
+fn body<S: Fixture>(
+    committee: &Committee<S>,
+    leader: &LeaderBlock<S, Digest>,
     marker: usize,
 ) -> VoteBody<Digest> {
     let codec = committee.codec();
@@ -78,14 +86,14 @@ fn body<V: Variant>(
     .unwrap()
 }
 
-const fn known<V: Variant>(message: &ViewMessage<V, Digest>) -> Verified<'_, V, Digest> {
+const fn known<S: Fixture>(message: &ViewMessage<S, Digest>) -> Verified<'_, S, Digest> {
     match message {
         ViewMessage::Vote(vote) => Verified::Vote(vote),
         ViewMessage::NoVote(vote) => Verified::NoVote(vote),
     }
 }
 
-fn campaign<V: Variant>(committee: &Committee<V>, input: &[u8]) {
+fn campaign<S: Fixture>(committee: &Committee<S>, input: &[u8]) {
     let codec = committee.codec();
     let mut schedule = ByteSchedule::padded(input.get(1..).unwrap_or_default());
     let rounds = 1 + schedule.index() % 3;
@@ -149,7 +157,7 @@ fn campaign<V: Variant>(committee: &Committee<V>, input: &[u8]) {
         let messages: Vec<_> = terms.iter().map(|term| term.message.clone()).collect();
         let vqc = committee
             .verifier
-            .assemble_vqc::<Sha256, _>(leader.clone(), &messages, &Sequential)
+            .assemble_vqc::<_, Sha256, _>(&mut test_rng(), leader.clone(), &messages, &Sequential)
             .unwrap();
         assert!(
             committee
@@ -216,7 +224,8 @@ fn campaign<V: Variant>(committee: &Committee<V>, input: &[u8]) {
                 "oracle sensitivity for mutation {mutation}"
             );
             let hostile_messages: Vec<_> = hostile.into_iter().map(|term| term.message).collect();
-            let assembled = committee.verifier.assemble_vqc::<Sha256, _>(
+            let assembled = committee.verifier.assemble_vqc::<_, Sha256, _>(
+                &mut test_rng(),
                 leader.clone(),
                 &hostile_messages,
                 &Sequential,
@@ -239,20 +248,30 @@ fn campaign<V: Variant>(committee: &Committee<V>, input: &[u8]) {
             .collect();
         let lqc = committee
             .verifier
-            .assemble_lqc::<Sha256, _>(leader.clone(), &votes, &Sequential)
+            .assemble_lqc::<_, Sha256, _>(&mut test_rng(), leader.clone(), &votes, &Sequential)
             .unwrap();
         let mut duplicate = votes.clone();
         duplicate[0] = duplicate[1].clone();
         assert!(
             committee
                 .verifier
-                .assemble_lqc::<Sha256, _>(leader.clone(), &duplicate, &Sequential)
+                .assemble_lqc::<_, Sha256, _>(
+                    &mut test_rng(),
+                    leader.clone(),
+                    &duplicate,
+                    &Sequential
+                )
                 .is_err()
         );
         assert!(
             committee
                 .verifier
-                .assemble_lqc::<Sha256, _>(alternate.clone(), &votes, &Sequential)
+                .assemble_lqc::<_, Sha256, _>(
+                    &mut test_rng(),
+                    alternate.clone(),
+                    &votes,
+                    &Sequential
+                )
                 .is_err()
         );
 
@@ -264,14 +283,14 @@ fn campaign<V: Variant>(committee: &Committee<V>, input: &[u8]) {
             vqc.tally().clone(),
             vqc.novoters().clone(),
             vqc.conflicting_votes().to_vec(),
-            donor.signature().unwrap().clone(),
+            donor.signature().clone(),
             codec,
         )
         .unwrap();
         let forged_lqc = Lqc::new(
             leader.clone(),
             lqc.tally().clone(),
-            donor.signature().unwrap().clone(),
+            donor.signature().clone(),
             codec,
         )
         .unwrap();
@@ -280,14 +299,14 @@ fn campaign<V: Variant>(committee: &Committee<V>, input: &[u8]) {
             vqc.tally().clone(),
             vqc.novoters().clone(),
             vqc.conflicting_votes().to_vec(),
-            vqc.signature().unwrap().clone(),
+            vqc.signature().clone(),
             codec,
         )
         .unwrap();
         let context_lqc = Lqc::new(
             alternate,
             lqc.tally().clone(),
-            lqc.signature().unwrap().clone(),
+            lqc.signature().clone(),
             codec,
         )
         .unwrap();
@@ -315,8 +334,14 @@ fn campaign<V: Variant>(committee: &Committee<V>, input: &[u8]) {
         authenticated.extend(previous.iter().cloned());
         for message in &authenticated {
             assert!(match message {
-                ViewMessage::Vote(vote) => committee.verifier.verify_vote(vote),
-                ViewMessage::NoVote(vote) => committee.verifier.verify_novote(vote),
+                ViewMessage::Vote(vote) =>
+                    committee
+                        .verifier
+                        .verify_vote(&mut test_rng(), vote, &Sequential),
+                ViewMessage::NoVote(vote) =>
+                    committee
+                        .verifier
+                        .verify_novote(&mut test_rng(), vote, &Sequential),
             });
         }
         for cache_mode in 0..4 {

@@ -21,6 +21,7 @@ use crate::{
             verification::Observation,
             view::VqcAggregateCompletion,
         },
+        mocks::Bls,
         types::{
             Activity, Artifact, ChainId, LeaderBlock, SignedLeaderBlock, TransactionBlockHeader,
             ViewMessage, ViewProof,
@@ -124,7 +125,7 @@ fn future_lqc_durably_advances_consensus_floors() {
     assert_eq!(machine.inspect().finality_floor(), certificate.view());
 
     let mut restored =
-        Machine::<Sha256, MinPk>::restore(profile, machine.live_snapshot_for_test()).unwrap();
+        Machine::<Sha256, Bls<MinPk>>::restore(profile, machine.live_snapshot_for_test()).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     restored.persist(&recovery.persist_job(), Until::CursorAdvance);
     assert_eq!(restored.inspect().view(), View::new(6));

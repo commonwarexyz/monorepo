@@ -43,13 +43,14 @@ use crate::{
             verification::JobId,
             view::{TimeoutCutoff, ViewState},
         },
+        scheme::Scheme,
         types::{
             Artifact, ArtifactId, BlockRef, ChainId, Context, FinalityFact, PoolSummary, ViewProof,
         },
     },
     types::{Epoch, Height, Participant, Round, View},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use std::collections::BTreeSet;
 
 /// One producer chain's local progress for diagnostics.
@@ -315,31 +316,31 @@ pub(crate) enum Lifecycle {
 }
 
 /// The single owner of all Multimmit protocol state for one epoch.
-pub(crate) struct Machine<H: Hasher, V: Variant> {
+pub(crate) struct Machine<H: Hasher, S: Scheme> {
     pub(in crate::multimmit::machine) profile: Profile<H::Digest>,
     pub(in crate::multimmit::machine) lifecycle: Lifecycle,
     /// Applied durable state and its reference ledgers.
-    pub(in crate::multimmit::machine) durable: DurableLedger<V, H::Digest>,
+    pub(in crate::multimmit::machine) durable: DurableLedger<S, H::Digest>,
     /// Retained artifacts and their indexes.
-    pub(in crate::multimmit::machine) store: ArtifactStore<V, H::Digest>,
+    pub(in crate::multimmit::machine) store: ArtifactStore<S, H::Digest>,
     /// Dependency availability, providers, and waiters.
     pub(in crate::multimmit::machine) dependencies: DependencyIndex<H::Digest>,
     /// Staged batches and release ordering.
-    pub(in crate::multimmit::machine) pipeline: Pipeline<V, H::Digest>,
+    pub(in crate::multimmit::machine) pipeline: Pipeline<S, H::Digest>,
     /// Issued work whose completions are outstanding or parked.
-    pub(in crate::multimmit::machine) completions: Completions<V, H::Digest>,
+    pub(in crate::multimmit::machine) completions: Completions<S, H::Digest>,
     pub(in crate::multimmit::machine) accountability: AccountabilityState<H::Digest>,
     pub(in crate::multimmit::machine) quarantine: Vec<Participant>,
     pub(in crate::multimmit::machine) da_order: DaOrder,
     pub(in crate::multimmit::machine) view_certificates: ViewCertificates,
-    pub(in crate::multimmit::machine) chain: ChainState<V, H::Digest>,
-    pub(in crate::multimmit::machine) views: ViewState<V, H::Digest>,
-    pub(in crate::multimmit::machine) finality: FinalityState<V, H::Digest>,
-    pub(in crate::multimmit::machine) resolution: ResolutionState<V, H::Digest>,
+    pub(in crate::multimmit::machine) chain: ChainState<S, H::Digest>,
+    pub(in crate::multimmit::machine) views: ViewState<S, H::Digest>,
+    pub(in crate::multimmit::machine) finality: FinalityState<S, H::Digest>,
+    pub(in crate::multimmit::machine) resolution: ResolutionState<S, H::Digest>,
     pub(in crate::multimmit::machine) scheduler: Scheduler,
 }
 
-impl<H: Hasher, V: Variant> Machine<H, V> {
+impl<H: Hasher, S: Scheme> Machine<H, S> {
     /// Returns application payloads that must be reverified before recovered authority is released.
     pub(crate) fn recovered_payloads(&self) -> Vec<(Context<H::Digest>, H::Digest)> {
         self.chain.recovered_payloads()
@@ -394,7 +395,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// Restores the last acknowledged snapshot and enters silent replay mode.
     pub(crate) fn restore(
         profile: Profile<H::Digest>,
-        snapshot: Snapshot<V, H::Digest>,
+        snapshot: Snapshot<S, H::Digest>,
     ) -> Result<Self, ReplayError> {
         let view = snapshot.validate::<H>(&profile)?;
         let mut machine = Self::new(profile);
@@ -733,7 +734,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     /// Projects current state for deterministic tests, including staged changes.
     #[cfg(any(test, feature = "mocks"))]
-    pub(crate) fn live_snapshot_for_test(&self) -> Snapshot<V, H::Digest> {
+    pub(crate) fn live_snapshot_for_test(&self) -> Snapshot<S, H::Digest> {
         Snapshot::new(
             self.profile.protocol().epoch(),
             self.profile.role(),
@@ -742,7 +743,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     }
 
     /// Returns a snapshot of acknowledged state, or `None` while staged changes await durability.
-    pub(crate) fn checkpoint_cut(&self) -> Option<Snapshot<V, H::Digest>> {
+    pub(crate) fn checkpoint_cut(&self) -> Option<Snapshot<S, H::Digest>> {
         (self.pipeline.staged.is_empty() && self.durable.state.cursor == self.pipeline.acked).then(
             || {
                 Snapshot::new(
@@ -756,7 +757,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     /// Returns the durable transition floor and the retained view proofs, from which the resolver
     /// rebuilds its volatile custody after startup.
-    pub(crate) fn resolver_seed(&self) -> (View, Vec<ViewProof<V, H::Digest>>) {
+    pub(crate) fn resolver_seed(&self) -> (View, Vec<ViewProof<S, H::Digest>>) {
         (
             self.durable.state.retired_view,
             self.durable.state.resolver_proofs(),
@@ -863,13 +864,13 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     /// Returns the L-QC that proves finality through the signing floor, if one was admitted.
     #[cfg(test)]
-    pub(crate) fn signing_floor(&self) -> Option<&Artifact<V, H::Digest>> {
+    pub(crate) fn signing_floor(&self) -> Option<&Artifact<S, H::Digest>> {
         self.durable.state.signing_floor.as_deref()
     }
 
     /// Returns the V-QC the next proposal builds on, if one was selected.
     #[cfg(test)]
-    pub(crate) fn anchor_vqc(&self) -> Option<&Artifact<V, H::Digest>> {
+    pub(crate) fn anchor_vqc(&self) -> Option<&Artifact<S, H::Digest>> {
         self.durable.state.proposal_anchor.as_deref()
     }
 
@@ -896,7 +897,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// An offer from a plane of an earlier process generation is stale.
     pub(crate) fn offer_da_votes(
         &mut self,
-        offer: DaVotesOffer<V, H::Digest>,
+        offer: DaVotesOffer<S, H::Digest>,
     ) -> StepStatus<H::Digest> {
         let DaVotesOffer {
             generation,

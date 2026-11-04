@@ -1,26 +1,27 @@
 //! Building the canonical tally from expanded votes.
 
 use super::{Deviation, ExtensionDeviation, PositionDeviation, Tally};
-use crate::multimmit::types::{
-    ChainId, CodecConfig, DigestedLeader, Error, Extension, LeaderBlock, Position, VoteBody,
+use crate::multimmit::{
+    scheme::Scheme,
+    types::{
+        ChainId, CodecConfig, DigestedLeader, Error, Extension, LeaderBlock, Position, VoteBody,
+    },
 };
 use commonware_codec::Encode;
-use commonware_cryptography::{
-    Digest, bls12381::primitives::variant::Variant, certificate::Signers,
-};
+use commonware_cryptography::{Digest, certificate::Signers};
 use commonware_utils::Participant;
 use core::num::NonZeroUsize;
 use std::collections::{BTreeMap, BTreeSet};
 
 impl<D: Digest> Tally<D> {
     /// Builds the canonical tally for a collection of complete votes for `leader`.
-    pub fn from_votes<V, I>(
-        leader: DigestedLeader<'_, V, D>,
+    pub fn from_votes<S, I>(
+        leader: DigestedLeader<'_, S, D>,
         votes: I,
         config: CodecConfig,
     ) -> Result<Self, Error>
     where
-        V: Variant,
+        S: Scheme,
         I: IntoIterator<Item = (Participant, VoteBody<D>)>,
     {
         let block = leader.block();
@@ -97,10 +98,10 @@ impl<D: Digest> Tally<D> {
 /// is a standard vote.
 ///
 /// Every nonempty extension that differs from the reference must be one of `paths`.
-fn deviation_for<V: Variant, D: Digest>(
+fn deviation_for<S: Scheme, D: Digest>(
     signer: Participant,
     body: &VoteBody<D>,
-    leader: &LeaderBlock<V, D>,
+    leader: &LeaderBlock<S, D>,
     reference: &[Extension<D>],
     paths: &[Extension<D>],
 ) -> Option<Deviation> {
@@ -134,8 +135,8 @@ fn deviation_for<V: Variant, D: Digest>(
 
 /// Selects the reference extension vector: the most common among votes at every proposal tip
 /// (or among all votes when none is), ties broken by the smallest encoding.
-pub(super) fn canonical_reference<'a, V: Variant, D: Digest>(
-    leader: &LeaderBlock<V, D>,
+pub(super) fn canonical_reference<'a, S: Scheme, D: Digest>(
+    leader: &LeaderBlock<S, D>,
     votes: impl IntoIterator<Item = (&'a [Position], &'a [Extension<D>])>,
 ) -> Vec<Extension<D>> {
     let mut standard_candidates = BTreeMap::<&[Extension<D>], usize>::new();

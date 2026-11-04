@@ -18,6 +18,7 @@ use crate::{
                 SymbolicVerifier, Until, cohort,
             },
         },
+        mocks::Bls,
         types::{
             Artifact, ChainId, DaVote, SignedLeaderBlock, SignedTransactionBlock,
             TransactionBlockHeader,
@@ -357,8 +358,8 @@ fn proof_capacity_does_not_invalidate_reserved_local_completion() {
 /// Returns the observation status and every capability the admission released.
 fn admit(
     machine: &mut TestMachine,
-    artifact: Artifact<MinPk, Digest>,
-) -> (ObservationStatus, Capabilities<MinPk, Digest>) {
+    artifact: Artifact<Bls<MinPk>, Digest>,
+) -> (ObservationStatus, Capabilities<Bls<MinPk>, Digest>) {
     let step = machine.step(cohort::<Sha256, _>(vec![artifact])).unwrap();
     let StepStatus::Observed(results) = step.status() else {
         panic!("one observed artifact must return an observation result");
@@ -382,7 +383,7 @@ fn admit(
 /// slot or neighbor with real headers, so it proves no fault and nothing else can ever retire it.
 fn assert_pinning_preserves_honest_progress(
     chain: ChainId,
-    pin: impl Fn(TransactionBlockHeader<Digest>) -> Artifact<MinPk, Digest>,
+    pin: impl Fn(TransactionBlockHeader<Digest>) -> Artifact<Bls<MinPk>, Digest>,
 ) {
     const PINNED_HEIGHT: u64 = 1 << 40;
     let (mut machine, _) = Harness::validator(5).participants(6).start();
@@ -631,7 +632,7 @@ fn forged_pending_blocks_cannot_crowd_out_the_honest_block() {
             attestation(producer.get()),
         ))
     };
-    let verify_job = |step: &Step<MinPk, Digest>| {
+    let verify_job = |step: &Step<Bls<MinPk>, Digest>| {
         let StepStatus::Observed(results) = step.status() else {
             panic!("observed blocks must return observation results");
         };

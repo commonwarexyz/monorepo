@@ -6,7 +6,7 @@ use crate::multimmit::marshal::OutputIndex;
 #[test]
 fn warmed_commit_retains_every_requested_hot_body() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(41, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(41, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BODY_HANDOFF")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -63,7 +63,7 @@ fn warmed_commit_retains_every_requested_hot_body() {
 #[test]
 fn live_handoff_takes_priority_over_materialized_history() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(47, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(47, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_SPARSE_HANDOFF")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -116,7 +116,7 @@ fn live_handoff_takes_priority_over_materialized_history() {
 #[test]
 fn recovered_handoff_survives_live_cache_eviction() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(49, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(49, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_RECOVERED_HANDOFF")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -186,7 +186,7 @@ fn recovered_handoff_survives_live_cache_eviction() {
 #[test]
 fn commits_buffer_a_second_cut_before_the_first_is_durable() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(18, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(18, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_COMMIT_PIPELINE")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -348,7 +348,7 @@ fn commits_buffer_a_second_cut_before_the_first_is_durable() {
 #[test]
 fn ready_checkpoint_completion_precedes_buffered_progress() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(46, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(46, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_COMPLETION_FAIRNESS")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -431,7 +431,7 @@ fn ready_checkpoint_completion_precedes_buffered_progress() {
 #[test]
 fn acknowledgement_durability_is_independent_of_commit_publication() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(62, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(62, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_INDEPENDENT_ACK")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -576,7 +576,7 @@ fn acknowledgement_durability_is_independent_of_commit_publication() {
 #[test]
 fn application_ready_acknowledgements_refill_while_cursor_sync_is_active() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(63, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(63, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_ACK_COALESCING")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -705,7 +705,7 @@ fn application_ready_acknowledgements_refill_while_cursor_sync_is_active() {
 #[test]
 fn commit_block_byte_bound_rejects_multi_block_overshoot_but_allows_a_single_block() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(30, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(30, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_COMMIT_BYTES")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))

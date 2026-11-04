@@ -12,11 +12,11 @@ mod block;
 mod mailbox;
 mod reporter;
 
-use crate::bench::Schedule;
+use crate::{bench::Schedule, committee::Suite};
 pub use actor::Actor;
 pub use block::{Block, Body};
 use commonware_consensus::multimmit::{marshal, types::ChainId};
-use commonware_cryptography::{Sha256, bls12381::primitives::variant::MinSig, ed25519};
+use commonware_cryptography::{Sha256, ed25519};
 pub use mailbox::Mailbox;
 pub use reporter::OutputReporter;
 use std::{
@@ -25,7 +25,7 @@ use std::{
 };
 
 /// Marshal mailbox type used by this example.
-pub type Marshal = marshal::Mailbox<Sha256, MinSig, Body>;
+pub type Marshal = marshal::Mailbox<Sha256, Suite, Body>;
 
 /// Marshal's relay, which broadcasts this node's staged blocks to peers.
 pub type Relay = marshal::Relay<Sha256, Body, ed25519::PublicKey>;

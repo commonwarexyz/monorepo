@@ -14,7 +14,7 @@ use crate::{
         config::{Error as ConfigError, LeaderSchedule, Profile, Role, Tuning},
         machine::{DischargeKind, Inspection},
         mocks::{
-            Committee, MockApplication, NoopReporter,
+            Bls, Committee, MockApplication, NoopReporter,
             cluster::{QUOTA, link_all, start_network},
         },
         storage::{OpenError, Recovered, RecoveryConfig, partitions, recover},
@@ -40,7 +40,7 @@ use commonware_runtime::{
     deterministic::{self, Runner as DeterministicRunner},
     telemetry::metrics::count_running_tasks,
 };
-use commonware_utils::{NZU64, NZUsize, channel::oneshot};
+use commonware_utils::{NZU64, NZUsize, channel::oneshot, test_rng};
 use rstest::rstest;
 use std::{
     collections::BTreeSet,
@@ -77,21 +77,23 @@ fn tuning() -> Tuning {
     }
 }
 
-fn profile(committee: &Committee<MinPk>, role: Role) -> Profile<Sha256Digest> {
-    Profile::new::<MinPk>(committee.config.clone(), role, tuning()).unwrap()
+fn profile(committee: &Committee<Bls<MinPk>>, role: Role) -> Profile<Sha256Digest> {
+    Profile::new::<Bls<MinPk>>(committee.config.clone(), role, tuning()).unwrap()
 }
 
+/// The suite these tests run on.
+type Suite = Bls<MinPk>;
+
 fn config(
-    committee: &Committee<MinPk>,
+    committee: &Committee<Suite>,
     index: usize,
     prefix: &str,
 ) -> Config<
     Sha256,
-    ed25519::PublicKey,
-    MinPk,
+    Suite,
     MockApplication,
     MockApplication,
-    NoopReporter<MinPk, Sha256Digest>,
+    NoopReporter<Suite, Sha256Digest>,
     Sequential,
     Sequential,
     TestBlocker,
@@ -159,7 +161,7 @@ fn assert_same_durable_prefix(
 #[test]
 fn skip_timeout_follows_the_tuning() {
     DeterministicRunner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(944, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(944, 6).build();
         // Unset, the window is five view timeouts of the tuning it belongs to.
         for (label, skip_timeout, expected) in [
             ("default", None, Duration::from_millis(2500)),
@@ -189,7 +191,7 @@ fn skip_timeout_follows_the_tuning() {
 #[case(Duration::from_secs(1))]
 fn skip_timeout_rejects_windows_below_the_retry_ceiling(#[case] window: Duration) {
     DeterministicRunner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(944, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(944, 6).build();
         let mut config = config(&committee, 0, "skip_timeout");
         config.tuning.skip_timeout = Some(window);
         let Err(error) = Engine::open(context.child("engine"), config).await else {
@@ -209,9 +211,9 @@ fn skip_timeout_rejects_windows_below_the_retry_ceiling(#[case] window: Duration
 
 #[test]
 fn voter_limits_are_nonzero_and_overflow_safe() {
-    let committee = Committee::<MinPk>::builder(77, 6).build();
+    let committee = Committee::<Bls<MinPk>>::builder(77, 6).build();
     for view_timeout in [Duration::from_nanos(1), Duration::MAX] {
-        let profile: Profile<Sha256Digest> = Profile::new::<MinPk>(
+        let profile: Profile<Sha256Digest> = Profile::new::<Bls<MinPk>>(
             committee.config.clone(),
             Role::Observer,
             Tuning {
@@ -267,7 +269,7 @@ fn inflight_application_covers_each_producer_pipeline() {
             20,
         ),
     ] {
-        let committee = Committee::<MinPk>::builder(seed, participants)
+        let committee = Committee::<Bls<MinPk>>::builder(seed, participants)
             .namespace(namespace)
             .producers((0..producers).map(Participant::new).collect())
             .build();
@@ -283,12 +285,12 @@ fn inflight_application_covers_each_producer_pipeline() {
 #[test]
 fn inflight_application_does_not_exceed_retained_artifact_capacity() {
     let producers = (0..100).map(Participant::new).collect();
-    let committee = Committee::<MinPk>::builder(89, 100)
+    let committee = Committee::<Bls<MinPk>>::builder(89, 100)
         .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_APPLICATION_ARTIFACT_CAP_TEST")
         .producers(producers)
         .limits(PathLimits::new(800, 1))
         .build();
-    let profile: Profile<Sha256Digest> = Profile::new::<MinPk>(
+    let profile: Profile<Sha256Digest> = Profile::new::<Bls<MinPk>>(
         committee.config,
         Role::Observer,
         Tuning {
@@ -335,7 +337,7 @@ fn readiness_wait_survives_cancellation_and_remembers_failure() {
 #[test_traced]
 fn open_spawns_no_task_until_start() {
     DeterministicRunner::timed(Duration::from_secs(10)).start(|context| async move {
-        let committee = Committee::<MinPk>::builder(79, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(79, 6).build();
         let oracle = start_network(&context, committee.identities.clone(), 4 * 1024 * 1024).await;
         let planes = register_planes(&oracle, &committee.identities[0]).await;
         let engine_context = context.child("split");
@@ -363,7 +365,7 @@ fn open_spawns_no_task_until_start() {
 #[test_traced]
 fn ready_reports_an_engine_stopped_before_readiness() {
     DeterministicRunner::timed(Duration::from_secs(10)).start(|context| async move {
-        let committee = Committee::<MinPk>::builder(80, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(80, 6).build();
         let oracle = start_network(&context, committee.identities.clone(), 4 * 1024 * 1024).await;
         let planes = register_planes(&oracle, &committee.identities[0]).await;
         let config = config(&committee, 0, "stopped_before_ready");
@@ -380,7 +382,7 @@ fn ready_reports_an_engine_stopped_before_readiness() {
 #[test_traced]
 fn maximum_timer_durations_do_not_overflow_actor_deadlines() {
     DeterministicRunner::timed(Duration::from_secs(10)).start(|context| async move {
-        let committee = Committee::<MinPk>::builder(78, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(78, 6).build();
         let oracle = start_network(&context, committee.identities.clone(), 4 * 1024 * 1024).await;
         let planes = register_planes(&oracle, &committee.identities[0]).await;
         let mut config = config(&committee, 0, "maximum_timer_durations");
@@ -396,7 +398,7 @@ fn maximum_timer_durations_do_not_overflow_actor_deadlines() {
     });
 }
 
-fn proof_covers_view(proof: &ViewProof<MinPk, Sha256Digest>, requested: View) -> bool {
+fn proof_covers_view(proof: &ViewProof<Bls<MinPk>, Sha256Digest>, requested: View) -> bool {
     match proof {
         ViewProof::Nullification(_) | ViewProof::Vqc(_) => proof.view() == requested,
         ViewProof::Lqc(_) => proof.view() >= requested,
@@ -404,7 +406,7 @@ fn proof_covers_view(proof: &ViewProof<MinPk, Sha256Digest>, requested: View) ->
 }
 
 /// Returns whether `proofs` serves a proof that crosses `view`.
-async fn serves_view(proofs: &resolver::Server<MinPk, Sha256Digest>, view: View) -> bool {
+async fn serves_view(proofs: &resolver::Server<Bls<MinPk>, Sha256Digest>, view: View) -> bool {
     proofs
         .serve(view)
         .await
@@ -418,7 +420,7 @@ fn engine_derives_the_protocol_from_the_scheme() {
     let limits = PathLimits::new(2, 1);
     let reversed =
         LeaderSchedule::from_order((0..6).rev().map(Participant::new).collect(), 6).unwrap();
-    let committee = Committee::<MinPk>::builder(76, 6)
+    let committee = Committee::<Bls<MinPk>>::builder(76, 6)
         .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_ENGINE_PROTOCOL_TEST")
         .producers(vec![Participant::new(4), Participant::new(1)])
         .limits(limits)
@@ -439,7 +441,7 @@ fn engine_derives_the_protocol_from_the_scheme() {
 
 #[test]
 fn engine_derives_the_role_from_the_scheme() {
-    let committee = Committee::<MinPk>::builder(77, 6).build();
+    let committee = Committee::<Bls<MinPk>>::builder(77, 6).build();
     DeterministicRunner::default().start(|_| async move {
         let mut config = config(&committee, 2, "role");
         let validator: Profile<Sha256Digest> = derive_profile(&config).unwrap();
@@ -454,8 +456,8 @@ fn engine_derives_the_role_from_the_scheme() {
 #[test]
 fn invalid_configurations_fail_before_touching_storage() {
     DeterministicRunner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(78, 6).build();
-        let other = Committee::<MinPk>::builder(79, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(78, 6).build();
+        let other = Committee::<Bls<MinPk>>::builder(79, 6).build();
         let genesis = other.config.genesis().clone();
         let foreign_genesis = EpochGenesis::new(
             genesis.epoch().next(),
@@ -515,13 +517,13 @@ fn invalid_configurations_fail_before_touching_storage() {
 fn an_unset_artifact_byte_limit_resolves_to_the_codec_bound_or_one_mebibyte() {
     DeterministicRunner::default().start(|_| async move {
         for (participants, limits) in [(6, PathLimits::new(2, 1)), (200, PathLimits::new(8, 8))] {
-            let committee = Committee::<MinPk>::builder(81, participants)
+            let committee = Committee::<Bls<MinPk>>::builder(81, participants)
                 .limits(limits)
                 .build();
             let config = config(&committee, 0, "resolved");
             let required = committee
                 .codec()
-                .max_artifact_bytes::<MinPk, Sha256Digest>()
+                .max_artifact_bytes::<Bls<MinPk>, Sha256Digest>()
                 .unwrap()
                 .get();
             let profile: Profile<Sha256Digest> = derive_profile(&config).unwrap();
@@ -537,7 +539,7 @@ fn an_unset_artifact_byte_limit_resolves_to_the_codec_bound_or_one_mebibyte() {
 /// An engine the tests started, with the handle that reads the proofs it serves.
 struct Launched {
     running: Running<Sha256Digest>,
-    proofs: resolver::Server<MinPk, Sha256Digest>,
+    proofs: resolver::Server<Bls<MinPk>, Sha256Digest>,
 }
 
 /// How a test launches validator zero's engine.
@@ -569,7 +571,7 @@ impl<'a> LaunchOptions<'a> {
 async fn launch(
     context: &deterministic::Context,
     oracle: &Oracle<ed25519::PublicKey, deterministic::Context>,
-    committee: Committee<MinPk>,
+    committee: Committee<Bls<MinPk>>,
     options: LaunchOptions<'_>,
 ) -> Launched {
     let LaunchOptions {
@@ -603,7 +605,7 @@ async fn produce_one_block(
     seed: u64,
     prefix: &str,
 ) -> Inspection<Sha256Digest> {
-    let committee = Committee::<MinPk>::builder(seed, 6).build();
+    let committee = Committee::<Bls<MinPk>>::builder(seed, 6).build();
     let oracle = start_network(context, committee.identities.clone(), 4 * 1024 * 1024).await;
     link_all(&oracle, &committee.identities).await;
     let application = MockApplication::new();
@@ -642,13 +644,13 @@ async fn produce_one_block(
 /// Recovers validator zero's durable state as `Engine::open` does, without starting actors.
 async fn recover_validator(
     context: &deterministic::Context,
-    committee: &Committee<MinPk>,
+    committee: &Committee<Bls<MinPk>>,
     label: &'static str,
     partition_prefix: &str,
     page_cache: CacheRef,
     checkpoint_interval: NonZeroU64,
     application: &MockApplication,
-) -> Result<Recovered<deterministic::Context, Sha256, MinPk>, OpenError> {
+) -> Result<Recovered<deterministic::Context, Sha256, Bls<MinPk>>, OpenError> {
     let profile = profile(committee, Role::Validator(Participant::new(0)));
     let inflight_application = inflight_application(&profile);
     let mut store_context = context.child(label);
@@ -677,7 +679,7 @@ fn recovery_checks_custody_before_compacting_the_suffix() {
     });
 
     DeterministicRunner::from(checkpoint).start(|context| async move {
-        let committee = Committee::<MinPk>::builder(seed, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(seed, 6).build();
         let page_cache = || CacheRef::new(paged::page_size(4_096), NZUsize!(8));
 
         // Compaction is due, but the application no longer holds a recovered payload.
@@ -743,7 +745,7 @@ fn recovery_verification_precedes_actor_construction_and_dependent_effects() {
 
     let runner = DeterministicRunner::from(checkpoint);
     runner.start(|context| async move {
-        let committee = Committee::<MinPk>::builder(seed, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(seed, 6).build();
         let oracle = start_network(&context, committee.identities.clone(), 4 * 1024 * 1024).await;
         link_all(&oracle, &committee.identities).await;
         let recovered = recover_validator(
@@ -834,7 +836,7 @@ fn engine_restart_preserves_every_active_publication_family(#[case] physical_pag
     let prefix = "typed_obligation_restart";
     let runner = DeterministicRunner::timed(Duration::from_secs(120));
     let ((first, second), checkpoint) = runner.start_and_recover(|context| async move {
-        let fixture = Committee::<MinPk>::builder(seed, 6).build();
+        let fixture = Committee::<Bls<MinPk>>::builder(seed, 6).build();
         let oracle = start_network(&context, fixture.identities.clone(), 4 * 1024 * 1024).await;
         link_all(&oracle, &fixture.identities).await;
 
@@ -849,7 +851,11 @@ fn engine_restart_preserves_every_active_publication_family(#[case] physical_pag
         let application = MockApplication::new();
         application.pause_building();
         application.permit_builds(2);
-        let mut engine_config = config(&Committee::<MinPk>::builder(seed, 6).build(), 0, prefix);
+        let mut engine_config = config(
+            &Committee::<Bls<MinPk>>::builder(seed, 6).build(),
+            0,
+            prefix,
+        );
         engine_config.automaton = application.clone();
         engine_config.relay = application;
         engine_config.page_cache = CacheRef::new(paged::page_size(physical_page_size), NZUsize!(2));
@@ -870,7 +876,7 @@ fn engine_restart_preserves_every_active_publication_family(#[case] physical_pag
             select! {
                 result = data_rx.recv() => {
                     let (_, bytes) = result.expect("network remains connected");
-                    let envelope = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
+                    let envelope = Envelope::<DataMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                         bytes,
                         &EnvelopeConfig {
                             max_frame_bytes: usize::MAX,
@@ -907,13 +913,13 @@ fn engine_restart_preserves_every_active_publication_family(#[case] physical_pag
             .collect::<Vec<_>>();
         let certificate = fixture
             .verifier
-            .assemble_da_certificate(&votes, &Sequential)
+            .assemble_da_certificate(&mut test_rng(), &votes, &Sequential)
             .expect("a quorum of valid shares recovers the DA certificate");
         let _ = data_tx.send(
             Recipients::One(fixture.identities[0].clone()),
             Envelope::new(
                 fixture.config.epoch(),
-                DataMessage::<MinPk, Sha256Digest>::DaCertificate(certificate),
+                DataMessage::<Bls<MinPk>, Sha256Digest>::DaCertificate(certificate),
             )
             .encode(),
             false,
@@ -922,7 +928,7 @@ fn engine_restart_preserves_every_active_publication_family(#[case] physical_pag
             Recipients::One(fixture.identities[0].clone()),
             Envelope::new(
                 fixture.config.epoch(),
-                CertificateMessage::<MinPk, Sha256Digest>::Nullification(
+                CertificateMessage::<Bls<MinPk>, Sha256Digest>::Nullification(
                     fixture.nullification(View::new(1)),
                 ),
             )
@@ -985,7 +991,7 @@ fn engine_restart_preserves_every_active_publication_family(#[case] physical_pag
     });
 
     DeterministicRunner::from(checkpoint).start(move |context| async move {
-        let committee = Committee::<MinPk>::builder(seed, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(seed, 6).build();
         let recovered = recover_validator(
             &context,
             &committee,

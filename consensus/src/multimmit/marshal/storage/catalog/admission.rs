@@ -7,9 +7,10 @@ use crate::multimmit::{
         archive::{PendingHistory, PendingLqc, put_once},
         pending::Append,
     },
+    scheme::Scheme,
     types::{BlockRef, Body, TransactionBlock},
 };
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use commonware_runtime::Handle;
 use commonware_storage::{Context, translator::Translator};
 use futures::{FutureExt as _, future::BoxFuture};
@@ -19,16 +20,16 @@ use std::{
 };
 
 /// The journal an admission holds until [`CatalogStore::finish_admission`] returns it.
-pub(crate) enum AdmissionWrite<T, E, H, V, B>
+pub(crate) enum AdmissionWrite<T, E, H, S, B>
 where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// The pending L-QC archive.
-    Lqc(PendingLqc<T, E, H, V>),
+    Lqc(PendingLqc<T, E, H, S>),
     /// The pending history archive.
     History(PendingHistory<T, E, H>),
     /// The pending block segment writer and the rows it appended.
@@ -36,19 +37,19 @@ where
 }
 
 /// A started admission write.
-pub(crate) type AdmissionFuture<T, E, H, V, B> =
-    BoxFuture<'static, Result<AdmissionWrite<T, E, H, V, B>, Error>>;
+pub(crate) type AdmissionFuture<T, E, H, S, B> =
+    BoxFuture<'static, Result<AdmissionWrite<T, E, H, S, B>, Error>>;
 
 /// A started admission write, or `None` when the admission writes nothing.
-pub(crate) type StartedAdmission<T, E, H, V, B> = Option<AdmissionFuture<T, E, H, V, B>>;
+pub(crate) type StartedAdmission<T, E, H, S, B> = Option<AdmissionFuture<T, E, H, S, B>>;
 
 /// A producer block and its reference.
 type BlockAdmission<H, B> = (BlockRef<<H as Hasher>::Digest>, Arc<TransactionBlock<H, B>>);
 
-impl<H, V, B> Admission<H, V, B>
+impl<H, S, B> Admission<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Returns the block of a block admission, or the admission itself otherwise.
@@ -61,12 +62,12 @@ where
 }
 
 /// Takes the next admission from `writes` if it is a block.
-fn next_block<H, V, B>(
-    writes: &mut Peekable<impl Iterator<Item = Admission<H, V, B>>>,
+fn next_block<H, S, B>(
+    writes: &mut Peekable<impl Iterator<Item = Admission<H, S, B>>>,
 ) -> Option<BlockAdmission<H, B>>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     writes
@@ -74,12 +75,12 @@ where
         .and_then(|write| write.into_block().ok())
 }
 
-impl<T, E, H, V, B> CatalogStore<T, E, H, V, B>
+impl<T, E, H, S, B> CatalogStore<T, E, H, S, B>
 where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Returns the pending families a batch must make durable, or `None` when it needs no cut.
@@ -87,7 +88,7 @@ where
     /// Rejects the batch before any write if a block is below its chain's custody floor.
     pub(crate) fn admission_footprint(
         &self,
-        writes: &[StagedAdmission<H, V, B>],
+        writes: &[StagedAdmission<H, S, B>],
     ) -> Result<Option<Footprint>, Error> {
         let mut footprint = Footprint::default();
         for write in writes {
@@ -114,8 +115,8 @@ where
     /// in which case no journal is lent. Dropping or failing the write makes this store unusable.
     pub(crate) fn start_admission(
         &mut self,
-        writes: &mut Peekable<impl Iterator<Item = Admission<H, V, B>>>,
-    ) -> Result<StartedAdmission<T, E, H, V, B>, Error> {
+        writes: &mut Peekable<impl Iterator<Item = Admission<H, S, B>>>,
+    ) -> Result<StartedAdmission<T, E, H, S, B>, Error> {
         // Boxed to keep the admission future small.
         Ok(Some(match writes.next().expect("admission is available") {
             Admission::Lqc(view, id, proof) => {
@@ -147,7 +148,7 @@ where
     /// Returns journal ownership and publishes any appended block metadata into custody indexes.
     pub(crate) fn finish_admission(
         &mut self,
-        write: AdmissionWrite<T, E, H, V, B>,
+        write: AdmissionWrite<T, E, H, S, B>,
     ) -> Result<(), Error> {
         match write {
             AdmissionWrite::Lqc(lqc) => self.pending_lqc.restore(lqc),

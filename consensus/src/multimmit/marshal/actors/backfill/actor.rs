@@ -25,12 +25,13 @@ use crate::{
             types::LqcVerifier,
             wire::BackfillKey,
         },
+        scheme::Scheme,
         types::{BlockRef, Body, CertificateId, CodecConfig, Lqc, TipRecord, TransactionBlock},
     },
     types::Epoch,
 };
 use commonware_actor::{Feedback, mailbox};
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use commonware_macros::select_loop;
 use commonware_resolver::{Delivery, Fetch, Outcome, Resolution, Resolver};
 use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
@@ -45,7 +46,7 @@ use std::{
 use tracing::{Instrument as _, Span, debug, info_span};
 
 /// Configuration for the backfill actor.
-pub(crate) struct Config<H: Hasher, V: Variant, B: Body<H>> {
+pub(crate) struct Config<H: Hasher, S: Scheme, B: Body<H>> {
     /// Epoch of every accepted proof, header and block.
     pub epoch: Epoch,
     /// Decode bounds for the epoch.
@@ -57,9 +58,9 @@ pub(crate) struct Config<H: Hasher, V: Variant, B: Body<H>> {
     /// Maximum size of one resolver value.
     pub max_value_bytes: NonZeroUsize,
     /// Catalog used for local rechecks, L-QC admission and block staging.
-    pub catalog: catalog::Mailbox<H, V, B>,
+    pub catalog: catalog::Mailbox<H, S, B>,
     /// Body lookups across temporary and immutable custody.
-    pub bodies: Bodies<H, V, B>,
+    pub bodies: Bodies<H, S, B>,
     /// Serving mailbox that the bridge forwards peer requests to.
     pub serve: serve::Mailbox<H::Digest>,
     /// Capacity of the actor's mailbox.
@@ -95,32 +96,32 @@ fn response_stage_span(process: &Span, blocks: usize, bytes: u64) -> Span {
 /// starts a local recheck; on a miss, every waiter of the key fetches under its own identity. A
 /// validated response completes every waiter of its key that it satisfies, after staging blocks
 /// in temporary custody when a waiter needs it and after verifying and admitting an L-QC.
-pub(crate) struct Actor<E, H, V, B>
+pub(crate) struct Actor<E, H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     context: ContextCell<E>,
     limits: Limits<B::Cfg>,
-    catalog: catalog::Mailbox<H, V, B>,
-    bodies: Bodies<H, V, B>,
-    receiver: mailbox::Receiver<Message<H, V, B>>,
+    catalog: catalog::Mailbox<H, S, B>,
+    bodies: Bodies<H, S, B>,
+    receiver: mailbox::Receiver<Message<H, S, B>>,
     /// Whether every mailbox sender is gone; the actor then drains accepted work and stops.
     closed: bool,
-    registry: Registry<H, V, B>,
-    rechecks: Rechecks<H, V, B>,
-    staging: Staging<H, V, B>,
-    verifications: Verifications<H, V, B>,
+    registry: Registry<H, S, B>,
+    rechecks: Rechecks<H, S, B>,
+    staging: Staging<H, S, B>,
+    verifications: Verifications<H, S, B>,
     cancellations: Pool<'static, Cancellation<H::Digest>>,
     metrics: metrics::Backfill,
 }
 
-impl<E, H, V, B> Actor<E, H, V, B>
+impl<E, H, S, B> Actor<E, H, S, B>
 where
     E: Clock + Spawner + Metrics,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Creates the actor, the bridge for the network `commonware_resolver` engine, and the
@@ -131,8 +132,8 @@ where
     /// `resolver` and its mailbox under `resolver_bridge`.
     pub(crate) fn new(
         context: &E,
-        config: Config<H, V, B>,
-    ) -> (Self, BackfillBridge<H, V, B>, Mailbox<H, V, B>) {
+        config: Config<H, S, B>,
+    ) -> (Self, BackfillBridge<H, S, B>, Mailbox<H, S, B>) {
         let (sender, receiver) =
             mailbox::new(context.child("resolver_bridge"), config.mailbox_size);
         let context = context.child("resolver");
@@ -168,7 +169,7 @@ where
     pub(crate) fn start<R, Q>(mut self, resolver: R, verifier: Q) -> Handle<Result<(), Error>>
     where
         R: Resolver<Key = BackfillKey<H::Digest>, Subscriber = BackfillSubscriber>,
-        Q: LqcVerifier<H, V> + Clone,
+        Q: LqcVerifier<H, S> + Clone,
     {
         spawn_cell!(self.context, self.run(resolver, verifier))
     }
@@ -176,7 +177,7 @@ where
     async fn run<R, Q>(mut self, mut resolver: R, verifier: Q) -> Result<(), Error>
     where
         R: Resolver<Key = BackfillKey<H::Digest>, Subscriber = BackfillSubscriber>,
-        Q: LqcVerifier<H, V> + Clone,
+        Q: LqcVerifier<H, S> + Clone,
     {
         select_loop! {
             self.context,
@@ -260,10 +261,10 @@ where
         self.metrics.pending(self.registry.len());
     }
 
-    fn on_message<R, Q>(&mut self, resolver: &mut R, verifier: &Q, message: Message<H, V, B>)
+    fn on_message<R, Q>(&mut self, resolver: &mut R, verifier: &Q, message: Message<H, S, B>)
     where
         R: Resolver<Key = BackfillKey<H::Digest>, Subscriber = BackfillSubscriber>,
-        Q: LqcVerifier<H, V> + Clone,
+        Q: LqcVerifier<H, S> + Clone,
     {
         match message {
             Message::Deliver(incoming) => {
@@ -319,10 +320,10 @@ where
         resolver: &mut R,
         verifier: &Q,
         incoming: Incoming<H::Digest>,
-    ) -> Option<Message<H, V, B>>
+    ) -> Option<Message<H, S, B>>
     where
         R: Resolver<Key = BackfillKey<H::Digest>, Subscriber = BackfillSubscriber>,
-        Q: LqcVerifier<H, V> + Clone,
+        Q: LqcVerifier<H, S> + Clone,
     {
         if !matches!(incoming.delivery.key, BackfillKey::ProducerBlock { .. }) {
             let process = response_process_span(&incoming.span, 1);
@@ -371,7 +372,7 @@ where
     fn drain_block_deliveries(
         &mut self,
         deliveries: &mut Vec<Incoming<H::Digest>>,
-    ) -> Option<Message<H, V, B>> {
+    ) -> Option<Message<H, S, B>> {
         while deliveries.len() < self.registry.capacity() {
             match self.receiver.try_recv() {
                 Ok(Message::Deliver(incoming))
@@ -393,12 +394,12 @@ where
         resolver: &mut R,
         verifier: &Q,
         incoming: Incoming<H::Digest>,
-        job: &mut StagingJob<H, V, B>,
+        job: &mut StagingJob<H, S, B>,
         process: &Span,
     ) -> bool
     where
         R: Resolver<Key = BackfillKey<H::Digest>, Subscriber = BackfillSubscriber>,
-        Q: LqcVerifier<H, V> + Clone,
+        Q: LqcVerifier<H, S> + Clone,
     {
         let Incoming {
             delivery,
@@ -412,7 +413,7 @@ where
             return false;
         }
         let bytes = u64::try_from(value.len()).unwrap_or(u64::MAX);
-        let Some(resolved) = validate::decode::<H, V, B>(&self.limits, key, value) else {
+        let Some(resolved) = validate::decode::<H, S, B>(&self.limits, key, value) else {
             self.respond(response, Outcome::Invalid);
             return false;
         };
@@ -485,12 +486,12 @@ where
 
     /// Verifies the decoded peer L-QC `proof` of `ready` on the shared blocking pool, then admits
     /// it to the catalog.
-    fn verify<Q: LqcVerifier<H, V> + Clone>(
+    fn verify<Q: LqcVerifier<H, S> + Clone>(
         &mut self,
         verifier: &Q,
         id: CertificateId<H::Digest>,
-        proof: Arc<Lqc<V, H::Digest>>,
-        ready: Ready<H, V, B>,
+        proof: Arc<Lqc<S, H::Digest>>,
+        ready: Ready<H, S, B>,
         process: &Span,
     ) {
         let mut verifier = verifier.clone();
@@ -522,7 +523,7 @@ where
     fn on_verified<R>(
         &mut self,
         resolver: &mut R,
-        verification: Verification<H, V, B>,
+        verification: Verification<H, S, B>,
     ) -> Result<(), Error>
     where
         R: Resolver<Key = BackfillKey<H::Digest>, Subscriber = BackfillSubscriber>,
@@ -550,7 +551,7 @@ where
     fn on_staged<R>(
         &mut self,
         resolver: &mut R,
-        completion: StagingCompletion<H, V, B>,
+        completion: StagingCompletion<H, S, B>,
     ) -> Result<(), Error>
     where
         R: Resolver<Key = BackfillKey<H::Digest>, Subscriber = BackfillSubscriber>,
@@ -574,7 +575,7 @@ where
     fn on_recheck<R>(
         &mut self,
         resolver: &mut R,
-        completion: Result<RecheckCompletion<H, V, B>, Aborted>,
+        completion: Result<RecheckCompletion<H, S, B>, Aborted>,
     ) -> Result<(), Error>
     where
         R: Resolver<Key = BackfillKey<H::Digest>, Subscriber = BackfillSubscriber>,
@@ -612,7 +613,7 @@ where
         resolver: &mut R,
         span: Span,
         target: Target<H::Digest>,
-        reply: Option<Reply<H, V, B>>,
+        reply: Option<Reply<H, S, B>>,
         reason: FetchReason,
     ) where
         R: Resolver<Key = BackfillKey<H::Digest>, Subscriber = BackfillSubscriber>,
@@ -669,9 +670,9 @@ where
         key: BackfillKey<H::Digest>,
         span: Span,
         target: Target<H::Digest>,
-        reply: Option<Reply<H, V, B>>,
+        reply: Option<Reply<H, S, B>>,
         reason: FetchReason,
-    ) -> Waiter<H, V, B> {
+    ) -> Waiter<H, S, B> {
         let id = self.registry.allocate();
         let reply =
             reply.map(|reply| reply.track(Cancellation { key, id }, &mut self.cancellations));
@@ -740,7 +741,7 @@ where
     }
 
     /// Cancels the network fetches and rechecks that removed waiters no longer need.
-    fn release<R>(&mut self, resolver: &mut R, removed: &[Removed<H, V, B>])
+    fn release<R>(&mut self, resolver: &mut R, removed: &[Removed<H, S, B>])
     where
         R: Resolver<Key = BackfillKey<H::Digest>, Subscriber = BackfillSubscriber>,
     {
@@ -772,7 +773,7 @@ where
         &mut self,
         resolver: &mut R,
         delivery: Option<&Delivery<BackfillKey<H::Digest>, BackfillSubscriber>>,
-        resolved: Resolved<H, V, B>,
+        resolved: Resolved<H, S, B>,
     ) -> Outcome
     where
         R: Resolver<Key = BackfillKey<H::Digest>, Subscriber = BackfillSubscriber>,

@@ -7,9 +7,10 @@ use crate::multimmit::{
         storage::{Error, blocks::BlockMeta, floors::FloorRecord},
         types::{Floor, MaybeFloor},
     },
+    scheme::Scheme,
     types::{BlockRef, Body, CertificateId, Lqc, TipRecord, TransactionBlockHeader},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{
     Context,
     archive::{Archive as _, Identifier, MultiArchive as _},
@@ -26,19 +27,19 @@ pub(super) struct StoredFloor<D: Digest> {
     pub(super) record: FloorRecord<D>,
 }
 
-impl<T, E, H, V, B> CatalogStore<T, E, H, V, B>
+impl<T, E, H, S, B> CatalogStore<T, E, H, S, B>
 where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Returns the L-QC with `id`, finalized or pending.
     pub(crate) async fn lqc(
         &self,
         id: CertificateId<H::Digest>,
-    ) -> Result<Option<Arc<Lqc<V, H::Digest>>>, Error> {
+    ) -> Result<Option<Arc<Lqc<S, H::Digest>>>, Error> {
         if let Some(proof) = self.final_lqc.get()?.get_by_key(&id.get()).await? {
             return Ok(Some(proof));
         }
@@ -55,7 +56,7 @@ where
     }
 
     /// Returns the first pending L-QC at the highest pending view.
-    pub(crate) async fn latest_lqc(&self) -> Result<Option<Arc<Lqc<V, H::Digest>>>, Error> {
+    pub(crate) async fn latest_lqc(&self) -> Result<Option<Arc<Lqc<S, H::Digest>>>, Error> {
         let pending = self.pending_lqc.get()?;
         let Some(view) = pending.last_index() else {
             return Ok(None);
@@ -149,7 +150,7 @@ where
         &self,
         at: OutputIndex,
         through: Option<u64>,
-    ) -> Result<MaybeFloor<V, H::Digest>, Error> {
+    ) -> Result<MaybeFloor<S, H::Digest>, Error> {
         let Some(StoredFloor { id, record, .. }) = self.floor_record_at(at, through).await? else {
             return Ok(None);
         };

@@ -9,10 +9,11 @@ use super::{
 use crate::multimmit::{
     actors::util::{gated, some_or_pending},
     machine::{BarrierAck, MAX_INFLIGHT_BARRIERS, Snapshot},
+    scheme::Scheme,
     storage::{JournalRecord, SafetyJournal, SnapshotError, SnapshotStore},
 };
 use commonware_actor::mailbox;
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select_loop;
 use commonware_runtime::{
     ContextCell, Error as RuntimeError, Handle, Spawner, spawn_cell,
@@ -34,18 +35,18 @@ struct Fault {
 }
 
 /// A finished snapshot write: the returned store, or why the write failed.
-type StoreResult<E, V, D> = Result<SnapshotStore<E, V, D>, SnapshotError>;
+type StoreResult<E, S, D> = Result<SnapshotStore<E, S, D>, SnapshotError>;
 
 /// Configuration for the persistence actor.
-pub(crate) struct Config<E: StorageContext, H: Hasher, V: Variant, K: Hooks = NoHooks> {
+pub(crate) struct Config<E: StorageContext, H: Hasher, S: Scheme, K: Hooks = NoHooks> {
     /// The epoch's safety journal, positioned after recovery.
-    pub(crate) journal: SafetyJournal<E, V, H::Digest>,
+    pub(crate) journal: SafetyJournal<E, S, H::Digest>,
     /// Durable checkpoint snapshots.
-    pub(crate) checkpoints: SnapshotStore<E, V, H::Digest>,
+    pub(crate) checkpoints: SnapshotStore<E, S, H::Digest>,
     /// Bound on queued commands and on appends awaiting durability.
     pub(crate) capacity: NonZeroUsize,
     /// Receives every result in the order it was produced.
-    pub(crate) output: mailbox::Sender<Output<V, H::Digest>>,
+    pub(crate) output: mailbox::Sender<Output<S, H::Digest>>,
     /// Runs each snapshot write under its `checkpoint` child.
     pub(crate) snapshot_tasks: E,
     /// The flush requests the actor serves.
@@ -55,8 +56,8 @@ pub(crate) struct Config<E: StorageContext, H: Hasher, V: Variant, K: Hooks = No
 }
 
 /// One appended barrier awaiting a covering sync.
-struct Pending<V: Variant, D: Digest, P> {
-    append: Append<V, D>,
+struct Pending<S: Scheme, D: Digest, P> {
+    append: Append<S, D>,
     ack: BarrierAck,
     point: P,
     encoded_size: usize,
@@ -75,41 +76,41 @@ struct PrefixSync<P> {
 }
 
 /// The checkpoint store and the snapshot write that may hold it.
-enum Checkpoint<E: StorageContext, V: Variant, D: Digest> {
+enum Checkpoint<E: StorageContext, S: Scheme, D: Digest> {
     /// No snapshot is being written.
-    Idle(SnapshotStore<E, V, D>),
+    Idle(SnapshotStore<E, S, D>),
     /// A task is writing the snapshot.
     Storing {
-        task: Handle<StoreResult<E, V, D>>,
+        task: Handle<StoreResult<E, S, D>>,
         origin: CheckpointOrigin,
         /// The write's span, which owns its failure.
         span: Span,
     },
     /// The snapshot is durable; the journal prunes once no append is pending.
     Stored {
-        store: SnapshotStore<E, V, D>,
+        store: SnapshotStore<E, S, D>,
         origin: CheckpointOrigin,
     },
 }
 
 /// The persistence actor for one epoch.
-pub(crate) struct Actor<E, H, V, K = NoHooks>
+pub(crate) struct Actor<E, H, S, K = NoHooks>
 where
     E: StorageContext + Spawner,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     K: Hooks,
 {
     context: ContextCell<E>,
     snapshot_tasks: E,
-    journal: Option<SafetyJournal<E, V, H::Digest>>,
-    checkpoint: Option<Checkpoint<E, V, H::Digest>>,
-    commands: mpsc::Receiver<Message<H, V>>,
+    journal: Option<SafetyJournal<E, S, H::Digest>>,
+    checkpoint: Option<Checkpoint<E, S, H::Digest>>,
+    commands: mpsc::Receiver<Message<H, S>>,
     commands_open: bool,
     flushes: mpsc::Receiver<()>,
     flush_requested: bool,
-    output: mailbox::Sender<Output<V, H::Digest>>,
-    pending: VecDeque<Pending<V, H::Digest, K::Point>>,
+    output: mailbox::Sender<Output<S, H::Digest>>,
+    pending: VecDeque<Pending<S, H::Digest, K::Point>>,
     pending_bytes: usize,
     pending_limit: usize,
     sync: Option<PrefixSync<K::Point>>,
@@ -117,11 +118,11 @@ where
     hooks: K,
 }
 
-impl<E, H, V, K> Actor<E, H, V, K>
+impl<E, H, S, K> Actor<E, H, S, K>
 where
     E: StorageContext + Spawner,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     K: Hooks,
 {
     /// Creates the actor and its command mailbox.
@@ -130,7 +131,7 @@ where
     /// queued commands and the appends awaiting durability: the actor stops receiving commands
     /// while that many appends are pending, so a stalled sync cannot turn prompt command intake
     /// into unbounded retention.
-    pub(crate) fn new(context: E, config: Config<E, H, V, K>) -> (Self, Mailbox<H, V>) {
+    pub(crate) fn new(context: E, config: Config<E, H, S, K>) -> (Self, Mailbox<H, S>) {
         let Config {
             journal,
             checkpoints,
@@ -255,7 +256,7 @@ where
         self.pending.is_empty() && self.sync.is_none()
     }
 
-    async fn process(&mut self, command: Message<H, V>) -> Result<(), Fault> {
+    async fn process(&mut self, command: Message<H, S>) -> Result<(), Fault> {
         match command {
             Message::Append(append) => self.append(append).await,
             Message::Checkpoint { cut, origin, span } => {
@@ -311,7 +312,7 @@ where
         parent = &append.span,
         fields(barrier = append.job.id().get())
     )]
-    async fn append(&mut self, append: Append<V, H::Digest>) -> Result<(), Fault> {
+    async fn append(&mut self, append: Append<S, H::Digest>) -> Result<(), Fault> {
         let journal = self.journal.take().expect(JOURNAL_PRESENT);
         let point = self.hooks.appending(&append.job);
         self.hooks.before_append(point, &*self.context).await;
@@ -442,7 +443,7 @@ where
     )]
     async fn roll(
         &mut self,
-        cut: Box<Snapshot<V, H::Digest>>,
+        cut: Box<Snapshot<S, H::Digest>>,
         origin: CheckpointOrigin,
     ) -> Result<(), Error> {
         if !self.idle() || !matches!(self.checkpoint, Some(Checkpoint::Idle(_))) {
@@ -466,7 +467,7 @@ where
     }
 
     /// Records a durable snapshot; its prune runs once no append is pending.
-    fn stored(&mut self, store: SnapshotStore<E, V, H::Digest>) {
+    fn stored(&mut self, store: SnapshotStore<E, S, H::Digest>) {
         let Some(Checkpoint::Storing { origin, .. }) = self.checkpoint.take() else {
             unreachable!("only a running snapshot write completes");
         };
@@ -504,7 +505,7 @@ where
         Ok(())
     }
 
-    fn emit(&self, output: Output<V, H::Digest>) {
+    fn emit(&self, output: Output<S, H::Digest>) {
         // A closed output means the voter stopped; the actor follows once its mailbox drops.
         let _ = self.output.enqueue(output);
     }
@@ -543,12 +544,12 @@ async fn wait_for_sync<P>(sync: Option<&mut PrefixSync<P>>) -> Result<(), Runtim
     (&mut sync.handle).await
 }
 
-async fn wait_for_store<E, V, D>(
-    checkpoint: Option<&mut Checkpoint<E, V, D>>,
-) -> Result<StoreResult<E, V, D>, RuntimeError>
+async fn wait_for_store<E, S, D>(
+    checkpoint: Option<&mut Checkpoint<E, S, D>>,
+) -> Result<StoreResult<E, S, D>, RuntimeError>
 where
     E: StorageContext,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     match checkpoint {

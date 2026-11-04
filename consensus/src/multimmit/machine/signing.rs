@@ -9,20 +9,21 @@ use super::{
     durability::{EffectId, SignEffect, SignRequest},
     job::{Generation, Issued},
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use crate::multimmit::scheme::Scheme;
+use commonware_cryptography::Digest;
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Debug)]
-struct ReservationEntry<S> {
-    subject: S,
+struct ReservationEntry<Sj> {
+    subject: Sj,
     issued_generation: Option<Generation>,
 }
 
 /// Bounded active durable signing reservations and their volatile capabilities.
 #[derive(Clone, Debug)]
-pub(crate) struct ReservationBook<S> {
+pub(crate) struct ReservationBook<Sj> {
     capacity: usize,
-    entries: BTreeMap<u64, ReservationEntry<S>>,
+    entries: BTreeMap<u64, ReservationEntry<Sj>>,
 }
 
 /// A signing reservation operation that contradicts the book's durable or volatile state.
@@ -45,7 +46,7 @@ pub(crate) enum ReservationError {
     StaleGeneration,
 }
 
-impl<S: Eq> ReservationBook<S> {
+impl<Sj: Eq> ReservationBook<Sj> {
     /// Creates an empty book holding at most `capacity` reservations.
     pub(crate) const fn new(capacity: usize) -> Self {
         Self {
@@ -55,7 +56,7 @@ impl<S: Eq> ReservationBook<S> {
     }
 
     /// Installs the durable subject before a signing capability can be issued.
-    pub(crate) fn reserve(&mut self, id: u64, subject: S) -> Result<(), ReservationError> {
+    pub(crate) fn reserve(&mut self, id: u64, subject: Sj) -> Result<(), ReservationError> {
         if let Some(existing) = self.entries.get(&id) {
             return if existing.subject == subject {
                 Ok(())
@@ -94,7 +95,7 @@ impl<S: Eq> ReservationBook<S> {
         &mut self,
         id: u64,
         generation: Generation,
-        subject: &S,
+        subject: &Sj,
     ) -> Result<(), ReservationError> {
         let entry = self.entries.get(&id).ok_or(ReservationError::Missing)?;
         if &entry.subject != subject {
@@ -111,7 +112,11 @@ impl<S: Eq> ReservationBook<S> {
     }
 
     /// Applies a journaled completion during replay, where no volatile capability exists.
-    pub(crate) fn replay_complete(&mut self, id: u64, subject: &S) -> Result<(), ReservationError> {
+    pub(crate) fn replay_complete(
+        &mut self,
+        id: u64,
+        subject: &Sj,
+    ) -> Result<(), ReservationError> {
         let entry = self.entries.get(&id).ok_or(ReservationError::Missing)?;
         if &entry.subject != subject {
             return Err(ReservationError::Conflict);
@@ -122,14 +127,14 @@ impl<S: Eq> ReservationBook<S> {
 
     /// Returns whether reservation `id` holds `subject` with a capability issued in
     /// `generation`.
-    pub(crate) fn is_issued(&self, id: u64, generation: Generation, subject: &S) -> bool {
+    pub(crate) fn is_issued(&self, id: u64, generation: Generation, subject: &Sj) -> bool {
         self.entries.get(&id).is_some_and(|entry| {
             &entry.subject == subject && entry.issued_generation == Some(generation)
         })
     }
 
     /// Returns the reserved subject when its volatile capability belongs to `generation`.
-    pub(crate) fn issued_subject(&self, id: u64, generation: Generation) -> Option<&S> {
+    pub(crate) fn issued_subject(&self, id: u64, generation: Generation) -> Option<&Sj> {
         self.entries.get(&id).and_then(|entry| {
             (entry.issued_generation == Some(generation)).then_some(&entry.subject)
         })
@@ -142,10 +147,10 @@ impl<S: Eq> ReservationBook<S> {
     }
 }
 
-impl<V: Variant, D: Digest> ChainState<V, D> {
+impl<S: Scheme, D: Digest> ChainState<S, D> {
     /// Returns the requests of a DA signing choice: a producer header, a DA vote, or a run of
     /// DA votes. Other signing choices hold no chain reservation.
-    fn signing_subject(effect: &SignEffect<V, D>) -> Option<Arc<[SignRequest<V, D>]>> {
+    fn signing_subject(effect: &SignEffect<S, D>) -> Option<Arc<[SignRequest<S, D>]>> {
         let requests = effect.requests();
         let reserved = match requests {
             [SignRequest::TransactionBlock(_) | SignRequest::DaVote(_)] => true,
@@ -161,7 +166,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     pub(crate) fn reserve_signing(
         &mut self,
         id: EffectId,
-        effect: &SignEffect<V, D>,
+        effect: &SignEffect<S, D>,
     ) -> Result<(), ChainError> {
         let Some(subject) = Self::signing_subject(effect) else {
             return Ok(());
@@ -175,7 +180,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     pub(crate) fn issue_signing(
         &mut self,
         issued: Issued<EffectId>,
-        effect: &SignEffect<V, D>,
+        effect: &SignEffect<S, D>,
     ) -> Result<(), ChainError> {
         if Self::signing_subject(effect).is_none() {
             return Ok(());
@@ -190,7 +195,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     pub(crate) fn signing_issued(
         &self,
         issued: Issued<EffectId>,
-        effect: &SignEffect<V, D>,
+        effect: &SignEffect<S, D>,
     ) -> bool {
         let Some(subject) = Self::signing_subject(effect) else {
             return true;
@@ -204,7 +209,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         &self,
         issued: Issued<EffectId>,
         index: usize,
-    ) -> Option<&SignRequest<V, D>> {
+    ) -> Option<&SignRequest<S, D>> {
         self.signing
             .issued_subject(issued.id().get(), issued.generation())?
             .get(index)
@@ -223,7 +228,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     pub(crate) fn complete_signing(
         &mut self,
         issued: Issued<EffectId>,
-        effect: &SignEffect<V, D>,
+        effect: &SignEffect<S, D>,
     ) -> Result<(), ChainError> {
         let Some(subject) = Self::signing_subject(effect) else {
             return Ok(());
@@ -237,7 +242,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     pub(crate) fn replay_signing(
         &mut self,
         id: EffectId,
-        effect: &SignEffect<V, D>,
+        effect: &SignEffect<S, D>,
     ) -> Result<(), ChainError> {
         let Some(subject) = Self::signing_subject(effect) else {
             return Ok(());
