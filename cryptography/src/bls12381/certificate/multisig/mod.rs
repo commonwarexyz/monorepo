@@ -14,6 +14,13 @@
 #[cfg(feature = "mocks")]
 pub mod mocks;
 
+#[commonware_macros::stability(ALPHA)]
+use super::claims::{self, Owned, Prepared};
+#[commonware_macros::stability(ALPHA)]
+use crate::{
+    Digest,
+    certificate::{Aggregator, Item},
+};
 use crate::{
     PublicKey,
     bls12381::primitives::{
@@ -23,6 +30,9 @@ use crate::{
     },
     certificate::{AssemblyError, Attestation, Namespace, Scheme, Signers, Subject, Verification},
 };
+#[cfg(not(feature = "std"))]
+#[commonware_macros::stability(ALPHA)]
+use alloc::vec;
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::BufMut;
@@ -344,6 +354,105 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
     pub const fn certificate_codec_config_unbounded() -> <Certificate<V> as Read>::Cfg {
         u32::MAX as usize
+    }
+
+    /// Sums attestations over any subjects into an aggregate.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn aggregate<'a, S, I>(
+        &self,
+        attestations: NonEmpty<I>,
+    ) -> Result<Lazy<aggregate::Signature<V>>, AssemblyError>
+    where
+        S: Scheme<Signature = V::Signature>,
+        I: Iterator<Item = &'a Attestation<S>>,
+    {
+        let mut signers =
+            Signers::try_from((self.participants.keys(), core::iter::empty::<Participant>()))?;
+        let mut signature = aggregate::Signature::zero();
+        for attestation in attestations {
+            signers.insert(attestation.signer)?;
+            signature.add(
+                attestation
+                    .signature
+                    .get()
+                    .ok_or(AssemblyError::MalformedSignature(attestation.signer))?,
+            );
+        }
+        Ok(Lazy::from(signature))
+    }
+
+    /// Verifies attestations and aggregates over any subjects with one randomly weighted batch,
+    /// returning one verdict per item.
+    ///
+    /// Known terms are subtracted from their aggregate before the batch, so they cost no
+    /// pairing.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn verify_aggregates<'a, S, R, D>(
+        &self,
+        rng: &mut R,
+        items: &[Item<'_, 'a, S, D>],
+        strategy: &impl Strategy,
+    ) -> Vec<bool>
+    where
+        S: Aggregator<Signature = V::Signature, Aggregate = Lazy<aggregate::Signature<V>>>,
+        S::Subject<'a, D>: Subject<Namespace = N>,
+        R: CryptoRng,
+        D: Digest,
+    {
+        // Decoding signatures and building messages dominate preparation, so items prepare in
+        // parallel.
+        let prepared = strategy.map_collect_vec(items, |item| {
+            claims::prepare::<_, _, V, _, _>(
+                self.participants.len(),
+                item,
+                |aggregate| aggregate.get().map(|signature| *signature.inner()),
+                |signer, subject| {
+                    Some(Owned {
+                        period: (),
+                        public: *self.participants.value(signer.into())?,
+                        namespace: subject.namespace(&self.namespace),
+                        message: subject.message(),
+                    })
+                },
+            )
+        });
+
+        let mut verdicts = vec![false; items.len()];
+        let mut positions = Vec::with_capacity(items.len());
+        let mut entries = Vec::<batch::Claim<'_, V>>::with_capacity(items.len());
+        for (position, prepared) in prepared.iter().enumerate() {
+            match prepared {
+                Prepared::Settled(valid) => verdicts[position] = *valid,
+                Prepared::Claim { signature, terms } => {
+                    verdicts[position] = true;
+                    positions.push(position);
+                    entries.push(batch::Claim {
+                        signature: *signature,
+                        terms: terms
+                            .as_slice()
+                            .iter()
+                            .map(|term| batch::Term {
+                                public: term.public,
+                                namespace: term.namespace,
+                                message: &term.message,
+                            })
+                            .collect(),
+                    });
+                }
+            }
+        }
+        if !entries.is_empty() {
+            for index in batch::verify_claims(rng, &entries, strategy) {
+                verdicts[positions[index]] = false;
+            }
+        }
+        verdicts
+    }
+
+    /// Returns the encoded size of an aggregate, which does not depend on its terms.
+    #[commonware_macros::stability(ALPHA)]
+    pub const fn max_aggregate_size(_terms: u32) -> usize {
+        aggregate::Signature::<V>::SIZE
     }
 }
 
@@ -711,6 +820,49 @@ macro_rules! impl_certificate_bls12381_multisig {
                 $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::is_attributable()
             }
         }
+
+        $crate::__alpha! {
+            impl<
+                P: $crate::PublicKey,
+                V: $crate::bls12381::primitives::variant::Variant,
+            > $crate::certificate::Aggregator for Scheme<P, V> {
+                type Aggregate = commonware_codec::types::lazy::Lazy<
+                    $crate::bls12381::primitives::ops::aggregate::Signature<V>,
+                >;
+
+                fn aggregate<'a, I>(
+                    &self,
+                    attestations: commonware_utils::iter::NonEmpty<I>,
+                ) -> Result<Self::Aggregate, $crate::certificate::AssemblyError>
+                where
+                    I: Iterator<Item = &'a $crate::certificate::Attestation<Self>>,
+                {
+                    self.generic.aggregate::<Self, _>(attestations)
+                }
+
+                fn verify_aggregates<R, D>(
+                    &self,
+                    rng: &mut R,
+                    items: &[$crate::certificate::Item<'_, '_, Self, D>],
+                    strategy: &impl commonware_parallel::Strategy,
+                ) -> Vec<bool>
+                where
+                    R: rand_core::CryptoRng,
+                    D: $crate::Digest,
+                {
+                    self.generic.verify_aggregates(rng, items, strategy)
+                }
+
+                fn max_aggregate_size(terms: u32) -> usize {
+                    $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::max_aggregate_size(terms)
+                }
+
+                fn aggregate_codec_config(
+                    _terms: u32,
+                ) -> <Self::Aggregate as commonware_codec::Read>::Cfg {
+                }
+            }
+        }
     };
 }
 
@@ -724,7 +876,10 @@ mod tests {
             ops::compute_public,
             variant::{MinPk, MinSig, Variant},
         },
-        certificate::{Attestation, Membership, Scheme as _, Verifier as _},
+        certificate::{
+            Aggregator as _, Attestation, Membership, Scheme as _, Term, Verifier as _,
+            aggregator_tests::Suite,
+        },
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
         sha256::Digest as Sha256Digest,
     };
@@ -1663,6 +1818,86 @@ mod tests {
     fn test_verify_attestations_rejects_malleability_variants() {
         test_verify_attestations_rejects_malleability::<MinPk>();
         test_verify_attestations_rejects_malleability::<MinSig>();
+    }
+
+    fn subject(index: usize) -> TestSubject {
+        TestSubject {
+            message: Bytes::from(format!("subject {index}")),
+        }
+    }
+
+    fn aggregator_suite<V: Variant>() {
+        let (schemes, verifier) = setup_signers::<V>(&mut test_rng(), 5);
+        Suite {
+            schemes: &schemes,
+            verifier: &verifier,
+            subject,
+            unique: true,
+        }
+        .run();
+    }
+
+    #[test]
+    fn test_aggregator_suite() {
+        aggregator_suite::<MinPk>();
+        aggregator_suite::<MinSig>();
+    }
+
+    /// Malformed aggregates fail, and errors that cancel across two aggregates are caught by the
+    /// batch's random weights.
+    fn aggregates_reject_malformed_and_cancelling<V: Variant>() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_signers::<V>(&mut rng, 4);
+        let attestations: Vec<_> = schemes
+            .iter()
+            .enumerate()
+            .map(|(i, scheme)| scheme.sign::<Sha256Digest>(subject(i)).unwrap())
+            .collect();
+        let terms: Vec<Term<'_, _, Sha256Digest>> = attestations
+            .iter()
+            .enumerate()
+            .map(|(i, attestation)| Term {
+                signer: attestation.signer,
+                subject: subject(i),
+                known: None,
+            })
+            .collect();
+        let aggregate = verifier.aggregate(non_empty![@&attestations]).unwrap();
+
+        let malformed = Lazy::deferred(
+            &mut Bytes::from(vec![0xFF; aggregate::Signature::<V>::SIZE]),
+            (),
+        );
+        assert!(!verifier.verify_aggregate(&mut rng, &terms, &malformed, &Sequential));
+
+        let delta = V::Signature::generator() * &Scalar::random(&mut rng);
+        let inner = *aggregate.get().unwrap().inner();
+        let high = Lazy::<aggregate::Signature<V>>::deferred(&mut (inner + &delta).encode(), ());
+        let low = Lazy::<aggregate::Signature<V>>::deferred(&mut (inner - &delta).encode(), ());
+        let items = [
+            Item::Aggregate {
+                terms: &terms,
+                aggregate: &high,
+            },
+            Item::Aggregate {
+                terms: &terms,
+                aggregate: &low,
+            },
+            Item::Aggregate {
+                terms: &terms,
+                aggregate: &aggregate,
+            },
+        ];
+        assert_eq!(
+            verifier.verify_aggregates(&mut rng, &items, &Sequential),
+            vec![false, false, true]
+        );
+    }
+
+    #[test]
+    fn test_aggregates_reject_malformed_and_cancelling() {
+        aggregates_reject_malformed_and_cancelling::<MinPk>();
+        aggregates_reject_malformed_and_cancelling::<MinSig>();
     }
 
     #[cfg(feature = "arbitrary")]
