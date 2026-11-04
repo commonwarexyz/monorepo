@@ -1,4 +1,5 @@
 //! Leverage common functionality across multiple primitives.
+// Measurement only: shifting the lines of this crate makes every crate that depends on it rebuild.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
