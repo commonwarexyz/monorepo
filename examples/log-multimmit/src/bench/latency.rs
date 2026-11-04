@@ -1,9 +1,10 @@
-//! Latency of locally produced blocks from input submission to finality and ordered delivery.
+//! Latency of locally produced blocks from input submission to finality, placement in the total
+//! order, and ordered delivery.
 
 use commonware_consensus::{
     multimmit::{
         FinalityFact, WAN_LATENCY,
-        types::{BlockRef, ChainId},
+        types::{BlockRef, ChainId, Placement},
     },
     types::{Height, View},
 };
@@ -93,6 +94,8 @@ enum Sample {
     Evicted,
     /// The block was delivered in the total order.
     Ordered,
+    /// Local finality fixed the block's position in the total order.
+    Placement { view: View },
     /// Consensus finalized the block for the first time.
     FirstFinality {
         class: Class,
@@ -107,6 +110,7 @@ impl Sample {
             Self::Start => "start",
             Self::Evicted => "eviction",
             Self::Ordered => "ordered",
+            Self::Placement { .. } => "placement",
             Self::FirstFinality { .. } => "first_finalization",
         }
     }
@@ -116,12 +120,13 @@ impl Sample {
             Self::Start => "submitted",
             Self::Evicted => "capacity",
             Self::Ordered => "delivery",
+            Self::Placement { .. } => "placed",
             Self::FirstFinality { class, .. } => class.label(),
         }
     }
 }
 
-/// One tracked block awaiting finality and ordered delivery.
+/// One tracked block awaiting finality, placement, and ordered delivery.
 struct ProposalStart {
     block: Reference,
     /// Digest of the block's parent, which extends finality coverage to older tracked blocks.
@@ -129,15 +134,26 @@ struct ProposalStart {
     started_at: SystemTime,
     input_ready_at: Option<SystemTime>,
     finalized: bool,
+    placed: bool,
     ordered: bool,
 }
 
-/// Tracks local blocks from input submission to consensus finality and to ordered delivery.
+impl ProposalStart {
+    /// Returns whether every milestone has been observed, so the block need not stay tracked.
+    const fn complete(&self) -> bool {
+        self.finalized && self.placed && self.ordered
+    }
+}
+
+/// Tracks local blocks from input submission to consensus finality, to placement in the total
+/// order, and to ordered delivery.
 ///
-/// A block is final once a finalized leader's chain tip is the block or one of its
-/// descendants. It is ordered once marshal delivers it in the total order, which can happen
-/// before consensus reports finality. A block stays tracked until both are observed or it is
-/// evicted to stay within capacity.
+/// A block is final once a finalized leader's chain tip is the block or one of its descendants.
+/// It is placed once consensus reports that local finality fixed its position in the total order
+/// ([`Activity::Placed`](commonware_consensus::multimmit::types::Activity::Placed)), which can be
+/// a view after finality when the final sweep halts before it. It is ordered once marshal delivers
+/// it in the total order. A block stays tracked until all three are observed or it is evicted to
+/// stay within capacity.
 pub struct ProposalLatency {
     started: VecDeque<ProposalStart>,
     capacity: usize,
@@ -148,13 +164,16 @@ pub struct ProposalLatency {
 struct LatencyMetrics {
     benchmark_quorum: Option<usize>,
     finality: Histogram,
+    placement: Histogram,
     ordering: Histogram,
     input_finality: Histogram,
     dropped: Counter,
     finality_evicted: Counter,
+    placement_evicted: Counter,
     starts: Counter,
     outstanding: Gauge,
     nonfinalized: Gauge,
+    unplaced: Gauge,
     proposed_early: Counter,
     proposed_late: Counter,
     extension_early: Counter,
@@ -177,6 +196,10 @@ impl LatencyMetrics {
                 "proposal_nonfinalized",
                 "retained starts without observed finality",
             ),
+            unplaced: context.gauge(
+                "proposal_unplaced",
+                "retained starts without observed placement in the total order",
+            ),
             proposed_early: context.counter(
                 "proposal_first_finality_proposed_early",
                 "first finality at or below proposed height with quorum votes",
@@ -198,6 +221,11 @@ impl LatencyMetrics {
                 "time from batch submission to first local consensus finality",
                 WAN_LATENCY,
             ),
+            placement: context.histogram(
+                "proposal_placement_latency",
+                "time from batch submission to local placement in the total order",
+                WAN_LATENCY,
+            ),
             ordering: context.histogram(
                 "proposal_ordering_latency",
                 "time from batch submission to delivery in the total order",
@@ -215,6 +243,10 @@ impl LatencyMetrics {
             finality_evicted: context.counter(
                 "proposal_finalization_latency_evicted",
                 "proposal starts evicted before first finality (see proposal_latency_dropped_total for ordering)",
+            ),
+            placement_evicted: context.counter(
+                "proposal_placement_latency_evicted",
+                "proposal starts evicted before placement in the total order",
             ),
         }
     }
@@ -244,9 +276,10 @@ impl LatencyMetrics {
             u64::try_from(now.duration_since(time).unwrap_or_default().as_micros())
                 .unwrap_or(u64::MAX)
         };
-        let evidence = match sample {
-            Sample::FirstFinality { view, votes, .. } => Some((view, votes)),
-            Sample::Start | Sample::Evicted | Sample::Ordered => None,
+        let (view, votes) = match sample {
+            Sample::FirstFinality { view, votes, .. } => (Some(view), Some(votes)),
+            Sample::Placement { view } => (Some(view), None),
+            Sample::Start | Sample::Evicted | Sample::Ordered => (None, None),
         };
         info!(
             target: BENCHMARK_TARGET,
@@ -262,18 +295,21 @@ impl LatencyMetrics {
             elapsed_us = elapsed(start.started_at),
             input_elapsed_us = start.input_ready_at.map(elapsed),
             finalized = start.finalized,
-            view = evidence.map(|(view, _)| view.get()),
-            votes = evidence.map(|(_, votes)| votes as u64),
+            placed = start.placed,
+            view = view.map(View::get),
+            votes = votes.map(|votes| votes as u64),
             quorum = self.benchmark_quorum.map(|quorum| quorum as u64),
             starts = self.starts.get(),
             drops = self.dropped.get(),
             finality_evictions = self.finality_evicted.get(),
+            placement_evictions = self.placement_evicted.get(),
             proposed_early = self.proposed_early.get(),
             proposed_late = self.proposed_late.get(),
             extension_early = self.extension_early.get(),
             extension_late = self.extension_late.get(),
             outstanding = self.outstanding.get(),
             nonfinalized = self.nonfinalized.get(),
+            unplaced = self.unplaced.get(),
             "proposal benchmark sample"
         );
     }
@@ -322,6 +358,10 @@ impl ProposalLatency {
                 metrics.finality_evicted.inc();
                 metrics.nonfinalized.dec();
             }
+            if !evicted.placed {
+                metrics.placement_evicted.inc();
+                metrics.unplaced.dec();
+            }
             if !evicted.ordered {
                 metrics.dropped.inc();
                 metrics.outstanding.dec();
@@ -331,12 +371,14 @@ impl ProposalLatency {
         self.metrics.starts.inc();
         self.metrics.outstanding.inc();
         self.metrics.nonfinalized.inc();
+        self.metrics.unplaced.inc();
         let start = ProposalStart {
             block,
             parent,
             started_at,
             input_ready_at,
             finalized: false,
+            placed: false,
             ordered: false,
         };
         self.metrics.sample(&start, Sample::Start, started_at);
@@ -348,23 +390,11 @@ impl ProposalLatency {
     /// Coverage extends from each finalized tip down to older tracked blocks through the parents
     /// recorded when tracking started.
     pub fn finalize(&mut self, finality: Finality<'_>, now: SystemTime) {
-        // Ordering removes only finalized starts. New submissions cannot be covered by
-        // this fact until their bodies have been staged and proposed.
-        let mut oldest = BTreeMap::<ChainId, Height>::new();
-        for start in self.started.iter().filter(|start| !start.finalized) {
-            oldest
-                .entry(start.block.chain())
-                .and_modify(|height| *height = (*height).min(start.block.height()))
-                .or_insert(start.block.height());
-        }
-        let parents = self
-            .started
+        let tips = finality
+            .blocks
             .iter()
-            .map(|start| (start.block, start.parent))
-            .collect::<HashMap<_, _>>();
-        let covered = Self::finalized_ancestry(finality.blocks, &oldest, |block| {
-            parents.get(&block).copied()
-        });
+            .map(|tip| (*tip, Height::zero(), tip.height()));
+        let covered = self.covered(tips, |start| start.finalized);
         let metrics = &self.metrics;
         for start in self.started.iter_mut() {
             if start.finalized || !covered.contains(&start.block) {
@@ -395,24 +425,87 @@ impl ProposalLatency {
                 );
             }
         }
-        self.started
-            .retain(|start| !start.finalized || !start.ordered);
+        self.started.retain(|start| !start.complete());
     }
 
-    fn finalized_ancestry(
-        blocks: &[Reference],
+    /// Records placement in the total order for every tracked block in a placed run.
+    ///
+    /// `view` is the view of the finalized leader whose finality completed the placement.
+    pub fn place(
+        &mut self,
+        placed: impl IntoIterator<Item = Placement<Sha256Digest>>,
+        view: View,
+        now: SystemTime,
+    ) {
+        let runs = placed
+            .into_iter()
+            .map(|run| (run.tip(), run.above(), run.height()));
+        let covered = self.covered(runs, |start| start.placed);
+        if covered.is_empty() {
+            return;
+        }
+        let metrics = &self.metrics;
+        for start in self.started.iter_mut() {
+            if start.placed || !covered.contains(&start.block) {
+                continue;
+            }
+            start.placed = true;
+            metrics.unplaced.dec();
+            metrics.placement.observe_between(start.started_at, now);
+            metrics.sample(start, Sample::Placement { view }, now);
+        }
+        self.started.retain(|start| !start.complete());
+    }
+
+    /// Returns the tracked blocks, not yet `done`, on the path to each tip above its lower bound
+    /// and at or below its height limit.
+    ///
+    /// Coverage extends from each tip down to older tracked blocks through the parents recorded
+    /// when tracking started. New submissions cannot be covered until their bodies have been
+    /// staged and proposed, and removal keeps only blocks some milestone still awaits.
+    fn covered(
+        &self,
+        tips: impl Iterator<Item = (Reference, Height, Height)>,
+        done: impl Fn(&ProposalStart) -> bool,
+    ) -> BTreeSet<Reference> {
+        let mut oldest = BTreeMap::<ChainId, Height>::new();
+        for start in self.started.iter().filter(|start| !done(start)) {
+            oldest
+                .entry(start.block.chain())
+                .and_modify(|height| *height = (*height).min(start.block.height()))
+                .or_insert(start.block.height());
+        }
+        if oldest.is_empty() {
+            return BTreeSet::new();
+        }
+        let parents = self
+            .started
+            .iter()
+            .map(|start| (start.block, start.parent))
+            .collect::<HashMap<_, _>>();
+        Self::ancestry(tips, &oldest, |block| parents.get(&block).copied())
+    }
+
+    /// Returns the blocks on the path to each tip, above its lower bound, at or below its height
+    /// limit, and at or above its chain's `oldest` height, following `parent` until it is
+    /// unknown.
+    fn ancestry(
+        tips: impl IntoIterator<Item = (Reference, Height, Height)>,
         oldest: &BTreeMap<ChainId, Height>,
         mut parent: impl FnMut(Reference) -> Option<Sha256Digest>,
     ) -> BTreeSet<Reference> {
-        let mut finalized = BTreeSet::new();
-        for tip in blocks {
+        let mut covered = BTreeSet::new();
+        for (tip, above, limit) in tips {
             let Some(oldest) = oldest.get(&tip.chain()) else {
                 continue;
             };
-            let mut cursor = *tip;
-            while cursor.height() >= *oldest {
-                finalized.insert(cursor);
-                if cursor.height() == *oldest {
+            let lowest = (*oldest).max(Height::new(above.get().saturating_add(1)));
+            let mut cursor = tip;
+            while cursor.height() >= lowest {
+                if cursor.height() <= limit {
+                    covered.insert(cursor);
+                }
+                if cursor.height() == lowest {
                     break;
                 }
                 let parent_height = cursor.height().previous().expect("above pending height");
@@ -422,10 +515,11 @@ impl ProposalLatency {
                 cursor = BlockRef::new(cursor.chain(), parent_height, digest);
             }
         }
-        finalized
+        covered
     }
 
-    /// Records ordered delivery once, retaining the start until finality is also observed.
+    /// Records ordered delivery once, retaining the start until finality and placement are also
+    /// observed.
     pub fn order(&mut self, block: Reference, now: SystemTime) {
         let Some(index) = self.started.iter().position(|start| start.block == block) else {
             return;
@@ -438,7 +532,7 @@ impl ProposalLatency {
         self.metrics.outstanding.dec();
         self.metrics.ordering.observe_between(start.started_at, now);
         self.metrics.sample(start, Sample::Ordered, now);
-        if start.finalized {
+        if start.complete() {
             self.started.remove(index);
         }
     }
@@ -447,6 +541,7 @@ impl ProposalLatency {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_consensus::multimmit::mocks::placement;
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, sync::Mutex};
@@ -531,6 +626,11 @@ mod tests {
                     },
                     now,
                 );
+                latency.place(
+                    [placement(reference(0, 2), Height::zero(), Height::new(2))],
+                    View::new(5),
+                    now + Duration::from_millis(500),
+                );
                 latency.order(reference(0, 2), now);
                 latency.start(reference(0, 3), parent(reference(0, 3)), started, None, now);
                 latency.start(reference(0, 4), parent(reference(0, 4)), started, None, now);
@@ -541,7 +641,7 @@ mod tests {
                 .lines()
                 .map(|line| serde_yaml::from_str(line).unwrap())
                 .collect();
-            assert_eq!(events.len(), 7);
+            assert_eq!(events.len(), 8);
             let first = &events[0]["fields"];
             assert_eq!(first["benchmark_event"].as_str(), Some("start"));
             assert_eq!(first["latency_start"].as_str(), Some("batch_submission"));
@@ -560,22 +660,30 @@ mod tests {
             assert_eq!(finality["view"].as_u64(), Some(4));
             assert_eq!(finality["votes"].as_u64(), Some(3));
             assert_eq!(finality["quorum"].as_u64(), Some(3));
+            let placement = &events[2]["fields"];
+            assert_eq!(placement["benchmark_event"].as_str(), Some("placement"));
+            assert_eq!(placement["reason"].as_str(), Some("placed"));
+            assert_eq!(placement["elapsed_us"].as_u64(), Some(2_500_000));
+            assert_eq!(placement["view"].as_u64(), Some(5));
+            assert_eq!(placement["placed"].as_bool(), Some(true));
             assert_eq!(
-                events[2]["fields"]["benchmark_event"].as_str(),
+                events[3]["fields"]["benchmark_event"].as_str(),
                 Some("ordered")
             );
-            assert_eq!(events[2]["fields"]["reason"].as_str(), Some("delivery"));
+            assert_eq!(events[3]["fields"]["reason"].as_str(), Some("delivery"));
             assert_eq!(
-                events[4]["fields"]["benchmark_event"].as_str(),
+                events[5]["fields"]["benchmark_event"].as_str(),
                 Some("eviction")
             );
-            assert_eq!(events[4]["fields"]["reason"].as_str(), Some("capacity"));
-            let last = &events[6]["fields"];
+            assert_eq!(events[5]["fields"]["reason"].as_str(), Some("capacity"));
+            let last = &events[7]["fields"];
             assert_eq!(last["benchmark_event"].as_str(), Some("ordered"));
             assert_eq!(last["starts"].as_u64(), Some(3));
             assert_eq!(last["drops"].as_u64(), Some(1));
+            assert_eq!(last["placement_evictions"].as_u64(), Some(1));
             assert_eq!(last["outstanding"].as_u64(), Some(0));
             assert_eq!(last["nonfinalized"].as_u64(), Some(1));
+            assert_eq!(last["unplaced"].as_u64(), Some(1));
         });
     }
 
@@ -822,6 +930,13 @@ mod tests {
             assert_eq!(latency.metrics.extension_early.get(), 1);
             assert_eq!(latency.metrics.nonfinalized.get(), 1);
             assert_eq!(latency.metrics.outstanding.get(), 2);
+            // Finalized and ordered blocks stay tracked until they are placed.
+            assert_eq!(latency.started.len(), 4);
+            latency.place(
+                [placement(blocks[2], Height::zero(), Height::new(2))],
+                View::new(8),
+                now,
+            );
             assert_eq!(latency.started.len(), 2);
             assert!(
                 latency
@@ -833,6 +948,13 @@ mod tests {
             assert!(metrics.contains("proposal_finalization_latency_count 3\n"));
             assert!(metrics.contains("proposal_ordering_latency_count 2\n"));
         });
+    }
+
+    /// Pairs each tip with its own height as the coverage limit.
+    fn tips(tips: &[Reference]) -> Vec<(Reference, Height, Height)> {
+        tips.iter()
+            .map(|tip| (*tip, Height::zero(), tip.height()))
+            .collect()
     }
 
     #[test]
@@ -849,7 +971,7 @@ mod tests {
         let unrelated = reference(ChainId::new(1), 100);
         let oldest = BTreeMap::from([(chain, Height::new(98))]);
         let mut lookups = 0;
-        let finalized = ProposalLatency::finalized_ancestry(&[tip, unrelated], &oldest, |cursor| {
+        let finalized = ProposalLatency::ancestry(tips(&[tip, unrelated]), &oldest, |cursor| {
             lookups += 1;
             Some(reference(cursor.chain(), cursor.height().get() - 1).digest())
         });
@@ -858,17 +980,112 @@ mod tests {
             finalized,
             (98..=100).map(|height| reference(chain, height)).collect()
         );
-        let finalized = ProposalLatency::finalized_ancestry(&[tip], &BTreeMap::new(), |_| {
+        let finalized = ProposalLatency::ancestry(tips(&[tip]), &BTreeMap::new(), |_| {
             panic!("no pending proposal needs ancestry")
         });
         assert!(finalized.is_empty());
-        let finalized =
-            ProposalLatency::finalized_ancestry(&[reference(chain, 97)], &oldest, |_| {
-                panic!("tip precedes every pending proposal")
-            });
+        let finalized = ProposalLatency::ancestry(tips(&[reference(chain, 97)]), &oldest, |_| {
+            panic!("tip precedes every pending proposal")
+        });
         assert!(finalized.is_empty());
-        let finalized = ProposalLatency::finalized_ancestry(&[tip], &oldest, |_| None);
+        let finalized = ProposalLatency::ancestry(tips(&[tip]), &oldest, |_| None);
         assert_eq!(finalized, BTreeSet::from([tip]));
+
+        // A height limit below the tip covers only the ancestors at or below it.
+        let parent =
+            |cursor: Reference| Some(reference(cursor.chain(), cursor.height().get() - 1).digest());
+        let placed =
+            ProposalLatency::ancestry([(tip, Height::zero(), Height::new(99))], &oldest, parent);
+        assert_eq!(
+            placed,
+            (98..=99).map(|height| reference(chain, height)).collect()
+        );
+
+        // A lower bound covers only the ancestors above it, whatever lies below.
+        let placed = ProposalLatency::ancestry(
+            [(tip, Height::new(98), Height::new(99))],
+            &oldest,
+            |cursor| {
+                assert!(cursor.height() > Height::new(99), "walked below the bound");
+                parent(cursor)
+            },
+        );
+        assert_eq!(placed, BTreeSet::from([reference(chain, 99)]));
+    }
+
+    #[test]
+    fn proposal_latency_places_only_up_to_the_placed_height() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut latency = ProposalLatency::new(&context, NZUsize!(8), None);
+            let now = context.current();
+            let blocks = chain(3);
+            for block in &blocks {
+                latency.start(*block, parent(*block), now, None, now);
+            }
+
+            // Finality covers all three blocks, but the sweep halted above height 2.
+            latency.finalize(finality(&[blocks[2]], &[Height::new(3)], 3), now);
+            let later = now + Duration::from_millis(50);
+            latency.place(
+                [placement(blocks[2], Height::zero(), Height::new(2))],
+                View::new(4),
+                later,
+            );
+            let placed = |latency: &ProposalLatency| {
+                latency
+                    .started
+                    .iter()
+                    .filter(|start| start.placed)
+                    .map(|start| start.block)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(placed(&latency), blocks[..2]);
+            assert_eq!(latency.metrics.unplaced.get(), 1);
+
+            // A later view places the last block; ordered delivery then completes every block.
+            latency.place(
+                [placement(blocks[2], Height::zero(), Height::new(3))],
+                View::new(5),
+                later + Duration::from_millis(50),
+            );
+            assert_eq!(placed(&latency), blocks);
+            for block in &blocks {
+                latency.order(*block, later + Duration::from_millis(100));
+            }
+            assert!(latency.started.is_empty());
+            let metrics = context.encode();
+            assert!(metrics.contains("proposal_placement_latency_count 3\n"));
+            assert!(metrics.contains("proposal_finalization_latency_count 3\n"));
+        });
+    }
+
+    #[test]
+    fn proposal_latency_keeps_a_finalized_and_ordered_block_until_placed() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut latency = ProposalLatency::new(&context, NZUsize!(4), None);
+            let now = context.current();
+            let block = reference(0, 1);
+            latency.start(block, parent(block), now, None, now);
+            latency.finalize(finality(&[block], &[Height::new(1)], 3), now);
+            latency.order(block, now);
+            assert_eq!(latency.started.len(), 1);
+
+            // Placement of another chain does not cover it.
+            latency.place(
+                [placement(reference(1, 4), Height::zero(), Height::new(4))],
+                View::new(2),
+                now,
+            );
+            assert_eq!(latency.started.len(), 1);
+
+            latency.place(
+                [placement(block, Height::zero(), Height::new(1))],
+                View::new(3),
+                now,
+            );
+            assert!(latency.started.is_empty());
+            assert_eq!(latency.metrics.unplaced.get(), 0);
+        });
     }
 
     #[test]
@@ -891,6 +1108,18 @@ mod tests {
             latency.finalize(finality(&[left], &[Height::new(100)], 3), now);
             assert!(latency.started.iter().all(|start| start.finalized));
             latency.order(left, now);
+            // Placement follows exact ancestry too.
+            latency.place(
+                [placement(right, Height::zero(), Height::new(1))],
+                View::new(1),
+                now,
+            );
+            assert_eq!(latency.started.len(), 1);
+            latency.place(
+                [placement(left, Height::zero(), Height::new(1))],
+                View::new(1),
+                now,
+            );
             assert!(latency.started.is_empty());
 
             // A finalized tip covers the tracked blocks its recorded parents lead to.
@@ -903,6 +1132,11 @@ mod tests {
             for block in &blocks {
                 latency.order(*block, now);
             }
+            latency.place(
+                [placement(blocks[1], Height::zero(), Height::new(2))],
+                View::new(2),
+                now,
+            );
             assert!(latency.started.is_empty());
         });
     }
