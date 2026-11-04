@@ -17,7 +17,10 @@ use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deter
 use commonware_storage::{
     journal::{authenticated::Config as MerkleConfig, contiguous::variable::Config as VConfig},
     merkle::{Graftable, Location, mmb, mmr},
-    qmdb::current::{VariableConfig, unordered::variable::Db as Current},
+    qmdb::{
+        any::value::VariableEncoding,
+        current::{VariableConfig, unordered::variable::Db as Current},
+    },
     translator::TwoCap,
 };
 use commonware_storage_fuzz::{
@@ -409,7 +412,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                     .expect("proof generation failed for a recovered key");
                 assert_eq!(proved_value, value);
                 assert!(
-                    Db::<F>::verify_key_value_proof(key, proved_value, &proof, &root),
+                    proof.verify::<Sha256, VariableEncoding<Value>, _>(key, proved_value, &root),
                     "key value proof failed to verify after crash recovery"
                 );
             }
@@ -424,7 +427,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                     .await
                     .expect("range proof generation failed after recovery");
                 assert!(
-                    Db::<F>::verify_range_proof(&proof, loc, &ops, &chunks, &root),
+                    proof.verify::<Sha256, _, _>(loc, &ops, &chunks, &root),
                     "range proof failed to verify after crash recovery at loc {loc}"
                 );
             }

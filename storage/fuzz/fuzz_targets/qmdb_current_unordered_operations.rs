@@ -8,7 +8,7 @@ use commonware_storage::{
     journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FConfig},
     merkle::{Graftable, Location, mmb, mmr},
     qmdb::{
-        any::traits::DbAny as _,
+        any::{traits::DbAny as _, value::FixedEncoding},
         current::{FixedConfig as Config, unordered::fixed::Db as CurrentDb},
     },
     translator::TwoCap,
@@ -297,8 +297,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             .expect("Range proof should not fail");
 
                         assert!(
-                            Db::<F>::verify_range_proof(
-                                &proof,
+                            proof.verify::<Sha256, _, _>(
                                 start_loc,
                                 &ops,
                                 &chunks,
@@ -337,8 +336,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         if range_proof.proof.digests != bad_digests {
                             let mut bad_digest_proof = range_proof.clone();
                             bad_digest_proof.proof.digests = bad_digests;
-                            assert!(!Db::<F>::verify_range_proof(
-                                &bad_digest_proof,
+                            assert!(!bad_digest_proof.verify::<Sha256, _, _>(
                                 start_loc,
                                 &ops,
                                 &chunks,
@@ -351,8 +349,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             && range_proof.pending_chunk_digest != bad_pending {
                                 let mut bad_pending_proof = range_proof.clone();
                                 bad_pending_proof.pending_chunk_digest = bad_pending;
-                                assert!(!Db::<F>::verify_range_proof(
-                                    &bad_pending_proof,
+                                assert!(!bad_pending_proof.verify::<Sha256, _, _>(
                                     start_loc,
                                     &ops,
                                     &chunks,
@@ -364,8 +361,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         if range_proof.partial_chunk_digest != bad_partial_digest {
                             let mut bad_partial_proof = range_proof.clone();
                             bad_partial_proof.partial_chunk_digest = bad_partial_digest;
-                            assert!(!Db::<F>::verify_range_proof(
-                                &bad_partial_proof,
+                            assert!(!bad_partial_proof.verify::<Sha256, _, _>(
                                 start_loc,
                                 &ops,
                                 &chunks,
@@ -382,8 +378,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             corrupted
                         }).collect();
                         if chunks != bad_chunks {
-                            assert!(!Db::<F>::verify_range_proof(
-                                &range_proof,
+                            assert!(!range_proof.verify::<Sha256, _, _>(
                                 start_loc,
                                 &ops,
                                 &bad_chunks,
@@ -406,12 +401,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         Ok((proof, value)) => {
                             let expected = committed_state.get(key).copied().flatten().expect("key should exist in committed state");
                             assert_eq!(value, Value::new(expected));
-                            let verification_result = Db::<F>::verify_key_value_proof(
-                                k,
-                                value,
-                                &proof,
-                                &current_root,
-                            );
+                            let verification_result = proof
+                                .verify::<Sha256, FixedEncoding<Value>, _>(k, value, &current_root);
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");
                         }
                         Err(commonware_storage::qmdb::Error::KeyNotFound) => {
