@@ -104,6 +104,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         outputs: Vec<FinalityOutput<S, H::Digest>>,
     ) -> Result<(), StepError> {
         for output in outputs {
+            self.report_certificate_history(&output.certificate, output.leader);
             self.apply_finality(output.observation, output.certificate, output.derived)?;
         }
         Ok(())

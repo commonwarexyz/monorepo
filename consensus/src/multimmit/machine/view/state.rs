@@ -5,6 +5,7 @@ use super::slot::ViewTransition;
 use super::{
     certificate::{CertificateScan, ViewCertificateId, ViewCertificateJob},
     claims::{Claim, ClaimIndex, ClaimKind},
+    history::{HistoryRecord, HistoryReports, LeaderHistory},
     proposal::{PassRestarts, RegularSignPass, TimeoutCutoff, ViewMetrics},
     slot::{SlotError, ViewSlotSnapshot},
     store::{
@@ -12,6 +13,8 @@ use super::{
         ParentRecord, ProposalRecords, StickyMessage, ViewMessageKind, VqcRecords,
     },
 };
+#[cfg(test)]
+use crate::multimmit::types::LeaderBlock;
 use crate::{
     Epochable as _, Viewable,
     multimmit::{
@@ -28,8 +31,8 @@ use crate::{
         },
         scheme::Scheme,
         types::{
-            Artifact, ArtifactId, CertificateId, CodecConfig, LeaderBlock, SelectedCommitments,
-            TipRecord, genesis_history,
+            Artifact, ArtifactId, CertificateId, CodecConfig, SelectedCommitments, TipRecord,
+            genesis_history,
         },
     },
     types::{Epoch, Participant, Round, View},
@@ -85,6 +88,9 @@ pub(crate) struct RetireFloors<D: Digest> {
     pub(crate) parents: View,
     /// The proposal anchor, which is always retained as a parent.
     pub(crate) anchor: Option<CertificateId<D>>,
+    /// Leaders at or below this view are no longer awaited or remembered by view for history
+    /// reporting.
+    pub(crate) reports: View,
 }
 
 /// View-layer facts and this node's view choices for one epoch.
@@ -141,6 +147,8 @@ pub(crate) struct ViewState<S: Scheme, D: Digest> {
     pub(super) certificate_ids: IdSequence<ViewCertificateId>,
     /// Certificate work issued and not yet taken.
     pub(super) capabilities: Capabilities<S, D>,
+    /// Leader history records reported, awaiting their parent, or not yet drained.
+    pub(super) history: HistoryReports<D>,
 }
 
 /// Everything retained for one view.
@@ -279,6 +287,7 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
             metrics: ViewMetrics::default(),
             certificate_ids: IdSequence::new(),
             capabilities: Vec::new(),
+            history: HistoryReports::default(),
         }
     }
 
@@ -309,6 +318,7 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
     }
 
     /// Reconstructs the safe-tip opening committed by a leader from its retained parent.
+    #[cfg(test)]
     pub(crate) fn leader_history<H: Hasher<Digest = D>>(
         &self,
         leader: &LeaderBlock<S, D>,
@@ -323,12 +333,49 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
             .ok_or(ViewError::Proposal)
     }
 
+    /// Reports the safe-tip opening `source` commits to, unless it was already reported.
+    ///
+    /// The opening is reconstructed from the retained parent; a leader whose parent is not
+    /// retained waits until it is. See [`HistoryReports`] for the exactly-once rule.
+    pub(crate) fn report_history(&mut self, source: LeaderHistory<D>) {
+        if self.history.reported(&source) {
+            return;
+        }
+        let Some(parent) = self.parents.get(&source.parent) else {
+            self.history.await_parent(source);
+            return;
+        };
+        // The parent caches the commitment of the opening its children name, so a mismatched
+        // leader is skipped without reconstructing or hashing the record.
+        if parent.child_history != Some(source.history) {
+            return;
+        }
+        let Ok(record) = parent.tip_record() else {
+            return;
+        };
+        self.history.record(source, Arc::new(record));
+    }
+
+    /// Takes the history records reconstructed since the last drain.
+    pub(crate) fn take_histories(&mut self) -> Vec<HistoryRecord<D>> {
+        self.history.take_pending()
+    }
+
+    /// Drops the history records not yet drained, leaving their leaders unreported.
+    pub(crate) fn discard_histories(&mut self) {
+        self.history.discard_pending();
+    }
+
     /// Applies every retirement floor in dependency order and returns the retired proposal
     /// parents.
     pub(crate) fn retire(&mut self, floors: RetireFloors<D>) -> Vec<CertificateId<D>> {
         self.retire_transitions_through(floors.transitions);
         let retired = self.retire_parents_through(floors.parents, floors.anchor);
         self.retire_forwarded_through(floors.transitions);
+        self.history.retire_parents(&retired);
+        let parents = &self.parents;
+        self.history
+            .retire_through(floors.reports, |parent| parents.contains_key(parent));
         retired
     }
 

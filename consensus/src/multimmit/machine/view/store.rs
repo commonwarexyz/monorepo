@@ -449,6 +449,9 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
         let ids = self.parents_by_view.entry(certificate.view()).or_default();
         let index = ids.binary_search(&id).unwrap_or_else(|index| index);
         ids.insert(index, id);
+        for source in self.history.take_awaiting(&id) {
+            self.report_history(source);
+        }
         Ok(id)
     }
 

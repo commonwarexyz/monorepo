@@ -40,6 +40,7 @@ use super::{
     job::{Admit, Generation, IdSequence, Issued, JobTable, SequenceId},
     util::OneOrMany,
     verification::Observation,
+    view::LeaderHistory,
 };
 use crate::{
     Epochable, Viewable,
@@ -98,6 +99,8 @@ pub(super) struct FinalityOutput<S: Scheme, D: Digest> {
     pub(super) certificate: Arc<Artifact<S, D>>,
     /// The V-QC projection verification derived from the certificate, if any.
     pub(super) derived: Option<DerivedVqc<S, D>>,
+    /// The digest of the certified leader block, when verification already derived it.
+    pub(super) leader: Option<D>,
 }
 
 impl<S: Scheme, D: Digest> FinalityOutput<S, D> {
@@ -107,10 +110,18 @@ impl<S: Scheme, D: Digest> FinalityOutput<S, D> {
         certificate: &Arc<Artifact<S, D>>,
         derivations: Option<&mut CertificateDerivations<S, D>>,
     ) -> Self {
+        let leader = match derivations.as_deref() {
+            Some(
+                CertificateDerivations::Vqc { leader, .. }
+                | CertificateDerivations::Lqc { leader, .. },
+            ) => Some(*leader),
+            None => None,
+        };
         Self {
             observation,
             certificate: Arc::clone(certificate),
             derived: derivations.and_then(CertificateDerivations::take_derived),
+            leader,
         }
     }
 }
@@ -271,6 +282,9 @@ pub(crate) struct FinalityState<S: Scheme, D: Digest> {
     lqc_aggregate_ids: IdSequence<LqcAggregateId>,
     capabilities: Capabilities<S, D>,
     updates: Vec<FinalityUpdate<D>>,
+    /// The leaders of the pools whose finality fact changed since they were last taken, which
+    /// may now report their history record.
+    histories: Vec<LeaderHistory<D>>,
     /// The highest final block height a finality update reported, by chain index.
     finalized: Vec<Height>,
     /// Views at or below this one are retired; zero before any retirement, since no finality
@@ -1225,6 +1239,7 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
             lqc_aggregate_ids: IdSequence::new(),
             capabilities: Vec::new(),
             updates: Vec::new(),
+            histories: Vec::new(),
             finalized: Vec::new(),
             retired_through: View::zero(),
             proof: None,
@@ -2329,6 +2344,7 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
             pools,
             ready_lqcs,
             updates,
+            histories,
             finalized,
             ..
         } = self;
@@ -2397,6 +2413,7 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
                             }
                             finalized[index] = finalized[index].max(block.height());
                         }
+                        histories.push(LeaderHistory::new(&pool.leader, key.leader));
                         updates.push(update);
                     }
                     if let Some(observation) = pool.stage_lqc(config.view_quorum())? {
@@ -2421,9 +2438,15 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
         take(&mut self.updates)
     }
 
-    /// Discards recorded finality updates.
+    /// Hands every leader whose finality fact changed since the last call to `report`.
+    pub(super) fn drain_histories(&mut self, report: impl FnMut(LeaderHistory<D>)) {
+        self.histories.drain(..).for_each(report);
+    }
+
+    /// Discards recorded finality updates and the leaders they changed.
     pub(crate) fn clear_updates(&mut self) {
         self.updates.clear();
+        self.histories.clear();
     }
 
     fn pool_key_and_signer(vote: &Vote<S, D>) -> (PoolKey<D>, Participant) {
