@@ -1434,7 +1434,7 @@ mod tests {
     use commonware_codec::{Encode, FixedSize};
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{test_collect_traces, test_traced};
-    use commonware_parallel::{Rayon, Sequential, mocks::Explorer};
+    use commonware_parallel::{Rayon, Sequential, mocks::Explorer, rayon::ThreadPoolBuilder};
     use commonware_runtime::{
         Runner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
@@ -4553,7 +4553,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_merkleize_retains_ancestors_after_cancellation() {
         deterministic::Runner::default().start(|context| async move {
-            let pool = Rayon::new(NZUsize!(2)).unwrap();
+            let pool = Rayon::new(ThreadPoolBuilder::new(NZUsize!(2))).unwrap();
             let strategy = Explorer::parallel(&pool);
             let merkle_cfg = merkle_config_with("cancelled-merkleize", strategy);
             let journal_cfg = journal_config("cancelled-merkleize");

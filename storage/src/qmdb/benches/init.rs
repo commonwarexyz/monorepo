@@ -87,7 +87,8 @@ async fn populate_keyless<F: Family>(ctx: Context, operations: u64) {
         batch = batch.append(make_var_value(&mut rng));
         if rng.next_u32().is_multiple_of(COMMIT_FREQUENCY) {
             let merkleized = batch
-                .merkleize(&db, None, db.inactivity_floor_loc())
+                .with_inactivity_floor(db.inactivity_floor_loc())
+                .merkleize(&db)
                 .await
                 .unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
@@ -96,7 +97,8 @@ async fn populate_keyless<F: Family>(ctx: Context, operations: u64) {
         }
     }
     let merkleized = batch
-        .merkleize(&db, None, db.inactivity_floor_loc())
+        .with_inactivity_floor(db.inactivity_floor_loc())
+        .merkleize(&db)
         .await
         .unwrap();
     let db = db.apply_batch(merkleized).await.unwrap();
