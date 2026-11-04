@@ -142,22 +142,26 @@ jobs:
           - { suite: fast, profile: default, partition: 1, partitions: 2 }
           - { suite: fast, profile: default, partition: 2, partitions: 2 }
         include:
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 1, partitions: 16 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 2, partitions: 16 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 3, partitions: 16 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 4, partitions: 16 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 5, partitions: 16 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 6, partitions: 16 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 7, partitions: 16 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 8, partitions: 16 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 9, partitions: 16 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 10, partitions: 16 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 11, partitions: 16 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 12, partitions: 16 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 13, partitions: 16 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 14, partitions: 16 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 15, partitions: 16 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 16, partitions: 16 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 1, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 2, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 3, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 4, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 5, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 6, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 7, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 8, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 9, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 10, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 11, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 12, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 13, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 14, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 15, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 16, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 17, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 18, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 19, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 20, partitions: 20 } }
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
