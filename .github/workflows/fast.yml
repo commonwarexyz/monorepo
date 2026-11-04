@@ -142,26 +142,21 @@ jobs:
           - { suite: fast, profile: default, partition: 1, partitions: 2 }
           - { suite: fast, profile: default, partition: 2, partitions: 2 }
         include:
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 1, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 2, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 3, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 4, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 5, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 6, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 7, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 8, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 9, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 10, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 11, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 12, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 13, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 14, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 15, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 16, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 17, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 18, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 19, partitions: 20 } }
-          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 20, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 1, partitions: 15 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 2, partitions: 15 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 3, partitions: 15 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 4, partitions: 15 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 5, partitions: 15 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 6, partitions: 15 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 7, partitions: 15 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 8, partitions: 15 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 9, partitions: 15 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 10, partitions: 15 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 11, partitions: 15 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 12, partitions: 15 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 13, partitions: 15 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 14, partitions: 15 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 15, partitions: 15 } }
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -180,7 +175,7 @@ jobs:
       run: >-
         cargo-nextest nextest run --archive-file "$RUNNER_TEMP/tests.tar.zst"
         --workspace-remap "$GITHUB_WORKSPACE" --profile ${{ matrix.shard.profile }}
-        --partition hash:${{ matrix.shard.partition }}/${{ matrix.shard.partitions }} --verbose
+        --partition slice:${{ matrix.shard.partition }}/${{ matrix.shard.partitions }} --verbose
 
   Tests-Subset:
     name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\"${{ matrix.rustflags && format(', rustflags: \"{0}\"', matrix.rustflags) || '' }}, cpu: \"${{ matrix.sde && format('native, else sde -{0}', matrix.sde) || matrix.qemu && format('native, else qemu -cpu {0}', matrix.qemu) || 'native' }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) || '' }}\")${{ matrix.partition && format(' (partition: {0})', matrix.partition) || '' }}"

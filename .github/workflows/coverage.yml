@@ -131,7 +131,7 @@ jobs:
         name: coverage-tests
         path: ${{ runner.temp }}
     - name: Generate coverage report
-      run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov nextest --branch --archive-file "$RUNNER_TEMP/coverage.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" --lcov --output-path lcov-${{ matrix.partition }}.info --partition hash:${{ matrix.partition }}/20 --profile all
+      run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov nextest --branch --archive-file "$RUNNER_TEMP/coverage.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" --lcov --output-path lcov-${{ matrix.partition }}.info --partition slice:${{ matrix.partition }}/20 --profile all
     - name: Store coverage report
       uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
       with:
