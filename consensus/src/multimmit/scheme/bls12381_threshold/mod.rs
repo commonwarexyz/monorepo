@@ -3,8 +3,7 @@
 //! Multimmit uses three independent key roles:
 //!
 //! - ordinary keys sign Pointcheval-Sanders synchronized aggregate signatures
-//!   ([`sas`](commonware_cryptography::bls12381::primitives::ops::sas)) over transaction blocks,
-//!   leader blocks, votes, and novotes, each in its [`Period`](super::Period);
+//!   ([`sas`]) over transaction blocks, leader blocks, votes, and novotes, each in its own period;
 //! - a threshold sharing at the epoch's [`DaQuorum`](crate::multimmit::types::DaQuorum) (`n-2f`,
 //!   or `n-f` for binding certificates) produces constant-size data-availability certificates;
 //!   and
