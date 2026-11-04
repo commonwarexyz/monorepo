@@ -1,7 +1,6 @@
 //! Per-chain path limits and binding DA quorums.
 
 use super::*;
-use crate::multimmit::types::{DaQuorum, Error as TypesError, genesis_tip_commitment};
 
 /// Pipelined chains everywhere except chain 0, which places only certified blocks.
 fn receipt_limits() -> Vec<PathLimits> {
@@ -12,13 +11,13 @@ fn receipt_limits() -> Vec<PathLimits> {
 
 /// Returns committees with the same keys: one holding chain 0 to `d = 0` and `e = 0`, and one
 /// bounding every chain by the other's largest limits.
-fn committees<V: Variant>() -> (Committee<V>, Committee<V>) {
-    let receipts = Committee::builder(SEED, PARTICIPANTS)
+fn committees<S: Suite>() -> (Committee<S>, Committee<S>) {
+    let receipts = Committee::<S>::builder(SEED, PARTICIPANTS)
         .namespace(NAMESPACE)
         .limits(PathLimits::new(2, 2))
         .chain_limits(receipt_limits())
         .build();
-    let uniform = Committee::builder(SEED, PARTICIPANTS)
+    let uniform = Committee::<S>::builder(SEED, PARTICIPANTS)
         .namespace(NAMESPACE)
         .limits(PathLimits::new(2, 2))
         .build();
@@ -27,11 +26,11 @@ fn committees<V: Variant>() -> (Committee<V>, Committee<V>) {
 }
 
 /// Returns a leader block for `view` above genesis with `payloads` blocks on every chain.
-fn leader<V: Variant>(
-    committee: &Committee<V>,
+fn leader<S: Suite>(
+    committee: &Committee<S>,
     view: View,
     payloads: usize,
-) -> LeaderBlock<V, Digest> {
+) -> LeaderBlock<S, Digest> {
     let codec = committee.codec();
     let genesis = committee.config.genesis();
     let proposals = genesis
@@ -60,10 +59,11 @@ fn leader<V: Variant>(
     .unwrap()
 }
 
-fn chains_are_held_to_their_own_pipeline_depth<V: Variant>() {
-    let (receipts, uniform) = committees::<V>();
+fn chains_are_held_to_their_own_pipeline_depth<S: Suite>() {
+    let (receipts, uniform) = committees::<S>();
     let view = View::new(1);
     let signer = receipts.config.leader(view).get() as usize;
+    let mut rng = test_rng();
 
     // A proposal within the largest depth but above chain 0's is unsigned and unverifiable.
     let deep = leader(&receipts, view, 1);
@@ -74,50 +74,68 @@ fn chains_are_held_to_their_own_pipeline_depth<V: Variant>() {
         Error::Types(TypesError::ProposalLength)
     );
     let forged = uniform.signers[signer].sign_leader_block(deep).unwrap();
-    assert!(uniform.verifier.verify_leader_block(&forged, &Sequential));
-    assert!(!receipts.verifier.verify_leader_block(&forged, &Sequential));
+    assert!(
+        uniform
+            .verifier
+            .verify_leader_block(&mut rng, &forged, &Sequential)
+    );
+    assert!(
+        !receipts
+            .verifier
+            .verify_leader_block(&mut rng, &forged, &Sequential)
+    );
+    let artifact = Artifact::LeaderBlock(forged);
+    assert_expanded_artifacts(&receipts.verifier, &[&artifact], &[], &[false]);
 
     let anchored = leader(&receipts, view, 0);
     let signed = receipts.signers[signer]
         .sign_leader_block(anchored)
         .unwrap();
-    assert!(receipts.verifier.verify_leader_block(&signed, &Sequential));
+    assert!(
+        receipts
+            .verifier
+            .verify_leader_block(&mut rng, &signed, &Sequential)
+    );
 }
 
 #[test]
 fn chains_are_held_to_their_own_pipeline_depth_for_both_variants() {
-    chains_are_held_to_their_own_pipeline_depth::<MinPk>();
-    chains_are_held_to_their_own_pipeline_depth::<MinSig>();
+    for_each_suite!(chains_are_held_to_their_own_pipeline_depth);
 }
 
-fn equal_chain_limits_skip_the_per_chain_pass<V: Variant>() {
-    let (receipts, uniform) = committees::<V>();
-    let listed = Committee::builder(SEED, PARTICIPANTS)
+fn equal_chain_limits_admit_what_shared_limits_admit<S: Suite>() {
+    let (_, uniform) = committees::<S>();
+    let listed = Committee::<S>::builder(SEED, PARTICIPANTS)
         .namespace(NAMESPACE)
         .limits(PathLimits::new(2, 2))
         .chain_limits(vec![PathLimits::new(2, 2); PARTICIPANTS as usize])
         .build();
-    assert!(receipts.verifier.distinct_chain_limits().is_some());
-    assert!(uniform.verifier.distinct_chain_limits().is_none());
-    assert!(listed.verifier.distinct_chain_limits().is_none());
 
     // Listing every chain's equal limits admits exactly what the shared limits admit.
     let view = View::new(1);
     let signer = listed.config.leader(view).get() as usize;
     let deepest = leader(&listed, view, 2);
     let signed = listed.signers[signer].sign_leader_block(deepest).unwrap();
-    assert!(listed.verifier.verify_leader_block(&signed, &Sequential));
-    assert!(uniform.verifier.verify_leader_block(&signed, &Sequential));
+    let mut rng = test_rng();
+    assert!(
+        listed
+            .verifier
+            .verify_leader_block(&mut rng, &signed, &Sequential)
+    );
+    assert!(
+        uniform
+            .verifier
+            .verify_leader_block(&mut rng, &signed, &Sequential)
+    );
 }
 
 #[test]
-fn equal_chain_limits_skip_the_per_chain_pass_for_both_variants() {
-    equal_chain_limits_skip_the_per_chain_pass::<MinPk>();
-    equal_chain_limits_skip_the_per_chain_pass::<MinSig>();
+fn equal_chain_limits_admit_what_shared_limits_admit_for_every_suite() {
+    for_each_suite!(equal_chain_limits_admit_what_shared_limits_admit);
 }
 
-fn chains_are_held_to_their_own_extension_bound<V: Variant>() {
-    let (receipts, uniform) = committees::<V>();
+fn chains_are_held_to_their_own_extension_bound<S: Suite>() {
+    let (receipts, uniform) = committees::<S>();
     let block = leader(&receipts, View::new(1), 0);
     let digested = DigestedLeader::new::<Sha256>(&block);
     let body = |extended: usize| {
@@ -131,6 +149,7 @@ fn chains_are_held_to_their_own_extension_bound<V: Variant>() {
         )
         .unwrap()
     };
+    let mut rng = test_rng();
 
     // An extension within the largest bound but above chain 0's is unsigned and unverifiable.
     assert_eq!(
@@ -138,15 +157,24 @@ fn chains_are_held_to_their_own_extension_bound<V: Variant>() {
         Error::Types(TypesError::ExtensionLength)
     );
     let forged = uniform.signers[1].sign_vote(body(0)).unwrap();
-    assert!(uniform.verifier.verify_vote(&forged));
-    assert!(!receipts.verifier.verify_vote(&forged));
+    assert!(uniform.verifier.verify_vote(&mut rng, &forged, &Sequential));
+    assert!(
+        !receipts
+            .verifier
+            .verify_vote(&mut rng, &forged, &Sequential)
+    );
 
     let vote = receipts.signers[1].sign_vote(body(1)).unwrap();
-    assert!(receipts.verifier.verify_vote(&vote));
+    assert!(receipts.verifier.verify_vote(&mut rng, &vote, &Sequential));
 }
 
-fn certificates_carrying_an_out_of_bound_vote_are_rejected<V: Variant>() {
-    let (receipts, uniform) = committees::<V>();
+#[test]
+fn chains_are_held_to_their_own_extension_bound_for_both_variants() {
+    for_each_suite!(chains_are_held_to_their_own_extension_bound);
+}
+
+fn certificates_carrying_an_out_of_bound_vote_are_rejected<S: Suite>() {
+    let (receipts, uniform) = committees::<S>();
     let block = leader(&receipts, View::new(1), 0);
     let digested = DigestedLeader::new::<Sha256>(&block);
     let votes = |extended: usize| {
@@ -166,11 +194,11 @@ fn certificates_carrying_an_out_of_bound_vote_are_rejected<V: Variant>() {
     };
 
     // A quorum that extends chain 0 certifies under the shared bound but not under chain 0's.
+    let mut rng = test_rng();
     let forged = uniform
         .verifier
-        .assemble_lqc::<Sha256, _>(block.clone(), &votes(0), &Sequential)
+        .assemble_lqc::<_, Sha256, _>(&mut rng, block.clone(), &votes(0), &Sequential)
         .unwrap();
-    let mut rng = test_rng();
     assert!(
         uniform
             .verifier
@@ -183,10 +211,16 @@ fn certificates_carrying_an_out_of_bound_vote_are_rejected<V: Variant>() {
             .verify_lqc::<_, Sha256, _>(&mut rng, &forged, &Sequential)
             .is_none()
     );
+    assert!(
+        receipts
+            .verifier
+            .assemble_lqc::<_, Sha256, _>(&mut rng, block.clone(), &votes(0), &Sequential)
+            .is_err()
+    );
 
     let lqc = uniform
         .verifier
-        .assemble_lqc::<Sha256, _>(block.clone(), &votes(1), &Sequential)
+        .assemble_lqc::<_, Sha256, _>(&mut rng, block.clone(), &votes(1), &Sequential)
         .unwrap();
     assert!(
         receipts
@@ -198,17 +232,16 @@ fn certificates_carrying_an_out_of_bound_vote_are_rejected<V: Variant>() {
 
 #[test]
 fn certificates_carrying_an_out_of_bound_vote_are_rejected_for_both_variants() {
-    certificates_carrying_an_out_of_bound_vote_are_rejected::<MinPk>();
-    certificates_carrying_an_out_of_bound_vote_are_rejected::<MinSig>();
+    for_each_suite!(certificates_carrying_an_out_of_bound_vote_are_rejected);
 }
 
-fn vqcs_carrying_an_out_of_bound_conflicting_vote_are_rejected<V: Variant>() {
+fn vqcs_carrying_an_out_of_bound_conflicting_vote_are_rejected<S: Suite>() {
     // The same keys under uniform limits that admit one extension digest and two.
-    let tight = Committee::<V>::builder(SEED, PARTICIPANTS)
+    let tight = Committee::<S>::builder(SEED, PARTICIPANTS)
         .namespace(NAMESPACE)
         .limits(PathLimits::new(2, 1))
         .build();
-    let wide = Committee::<V>::builder(SEED, PARTICIPANTS)
+    let wide = Committee::<S>::builder(SEED, PARTICIPANTS)
         .namespace(NAMESPACE)
         .limits(PathLimits::new(2, 2))
         .build();
@@ -247,13 +280,13 @@ fn vqcs_carrying_an_out_of_bound_conflicting_vote_are_rejected<V: Variant>() {
     messages.push(ViewMessage::NoVote(
         wide.signers[4].sign_novote(block.round()).unwrap(),
     ));
+    let mut rng = test_rng();
     let certificate = wide
         .verifier
-        .assemble_vqc::<Sha256, _>(block, &messages, &Sequential)
+        .assemble_vqc::<_, Sha256, _>(&mut rng, block, &messages, &Sequential)
         .unwrap();
     assert_eq!(certificate.conflicting_votes().len(), 1);
 
-    let mut rng = test_rng();
     assert!(
         wide.verifier
             .verify_vqc::<_, Sha256, _>(&mut rng, &certificate, &Sequential)
@@ -272,24 +305,23 @@ fn vqcs_carrying_an_out_of_bound_conflicting_vote_are_rejected<V: Variant>() {
 
 #[test]
 fn vqcs_carrying_an_out_of_bound_conflicting_vote_are_rejected_for_both_variants() {
-    vqcs_carrying_an_out_of_bound_conflicting_vote_are_rejected::<MinPk>();
-    vqcs_carrying_an_out_of_bound_conflicting_vote_are_rejected::<MinSig>();
+    for_each_suite!(vqcs_carrying_an_out_of_bound_conflicting_vote_are_rejected);
 }
 
-#[test]
-fn chains_are_held_to_their_own_extension_bound_for_both_variants() {
-    chains_are_held_to_their_own_extension_bound::<MinPk>();
-    chains_are_held_to_their_own_extension_bound::<MinSig>();
-}
-
-fn binding_da_certificates_need_n_minus_f_shares<V: Variant>() {
-    let binding = Committee::<V>::builder(SEED, PARTICIPANTS)
+/// Checks that a DA certificate under `B` needs `n - f` shares where `A`'s needs `n - 2f`.
+fn binding_da_certificates_need_n_minus_f_shares<A: Suite, B: Suite>() {
+    assert_eq!(A::DaFaults::QUORUM, DaQuorum::Available);
+    assert_eq!(B::DaFaults::QUORUM, DaQuorum::Binding);
+    let binding = Committee::<B>::builder(SEED, PARTICIPANTS)
         .namespace(NAMESPACE)
-        .da_quorum(DaQuorum::Binding)
+        .build();
+    let available = Committee::<A>::builder(SEED, PARTICIPANTS)
+        .namespace(NAMESPACE)
         .build();
     let codec = binding.codec();
+    assert_eq!(codec.da_quorum_kind(), DaQuorum::Binding);
     assert_eq!(codec.da_quorum(), codec.view_quorum());
-    assert!(codec.da_quorum() > Fixture::<V>::new().codec.da_quorum());
+    assert!(codec.da_quorum() > available.codec().da_quorum());
 
     let header = binding.transaction_header(ChainId::new(0), digest(b"commitment", 0));
     let votes = binding
@@ -298,47 +330,32 @@ fn binding_da_certificates_need_n_minus_f_shares<V: Variant>() {
         .map(|signer| signer.sign_da_vote(header.clone()).unwrap())
         .collect::<Vec<_>>();
     let quorum = codec.da_quorum();
-    assert_eq!(
-        binding
-            .verifier
-            .assemble_da_certificate(&votes[..quorum - 1], &Sequential)
-            .unwrap_err(),
-        Error::Quorum
-    );
+    let mut rng = test_rng();
+    for count in [quorum - 1, quorum + 1, available.codec().da_quorum()] {
+        assert_eq!(
+            binding
+                .verifier
+                .assemble_da_certificate(&mut rng, &votes[..count], &Sequential)
+                .unwrap_err(),
+            Error::Quorum
+        );
+    }
     let certificate = binding
         .verifier
-        .assemble_da_certificate(&votes[..quorum], &Sequential)
+        .assemble_da_certificate(&mut rng, &votes[..quorum], &Sequential)
         .unwrap();
-    assert!(binding.verifier.verify_da_certificate(&certificate));
-
-    // A sharing dealt for one quorum is rejected under the other.
-    let available = Committee::<V>::builder(SEED, PARTICIPANTS)
-        .namespace(NAMESPACE)
-        .build();
-    assert_eq!(
-        Scheme::verifier(
-            available.config.parameters(),
-            binding.roster.clone(),
-            binding.da.clone(),
-            binding.nullification.clone(),
-        )
-        .unwrap_err(),
-        Error::Sharing
-    );
-    assert_eq!(
-        Scheme::verifier(
-            binding.config.parameters(),
-            available.roster,
-            available.da,
-            available.nullification,
-        )
-        .unwrap_err(),
-        Error::Sharing
+    assert!(
+        binding
+            .verifier
+            .verify_da_certificate(&mut rng, &certificate, &Sequential)
     );
 }
 
 #[test]
 fn binding_da_certificates_need_n_minus_f_shares_for_both_variants() {
-    binding_da_certificates_need_n_minus_f_shares::<MinPk>();
-    binding_da_certificates_need_n_minus_f_shares::<MinSig>();
+    binding_da_certificates_need_n_minus_f_shares::<Bls<MinPk>, Bls<MinPk, Binding>>();
+    binding_da_certificates_need_n_minus_f_shares::<Bls<MinSig>, Bls<MinSig, Binding>>();
+    binding_da_certificates_need_n_minus_f_shares::<Sas<MinPk>, Sas<MinPk, Binding>>();
+    binding_da_certificates_need_n_minus_f_shares::<Sas<MinSig>, Sas<MinSig, Binding>>();
+    binding_da_certificates_need_n_minus_f_shares::<Ed25519, Ed25519<Binding>>();
 }

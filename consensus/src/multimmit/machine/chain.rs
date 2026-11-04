@@ -18,6 +18,7 @@ use crate::{
     Epochable as _,
     multimmit::{
         config::{Profile, ProposalPolicy, Role},
+        scheme::Scheme,
         types::{
             Artifact, ArtifactId, BlockRef, ChainId, ChainLimits, CodecConfig, Context,
             DaCertificate, PathLimits, SignedTransactionBlock, TransactionBlockHeader,
@@ -25,7 +26,7 @@ use crate::{
     },
     types::{Epoch, Height, Participant, View},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{Faults as _, N5f1};
 use std::{ops::Bound, sync::Arc};
 
@@ -77,7 +78,7 @@ pub(crate) fn forwards_at(view: View, participant: Participant, participants: us
 /// The DA choices, producer headers, and DA signing reservations (see
 /// [`Self::reserve_signing`] and [`Self::replay_signing`]) mirror durable state; everything else
 /// is rebuildable from admitted artifacts and durable anchors.
-pub(crate) struct ChainState<V: Variant, D: Digest> {
+pub(crate) struct ChainState<S: Scheme, D: Digest> {
     pub(super) config: CodecConfig,
     pub(super) proposal_policy: ProposalPolicy,
     pub(super) epoch: Epoch,
@@ -95,16 +96,16 @@ pub(crate) struct ChainState<V: Variant, D: Digest> {
     ///
     /// [`Parameters::receipt_chain`]: crate::multimmit::config::Parameters::receipt_chain
     receipts: Vec<bool>,
-    pub(super) da: DaState<V, D>,
+    pub(super) da: DaState<S, D>,
     /// The local producer's pipeline, when this node produces a chain.
     pub(super) producer: Option<ProducerState<D>>,
     /// Reserved DA signing choices, each keyed by its effect and held as its shared requests.
-    pub(super) signing: ReservationBook<Arc<[SignRequest<V, D>]>>,
+    pub(super) signing: ReservationBook<Arc<[SignRequest<S, D>]>>,
     /// Work issued since the reducer last took it.
-    pub(super) capabilities: Capabilities<V, D>,
+    pub(super) capabilities: Capabilities<S, D>,
 }
 
-impl<V: Variant, D: Digest> ChainState<V, D> {
+impl<S: Scheme, D: Digest> ChainState<S, D> {
     /// Creates the chain state for the profile, with a producer pipeline when this validator
     /// produces a chain.
     pub(crate) fn new(profile: &Profile<D>) -> Self {
@@ -199,7 +200,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     pub(crate) fn unplaced_certificates(
         &mut self,
         placed: &[BlockRef<D>],
-    ) -> Vec<DaCertificate<V, D>> {
+    ) -> Vec<DaCertificate<S, D>> {
         let mut forwards = Vec::new();
         if !self.forwards {
             return forwards;
@@ -234,7 +235,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     /// Prunes chain work made obsolete by a durably recorded DA certificate.
     pub(crate) fn compact_certified<H: Hasher<Digest = D>>(
         &mut self,
-        certificate: &DaCertificate<V, D>,
+        certificate: &DaCertificate<S, D>,
         retired: Height,
     ) -> Result<(), ChainError> {
         let block = certificate.block_ref::<H>();
@@ -339,7 +340,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         &mut self,
         id: ArtifactId<D>,
         observation: Observation,
-        artifact: &Artifact<V, D>,
+        artifact: &Artifact<S, D>,
     ) -> Result<(), ChainError> {
         let block_ref = match artifact {
             Artifact::TransactionBlock(block) => Some(block.header().block_ref::<H>()),
@@ -403,7 +404,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     pub(crate) fn reject_unverified<H: Hasher<Digest = D>>(
         &mut self,
         id: ArtifactId<D>,
-        artifact: &Artifact<V, D>,
+        artifact: &Artifact<S, D>,
     ) -> Result<(), ChainError> {
         match artifact {
             // A block is routed to its chain plane only after producer-signature verification,
@@ -464,7 +465,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         &self,
         limit: usize,
         run_limit: usize,
-    ) -> Vec<Arc<SignedTransactionBlock<V, D>>> {
+    ) -> Vec<Arc<SignedTransactionBlock<S, D>>> {
         if self.me.is_none() {
             return Vec::new();
         }
@@ -481,7 +482,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     }
 
     /// Takes the work issued since the last call.
-    pub(crate) fn take_capabilities(&mut self) -> Capabilities<V, D> {
+    pub(crate) fn take_capabilities(&mut self) -> Capabilities<S, D> {
         std::mem::take(&mut self.capabilities)
     }
 }

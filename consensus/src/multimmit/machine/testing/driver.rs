@@ -17,17 +17,18 @@ use super::{
 };
 use crate::multimmit::{
     config::Profile,
+    scheme::Scheme,
     types::{Artifact, ArtifactId},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 #[cfg(test)]
 use std::collections::VecDeque;
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 /// Builds one observation input, pairing artifacts with the identifiers ingress computes.
-pub(in crate::multimmit::machine) fn cohort<H: Hasher, V: Variant>(
-    artifacts: Vec<Artifact<V, H::Digest>>,
-) -> Input<V, H::Digest> {
+pub(in crate::multimmit::machine) fn cohort<H: Hasher, S: Scheme>(
+    artifacts: Vec<Artifact<S, H::Digest>>,
+) -> Input<S, H::Digest> {
     Input::Observe(
         artifacts
             .into_iter()
@@ -105,7 +106,7 @@ impl<D: Digest> SymbolicVerifier<D> {
     }
 
     /// Builds a completion without bypassing production tickets.
-    pub fn complete<V: Variant>(&self, job: &VerifyJob<V, D>) -> VerificationCompletion<V, D> {
+    pub fn complete<S: Scheme>(&self, job: &VerifyJob<S, D>) -> VerificationCompletion<S, D> {
         let verdicts = job
             .items()
             .iter()
@@ -124,24 +125,24 @@ impl<D: Digest> SymbolicVerifier<D> {
 }
 
 /// Completion of a verification job without real cryptography.
-pub(crate) trait VerifyJobExt<V: Variant, D: Digest> {
+pub(crate) trait VerifyJobExt<S: Scheme, D: Digest> {
     /// Completes every item of the job as valid.
-    fn all_valid(&self) -> VerificationCompletion<V, D>;
+    fn all_valid(&self) -> VerificationCompletion<S, D>;
 }
 
-impl<V: Variant, D: Digest> VerifyJobExt<V, D> for VerifyJob<V, D> {
-    fn all_valid(&self) -> VerificationCompletion<V, D> {
+impl<S: Scheme, D: Digest> VerifyJobExt<S, D> for VerifyJob<S, D> {
+    fn all_valid(&self) -> VerificationCompletion<S, D> {
         SymbolicVerifier::new(true).complete(self)
     }
 }
 
 /// A production machine, or a wrapper around one, that a deterministic test can drive.
-pub(in crate::multimmit::machine) trait Drive<V: Variant, D: Digest> {
+pub(in crate::multimmit::machine) trait Drive<S: Scheme, D: Digest> {
     /// Submits one input through the production reducer.
-    fn submit(&mut self, input: Input<V, D>) -> Result<Step<V, D>, DriverError>;
+    fn submit(&mut self, input: Input<S, D>) -> Result<Step<S, D>, DriverError>;
 
     /// Runs one bounded machine-owned work turn.
-    fn poll_with(&mut self, budget: NonZeroUsize) -> Result<PollResult<V, D>, DriverError>;
+    fn poll_with(&mut self, budget: NonZeroUsize) -> Result<PollResult<S, D>, DriverError>;
 
     /// Returns whether another machine-owned quantum is ready.
     #[cfg(test)]
@@ -153,7 +154,7 @@ pub(in crate::multimmit::machine) trait Drive<V: Variant, D: Digest> {
 
     /// Makes `job` durable and returns the machine's step for its acknowledgement.
     #[cfg(test)]
-    fn make_durable(&mut self, job: &PersistJob<V, D>) -> Result<Step<V, D>, DriverError>;
+    fn make_durable(&mut self, job: &PersistJob<S, D>) -> Result<Step<S, D>, DriverError>;
 
     /// Folds machine-owned work into `step` as far as `until` asks.
     ///
@@ -161,7 +162,7 @@ pub(in crate::multimmit::machine) trait Drive<V: Variant, D: Digest> {
     ///
     /// Panics if the machine rejects a poll or does not settle within [`MAX_DRAIN_TURNS`] polls.
     #[cfg(test)]
-    fn settle(&mut self, step: Step<V, D>, until: Until) -> Step<V, D> {
+    fn settle(&mut self, step: Step<S, D>, until: Until) -> Step<S, D> {
         let budget = match until {
             Until::Step => return step,
             Until::Persist | Until::CursorAdvance => NonZeroUsize::MIN,
@@ -203,7 +204,7 @@ pub(in crate::multimmit::machine) trait Drive<V: Variant, D: Digest> {
     ///
     /// Panics if the job is not the next durable batch or the machine rejects it.
     #[cfg(test)]
-    fn persist(&mut self, job: &PersistJob<V, D>, until: Until) -> Step<V, D> {
+    fn persist(&mut self, job: &PersistJob<S, D>, until: Until) -> Step<S, D> {
         let step = self
             .make_durable(job)
             .unwrap_or_else(|error| panic!("persisting barrier {:?} failed: {error}", job.id()));
@@ -217,7 +218,7 @@ pub(in crate::multimmit::machine) trait Drive<V: Variant, D: Digest> {
     ///
     /// Panics if the machine rejects the completion.
     #[cfg(test)]
-    fn verify(&mut self, job: &VerifyJob<V, D>, valid: bool, until: Until) -> Step<V, D> {
+    fn verify(&mut self, job: &VerifyJob<S, D>, valid: bool, until: Until) -> Step<S, D> {
         let step = self
             .submit(Input::Verified(SymbolicVerifier::new(valid).complete(job)))
             .unwrap_or_else(|error| panic!("verification completion failed: {error}"));
@@ -228,9 +229,9 @@ pub(in crate::multimmit::machine) trait Drive<V: Variant, D: Digest> {
     #[cfg(test)]
     fn execute(
         &mut self,
-        executor: &mut impl Executor<V, D>,
-        effect: &Capability<V, D>,
-    ) -> Result<Option<Step<V, D>>, DriverError> {
+        executor: &mut impl Executor<S, D>,
+        effect: &Capability<S, D>,
+    ) -> Result<Option<Step<S, D>>, DriverError> {
         let Some(execution) = executor.execute(effect) else {
             return Ok(None);
         };
@@ -253,10 +254,10 @@ pub(in crate::multimmit::machine) trait Drive<V: Variant, D: Digest> {
     #[cfg(test)]
     fn drain(
         &mut self,
-        executor: &mut impl Executor<V, D>,
-        effects: impl IntoIterator<Item = Capability<V, D>>,
+        executor: &mut impl Executor<S, D>,
+        effects: impl IntoIterator<Item = Capability<S, D>>,
         until: Until,
-    ) -> Capabilities<V, D> {
+    ) -> Capabilities<S, D> {
         let mut pending = VecDeque::from_iter(effects);
         let mut unhandled = Capabilities::new();
         for _ in 0..MAX_DRAIN_TURNS {
@@ -293,7 +294,7 @@ pub(in crate::multimmit::machine) trait Drive<V: Variant, D: Digest> {
     /// Persists every barrier `step` leads to, folding each acknowledgement until the cursor
     /// advances, and returns the other effects in issuance order.
     #[cfg(test)]
-    fn drain_persisting(&mut self, step: Step<V, D>) -> Capabilities<V, D> {
+    fn drain_persisting(&mut self, step: Step<S, D>) -> Capabilities<S, D> {
         self.drain(
             &mut SymbolicPersistence,
             step.into_capabilities(),
@@ -302,12 +303,12 @@ pub(in crate::multimmit::machine) trait Drive<V: Variant, D: Digest> {
     }
 }
 
-impl<H: Hasher, V: Variant> Drive<V, H::Digest> for Machine<H, V> {
-    fn submit(&mut self, input: Input<V, H::Digest>) -> Result<Step<V, H::Digest>, DriverError> {
+impl<H: Hasher, S: Scheme> Drive<S, H::Digest> for Machine<H, S> {
+    fn submit(&mut self, input: Input<S, H::Digest>) -> Result<Step<S, H::Digest>, DriverError> {
         Ok(self.step(input)?)
     }
 
-    fn poll_with(&mut self, budget: NonZeroUsize) -> Result<PollResult<V, H::Digest>, DriverError> {
+    fn poll_with(&mut self, budget: NonZeroUsize) -> Result<PollResult<S, H::Digest>, DriverError> {
         Ok(self.poll(budget)?)
     }
 
@@ -324,8 +325,8 @@ impl<H: Hasher, V: Variant> Drive<V, H::Digest> for Machine<H, V> {
     #[cfg(test)]
     fn make_durable(
         &mut self,
-        job: &PersistJob<V, H::Digest>,
-    ) -> Result<Step<V, H::Digest>, DriverError> {
+        job: &PersistJob<S, H::Digest>,
+    ) -> Result<Step<S, H::Digest>, DriverError> {
         Ok(self.step(Input::Persisted(job.ack()))?)
     }
 }
@@ -335,10 +336,10 @@ impl<H: Hasher, V: Variant> Drive<V, H::Digest> for Machine<H, V> {
 /// The view timer arms when the start stages, so the returned step merges the start's volatile
 /// effects with the acknowledgement's follow-up work, folded as far as `until` asks.
 #[cfg(test)]
-pub(in crate::multimmit::machine) fn start<H: Hasher, V: Variant>(
+pub(in crate::multimmit::machine) fn start<H: Hasher, S: Scheme>(
     profile: Profile<H::Digest>,
     until: Until,
-) -> (Machine<H, V>, Step<V, H::Digest>) {
+) -> (Machine<H, S>, Step<S, H::Digest>) {
     let mut machine = Machine::new(profile);
     let starting = machine.step(Input::Start).expect("a fresh machine starts");
     let (effects, _) = starting.into_parts();
@@ -359,15 +360,15 @@ pub(in crate::multimmit::machine) fn start<H: Hasher, V: Variant>(
 }
 
 /// Single-machine deterministic driver backed by an in-memory symbolic journal.
-pub(in crate::multimmit::machine) struct Driver<H: Hasher, V: Variant> {
+pub(in crate::multimmit::machine) struct Driver<H: Hasher, S: Scheme> {
     profile: Profile<H::Digest>,
-    machine: Machine<H, V>,
-    checkpoint: Snapshot<V, H::Digest>,
-    journal: Vec<DomainEvent<V, H::Digest>>,
-    persistence: BTreeMap<BatchId, PersistJob<V, H::Digest>>,
+    machine: Machine<H, S>,
+    checkpoint: Snapshot<S, H::Digest>,
+    journal: Vec<DomainEvent<S, H::Digest>>,
+    persistence: BTreeMap<BatchId, PersistJob<S, H::Digest>>,
 }
 
-impl<H: Hasher, V: Variant> Driver<H, V> {
+impl<H: Hasher, S: Scheme> Driver<H, S> {
     /// Creates a driver for a fresh, not-yet-started machine.
     pub fn new(profile: Profile<H::Digest>) -> Self {
         let machine = Machine::new(profile.clone());
@@ -387,7 +388,7 @@ impl<H: Hasher, V: Variant> Driver<H, V> {
     }
 
     /// Returns the production machine for read-only assertions.
-    pub(in crate::multimmit::machine) const fn machine(&self) -> &Machine<H, V> {
+    pub(in crate::multimmit::machine) const fn machine(&self) -> &Machine<H, S> {
         &self.machine
     }
 
@@ -397,12 +398,12 @@ impl<H: Hasher, V: Variant> Driver<H, V> {
     }
 
     /// Returns the checkpoint the symbolic journal starts from.
-    pub(in crate::multimmit::machine) const fn checkpoint(&self) -> &Snapshot<V, H::Digest> {
+    pub(in crate::multimmit::machine) const fn checkpoint(&self) -> &Snapshot<S, H::Digest> {
         &self.checkpoint
     }
 
     /// Returns the durably appended events after the checkpoint, in cursor order.
-    pub(in crate::multimmit::machine) fn journal(&self) -> &[DomainEvent<V, H::Digest>] {
+    pub(in crate::multimmit::machine) fn journal(&self) -> &[DomainEvent<S, H::Digest>] {
         &self.journal
     }
 
@@ -417,12 +418,12 @@ impl<H: Hasher, V: Variant> Driver<H, V> {
     }
 
     /// Applies a chain plane's DA-vote offer, as the core does outside its lanes.
-    pub fn offer_da_votes(&mut self, offer: DaVotesOffer<V, H::Digest>) -> StepStatus<H::Digest> {
+    pub fn offer_da_votes(&mut self, offer: DaVotesOffer<S, H::Digest>) -> StepStatus<H::Digest> {
         self.machine.offer_da_votes(offer)
     }
 
     /// Appends a persistence job without returning its completion to the machine.
-    pub fn append(&mut self, job: &PersistJob<V, H::Digest>) -> Result<(), DriverError> {
+    pub fn append(&mut self, job: &PersistJob<S, H::Digest>) -> Result<(), DriverError> {
         if self.persistence.get(&job.id()) != Some(job)
             || job.previous() != self.journal_cursor()
             || job.events().is_empty()
@@ -443,8 +444,8 @@ impl<H: Hasher, V: Variant> Driver<H, V> {
     /// Acknowledges an already appended persistence job.
     pub fn acknowledge(
         &mut self,
-        job: &PersistJob<V, H::Digest>,
-    ) -> Result<Step<V, H::Digest>, DriverError> {
+        job: &PersistJob<S, H::Digest>,
+    ) -> Result<Step<S, H::Digest>, DriverError> {
         if self.journal_cursor() != job.last_cursor() {
             return Err(DriverError::NotDurable);
         }
@@ -454,7 +455,7 @@ impl<H: Hasher, V: Variant> Driver<H, V> {
     }
 
     /// Discards volatile state, silently replays durable state, and requests recovery completion.
-    pub fn crash_and_restore(&mut self) -> Result<Step<V, H::Digest>, DriverError> {
+    pub fn crash_and_restore(&mut self) -> Result<Step<S, H::Digest>, DriverError> {
         let mut machine = Machine::restore(self.profile.clone(), self.checkpoint.clone())?;
         for event in &self.journal {
             machine.replay(event.clone())?;
@@ -468,8 +469,8 @@ impl<H: Hasher, V: Variant> Driver<H, V> {
     #[cfg(test)]
     pub fn reserve(
         &mut self,
-        effect: DurableEffect<V, H::Digest>,
-    ) -> Result<Step<V, H::Digest>, DriverError> {
+        effect: DurableEffect<S, H::Digest>,
+    ) -> Result<Step<S, H::Digest>, DriverError> {
         let step = self.machine.reserve_test_effect(effect)?;
         self.record_effects(step.capabilities());
         Ok(step)
@@ -481,7 +482,7 @@ impl<H: Hasher, V: Variant> Driver<H, V> {
             .map_or(self.checkpoint.cursor(), DomainEvent::cursor)
     }
 
-    fn record_effects(&mut self, effects: &[Capability<V, H::Digest>]) {
+    fn record_effects(&mut self, effects: &[Capability<S, H::Digest>]) {
         for effect in effects {
             if let Capability::Journal(directive) = effect {
                 self.persistence
@@ -491,14 +492,14 @@ impl<H: Hasher, V: Variant> Driver<H, V> {
     }
 }
 
-impl<H: Hasher, V: Variant> Drive<V, H::Digest> for Driver<H, V> {
-    fn submit(&mut self, input: Input<V, H::Digest>) -> Result<Step<V, H::Digest>, DriverError> {
+impl<H: Hasher, S: Scheme> Drive<S, H::Digest> for Driver<H, S> {
+    fn submit(&mut self, input: Input<S, H::Digest>) -> Result<Step<S, H::Digest>, DriverError> {
         let step = self.machine.step(input)?;
         self.record_effects(step.capabilities());
         Ok(step)
     }
 
-    fn poll_with(&mut self, budget: NonZeroUsize) -> Result<PollResult<V, H::Digest>, DriverError> {
+    fn poll_with(&mut self, budget: NonZeroUsize) -> Result<PollResult<S, H::Digest>, DriverError> {
         let result = self.machine.poll(budget)?;
         self.record_effects(result.capabilities());
         Ok(result)
@@ -517,8 +518,8 @@ impl<H: Hasher, V: Variant> Drive<V, H::Digest> for Driver<H, V> {
     #[cfg(test)]
     fn make_durable(
         &mut self,
-        job: &PersistJob<V, H::Digest>,
-    ) -> Result<Step<V, H::Digest>, DriverError> {
+        job: &PersistJob<S, H::Digest>,
+    ) -> Result<Step<S, H::Digest>, DriverError> {
         self.append(job)?;
         self.acknowledge(job)
     }
@@ -552,7 +553,7 @@ pub(in crate::multimmit::machine) trait CapabilityExt {
     fn is_publish(&self) -> bool;
 }
 
-impl<V: Variant, D: Digest> CapabilityExt for Capability<V, D> {
+impl<S: Scheme, D: Digest> CapabilityExt for Capability<S, D> {
     fn is_verify(&self) -> bool {
         matches!(self, Self::Verify(_))
     }

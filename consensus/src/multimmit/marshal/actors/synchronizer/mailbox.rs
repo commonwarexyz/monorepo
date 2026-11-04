@@ -10,6 +10,7 @@ use crate::{
             storage,
             types::{self, Floor},
         },
+        scheme::Scheme,
         types::{CertificateId, FinalityFact, Lqc, SelectedCommitments, TransactionBlockHeader},
     },
     types::View,
@@ -18,7 +19,7 @@ use commonware_actor::{
     Feedback,
     mailbox::{self, Policy},
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, VecDeque},
@@ -78,20 +79,20 @@ pub(crate) enum Error {
 pub(super) type Reply = types::Reply<(), Error>;
 
 /// Distinct same-view L-QCs, keyed by certificate identifier.
-pub(super) type FinalityProofs<V, D> = BTreeMap<CertificateId<D>, Arc<Lqc<V, D>>>;
+pub(super) type FinalityProofs<S, D> = BTreeMap<CertificateId<D>, Arc<Lqc<S, D>>>;
 
 /// Finalized L-QCs of the highest view reported so far, coalesced into one synchronization pass.
-pub(super) struct FinalityBatch<V: Variant, D: Digest> {
+pub(super) struct FinalityBatch<S: Scheme, D: Digest> {
     /// View shared by every proof in the batch.
     pub view: View,
     /// Distinct same-view proofs, keyed by certificate identifier.
-    pub proofs: FinalityProofs<V, D>,
+    pub proofs: FinalityProofs<S, D>,
     /// Maximum number of distinct proofs retained.
     max_proofs: usize,
 }
 
-impl<V: Variant, D: Digest> FinalityBatch<V, D> {
-    pub(super) fn new(id: CertificateId<D>, proof: Arc<Lqc<V, D>>, max_proofs: usize) -> Self {
+impl<S: Scheme, D: Digest> FinalityBatch<S, D> {
+    pub(super) fn new(id: CertificateId<D>, proof: Arc<Lqc<S, D>>, max_proofs: usize) -> Self {
         debug_assert!(max_proofs > 0);
         let view = proof.view();
         let mut proofs = BTreeMap::new();
@@ -126,7 +127,7 @@ impl<V: Variant, D: Digest> FinalityBatch<V, D> {
 }
 
 /// A command for the synchronization actor.
-pub(super) enum Message<V: Variant, D: Digest> {
+pub(super) enum Message<S: Scheme, D: Digest> {
     /// An authenticated producer header, used as an ancestry hint.
     Header {
         span: Span,
@@ -137,19 +138,19 @@ pub(super) enum Message<V: Variant, D: Digest> {
     /// Finalized L-QCs to synchronize to.
     Synchronize {
         span: Span,
-        batch: FinalityBatch<V, D>,
+        batch: FinalityBatch<S, D>,
     },
     /// A locally derived direct-pool finality fact.
     Finality { span: Span, fact: FinalityFact<D> },
     /// A verified floor checkpoint to install, with the reply for its result.
     InstallFloor {
         span: Span,
-        checkpoint: Floor<V, D>,
+        checkpoint: Floor<S, D>,
         reply: Reply,
     },
 }
 
-impl<V: Variant, D: Digest> Policy for Message<V, D> {
+impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
@@ -182,13 +183,13 @@ impl<V: Variant, D: Digest> Policy for Message<V, D> {
 }
 
 /// Mailbox for the synchronization actor.
-pub(crate) struct Mailbox<V: Variant, D: Digest> {
-    commands: mailbox::Sender<Message<V, D>>,
+pub(crate) struct Mailbox<S: Scheme, D: Digest> {
+    commands: mailbox::Sender<Message<S, D>>,
     /// Maximum number of distinct same-view proofs one synchronization pass retains.
     max_proofs: usize,
 }
 
-impl<V: Variant, D: Digest> Clone for Mailbox<V, D> {
+impl<S: Scheme, D: Digest> Clone for Mailbox<S, D> {
     fn clone(&self) -> Self {
         Self {
             commands: self.commands.clone(),
@@ -197,8 +198,8 @@ impl<V: Variant, D: Digest> Clone for Mailbox<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Mailbox<V, D> {
-    pub(super) const fn new(commands: mailbox::Sender<Message<V, D>>, max_proofs: usize) -> Self {
+impl<S: Scheme, D: Digest> Mailbox<S, D> {
+    pub(super) const fn new(commands: mailbox::Sender<Message<S, D>>, max_proofs: usize) -> Self {
         Self {
             commands,
             max_proofs,
@@ -206,7 +207,7 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
     }
 
     /// Enqueues a finalized target without waiting for resolution or durable publication.
-    pub(crate) fn trigger(&self, id: CertificateId<D>, proof: Arc<Lqc<V, D>>) -> Result<(), Error> {
+    pub(crate) fn trigger(&self, id: CertificateId<D>, proof: Arc<Lqc<S, D>>) -> Result<(), Error> {
         match self.commands.enqueue(Message::Synchronize {
             span: Span::current(),
             batch: FinalityBatch::new(id, proof, self.max_proofs),
@@ -241,7 +242,7 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
     ///
     /// Returns once the catalog has installed the floor, or an error if the checkpoint is invalid
     /// or does not advance the current floor.
-    pub(crate) async fn install_floor(&self, checkpoint: Floor<V, D>) -> Result<(), Error> {
+    pub(crate) async fn install_floor(&self, checkpoint: Floor<S, D>) -> Result<(), Error> {
         ask(
             |message| self.commands.enqueue(message),
             |reply| Message::InstallFloor {

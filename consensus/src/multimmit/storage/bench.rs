@@ -5,7 +5,7 @@ use crate::{
     multimmit::{
         config::{Profile, Role, Tuning},
         machine::{Cursor, DomainEventCodecConfig, Input, Machine, PersistJob},
-        mocks::Committee,
+        mocks::{Bls, Committee},
         storage::{JournalConfig, SafetyJournal},
         test_utils::bench::fabric,
         types::{Artifact, ViewProof},
@@ -42,16 +42,17 @@ fn unique_partition(label: &str) -> String {
 
 struct Harvest {
     profile: Profile<Digest>,
-    jobs: Vec<PersistJob<MinPk, Digest>>,
+    jobs: Vec<PersistJob<Bls<MinPk>, Digest>>,
 }
 
 /// Drives a live single-participant observer through nullified views until it has collected at
 /// least `records` contiguous persistence jobs. `PersistJob` and `DomainEvent` are machine-issued
 /// only, so real machine output is the only public source of journal input.
 fn harvest(records: usize, seed: u64) -> Harvest {
-    let committee = Committee::<MinPk>::builder(seed, 1).build();
+    let committee = Committee::<Bls<MinPk>>::builder(seed, 1).build();
     let profile: Profile<Digest> =
-        Profile::new::<MinPk>(committee.config.clone(), Role::Observer, Tuning::default()).unwrap();
+        Profile::new::<Bls<MinPk>>(committee.config.clone(), Role::Observer, Tuning::default())
+            .unwrap();
     let mut jobs = Vec::new();
     let mut machine = Machine::new(profile.clone());
     let step = machine.step(Input::Start).unwrap();
@@ -99,7 +100,7 @@ fn journal_config(profile: &Profile<Digest>, partition: String) -> JournalConfig
 async fn open_journal(
     context: &TokioContext,
     config: JournalConfig,
-) -> SafetyJournal<TokioContext, MinPk, Digest> {
+) -> SafetyJournal<TokioContext, Bls<MinPk>, Digest> {
     let mut recovery = SafetyJournal::open(context.child("journal"), config, Cursor::zero())
         .await
         .unwrap();
@@ -109,9 +110,9 @@ async fn open_journal(
 
 /// Appends `jobs` awaiting the previous sync just before the next append (depth-one pipeline).
 async fn append_pipelined(
-    mut journal: SafetyJournal<TokioContext, MinPk, Digest>,
-    jobs: &[PersistJob<MinPk, Digest>],
-) -> SafetyJournal<TokioContext, MinPk, Digest> {
+    mut journal: SafetyJournal<TokioContext, Bls<MinPk>, Digest>,
+    jobs: &[PersistJob<Bls<MinPk>, Digest>],
+) -> SafetyJournal<TokioContext, Bls<MinPk>, Digest> {
     let mut previous: Option<Handle<()>> = None;
     for job in jobs {
         if let Some(handle) = previous.take() {
@@ -220,7 +221,7 @@ pub async fn run_journal(ctx: &TokioContext, scenario: JournalScenario) -> Durat
 
             let config = journal_config(&harvest.profile, partition.clone());
             let started = Instant::now();
-            let mut recovery = SafetyJournal::<_, MinPk, Digest>::open(
+            let mut recovery = SafetyJournal::<_, Bls<MinPk>, Digest>::open(
                 ctx.child("journal"),
                 config,
                 Cursor::zero(),

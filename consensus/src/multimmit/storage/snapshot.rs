@@ -7,10 +7,13 @@
 //! the journal's per-record bounds.
 
 use crate::{
-    multimmit::machine::{Snapshot, SnapshotCodecConfig},
+    multimmit::{
+        machine::{Snapshot, SnapshotCodecConfig},
+        scheme::Scheme,
+    },
     types::Epoch,
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use commonware_storage::{
     Context as StorageContext,
     metadata::{Config as MetadataConfig, Error as MetadataError, Metadata},
@@ -21,8 +24,8 @@ use commonware_utils::sequence::U64;
 const SNAPSHOT_KEY: u64 = 0;
 
 /// Atomic store for the newest acknowledged machine snapshot.
-pub struct SnapshotStore<E: StorageContext, V: Variant, D: Digest> {
-    inner: Metadata<E, U64, Snapshot<V, D>>,
+pub struct SnapshotStore<E: StorageContext, S: Scheme, D: Digest> {
+    inner: Metadata<E, U64, Snapshot<S, D>>,
 }
 
 /// A snapshot store failure. Fatal to the current instance.
@@ -36,10 +39,10 @@ pub enum SnapshotError {
     EpochMismatch { expected: Epoch, actual: Epoch },
 }
 
-impl<E, V, D> SnapshotStore<E, V, D>
+impl<E, S, D> SnapshotStore<E, S, D>
 where
     E: StorageContext,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     /// Opens the store and returns the newest durable snapshot, if any.
@@ -48,7 +51,7 @@ where
         partition: String,
         codec: SnapshotCodecConfig,
         epoch: Epoch,
-    ) -> Result<(Self, Option<Snapshot<V, D>>), SnapshotError> {
+    ) -> Result<(Self, Option<Snapshot<S, D>>), SnapshotError> {
         let inner = Metadata::init(
             context,
             MetadataConfig {
@@ -57,7 +60,7 @@ where
             },
         )
         .await?;
-        let snapshot: Option<Snapshot<V, D>> = inner.get(&U64::new(SNAPSHOT_KEY)).cloned();
+        let snapshot: Option<Snapshot<S, D>> = inner.get(&U64::new(SNAPSHOT_KEY)).cloned();
         if let Some(snapshot) = snapshot.as_ref()
             && snapshot.epoch() != epoch
         {
@@ -73,7 +76,7 @@ where
     ///
     /// Blocks until the swap is synced; callers off the hot path may run it on a task and
     /// reclaim the store from the handle.
-    pub async fn store(self, snapshot: Snapshot<V, D>) -> Result<Self, SnapshotError> {
+    pub async fn store(self, snapshot: Snapshot<S, D>) -> Result<Self, SnapshotError> {
         let inner = self
             .inner
             .put_sync(U64::new(SNAPSHOT_KEY), snapshot)
@@ -88,7 +91,7 @@ mod tests {
     use crate::multimmit::{
         config::{Profile, Role, Tuning},
         machine::{CoreState, Cursor},
-        mocks::Committee,
+        mocks::{Bls, Committee},
     };
     use commonware_cryptography::{
         Sha256, bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest,
@@ -104,10 +107,10 @@ mod tests {
 
     const PARTITION: &str = "multimmit-checkpoints";
 
-    type TestSnapshot = Snapshot<MinPk, Sha256Digest>;
+    type TestSnapshot = Snapshot<Bls<MinPk>, Sha256Digest>;
 
     /// Returns the cursor of the snapshot `store` holds, or zero when it is empty.
-    fn covered<E: StorageContext>(store: &SnapshotStore<E, MinPk, Sha256Digest>) -> Cursor {
+    fn covered<E: StorageContext>(store: &SnapshotStore<E, Bls<MinPk>, Sha256Digest>) -> Cursor {
         store
             .inner
             .get(&U64::new(SNAPSHOT_KEY))
@@ -123,11 +126,12 @@ mod tests {
 
     fn fixture() -> Fixture {
         let epoch = Epoch::new(7);
-        let committee = Committee::<MinPk>::builder(7, 1).build();
+        let committee = Committee::<Bls<MinPk>>::builder(7, 1).build();
         let profile: Profile<Sha256Digest> =
-            Profile::new::<MinPk>(committee.config, Role::Observer, Tuning::default()).unwrap();
+            Profile::new::<Bls<MinPk>>(committee.config, Role::Observer, Tuning::default())
+                .unwrap();
         let codec = SnapshotCodecConfig::from_profile(&profile);
-        let snapshot = CoreState::<Sha256, MinPk>::fresh(profile)
+        let snapshot = CoreState::<Sha256, Bls<MinPk>>::fresh(profile)
             .unwrap()
             .machine()
             .live_snapshot_for_test();
@@ -146,7 +150,7 @@ mod tests {
     fn opens_empty() {
         let fixture = fixture();
         deterministic::Runner::default().start(|context| async move {
-            let (store, snapshot) = SnapshotStore::<_, MinPk, Sha256Digest>::open(
+            let (store, snapshot) = SnapshotStore::<_, Bls<MinPk>, Sha256Digest>::open(
                 context.child("open"),
                 PARTITION.into(),
                 fixture.codec,
@@ -164,7 +168,7 @@ mod tests {
     fn stores_and_reopens_exact_snapshot() {
         let fixture = fixture();
         deterministic::Runner::default().start(|context| async move {
-            let (store, snapshot) = SnapshotStore::<_, MinPk, Sha256Digest>::open(
+            let (store, snapshot) = SnapshotStore::<_, Bls<MinPk>, Sha256Digest>::open(
                 context.child("open"),
                 PARTITION.into(),
                 fixture.codec,
@@ -178,7 +182,7 @@ mod tests {
             assert_eq!(covered(&store), fixture.first.cursor());
             drop(store);
 
-            let (store, snapshot) = SnapshotStore::<_, MinPk, Sha256Digest>::open(
+            let (store, snapshot) = SnapshotStore::<_, Bls<MinPk>, Sha256Digest>::open(
                 context.child("reopen"),
                 PARTITION.into(),
                 fixture.codec,
@@ -195,7 +199,7 @@ mod tests {
     fn replaces_snapshot() {
         let fixture = fixture();
         deterministic::Runner::default().start(|context| async move {
-            let (store, _) = SnapshotStore::<_, MinPk, Sha256Digest>::open(
+            let (store, _) = SnapshotStore::<_, Bls<MinPk>, Sha256Digest>::open(
                 context.child("open"),
                 PARTITION.into(),
                 fixture.codec,
@@ -207,7 +211,7 @@ mod tests {
             let store = store.store(fixture.replacement.clone()).await.unwrap();
             drop(store);
 
-            let (store, snapshot) = SnapshotStore::<_, MinPk, Sha256Digest>::open(
+            let (store, snapshot) = SnapshotStore::<_, Bls<MinPk>, Sha256Digest>::open(
                 context.child("reopen"),
                 PARTITION.into(),
                 fixture.codec,
@@ -224,7 +228,7 @@ mod tests {
     fn rejects_snapshot_from_another_epoch() {
         let fixture = fixture();
         deterministic::Runner::default().start(|context| async move {
-            let (store, _) = SnapshotStore::<_, MinPk, Sha256Digest>::open(
+            let (store, _) = SnapshotStore::<_, Bls<MinPk>, Sha256Digest>::open(
                 context.child("open"),
                 PARTITION.into(),
                 fixture.codec,
@@ -235,7 +239,7 @@ mod tests {
             let store = store.store(fixture.first).await.unwrap();
             drop(store);
 
-            let result = SnapshotStore::<_, MinPk, Sha256Digest>::open(
+            let result = SnapshotStore::<_, Bls<MinPk>, Sha256Digest>::open(
                 context.child("wrong_epoch"),
                 PARTITION.into(),
                 fixture.codec,
@@ -254,7 +258,7 @@ mod tests {
     fn checksum_mismatch_recovers_previous_snapshot() {
         let fixture = fixture();
         deterministic::Runner::default().start(|context| async move {
-            let (store, _) = SnapshotStore::<_, MinPk, Sha256Digest>::open(
+            let (store, _) = SnapshotStore::<_, Bls<MinPk>, Sha256Digest>::open(
                 context.child("open"),
                 PARTITION.into(),
                 fixture.codec,
@@ -273,7 +277,7 @@ mod tests {
                 .unwrap();
             drop(current);
 
-            let (store, snapshot) = SnapshotStore::<_, MinPk, Sha256Digest>::open(
+            let (store, snapshot) = SnapshotStore::<_, Bls<MinPk>, Sha256Digest>::open(
                 context.child("reopen"),
                 PARTITION.into(),
                 fixture.codec,
@@ -295,7 +299,7 @@ mod tests {
                 inner: context.child("open"),
                 faults: faults.clone(),
             };
-            let (store, _) = SnapshotStore::<_, MinPk, Sha256Digest>::open(
+            let (store, _) = SnapshotStore::<_, Bls<MinPk>, Sha256Digest>::open(
                 storage,
                 PARTITION.into(),
                 fixture.codec,
@@ -314,7 +318,7 @@ mod tests {
                 inner: context.child("reopen"),
                 faults,
             };
-            let (store, snapshot) = SnapshotStore::<_, MinPk, Sha256Digest>::open(
+            let (store, snapshot) = SnapshotStore::<_, Bls<MinPk>, Sha256Digest>::open(
                 storage,
                 PARTITION.into(),
                 fixture.codec,
@@ -343,7 +347,7 @@ mod tests {
                     inner: context.child("open"),
                     pending: pending.clone(),
                 };
-                let (store, _) = SnapshotStore::<_, MinPk, Sha256Digest>::open(
+                let (store, _) = SnapshotStore::<_, Bls<MinPk>, Sha256Digest>::open(
                     storage,
                     PARTITION.into(),
                     codec,
@@ -366,7 +370,7 @@ mod tests {
         let completed_replacement = replacement.clone();
         let (_, checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
-                let (store, snapshot) = SnapshotStore::<_, MinPk, Sha256Digest>::open(
+                let (store, snapshot) = SnapshotStore::<_, Bls<MinPk>, Sha256Digest>::open(
                     context.child("recover_old"),
                     PARTITION.into(),
                     codec,
@@ -381,7 +385,7 @@ mod tests {
             });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let (store, snapshot) = SnapshotStore::<_, MinPk, Sha256Digest>::open(
+            let (store, snapshot) = SnapshotStore::<_, Bls<MinPk>, Sha256Digest>::open(
                 context.child("recover_new"),
                 PARTITION.into(),
                 codec,

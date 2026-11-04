@@ -4,11 +4,12 @@ use super::{Error, ProposalPolicy, Protocol};
 use crate::{
     multimmit::{
         machine::max_lane_artifacts,
+        scheme::Scheme,
         types::{ChainId, CodecConfig, PathLimits},
     },
     types::{Participant, View, ViewDelta},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{Faults as _, N5f1};
 use core::{num::NonZeroUsize, time::Duration};
 
@@ -171,12 +172,12 @@ const MIN_ARTIFACT_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap()
 
 /// Returns the artifact byte limit `configured` sets under `codec`, or the larger of the codec
 /// bound and [`MIN_ARTIFACT_BYTES`] when it is unset.
-fn artifact_byte_limit<V: Variant, D: Digest>(
+fn artifact_byte_limit<S: Scheme, D: Digest>(
     codec: CodecConfig,
     configured: Option<NonZeroUsize>,
 ) -> Result<NonZeroUsize, Error> {
     let required = codec
-        .max_artifact_bytes::<V, D>()
+        .max_artifact_bytes::<S, D>()
         .ok_or(Error::EncodedSizeOverflow)?;
     match configured {
         Some(limit) if limit < required => Err(Error::ArtifactByteLimitTooSmall {
@@ -252,11 +253,11 @@ impl Tuning {
     /// # Errors
     ///
     /// Returns an error when the tuning is invalid or cannot sustain the epoch's committee.
-    pub fn validate<H: Hasher, V: Variant>(
+    pub fn validate<H: Hasher, S: Scheme>(
         &self,
         protocol: &Protocol<H::Digest>,
     ) -> Result<(), Error> {
-        Profile::<H::Digest>::new::<V>(protocol.clone(), Role::Observer, *self).map(|_| ())
+        Profile::<H::Digest>::new::<S>(protocol.clone(), Role::Observer, *self).map(|_| ())
     }
 
     /// Resolves the limits this tuning leaves unset against `codec` and checks the artifact byte
@@ -266,8 +267,8 @@ impl Tuning {
     ///
     /// Returns an error when the epoch's encoded maxima do not fit this target, or when the
     /// artifact byte limit cannot admit every bounded protocol artifact.
-    fn resolve<V: Variant, D: Digest>(self, codec: CodecConfig) -> Result<ResolvedTuning, Error> {
-        let max_artifact_bytes = artifact_byte_limit::<V, D>(codec, self.max_artifact_bytes)?;
+    fn resolve<S: Scheme, D: Digest>(self, codec: CodecConfig) -> Result<ResolvedTuning, Error> {
+        let max_artifact_bytes = artifact_byte_limit::<S, D>(codec, self.max_artifact_bytes)?;
         Ok(ResolvedTuning::new(self, max_artifact_bytes))
     }
 }
@@ -707,12 +708,12 @@ impl<D: Digest> Profile<D> {
     /// # Errors
     ///
     /// Returns an error when the tuning is invalid or when a validator role names a non-member.
-    pub fn new<V: Variant>(
+    pub fn new<S: Scheme>(
         protocol: Protocol<D>,
         role: Role,
         tuning: Tuning,
     ) -> Result<Self, Error> {
-        let tuning = tuning.resolve::<V, D>(protocol.codec_config())?;
+        let tuning = tuning.resolve::<S, D>(protocol.codec_config())?;
         let resources = Self::derive(&protocol, tuning);
         Self::validate(&protocol, role, tuning, resources)?;
         Ok(Self {
@@ -776,7 +777,10 @@ impl<D: Digest> Profile<D> {
 mod tests {
     use super::*;
     use crate::{
-        multimmit::types::{BlockRef, CertificateId, ChainId, DaQuorum, EpochGenesis, PathLimits},
+        multimmit::{
+            mocks::Bls,
+            types::{BlockRef, CertificateId, ChainId, DaQuorum, EpochGenesis, PathLimits},
+        },
         types::{Epoch, Height},
     };
     use commonware_cryptography::{
@@ -830,21 +834,21 @@ mod tests {
     }
 
     fn profile(participants: u32, view_retention: u64) -> Result<Profile<Sha256Digest>, Error> {
-        Profile::new::<MinPk>(
+        Profile::new::<Bls<MinPk>>(
             protocol(participants),
             Role::Observer,
             tuning(view_retention),
         )
     }
 
-    fn assert_artifact_byte_limit<V: Variant>() {
+    fn assert_artifact_byte_limit<S: Scheme>() {
         let protocol = protocol_with_limits(11, PathLimits::new(3, 2));
         let required = protocol
             .codec_config()
-            .max_artifact_bytes::<V, Sha256Digest>()
+            .max_artifact_bytes::<S, Sha256Digest>()
             .unwrap();
         let resolved = |limit| {
-            Profile::new::<V>(
+            Profile::new::<S>(
                 protocol.clone(),
                 Role::Observer,
                 Tuning {
@@ -865,7 +869,7 @@ mod tests {
             max_artifact_bytes: Some(actual),
             ..tuning(64)
         };
-        assert_eq!(tuning.validate::<Sha256, V>(&protocol), Err(error));
+        assert_eq!(tuning.validate::<Sha256, S>(&protocol), Err(error));
     }
 
     #[test]
@@ -893,7 +897,7 @@ mod tests {
                 for pipeline_depth in [1, 2, 32, 48, deepest].map(|depth| depth.min(deepest)) {
                     let limits = PathLimits::new(u32::try_from(pipeline_depth).unwrap(), 0);
                     // Deep pipelines carry large leader blocks.
-                    let profile = Profile::new::<MinPk>(
+                    let profile = Profile::new::<Bls<MinPk>>(
                         protocol_with_limits(participants, limits),
                         Role::Observer,
                         Tuning {
@@ -935,14 +939,14 @@ mod tests {
                     let receipts =
                         Protocol::from_parameters(Arc::new(parameters), base.genesis().clone())
                             .unwrap();
-                    let with = Profile::new::<MinPk>(
+                    let with = Profile::new::<Bls<MinPk>>(
                         receipts.clone(),
                         Role::Observer,
                         tuning(view_retention),
                     )
                     .unwrap();
                     let without =
-                        Profile::new::<MinPk>(base, Role::Observer, tuning(view_retention))
+                        Profile::new::<Bls<MinPk>>(base, Role::Observer, tuning(view_retention))
                             .unwrap();
 
                     // Every receipt chain's votes fit on top of the default partition, which is
@@ -1001,7 +1005,7 @@ mod tests {
                     let protocol =
                         Protocol::from_parameters(Arc::new(parameters), base.genesis().clone())
                             .unwrap();
-                    let profile = Profile::new::<MinPk>(
+                    let profile = Profile::new::<Bls<MinPk>>(
                         protocol.clone(),
                         Role::Observer,
                         tuning(view_retention),
@@ -1046,15 +1050,15 @@ mod tests {
 
     #[test]
     fn production_profiles_enforce_the_exact_artifact_byte_bound_for_both_variants() {
-        assert_artifact_byte_limit::<MinPk>();
-        assert_artifact_byte_limit::<MinSig>();
+        assert_artifact_byte_limit::<Bls<MinPk>>();
+        assert_artifact_byte_limit::<Bls<MinSig>>();
     }
 
     #[test]
     fn explicit_test_limits_allow_an_undersized_artifact_byte_bound() {
         let protocol = protocol(6);
         let tuning = tuning(64);
-        let derived = Profile::new::<MinPk>(protocol.clone(), Role::Observer, tuning)
+        let derived = Profile::new::<Bls<MinPk>>(protocol.clone(), Role::Observer, tuning)
             .unwrap()
             .resources();
         let resources = ResourceLimits {
@@ -1070,7 +1074,7 @@ mod tests {
     fn explicit_test_limits_cover_pinned_and_live_finality_partitions() {
         let protocol = protocol(6);
         let tuning = tuning(2);
-        let derived = Profile::new::<MinPk>(protocol.clone(), Role::Observer, tuning)
+        let derived = Profile::new::<Bls<MinPk>>(protocol.clone(), Role::Observer, tuning)
             .unwrap()
             .resources();
         let pinned = 3 + derived.max_future_view_distance() as usize;
@@ -1089,7 +1093,7 @@ mod tests {
     #[test]
     fn unrepresentable_required_capacities_are_overflow_errors() {
         let protocol = protocol(6);
-        let derived = Profile::new::<MinPk>(protocol.clone(), Role::Observer, tuning(64))
+        let derived = Profile::new::<Bls<MinPk>>(protocol.clone(), Role::Observer, tuning(64))
             .unwrap()
             .resources();
 
@@ -1172,7 +1176,7 @@ mod tests {
 
     #[test]
     fn tuning_is_carried_through_verbatim() {
-        let profile = Profile::new::<MinPk>(
+        let profile = Profile::new::<Bls<MinPk>>(
             protocol(6),
             Role::Observer,
             Tuning {
@@ -1209,7 +1213,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                Profile::new::<MinPk>(protocol(6), Role::Observer, tuning).unwrap_err(),
+                Profile::new::<Bls<MinPk>>(protocol(6), Role::Observer, tuning).unwrap_err(),
                 expected
             );
         }
@@ -1221,9 +1225,9 @@ mod tests {
             let protocol = protocol_with_limits(participants, limits);
             let required = protocol
                 .codec_config()
-                .max_artifact_bytes::<MinPk, Sha256Digest>()
+                .max_artifact_bytes::<Bls<MinPk>, Sha256Digest>()
                 .unwrap();
-            let profile = Profile::new::<MinPk>(protocol, Role::Observer, tuning(64)).unwrap();
+            let profile = Profile::new::<Bls<MinPk>>(protocol, Role::Observer, tuning(64)).unwrap();
             assert_eq!(
                 profile.resources().max_artifact_bytes(),
                 required.max(MIN_ARTIFACT_BYTES).get(),
@@ -1235,7 +1239,7 @@ mod tests {
         assert!(
             small
                 .codec_config()
-                .max_artifact_bytes::<MinPk, Sha256Digest>()
+                .max_artifact_bytes::<Bls<MinPk>, Sha256Digest>()
                 .unwrap()
                 < MIN_ARTIFACT_BYTES
         );
@@ -1243,7 +1247,7 @@ mod tests {
         assert!(
             large
                 .codec_config()
-                .max_artifact_bytes::<MinPk, Sha256Digest>()
+                .max_artifact_bytes::<Bls<MinPk>, Sha256Digest>()
                 .unwrap()
                 > MIN_ARTIFACT_BYTES
         );
@@ -1256,16 +1260,16 @@ mod tests {
             ..tuning(64)
         };
         let Err(Error::ArtifactByteLimitTooLarge { max, actual }) =
-            Profile::new::<MinPk>(protocol(6), Role::Observer, with_limit(usize::MAX))
+            Profile::new::<Bls<MinPk>>(protocol(6), Role::Observer, with_limit(usize::MAX))
         else {
             panic!("an overflowing artifact byte limit was accepted");
         };
         assert_eq!(actual, usize::MAX);
-        let profile = Profile::new::<MinPk>(protocol(6), Role::Observer, with_limit(max))
+        let profile = Profile::new::<Bls<MinPk>>(protocol(6), Role::Observer, with_limit(max))
             .expect("the largest supported limit is accepted");
         assert_eq!(profile.resources().max_artifact_bytes(), max);
         assert!(matches!(
-            Profile::new::<MinPk>(protocol(6), Role::Observer, with_limit(max + 1)),
+            Profile::new::<Bls<MinPk>>(protocol(6), Role::Observer, with_limit(max + 1)),
             Err(Error::ArtifactByteLimitTooLarge { .. })
         ));
     }
@@ -1274,7 +1278,7 @@ mod tests {
     fn an_artifact_byte_limit_that_overflows_the_resolver_lane_is_rejected() {
         let protocol = protocol(6);
         let tuning = tuning(64);
-        let derived = Profile::new::<MinPk>(protocol.clone(), Role::Observer, tuning)
+        let derived = Profile::new::<Bls<MinPk>>(protocol.clone(), Role::Observer, tuning)
             .unwrap()
             .resources();
         // The resolver lane holds one artifact per dependency waiter, so this many waiters make
@@ -1300,12 +1304,13 @@ mod tests {
         };
         for accepted in [None, Some(Duration::from_millis(1_001))] {
             assert!(
-                Profile::new::<MinPk>(protocol(6), Role::Observer, with_skip(accepted)).is_ok()
+                Profile::new::<Bls<MinPk>>(protocol(6), Role::Observer, with_skip(accepted))
+                    .is_ok()
             );
         }
         for rejected in [Duration::ZERO, view_timeout, Duration::from_secs(1)] {
             let error =
-                Profile::new::<MinPk>(protocol(6), Role::Observer, with_skip(Some(rejected)))
+                Profile::new::<Bls<MinPk>>(protocol(6), Role::Observer, with_skip(Some(rejected)))
                     .unwrap_err();
             assert_eq!(
                 error,
@@ -1320,7 +1325,7 @@ mod tests {
             );
         }
         let resolved = |tuning| {
-            Profile::new::<MinPk>(protocol(6), Role::Observer, tuning)
+            Profile::new::<Bls<MinPk>>(protocol(6), Role::Observer, tuning)
                 .unwrap()
                 .tuning()
                 .skip_timeout
@@ -1363,7 +1368,7 @@ mod tests {
     fn validator_must_be_a_committee_member() {
         let outside = Role::Validator(Participant::new(6));
         assert!(matches!(
-            Profile::new::<MinPk>(protocol(6), outside, tuning(64)),
+            Profile::new::<Bls<MinPk>>(protocol(6), outside, tuning(64)),
             Err(Error::ValidatorOutOfRange(participant)) if participant == Participant::new(6)
         ));
     }

@@ -15,15 +15,16 @@ use crate::{
             util::{drain_prefix, retire_prefix},
             view::RetireFloors,
         },
+        scheme::Scheme,
         types::{Artifact, ArtifactId},
     },
     types::View,
 };
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use core::mem::take;
 use std::sync::Arc;
 
-impl<H: Hasher, V: Variant> Machine<H, V> {
+impl<H: Hasher, S: Scheme> Machine<H, S> {
     /// Returns the greatest view whose state the machine has stopped retaining.
     ///
     /// The machine can never act in a view it has already left, so retirement is measured from the
@@ -71,7 +72,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     pub(crate) fn advance_proposal_anchor(
         &mut self,
-        artifact: &Arc<Artifact<V, H::Digest>>,
+        artifact: &Arc<Artifact<S, H::Digest>>,
     ) -> Result<(), ReplayError> {
         let Artifact::Vqc(certificate) = artifact.as_ref() else {
             return Err(ReplayError::Transition(TransitionReason::ArtifactKind));
@@ -87,7 +88,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// Installs a proposal parent, including a finality-backed same-view replacement.
     pub(crate) fn set_proposal_anchor(
         &mut self,
-        artifact: &Arc<Artifact<V, H::Digest>>,
+        artifact: &Arc<Artifact<S, H::Digest>>,
         validated: Option<ValidatedVqc<H::Digest>>,
     ) -> Result<(), ReplayError> {
         let Artifact::Vqc(certificate) = artifact.as_ref() else {
@@ -180,7 +181,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     /// Whether `artifact` sits at or below a retention floor: its view is retired or its chain
     /// position is certified.
-    pub(super) fn retired(&self, artifact: &Artifact<V, H::Digest>) -> bool {
+    pub(super) fn retired(&self, artifact: &Artifact<S, H::Digest>) -> bool {
         artifact
             .view()
             .is_some_and(|view| view <= self.durable.state.retired_view)
@@ -194,7 +195,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     }
 
     /// Returns where `artifact` sits against the retention floors.
-    pub(super) fn floor_position(&self, artifact: &Artifact<V, H::Digest>) -> FloorPosition {
+    pub(super) fn floor_position(&self, artifact: &Artifact<S, H::Digest>) -> FloorPosition {
         if self.retired(artifact) {
             FloorPosition::Retired
         } else {
@@ -220,7 +221,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(super) fn forgettable(
         &self,
         id: &ArtifactId<H::Digest>,
-        entry: &ArtifactEntry<V, H::Digest>,
+        entry: &ArtifactEntry<S, H::Digest>,
     ) -> bool {
         !entry.future && !self.durable.artifact_references.contains_key(id)
     }

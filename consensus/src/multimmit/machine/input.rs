@@ -17,16 +17,17 @@ use crate::{
             view::{NullificationRecoveryCompletion, ViewError, ViewTimer, VqcAggregateCompletion},
             vote_body::VoteBuilds,
         },
+        scheme::Scheme,
         types::{Activity, ArtifactId, BlockRef, ChainId, DaCertificate, SignedTransactionBlock},
     },
     types::Height,
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use std::sync::Arc;
 
 /// A serialized input to the local state machine.
 #[derive(Clone, Debug)]
-pub(crate) enum Input<V: Variant, D: Digest> {
+pub(crate) enum Input<S: Scheme, D: Digest> {
     /// Start a fresh machine after making its process generation durable.
     Start,
     /// Finish silent recovery and durably enter a new process generation.
@@ -35,13 +36,13 @@ pub(crate) enum Input<V: Variant, D: Digest> {
     ///
     /// Identifiers hash the full encoding, so ingress computes them once on its own task
     /// rather than re-hashing multi-kilobyte certificates on the voter loop.
-    Observe(Vec<IdentifiedArtifact<V, D>>),
+    Observe(Vec<IdentifiedArtifact<S, D>>),
     /// Complete one machine-issued verification job.
-    Verified(VerificationCompletion<V, D>),
+    Verified(VerificationCompletion<S, D>),
     /// Complete one safety-journal barrier.
     Persisted(BarrierAck),
     /// Complete one stable durable outbox action.
-    EffectCompleted(EffectCompletion<V, D>),
+    EffectCompleted(EffectCompletion<S, D>),
     /// Fire one logical view timer.
     TimerFired(ViewTimer),
     /// Wake the local producer.
@@ -55,11 +56,11 @@ pub(crate) enum Input<V: Variant, D: Digest> {
     /// Complete cancellation of custody for one superseded prepared block.
     CustodyCancelled(CustodyCancellation),
     /// Complete one machine-issued view-proof request.
-    ResolutionCompleted(ResolutionCompletion<V, D>),
+    ResolutionCompleted(ResolutionCompletion<S, D>),
     /// Fire one producer deadline bound to a parent.
     ProductionTimerFired(ProductionTimer<D>),
     /// Complete one recovery or aggregation job, which stages a durable change.
-    Crypto(CryptoCompletion<V, D>),
+    Crypto(CryptoCompletion<S, D>),
 }
 
 /// One producer chain's eligible DA-vote run, offered by its chain plane.
@@ -67,13 +68,13 @@ pub(crate) enum Input<V: Variant, D: Digest> {
 /// An offer is not an [`Input`]: the core applies it at once through `CoreState::offer`, outside
 /// the lanes, and the machine checks its generation.
 #[derive(Clone, Debug)]
-pub(crate) struct DaVotesOffer<V: Variant, D: Digest> {
+pub(crate) struct DaVotesOffer<S: Scheme, D: Digest> {
     /// The process generation the plane ran under.
     pub(crate) generation: Generation,
     /// The producer chain the run belongs to.
     pub(crate) chain: ChainId,
     /// The contiguous eligible run above the certified anchor, lowest height first.
-    pub(crate) candidates: Vec<Arc<SignedTransactionBlock<V, D>>>,
+    pub(crate) candidates: Vec<Arc<SignedTransactionBlock<S, D>>>,
     /// The greatest height the run reaches, or the certified anchor when the run is empty.
     pub(crate) ready_through: Height,
 }
@@ -83,20 +84,20 @@ pub(crate) struct DaVotesOffer<V: Variant, D: Digest> {
 /// Each completion stages a durable change, so completions park and drain in arrival order
 /// through the machine's scheduler.
 #[derive(Clone, Debug)]
-pub(crate) enum CryptoCompletion<V: Variant, D: Digest> {
+pub(crate) enum CryptoCompletion<S: Scheme, D: Digest> {
     /// A certificate the own-chain DA task recovered off-thread, to admit and publish.
     DaCertificate {
         /// The certified block.
         block: BlockRef<D>,
         /// The recovered certificate.
-        certificate: DaCertificate<V, D>,
+        certificate: DaCertificate<S, D>,
     },
     /// One nullification recovery request.
-    Nullification(NullificationRecoveryCompletion<V>),
+    Nullification(NullificationRecoveryCompletion<S>),
     /// One V-QC aggregation request.
-    Vqc(Box<VqcAggregateCompletion<V, D>>),
+    Vqc(Box<VqcAggregateCompletion<S, D>>),
     /// One L-QC aggregation request.
-    Lqc(Box<LqcAggregateCompletion<V, D>>),
+    Lqc(Box<LqcAggregateCompletion<S, D>>),
 }
 
 /// Why a decoded artifact did not enter cryptographic verification.
@@ -195,53 +196,53 @@ pub(crate) enum StepStatus<D: Digest> {
 }
 
 /// Authoritative capabilities and non-authoritative activities emitted by one core transition.
-pub(crate) type StepParts<V, D> = (Capabilities<V, D>, Vec<Activity<V, D>>);
+pub(crate) type StepParts<S, D> = (Capabilities<S, D>, Vec<Activity<S, D>>);
 
 /// Bounded capabilities emitted while polling core-owned semantic work.
 #[derive(Clone, Debug)]
-pub(crate) struct PollResult<V: Variant, D: Digest> {
-    pub(crate) capabilities: Capabilities<V, D>,
-    pub(crate) activities: Vec<Activity<V, D>>,
+pub(crate) struct PollResult<S: Scheme, D: Digest> {
+    pub(crate) capabilities: Capabilities<S, D>,
+    pub(crate) activities: Vec<Activity<S, D>>,
     /// Vote-pass lifecycle events for tracing. They never influence protocol decisions.
     pub(crate) vote_builds: VoteBuilds,
 }
 
-impl<V: Variant, D: Digest> PollResult<V, D> {
+impl<S: Scheme, D: Digest> PollResult<S, D> {
     /// Returns capabilities in deterministic issuance order.
     #[cfg(any(test, feature = "mocks"))]
-    pub(crate) fn capabilities(&self) -> &[Capability<V, D>] {
+    pub(crate) fn capabilities(&self) -> &[Capability<S, D>] {
         &self.capabilities
     }
 
     /// Returns non-authoritative activities authorized by this poll.
     #[cfg(test)]
-    pub(crate) fn activities(&self) -> &[Activity<V, D>] {
+    pub(crate) fn activities(&self) -> &[Activity<S, D>] {
         &self.activities
     }
 
     /// Consumes the result and returns its capabilities.
     #[cfg(any(test, feature = "mocks"))]
-    pub(crate) fn into_capabilities(self) -> Capabilities<V, D> {
+    pub(crate) fn into_capabilities(self) -> Capabilities<S, D> {
         self.capabilities
     }
 
     /// Consumes the result and separates authoritative capabilities from telemetry.
     #[cfg(test)]
-    pub(crate) fn into_parts(self) -> StepParts<V, D> {
+    pub(crate) fn into_parts(self) -> StepParts<S, D> {
         (self.capabilities, self.activities)
     }
 }
 
 /// Result of one deterministic machine step.
 #[derive(Clone, Debug)]
-pub(crate) struct Step<V: Variant, D: Digest> {
+pub(crate) struct Step<S: Scheme, D: Digest> {
     pub(crate) status: StepStatus<D>,
-    pub(crate) capabilities: Capabilities<V, D>,
-    pub(crate) activities: Vec<Activity<V, D>>,
+    pub(crate) capabilities: Capabilities<S, D>,
+    pub(crate) activities: Vec<Activity<S, D>>,
 }
 
-impl<V: Variant, D: Digest> Step<V, D> {
-    pub(crate) fn new(status: StepStatus<D>, capabilities: impl Into<Capabilities<V, D>>) -> Self {
+impl<S: Scheme, D: Digest> Step<S, D> {
+    pub(crate) fn new(status: StepStatus<D>, capabilities: impl Into<Capabilities<S, D>>) -> Self {
         Self {
             status,
             capabilities: capabilities.into(),
@@ -265,28 +266,28 @@ impl<V: Variant, D: Digest> Step<V, D> {
 
     /// Returns immutable capabilities in deterministic issuance order.
     #[cfg(any(test, feature = "mocks"))]
-    pub(crate) fn capabilities(&self) -> &[Capability<V, D>] {
+    pub(crate) fn capabilities(&self) -> &[Capability<S, D>] {
         &self.capabilities
     }
 
     /// Returns non-authoritative activities authorized by this step.
     #[cfg(test)]
-    pub(crate) fn activities(&self) -> &[Activity<V, D>] {
+    pub(crate) fn activities(&self) -> &[Activity<S, D>] {
         &self.activities
     }
 
     /// Consumes the result and returns its capabilities.
-    pub(crate) fn into_capabilities(self) -> Capabilities<V, D> {
+    pub(crate) fn into_capabilities(self) -> Capabilities<S, D> {
         self.capabilities
     }
 
     /// Consumes the result and separates authoritative capabilities from telemetry.
-    pub(crate) fn into_parts(self) -> StepParts<V, D> {
+    pub(crate) fn into_parts(self) -> StepParts<S, D> {
         (self.capabilities, self.activities)
     }
 }
 
-impl<V: Variant, D: Digest> From<StepStatus<D>> for Step<V, D> {
+impl<S: Scheme, D: Digest> From<StepStatus<D>> for Step<S, D> {
     fn from(status: StepStatus<D>) -> Self {
         Self {
             status,

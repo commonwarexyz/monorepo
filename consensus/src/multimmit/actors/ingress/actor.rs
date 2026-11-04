@@ -18,13 +18,14 @@ use crate::{
             verifier::{self, Verifier},
             voter::{Completions, Observations, Observed},
         },
+        scheme::Scheme,
         types::{CodecConfig, EncodedBounds},
         wire::{EnvelopeConfig, Plane},
     },
     types::Epoch,
 };
 use commonware_actor::{Feedback, Unreliable, mailbox};
-use commonware_cryptography::{Digest, Hasher, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::{select, select_loop};
 use commonware_p2p::Receiver;
 use commonware_parallel::Strategy;
@@ -50,18 +51,18 @@ pub(super) enum Fatal {
 }
 
 /// One completed decode and the plane whose frame produced it.
-pub(super) struct Arrival<P, V: Variant, D: Digest> {
+pub(super) struct Arrival<P, S: Scheme, D: Digest> {
     pub(super) plane: Plane,
-    pub(super) outcome: IngressOutcome<P, V, D>,
+    pub(super) outcome: IngressOutcome<P, S, D>,
 }
 
 /// Decodes peer traffic on three planes and forwards fair bounded cohorts to the voter.
-pub(crate) struct Actor<E, H, P, V, T, C>
+pub(crate) struct Actor<E, H, P, S, T, C>
 where
     E: Clock + Metrics + Spawner,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     T: Strategy,
     C: Strategy,
 {
@@ -76,15 +77,15 @@ where
     observation_capacity: usize,
     mailbox: mailbox::Receiver<Message>,
     pub(super) metrics: ActorMetrics,
-    _types: PhantomData<(H, P, V)>,
+    _types: PhantomData<(H, P, S)>,
 }
 
-impl<E, H, P, V, T, C> Actor<E, H, P, V, T, C>
+impl<E, H, P, S, T, C> Actor<E, H, P, S, T, C>
 where
     E: Clock + Metrics + Spawner,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     T: Strategy,
     C: Strategy,
 {
@@ -119,9 +120,9 @@ where
     /// any two ingress turns. The task stops when either side stops.
     pub(crate) fn start(
         mut self,
-        verifier: Verifier<E, H, P, V, T, C>,
-        completions: Completions<V, H::Digest>,
-        observations: Observations<P, V, H::Digest>,
+        verifier: Verifier<E, H, S, T, C>,
+        completions: Completions<S, H::Digest>,
+        observations: Observations<P, S, H::Digest>,
         data: impl Receiver<PublicKey = P>,
         consensus: impl Receiver<PublicKey = P>,
         certificates: impl Receiver<PublicKey = P>,
@@ -144,9 +145,9 @@ where
 
     async fn run(
         mut self,
-        mut verifier: Verifier<E, H, P, V, T, C>,
-        completions: Completions<V, H::Digest>,
-        observations: Observations<P, V, H::Digest>,
+        mut verifier: Verifier<E, H, S, T, C>,
+        completions: Completions<S, H::Digest>,
+        observations: Observations<P, S, H::Digest>,
         data: impl Receiver<PublicKey = P>,
         consensus: impl Receiver<PublicKey = P>,
         certificates: impl Receiver<PublicKey = P>,
@@ -171,10 +172,10 @@ where
 
     async fn serve<DR, CR, RR>(
         &mut self,
-        ingress: &mut Ingress<E, H, P, V, T, C, DR, CR, RR>,
-        verifier: &mut Verifier<E, H, P, V, T, C>,
-        completions: &Completions<V, H::Digest>,
-        observations: &Observations<P, V, H::Digest>,
+        ingress: &mut Ingress<E, H, P, S, T, C, DR, CR, RR>,
+        verifier: &mut Verifier<E, H, S, T, C>,
+        completions: &Completions<S, H::Digest>,
+        observations: &Observations<P, S, H::Digest>,
     ) -> Result<(), Fatal>
     where
         E: CryptoRng,
@@ -214,7 +215,7 @@ where
         data: DR,
         consensus: CR,
         certificates: RR,
-    ) -> Ingress<E, H, P, V, T, C, DR, CR, RR>
+    ) -> Ingress<E, H, P, S, T, C, DR, CR, RR>
     where
         DR: Receiver<PublicKey = P>,
         CR: Receiver<PublicKey = P>,
@@ -238,12 +239,12 @@ where
     }
 
     /// Builds the bounded receiver of one plane.
-    pub(super) fn receiver<R: Receiver<PublicKey = P>, S: Strategy>(
+    pub(super) fn receiver<R: Receiver<PublicKey = P>, St: Strategy>(
         &self,
         receiver: R,
         plane: Plane,
-        strategy: S,
-    ) -> IngressReceiver<E, R, H, V, S> {
+        strategy: St,
+    ) -> IngressReceiver<E, R, H, S, St> {
         let context = self
             .context
             .child("ingress")
@@ -268,19 +269,19 @@ where
 }
 
 /// The running ingress state: plane receivers, fair lanes, and observation credits.
-pub(super) struct Ingress<E, H, P, V, T, C, DR, CR, RR>
+pub(super) struct Ingress<E, H, P, S, T, C, DR, CR, RR>
 where
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     DR: Receiver<PublicKey = P>,
     CR: Receiver<PublicKey = P>,
     RR: Receiver<PublicKey = P>,
 {
-    pub(super) data: IngressReceiver<E, DR, H, V, T>,
-    pub(super) consensus: IngressReceiver<E, CR, H, V, C>,
-    pub(super) certificates: IngressReceiver<E, RR, H, V, C>,
-    pub(super) lanes: Lanes<P, V, H::Digest>,
+    pub(super) data: IngressReceiver<E, DR, H, S, T>,
+    pub(super) consensus: IngressReceiver<E, CR, H, S, C>,
+    pub(super) certificates: IngressReceiver<E, RR, H, S, C>,
+    pub(super) lanes: Lanes<P, S, H::Digest>,
     /// The identity-key committee, for the data-availability-vote sender check.
     pub(super) participants: Arc<Set<P>>,
     /// The plane scanned first for the next ready completion.
@@ -293,12 +294,12 @@ where
     pub(super) cohort_items: usize,
 }
 
-impl<E, H, P, V, T, C, DR, CR, RR> Ingress<E, H, P, V, T, C, DR, CR, RR>
+impl<E, H, P, S, T, C, DR, CR, RR> Ingress<E, H, P, S, T, C, DR, CR, RR>
 where
     E: Clock,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     T: Strategy,
     C: Strategy,
     DR: Receiver<PublicKey = P>,
@@ -310,7 +311,7 @@ where
     /// `select!` is biased toward earlier arms, so each block lists the planes in
     /// [`Plane::rotation`] order from its starting plane. The receivers have different types, so
     /// the three orders are written out instead of looped.
-    pub(super) async fn recv(&mut self) -> Option<Arrival<P, V, H::Digest>> {
+    pub(super) async fn recv(&mut self) -> Option<Arrival<P, S, H::Digest>> {
         let arrival = |plane| move |outcome| Arrival { plane, outcome };
         match self.next {
             Plane::Consensus => {
@@ -338,7 +339,7 @@ where
     }
 
     /// Returns a completion that is already ready, scanning planes in rotation order from `next`.
-    fn try_ready(&mut self) -> Option<Arrival<P, V, H::Digest>> {
+    fn try_ready(&mut self) -> Option<Arrival<P, S, H::Digest>> {
         self.next.rotation().into_iter().find_map(|plane| {
             let outcome = match plane {
                 Plane::Data => self.data.try_completed(),
@@ -353,7 +354,7 @@ where
     /// rotating planes after each.
     pub(super) fn drain_ready(
         &mut self,
-        first: Arrival<P, V, H::Digest>,
+        first: Arrival<P, S, H::Digest>,
         budget: usize,
         metrics: &ActorMetrics,
     ) -> Result<(), Fatal> {
@@ -403,7 +404,7 @@ where
         &mut self,
         lane: LaneId,
         peer: P,
-        group: Group<V, H::Digest>,
+        group: Group<S, H::Digest>,
         metrics: &ActorMetrics,
     ) {
         let items = group.len() as u64;
@@ -440,7 +441,7 @@ where
     pub(super) fn flush(
         &mut self,
         clock: &impl Clock,
-        voter: &Observations<P, V, H::Digest>,
+        voter: &Observations<P, S, H::Digest>,
         metrics: &ActorMetrics,
     ) -> Result<(), Fatal> {
         while self.inflight < self.capacity && self.lanes.items() > 0 {

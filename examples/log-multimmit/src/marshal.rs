@@ -2,7 +2,7 @@
 
 use crate::{
     application::{Block, Body, Marshal, Relay},
-    committee::Committee,
+    committee::{Committee, Suite},
     config::NodeTuning,
     node::PARTITION_PREFIX,
 };
@@ -15,7 +15,7 @@ use commonware_consensus::{
     },
     types::Participant,
 };
-use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
+use commonware_cryptography::ed25519;
 use commonware_p2p::{Receiver, Sender, authenticated::discovery};
 use commonware_parallel::Rayon;
 use commonware_resolver::p2p as resolver;
@@ -56,7 +56,7 @@ const RESOLVER_RETRY: Duration = Duration::from_millis(100);
 ///
 /// Every size bound follows from the largest encoded block, so the configuration scales with
 /// `--body-size` without separate knobs.
-fn config(committee: &Committee, tuning: &NodeTuning) -> Config<EightCap, MinSig, Body> {
+fn config(committee: &Committee, tuning: &NodeTuning) -> Config<EightCap, Suite, Body> {
     let archive = ArchiveConfig::new(
         EightCap,
         CacheRef::new(ARCHIVE_PAGE_SIZE, ARCHIVE_CACHE_PAGES),

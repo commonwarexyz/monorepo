@@ -22,9 +22,10 @@ use crate::multimmit::{
         persistence::{self, Output},
     },
     machine::{IdentifiedArtifact, Lane},
+    scheme::Scheme,
 };
 use commonware_actor::mailbox::{self, Policy, UnreliablePolicy};
-use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::Sender;
 use commonware_runtime::Clock as _;
 use futures::{FutureExt as _, future::poll_fn, task::noop_waker_ref};
@@ -173,10 +174,10 @@ impl ReadinessCursor {
     }
 
     /// Moves the scan start past `event`'s input and, for a rotating source, past `source`.
-    pub(crate) const fn record<P: PublicKey, V: Variant, D: Digest>(
+    pub(crate) const fn record<P: PublicKey, S: Scheme, D: Digest>(
         &mut self,
         source: Option<Source>,
-        event: &RuntimeEvent<P, V, D>,
+        event: &RuntimeEvent<P, S, D>,
     ) {
         match event {
             // Checkpoint progress, like other housekeeping, leaves the rotation where it was.
@@ -218,25 +219,25 @@ pub(crate) enum Arm {
 }
 
 /// One ready runtime input, before it is admitted to the core.
-pub(crate) enum RuntimeEvent<P: PublicKey, V: Variant, D: Digest> {
-    Persistence(Output<V, D>),
+pub(crate) enum RuntimeEvent<P: PublicKey, S: Scheme, D: Digest> {
+    Persistence(Output<S, D>),
     /// A persistence command slot freed, or the persistence actor closed.
     PersistenceCapacity(Result<(), persistence::Error>),
     Application(Finished<AppResult<D>>),
-    Crypto(Finished<CryptoResult<V, D>>),
-    ChainTask(ChainUpdate<V, D>),
+    Crypto(Finished<CryptoResult<S, D>>),
+    ChainTask(ChainUpdate<S, D>),
     ViewTimer,
     ProductionTimer,
     Publication,
     Heartbeat,
-    Verification(Completed<V, D>),
-    Resolution(Message<V, D>),
+    Verification(Completed<S, D>),
+    Resolution(Message<S, D>),
     Inspection(Query<D>),
-    Observation(ObservedBatch<P, V, D>),
+    Observation(ObservedBatch<P, S, D>),
     InputClosed,
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> RuntimeEvent<P, V, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> RuntimeEvent<P, S, D> {
     /// Returns the core lane this event feeds, if any.
     pub(crate) const fn core_lane(&self) -> Option<Lane> {
         match self {
@@ -263,8 +264,8 @@ impl<P: PublicKey, V: Variant, D: Digest> RuntimeEvent<P, V, D> {
 /// and verification batch cover work that accumulated while the voter was busy.
 /// View-critical batches retain the ingress actor's small artifact bound. Whole cohorts stay
 /// intact, including indivisible parent-and-proposal groups.
-pub(crate) struct ObservedBatch<P: PublicKey, V: Variant, D: Digest> {
-    pub(crate) artifacts: Vec<(P, IdentifiedArtifact<V, D>)>,
+pub(crate) struct ObservedBatch<P: PublicKey, S: Scheme, D: Digest> {
+    pub(crate) artifacts: Vec<(P, IdentifiedArtifact<S, D>)>,
     pub(crate) spans: Vec<Span>,
     pub(crate) cohorts: usize,
     /// The earliest hand-off among the merged cohorts.
@@ -273,18 +274,18 @@ pub(crate) struct ObservedBatch<P: PublicKey, V: Variant, D: Digest> {
     pub(crate) bytes: usize,
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> ObservedBatch<P, V, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> ObservedBatch<P, S, D> {
     /// Merges adjacent compatible cohorts within their item bound, carrying the first incompatible
     /// cohort into the next batch without reordering observations.
     ///
     /// View-critical batches stop at `view_items`. A cohort's plane decides whether it is
     /// view-critical, and only cohorts of equal criticality merge.
     pub(crate) fn drain(
-        first: Observed<P, V, D>,
-        observations: &mut mailbox::UnreliableReceiver<Observed<P, V, D>>,
+        first: Observed<P, S, D>,
+        observations: &mut mailbox::UnreliableReceiver<Observed<P, S, D>>,
         max_items: usize,
         view_items: usize,
-    ) -> (Self, Option<Observed<P, V, D>>) {
+    ) -> (Self, Option<Observed<P, S, D>>) {
         let Observed {
             artifacts,
             bytes,
@@ -396,10 +397,10 @@ impl<T: UnreliablePolicy> Inbound for mailbox::UnreliableReceiver<T> {
     }
 }
 
-impl<T, S> Live<T, S>
+impl<T, Sn> Live<T, Sn>
 where
     T: VoterTypes,
-    S: Sender<PublicKey = T::PublicKey>,
+    Sn: Sender<PublicKey = T::PublicKey>,
 {
     /// Captures which sources the core can admit right now.
     pub(crate) fn gates(&self) -> Gates {
@@ -424,7 +425,7 @@ where
     pub(crate) async fn next_event(
         &mut self,
         cursor: &mut ReadinessCursor,
-    ) -> Option<RuntimeEvent<T::PublicKey, T::Variant, DigestOf<T>>> {
+    ) -> Option<RuntimeEvent<T::PublicKey, T::Scheme, DigestOf<T>>> {
         if self.pending_inspection.is_some() {
             // The inspection stays pending during the scan, which keeps the query source closed.
             if matches!(
@@ -460,7 +461,7 @@ where
         &mut self,
         cursor: &mut ReadinessCursor,
         excluded: Option<Lane>,
-    ) -> Option<RuntimeEvent<T::PublicKey, T::Variant, DigestOf<T>>> {
+    ) -> Option<RuntimeEvent<T::PublicKey, T::Scheme, DigestOf<T>>> {
         if !self.persistence.has_capacity()
             && let Some(result) = self
                 .persistence
@@ -528,7 +529,7 @@ where
     pub(super) async fn wait(
         &mut self,
         cursor: &mut ReadinessCursor,
-    ) -> RuntimeEvent<T::PublicKey, T::Variant, DigestOf<T>> {
+    ) -> RuntimeEvent<T::PublicKey, T::Scheme, DigestOf<T>> {
         let gates = self.gates();
         // A fenced voter cannot rely on new ingress to fill a quiet journal prefix.
         if self.persistence.ledger().fenced()
@@ -611,7 +612,7 @@ where
         &mut self,
         arm: Arm,
         probe: &mut Probe<'_, '_>,
-    ) -> Poll<RuntimeEvent<T::PublicKey, T::Variant, DigestOf<T>>> {
+    ) -> Poll<RuntimeEvent<T::PublicKey, T::Scheme, DigestOf<T>>> {
         match arm {
             Arm::Persistence => probe.recv(self.persistence.output()).map(|output| {
                 RuntimeEvent::Persistence(output.unwrap_or_else(|| self.persistence_closed()))
@@ -661,7 +662,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::multimmit::actors::util::reliable_policy;
+    use crate::multimmit::{actors::util::reliable_policy, mocks::Bls};
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk, ed25519, sha256::Digest as Sha256Digest,
     };
@@ -675,7 +676,7 @@ mod tests {
         },
     };
 
-    type Event = RuntimeEvent<ed25519::PublicKey, MinPk, Sha256Digest>;
+    type Event = RuntimeEvent<ed25519::PublicKey, Bls<MinPk>, Sha256Digest>;
 
     #[derive(Debug, PartialEq, Eq)]
     struct Item(u8);

@@ -9,7 +9,7 @@ fn immediate_body_reads_keep_request_trace() {
     let subscriber = tracing_subscriber::registry().with(paths.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
     deterministic::Runner::default().start(|context| async move {
-        let committee = Committee::<MinPk>::builder(44, 6)
+        let committee = Committee::<Bls<MinPk>>::builder(44, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BODY_TRACE")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -59,7 +59,7 @@ fn queued_admissions_from_one_span_link_only_distinct_spans() {
         .with(tracing_subscriber::filter::LevelFilter::INFO);
     tracing::subscriber::with_default(subscriber, || {
         deterministic::Runner::default().start(|context| async move {
-            let committee = Committee::<MinPk>::builder(27, 6)
+            let committee = Committee::<Bls<MinPk>>::builder(27, 6)
                 .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_SPAN_LINKS")
                 .producers((0..4).map(Participant::new).collect())
                 .limits(PathLimits::new(2, 2))

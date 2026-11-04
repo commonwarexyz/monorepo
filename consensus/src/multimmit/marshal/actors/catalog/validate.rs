@@ -11,23 +11,24 @@ use crate::{
             catalog_state::Checkpoint,
             commit::{Commit, HistoryOpening, OutputRow, SelectedLqc},
         },
+        scheme::Scheme,
         types::{BlockRef, Body},
     },
     types::Epoch,
 };
 use commonware_codec::EncodeSize as _;
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 
 /// Checks that an admission names its artifact exactly and belongs to `epoch`.
-pub(super) fn admission<H, V, B>(
+pub(super) fn admission<H, S, B>(
     epoch: Epoch,
     chains: usize,
     max_block_bytes: usize,
-    admission: &Admission<H, V, B>,
+    admission: &Admission<H, S, B>,
 ) -> Result<(), Error>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     match admission {
@@ -57,33 +58,33 @@ where
 }
 
 /// Checks that `batch` extends `current` exactly within `bounds`.
-pub(super) fn commit<H, V>(
+pub(super) fn commit<H, S>(
     current: &Checkpoint<H::Digest>,
     chains: usize,
     bounds: &Bounds,
-    batch: &Commit<H, V>,
+    batch: &Commit<H, S>,
 ) -> Result<(), Error>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
 {
     let next = &batch.checkpoint;
     context(current, next, chains, bounds, batch)?;
-    selected::<H, V>(current, next, &batch.selected)?;
+    selected::<H, S>(current, next, &batch.selected)?;
     history::<H>(current, next, &batch.history)?;
     outputs::<H>(current, next, chains, bounds, &batch.outputs)
 }
 
 /// Checks that a floor installation is a newer compatible generation established by its
 /// artifacts.
-pub(super) fn install<H, V>(
+pub(super) fn install<H, S>(
     current: &Checkpoint<H::Digest>,
     chains: usize,
-    request: &InstallRequest<V, H::Digest>,
+    request: &InstallRequest<S, H::Digest>,
 ) -> Result<(), Error>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
 {
     let InstallRequest {
         checkpoint,
@@ -129,16 +130,16 @@ fn next_history_index(current: Option<u64>, count: usize) -> Result<Option<u64>,
 }
 
 /// Checks the checkpoint context and batch sizes.
-fn context<H, V>(
+fn context<H, S>(
     current: &Checkpoint<H::Digest>,
     next: &Checkpoint<H::Digest>,
     chains: usize,
     bounds: &Bounds,
-    batch: &Commit<H, V>,
+    batch: &Commit<H, S>,
 ) -> Result<(), Error>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
 {
     if next.epoch() != current.epoch()
         || next.floor_generation() != current.floor_generation()
@@ -154,14 +155,14 @@ where
 }
 
 /// Checks that the selected L-QCs are ordered, belong to the epoch, and establish the floor.
-fn selected<H, V>(
+fn selected<H, S>(
     current: &Checkpoint<H::Digest>,
     next: &Checkpoint<H::Digest>,
-    selected: &[SelectedLqc<V, H>],
+    selected: &[SelectedLqc<S, H>],
 ) -> Result<(), Error>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
 {
     if selected.iter().any(|selected| {
         selected.proof.view() != selected.view
@@ -290,7 +291,7 @@ mod tests {
     use crate::{
         multimmit::{
             marshal::OutputIndex,
-            mocks::Committee,
+            mocks::{Bls, Committee},
             testing::TestBody,
             types::{PathLimits, genesis_history},
         },
@@ -300,8 +301,8 @@ mod tests {
     use commonware_utils::NZUsize;
     use std::sync::Arc;
 
-    fn committee() -> Committee<MinPk> {
-        Committee::<MinPk>::builder(7, 6)
+    fn committee() -> Committee<Bls<MinPk>> {
+        Committee::<Bls<MinPk>>::builder(7, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_VALIDATE")
             .producers((0..4).map(Participant::new).collect())
             .limits(PathLimits::new(2, 2))
@@ -322,7 +323,7 @@ mod tests {
         let epoch = committee.config.epoch();
         let block = producer_block(&committee, 1, 10);
         let write =
-            Admission::<Sha256, MinPk, TestBody>::Block(block.reference(), Arc::clone(&block));
+            Admission::<Sha256, Bls<MinPk>, TestBody>::Block(block.reference(), Arc::clone(&block));
         assert_eq!(admission(epoch, 4, 1 << 20, &write), Ok(()));
         assert_eq!(
             admission(epoch, 4, block.encode_size() - 1, &write),
@@ -337,7 +338,7 @@ mod tests {
             Err(Error::Invalid("producer-block identity or epoch mismatch"))
         );
         let other = producer_block(&committee, 2, 11);
-        let misnamed = Admission::<Sha256, MinPk, TestBody>::Block(other.reference(), block);
+        let misnamed = Admission::<Sha256, Bls<MinPk>, TestBody>::Block(other.reference(), block);
         assert_eq!(
             admission(epoch, 4, 1 << 20, &misnamed),
             Err(Error::Invalid("producer-block identity or epoch mismatch"))
@@ -364,21 +365,23 @@ mod tests {
         let mut emitted = genesis.tips().to_vec();
         emitted[0] = blocks[0].reference();
         emitted[1] = blocks[1].reference();
-        let batch =
-            |outputs: Vec<OutputRow<_>>, floor_generation, floor_index| Commit::<Sha256, MinPk> {
-                selected: Vec::new(),
-                history: Vec::new(),
-                outputs,
-                checkpoint: checkpoint(
-                    &committee,
-                    floor_generation,
-                    genesis.lqc(),
-                    genesis_history::<Sha256>(genesis),
-                    0,
-                    emitted.clone(),
-                    floor_index,
-                ),
-            };
+        let batch = |outputs: Vec<OutputRow<_>>, floor_generation, floor_index| Commit::<
+            Sha256,
+            Bls<MinPk>,
+        > {
+            selected: Vec::new(),
+            history: Vec::new(),
+            outputs,
+            checkpoint: checkpoint(
+                &committee,
+                floor_generation,
+                genesis.lqc(),
+                genesis_history::<Sha256>(genesis),
+                0,
+                emitted.clone(),
+                floor_index,
+            ),
+        };
         let rows = || {
             vec![
                 output_row(OutputIndex::new(1), &blocks[0]),

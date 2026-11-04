@@ -9,27 +9,30 @@ use super::{
     job::{Generation, IdSequence, Issued, SequenceId},
 };
 use crate::{
-    multimmit::types::{ArtifactId, ViewProof},
+    multimmit::{
+        scheme::Scheme,
+        types::{ArtifactId, ViewProof},
+    },
     types::View,
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use core::mem::take;
 use std::collections::BTreeMap;
 
 /// A completion correlated to one resolution request.
 #[derive(Clone, Debug)]
-pub(crate) struct ResolutionCompletion<V: Variant, D: Digest> {
+pub(crate) struct ResolutionCompletion<S: Scheme, D: Digest> {
     issued: Issued<ResolutionId>,
     view: View,
-    proof: ViewProof<V, D>,
+    proof: ViewProof<S, D>,
 }
 
-impl<V: Variant, D: Digest> ResolutionCompletion<V, D> {
+impl<S: Scheme, D: Digest> ResolutionCompletion<S, D> {
     /// Creates a completion for one machine-issued request.
     pub(crate) const fn new(
         issued: Issued<ResolutionId>,
         view: View,
-        proof: ViewProof<V, D>,
+        proof: ViewProof<S, D>,
     ) -> Self {
         Self {
             issued,
@@ -49,12 +52,12 @@ impl<V: Variant, D: Digest> ResolutionCompletion<V, D> {
     }
 
     /// Returns the decoded proof.
-    pub(crate) const fn proof(&self) -> &ViewProof<V, D> {
+    pub(crate) const fn proof(&self) -> &ViewProof<S, D> {
         &self.proof
     }
 
     /// Returns the decoded proof, consuming the completion.
-    pub(crate) fn into_proof(self) -> ViewProof<V, D> {
+    pub(crate) fn into_proof(self) -> ViewProof<S, D> {
         self.proof
     }
 }
@@ -132,16 +135,16 @@ pub(crate) enum ResolutionError {
 /// Jobs remain keyed by view while an attempt is in flight or its decoded artifact is undergoing
 /// ordinary verification. Removing a failed attempt permits the same view to be
 /// retried with a fresh identifier while retaining the process generation.
-pub(crate) struct ResolutionState<V: Variant, D: Digest> {
+pub(crate) struct ResolutionState<S: Scheme, D: Digest> {
     records: BTreeMap<View, ResolutionRecord<D>>,
     ids: IdSequence<ResolutionId>,
     /// Resolver capabilities waiting to be emitted.
-    pub(super) capabilities: Capabilities<V, D>,
+    pub(super) capabilities: Capabilities<S, D>,
     /// Current view in which finality-floor recovery was last probed.
     pub(super) floor_probe_view: View,
 }
 
-impl<V: Variant, D: Digest> ResolutionState<V, D> {
+impl<S: Scheme, D: Digest> ResolutionState<S, D> {
     /// Creates state with no outstanding requests.
     pub(super) const fn new() -> Self {
         Self {
@@ -178,7 +181,7 @@ impl<V: Variant, D: Digest> ResolutionState<V, D> {
     }
 
     /// Returns whether `completion` answers the in-flight request for its view.
-    pub(crate) fn matches(&self, completion: &ResolutionCompletion<V, D>) -> bool {
+    pub(crate) fn matches(&self, completion: &ResolutionCompletion<S, D>) -> bool {
         self.records.get(&completion.view()).is_some_and(|record| {
             record.status == ResolutionStatus::InFlight
                 && record.job.issued() == completion.issued()
@@ -238,7 +241,7 @@ impl<V: Variant, D: Digest> ResolutionState<V, D> {
     }
 
     /// Takes the resolver capabilities issued since the last call.
-    pub(crate) fn take_capabilities(&mut self) -> Capabilities<V, D> {
+    pub(crate) fn take_capabilities(&mut self) -> Capabilities<S, D> {
         take(&mut self.capabilities)
     }
 }

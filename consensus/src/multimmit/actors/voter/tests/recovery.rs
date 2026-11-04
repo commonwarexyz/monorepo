@@ -10,7 +10,7 @@ use crate::{
         },
         config::Role,
         machine::{CoreState, Input, Inspection},
-        mocks::{Committee, MockApplication, cluster::start_network},
+        mocks::{Bls, Committee, MockApplication, cluster::start_network},
         storage::{RecoveryConfig, partitions, recover},
         testing::{expect_before, expect_within},
         types::{Artifact, ViewMessage},
@@ -29,16 +29,18 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock as _, Metrics as _, Runner as _, Storage as _, Supervisor as _,
     buffer::paged::{self, CacheRef},
-    deterministic::Runner as DeterministicRunner,
+    deterministic::{Config as DeterministicConfig, Runner as DeterministicRunner},
     mocks::{DeferredSync, PendingSyncs, next_pending_sync},
     telemetry::metrics::count_running_tasks,
 };
-use commonware_utils::{NZU64, NZUsize};
+use commonware_utils::{NZU64, NZUsize, test_rng};
 use std::time::Duration;
 
 #[test_traced]
 fn attached_observer_matches_the_synchronous_core() {
-    let executor = DeterministicRunner::default();
+    // The runtime seed fixes one interleaving of the concurrent V-QC and L-QC aggregations; this
+    // one completes the L-QC first, the order the synchronous driver uses.
+    let executor = DeterministicRunner::new(DeterministicConfig::default().with_seed(1));
     executor.start(|context| async move {
         let mut node = NodeBuilder::new(45, Role::Observer, "primary")
             .start(&context)
@@ -70,7 +72,7 @@ fn attached_observer_matches_the_synchronous_core() {
         }
 
         // Drive the synchronous Core over the identical cohort.
-        let committee = Committee::<MinPk>::builder(45, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(45, 6).build();
         let mut core = CoreState::fresh(profile(&committee, Role::Observer)).unwrap();
         core.enqueue(Input::Start).unwrap();
         let mut driver = CoreDriver::new(&committee.verifier);
@@ -108,13 +110,13 @@ fn exact_broadcast_parent_is_omitted_from_a_live_proposal() {
 fn broadcast_parent_proposal(update_parent: bool) {
     DeterministicRunner::timed(Duration::from_secs(10)).start(|context| async move {
         let seed = 79;
-        let committee = Committee::<MinPk>::builder(seed, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(seed, 6).build();
         let oracle = start_network(&context, committee.identities.clone(), 1024 * 1024).await;
         let role = Role::Validator(Participant::new(3));
         let application = MockApplication::new();
         application.pause_building();
         let mut node = NodeBuilder::new(seed, role, "updated_parent")
-            .network(Committee::<MinPk>::builder(seed, 6).build(), oracle, 3)
+            .network(Committee::<Bls<MinPk>>::builder(seed, 6).build(), oracle, 3)
             .attachments(Attachments {
                 application,
                 ..Attachments::default()
@@ -162,7 +164,7 @@ fn broadcast_parent_proposal(update_parent: bool) {
             )
             .await
             .expect("network stays up");
-            let envelope = Envelope::<CertificateMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<CertificateMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 bytes,
                 &node.envelope_cfg(node.committee.codec()),
             )
@@ -177,7 +179,12 @@ fn broadcast_parent_proposal(update_parent: bool) {
         let updated = update_parent.then(|| {
             committee
                 .verifier
-                .assemble_vqc::<Sha256, _>(block.block().clone(), &messages, &Sequential)
+                .assemble_vqc::<_, Sha256, _>(
+                    &mut test_rng(),
+                    block.block().clone(),
+                    &messages,
+                    &Sequential,
+                )
                 .expect("all participants form a fuller V-QC")
         });
         if let Some(parent) = &updated {
@@ -196,9 +203,11 @@ fn broadcast_parent_proposal(update_parent: bool) {
 
         certificate_tx.send(
             Recipients::One(node.me.clone()),
-            node.envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
-                committee.nullification(View::new(2)),
-            ))
+            node.envelope(
+                CertificateMessage::<Bls<MinPk>, Sha256Digest>::Nullification(
+                    committee.nullification(View::new(2)),
+                ),
+            )
             .encode(),
             true,
         );
@@ -211,7 +220,7 @@ fn broadcast_parent_proposal(update_parent: bool) {
                 result = certificate_rx.recv() => {
                     let (_, bytes) = result.expect("network stays up");
                     let envelope =
-                        Envelope::<CertificateMessage<MinPk, Sha256Digest>>::decode_cfg(
+                        Envelope::<CertificateMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                             bytes,
                             &node.envelope_cfg(node.committee.codec()),
                         )
@@ -225,7 +234,7 @@ fn broadcast_parent_proposal(update_parent: bool) {
                 },
                 () = context.sleep_until(deadline) => panic!("the view-3 proposal never arrived"),
             };
-            let envelope = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
+            let envelope = Envelope::<ConsensusMessage<Bls<MinPk>, Sha256Digest>>::decode_cfg(
                 bytes,
                 &node.envelope_cfg(node.committee.codec()),
             )
@@ -532,9 +541,9 @@ fn repeated_pre_ack_recovery_crashes_keep_the_suffix_bounded() {
     }
 
     DeterministicRunner::from(checkpoint).start(move |context| async move {
-        let committee = Committee::<MinPk>::builder(SEED, 6).build();
+        let committee = Committee::<Bls<MinPk>>::builder(SEED, 6).build();
         let mut store_context = context.child("bounded_recovery_stores");
-        let recovered = Box::pin(recover::<_, Sha256, _, _, _, _>(
+        let recovered = Box::pin(recover::<_, Sha256, _, _, _>(
             &mut store_context,
             RecoveryConfig {
                 profile: profile(&committee, role),

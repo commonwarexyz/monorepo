@@ -19,6 +19,7 @@ use crate::{
             verification::{Verdict, VerificationCompletion},
             view::{NullificationRecoveryCompletion, VqcAggregateCompletion},
         },
+        mocks::Bls,
         types::{Artifact, SignedLeaderBlock, ViewMessage},
     },
     types::View,
@@ -121,7 +122,7 @@ fn local_vqc_survives_a_crash_before_forwarding() {
             if matches!(artifact.as_ref(), Artifact::Vqc(_))
     ));
 
-    let mut restored = Machine::<Sha256, MinPk>::restore(profile, crashed).unwrap();
+    let mut restored = Machine::<Sha256, Bls<MinPk>>::restore(profile, crashed).unwrap();
     let recovery = restored.step(Input::RecoveryComplete).unwrap();
     let recovered = restored.persist(&recovery.persist_job(), Until::CursorAdvance);
     let forwarding = recovered.persist_job();
@@ -193,7 +194,7 @@ fn forwarding_one_certificate_class_does_not_suppress_the_other() {
         .collect::<Vec<_>>();
     assert_eq!(exits, vec![nullification_publication, vqc_publication]);
 
-    let restored = Machine::<Sha256, MinPk>::restore(profile, snapshot).unwrap();
+    let restored = Machine::<Sha256, Bls<MinPk>>::restore(profile, snapshot).unwrap();
     assert!(
         restored
             .live_snapshot_for_test()

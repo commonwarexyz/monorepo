@@ -20,11 +20,12 @@ use crate::{
             scheduler::{Budget, DA_VOTE_RUN, ProtocolComponent, WorkKey},
             verification::Observation,
         },
+        scheme::Scheme,
         types::{Artifact, ArtifactId, CertificateId, ChainId, Lqc},
     },
     types::{Height, View},
 };
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use core::mem::take;
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -47,14 +48,14 @@ pub(super) enum WorkStatus {
     Blocked,
 }
 
-pub(super) type WorkResult<V, D> = Result<(WorkStatus, Capabilities<V, D>), StepError>;
+pub(super) type WorkResult<S, D> = Result<(WorkStatus, Capabilities<S, D>), StepError>;
 
-impl<H: Hasher, V: Variant> Machine<H, V> {
+impl<H: Hasher, S: Scheme> Machine<H, S> {
     pub(super) fn claim_finality(
         &mut self,
         artifact_id: ArtifactId<H::Digest>,
         observation: Observation,
-        artifact: Arc<Artifact<V, H::Digest>>,
+        artifact: Arc<Artifact<S, H::Digest>>,
     ) -> Result<(), StepError> {
         self.finality
             .claim_finality::<H>(artifact_id, observation, artifact, &self.profile)?;
@@ -65,8 +66,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         &mut self,
         artifact_id: ArtifactId<H::Digest>,
         observation: Observation,
-        artifact: &Arc<Artifact<V, H::Digest>>,
-        prepared: Option<CertificateDerivations<V, H::Digest>>,
+        artifact: &Arc<Artifact<S, H::Digest>>,
+        prepared: Option<CertificateDerivations<S, H::Digest>>,
     ) -> Result<(), StepError> {
         let outputs = self.finality.validate_finality_claim::<H>(
             artifact_id,
@@ -82,7 +83,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         &mut self,
         artifact_id: ArtifactId<H::Digest>,
         observation: Observation,
-        artifact: &Arc<Artifact<V, H::Digest>>,
+        artifact: &Arc<Artifact<S, H::Digest>>,
     ) -> Result<(), StepError> {
         let outputs = self.finality.reject_finality_claim::<H>(
             artifact_id,
@@ -100,7 +101,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn apply_finality_outputs(
         &mut self,
-        outputs: Vec<FinalityOutput<V, H::Digest>>,
+        outputs: Vec<FinalityOutput<S, H::Digest>>,
     ) -> Result<(), StepError> {
         for output in outputs {
             self.apply_finality(output.observation, output.certificate, output.derived)?;
@@ -111,8 +112,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(crate) fn apply_finality(
         &mut self,
         observation: Observation,
-        certificate: Arc<Artifact<V, H::Digest>>,
-        derived: Option<DerivedVqc<V, H::Digest>>,
+        certificate: Arc<Artifact<S, H::Digest>>,
+        derived: Option<DerivedVqc<S, H::Digest>>,
     ) -> Result<(), StepError> {
         let Artifact::Lqc(lqc) = certificate.as_ref() else {
             return Err(StepError::ViewInvariant);
@@ -143,7 +144,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         (anchor.view(), Some(anchor.id::<H>()))
     }
 
-    pub(super) fn drive_finality_component(&mut self) -> WorkResult<V, H::Digest> {
+    pub(super) fn drive_finality_component(&mut self) -> WorkResult<S, H::Digest> {
         let mut capabilities = Capabilities::new();
         if let Some(view) = self.floor_resolution_view() {
             self.resolution.floor_probe_view = self.durable.state.view;
@@ -216,7 +217,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         Ok((status, capabilities))
     }
 
-    pub(super) fn drive_da_component(&mut self, budget: &mut Budget) -> WorkResult<V, H::Digest> {
+    pub(super) fn drive_da_component(&mut self, budget: &mut Budget) -> WorkResult<S, H::Digest> {
         if let Some(request) = self.chain.pending_build_sign_request() {
             let effect = DurableEffect::sign(request);
             if self.effect_fits(&effect, 1, &[])? {
@@ -271,7 +272,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         Ok((status, capabilities))
     }
 
-    fn reserve_ready_da_votes(&mut self, budget: &mut Budget) -> WorkResult<V, H::Digest> {
+    fn reserve_ready_da_votes(&mut self, budget: &mut Budget) -> WorkResult<S, H::Digest> {
         if budget.remaining() == 0 {
             return Ok((WorkStatus::Requeue, Capabilities::new()));
         }
@@ -343,8 +344,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// Reserves the signing `effect` into `capabilities` when it fits and returns whether it did.
     fn try_reserve_sign(
         &mut self,
-        effect: DurableEffect<V, H::Digest>,
-        capabilities: &mut Capabilities<V, H::Digest>,
+        effect: DurableEffect<S, H::Digest>,
+        capabilities: &mut Capabilities<S, H::Digest>,
     ) -> Result<bool, StepError> {
         if !self.effect_fits(&effect, 0, &[])? {
             return Ok(false);
@@ -353,7 +354,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         Ok(true)
     }
 
-    pub(super) fn drive_view_component(&mut self, budget: &mut Budget) -> WorkResult<V, H::Digest> {
+    pub(super) fn drive_view_component(&mut self, budget: &mut Budget) -> WorkResult<S, H::Digest> {
         let mut capabilities = self.views.take_capabilities();
         let local_leader = matches!(
             self.profile.role(),
@@ -392,7 +393,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn drive_votes(
         &mut self,
         budget: &mut Budget,
-        capabilities: &mut Capabilities<V, H::Digest>,
+        capabilities: &mut Capabilities<S, H::Digest>,
     ) -> Result<WorkStatus, StepError> {
         if let Some(request) = self.views.cutoff_vote(self.durable.state.view)
             && self.try_reserve_sign(DurableEffect::sign(request), capabilities)?
@@ -437,7 +438,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn drive_certificates(
         &mut self,
         budget: &mut Budget,
-        capabilities: &mut Capabilities<V, H::Digest>,
+        capabilities: &mut Capabilities<S, H::Digest>,
     ) -> Result<WorkStatus, StepError> {
         if budget.remaining() == 0 {
             return Ok(WorkStatus::Requeue);
@@ -461,7 +462,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn drive_exit(
         &mut self,
         budget: &mut Budget,
-        capabilities: &mut Capabilities<V, H::Digest>,
+        capabilities: &mut Capabilities<S, H::Digest>,
     ) -> Result<WorkStatus, StepError> {
         // The exit reads the durable forwarding fact for the current view, and a staged change
         // applies to durable state immediately. Deriving the exit again after staging that fact
@@ -539,7 +540,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// proposes as it enters the view. Every validator reads its unplaced certificates at every
     /// entry, forwarder or not, so a certificate it starts forwarding has stayed unplaced for at
     /// least a full view.
-    fn forward_unplaced_certificates(&mut self) -> Option<Capability<V, H::Digest>> {
+    fn forward_unplaced_certificates(&mut self) -> Option<Capability<S, H::Digest>> {
         let Role::Validator(me) = self.profile.role() else {
             return None;
         };
@@ -573,7 +574,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn drive_deferred_certificate(
         &mut self,
         budget: &mut Budget,
-        capabilities: &mut Capabilities<V, H::Digest>,
+        capabilities: &mut Capabilities<S, H::Digest>,
     ) -> Result<WorkStatus, StepError> {
         if self.view_certificates != ViewCertificates::WithDeferred {
             return Ok(WorkStatus::Complete);
@@ -631,7 +632,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         {
             return false;
         }
-        let beyond = |exits: &BTreeMap<View, Arc<Artifact<V, H::Digest>>>| {
+        let beyond = |exits: &BTreeMap<View, Arc<Artifact<S, H::Digest>>>| {
             exits
                 .last_key_value()
                 .is_some_and(|(view, _)| *view > current)
@@ -669,7 +670,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         lagging.then_some(next)
     }
 
-    pub(crate) fn next_finality_floor_change(&self) -> Option<Change<V, H::Digest>> {
+    pub(crate) fn next_finality_floor_change(&self) -> Option<Change<S, H::Digest>> {
         let proof = self
             .finality
             .signing_floor_candidate(self.signing_floor_view())?;
@@ -686,8 +687,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     pub(super) fn next_artifact_forwarding(
         &self,
-        required: Option<&Lqc<V, H::Digest>>,
-    ) -> Result<Option<Change<V, H::Digest>>, StepError> {
+        required: Option<&Lqc<S, H::Digest>>,
+    ) -> Result<Option<Change<S, H::Digest>>, StepError> {
         let Some(artifact) = self.views.next_forward() else {
             return Ok(None);
         };
@@ -721,7 +722,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// cryptographic job.
     fn observe_derived_vqc(
         &mut self,
-        certificate: &Arc<Artifact<V, H::Digest>>,
+        certificate: &Arc<Artifact<S, H::Digest>>,
         observation: Observation,
     ) -> Result<(), StepError> {
         let derived = self
@@ -753,7 +754,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn advance_da_certificate(
         &mut self,
-        capabilities: &mut Capabilities<V, H::Digest>,
+        capabilities: &mut Capabilities<S, H::Digest>,
     ) -> Result<bool, StepError> {
         // The frontier only picks between advanceable chains, so a floor no certificate exceeds
         // makes the sweep pure overhead.
@@ -812,7 +813,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn next_durable_da_certificate(
         &self,
         preferred: Option<ChainId>,
-    ) -> Option<Arc<Artifact<V, H::Digest>>> {
+    ) -> Option<Arc<Artifact<S, H::Digest>>> {
         self.chain
             .da
             .next_certificate_above(&self.durable.state.certified_tips, preferred)

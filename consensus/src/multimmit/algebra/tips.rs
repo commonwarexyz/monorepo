@@ -7,13 +7,16 @@ use super::{
 #[cfg(any(test, feature = "mocks"))]
 use crate::multimmit::types::Vqc;
 use crate::{
-    multimmit::types::{
-        BlockRef, ChainId, CodecConfig, DigestedLeader, FinalityFact, FinalityId, LeaderBlock, Lqc,
-        Position, SelectedCommitments, VoteBody,
+    multimmit::{
+        scheme::Scheme,
+        types::{
+            BlockRef, ChainId, CodecConfig, DigestedLeader, FinalityFact, FinalityId, LeaderBlock,
+            Lqc, Position, SelectedCommitments, VoteBody,
+        },
     },
     types::Epoch,
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::Participant;
 use core::mem::size_of;
 use std::collections::{BTreeMap, BTreeSet};
@@ -46,15 +49,15 @@ impl<D: Digest> PoolExtractor<D> {
     }
 
     /// Creates an empty pool for one leader block.
-    pub(crate) fn new<H, V>(leader: &LeaderBlock<V, D>, config: CodecConfig) -> Result<Self, Error>
+    pub(crate) fn new<H, S>(leader: &LeaderBlock<S, D>, config: CodecConfig) -> Result<Self, Error>
     where
         H: Hasher<Digest = D>,
-        V: Variant,
+        S: Scheme,
     {
         if leader.validate(config).is_err() {
             return Err(Error::Leader);
         }
-        let proposals = ProposalPaths::new::<H, V>(leader)?;
+        let proposals = ProposalPaths::new::<H, S>(leader)?;
         let mut ancestry = PathIndex::default();
         proposals.index(&mut ancestry)?;
         let position_counts = config
@@ -78,15 +81,15 @@ impl<D: Digest> PoolExtractor<D> {
     /// Incorporates a participant's first authenticated complete vote.
     ///
     /// Returns `false` when that participant already has a sticky pool entry.
-    pub(crate) fn insert<H, V>(
+    pub(crate) fn insert<H, S>(
         &mut self,
-        leader: &LeaderBlock<V, D>,
+        leader: &LeaderBlock<S, D>,
         signer: Participant,
         body: &VoteBody<D>,
     ) -> Result<bool, Error>
     where
         H: Hasher<Digest = D>,
-        V: Variant,
+        S: Scheme,
     {
         let signer_index = usize::from(signer);
         let Some(seen) = self.signers_seen.get(signer_index) else {
@@ -99,7 +102,7 @@ impl<D: Digest> PoolExtractor<D> {
             return Err(Error::Vote);
         }
 
-        let paths = VotePaths::new::<H, V>(
+        let paths = VotePaths::new::<H, S>(
             DigestedLeader::with_digest(leader, self.leader),
             &self.proposals,
             body,
@@ -209,16 +212,16 @@ impl<D: Digest> VqcExtraction<D> {
     /// Production extraction flows through [`super::validate_vqc`], which reuses the leader digest
     /// across derivations; this convenience wrapper serves tests and mocks.
     #[cfg(any(test, feature = "mocks"))]
-    pub(crate) fn new<H, V>(certificate: &Vqc<V, D>, config: CodecConfig) -> Result<Self, Error>
+    pub(crate) fn new<H, S>(certificate: &Vqc<S, D>, config: CodecConfig) -> Result<Self, Error>
     where
         H: Hasher<Digest = D>,
-        V: Variant,
+        S: Scheme,
     {
         let leader = DigestedLeader::new::<H>(certificate.leader());
         let expanded = certificate
             .expand_votes(leader.digest(), config)
             .map_err(|_| Error::Vote)?;
-        Self::from_votes::<H, V>(
+        Self::from_votes::<H, S>(
             leader,
             expanded.iter().map(|(signer, body)| (*signer, body)),
             config,
@@ -226,17 +229,17 @@ impl<D: Digest> VqcExtraction<D> {
     }
 
     /// Extracts ordering data from the already expanded votes of one authenticated V-QC.
-    pub(crate) fn from_votes<'a, H, V>(
-        leader: DigestedLeader<'_, V, D>,
+    pub(crate) fn from_votes<'a, H, S>(
+        leader: DigestedLeader<'_, S, D>,
         votes: impl IntoIterator<Item = (Participant, &'a VoteBody<D>)>,
         config: CodecConfig,
     ) -> Result<Self, Error>
     where
         H: Hasher<Digest = D>,
-        V: Variant,
+        S: Scheme,
         D: 'a,
     {
-        let prepared = PreparedVotes::new_digested::<H, V, _>(leader, votes, config)?;
+        let prepared = PreparedVotes::new_digested::<H, S, _>(leader, votes, config)?;
         prepared.check_vqc_quorum(config)?;
         Ok(Self {
             tips: Tips::from_prepared(&prepared, config)?,
@@ -284,18 +287,18 @@ impl<D: Digest> Tips<D> {
 #[cfg(test)]
 impl<D: Digest> Tips<D> {
     /// Extracts safe tips from the designated votes of a V-QC transcript.
-    pub(crate) fn from_votes<'a, H, V, I>(
-        leader: &LeaderBlock<V, D>,
+    pub(crate) fn from_votes<'a, H, S, I>(
+        leader: &LeaderBlock<S, D>,
         votes: I,
         config: CodecConfig,
     ) -> Result<Self, Error>
     where
         H: Hasher<Digest = D>,
-        V: Variant,
+        S: Scheme,
         I: IntoIterator<Item = (Participant, &'a VoteBody<D>)>,
         D: 'a,
     {
-        let prepared = PreparedVotes::new::<H, V, I>(leader, votes, config)?;
+        let prepared = PreparedVotes::new::<H, S, I>(leader, votes, config)?;
         prepared.check_vqc_quorum(config)?;
         Self::from_prepared(&prepared, config)
     }
@@ -369,18 +372,18 @@ impl<D: Digest> FinalTips<D> {
     }
 
     /// Extracts final tips from a vote set with at most one vote per participant.
-    pub(crate) fn from_pool<'a, H, V, I>(
-        leader: &LeaderBlock<V, D>,
+    pub(crate) fn from_pool<'a, H, S, I>(
+        leader: &LeaderBlock<S, D>,
         votes: I,
         config: CodecConfig,
     ) -> Result<Self, Error>
     where
         H: Hasher<Digest = D>,
-        V: Variant,
+        S: Scheme,
         I: IntoIterator<Item = (Participant, &'a VoteBody<D>)>,
         D: 'a,
     {
-        let prepared = PreparedVotes::new::<H, V, I>(leader, votes, config)?;
+        let prepared = PreparedVotes::new::<H, S, I>(leader, votes, config)?;
         Self::from_prepared(&prepared, config)
     }
 
@@ -411,19 +414,19 @@ impl<D: Digest> FinalTips<D> {
     }
 
     /// Extracts final tips from an authenticated L-QC transcript.
-    pub(crate) fn from_lqc<H, V>(
-        certificate: &Lqc<V, D>,
+    pub(crate) fn from_lqc<H, S>(
+        certificate: &Lqc<S, D>,
         config: CodecConfig,
     ) -> Result<Self, Error>
     where
         H: Hasher<Digest = D>,
-        V: Variant,
+        S: Scheme,
     {
         let leader = DigestedLeader::new::<H>(certificate.leader());
         let votes = certificate
             .expand_votes(leader.digest(), config)
             .map_err(|_| Error::Vote)?;
-        let prepared = PreparedVotes::new_digested::<H, V, _>(
+        let prepared = PreparedVotes::new_digested::<H, S, _>(
             leader,
             votes.iter().map(|(signer, body)| (*signer, body)),
             config,
@@ -449,10 +452,10 @@ impl<D: Digest> FinalTips<D> {
 
     /// Returns the finality fact these tips give `leader`, identified by `id` and backed by
     /// `votes` distinct votes.
-    pub(crate) fn fact<V: Variant>(
+    pub(crate) fn fact<S: Scheme>(
         &self,
         id: FinalityId<D>,
-        leader: DigestedLeader<'_, V, D>,
+        leader: DigestedLeader<'_, S, D>,
         votes: usize,
         config: CodecConfig,
     ) -> Result<FinalityFact<D>, Error> {
@@ -565,28 +568,28 @@ pub(super) struct PreparedVotes<D: Digest> {
 }
 
 impl<D: Digest> PreparedVotes<D> {
-    pub(super) fn new<'a, H, V, I>(
-        leader: &LeaderBlock<V, D>,
+    pub(super) fn new<'a, H, S, I>(
+        leader: &LeaderBlock<S, D>,
         votes: I,
         config: CodecConfig,
     ) -> Result<Self, Error>
     where
         H: Hasher<Digest = D>,
-        V: Variant,
+        S: Scheme,
         I: IntoIterator<Item = (Participant, &'a VoteBody<D>)>,
         D: 'a,
     {
-        Self::new_digested::<H, V, I>(DigestedLeader::new::<H>(leader), votes, config)
+        Self::new_digested::<H, S, I>(DigestedLeader::new::<H>(leader), votes, config)
     }
 
-    pub(super) fn new_digested<'a, H, V, I>(
-        digested: DigestedLeader<'_, V, D>,
+    pub(super) fn new_digested<'a, H, S, I>(
+        digested: DigestedLeader<'_, S, D>,
         votes: I,
         config: CodecConfig,
     ) -> Result<Self, Error>
     where
         H: Hasher<Digest = D>,
-        V: Variant,
+        S: Scheme,
         I: IntoIterator<Item = (Participant, &'a VoteBody<D>)>,
         D: 'a,
     {
@@ -595,7 +598,7 @@ impl<D: Digest> PreparedVotes<D> {
             return Err(Error::Leader);
         }
 
-        let proposals = ProposalPaths::new::<H, V>(leader)?;
+        let proposals = ProposalPaths::new::<H, S>(leader)?;
         let mut signers = BTreeSet::new();
         let mut prepared = Vec::new();
         for (signer, body) in votes {
@@ -611,7 +614,7 @@ impl<D: Digest> PreparedVotes<D> {
             if body.validate(config).is_err() {
                 return Err(Error::Vote);
             }
-            let paths = VotePaths::new::<H, V>(digested, &proposals, body)?;
+            let paths = VotePaths::new::<H, S>(digested, &proposals, body)?;
             prepared.push(PreparedVote {
                 positions: body.positions().to_vec(),
                 paths,
@@ -743,6 +746,7 @@ mod tests {
     use super::*;
     use crate::multimmit::{
         algebra::tests::{config, leader},
+        mocks::Bls,
         types::Extension,
     };
     use commonware_cryptography::{Sha256, bls12381::primitives::variant::MinSig};
@@ -766,7 +770,7 @@ mod tests {
     fn invalid_extension_leaves_the_entire_pool_unchanged() {
         let config = config(6);
         let leader = leader(6);
-        let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+        let mut pool = PoolExtractor::new::<Sha256, Bls<MinSig>>(&leader, config).unwrap();
         let positions = vec![Position::new(1); config.chains()];
         let mut extensions = vec![Extension::empty(); config.chains()];
         for extension in &mut extensions[..2] {
@@ -780,7 +784,7 @@ mod tests {
             config,
         )
         .unwrap();
-        let paths = VotePaths::new::<Sha256, MinSig>(
+        let paths = VotePaths::new::<Sha256, Bls<MinSig>>(
             DigestedLeader::with_digest(&leader, pool.leader),
             &pool.proposals,
             &body,
@@ -798,7 +802,7 @@ mod tests {
         let before = pool.clone();
         let signer = Participant::new(0);
         assert_eq!(
-            pool.insert::<Sha256, MinSig>(&leader, signer, &body),
+            pool.insert::<Sha256, Bls<MinSig>>(&leader, signer, &body),
             Err(Error::ConflictingAncestry)
         );
         assert_eq!(pool.proposals, before.proposals);
@@ -817,12 +821,12 @@ mod tests {
         )
         .unwrap();
         assert!(
-            pool.insert::<Sha256, MinSig>(&leader, signer, &valid)
+            pool.insert::<Sha256, Bls<MinSig>>(&leader, signer, &valid)
                 .unwrap()
         );
         assert!(
             !pool
-                .insert::<Sha256, MinSig>(&leader, signer, &body)
+                .insert::<Sha256, Bls<MinSig>>(&leader, signer, &body)
                 .unwrap()
         );
     }

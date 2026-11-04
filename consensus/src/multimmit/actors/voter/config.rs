@@ -5,12 +5,12 @@ use crate::{
     multimmit::{
         actors::ingress::IngressLimits,
         config::{Profile, RETRY_CEILING_VIEWS},
-        scheme::bls12381_threshold::Scheme,
+        scheme::{Generic, Scheme},
         storage::Recovered,
         types::{Activity, Context, PathLimits},
     },
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -33,21 +33,21 @@ pub(crate) fn blocked_counter(context: &impl Metrics) -> Counter {
 }
 
 /// Configuration for the voter.
-pub(crate) struct Config<E, H, P, V, A, R, F, T, C, B>
+pub(crate) struct Config<E, H, P, S, A, R, F, T, C, B>
 where
     E: StorageContext,
     H: Hasher,
     P: PublicKey,
-    V: Variant,
+    S: Scheme<PublicKey = P>,
     A: Automaton<Context = Context<H::Digest>, Digest = H::Digest>,
     R: Relay<Digest = H::Digest, PublicKey = P, Plan = ()>,
-    F: Reporter<Activity = Activity<V, H::Digest>>,
+    F: Reporter<Activity = Activity<S, H::Digest>>,
     T: Strategy,
     C: Strategy,
     B: Blocker<PublicKey = P>,
 {
     /// Scheme holding this replica's key material (or verifier-only material).
-    pub(crate) scheme: Scheme<P, V>,
+    pub(crate) scheme: Generic<S>,
     /// Execution strategy for bulk CPU-heavy cryptography.
     ///
     /// Carries data-availability certificate recovery, the one class of assembly the round does
@@ -69,7 +69,7 @@ where
     /// Peers blocked for authenticated equivocation, registered by [`blocked_counter`].
     pub(crate) blocked: Counter,
     /// The machine and stores to drive, fresh or recovered.
-    pub(crate) recovered: Recovered<E, H, V>,
+    pub(crate) recovered: Recovered<E, H, S>,
     /// Bounded execution and retry policy.
     pub(crate) limits: VoterLimits,
     /// Capacity of each inbound queue.

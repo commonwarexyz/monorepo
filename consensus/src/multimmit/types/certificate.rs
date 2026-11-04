@@ -5,7 +5,8 @@ use super::{
     TransactionBlockHeader,
     bounds::{
         MAX_U64_VARINT_SIZE, VARINT_BOUNDARIES, checked_product, checked_sum, encoded_len,
-        largest_index_width_sum, signers_size,
+        largest_index_width_sum, max_aggregate_size, max_da_certificate_size,
+        max_nullification_size, read_aggregate, signers_size,
     },
     canonical_digest,
 };
@@ -15,34 +16,27 @@ use super::{DigestedLeader, VoteBody};
 use crate::types::Participant;
 use crate::{
     Epochable, Heightable, Viewable,
-    multimmit::types::CodecConfig,
+    multimmit::{
+        scheme::{AggregateOf, DaCertificateOf, NullificationOf, Scheme},
+        types::CodecConfig,
+    },
     types::{Epoch, Height, Round, View},
 };
 use bytes::BufMut;
-use commonware_codec::{
-    Buf, EncodeSize, Error as CodecError, FixedSize as _, RangeCfg, Read, ReadExt, Write,
-    types::lazy::Lazy,
-};
-use commonware_cryptography::{
-    Digest, Hasher,
-    bls12381::{
-        certificate::threshold,
-        primitives::{ops::aggregate, variant::Variant},
-    },
-    certificate::Signers,
-};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
+use commonware_cryptography::{Digest, Hasher, certificate::Signers};
 
 /// A recovered data-availability threshold signature over one block header.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct DaCertificate<V: Variant, D: Digest> {
+pub struct DaCertificate<S: Scheme, D: Digest> {
     header: TransactionBlockHeader<D>,
-    certificate: threshold::Certificate<V>,
+    certificate: DaCertificateOf<S>,
 }
 
-impl<V: Variant, D: Digest> DaCertificate<V, D> {
+impl<S: Scheme, D: Digest> DaCertificate<S, D> {
     pub(crate) const fn new(
         header: TransactionBlockHeader<D>,
-        certificate: threshold::Certificate<V>,
+        certificate: DaCertificateOf<S>,
     ) -> Self {
         Self {
             header,
@@ -56,7 +50,7 @@ impl<V: Variant, D: Digest> DaCertificate<V, D> {
     }
 
     /// Returns the recovered threshold certificate.
-    pub const fn certificate(&self) -> &threshold::Certificate<V> {
+    pub const fn certificate(&self) -> &DaCertificateOf<S> {
         &self.certificate
     }
 
@@ -69,55 +63,55 @@ impl<V: Variant, D: Digest> DaCertificate<V, D> {
     pub(super) fn max_encode_size(codec: CodecConfig) -> Option<usize> {
         checked_sum(&[
             TransactionBlockHeader::<D>::max_encode_size(codec)?,
-            V::Signature::SIZE,
+            max_da_certificate_size::<S>(codec)?,
         ])
     }
 }
 
-impl<V: Variant, D: Digest> Epochable for DaCertificate<V, D> {
+impl<S: Scheme, D: Digest> Epochable for DaCertificate<S, D> {
     fn epoch(&self) -> Epoch {
         self.header.epoch()
     }
 }
 
-impl<V: Variant, D: Digest> Heightable for DaCertificate<V, D> {
+impl<S: Scheme, D: Digest> Heightable for DaCertificate<S, D> {
     fn height(&self) -> Height {
         self.header.height()
     }
 }
 
-impl<V: Variant, D: Digest> Write for DaCertificate<V, D> {
+impl<S: Scheme, D: Digest> Write for DaCertificate<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.header.write(writer);
         self.certificate.write(writer);
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for DaCertificate<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for DaCertificate<S, D> {
     fn encode_size(&self) -> usize {
         self.header.encode_size() + self.certificate.encode_size()
     }
 }
 
-impl<V: Variant, D: Digest> Read for DaCertificate<V, D> {
-    type Cfg = ();
+impl<S: Scheme, D: Digest> Read for DaCertificate<S, D> {
+    type Cfg = CodecConfig;
 
-    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, config: &Self::Cfg) -> Result<Self, CodecError> {
         let header = ReadExt::read(reader)?;
-        let certificate = ReadExt::read(reader)?;
+        let certificate = Read::read_cfg(reader, &S::da_certificate_config(config.participants()))?;
         Ok(Self::new(header, certificate))
     }
 }
 
 /// A recovered threshold signature authorizing a view skip.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Nullification<V: Variant> {
+pub struct Nullification<S: Scheme> {
     round: Round,
-    certificate: threshold::Certificate<V>,
+    certificate: NullificationOf<S>,
 }
 
-impl<V: Variant> Nullification<V> {
-    pub(crate) fn new(round: Round, certificate: threshold::Certificate<V>) -> Result<Self, Error> {
+impl<S: Scheme> Nullification<S> {
+    pub(crate) fn new(round: Round, certificate: NullificationOf<S>) -> Result<Self, Error> {
         if round.view().is_zero() {
             return Err(Error::GenesisView);
         }
@@ -130,47 +124,50 @@ impl<V: Variant> Nullification<V> {
     }
 
     /// Returns the recovered threshold certificate.
-    pub const fn certificate(&self) -> &threshold::Certificate<V> {
+    pub const fn certificate(&self) -> &NullificationOf<S> {
         &self.certificate
     }
 
     /// Returns the largest encoding of a nullification.
-    pub(super) fn max_encode_size() -> Option<usize> {
-        checked_sum(&[checked_product(2, MAX_U64_VARINT_SIZE)?, V::Signature::SIZE])
+    pub(super) fn max_encode_size(codec: CodecConfig) -> Option<usize> {
+        checked_sum(&[
+            checked_product(2, MAX_U64_VARINT_SIZE)?,
+            max_nullification_size::<S>(codec)?,
+        ])
     }
 }
 
-impl<V: Variant> Epochable for Nullification<V> {
+impl<S: Scheme> Epochable for Nullification<S> {
     fn epoch(&self) -> Epoch {
         self.round.epoch()
     }
 }
 
-impl<V: Variant> Viewable for Nullification<V> {
+impl<S: Scheme> Viewable for Nullification<S> {
     fn view(&self) -> View {
         self.round.view()
     }
 }
 
-impl<V: Variant> Write for Nullification<V> {
+impl<S: Scheme> Write for Nullification<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.round.write(writer);
         self.certificate.write(writer);
     }
 }
 
-impl<V: Variant> EncodeSize for Nullification<V> {
+impl<S: Scheme> EncodeSize for Nullification<S> {
     fn encode_size(&self) -> usize {
         self.round.encode_size() + self.certificate.encode_size()
     }
 }
 
-impl<V: Variant> Read for Nullification<V> {
-    type Cfg = ();
+impl<S: Scheme> Read for Nullification<S> {
+    type Cfg = CodecConfig;
 
-    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, config: &Self::Cfg) -> Result<Self, CodecError> {
         let round = Round::read(reader)?;
-        let certificate = ReadExt::read(reader)?;
+        let certificate = Read::read_cfg(reader, &S::nullification_config(config.participants()))?;
         Self::new(round, certificate)
             .map_err(|error| CodecError::Wrapped("Nullification", error.into()))
     }
@@ -178,21 +175,21 @@ impl<V: Variant> Read for Nullification<V> {
 
 /// A view quorum certificate over votes and novotes from `n-f..=n` participants.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Vqc<V: Variant, D: Digest> {
-    leader: LeaderBlock<V, D>,
+pub struct Vqc<S: Scheme, D: Digest> {
+    leader: LeaderBlock<S, D>,
     tally: Tally<D>,
     novoters: Signers,
     conflicting: Vec<ConflictingVote<D>>,
-    signature: Lazy<aggregate::Signature<V>>,
+    signature: AggregateOf<S>,
 }
 
-impl<V: Variant, D: Digest> Vqc<V, D> {
+impl<S: Scheme, D: Digest> Vqc<S, D> {
     pub(crate) fn new(
-        leader: LeaderBlock<V, D>,
+        leader: LeaderBlock<S, D>,
         tally: Tally<D>,
         novoters: Signers,
         conflicting: Vec<ConflictingVote<D>>,
-        signature: aggregate::Signature<V>,
+        signature: AggregateOf<S>,
         config: CodecConfig,
     ) -> Result<Self, Error> {
         let certificate = Self {
@@ -200,14 +197,14 @@ impl<V: Variant, D: Digest> Vqc<V, D> {
             tally,
             novoters,
             conflicting,
-            signature: signature.into(),
+            signature,
         };
         certificate.validate(config)?;
         Ok(certificate)
     }
 
     /// Returns the unsigned designated leader block.
-    pub const fn leader(&self) -> &LeaderBlock<V, D> {
+    pub const fn leader(&self) -> &LeaderBlock<S, D> {
         &self.leader
     }
 
@@ -226,9 +223,9 @@ impl<V: Variant, D: Digest> Vqc<V, D> {
         &self.conflicting
     }
 
-    /// Returns the decoded aggregate authenticating the complete view messages.
-    pub fn signature(&self) -> Option<&aggregate::Signature<V>> {
-        self.signature.get()
+    /// Returns the aggregate authenticating the complete view messages.
+    pub const fn signature(&self) -> &AggregateOf<S> {
+        &self.signature
     }
 
     /// Returns the identifier used by leader blocks to reference this V-QC.
@@ -271,7 +268,7 @@ impl<V: Variant, D: Digest> Vqc<V, D> {
     pub(super) fn max_encode_size(codec: CodecConfig) -> Option<usize> {
         let participants = codec.participants();
         let maximum = codec.vqc_max_messages();
-        let leader = LeaderBlock::<V, D>::max_encode_size(codec)?;
+        let leader = LeaderBlock::<S, D>::max_encode_size(codec)?;
         let conflicting_vote = Ballot::<D>::max_encode_size(codec)?;
         // Tally deviations and conflicting votes name distinct signers.
         let signer_indices = largest_index_width_sum(participants, maximum)?;
@@ -286,7 +283,7 @@ impl<V: Variant, D: Digest> Vqc<V, D> {
                 novoters,
                 encoded_len(conflicting)?,
                 checked_product(conflicting, conflicting_vote)?,
-                V::Signature::SIZE,
+                max_aggregate_size::<S>(maximum)?,
             ])?;
             largest = largest.max(candidate);
         }
@@ -296,8 +293,8 @@ impl<V: Variant, D: Digest> Vqc<V, D> {
 
 /// Rebuilds the vote of every signer `tally` attests for `leader`, in signer order.
 #[cfg(not(target_arch = "wasm32"))]
-fn expand_tally<V: Variant, D: Digest>(
-    leader: &LeaderBlock<V, D>,
+fn expand_tally<S: Scheme, D: Digest>(
+    leader: &LeaderBlock<S, D>,
     tally: &Tally<D>,
     leader_digest: D,
     config: CodecConfig,
@@ -316,13 +313,13 @@ fn expand_tally<V: Variant, D: Digest>(
         .collect()
 }
 
-impl<V: Variant, D: Digest> Epochable for Vqc<V, D> {
+impl<S: Scheme, D: Digest> Epochable for Vqc<S, D> {
     fn epoch(&self) -> Epoch {
         self.leader.epoch()
     }
 }
 
-impl<V: Variant, D: Digest> Viewable for Vqc<V, D> {
+impl<S: Scheme, D: Digest> Viewable for Vqc<S, D> {
     fn view(&self) -> View {
         self.leader.view()
     }
@@ -347,7 +344,7 @@ fn vqc_candidates(minimum: usize, maximum: usize, chains: usize) -> Vec<usize> {
     candidates
 }
 
-impl<V: Variant, D: Digest> Write for Vqc<V, D> {
+impl<S: Scheme, D: Digest> Write for Vqc<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.leader.write(writer);
         self.tally.write(writer);
@@ -357,7 +354,7 @@ impl<V: Variant, D: Digest> Write for Vqc<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Vqc<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Vqc<S, D> {
     fn encode_size(&self) -> usize {
         self.leader.encode_size()
             + self.tally.encode_size()
@@ -367,18 +364,19 @@ impl<V: Variant, D: Digest> EncodeSize for Vqc<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for Vqc<V, D> {
+impl<S: Scheme, D: Digest> Read for Vqc<S, D> {
     type Cfg = CodecConfig;
 
     fn read_cfg(reader: &mut impl Buf, config: &Self::Cfg) -> Result<Self, CodecError> {
-        let leader = LeaderBlock::<V, D>::read_cfg(reader, config)?;
+        let leader = LeaderBlock::<S, D>::read_cfg(reader, config)?;
         let tally = Tally::decode_for_leader(reader, &leader, *config)?;
         let novoters = Signers::read_cfg(reader, &config.participants())?;
         let conflicting = Vec::<ConflictingVote<D>>::read_cfg(
             reader,
             &(RangeCfg::from(0..=config.vqc_max_messages()), *config),
         )?;
-        let signature = Lazy::<aggregate::Signature<V>>::read(reader)?;
+        let terms = tally.signers().count() + novoters.count() + conflicting.len();
+        let signature = read_aggregate::<S>(reader, terms)?;
         validate_vqc_participants(&tally, &novoters, &conflicting, *config)
             .map_err(|error| CodecError::Wrapped("Vqc", error.into()))?;
         Ok(Self {
@@ -393,30 +391,30 @@ impl<V: Variant, D: Digest> Read for Vqc<V, D> {
 
 /// A leader quorum certificate over exactly `n-f` votes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Lqc<V: Variant, D: Digest> {
-    leader: LeaderBlock<V, D>,
+pub struct Lqc<S: Scheme, D: Digest> {
+    leader: LeaderBlock<S, D>,
     tally: Tally<D>,
-    signature: Lazy<aggregate::Signature<V>>,
+    signature: AggregateOf<S>,
 }
 
-impl<V: Variant, D: Digest> Lqc<V, D> {
+impl<S: Scheme, D: Digest> Lqc<S, D> {
     pub(crate) fn new(
-        leader: LeaderBlock<V, D>,
+        leader: LeaderBlock<S, D>,
         tally: Tally<D>,
-        signature: aggregate::Signature<V>,
+        signature: AggregateOf<S>,
         config: CodecConfig,
     ) -> Result<Self, Error> {
         let certificate = Self {
             leader,
             tally,
-            signature: signature.into(),
+            signature,
         };
         certificate.validate(config)?;
         Ok(certificate)
     }
 
     /// Returns the finalized unsigned leader block.
-    pub const fn leader(&self) -> &LeaderBlock<V, D> {
+    pub const fn leader(&self) -> &LeaderBlock<S, D> {
         &self.leader
     }
 
@@ -425,9 +423,9 @@ impl<V: Variant, D: Digest> Lqc<V, D> {
         &self.tally
     }
 
-    /// Returns the decoded aggregate, or `None` if its group element is malformed.
-    pub fn signature(&self) -> Option<&aggregate::Signature<V>> {
-        self.signature.get()
+    /// Returns the aggregate authenticating the tallied votes.
+    pub const fn signature(&self) -> &AggregateOf<S> {
+        &self.signature
     }
 
     /// Returns the identifier of this L-QC.
@@ -455,21 +453,18 @@ impl<V: Variant, D: Digest> Lqc<V, D> {
 
     /// Returns whether a V-QC carries this exact all-vote transcript and aggregate.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn equivalent_vqc(&self, certificate: &Vqc<V, D>) -> bool {
-        let Some(signature) = self.signature() else {
-            return false;
-        };
+    pub(crate) fn equivalent_vqc(&self, certificate: &Vqc<S, D>) -> bool {
         certificate.leader() == &self.leader
             && certificate.tally() == &self.tally
             && certificate.novoters().count() == 0
             && certificate.conflicting_votes().is_empty()
-            && certificate.signature() == Some(signature)
+            && certificate.signature() == self.signature()
     }
 
     /// Derives the equivalent all-vote V-QC without re-aggregating signatures.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn derive_vqc(&self, config: CodecConfig) -> Result<Vqc<V, D>, Error> {
-        let signature = self.signature().cloned().ok_or(Error::Transcript)?;
+    pub(crate) fn derive_vqc(&self, config: CodecConfig) -> Result<Vqc<S, D>, Error> {
+        let signature = self.signature.clone();
         Vqc::new(
             self.leader.clone(),
             self.tally.clone(),
@@ -490,26 +485,26 @@ impl<V: Variant, D: Digest> Lqc<V, D> {
     /// Returns the largest encoding of an L-QC under `codec`.
     pub(super) fn max_encode_size(codec: CodecConfig) -> Option<usize> {
         checked_sum(&[
-            LeaderBlock::<V, D>::max_encode_size(codec)?,
+            LeaderBlock::<S, D>::max_encode_size(codec)?,
             Tally::<D>::max_encode_size(codec, codec.view_quorum())?,
-            V::Signature::SIZE,
+            max_aggregate_size::<S>(codec.view_quorum())?,
         ])
     }
 }
 
-impl<V: Variant, D: Digest> Epochable for Lqc<V, D> {
+impl<S: Scheme, D: Digest> Epochable for Lqc<S, D> {
     fn epoch(&self) -> Epoch {
         self.leader.epoch()
     }
 }
 
-impl<V: Variant, D: Digest> Viewable for Lqc<V, D> {
+impl<S: Scheme, D: Digest> Viewable for Lqc<S, D> {
     fn view(&self) -> View {
         self.leader.view()
     }
 }
 
-impl<V: Variant, D: Digest> Write for Lqc<V, D> {
+impl<S: Scheme, D: Digest> Write for Lqc<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.leader.write(writer);
         self.tally.write(writer);
@@ -517,19 +512,19 @@ impl<V: Variant, D: Digest> Write for Lqc<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Lqc<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Lqc<S, D> {
     fn encode_size(&self) -> usize {
         self.leader.encode_size() + self.tally.encode_size() + self.signature.encode_size()
     }
 }
 
-impl<V: Variant, D: Digest> Read for Lqc<V, D> {
+impl<S: Scheme, D: Digest> Read for Lqc<S, D> {
     type Cfg = CodecConfig;
 
     fn read_cfg(reader: &mut impl Buf, config: &Self::Cfg) -> Result<Self, CodecError> {
-        let leader = LeaderBlock::<V, D>::read_cfg(reader, config)?;
+        let leader = LeaderBlock::<S, D>::read_cfg(reader, config)?;
         let tally = Tally::decode_for_leader(reader, &leader, *config)?;
-        let signature = Lazy::<aggregate::Signature<V>>::read(reader)?;
+        let signature = read_aggregate::<S>(reader, tally.signers().count())?;
         validate_signers(tally.signers(), *config)
             .map_err(|error| CodecError::Wrapped("Lqc", error.into()))?;
         Ok(Self {
@@ -588,11 +583,15 @@ fn validate_vqc_participants<D: Digest>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::multimmit::types::{
-        Anchor, ChainId, ChainProposal, Extension, PathLimits, Position,
+    use crate::multimmit::{
+        mocks::Bls,
+        types::{Anchor, ChainId, ChainProposal, Extension, PathLimits, Position},
     };
+    use commonware_codec::types::lazy::Lazy;
     use commonware_cryptography::{
-        Sha256, bls12381::primitives::variant::MinSig, sha256::Digest as Sha256Digest,
+        Sha256,
+        bls12381::primitives::{ops::aggregate, variant::MinSig},
+        sha256::Digest as Sha256Digest,
     };
 
     fn digest(marker: u64) -> Sha256Digest {
@@ -603,7 +602,7 @@ mod tests {
         CodecConfig::new(6, 6, PathLimits::new(2, 1)).unwrap()
     }
 
-    fn leader(parent: u64) -> LeaderBlock<MinSig, Sha256Digest> {
+    fn leader(parent: u64) -> LeaderBlock<Bls<MinSig>, Sha256Digest> {
         let config = config();
         let proposals = (0..config.chains())
             .map(|index| {
@@ -627,7 +626,10 @@ mod tests {
         .unwrap()
     }
 
-    fn body(leader: &LeaderBlock<MinSig, Sha256Digest>, position: u32) -> VoteBody<Sha256Digest> {
+    fn body(
+        leader: &LeaderBlock<Bls<MinSig>, Sha256Digest>,
+        position: u32,
+    ) -> VoteBody<Sha256Digest> {
         let config = config();
         VoteBody::for_leader(
             DigestedLeader::new::<Sha256>(leader),
@@ -660,7 +662,7 @@ mod tests {
                 ConflictingVote::new(Participant::new(3), conflict.ballot().clone(), config)
                     .unwrap(),
             ],
-            aggregate::Signature::<MinSig>::zero(),
+            Lazy::from(aggregate::Signature::<MinSig>::zero()),
             config,
         )
         .unwrap();
@@ -700,7 +702,7 @@ mod tests {
         let certificate = Lqc::new(
             finalized.clone(),
             tally,
-            aggregate::Signature::<MinSig>::zero(),
+            Lazy::from(aggregate::Signature::<MinSig>::zero()),
             config,
         )
         .unwrap();

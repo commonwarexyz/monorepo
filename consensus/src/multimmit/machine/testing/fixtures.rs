@@ -7,11 +7,12 @@ use crate::{
     Epochable as _,
     multimmit::{
         config::{Parameters, Protocol},
+        mocks::Bls,
         types::{
             Anchor, Attestation, BlockRef, CertificateId, ChainId, ChainProposal, CodecConfig,
             DaCertificate, DaQuorum, DigestedLeader, EpochGenesis, Extension, LeaderBlock, Lqc,
-            Nullification, PathLimits, Position, Tally, ThresholdShare, TransactionBlockHeader,
-            ViewMessage, Vote, VoteBody, Vqc, genesis_tip_commitment,
+            Nullification, PathLimits, Position, Tally, TransactionBlockHeader, ViewMessage, Vote,
+            VoteBody, Vqc, genesis_tip_commitment,
         },
     },
     types::{Attributable as _, Epoch, Height, Participant, Round, View},
@@ -26,6 +27,7 @@ use commonware_cryptography::{
             variant::{MinPk, Variant},
         },
     },
+    certificate,
     certificate::Signers,
     sha256::Digest,
 };
@@ -279,7 +281,7 @@ pub(crate) fn genesis_tip_history(protocol: &Protocol<Digest>) -> Digest {
 pub(crate) fn genesis_leader(
     protocol: &Protocol<Digest>,
     view: View,
-) -> LeaderBlock<MinPk, Digest> {
+) -> LeaderBlock<Bls<MinPk>, Digest> {
     let proposals = protocol
         .genesis()
         .tips()
@@ -305,25 +307,28 @@ pub(crate) fn genesis_leader(
 }
 
 /// Fabricates `signer`'s attributed signature.
-pub(crate) fn attestation(signer: u32) -> Attestation<MinPk> {
-    Attestation::new(
-        Participant::new(signer),
-        Lazy::from(<MinPk as Variant>::Signature::zero()),
-    )
+pub(crate) fn attestation(signer: u32) -> Attestation<Bls<MinPk>> {
+    certificate::Attestation {
+        signer: Participant::new(signer),
+        signature: Lazy::from(<MinPk as Variant>::Signature::zero()),
+    }
 }
 
 /// Fabricates `signer`'s threshold signature share.
-pub(crate) fn threshold_share(signer: u32) -> ThresholdShare<MinPk> {
-    ThresholdShare::new(
-        Participant::new(signer),
-        Lazy::from(<MinPk as Variant>::Signature::zero()),
-    )
+pub(crate) fn threshold_share<R>(signer: u32) -> certificate::Attestation<R>
+where
+    R: certificate::Scheme<Signature = <MinPk as Variant>::Signature>,
+{
+    certificate::Attestation {
+        signer: Participant::new(signer),
+        signature: Lazy::from(<MinPk as Variant>::Signature::zero()),
+    }
 }
 
 /// Fabricates a nullification for `round` whose certificate is the identity signature.
 ///
 /// Every call for one round returns the same bytes.
-pub(crate) fn unsigned_nullification(round: Round) -> Nullification<MinPk> {
+pub(crate) fn unsigned_nullification(round: Round) -> Nullification<Bls<MinPk>> {
     Nullification::new(
         round,
         ThresholdCertificate::new(<MinPk as Variant>::Signature::zero()),
@@ -334,7 +339,7 @@ pub(crate) fn unsigned_nullification(round: Round) -> Nullification<MinPk> {
 /// Fabricates a DA certificate for `header` whose certificate is the identity signature.
 pub(crate) fn unsigned_da_certificate(
     header: TransactionBlockHeader<Digest>,
-) -> DaCertificate<MinPk, Digest> {
+) -> DaCertificate<Bls<MinPk>, Digest> {
     DaCertificate::new(
         header,
         ThresholdCertificate::new(<MinPk as Variant>::Signature::zero()),
@@ -343,11 +348,11 @@ pub(crate) fn unsigned_da_certificate(
 
 /// Fabricates `signer`'s vote for `leader` at `positions`, one per chain, with empty extensions.
 pub(crate) fn vote(
-    leader: &LeaderBlock<MinPk, Digest>,
+    leader: &LeaderBlock<Bls<MinPk>, Digest>,
     signer: u32,
     positions: &[u32],
     codec: CodecConfig,
-) -> Vote<MinPk, Digest> {
+) -> Vote<Bls<MinPk>, Digest> {
     let body = VoteBody::for_leader(
         DigestedLeader::new::<Sha256>(leader),
         positions.iter().copied().map(Position::new).collect(),
@@ -362,10 +367,10 @@ pub(crate) fn vote(
 ///
 /// Votes for another leader are left out of the designated tally; novotes are attributed.
 pub(crate) fn symbolic_vqc(
-    leader: LeaderBlock<MinPk, Digest>,
-    messages: &[ViewMessage<MinPk, Digest>],
+    leader: LeaderBlock<Bls<MinPk>, Digest>,
+    messages: &[ViewMessage<Bls<MinPk>, Digest>],
     codec: CodecConfig,
-) -> Vqc<MinPk, Digest> {
+) -> Vqc<Bls<MinPk>, Digest> {
     let leader_digest = leader.digest::<Sha256>();
     let votes = messages.iter().filter_map(|message| match message {
         ViewMessage::Vote(vote) if vote.body().leader() == leader_digest => {
@@ -388,7 +393,7 @@ pub(crate) fn symbolic_vqc(
         tally,
         novoters,
         Vec::new(),
-        aggregate::Signature::<MinPk>::zero(),
+        Lazy::from(aggregate::Signature::<MinPk>::zero()),
         codec,
     )
     .expect("a symbolic V-QC is valid")
@@ -396,10 +401,10 @@ pub(crate) fn symbolic_vqc(
 
 /// Fabricates an L-QC for `leader` over `votes`.
 pub(crate) fn symbolic_lqc<'a>(
-    leader: LeaderBlock<MinPk, Digest>,
-    votes: impl IntoIterator<Item = &'a Vote<MinPk, Digest>>,
+    leader: LeaderBlock<Bls<MinPk>, Digest>,
+    votes: impl IntoIterator<Item = &'a Vote<Bls<MinPk>, Digest>>,
     codec: CodecConfig,
-) -> Lqc<MinPk, Digest> {
+) -> Lqc<Bls<MinPk>, Digest> {
     let tally = Tally::from_votes(
         DigestedLeader::new::<Sha256>(&leader),
         votes
@@ -408,8 +413,13 @@ pub(crate) fn symbolic_lqc<'a>(
         codec,
     )
     .expect("symbolic votes tally");
-    Lqc::new(leader, tally, aggregate::Signature::<MinPk>::zero(), codec)
-        .expect("a symbolic L-QC is valid")
+    Lqc::new(
+        leader,
+        tally,
+        Lazy::from(aggregate::Signature::<MinPk>::zero()),
+        codec,
+    )
+    .expect("a symbolic L-QC is valid")
 }
 
 /// Where a crash interrupts one persistence barrier.
@@ -616,7 +626,7 @@ impl Harness {
     ///
     /// The returned step merges the start's volatile effects with the acknowledgement's follow-up
     /// work, folded until the applied cursor advances.
-    pub(crate) fn start(self) -> (Machine<Sha256, MinPk>, Step<MinPk, Digest>) {
+    pub(crate) fn start(self) -> (Machine<Sha256, Bls<MinPk>>, Step<Bls<MinPk>, Digest>) {
         start(self.profile(), Until::CursorAdvance)
     }
 }

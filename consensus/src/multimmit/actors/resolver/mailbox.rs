@@ -2,14 +2,14 @@
 
 use super::custody::{Change, Custody};
 use crate::{
-    multimmit::{machine::ResolutionJob, types::ViewProof},
+    multimmit::{machine::ResolutionJob, scheme::Scheme, types::ViewProof},
     types::{Round, View},
 };
 use commonware_actor::{
     Feedback,
     mailbox::{self, Overflow, Policy, UnreliablePolicy},
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, sync::Arc};
 use tracing::Span;
@@ -27,7 +27,7 @@ pub(crate) struct ResolveRequest {
 }
 
 /// Reliable local control accepted by the resolver.
-pub(crate) enum Message<V: Variant, D: Digest> {
+pub(crate) enum Message<S: Scheme, D: Digest> {
     /// Resolve one machine-issued view request.
     Resolve(ResolveRequest),
     /// Retract one machine-owned request.
@@ -37,7 +37,7 @@ pub(crate) enum Message<V: Variant, D: Digest> {
     /// Reject content returned by the queried peer.
     Reject { job: ResolutionJob },
     /// Retain one machine-verified view proof for peers.
-    Retain { proof: ViewProof<V, D> },
+    Retain { proof: ViewProof<S, D> },
     /// Retire view evidence no longer retained by the machine.
     Prune { through: View },
 }
@@ -47,16 +47,16 @@ pub(crate) enum Message<V: Variant, D: Digest> {
 /// Job messages delimit the deltas because moving retention across a resolve or cancellation can
 /// change whether that job is served locally. Within one delta, the [`Custody`] rules make
 /// retention monotone, so only the final projection is forwarded.
-pub(super) type RetentionDelta<V, D> = Custody<V, D, ViewProof<V, D>>;
+pub(super) type RetentionDelta<S, D> = Custody<S, D, ViewProof<S, D>>;
 
-impl<V: Variant, D: Digest> RetentionDelta<V, D> {
+impl<S: Scheme, D: Digest> RetentionDelta<S, D> {
     /// Forwards the delta as a Prune followed by Retains, stopping at the first message `push`
     /// hands back.
     ///
     /// Returns `false`, keeping the unsent remainder, when `push` hands a message back.
     fn forward<F>(&mut self, push: &mut F) -> bool
     where
-        F: FnMut(Message<V, D>) -> Option<Message<V, D>>,
+        F: FnMut(Message<S, D>) -> Option<Message<S, D>>,
     {
         self.drain(|change| {
             let message = match change {
@@ -73,28 +73,28 @@ impl<V: Variant, D: Digest> RetentionDelta<V, D> {
 }
 
 /// One job message, or the coalesced Retain/Prune messages queued before it.
-pub(super) enum OverflowChunk<V: Variant, D: Digest> {
-    Job(Message<V, D>),
-    Retention(RetentionDelta<V, D>),
+pub(super) enum OverflowChunk<S: Scheme, D: Digest> {
+    Job(Message<S, D>),
+    Retention(RetentionDelta<S, D>),
 }
 
 /// Reliable overflow that keeps every job message and coalesces the Retain/Prune messages queued
 /// between two job messages.
-pub(crate) struct ControlOverflow<V: Variant, D: Digest> {
+pub(crate) struct ControlOverflow<S: Scheme, D: Digest> {
     /// Job messages and the retention deltas between them, in arrival order.
-    pub(super) chunks: VecDeque<OverflowChunk<V, D>>,
+    pub(super) chunks: VecDeque<OverflowChunk<S, D>>,
     /// Retain/Prune messages queued after the last job message.
-    tail: Option<RetentionDelta<V, D>>,
+    tail: Option<RetentionDelta<S, D>>,
 }
 
-impl<V: Variant, D: Digest> ControlOverflow<V, D> {
+impl<S: Scheme, D: Digest> ControlOverflow<S, D> {
     /// Returns the delta that coalesces Retain/Prune messages queued after the last job message.
-    fn back_delta(&mut self) -> &mut RetentionDelta<V, D> {
+    fn back_delta(&mut self) -> &mut RetentionDelta<S, D> {
         self.tail.get_or_insert_with(RetentionDelta::empty)
     }
 }
 
-impl<V: Variant, D: Digest> Default for ControlOverflow<V, D> {
+impl<S: Scheme, D: Digest> Default for ControlOverflow<S, D> {
     fn default() -> Self {
         Self {
             chunks: VecDeque::new(),
@@ -103,14 +103,14 @@ impl<V: Variant, D: Digest> Default for ControlOverflow<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Overflow<Message<V, D>> for ControlOverflow<V, D> {
+impl<S: Scheme, D: Digest> Overflow<Message<S, D>> for ControlOverflow<S, D> {
     fn is_empty(&self) -> bool {
         self.chunks.is_empty() && self.tail.is_none()
     }
 
     fn drain<F>(&mut self, mut push: F)
     where
-        F: FnMut(Message<V, D>) -> Option<Message<V, D>>,
+        F: FnMut(Message<S, D>) -> Option<Message<S, D>>,
     {
         while let Some(chunk) = self.chunks.pop_front() {
             match chunk {
@@ -136,8 +136,8 @@ impl<V: Variant, D: Digest> Overflow<Message<V, D>> for ControlOverflow<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Policy for Message<V, D> {
-    type Overflow = ControlOverflow<V, D>;
+impl<S: Scheme, D: Digest> Policy for Message<S, D> {
+    type Overflow = ControlOverflow<S, D>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         match message {
@@ -154,14 +154,14 @@ impl<V: Variant, D: Digest> Policy for Message<V, D> {
 }
 
 /// A best-effort request for one locally retained view proof.
-pub(crate) struct Serve<V: Variant, D: Digest> {
+pub(crate) struct Serve<S: Scheme, D: Digest> {
     /// The requested view.
     pub(crate) view: View,
     /// Receives the retained proof covering `view`, if any.
-    pub(crate) responder: oneshot::Sender<Option<Arc<ViewProof<V, D>>>>,
+    pub(crate) responder: oneshot::Sender<Option<Arc<ViewProof<S, D>>>>,
 }
 
-impl<V: Variant, D: Digest> UnreliablePolicy for Serve<V, D> {
+impl<S: Scheme, D: Digest> UnreliablePolicy for Serve<S, D> {
     type Overflow = VecDeque<Self>;
 
     fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
@@ -170,8 +170,8 @@ impl<V: Variant, D: Digest> UnreliablePolicy for Serve<V, D> {
 }
 
 /// Typed control endpoint of the resolver.
-pub(crate) struct Mailbox<V: Variant, D: Digest> {
-    control: mailbox::Sender<Message<V, D>>,
+pub(crate) struct Mailbox<S: Scheme, D: Digest> {
+    control: mailbox::Sender<Message<S, D>>,
     #[cfg_attr(
         not(any(test, feature = "mocks")),
         expect(
@@ -179,14 +179,14 @@ pub(crate) struct Mailbox<V: Variant, D: Digest> {
             reason = "only tests and mocks query retained proofs locally"
         )
     )]
-    server: Server<V, D>,
+    server: Server<S, D>,
 }
 
-impl<V: Variant, D: Digest> Mailbox<V, D> {
+impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Wraps the sending halves of the resolver's control and query queues.
     pub(crate) const fn new(
-        control: mailbox::Sender<Message<V, D>>,
-        queries: mailbox::UnreliableSender<Serve<V, D>>,
+        control: mailbox::Sender<Message<S, D>>,
+        queries: mailbox::UnreliableSender<Serve<S, D>>,
     ) -> Self {
         Self {
             control,
@@ -210,7 +210,7 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
     }
 
     /// Retains one machine-verified view proof for peers.
-    pub(crate) fn retain(&self, proof: ViewProof<V, D>) -> Feedback {
+    pub(crate) fn retain(&self, proof: ViewProof<S, D>) -> Feedback {
         self.control.enqueue(Message::Retain { proof })
     }
 
@@ -221,17 +221,17 @@ impl<V: Variant, D: Digest> Mailbox<V, D> {
 
     /// Returns a handle that only serves retained proofs.
     #[cfg(any(test, feature = "mocks"))]
-    pub(crate) fn server(&self) -> Server<V, D> {
+    pub(crate) fn server(&self) -> Server<S, D> {
         self.server.clone()
     }
 }
 
 /// A cloneable handle that reads the view proofs the resolver retains.
-pub(crate) struct Server<V: Variant, D: Digest> {
-    queries: mailbox::UnreliableSender<Serve<V, D>>,
+pub(crate) struct Server<S: Scheme, D: Digest> {
+    queries: mailbox::UnreliableSender<Serve<S, D>>,
 }
 
-impl<V: Variant, D: Digest> Clone for Server<V, D> {
+impl<S: Scheme, D: Digest> Clone for Server<S, D> {
     fn clone(&self) -> Self {
         Self {
             queries: self.queries.clone(),
@@ -240,12 +240,12 @@ impl<V: Variant, D: Digest> Clone for Server<V, D> {
 }
 
 #[cfg(any(test, feature = "mocks"))]
-impl<V: Variant, D: Digest> Server<V, D> {
+impl<S: Scheme, D: Digest> Server<S, D> {
     /// Requests the retained proof covering `view`.
     ///
     /// The receiver resolves to `None` when nothing covers `view`, and closes when the resolver is
     /// stopped or its query queue is full.
-    pub(crate) fn serve(&self, view: View) -> oneshot::Receiver<Option<Arc<ViewProof<V, D>>>> {
+    pub(crate) fn serve(&self, view: View) -> oneshot::Receiver<Option<Arc<ViewProof<S, D>>>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.queries.enqueue(Serve { view, responder });
         receiver

@@ -7,20 +7,21 @@ use crate::{
             OutputIndex,
             storage::{Error, pending::ChainFloors},
         },
+        scheme::Scheme,
         types::{BlockRef, Body, ChainId, Frontier},
     },
     types::Height,
 };
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use commonware_storage::{Context, translator::Translator};
 use std::collections::BTreeSet;
 
-impl<T, E, H, V, B> CatalogStore<T, E, H, V, B>
+impl<T, E, H, S, B> CatalogStore<T, E, H, S, B>
 where
     T: Translator,
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Reclaims immutable-mode pending bodies covered by a durable promotion cursor, keeping every

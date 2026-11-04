@@ -22,12 +22,13 @@ use crate::{
             BarrierAck, BatchId, Cursor, DomainEvent, DomainEventCodecConfig, Generation,
             MAX_BATCH_BYTES, MAX_BATCH_EVENTS, PersistJob,
         },
+        scheme::Scheme,
     },
     types::Epoch,
 };
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use commonware_runtime::{Handle, Metrics, ReadOptions, Storage, buffer::paged::CacheRef};
 use commonware_storage::journal::{
     Error as StorageError,
@@ -108,15 +109,15 @@ pub(crate) struct RecordCodecConfig {
 
 /// One self-contained machine persistence barrier.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct JournalRecord<V: Variant, D: Digest> {
+pub(crate) struct JournalRecord<S: Scheme, D: Digest> {
     barrier: BatchId,
     generation: Generation,
     previous: Cursor,
-    events: Arc<Vec<DomainEvent<V, D>>>,
+    events: Arc<Vec<DomainEvent<S, D>>>,
 }
 
-impl<V: Variant, D: Digest> JournalRecord<V, D> {
-    fn from_job(job: &PersistJob<V, D>) -> Self {
+impl<S: Scheme, D: Digest> JournalRecord<S, D> {
+    fn from_job(job: &PersistJob<S, D>) -> Self {
         Self {
             barrier: job.id(),
             generation: job.generation(),
@@ -141,12 +142,12 @@ impl<V: Variant, D: Digest> JournalRecord<V, D> {
     }
 
     /// Returns the ordered events in this barrier.
-    pub(crate) fn events(&self) -> &[DomainEvent<V, D>] {
+    pub(crate) fn events(&self) -> &[DomainEvent<S, D>] {
         self.events.as_slice()
     }
 
     /// Consumes the record and returns its events, cloning them only if the allocation is shared.
-    pub(crate) fn into_events(self) -> Vec<DomainEvent<V, D>> {
+    pub(crate) fn into_events(self) -> Vec<DomainEvent<S, D>> {
         Arc::unwrap_or_clone(self.events)
     }
 
@@ -163,17 +164,17 @@ impl<V: Variant, D: Digest> JournalRecord<V, D> {
     }
 
     /// Returns the encoded size of the record that persists `job`.
-    pub(crate) fn encoded_size(job: &PersistJob<V, D>) -> usize {
+    pub(crate) fn encoded_size(job: &PersistJob<S, D>) -> usize {
         encoded_size(job.id(), job.generation(), job.previous(), job.events())
     }
 }
 
 /// Returns the encoded size of a record with these fields.
-fn encoded_size<V: Variant, D: Digest>(
+fn encoded_size<S: Scheme, D: Digest>(
     barrier: BatchId,
     generation: Generation,
     previous: Cursor,
-    events: &[DomainEvent<V, D>],
+    events: &[DomainEvent<S, D>],
 ) -> usize {
     barrier.encode_size()
         + generation.encode_size()
@@ -182,7 +183,7 @@ fn encoded_size<V: Variant, D: Digest>(
         + events.iter().map(EncodeSize::encode_size).sum::<usize>()
 }
 
-impl<V: Variant, D: Digest> Write for JournalRecord<V, D> {
+impl<S: Scheme, D: Digest> Write for JournalRecord<S, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.barrier.write(buf);
         self.generation.write(buf);
@@ -194,20 +195,20 @@ impl<V: Variant, D: Digest> Write for JournalRecord<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for JournalRecord<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for JournalRecord<S, D> {
     fn encode_size(&self) -> usize {
         encoded_size(self.barrier, self.generation, self.previous, self.events())
     }
 }
 
-impl<V: Variant, D: Digest> Read for JournalRecord<V, D> {
+impl<S: Scheme, D: Digest> Read for JournalRecord<S, D> {
     type Cfg = RecordCodecConfig;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let barrier = BatchId::read(buf)?;
         let generation = Generation::read(buf)?;
         let previous = Cursor::read(buf)?;
-        let events: Vec<DomainEvent<V, D>> = Vec::<DomainEvent<V, D>>::read_cfg(
+        let events: Vec<DomainEvent<S, D>> = Vec::<DomainEvent<S, D>>::read_cfg(
             buf,
             &(RangeCfg::from(1..=cfg.max_events), cfg.event),
         )?;
@@ -221,11 +222,11 @@ impl<V: Variant, D: Digest> Read for JournalRecord<V, D> {
 }
 
 /// Open safety journal after recovery has completed.
-pub(crate) struct SafetyJournal<E: Storage + Metrics, V: Variant, D: Digest> {
-    journal: Journal<E, JournalRecord<V, D>>,
+pub(crate) struct SafetyJournal<E: Storage + Metrics, S: Scheme, D: Digest> {
+    journal: Journal<E, JournalRecord<S, D>>,
     config: Config,
     cursor: Cursor,
-    last: Option<JournalRecord<V, D>>,
+    last: Option<JournalRecord<S, D>>,
     section: u64,
 }
 
@@ -256,10 +257,10 @@ pub enum JournalError {
     Corrupt,
 }
 
-impl<E, V, D> SafetyJournal<E, V, D>
+impl<E, S, D> SafetyJournal<E, S, D>
 where
     E: Storage + Metrics,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     /// Opens the segmented journal and returns a reader over the suffix after `covered`.
@@ -270,7 +271,7 @@ where
         context: E,
         config: Config,
         covered: Cursor,
-    ) -> Result<SuffixReplay<E, V, D>, JournalError> {
+    ) -> Result<SuffixReplay<E, S, D>, JournalError> {
         let journal = Journal::init(context, Self::storage_config(&config)).await?;
         let replay = journal
             .replay(0, 0, config.replay_buffer, ReadOptions::default())
@@ -305,7 +306,7 @@ where
     #[cfg(any(test, feature = "mocks"))]
     pub(crate) async fn start_persist(
         self,
-        job: &PersistJob<V, D>,
+        job: &PersistJob<S, D>,
     ) -> Result<(Self, BarrierAck, Handle<()>), JournalError> {
         let (journal, result) = self.append_persist(job).await?;
         let (journal, sync) = journal.start_sync().await?;
@@ -328,7 +329,7 @@ where
     /// effects must sync first.
     pub(crate) async fn append_persist(
         self,
-        job: &PersistJob<V, D>,
+        job: &PersistJob<S, D>,
     ) -> Result<(Self, BarrierAck), JournalError> {
         if let Some(last) = self.last.as_ref()
             && last.barrier() == job.id()
@@ -393,8 +394,8 @@ where
 }
 
 /// Streaming reader over the journal records a checkpoint does not cover.
-pub(crate) struct SuffixReplay<E: Storage + Metrics, V: Variant, D: Digest> {
-    replay: Replay<E, JournalRecord<V, D>>,
+pub(crate) struct SuffixReplay<E: Storage + Metrics, S: Scheme, D: Digest> {
+    replay: Replay<E, JournalRecord<S, D>>,
     config: Config,
     covered: Cursor,
     cursor: Cursor,
@@ -402,10 +403,10 @@ pub(crate) struct SuffixReplay<E: Storage + Metrics, V: Variant, D: Digest> {
     section: u64,
 }
 
-impl<E, V, D> SuffixReplay<E, V, D>
+impl<E, S, D> SuffixReplay<E, S, D>
 where
     E: Storage + Metrics,
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
     /// Returns the first section containing an event not covered by the checkpoint.
@@ -417,7 +418,7 @@ where
     ///
     /// The segmented journal repairs incomplete outer framing before yielding records. Any
     /// complete record yielded here must decode and extend the validated prefix exactly.
-    pub(crate) async fn next(&mut self) -> Result<Option<JournalRecord<V, D>>, JournalError> {
+    pub(crate) async fn next(&mut self) -> Result<Option<JournalRecord<S, D>>, JournalError> {
         loop {
             let Some(item) = self.replay.next().await else {
                 return Ok(None);
@@ -455,7 +456,7 @@ where
     /// Appends continue in the last section that held a record, or section zero when the journal
     /// is empty. Physical tail repair is completed by the segmented journal before this handle is
     /// returned.
-    pub(crate) fn finish(self) -> Result<SafetyJournal<E, V, D>, JournalError> {
+    pub(crate) fn finish(self) -> Result<SafetyJournal<E, S, D>, JournalError> {
         let journal = self.replay.finish()?;
         Ok(SafetyJournal {
             journal,
@@ -467,8 +468,8 @@ where
     }
 }
 
-fn validate_events<V: Variant, D: Digest>(
-    record: &JournalRecord<V, D>,
+fn validate_events<S: Scheme, D: Digest>(
+    record: &JournalRecord<S, D>,
     cfg: &Config,
 ) -> Result<(), JournalError> {
     let count = record.events().len();
@@ -497,6 +498,7 @@ mod tests {
     use super::*;
     use crate::multimmit::{
         machine::Change,
+        mocks::Bls,
         types::{CodecConfig, PathLimits},
     };
     use commonware_codec::{Decode as _, Encode, varint::UInt};
@@ -510,8 +512,8 @@ mod tests {
     };
     use commonware_utils::{NZU16, NZUsize};
 
-    type TestRecord = JournalRecord<MinPk, Sha256Digest>;
-    type TestJournal = SafetyJournal<DeterministicContext, MinPk, Sha256Digest>;
+    type TestRecord = JournalRecord<Bls<MinPk>, Sha256Digest>;
+    type TestJournal = SafetyJournal<DeterministicContext, Bls<MinPk>, Sha256Digest>;
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
@@ -520,7 +522,7 @@ mod tests {
         use commonware_conformance::Conformance;
         use commonware_cryptography::bls12381::primitives::variant::{MinSig, Variant};
 
-        fn record<V: Variant>(seed: u64) -> JournalRecord<V, Sha256Digest>
+        fn record<V: Variant>(seed: u64) -> JournalRecord<Bls<V>, Sha256Digest>
         where
             V::Signature: for<'a> Arbitrary<'a>,
         {
@@ -558,7 +560,7 @@ mod tests {
                 max_events: 4,
             };
             assert_eq!(
-                <JournalRecord<V, Sha256Digest> as commonware_codec::Decode>::decode_cfg(
+                <JournalRecord<Bls<V>, Sha256Digest> as commonware_codec::Decode>::decode_cfg(
                     encoded.clone(),
                     &config,
                 )
@@ -613,7 +615,7 @@ mod tests {
         )
     }
 
-    fn event(epoch: Epoch, cursor: u64, generation: u64) -> DomainEvent<MinPk, Sha256Digest> {
+    fn event(epoch: Epoch, cursor: u64, generation: u64) -> DomainEvent<Bls<MinPk>, Sha256Digest> {
         DomainEvent::new(
             epoch,
             Cursor::new(cursor),
@@ -626,7 +628,7 @@ mod tests {
         barrier: u64,
         previous: u64,
         generation: u64,
-    ) -> PersistJob<MinPk, Sha256Digest> {
+    ) -> PersistJob<Bls<MinPk>, Sha256Digest> {
         PersistJob::new(
             BatchId::new(barrier),
             Generation::new(generation),

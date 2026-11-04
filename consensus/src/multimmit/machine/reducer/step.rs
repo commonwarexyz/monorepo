@@ -26,11 +26,12 @@ use crate::{
             verification::VerificationCompletion,
             view::ViewError,
         },
+        scheme::Scheme,
         types::{Activity, Artifact, ArtifactId, ChainId, SignedLeaderBlock},
     },
     types::{Height, Participant, View},
 };
-use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Hasher};
 use core::mem::take;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -51,13 +52,13 @@ enum VerificationPassPhase {
 }
 
 /// Owned verification input and item cursor retained across core cycles.
-pub(crate) struct VerificationPass<V: Variant, D: Digest> {
-    completion: VerificationCompletion<V, D>,
+pub(crate) struct VerificationPass<S: Scheme, D: Digest> {
+    completion: VerificationCompletion<S, D>,
     phase: VerificationPassPhase,
 }
 
-impl<V: Variant, D: Digest> VerificationPass<V, D> {
-    pub(crate) const fn new(completion: VerificationCompletion<V, D>) -> Self {
+impl<S: Scheme, D: Digest> VerificationPass<S, D> {
+    pub(crate) const fn new(completion: VerificationCompletion<S, D>) -> Self {
         Self {
             completion,
             phase: VerificationPassPhase::Start,
@@ -66,24 +67,24 @@ impl<V: Variant, D: Digest> VerificationPass<V, D> {
 }
 
 /// Where a signing batch pass is.
-enum SigningBatchPassPhase<V: Variant, D: Digest> {
+enum SigningBatchPassPhase<S: Scheme, D: Digest> {
     /// The completion has not been matched to its reservation.
     Start,
     /// Artifacts are prepared against the reservation's requests, signed by `signer`.
     Prepare {
-        requests: Arc<[SignRequest<V, D>]>,
+        requests: Arc<[SignRequest<S, D>]>,
         signer: Participant,
     },
     Complete,
 }
 
 /// Owned signing completion and private preparation cursor retained across core cycles.
-pub(crate) struct SigningBatchPass<V: Variant, D: Digest> {
+pub(crate) struct SigningBatchPass<S: Scheme, D: Digest> {
     issued: Issued<EffectId>,
-    artifacts: std::vec::IntoIter<Arc<Artifact<V, D>>>,
+    artifacts: std::vec::IntoIter<Arc<Artifact<S, D>>>,
     total: usize,
-    phase: SigningBatchPassPhase<V, D>,
-    prepared: Vec<Arc<Artifact<V, D>>>,
+    phase: SigningBatchPassPhase<S, D>,
+    prepared: Vec<Arc<Artifact<S, D>>>,
     ids: Vec<ArtifactId<D>>,
     unique: BTreeSet<ArtifactId<D>>,
     /// The last DA-vote height accepted per chain, enforcing consecutive runs.
@@ -94,8 +95,8 @@ pub(crate) struct SigningBatchPass<V: Variant, D: Digest> {
     all_da_votes: bool,
 }
 
-impl<V: Variant, D: Digest> SigningBatchPass<V, D> {
-    pub(crate) fn new(issued: Issued<EffectId>, artifacts: Vec<Arc<Artifact<V, D>>>) -> Self {
+impl<S: Scheme, D: Digest> SigningBatchPass<S, D> {
+    pub(crate) fn new(issued: Issued<EffectId>, artifacts: Vec<Arc<Artifact<S, D>>>) -> Self {
         let total = artifacts.len();
         Self {
             issued,
@@ -117,9 +118,9 @@ impl<V: Variant, D: Digest> SigningBatchPass<V, D> {
     /// sent for the next one's eligibility within the same authorization.
     fn note_request(
         &mut self,
-        request: &SignRequest<V, D>,
+        request: &SignRequest<S, D>,
         chains: usize,
-        reserved: Option<&SignRequest<V, D>>,
+        reserved: Option<&SignRequest<S, D>>,
     ) {
         let SignRequest::DaVote(da_request) = request else {
             self.all_da_votes = false;
@@ -143,19 +144,19 @@ impl<V: Variant, D: Digest> SigningBatchPass<V, D> {
 ///
 /// Observation cohorts, verification completions and signing batches resume where the last
 /// budget ran out; every other input applies atomically in one unit.
-pub(crate) struct InputPass<V: Variant, D: Digest>(PassKind<V, D>);
+pub(crate) struct InputPass<S: Scheme, D: Digest>(PassKind<S, D>);
 
-enum PassKind<V: Variant, D: Digest> {
+enum PassKind<S: Scheme, D: Digest> {
     /// An input not yet applied; taken when it applies.
-    Atomic(Option<Input<V, D>>),
+    Atomic(Option<Input<S, D>>),
     /// The artifacts of an observation cohort not yet observed, in observation order.
-    Observe(std::vec::IntoIter<IdentifiedArtifact<V, D>>),
-    Verified(VerificationPass<V, D>),
-    SignedBatch(SigningBatchPass<V, D>),
+    Observe(std::vec::IntoIter<IdentifiedArtifact<S, D>>),
+    Verified(VerificationPass<S, D>),
+    SignedBatch(SigningBatchPass<S, D>),
 }
 
-impl<V: Variant, D: Digest> InputPass<V, D> {
-    pub(crate) fn new(input: Input<V, D>) -> Self {
+impl<S: Scheme, D: Digest> InputPass<S, D> {
+    pub(crate) fn new(input: Input<S, D>) -> Self {
         Self(match input {
             Input::Observe(artifacts) => PassKind::Observe(artifacts.into_iter()),
             Input::Verified(completion) => PassKind::Verified(VerificationPass::new(completion)),
@@ -177,7 +178,7 @@ impl<V: Variant, D: Digest> InputPass<V, D> {
 
     /// Returns the input of an atomic pass that has not applied yet.
     #[cfg(test)]
-    pub(crate) const fn pending_input(&self) -> Option<&Input<V, D>> {
+    pub(crate) const fn pending_input(&self) -> Option<&Input<S, D>> {
         match &self.0 {
             PassKind::Atomic(input) => input.as_ref(),
             PassKind::Observe(_) | PassKind::Verified(_) | PassKind::SignedBatch(_) => None,
@@ -185,16 +186,16 @@ impl<V: Variant, D: Digest> InputPass<V, D> {
     }
 }
 
-impl<H: Hasher, V: Variant> Machine<H, V> {
+impl<H: Hasher, S: Scheme> Machine<H, S> {
     /// Advances one queued input by at most `budget` units.
     ///
     /// An observation prefix also stops at the verification batch bound, so one pass never
     /// schedules more than one verification job.
     pub(crate) fn advance(
         &mut self,
-        pass: &mut InputPass<V, H::Digest>,
+        pass: &mut InputPass<S, H::Digest>,
         budget: usize,
-    ) -> Result<Drive<Step<V, H::Digest>>, StepError> {
+    ) -> Result<Drive<Step<S, H::Digest>>, StepError> {
         match &mut pass.0 {
             PassKind::Atomic(input) => {
                 let input = input
@@ -229,8 +230,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// Applies one serialized input and returns deterministic immutable capabilities.
     pub(crate) fn step(
         &mut self,
-        input: Input<V, H::Digest>,
-    ) -> Result<Step<V, H::Digest>, StepError> {
+        input: Input<S, H::Digest>,
+    ) -> Result<Step<S, H::Digest>, StepError> {
         let report_admissions = self.lifecycle == Lifecycle::Live;
 
         // Only lifecycle inputs and persistence acknowledgements arrive before the machine is live.
@@ -298,9 +299,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// Applies at most `budget` real verification items and retains the suffix cursor.
     fn advance_verification_pass(
         &mut self,
-        pass: &mut VerificationPass<V, H::Digest>,
+        pass: &mut VerificationPass<S, H::Digest>,
         budget: usize,
-    ) -> Result<Drive<Step<V, H::Digest>>, StepError> {
+    ) -> Result<Drive<Step<S, H::Digest>>, StepError> {
         self.ensure_live()?;
         debug_assert!(budget > 0);
 
@@ -401,9 +402,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// Privately prepares at most `budget` signed artifacts before one atomic admission.
     fn advance_signing_batch_pass(
         &mut self,
-        pass: &mut SigningBatchPass<V, H::Digest>,
+        pass: &mut SigningBatchPass<S, H::Digest>,
         budget: usize,
-    ) -> Result<Drive<Step<V, H::Digest>>, StepError> {
+    ) -> Result<Drive<Step<S, H::Digest>>, StepError> {
         self.ensure_live()?;
         debug_assert!(budget > 0);
 
@@ -533,7 +534,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(crate) fn poll(
         &mut self,
         budget: NonZeroUsize,
-    ) -> Result<PollResult<V, H::Digest>, StepError> {
+    ) -> Result<PollResult<S, H::Digest>, StepError> {
         self.ensure_live()?;
         let mut capabilities = Capabilities::new();
 
@@ -576,7 +577,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// A promotion that the same drain window also discarded is not an admission: the artifact
     /// is no longer retained, so it is filtered out exactly as a before-and-after comparison of
     /// the retained map would have.
-    fn drain_activities(&mut self) -> Vec<Activity<V, H::Digest>> {
+    fn drain_activities(&mut self) -> Vec<Activity<S, H::Digest>> {
         let finalized = self.finality.drain_updates();
         if self.store.newly_ready.is_empty() && finalized.is_empty() {
             return Vec::new();
@@ -611,8 +612,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(super) fn push_acceptance(
         &self,
         artifact_id: ArtifactId<H::Digest>,
-        artifact: Arc<Artifact<V, H::Digest>>,
-        activities: &mut Vec<Activity<V, H::Digest>>,
+        artifact: Arc<Artifact<S, H::Digest>>,
+        activities: &mut Vec<Activity<S, H::Digest>>,
     ) {
         if let Some(commitments) = self
             .views
@@ -643,8 +644,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn history_acceptance(
         &self,
-        block: &SignedLeaderBlock<V, H::Digest>,
-    ) -> Result<Activity<V, H::Digest>, ViewError> {
+        block: &SignedLeaderBlock<S, H::Digest>,
+    ) -> Result<Activity<S, H::Digest>, ViewError> {
         let record = self.views.leader_history::<H>(block.block())?;
         Ok(Activity::HistoryAccepted {
             view: block.view(),
@@ -654,7 +655,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     }
 
     /// Replays one contiguous durable event without emitting live capabilities.
-    pub(crate) fn replay(&mut self, event: DomainEvent<V, H::Digest>) -> Result<(), ReplayError> {
+    pub(crate) fn replay(&mut self, event: DomainEvent<S, H::Digest>) -> Result<(), ReplayError> {
         if self.lifecycle != Lifecycle::Recovering || !self.pipeline.staged.is_empty() {
             return Err(ReplayError::Lifecycle);
         }
@@ -673,7 +674,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         Ok(())
     }
 
-    pub(super) fn start(&mut self, recovery: bool) -> Result<Step<V, H::Digest>, StepError> {
+    pub(super) fn start(&mut self, recovery: bool) -> Result<Step<S, H::Digest>, StepError> {
         let expected = if recovery {
             Lifecycle::Recovering
         } else {
@@ -737,8 +738,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     pub(super) fn observe(
         &mut self,
-        artifacts: Vec<IdentifiedArtifact<V, H::Digest>>,
-    ) -> Result<Step<V, H::Digest>, StepError> {
+        artifacts: Vec<IdentifiedArtifact<S, H::Digest>>,
+    ) -> Result<Step<S, H::Digest>, StepError> {
         self.observe_artifacts(artifacts.into_iter())
     }
 
@@ -746,7 +747,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         &mut self,
         component: ProtocolComponent,
         budget: &mut Budget,
-    ) -> WorkResult<V, H::Digest> {
+    ) -> WorkResult<S, H::Digest> {
         let before = self.durable.state.cursor;
         let (status, capabilities) = match component {
             ProtocolComponent::Finality => self.drive_finality_component()?,

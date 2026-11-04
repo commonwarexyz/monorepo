@@ -4,13 +4,16 @@ use super::{
     common::{Fixture, PARTICIPANTS, bench_strategies},
     ordinary::VerifyArtifacts,
 };
-use commonware_consensus::multimmit::Artifact;
-use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig, Variant};
+use commonware_consensus::multimmit::{
+    Artifact,
+    mocks::{Bls, Fixture as Suite},
+};
+use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
 use commonware_utils::test_rng;
 use criterion::{Criterion, criterion_group};
 
-fn register<V: Variant>(c: &mut Criterion, variant: &str) {
-    let fixture = Fixture::<V>::new();
+fn register<S: Suite>(c: &mut Criterion, variant: &str) {
+    let fixture = Fixture::<S>::new();
     let header = fixture.header(0, 1);
     let da_votes = fixture
         .signers
@@ -42,8 +45,8 @@ fn register<V: Variant>(c: &mut Criterion, variant: &str) {
 }
 
 fn bench_shares(c: &mut Criterion) {
-    register::<MinPk>(c, "minpk");
-    register::<MinSig>(c, "minsig");
+    register::<Bls<MinPk>>(c, "minpk");
+    register::<Bls<MinSig>>(c, "minsig");
 }
 
 criterion_group! {

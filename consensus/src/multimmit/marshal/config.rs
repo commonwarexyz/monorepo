@@ -15,13 +15,14 @@ use super::{
 use crate::{
     Epochable as _,
     multimmit::{
+        scheme::Scheme,
         storage::valid_partition_prefix,
         types::{CodecConfig, EpochGenesis, Frontier},
     },
     types::Epoch,
 };
 use commonware_codec::{Codec, EncodeSize as _};
-use commonware_cryptography::{Digest, Digestible, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, Digestible};
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_storage::{
     archive::{immutable, prunable},
@@ -166,7 +167,7 @@ impl<T: Translator> ArchiveConfig<T> {
 /// authority for a fresh storage namespace, not a runtime floor-update mechanism; use
 /// [`super::Mailbox::install_floor`] for a floor received while the service is running.
 #[derive(Clone, Debug)]
-pub enum Start<V: Variant, D: Digest> {
+pub enum Start<S: Scheme, D: Digest> {
     /// Start after the synthetic height-zero tips.
     Genesis(EpochGenesis<D>),
     /// Start after a state sync authenticated by the caller.
@@ -181,11 +182,11 @@ pub enum Start<V: Variant, D: Digest> {
         /// Positive monotone generation authenticated by the state-sync owner.
         floor_generation: u64,
         /// The floor to start after.
-        floor: Box<Floor<V, D>>,
+        floor: Box<Floor<S, D>>,
     },
 }
 
-impl<V: Variant, D: Digest> Start<V, D> {
+impl<S: Scheme, D: Digest> Start<S, D> {
     /// Returns the epoch the anchor belongs to.
     pub fn epoch(&self) -> Epoch {
         match self {
@@ -336,9 +337,9 @@ impl Default for Limits {
 /// Marshal configuration for one Multimmit epoch.
 ///
 /// The epoch is the start anchor's, and the chain count is the protocol codec's.
-pub struct Config<T: Translator, V: Variant, B: Codec + Digestible> {
+pub struct Config<T: Translator, S: Scheme, B: Codec + Digestible> {
     /// Anchor for a namespace without durable marshal progress.
-    pub start: Start<V, B::Digest>,
+    pub start: Start<S, B::Digest>,
     /// Prefix from which exclusive storage partitions are derived.
     pub partition_prefix: String,
     /// Queue, batch and cache capacities.
@@ -355,12 +356,12 @@ pub struct Config<T: Translator, V: Variant, B: Codec + Digestible> {
     pub archive: ArchiveConfig<T>,
 }
 
-impl<T: Translator, V: Variant, B: Codec + Digestible> Config<T, V, B> {
+impl<T: Translator, S: Scheme, B: Codec + Digestible> Config<T, S, B> {
     /// Constructs a configuration with default bounds and immutable finalized archives.
     ///
     /// [`open`](fn@super::open) validates the configuration.
     pub fn new(
-        start: Start<V, B::Digest>,
+        start: Start<S, B::Digest>,
         partition_prefix: String,
         codec_config: CodecConfig,
         body_codec_config: B::Cfg,
@@ -687,7 +688,10 @@ pub enum ConfigError {
 mod tests {
     use super::*;
     use crate::{
-        multimmit::types::{BlockRef, CertificateId, ChainId, PathLimits},
+        multimmit::{
+            mocks::Bls,
+            types::{BlockRef, CertificateId, ChainId, PathLimits},
+        },
         simplex::marshal::mocks::block::EmptyBlock,
         types::Height,
     };
@@ -698,7 +702,7 @@ mod tests {
     use commonware_storage::translator::TwoCap;
     use commonware_utils::NZU16;
 
-    type TestConfig = Config<TwoCap, MinPk, EmptyBlock<Sha256>>;
+    type TestConfig = Config<TwoCap, Bls<MinPk>, EmptyBlock<Sha256>>;
 
     fn genesis(epoch: Epoch, chains: u32) -> EpochGenesis<Sha256Digest> {
         let tips = (0..chains)

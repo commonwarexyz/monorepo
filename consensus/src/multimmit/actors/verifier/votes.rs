@@ -3,11 +3,12 @@
 use crate::{
     multimmit::{
         machine::{VerificationCompletion, VerifyJob},
+        scheme::Scheme,
         types::Artifact,
     },
     types::{Round, View},
 };
-use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Digest;
 use commonware_runtime::telemetry::metrics::Histogram;
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -16,12 +17,12 @@ use std::{collections::BTreeMap, sync::Arc};
 /// The machine attaches the votes it has already accepted when it admits a certificate, but at
 /// scale the view's votes are usually still queued for verification at that moment. Jobs consult
 /// this cache as they start, when the same verifier has typically just verified those votes.
-pub(super) struct VerifiedVotes<V: Variant, D: Digest> {
-    views: BTreeMap<View, Vec<Arc<Artifact<V, D>>>>,
+pub(super) struct VerifiedVotes<S: Scheme, D: Digest> {
+    views: BTreeMap<View, Vec<Arc<Artifact<S, D>>>>,
     per_view: usize,
 }
 
-impl<V: Variant, D: Digest> VerifiedVotes<V, D> {
+impl<S: Scheme, D: Digest> VerifiedVotes<S, D> {
     /// Views kept behind the newest verified vote.
     ///
     /// A certificate job for a view usually starts within a few views of that view's votes, and
@@ -37,7 +38,7 @@ impl<V: Variant, D: Digest> VerifiedVotes<V, D> {
     }
 
     /// Caches one verified vote or novote of `view`.
-    pub(super) fn record(&mut self, view: View, artifact: &Arc<Artifact<V, D>>) {
+    pub(super) fn record(&mut self, view: View, artifact: &Arc<Artifact<S, D>>) {
         let messages = self.views.entry(view).or_default();
         if messages.len() < self.per_view {
             messages.push(Arc::clone(artifact));
@@ -57,8 +58,8 @@ impl<V: Variant, D: Digest> VerifiedVotes<V, D> {
     /// each trails the job's round.
     pub(super) fn record_job(
         &mut self,
-        job: &VerifyJob<V, D>,
-        completion: &VerificationCompletion<V, D>,
+        job: &VerifyJob<S, D>,
+        completion: &VerificationCompletion<S, D>,
         round: Round,
         lag: &Histogram,
     ) {
@@ -76,7 +77,7 @@ impl<V: Variant, D: Digest> VerifiedVotes<V, D> {
     }
 
     /// Returns the cached messages of `view`.
-    pub(super) fn known(&self, view: View) -> Vec<Arc<Artifact<V, D>>> {
+    pub(super) fn known(&self, view: View) -> Vec<Arc<Artifact<S, D>>> {
         self.views.get(&view).cloned().unwrap_or_default()
     }
 }

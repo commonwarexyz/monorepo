@@ -2,10 +2,10 @@
 
 use super::IngressLimits;
 use crate::{
-    multimmit::{machine::IdentifiedArtifact, types::Artifact, wire::Plane},
+    multimmit::{machine::IdentifiedArtifact, scheme::Scheme, types::Artifact, wire::Plane},
     types::{Attributable as _, Participant},
 };
-use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digest, PublicKey};
 use std::{
     collections::{HashMap, VecDeque, hash_map::Entry as MapEntry},
     iter::once,
@@ -44,28 +44,28 @@ impl LaneId {
 }
 
 /// One buffered artifact and its canonical encoded length, measured once at admission.
-pub(super) struct Entry<V: Variant, D: Digest> {
-    artifact: IdentifiedArtifact<V, D>,
+pub(super) struct Entry<S: Scheme, D: Digest> {
+    artifact: IdentifiedArtifact<S, D>,
     bytes: usize,
 }
 
-impl<V: Variant, D: Digest> Entry<V, D> {
-    fn new(artifact: IdentifiedArtifact<V, D>) -> Self {
+impl<S: Scheme, D: Digest> Entry<S, D> {
+    fn new(artifact: IdentifiedArtifact<S, D>) -> Self {
         let bytes = artifact.artifact.encoded_len();
         Self { artifact, bytes }
     }
 }
 
 /// An indivisible parent+proposal pair or one artifact.
-pub(super) struct Group<V: Variant, D: Digest> {
-    first: Entry<V, D>,
-    second: Option<Box<Entry<V, D>>>,
+pub(super) struct Group<S: Scheme, D: Digest> {
+    first: Entry<S, D>,
+    second: Option<Box<Entry<S, D>>>,
     /// When the network message carrying the group arrived at the ingress actor.
     received_at: SystemTime,
 }
 
-impl<V: Variant, D: Digest> Group<V, D> {
-    pub(super) fn one(artifact: IdentifiedArtifact<V, D>, received_at: SystemTime) -> Self {
+impl<S: Scheme, D: Digest> Group<S, D> {
+    pub(super) fn one(artifact: IdentifiedArtifact<S, D>, received_at: SystemTime) -> Self {
         Self {
             first: Entry::new(artifact),
             second: None,
@@ -74,7 +74,7 @@ impl<V: Variant, D: Digest> Group<V, D> {
     }
 
     pub(super) fn pair(
-        [first, second]: [IdentifiedArtifact<V, D>; 2],
+        [first, second]: [IdentifiedArtifact<S, D>; 2],
         received_at: SystemTime,
     ) -> Self {
         Self {
@@ -110,7 +110,7 @@ impl<V: Variant, D: Digest> Group<V, D> {
     /// Pairs each entry with `peer` in observation order, parent first.
     ///
     /// Only a pair clones `peer`; a single artifact takes it.
-    fn into_selected<P: PublicKey>(self, peer: P) -> impl Iterator<Item = Selected<P, V, D>> {
+    fn into_selected<P: PublicKey>(self, peer: P) -> impl Iterator<Item = Selected<P, S, D>> {
         let Self {
             first,
             second,
@@ -133,8 +133,8 @@ impl<V: Variant, D: Digest> Group<V, D> {
 
 /// One ingress selection and its authenticated source.
 #[derive(Debug)]
-pub(super) struct Selected<P: PublicKey, V: Variant, D: Digest> {
-    pub(super) artifact: IdentifiedArtifact<V, D>,
+pub(super) struct Selected<P: PublicKey, S: Scheme, D: Digest> {
+    pub(super) artifact: IdentifiedArtifact<S, D>,
     pub(super) peer: P,
     /// The artifact's canonical encoded length, measured once at admission.
     pub(super) bytes: usize,
@@ -143,29 +143,29 @@ pub(super) struct Selected<P: PublicKey, V: Variant, D: Digest> {
 }
 
 /// The artifacts of one plane selected into one observation cohort.
-pub(super) struct Cohort<P: PublicKey, V: Variant, D: Digest> {
+pub(super) struct Cohort<P: PublicKey, S: Scheme, D: Digest> {
     /// The plane every selected artifact arrived on.
     pub(super) plane: Plane,
     /// The selected artifacts in observation order.
-    pub(super) selected: Vec<Selected<P, V, D>>,
+    pub(super) selected: Vec<Selected<P, S, D>>,
 }
 
 /// One peer's buffered groups in one lane, with their item and byte totals.
-struct PeerLane<V: Variant, D: Digest> {
-    groups: VecDeque<Group<V, D>>,
+struct PeerLane<S: Scheme, D: Digest> {
+    groups: VecDeque<Group<S, D>>,
     items: usize,
     bytes: usize,
 }
 
 /// One lane's per-peer buffers, served round-robin across the peers in `ready`.
-struct Lane<P: PublicKey, V: Variant, D: Digest> {
-    peers: HashMap<P, PeerLane<V, D>>,
+struct Lane<P: PublicKey, S: Scheme, D: Digest> {
+    peers: HashMap<P, PeerLane<S, D>>,
     ready: VecDeque<P>,
     items: usize,
     bytes: usize,
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Lane<P, V, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Lane<P, S, D> {
     fn new() -> Self {
         Self {
             peers: HashMap::new(),
@@ -180,10 +180,10 @@ impl<P: PublicKey, V: Variant, D: Digest> Lane<P, V, D> {
 ///
 /// Lanes bound retained items and bytes per lane and per peer. Flushing rotates across consensus,
 /// certificate, and data traffic. Data selections rotate across producer chains.
-pub(super) struct Lanes<P: PublicKey, V: Variant, D: Digest> {
-    consensus: Lane<P, V, D>,
-    certificates: Lane<P, V, D>,
-    data: Vec<Lane<P, V, D>>,
+pub(super) struct Lanes<P: PublicKey, S: Scheme, D: Digest> {
+    consensus: Lane<P, S, D>,
+    certificates: Lane<P, S, D>,
+    data: Vec<Lane<P, S, D>>,
     items: usize,
     next_plane: Plane,
     next_chain: usize,
@@ -192,7 +192,7 @@ pub(super) struct Lanes<P: PublicKey, V: Variant, D: Digest> {
     limits: IngressLimits,
 }
 
-impl<P: PublicKey, V: Variant, D: Digest> Lanes<P, V, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Lanes<P, S, D> {
     pub(super) fn new(chains: usize, participants: usize, limits: IngressLimits) -> Self {
         let (peer_items, peer_bytes) = limits.peer_share(participants);
         Self {
@@ -213,7 +213,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Lanes<P, V, D> {
         self.items
     }
 
-    fn lane_mut(&mut self, lane: LaneId) -> &mut Lane<P, V, D> {
+    fn lane_mut(&mut self, lane: LaneId) -> &mut Lane<P, S, D> {
         match lane {
             LaneId::Consensus => &mut self.consensus,
             LaneId::Certificate => &mut self.certificates,
@@ -226,7 +226,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Lanes<P, V, D> {
         &mut self,
         lane: LaneId,
         peer: P,
-        group: Group<V, D>,
+        group: Group<S, D>,
     ) -> Result<(), DropReason> {
         let bytes = group.bytes();
         let items = group.len();
@@ -269,7 +269,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Lanes<P, V, D> {
         Ok(())
     }
 
-    fn pop(&mut self, lane: LaneId) -> Option<(P, Group<V, D>)> {
+    fn pop(&mut self, lane: LaneId) -> Option<(P, Group<S, D>)> {
         let target = self.lane_mut(lane);
         let peer = target.ready.pop_front()?;
         let buffered = target
@@ -291,7 +291,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Lanes<P, V, D> {
         Some((peer, group))
     }
 
-    fn pop_data(&mut self) -> Option<(P, Group<V, D>)> {
+    fn pop_data(&mut self) -> Option<(P, Group<S, D>)> {
         let chains = self.data.len();
         if chains == 0 {
             return None;
@@ -330,7 +330,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Lanes<P, V, D> {
     /// [`IngressLimits::view_cohort_items`] to keep view-critical work separate from large data
     /// batches. Consecutive flushes rotate across planes, and data selections rotate across
     /// producer chains. Returns `None` when nothing is selected.
-    pub(super) fn flush(&mut self, budget: usize) -> Option<Cohort<P, V, D>> {
+    pub(super) fn flush(&mut self, budget: usize) -> Option<Cohort<P, S, D>> {
         let plane = self.next_ready_plane()?;
         let budget = if plane.view_critical() {
             budget.min(self.limits.view_cohort_items.get())
@@ -358,7 +358,7 @@ mod tests {
     use super::*;
     use crate::{
         multimmit::{
-            mocks::Committee,
+            mocks::{Bls, Committee},
             types::{Artifact, Attestation, ChainId, NoVote},
         },
         types::{Epoch, Round, View},
@@ -366,7 +366,7 @@ mod tests {
     use commonware_codec::types::lazy::Lazy;
     use commonware_cryptography::{
         Hasher as _, Sha256, Signer as _,
-        bls12381::primitives::variant::MinPk,
+        bls12381::primitives::variant::{MinPk, Variant},
         ed25519::{PrivateKey as Ed25519PrivateKey, PublicKey as Ed25519PublicKey},
         sha256::Digest as Sha256Digest,
     };
@@ -377,14 +377,14 @@ mod tests {
 
     const EPOCH: SystemTime = SystemTime::UNIX_EPOCH;
 
-    impl<P: PublicKey, V: Variant, D: Digest> PartialEq<Artifact<V, D>> for Selected<P, V, D> {
-        fn eq(&self, other: &Artifact<V, D>) -> bool {
+    impl<P: PublicKey, S: Scheme, D: Digest> PartialEq<Artifact<S, D>> for Selected<P, S, D> {
+        fn eq(&self, other: &Artifact<S, D>) -> bool {
             self.artifact.artifact == *other
         }
     }
 
-    impl<P: PublicKey, V: Variant, D: Digest> PartialEq<Selected<P, V, D>> for Artifact<V, D> {
-        fn eq(&self, other: &Selected<P, V, D>) -> bool {
+    impl<P: PublicKey, S: Scheme, D: Digest> PartialEq<Selected<P, S, D>> for Artifact<S, D> {
+        fn eq(&self, other: &Selected<P, S, D>) -> bool {
             *self == other.artifact.artifact
         }
     }
@@ -399,15 +399,15 @@ mod tests {
 
     /// Flushes one cohort and returns its selections, or none when every lane is empty.
     fn flushed(
-        lanes: &mut Lanes<Ed25519PublicKey, MinPk, Sha256Digest>,
+        lanes: &mut Lanes<Ed25519PublicKey, Bls<MinPk>, Sha256Digest>,
         budget: usize,
-    ) -> Vec<Selected<Ed25519PublicKey, MinPk, Sha256Digest>> {
+    ) -> Vec<Selected<Ed25519PublicKey, Bls<MinPk>, Sha256Digest>> {
         lanes
             .flush(budget)
             .map_or_else(Vec::new, |cohort| cohort.selected)
     }
 
-    fn committee() -> Committee<MinPk> {
+    fn committee() -> Committee<Bls<MinPk>> {
         Committee::builder(21, 6).build()
     }
 
@@ -416,8 +416,8 @@ mod tests {
     }
 
     fn identified(
-        artifact: Artifact<MinPk, Sha256Digest>,
-    ) -> IdentifiedArtifact<MinPk, Sha256Digest> {
+        artifact: Artifact<Bls<MinPk>, Sha256Digest>,
+    ) -> IdentifiedArtifact<Bls<MinPk>, Sha256Digest> {
         artifact.identify::<Sha256>(&mut Vec::new())
     }
 
@@ -427,7 +427,8 @@ mod tests {
         const ROUNDS: usize = SERVICE_BOUND * 3;
 
         let committee = committee();
-        let mut lanes: Lanes<Ed25519PublicKey, MinPk, Sha256Digest> = Lanes::new(6, 6, limits());
+        let mut lanes: Lanes<Ed25519PublicKey, Bls<MinPk>, Sha256Digest> =
+            Lanes::new(6, 6, limits());
 
         let block0 = Artifact::TransactionBlock(
             committee.signed_block(ChainId::new(0), Sha256::hash(&[b"block zero"])),
@@ -514,7 +515,8 @@ mod tests {
     #[test]
     fn flush_rotates_the_first_data_chain() {
         let committee = committee();
-        let mut lanes: Lanes<Ed25519PublicKey, MinPk, Sha256Digest> = Lanes::new(6, 6, limits());
+        let mut lanes: Lanes<Ed25519PublicKey, Bls<MinPk>, Sha256Digest> =
+            Lanes::new(6, 6, limits());
         let block0 = Artifact::TransactionBlock(
             committee.signed_block(ChainId::new(0), Sha256::hash(&[b"rot zero"])),
         );
@@ -552,7 +554,8 @@ mod tests {
     #[test]
     fn flush_selects_a_single_plane_per_cohort() {
         let committee = committee();
-        let mut lanes: Lanes<Ed25519PublicKey, MinPk, Sha256Digest> = Lanes::new(6, 6, limits());
+        let mut lanes: Lanes<Ed25519PublicKey, Bls<MinPk>, Sha256Digest> =
+            Lanes::new(6, 6, limits());
         let novote = Artifact::NoVote(committee.novote(Participant::new(2), View::new(1)));
         let nullification = Artifact::Nullification(committee.nullification(View::new(1)));
         let block = Artifact::TransactionBlock(
@@ -597,7 +600,8 @@ mod tests {
     #[test]
     fn flush_without_budget_selects_no_cohort() {
         let committee = committee();
-        let mut lanes: Lanes<Ed25519PublicKey, MinPk, Sha256Digest> = Lanes::new(6, 6, limits());
+        let mut lanes: Lanes<Ed25519PublicKey, Bls<MinPk>, Sha256Digest> =
+            Lanes::new(6, 6, limits());
         lanes
             .push_group(
                 LaneId::Consensus,
@@ -629,7 +633,7 @@ mod tests {
         let committee = committee();
         let mut bounds = limits();
         bounds.lane_items = NonZeroUsize::new(16).unwrap();
-        let mut lanes: Lanes<Ed25519PublicKey, MinPk, Sha256Digest> = Lanes::new(6, 6, bounds);
+        let mut lanes: Lanes<Ed25519PublicKey, Bls<MinPk>, Sha256Digest> = Lanes::new(6, 6, bounds);
         for signer in 0..6usize {
             let novote =
                 Artifact::NoVote(committee.novote(Participant::from_usize(signer), View::new(1)));
@@ -658,7 +662,7 @@ mod tests {
         let novote = Artifact::NoVote(committee.novote(Participant::new(0), View::new(1)));
         let mut bounds = limits();
         bounds.lane_bytes = NonZeroUsize::new(novote.encoded_len() * 2).unwrap();
-        let mut lanes: Lanes<Ed25519PublicKey, MinPk, Sha256Digest> = Lanes::new(6, 6, bounds);
+        let mut lanes: Lanes<Ed25519PublicKey, Bls<MinPk>, Sha256Digest> = Lanes::new(6, 6, bounds);
 
         lanes
             .push_group(
@@ -709,7 +713,7 @@ mod tests {
         let correct = Artifact::NoVote(committee.novote(Participant::new(1), View::new(1)));
         let mut bounds = limits();
         bounds.lane_items = NonZeroUsize::new(4).unwrap();
-        let mut lanes: Lanes<Ed25519PublicKey, MinPk, Sha256Digest> = Lanes::new(6, 6, bounds);
+        let mut lanes: Lanes<Ed25519PublicKey, Bls<MinPk>, Sha256Digest> = Lanes::new(6, 6, bounds);
 
         lanes
             .push_group(
@@ -757,7 +761,8 @@ mod tests {
         let second = Artifact::NoVote(committee.novote(Participant::new(1), View::new(1)));
         let group_bytes = first.encoded_len() + second.encoded_len();
 
-        let mut ordered: Lanes<Ed25519PublicKey, MinPk, Sha256Digest> = Lanes::new(6, 6, limits());
+        let mut ordered: Lanes<Ed25519PublicKey, Bls<MinPk>, Sha256Digest> =
+            Lanes::new(6, 6, limits());
         ordered
             .push_group(
                 LaneId::Consensus,
@@ -801,7 +806,8 @@ mod tests {
         ];
 
         for (bounds, expected) in cases {
-            let mut lanes: Lanes<Ed25519PublicKey, MinPk, Sha256Digest> = Lanes::new(6, 6, bounds);
+            let mut lanes: Lanes<Ed25519PublicKey, Bls<MinPk>, Sha256Digest> =
+                Lanes::new(6, 6, bounds);
             assert_eq!(
                 lanes.push_group(
                     LaneId::Consensus,
@@ -828,7 +834,7 @@ mod tests {
         let group_bytes = parent.encoded_len() + block.encoded_len();
         let mut bounds = limits();
         bounds.lane_bytes = NonZeroUsize::new(group_bytes * 2).unwrap();
-        let mut lanes: Lanes<Ed25519PublicKey, MinPk, Sha256Digest> = Lanes::new(6, 6, bounds);
+        let mut lanes: Lanes<Ed25519PublicKey, Bls<MinPk>, Sha256Digest> = Lanes::new(6, 6, bounds);
 
         lanes
             .push_group(
@@ -846,13 +852,13 @@ mod tests {
     const CHAINS: usize = 4;
     const PEERS: usize = 4;
 
-    fn artifact(marker: u8) -> Artifact<MinPk, Sha256Digest> {
+    fn artifact(marker: u8) -> Artifact<Bls<MinPk>, Sha256Digest> {
         let novote = NoVote::new(
             Round::new(Epoch::new(1), View::new(u64::from(marker) + 1)),
-            Attestation::new(
-                Participant::new(u32::from(marker % 8)),
-                Lazy::from(<MinPk as Variant>::Signature::zero()),
-            ),
+            Attestation::<Bls<MinPk>> {
+                signer: Participant::new(u32::from(marker % 8)),
+                signature: Lazy::from(<MinPk as Variant>::Signature::zero()),
+            },
         )
         .expect("live view is valid");
         Artifact::NoVote(novote)
@@ -866,7 +872,7 @@ mod tests {
         bounds.cohort_items = NonZeroUsize::new(4).unwrap();
         bounds.lane_items = NonZeroUsize::new(3).unwrap();
         bounds.lane_bytes = NonZeroUsize::new(4096).unwrap();
-        let mut lanes: Lanes<Ed25519PublicKey, MinPk, Sha256Digest> =
+        let mut lanes: Lanes<Ed25519PublicKey, Bls<MinPk>, Sha256Digest> =
             Lanes::new(CHAINS, PEERS, bounds);
 
         let mut buffered = 0usize;

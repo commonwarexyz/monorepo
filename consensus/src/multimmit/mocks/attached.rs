@@ -2,14 +2,14 @@
 
 use crate::{
     Automaton, Epochable, Heightable, Relay, Reporter,
-    multimmit::types::{Activity as MultimmitActivity, ChainId, Context},
+    multimmit::{
+        scheme::Scheme,
+        types::{Activity as MultimmitActivity, ChainId, Context},
+    },
     types::Height,
 };
 use commonware_actor::Feedback;
-use commonware_cryptography::{
-    Digest, Hasher, Sha256, bls12381::primitives::variant::Variant, ed25519,
-    sha256::Digest as Sha256Digest,
-};
+use commonware_cryptography::{Digest, Hasher, Sha256, ed25519, sha256::Digest as Sha256Digest};
 use commonware_utils::{
     NZUsize,
     channel::{oneshot, ring},
@@ -459,11 +459,11 @@ impl Relay for MockApplication {
 
 /// Reporter fixture that discards authenticated Multimmit activity.
 #[derive(Clone)]
-pub struct NoopReporter<V, D> {
-    _marker: PhantomData<fn() -> (V, D)>,
+pub struct NoopReporter<S, D> {
+    _marker: PhantomData<fn() -> (S, D)>,
 }
 
-impl<V, D> Default for NoopReporter<V, D> {
+impl<S, D> Default for NoopReporter<S, D> {
     fn default() -> Self {
         Self {
             _marker: PhantomData,
@@ -471,12 +471,12 @@ impl<V, D> Default for NoopReporter<V, D> {
     }
 }
 
-impl<V, D> Reporter for NoopReporter<V, D>
+impl<S, D> Reporter for NoopReporter<S, D>
 where
-    V: Variant,
+    S: Scheme,
     D: Digest,
 {
-    type Activity = MultimmitActivity<V, D>;
+    type Activity = MultimmitActivity<S, D>;
 
     fn report(&mut self, _activity: Self::Activity) -> Feedback {
         Feedback::Ok

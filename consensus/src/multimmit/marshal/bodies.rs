@@ -7,9 +7,10 @@ use super::{
 };
 use crate::multimmit::{
     marshal::OutputIndex,
+    scheme::Scheme,
     types::{BlockRef, Body, ChainId, TransactionBlock},
 };
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use std::sync::Arc;
 
 /// A body lookup failed.
@@ -40,20 +41,20 @@ pub(crate) fn fill_missing<T>(slots: &mut [Option<T>], source: Vec<Option<T>>) {
 ///
 /// The catalog answers from live custody; the promoter, when finalized bodies move to an
 /// immutable archive, answers the rest.
-pub(crate) struct Bodies<H, V, B>
+pub(crate) struct Bodies<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
-    catalog: catalog::Mailbox<H, V, B>,
+    catalog: catalog::Mailbox<H, S, B>,
     promoter: Option<promoter::Mailbox<H, B>>,
 }
 
-impl<H, V, B> Clone for Bodies<H, V, B>
+impl<H, S, B> Clone for Bodies<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     fn clone(&self) -> Self {
@@ -64,14 +65,14 @@ where
     }
 }
 
-impl<H, V, B> Bodies<H, V, B>
+impl<H, S, B> Bodies<H, S, B>
 where
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     pub(crate) const fn new(
-        catalog: catalog::Mailbox<H, V, B>,
+        catalog: catalog::Mailbox<H, S, B>,
         promoter: Option<promoter::Mailbox<H, B>>,
     ) -> Self {
         Self { catalog, promoter }

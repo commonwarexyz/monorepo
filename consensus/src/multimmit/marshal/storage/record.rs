@@ -21,7 +21,7 @@ pub(crate) enum OnMissing {
 }
 
 /// Returns the size of the metadata blob that stores `value` as its only row.
-pub(crate) fn blob_size<V: EncodeSize>(value: &V) -> Option<usize> {
+pub(crate) fn blob_size<S: EncodeSize>(value: &S) -> Option<usize> {
     u64::SIZE
         .checked_add(Unit::SIZE)?
         .checked_add(value.encode_size())?
@@ -32,18 +32,18 @@ pub(crate) fn blob_size<V: EncodeSize>(value: &V) -> Option<usize> {
 ///
 /// Mutations take the metadata handle for their duration. A failed or canceled mutation leaves
 /// the record without a handle, and every later operation returns [`Error::Poisoned`].
-pub(crate) struct DurableRecord<E: Context, V: Codec> {
-    metadata: Option<Metadata<E, Unit, V>>,
+pub(crate) struct DurableRecord<E: Context, S: Codec> {
+    metadata: Option<Metadata<E, Unit, S>>,
     /// Largest blob a staged value may produce, if bounded.
     max_bytes: Option<NonZeroUsize>,
 }
 
-impl<E: Context, V: Codec> DurableRecord<E, V> {
+impl<E: Context, S: Codec> DurableRecord<E, S> {
     /// Opens the record stored in `partition`.
     pub(crate) async fn init(
         context: E,
         partition: String,
-        codec_config: V::Cfg,
+        codec_config: S::Cfg,
         max_bytes: Option<NonZeroUsize>,
     ) -> Result<Self, Error> {
         let metadata = Metadata::init(
@@ -61,7 +61,7 @@ impl<E: Context, V: Codec> DurableRecord<E, V> {
     }
 
     /// Returns the current value, if one was stored or staged.
-    pub(crate) fn get(&self) -> Result<Option<&V>, Error> {
+    pub(crate) fn get(&self) -> Result<Option<&S>, Error> {
         Ok(self.metadata.as_ref().ok_or(Error::Poisoned)?.get(&Unit))
     }
 
@@ -69,12 +69,12 @@ impl<E: Context, V: Codec> DurableRecord<E, V> {
     ///
     /// Callers that must reject an oversized value without side effects check it before
     /// mutating anything. Staging an oversized value is an [`Error::Inconsistent`] failure.
-    pub(crate) fn fits(&self, value: &V) -> bool {
+    pub(crate) fn fits(&self, value: &S) -> bool {
         self.max_bytes
             .is_none_or(|max| blob_size(value).is_some_and(|size| size <= max.get()))
     }
 
-    fn require_fit(&self, value: &V) -> Result<(), Error> {
+    fn require_fit(&self, value: &S) -> Result<(), Error> {
         if self.fits(value) {
             Ok(())
         } else {
@@ -85,7 +85,7 @@ impl<E: Context, V: Codec> DurableRecord<E, V> {
     }
 
     /// Replaces the value in memory without starting durability.
-    pub(crate) fn stage(&mut self, value: V) -> Result<(), Error> {
+    pub(crate) fn stage(&mut self, value: S) -> Result<(), Error> {
         self.require_fit(&value)?;
         self.metadata
             .as_mut()
@@ -95,7 +95,7 @@ impl<E: Context, V: Codec> DurableRecord<E, V> {
     }
 
     /// Replaces the value and waits until it is durable.
-    pub(crate) async fn put_sync(&mut self, value: V) -> Result<(), Error> {
+    pub(crate) async fn put_sync(&mut self, value: S) -> Result<(), Error> {
         self.require_fit(&value)?;
         let metadata = self.metadata.take().ok_or(Error::Poisoned)?;
         self.metadata = Some(metadata.put_sync(Unit, value).await?);
@@ -111,7 +111,7 @@ impl<E: Context, V: Codec> DurableRecord<E, V> {
     }
 
     /// Replaces the value and starts its durability.
-    pub(crate) async fn put_start_sync(&mut self, value: V) -> Result<Handle<()>, Error> {
+    pub(crate) async fn put_start_sync(&mut self, value: S) -> Result<Handle<()>, Error> {
         self.stage(value)?;
         self.start_sync().await
     }

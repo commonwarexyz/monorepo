@@ -18,11 +18,12 @@ use crate::{
             storage::{Error as StorageError, catalog::StoredRef},
             types::Update,
         },
+        scheme::Scheme,
         types::{Body, TransactionBlock},
     },
 };
 use commonware_actor::Feedback;
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::Hasher;
 use commonware_macros::select_loop;
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell};
 use commonware_storage::Context;
@@ -71,19 +72,19 @@ pub(crate) struct Bounds {
 }
 
 /// Delivery configuration.
-pub(crate) struct Config<E, H, V, B, A>
+pub(crate) struct Config<E, H, S, B, A>
 where
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     /// Runtime context of the delivery task.
     pub(crate) context: E,
     /// The durable cursor, opened against the catalog's recovered checkpoint.
     pub(crate) store: DeliveryCursor<E>,
-    pub(crate) catalog: catalog::Mailbox<H, V, B>,
-    pub(crate) bodies: Bodies<H, V, B>,
+    pub(crate) catalog: catalog::Mailbox<H, S, B>,
+    pub(crate) bodies: Bodies<H, S, B>,
     /// Receives each output in order.
     pub(crate) application: A,
     /// The receiving half of [`super::channel`].
@@ -114,17 +115,17 @@ where
 }
 
 /// The single owner of the delivery cursor and the application window.
-pub(crate) struct Actor<E, H, V, B, A>
+pub(crate) struct Actor<E, H, S, B, A>
 where
     E: Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
 {
     context: ContextCell<E>,
     store: DeliveryCursor<E>,
-    catalog: catalog::Mailbox<H, V, B>,
-    bodies: Bodies<H, V, B>,
+    catalog: catalog::Mailbox<H, S, B>,
+    bodies: Bodies<H, S, B>,
     application: A,
     mailbox: Receiver<H, B>,
     pending: PendingAcks,
@@ -134,15 +135,15 @@ where
     bounds: Bounds,
 }
 
-impl<E, H, V, B, A> Actor<E, H, V, B, A>
+impl<E, H, S, B, A> Actor<E, H, S, B, A>
 where
     E: Spawner + Context,
     H: Hasher,
-    V: Variant,
+    S: Scheme,
     B: Body<H>,
     A: Reporter<Activity = Update<TransactionBlock<H, B>>>,
 {
-    pub(crate) fn new(config: Config<E, H, V, B, A>) -> Self {
+    pub(crate) fn new(config: Config<E, H, S, B, A>) -> Self {
         let Config {
             context,
             store,
