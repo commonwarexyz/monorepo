@@ -69,6 +69,7 @@ pub mod test {
                 tests::{fixed_config, fixed_config_partitioned},
                 unordered::tests as shared,
             },
+            floor::Proportional,
         },
         translator::{OneCap, TwoCap},
     };
@@ -105,8 +106,10 @@ pub mod test {
         CurrentTest::init(context, cfg, None).await.unwrap()
     }
 
+    /// Metadata set before staging survives `stage` and `expand`, can be replaced or cleared on the
+    /// staged handle, and is not inherited by child batches.
     #[test_traced]
-    fn batch_options_survive_staging_and_expansion() {
+    fn test_staged_metadata_carries_and_is_not_inherited() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db(context, "batch-options".into()).await;
             let key = Digest::from([1; 32]);
@@ -117,7 +120,7 @@ pub mod test {
                 .new_batch()
                 .write(key, Some(value))
                 .with_metadata(metadata)
-                .merkleize_with(&db, &mut crate::qmdb::floor::Proportional)
+                .merkleize_with(&db, &mut Proportional)
                 .await
                 .unwrap();
             let (_, staged) = db
@@ -140,12 +143,7 @@ pub mod test {
                 .unwrap();
             let overridden = overridden
                 .with_metadata(metadata)
-                .merkleize_with(
-                    vec![Slot::Put(value)],
-                    vec![],
-                    &db,
-                    &mut crate::qmdb::floor::Proportional,
-                )
+                .merkleize_with(vec![Slot::Put(value)], vec![], &db, &mut Proportional)
                 .await
                 .unwrap();
             assert_eq!(overridden.root(), explicit.root());
@@ -235,8 +233,7 @@ pub mod test {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed = seed.merkleize(&db).await.unwrap();
-            let db = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
                 let mut rng = TestRng::new(salt);
@@ -326,8 +323,7 @@ pub mod test {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed = seed.merkleize(&db).await.unwrap();
-            let db = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Grandparent -> parent chain. The parent touches neither staged key, so the
             // staged reads resolve in the grandparent's diff.
@@ -634,8 +630,7 @@ pub mod test {
                     batch = batch.write(key(i), Some(value(1, i)));
                 }
                 let batch = batch.merkleize(&db).await.unwrap();
-                let db = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 103);
                 let root_a = db.root();
 
@@ -645,8 +640,7 @@ pub mod test {
                     batch = batch.write(key(i), Some(value(2, i)));
                 }
                 let batch = batch.merkleize(&db).await.unwrap();
-                let db = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 203);
                 let root_b = db.root();
                 drop(db);

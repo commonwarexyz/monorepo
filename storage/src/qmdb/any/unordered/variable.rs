@@ -223,8 +223,7 @@ pub(crate) mod test {
                 seed = seed.write(key(i), Some(to_bytes(i)));
             }
             let seed = seed.merkleize(&db).await.unwrap();
-            let db = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Read set: key(5) duplicated at slots 0 and 3, read-only key(6), missing key(9000),
             // and key(20) deleted at slot 4.
@@ -293,8 +292,7 @@ pub(crate) mod test {
                 seed = seed.write(key(i), Some(to_bytes(i)));
             }
             let seed = seed.merkleize(&db).await.unwrap();
-            let db = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Grandparent -> parent chain. The parent touches neither staged key, so the
             // staged reads resolve in the grandparent's diff.
@@ -381,8 +379,7 @@ pub(crate) mod test {
                     seed = seed.write(key(i), Some(to_bytes(i)));
                 }
                 let seed = seed.merkleize(&db).await.unwrap();
-                let db = db.apply_batch(seed).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                 let grandparent = db
                     .new_batch()
@@ -780,7 +777,7 @@ pub(crate) mod test {
             assert!(weak_grandparent.upgrade().is_some());
 
             let (batch, retained_ancestors) = prepared
-                .merkleize_with_floor_walk(None, updates, db.bitmap.as_ref(), &mut Proportional)
+                .walk_floor_and_merkleize(updates, db.bitmap.as_ref(), &mut Proportional)
                 .await
                 .unwrap();
             assert_eq!(batch.root(), expected_root);
@@ -1117,6 +1114,10 @@ pub(crate) mod test {
             skips: 1,
         };
         is_send(db.new_batch().merkleize_with(db, &mut policy));
+        is_send(async move {
+            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            staged.merkleize(Vec::new(), Vec::new(), db).await
+        });
         is_send(async move {
             let (_, staged) = db.new_batch().stage(&[&key], db).await?;
             staged
