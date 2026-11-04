@@ -13,6 +13,7 @@ use super::{
         tasks::tests::AFTER_INSERT,
         waiter::Observer,
         waker::tests::state_bits,
+        wheel::BUDGET,
     },
     *,
 };
@@ -4364,6 +4365,78 @@ fn test_busy_worker_checks_the_global_queue_every_interval() {
             }
         });
     }
+}
+
+/// A storm of sleeps due at once beside a task whose every poll outlasts the
+/// backlog slice. Each expiry pass fires one budget, about one group's worth,
+/// and each group completes its other sleeps early once woken. With a full
+/// batch between passes, every group after the first would wait for about
+/// [`BATCH_SIZE`] of the long polls. The slice holds the whole storm to a few.
+#[test]
+fn test_expiry_backlog_keeps_pace_with_long_polls() {
+    /// Groups of sleeps, each owned by one task.
+    const GROUPS: usize = 4;
+    Runner::new(config()).start(|context| async move {
+        // A task that requeues itself after polling for twice the slice.
+        let polls = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let spinner = context.child("spinner").spawn({
+            let polls = polls.clone();
+            let stop = stop.clone();
+            move |_| async move {
+                while !stop.load(Ordering::Relaxed) {
+                    let began = Instant::now();
+                    while began.elapsed() < 2 * BACKLOG_SLICE {
+                        std::hint::spin_loop();
+                    }
+                    polls.fetch_add(1, Ordering::Relaxed);
+                    reschedule().await;
+                }
+            }
+        });
+
+        // Each group registers two budgets of sleeps in one poll on the only
+        // worker, all at one deadline, then awaits them in order.
+        let deadline = SystemTime::now() + Duration::from_millis(20);
+        let groups: Vec<_> = (0..GROUPS)
+            .map(|_| {
+                let polls = polls.clone();
+                context.child("group").spawn(move |context| async move {
+                    let mut sleeps: Vec<_> = (0..2 * BUDGET)
+                        .map(|_| context.sleep_until(deadline))
+                        .collect();
+                    poll_fn(|cx| {
+                        for sleep in &mut sleeps {
+                            assert!(sleep.poll_unpin(cx).is_pending());
+                        }
+                        Poll::Ready(())
+                    })
+                    .await;
+                    let mut first = None;
+                    for sleep in sleeps {
+                        sleep.await;
+                        first.get_or_insert(polls.load(Ordering::Relaxed));
+                    }
+                    (first.unwrap(), polls.load(Ordering::Relaxed))
+                })
+            })
+            .collect();
+        let (mut first, mut last) = (usize::MAX, 0);
+        for group in groups {
+            let (began, ended) = group.await.unwrap();
+            first = first.min(began);
+            last = last.max(ended);
+        }
+        stop.store(true, Ordering::Relaxed);
+        spinner.await.unwrap();
+
+        // Every pass after the first followed a slice, not a full batch.
+        assert!(
+            last - first < BATCH_SIZE,
+            "the storm spanned {} long polls",
+            last - first
+        );
+    });
 }
 
 /// A task that completes on a worker other than the one that spawned it
