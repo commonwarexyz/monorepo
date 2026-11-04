@@ -13,12 +13,16 @@
 //! deadline that passed after that time registers and fires at its firing
 //! time in a later service pass. Only a first poll on a thread whose worker is
 //! missing or closing reads the clock, to complete a deadline that has passed.
-//! Polls and drops on any thread act on that shard directly, and a drop
-//! unlinks its registration at once. Waker clones, wakes, and waker
-//! destruction never run under the shard lock or a worker borrow: a pending
-//! poll clones a changed waker before it locks, while wakes and released
-//! wakers go through the current worker's [`Deferred`] batch, or are dropped
-//! at once on a thread without a worker.
+//! Polls on any thread act on that shard directly. So does a drop on any
+//! thread but the registering worker's, or on that worker once it is closing,
+//! which unlinks its registration at once. A drop on the registering worker
+//! otherwise takes no lock: it queues the registration's identity in the
+//! worker's [`Local`], and the worker removes every queued registration in
+//! one critical section in its next service pass (see below). Waker clones,
+//! wakes, and waker destruction never run under the shard lock or a worker
+//! borrow: a pending poll clones a changed waker before it locks, while wakes
+//! and released wakers go through the current worker's [`Deferred`] batch, or
+//! are dropped at once on a thread without a worker.
 //!
 //! A pending poll at an unchanged epoch whose waker matches an identity that
 //! cannot recur unseen takes no lock. Only the sleep writes its registration's
@@ -55,21 +59,37 @@
 //! Parked workers do not check, so a frozen worker's timers wait for some
 //! peer's service. A dedicated worker's shard is private, so no peer checks it.
 //!
+//! The owner's service pass removes the queued registrations before its
+//! expiry, in whatever state, so the owner never fires one. A queued
+//! registration keeps its slot until then. An identity queued after its
+//! registration ended, by a poll that concluded it and then unwound, no longer
+//! matches its slot's generation, so a removal never reaches a later
+//! registration in that slot. A peer's rescue can still fire a queued
+//! registration first and wake the dropped sleep's waker once, a spurious wake
+//! that the future contract allows, and the removal then finds it fired. No
+//! sleep remains to poll a queued registration, so its removal ends nothing
+//! that the epoch guards. A callback that drops a sleep after the service pass
+//! makes the worker serve again before it parks. The queue holds one identity
+//! per sleep dropped since the last pass and keeps its capacity.
+//!
 //! Lock order and ownership: the shard lock is a leaf, taken while a worker
 //! may be borrowed but never the other way around. Only the owner, while it
 //! runs and is not closing, registers, so no other thread can introduce a
-//! deadline earlier than the owner's cached bound. Drops and peer expiry only
-//! remove registrations, which can leave cached and published bounds early but
-//! never late. An early bound costs spurious expiry passes or lock attempts
-//! until expiry has drained the wheel bucket whose minimum was removed (see
-//! [`Wheel`]). A drop that empties the wheel publishes no bound, and on the
-//! owner it also clears the owner's cached bound, so an idle worker takes no
-//! timed wake for a cancelled sleep.
+//! deadline earlier than the owner's cached bound. Drops, the owner's removal
+//! of queued ones, and peer expiry only remove registrations, which can leave
+//! cached and published bounds early but never late. An early bound costs
+//! spurious expiry passes or lock attempts until expiry has drained the wheel
+//! bucket whose minimum was removed (see [`Wheel`]). A removal that empties
+//! the wheel publishes no bound, and on the owner it also clears the owner's
+//! cached bound, so an idle worker takes no timed wake for a cancelled sleep.
+//! A queued registration keeps both bounds until its removal.
 //!
-//! Worker cleanup closes the shard: later registration is rejected and every
-//! pending sleeper is woken. A sleep then observes how its registration ended.
-//! A fired one completes. A closed one completes if its deadline has passed
-//! by then, and its poll panics otherwise, since a sleep has no error output.
+//! Worker cleanup removes the queued registrations and then closes the shard:
+//! later registration is rejected and every pending sleeper is woken, but no
+//! dropped one. The worker is closing by then, so no drop queues afterwards.
+//! A sleep then observes how its registration ended. A fired one completes. A
+//! closed one completes if its deadline has passed by then, and its poll
+//! panics otherwise, since a sleep has no error output.
 
 use super::{
     clock,
@@ -364,6 +384,55 @@ impl TimerShard {
         self.end(&mut registrations, deferred, Registrations::close);
         self.published.store(u64::MAX, Ordering::Relaxed);
     }
+
+    /// Remove the registration `id` at once, in whatever state, unlinking it
+    /// from the wheel if it waits. Returns its waker if it waited, and whether
+    /// that emptied the wheel, which then publishes no bound.
+    #[inline]
+    fn remove(&self, id: Id) -> (Option<Waker>, bool) {
+        let mut registrations = self.lock();
+        let Registrations { entries, wheel, .. } = &mut *registrations;
+        match entries.remove(id) {
+            Some(Entry::Waiting(waker)) => {
+                wheel.remove(id.index);
+
+                // An empty wheel has no firing time to publish.
+                let emptied = wheel.is_empty();
+                if emptied {
+                    self.published.store(u64::MAX, Ordering::Relaxed);
+                }
+                (Some(waker), emptied)
+            }
+            _ => (None, false),
+        }
+    }
+
+    /// The owner's removal of the registrations in `dropped`, whose sleeps
+    /// were dropped on it, in one critical section. Each goes in whatever
+    /// state, since no sleep remains to conclude it, and a waiting one leaves
+    /// the wheel and moves its waker to `deferred`, to be destroyed after the
+    /// lock. An identity that no longer resolves matches nothing. Empties
+    /// `dropped`, keeping its capacity, and returns whether the wheel is
+    /// empty, in which case it publishes no bound.
+    pub fn drain(&self, dropped: &mut Vec<Id>, deferred: &mut Deferred) -> bool {
+        // Each identity releases at most one waker, so no push under the lock
+        // reallocates.
+        deferred.drops.reserve(dropped.len());
+        let mut registrations = self.lock();
+        let Registrations { entries, wheel, .. } = &mut *registrations;
+        for id in dropped.drain(..) {
+            // A fired or closed registration holds no waker.
+            if let Some(Entry::Waiting(waker)) = entries.remove(id) {
+                wheel.remove(id.index);
+                deferred.drops.push(waker);
+            }
+        }
+        let empty = wheel.is_empty();
+        if empty {
+            self.published.store(u64::MAX, Ordering::Relaxed);
+        }
+        empty
+    }
 }
 
 /// Expire, at `now`, the due registrations of every shard but `own` whose
@@ -545,25 +614,68 @@ impl Sleeper {
 
     /// Remove the registration and release its wakers outside the lock.
     fn cancel(&mut self) {
-        let (removed, emptied) = {
-            let mut registrations = self.shard.lock();
-            let Registrations { entries, wheel, .. } = &mut *registrations;
-            match entries.remove(self.id) {
-                Some(Entry::Waiting(waker)) => {
-                    wheel.remove(self.id.index);
-
-                    // An empty wheel has no firing time to publish.
-                    let emptied = wheel.is_empty();
-                    if emptied {
-                        self.shard.published.store(u64::MAX, Ordering::Relaxed);
-                    }
-                    (Some(waker), emptied)
-                }
-                _ => (None, false),
-            }
-        };
+        let (removed, emptied) = self.shard.remove(self.id);
         let held = self.fast.take_held();
         release_all(removed, held, emptied.then_some(&self.shard));
+    }
+
+    /// End the registration of a dropped sleep in one access to the current
+    /// worker. On the registering worker, while it is not closing, this takes
+    /// no lock: the registration's identity joins the worker's queue, whose
+    /// registrations its next service pass, or its cleanup before closure,
+    /// removes in one critical section. Anywhere else the registration is
+    /// removed at once. A held clone, and a waker removed here, go to the
+    /// current worker's callback batch, or are dropped at once on a thread
+    /// without a worker.
+    fn abandon(&mut self) {
+        let held = self.fast.take_held();
+        let this = &*self;
+        let unreleased = Local::with_current(|local| match local {
+            Some(local) if Arc::ptr_eq(&this.shard, &local.timers) && !local.closing => {
+                local.timers_dropped.push(this.id);
+                if let Some(held) = held {
+                    local.deferred.drops.push(held);
+                }
+                None
+            }
+            local => this.evict(held, local),
+        });
+        match unreleased {
+            Some((Some(first), Some(second))) => drop_pair(first, second),
+            // At most one is present, so at most one destructor runs.
+            Some(wakers) => drop(wakers),
+            None => {}
+        }
+    }
+
+    /// The part of [`Self::abandon`] off an open owner: remove the
+    /// registration at once, then release its waker and `held` to `local`'s
+    /// callback batch, or, without a worker, return them to be dropped after
+    /// the access. Kept out of line, since it locks anyway, so that the
+    /// owner's path stays compact.
+    #[inline(never)]
+    fn evict(
+        &self,
+        held: Option<Waker>,
+        local: Option<&mut Local>,
+    ) -> Option<(Option<Waker>, Option<Waker>)> {
+        let (removed, emptied) = self.shard.remove(self.id);
+        let Some(local) = local else {
+            return Some((removed, held));
+        };
+
+        // A closing owner that empties its wheel clears its cached bound, as
+        // `release` does.
+        if emptied && Arc::ptr_eq(&self.shard, &local.timers) {
+            local.timers_next = u64::MAX;
+        }
+        if let Some(removed) = removed {
+            local.deferred.drops.push(removed);
+        }
+        if let Some(held) = held {
+            local.deferred.drops.push(held);
+        }
+        None
     }
 }
 
@@ -600,12 +712,8 @@ fn release(waker: Waker, emptied: Option<&Arc<TimerShard>>) {
 }
 
 /// Release two wakers in one access, as [`release`] does. Kept out of line,
-/// since only a held clone ends alongside another waker.
-///
-/// Without a worker, each waker drops under its own guard, so two panicking
-/// destructors unwind once, as one would, instead of aborting the process.
-/// The first panic propagates, and a second one's payload is leaked, since
-/// dropping it could panic as well.
+/// since only a held clone ends alongside another waker. Without a worker,
+/// both drop as [`drop_pair`] drops them.
 #[inline(never)]
 fn release_pair(first: Waker, second: Waker, emptied: Option<&Arc<TimerShard>>) {
     let wakers = Local::with_current(|local| match local {
@@ -622,6 +730,16 @@ fn release_pair(first: Waker, second: Waker, emptied: Option<&Arc<TimerShard>>) 
     let Some((first, second)) = wakers else {
         return;
     };
+    drop_pair(first, second);
+}
+
+/// Drop two wakers on a thread without a worker, each under its own guard, so
+/// two panicking destructors unwind once, as one would, instead of aborting
+/// the process. The first panic propagates, and a second one's payload is
+/// leaked, since dropping it could panic as well. Kept out of line, since only
+/// a thread without a worker drops two wakers at once.
+#[inline(never)]
+fn drop_pair(first: Waker, second: Waker) {
     let first = panic::catch_unwind(AssertUnwindSafe(|| drop(first)));
     let second = panic::catch_unwind(AssertUnwindSafe(|| drop(second)));
     match (first, second) {
@@ -768,7 +886,7 @@ impl Future for Sleep {
 impl Drop for Sleep {
     fn drop(&mut self) {
         if let State::Registered(sleeper) = &mut self.state {
-            sleeper.cancel();
+            sleeper.abandon();
         }
     }
 }
@@ -933,6 +1051,20 @@ mod tests {
         sleeper.poll(&Context::from_waker(waker))
     }
 
+    /// Poll `sleep` once with `waker`, which must leave it pending.
+    fn pend(sleep: &mut Sleep, waker: &Waker) {
+        assert!(
+            sleep
+                .poll_unpin(&mut Context::from_waker(waker))
+                .is_pending()
+        );
+    }
+
+    /// The current worker's cached bound.
+    fn timers_next() -> u64 {
+        Local::current().unwrap().borrow().timers_next
+    }
+
     /// Run a callback batch as a worker would, outside the shard lock.
     fn run(deferred: &mut Deferred) {
         for waker in deferred.wakes.drain(..) {
@@ -1075,11 +1207,11 @@ mod tests {
         let sleeper = register(&shard, deadline, &waker);
         drop(waker);
 
-        // Cancelling on another thread removes the registration and releases
+        // Dropping it on another thread removes the registration and releases
         // its waker there.
         thread::spawn(move || {
             let mut sleeper = sleeper;
-            sleeper.cancel();
+            sleeper.abandon();
         })
         .join()
         .unwrap();
@@ -1669,9 +1801,15 @@ mod tests {
             Poll::Ready(Outcome::Fired)
         );
 
-        // Cancel a waiting registration, and close one.
+        // Cancel a waiting registration, remove one whose sleep left its
+        // identity for its owner's batch, and close one.
         let mut cancelled = register(&shard, deadline, &wakers[2]);
         cancelled.cancel();
+        let abandoned = register(&shard, deadline, &wakers[2]);
+        let mut dropped = vec![abandoned.id];
+        drop(abandoned);
+        assert!(shard.drain(&mut dropped, &mut deferred));
+        run(&mut deferred);
         let mut closed = register(&shard, deadline + 1_000_000, &wakers[2]);
         shard.close(&mut deferred);
         run(&mut deferred);
@@ -1750,10 +1888,10 @@ mod tests {
             let sleepers: Vec<_> = (0..8).map(|_| register(&shard, deadline, &waker)).collect();
             drop(waker);
 
-            // Cancel them on another thread while this one expires them.
+            // Drop them on another thread while this one expires them.
             let dropper = thread::spawn(move || {
                 for mut sleeper in sleepers {
-                    sleeper.cancel();
+                    sleeper.abandon();
                 }
             });
             let mut deferred = Deferred::default();
@@ -1807,12 +1945,14 @@ mod tests {
             assert_eq!(extract_panic_message(&*panic), "waker callback panic 1");
             assert!(shard.waits_with(id, &second_waker));
 
-            // Dropping removes the registration and defers destruction of
-            // its waker.
+            // Dropping it on its worker leaves the registration to the next
+            // service pass, which removes it and defers destruction of its
+            // waker until after the pass.
             drop(sleep);
-            assert!(!shard.holds(id));
+            assert!(shard.holds(id));
             assert_eq!(second.drops.load(Ordering::Relaxed), 0);
             reschedule().await;
+            assert!(!shard.holds(id));
             assert_eq!(second.drops.load(Ordering::Relaxed), 1);
         });
     }
@@ -1893,12 +2033,14 @@ mod tests {
     #[test]
     fn test_foreign_poll_and_drop_free_the_slot_for_reuse() {
         Runner::default().start(|_| async {
-            // Register, poll once on another thread, and drop the sleep.
+            // Register, poll once on another thread, and drop the sleep on
+            // its worker, whose next service pass frees the slot.
             let mut sleep = Sleep::new(Duration::from_secs(60));
             assert!(poll!(&mut sleep).is_pending());
             let (shard, old) = registration(&sleep);
             let sleep = poll_on_foreign_thread(sleep, Waker::noop().clone());
             drop(sleep);
+            reschedule().await;
 
             // A replacement reuses the slot under a new generation.
             let mut replacement = Sleep::new(Duration::from_secs(60));
@@ -1907,12 +2049,14 @@ mod tests {
             assert_eq!(old.index, current.index);
             assert_ne!(old.generation, current.generation);
 
-            // After a worker turn, only the replacement is held, until it drops.
+            // After a worker turn, only the replacement is held, until it drops
+            // and the next service pass removes it.
             reschedule().await;
             assert!(poll!(&mut replacement).is_pending());
             assert!(!shard.holds(old));
             assert!(shard.holds(current));
             drop(replacement);
+            reschedule().await;
             assert!(!shard.holds(current));
         });
     }
@@ -2256,29 +2400,391 @@ mod tests {
     }
 
     #[test]
-    fn test_owner_drop_of_the_last_registration_clears_both_bounds() {
+    fn test_owner_drops_take_no_lock_until_the_next_service_pass() {
         Runner::default().start(|context| async move {
-            // A dedicated worker's shard is private, so this is its only
-            // registration, whose firing time the worker caches and publishes.
+            // A dedicated worker's shard is private, so its service passes
+            // lock it only for these sleeps.
             context
                 .dedicated()
                 .spawn(|_| async {
-                    let mut sleep = Sleep::new(Duration::from_secs(60));
-                    assert!(poll!(&mut sleep).is_pending());
-                    let (shard, _) = registration(&sleep);
-                    let local = Local::current().unwrap();
-                    let firing = shard.bound();
-                    assert_eq!(shard.published(), firing);
-                    assert_eq!(local.borrow().timers_next, firing);
+                    // Four registrations hold clones of one counting waker.
+                    let (count, waker) = counter();
+                    let mut kept = Sleep::new(Duration::from_secs(120));
+                    pend(&mut kept, &waker);
+                    let mut dropped: Vec<_> = (0..3)
+                        .map(|_| Sleep::new(Duration::from_secs(60)))
+                        .collect();
+                    for sleep in &mut dropped {
+                        pend(sleep, &waker);
+                    }
+                    let (shard, _) = registration(&kept);
+                    let ids: Vec<_> = dropped.iter().map(|sleep| registration(sleep).1).collect();
+                    assert_eq!(Arc::strong_count(&count), 6);
 
-                    // Dropping it on the owner leaves no firing time, so the
-                    // worker takes no timed wake for it.
-                    drop(sleep);
-                    assert_eq!(shard.published(), u64::MAX);
-                    assert_eq!(local.borrow().timers_next, u64::MAX);
+                    // Dropping three of them on their worker takes no lock and
+                    // leaves their registrations, and the shard's clones, in
+                    // place.
+                    let before = locks();
+                    drop(dropped);
+                    assert_eq!(locks(), before);
+                    assert!(ids.iter().all(|&id| shard.holds(id)));
+                    assert_eq!(shard.resident(), 4);
+                    assert_eq!(Arc::strong_count(&count), 6);
+
+                    // The next service pass removes all three in one critical
+                    // section and releases their clones without waking them,
+                    // and the worker's queue keeps its capacity.
+                    reschedule().await;
+                    assert_eq!(locks() - before, 1);
+                    assert!(ids.iter().all(|&id| !shard.holds(id)));
+                    assert_eq!(shard.resident(), 1);
+                    assert_eq!(Arc::strong_count(&count), 3);
+                    assert_eq!(count.get(), 0);
+                    assert!(Local::current().unwrap().borrow().timers_dropped.capacity() >= 3);
                 })
                 .await
                 .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_owner_drop_fired_before_the_next_service_pass_is_removed_once() {
+        Runner::default().start(|context| async move {
+            context
+                .dedicated()
+                .spawn(|_| async {
+                    // A sleep registers on its worker and is dropped there,
+                    // which leaves its registration waiting.
+                    let (count, waker) = counter();
+                    let deadline = Instant::now() + Duration::from_secs(60);
+                    let mut sleep = Sleep::at(deadline);
+                    pend(&mut sleep, &waker);
+                    let (shard, id) = registration(&sleep);
+                    drop(sleep);
+
+                    // A peer's rescue fires it first, which wakes the dropped
+                    // sleep's waker once, spuriously.
+                    {
+                        let mut deferred = Deferred::default();
+                        assert!(shard.rescue(clock::nanos(deadline) + RES, &mut deferred));
+                        run(&mut deferred);
+                    }
+                    assert_eq!(count.get(), 1);
+                    assert!(shard.holds(id));
+                    assert_eq!(shard.resident(), 0);
+
+                    // The next service pass removes the fired registration,
+                    // which has no waker left to release, and clears the
+                    // worker's cached bound.
+                    reschedule().await;
+                    assert!(!shard.holds(id));
+                    assert_eq!(shard.live(), 0);
+                    assert_eq!(count.get(), 1);
+                    assert_eq!(Arc::strong_count(&count), 2);
+                    assert_eq!(timers_next(), u64::MAX);
+
+                    // Its slot is free for the next registration.
+                    let mut next = Sleep::at(deadline + Duration::from_secs(60));
+                    pend(&mut next, &waker);
+                    assert_eq!(registration(&next).1.index, id.index);
+                })
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_closure_wakes_no_sleep_dropped_on_its_worker() {
+        // The root registers two sleeps on worker zero, lets one escape, and
+        // drops the other in its last poll, after which no service pass runs
+        // before cleanup closes the shard.
+        let (dropped, dropped_waker) = counter();
+        let (escaped, escaped_waker) = counter();
+        let (sleep,) = Runner::default().start(|_| async {
+            let mut kept = Sleep::new(Duration::from_secs(60));
+            pend(&mut kept, &escaped_waker);
+            let mut sleep = Sleep::new(Duration::from_secs(60));
+            pend(&mut sleep, &dropped_waker);
+            drop(sleep);
+            (kept,)
+        });
+
+        // Cleanup removed the dropped sleep's registration and released its
+        // waker before closure, which woke only the escaped one.
+        assert_eq!(dropped.get(), 0, "closure woke a dropped sleep");
+        assert_eq!(Arc::strong_count(&dropped), 2);
+        assert_eq!(escaped.get(), 1);
+        drop(sleep);
+    }
+
+    #[test]
+    fn test_dropped_slot_is_reused_only_after_the_next_service_pass() {
+        Runner::default().start(|context| async move {
+            context
+                .dedicated()
+                .spawn(|_| async {
+                    // Until a service pass removes a dropped sleep's
+                    // registration, its slot stays taken, so a registration
+                    // in between takes another.
+                    let mut old = Sleep::new(Duration::from_secs(60));
+                    pend(&mut old, Waker::noop());
+                    let (shard, old_id) = registration(&old);
+                    drop(old);
+                    let mut between = Sleep::new(Duration::from_secs(60));
+                    pend(&mut between, Waker::noop());
+                    let (_, between_id) = registration(&between);
+                    assert_ne!(between_id.index, old_id.index);
+
+                    // Afterwards, a registration reuses the slot under a new
+                    // generation, which the old identity does not resolve to.
+                    reschedule().await;
+                    let mut current = Sleep::new(Duration::from_secs(60));
+                    pend(&mut current, Waker::noop());
+                    let (_, current_id) = registration(&current);
+                    assert_eq!(current_id.index, old_id.index);
+                    assert_ne!(current_id.generation, old_id.generation);
+                    assert!(!shard.holds(old_id));
+
+                    // A later batch removes only its own registrations.
+                    drop(between);
+                    reschedule().await;
+                    assert!(!shard.holds(between_id));
+                    assert!(shard.holds(current_id));
+                    assert_eq!(shard.resident(), 1);
+                })
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_drop_on_another_worker_removes_at_once() {
+        Runner::default().start(|context| async move {
+            // A sleep registers on worker zero with a counted waker.
+            let observed = Arc::new(Reentrant::default());
+            let mut sleep = Sleep::new(Duration::from_secs(60));
+            pend(&mut sleep, &observed.waker());
+            let (shard, id) = registration(&sleep);
+            assert_eq!(observed.drops.load(Ordering::Relaxed), 1);
+
+            // A dedicated worker drops it, which removes the registration in
+            // one critical section and releases its waker after the poll.
+            context
+                .dedicated()
+                .spawn(move |_| async move {
+                    let before = locks();
+                    drop(sleep);
+                    assert_eq!(locks() - before, 1);
+                    assert!(!shard.holds(id));
+                    assert_eq!(observed.drops.load(Ordering::Relaxed), 1);
+                    reschedule().await;
+                    assert_eq!(observed.drops.load(Ordering::Relaxed), 2);
+                })
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_closing_worker_removes_a_dropped_sleep_at_once() {
+        /// Drops its sleep, registered on the current worker, and records
+        /// whether that worker was closing and removed the registration at
+        /// once.
+        struct DropCheck {
+            /// The registered sleep.
+            sleep: Option<Sleep>,
+            /// Set if the drop found the worker closing and removed the
+            /// registration at once.
+            removed: Arc<AtomicBool>,
+        }
+
+        impl Drop for DropCheck {
+            fn drop(&mut self) {
+                let sleep = self.sleep.take().unwrap();
+                let (shard, id) = registration(&sleep);
+                let closing = Local::current().unwrap().borrow().closing;
+                drop(sleep);
+                self.removed
+                    .store(closing && !shard.holds(id), Ordering::SeqCst);
+            }
+        }
+
+        // The only pool worker polls a task that registers a sleep and never
+        // finishes, so that worker drops the sleep while it closes.
+        let removed = Arc::new(AtomicBool::new(false));
+        let cfg = Config::default().with_worker_threads(1);
+        Runner::new(cfg).start(|context| {
+            let removed = removed.clone();
+            async move {
+                let (registered, ready) = oneshot::channel();
+                context.spawn(move |_| async move {
+                    let mut sleep = Sleep::new(Duration::from_secs(60));
+                    assert!(poll!(&mut sleep).is_pending());
+                    let _check = DropCheck {
+                        sleep: Some(sleep),
+                        removed,
+                    };
+                    registered.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                });
+                ready.await.unwrap();
+            }
+        });
+        assert!(
+            removed.load(Ordering::SeqCst),
+            "a closing worker left a dropped sleep's registration queued"
+        );
+    }
+
+    #[test]
+    fn test_stale_identity_queued_by_a_drop_removes_nothing() {
+        Runner::default().start(|context| async move {
+            context
+                .dedicated()
+                .spawn(|_| async {
+                    // A sleep registers on its worker, and a peer's rescue
+                    // fires it.
+                    let deadline = Instant::now() + Duration::from_secs(60);
+                    let mut sleep = Sleep::at(deadline);
+                    pend(&mut sleep, Waker::noop());
+                    let (shard, old) = registration(&sleep);
+                    {
+                        let mut deferred = Deferred::default();
+                        assert!(shard.rescue(clock::nanos(deadline) + RES, &mut deferred));
+                        run(&mut deferred);
+                    }
+
+                    // A poll on a thread without a worker concludes the
+                    // registration, then unwinds from the destructor of its
+                    // waker's clone, so the sleep keeps the concluded identity.
+                    let sleep = thread::spawn(move || {
+                        let mut sleep = sleep;
+                        let check = Arc::new(PanicDrop::default());
+                        let waker = PanicDrop::waker(&check);
+                        check.armed.store(true, Ordering::SeqCst);
+                        let polled = catch_unwind(AssertUnwindSafe(|| {
+                            sleep.poll_unpin(&mut Context::from_waker(&waker))
+                        }));
+                        check.armed.store(false, Ordering::SeqCst);
+                        assert!(polled.is_err());
+                        sleep
+                    })
+                    .join()
+                    .unwrap();
+                    assert!(!shard.holds(old));
+
+                    // A new registration reuses the slot. Dropping the sleep
+                    // on its worker queues the stale identity, whose removal
+                    // leaves the new registration waiting.
+                    let mut current = Sleep::at(deadline + Duration::from_secs(60));
+                    pend(&mut current, Waker::noop());
+                    let (_, current_id) = registration(&current);
+                    assert_eq!(current_id.index, old.index);
+                    drop(sleep);
+                    reschedule().await;
+                    assert!(shard.holds(current_id));
+                    assert_eq!(shard.resident(), 1);
+                })
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_drained_drops_that_empty_the_wheel_clear_both_bounds() {
+        Runner::default().start(|context| async move {
+            // A dedicated worker's shard is private, so these are its only
+            // registrations, whose earliest firing time the worker caches and
+            // publishes.
+            context
+                .dedicated()
+                .spawn(|_| async {
+                    let mut sleeps: Vec<_> = (60..63)
+                        .map(|seconds| Sleep::new(Duration::from_secs(seconds)))
+                        .collect();
+                    for sleep in &mut sleeps {
+                        pend(sleep, Waker::noop());
+                    }
+                    let (shard, _) = registration(&sleeps[0]);
+                    let firing = shard.bound();
+                    assert_eq!(shard.published(), firing);
+                    assert_eq!(timers_next(), firing);
+
+                    // Drops on the worker keep both bounds until the next
+                    // service pass, whose batch keeps them, early, while a
+                    // registration remains.
+                    let last = sleeps.pop().unwrap();
+                    drop(sleeps);
+                    assert_eq!(shard.published(), firing);
+                    assert_eq!(timers_next(), firing);
+                    reschedule().await;
+                    assert_eq!(shard.resident(), 1);
+                    assert_eq!(shard.published(), firing);
+                    assert_eq!(timers_next(), firing);
+
+                    // A batch that empties the wheel leaves no firing time, so
+                    // the worker takes no timed wake for it.
+                    drop(last);
+                    reschedule().await;
+                    assert_eq!(shard.published(), u64::MAX);
+                    assert_eq!(timers_next(), u64::MAX);
+                })
+                .await
+                .unwrap();
+        });
+    }
+
+    /// A waker that drops its sleep when destroyed.
+    struct DropSleep(
+        /// The sleep, taken by the destructor.
+        Option<Sleep>,
+    );
+
+    // This waker owns a destructor, which Waker::noop cannot model.
+    #[allow(clippy::manual_noop_waker)]
+    impl Wake for DropSleep {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for DropSleep {
+        fn drop(&mut self) {
+            drop(self.0.take());
+        }
+    }
+
+    #[test]
+    fn test_worker_serves_a_drop_by_its_callbacks_before_parking() {
+        Runner::default().start(|context| async move {
+            // On a dedicated worker, a sleep with a counted waker belongs to
+            // the waker of another sleep, which fires soon.
+            let observed = Arc::new(Reentrant::default());
+            let (release, released) = oneshot::channel::<()>();
+            let holder = context.child("holder").dedicated().spawn({
+                let observed = observed.clone();
+                move |_| async move {
+                    let mut owned = Sleep::new(Duration::from_secs(60));
+                    pend(&mut owned, &observed.waker());
+                    let mut trigger = Sleep::new(Duration::from_millis(1));
+                    pend(&mut trigger, &Waker::from(Arc::new(DropSleep(Some(owned)))));
+                    released.await.unwrap();
+                    drop(trigger);
+                }
+            });
+
+            // The firing's wake runs in a callback after the service pass and
+            // drops the first sleep on its worker. The worker serves again
+            // before parking until the first sleep's deadline, which releases
+            // its registered waker.
+            let start = Instant::now();
+            while observed.drops.load(Ordering::Relaxed) < 2 {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10),
+                    "the worker parked with a dropped sleep's removal queued"
+                );
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            release.send(()).unwrap();
+            holder.await.unwrap();
         });
     }
 
