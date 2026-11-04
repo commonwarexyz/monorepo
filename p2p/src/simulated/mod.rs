@@ -12,11 +12,11 @@
 //!
 //! # Peer Sets
 //!
-//! Peers exchange messages only while they are in tracked peer sets. By default every peer uses the
-//! network-wide peer sets, tracked through [Oracle::manager] or [Oracle::socket_manager]. A peer
-//! with its own manager, from [Control::manager] or [Control::socket_manager], uses only the sets
-//! tracked through it and reaches a peer only while each tracks the other, as authenticated
-//! networks do. Use this when peers advance through peer sets at different times.
+//! Two peers exchange messages only while each tracks the other, as on an authenticated network.
+//! By default a peer follows the network-wide peer sets, tracked through [Oracle::manager] or
+//! [Oracle::socket_manager]. It tracks the peers they list, or no one if they do not list it. A
+//! peer with its own manager, from [Control::manager] or [Control::socket_manager], follows only
+//! the sets tracked through it. Use this when peers advance through peer sets at different times.
 //!
 //! # Bandwidth Simulation
 //!
