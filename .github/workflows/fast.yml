@@ -5,6 +5,11 @@ on:
     branches: [ "main" ]
   pull_request:
   merge_group:
+  # Nightly toolchains are published around 01:05 to 01:15 UTC. A run on main after that saves
+  # the nightly build jobs' caches. 03:17 UTC is a quiet hour in both California and Europe, and
+  # avoids the top of the hour, when GitHub delays scheduled runs the most.
+  schedule:
+    - cron: "17 3 * * *"
 
 permissions:
   contents: read
