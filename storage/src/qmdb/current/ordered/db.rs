@@ -66,6 +66,11 @@ where
         self.any.get_prev_key(key).await
     }
 
+    /// Get the (value, next-key) pair of `key` in the db, or None if it has no value.
+    pub async fn get_all(&self, key: &K) -> Result<Option<(V::Value, K)>, Error<F>> {
+        self.any.get_all(key).await
+    }
+
     /// Streams active (key, value) pairs in ascending key order within `range`.
     pub fn stream_range<'a>(
         &'a self,

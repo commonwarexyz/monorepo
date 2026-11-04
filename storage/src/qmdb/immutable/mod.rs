@@ -508,52 +508,52 @@ where
         Ok(metadata)
     }
 
-    /// Analogous to proof but with respect to the state of the database when it had `op_count`
-    /// operations.
+    /// Analogous to proof but with respect to the state of the database when it had
+    /// `historical_size` operations.
     ///
     /// # Contract
     ///
-    /// `op_count` must be a commit-boundary size: the operation at `op_count - 1` must
-    /// itself be a commit op. Non-commit-boundary sizes are not supported because the
+    /// `historical_size` must be a commit-boundary size: the operation at `historical_size - 1`
+    /// must itself be a commit op. Non-commit-boundary sizes are not supported because the
     /// inactivity floor governing them is not directly retrievable.
     ///
     /// # Errors
     ///
-    /// Returns [crate::merkle::Error::RangeOutOfBounds] if `op_count` > number of operations, or
-    /// if `start_loc` >= `op_count`.
+    /// Returns [crate::merkle::Error::RangeOutOfBounds] if `historical_size` > number of
+    /// operations, or if `start_loc` >= `historical_size`.
     /// Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
     /// with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     /// been pruned.
-    /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a
-    /// commit op, either because the caller passed a non-commit-boundary `op_count` or
-    /// because pruning removed the commit that would have governed `op_count`.
+    /// Returns [`Error::HistoricalFloorPruned`] if `historical_size - 1` is retained but is not a
+    /// commit op, either because the caller passed a non-commit-boundary `historical_size` or
+    /// because pruning removed the commit that would have governed `historical_size`.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.immutable.db.historical_proof",
         level = "info",
         skip_all,
         fields(
-            op_count = *op_count,
+            historical_size = *historical_size,
             start_loc = *start_loc,
             max_ops = max_ops.get(),
         ),
     )]
     pub async fn historical_proof(
         &self,
-        op_count: Location<F>,
+        historical_size: Location<F>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, K, V>>), Error<F>> {
-        if op_count > self.journal.size() {
-            return Err(crate::merkle::Error::RangeOutOfBounds(op_count).into());
+        if historical_size > self.journal.size() {
+            return Err(crate::merkle::Error::RangeOutOfBounds(historical_size).into());
         }
 
         let inactive_peaks =
-            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count).await?;
+            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, historical_size).await?;
 
         Ok(self
             .journal
-            .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
+            .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
             .await?)
     }
 
@@ -576,33 +576,33 @@ where
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, K, V>>), Error<F>> {
-        let op_count = self.bounds().end;
-        self.historical_proof(op_count, start_loc, max_ops).await
+        self.historical_proof(self.bounds().end, start_loc, max_ops)
+            .await
     }
 
-    /// Prune operations prior to `loc` without changing the db's root. Keys whose operations
+    /// Prune operations prior to `prune_loc` without changing the db's root. Keys whose operations
     /// are no longer retained cannot be retrieved.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `loc`.
+    /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
     ///
     /// Pruning is irreversible and requires no prior commit. After a crash, the database remains
     /// recoverable; uncommitted operations are not guaranteed to survive.
     ///
     /// # Errors
     ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `loc` > inactivity floor.
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     #[tracing::instrument(name = "qmdb.immutable.db.prune", level = "info", skip_all)]
     #[boxed]
-    pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>> {
+    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>> {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
-        if loc > self.inactivity_floor_loc {
+        if prune_loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
-                loc,
+                prune_loc,
                 self.inactivity_floor_loc,
             ));
         }
-        (self.journal, _) = self.journal.prune(loc).await?;
+        (self.journal, _) = self.journal.prune(prune_loc).await?;
         self.snapshot.prune(*self.bounds().start);
         self.update_metrics();
         Ok(self)

@@ -359,46 +359,46 @@ where
     }
 
     /// Analogous to proof, but with respect to the state of the Merkle structure when it had
-    /// `op_count` operations.
+    /// `historical_size` operations.
     ///
-    /// `op_count` must be the size of a commit boundary.
+    /// `historical_size` must be the size of a commit boundary.
     ///
     /// # Errors
     ///
     /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `start_loc`
-    ///   >= `op_count` or `op_count` > number of operations.
+    ///   >= `historical_size` or `historical_size` > number of operations.
     /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
     ///   with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     ///   been pruned.
-    /// - Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a commit
-    ///   op.
+    /// - Returns [`Error::HistoricalFloorPruned`] if `historical_size - 1` is retained but is not a
+    ///   commit op.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.keyless.db.historical_proof",
         level = "info",
         skip_all,
         fields(
-            op_count = *op_count,
+            historical_size = *historical_size,
             start_loc = *start_loc,
             max_ops = max_ops.get(),
         ),
     )]
     pub async fn historical_proof(
         &self,
-        op_count: Location<F>,
+        historical_size: Location<F>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, V>>), Error<F>> {
-        if op_count > self.journal.size() {
-            return Err(crate::merkle::Error::RangeOutOfBounds(op_count).into());
+        if historical_size > self.journal.size() {
+            return Err(crate::merkle::Error::RangeOutOfBounds(historical_size).into());
         }
 
         let inactive_peaks =
-            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count).await?;
+            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, historical_size).await?;
 
         Ok(self
             .journal
-            .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
+            .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
             .await?)
     }
 
@@ -411,28 +411,28 @@ where
             .map_err(Into::into)
     }
 
-    /// Prune historical operations prior to `loc`. This does not affect the db's root.
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `loc`.
+    /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.
     ///
     /// # Errors
     ///
-    /// - Returns [`Error::PruneBeyondMinRequired`] if `loc` > the inactivity floor.
+    /// - Returns [`Error::PruneBeyondMinRequired`] if `prune_loc` > the inactivity floor.
     #[tracing::instrument(name = "qmdb.keyless.db.prune", level = "info", skip_all)]
     #[boxed]
-    pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>> {
+    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>> {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
-        if loc > self.inactivity_floor_loc {
+        if prune_loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
-                loc,
+                prune_loc,
                 self.inactivity_floor_loc,
             ));
         }
-        (self.journal, _) = self.journal.prune(loc).await?;
+        (self.journal, _) = self.journal.prune(prune_loc).await?;
         self.update_metrics();
         Ok(self)
     }

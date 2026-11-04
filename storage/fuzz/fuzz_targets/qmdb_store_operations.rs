@@ -180,12 +180,12 @@ fn fuzz(input: FuzzInput) {
                             }
                         };
                     }
-                    let changeset = batch.finalize(metadata_bytes.clone());
+                    let changeset = batch.with_metadata(metadata_bytes.clone()).finalize();
                     let inherited = db.inactivity_floor_loc();
                     let mut policy =
                         Recorder::new(plan, |seed| vec![seed; usize::from(seed % 16) + 1]);
                     let db = db
-                        .apply_batch(changeset, &mut policy)
+                        .apply_batch_with(changeset, &mut policy)
                         .await
                         .expect("Apply batch should not fail");
                     policy.check(

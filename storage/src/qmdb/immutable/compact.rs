@@ -629,7 +629,7 @@ where
         Ok(self)
     }
 
-    /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness below
+    /// Drop witnesses for commits with fewer than `prune_loc` operations. Some witness below
     /// the boundary may survive.
     ///
     /// Bounded initialization and compact sync can only use witnesses that survive. The current
@@ -639,8 +639,8 @@ where
     ///
     /// Fails if a compact-sync import has not yet been applied to the witness journal.
     #[tracing::instrument(name = "qmdb.immutable.compact.db.prune", level = "info", skip_all)]
-    pub async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
-        self.witness = self.witness.prune(pruning_boundary).await?;
+    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>> {
+        self.witness = self.witness.prune(prune_loc).await?;
         Ok(self)
     }
 

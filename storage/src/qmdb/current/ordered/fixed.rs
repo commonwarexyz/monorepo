@@ -147,6 +147,34 @@ pub mod test {
         });
     }
 
+    /// `get_all` returns an active key's value with the next active key, wrapping from the last
+    /// key to the first, and `None` for an inactive key.
+    #[test_traced("DEBUG")]
+    fn test_current_db_get_all() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "get-all".to_string()).await;
+            let mut keys = [Sha256::fill(0x11), Sha256::fill(0x22), Sha256::fill(0x33)];
+            keys.sort();
+            let mut batch = db.new_batch();
+            for (i, key) in keys.iter().enumerate() {
+                batch = batch.write(*key, Some(Sha256::fill(i as u8)));
+            }
+            let merkleized = batch.merkleize(&db).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
+
+            for (i, key) in keys.iter().enumerate() {
+                assert_eq!(
+                    db.get_all(key).await.unwrap(),
+                    Some((Sha256::fill(i as u8), keys[(i + 1) % keys.len()])),
+                );
+            }
+            assert_eq!(db.get_all(&Sha256::fill(0x44)).await.unwrap(), None);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("DEBUG")]
     pub fn test_current_db_key_value_proof() {
         shared::test_key_value_proof(open_db::<mmr::Family>);

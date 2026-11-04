@@ -482,7 +482,7 @@ mod tests {
             let mut db = Store::init(context.child("db"), cfg, None).await?;
             for writes in keyed_batches(seed) {
                 let batch = writes.into_iter().collect();
-                db = db.apply_batch(batch, &mut Proportional).await?;
+                db = db.apply_batch(batch).await?;
             }
             db.sync().await?;
             Ok(())
@@ -877,7 +877,7 @@ mod tests {
             let mut db = Store::init(context.child("db"), cfg, None).await?;
             for (writes, mut rule) in floor_batches(seed) {
                 let batch = writes.into_iter().collect();
-                db = db.apply_batch(batch, &mut rule).await?;
+                db = db.apply_batch_with(batch, &mut rule).await?;
             }
             db.sync().await?;
             Ok(())
