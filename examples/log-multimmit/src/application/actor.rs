@@ -214,6 +214,7 @@ impl<E: Clock + Spawner + Metrics> Actor<E> {
                 response,
             } => self.verify(marshal, context, body, response),
             Message::Finalized { fact, at } => self.latency.finalize((&fact).into(), at),
+            Message::Placed { placed, view, at } => self.latency.place(placed, view, at),
             Message::Ordered { block, at } => self.latency.order(block, at),
         }
     }
@@ -390,9 +391,9 @@ mod tests {
             mocks::{
                 Committee,
                 cluster::{BOUNDED_QUOTA, link_all, start_network},
-                finality_fact,
+                finality_fact, placement,
             },
-            types::{Activity, BlockRef, Lqc, PathLimits},
+            types::{Activity, BlockRef, FinalityId, Lqc, PathLimits},
         },
         types::{Epoch, Height, Participant, Round, View},
     };
@@ -953,6 +954,70 @@ mod tests {
                 2
             );
             assert_eq!(metric(&context, "application_proposal_nonfinalized"), 0);
+        });
+    }
+
+    #[test]
+    fn placement_of_the_local_chain_reaches_the_latency_tracker() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(&context, saturated()).await;
+            let first = harness.propose().await;
+            let next = Context::new(
+                harness.committee.config.epoch(),
+                first.chain(),
+                Height::new(2),
+                first.digest(),
+            )
+            .unwrap();
+            let tip = harness.propose_in(next).await;
+            let other = BlockRef::new(ChainId::new(1), Height::new(1), Sha256::hash(&[b"other"]));
+            let placed = |placed| Activity::Placed {
+                view: View::new(1),
+                evidence: FinalityId::Direct(Sha256::hash(&[b"evidence"])),
+                history: Sha256::hash(&[b"history"]),
+                placed,
+            };
+
+            // Another chain's placement is not this producer's.
+            assert_eq!(
+                harness.mailbox.report(placed(vec![placement(
+                    other,
+                    Height::zero(),
+                    other.height()
+                )])),
+                Feedback::Ok
+            );
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(
+                metric(&context, "application_proposal_placement_latency_count"),
+                0
+            );
+
+            // A run up to the parent of the newer block covers only the parent.
+            assert_eq!(
+                harness.mailbox.report(placed(vec![
+                    placement(tip, Height::zero(), Height::new(1)),
+                    placement(other, Height::zero(), other.height()),
+                ])),
+                Feedback::Ok
+            );
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(
+                metric(&context, "application_proposal_placement_latency_count"),
+                1
+            );
+
+            assert_eq!(
+                harness
+                    .mailbox
+                    .report(placed(vec![placement(tip, Height::new(1), tip.height())])),
+                Feedback::Ok
+            );
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(
+                metric(&context, "application_proposal_placement_latency_count"),
+                2
+            );
         });
     }
 
