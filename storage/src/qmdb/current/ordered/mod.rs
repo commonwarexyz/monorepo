@@ -252,15 +252,14 @@ pub mod tests {
                 },
                 next_key: k,
             };
-            // This proof should verify using verify_range_proof which does not check activity
+            // This proof should verify using RangeProof::verify, which does not check activity
             // status.
             let op = Operation::Update(Update {
                 key: k,
                 value: v1,
                 next_key: k,
             });
-            assert!(TestDb::<F, C, V>::verify_range_proof(
-                &proof_inactive.proof.range_proof,
+            assert!(proof_inactive.proof.range_proof.verify::<Sha256, _, _>(
                 proof_inactive.proof.loc,
                 &[op],
                 &[proof_inactive.proof.chunk],
@@ -339,8 +338,7 @@ pub mod tests {
                 partial_chunk_digest: None,
                 ops_root: Digest::EMPTY,
             };
-            assert!(!TestDb::<F, C, V>::verify_range_proof(
-                &proof,
+            assert!(!proof.verify::<Sha256, Operation<F, Digest, V>, 32>(
                 Location::<F>::new(0),
                 &[],
                 &[],
@@ -364,19 +362,13 @@ pub mod tests {
                 let loc = Location::<F>::new(loc);
                 let (proof, ops, chunks) = db.range_proof(loc, NZU64!(max_ops)).await.unwrap();
                 assert!(
-                    TestDb::<F, C, V>::verify_range_proof(&proof, loc, &ops, &chunks, &root),
+                    proof.verify::<Sha256, _, _>(loc, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",
                 );
                 // Proof should not verify if we include extra chunks.
                 let mut chunks_with_extra = chunks.clone();
                 chunks_with_extra.push(chunks[chunks.len() - 1]);
-                assert!(!TestDb::<F, C, V>::verify_range_proof(
-                    &proof,
-                    loc,
-                    &ops,
-                    &chunks_with_extra,
-                    &root,
-                ));
+                assert!(!proof.verify::<Sha256, _, _>(loc, &ops, &chunks_with_extra, &root));
             }
 
             db.destroy().await.unwrap();

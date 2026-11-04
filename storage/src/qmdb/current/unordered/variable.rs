@@ -155,10 +155,9 @@ mod test {
             let root = db.root();
             let (proof, proved_value) = db.key_value_proof(&key).await.unwrap();
             assert_eq!(proved_value, value);
-            assert!(VecKeyTest::verify_key_value_proof(
+            assert!(proof.verify::<Sha256, VariableEncoding<Digest>, _>(
                 key.clone(),
                 proved_value,
-                &proof,
                 &root
             ));
             drop(db);
