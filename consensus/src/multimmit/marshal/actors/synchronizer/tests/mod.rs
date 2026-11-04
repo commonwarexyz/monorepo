@@ -19,10 +19,7 @@ use crate::{
                 metrics::{self, FetchReason},
             },
             config::{ArchiveMode, Retention},
-            protocol::{
-                floor::Error as FloorError,
-                order::{self, Slot, SlotStream},
-            },
+            protocol::floor::Error as FloorError,
             storage::{
                 catalog_state::{Checkpoint, CheckpointParts, PendingFloors, frontier_index},
                 commit::{Commit, CustodyRef, OutputRow},
@@ -32,6 +29,7 @@ use crate::{
             wire::max_block_segment_items,
         },
         mocks::{Bls, Committee},
+        order::{self, Slot, SlotStream},
         testing::{SpanRecorder, TestBody},
         types::{
             Anchor, BlockRef, CertificateId, ChainId, ChainProposal, CodecConfig, DigestedLeader,

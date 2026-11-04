@@ -12,13 +12,14 @@ use crate::{
     multimmit::{
         marshal::{
             actors::{backfill::CustodiedBlock, metrics::FetchReason},
-            protocol::{order::Slot, paths::Branch},
+            protocol::paths::Branch,
             storage::{
                 commit::CustodyRef,
                 scratch::{BlockStack, HistoryStack},
             },
             types::{CustodyValues, LqcVerifier},
         },
+        order::Slot,
         scheme::Scheme,
         types::{BlockRef, Body, TransactionBlock},
     },
