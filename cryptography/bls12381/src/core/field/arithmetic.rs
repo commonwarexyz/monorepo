@@ -176,12 +176,13 @@ pub trait Field<S: Simd>: Copy {
     /// Requires valid value bounds. Entries beyond [`Self::LANES`] are unchanged.
     fn store(self, simd: S, elements: &mut [[u8; BYTES]]);
 
-    /// Runs an operation of base field or quadratic extension size, such as a reduction or an
-    /// [`Fp2`] product, as its own kernel when the representation's multiplication is large enough
-    /// to be worth outlining, so that formulas call one copy; representations whose operations are
-    /// small run it inline.
+    /// Runs an operation of base field, quadratic, or sextic extension size, such as a reduction
+    /// or an [`Fp2`] or [`Fp6`] product, as its own kernel when the representation's
+    /// multiplication is large enough to be worth outlining, so that formulas call one copy;
+    /// representations whose operations are small run it inline.
     ///
     /// [`Fp2`]: super::fp2::Fp2
+    /// [`Fp6`]: super::fp6::Fp6
     #[inline(always)]
     fn kernel<O: Operation<S>>(simd: S, operation: O) -> O::Output {
         simd.execute(operation)
