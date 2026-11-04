@@ -713,8 +713,8 @@ pub(crate) mod harnesses {
                 }
             }
         }
-        let merkleized = batch.with_metadata(metadata).with_inactivity_floor(floor);
-        let merkleized = merkleized.merkleize(&db).await.unwrap();
+        let batch = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let merkleized = batch.merkleize(&db).await.unwrap();
         db.apply_batch(merkleized).await.unwrap()
     }
 
@@ -778,8 +778,8 @@ pub(crate) mod harnesses {
             let db = if db.inactivity_floor_loc() > loc {
                 db
             } else {
-                let merkleized = db.new_batch().with_inactivity_floor(loc);
-                let merkleized = merkleized.merkleize(&db).await.unwrap();
+                let batch = db.new_batch().with_inactivity_floor(loc);
+                let merkleized = batch.merkleize(&db).await.unwrap();
                 let db = db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap()
             };

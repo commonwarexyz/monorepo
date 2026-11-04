@@ -205,8 +205,8 @@ mod tests {
                         ));
                 }
                 let new_commit_loc = db.bounds().end + 3;
-                let merkleized = batch.with_inactivity_floor(new_commit_loc);
-                let merkleized = merkleized.merkleize(&db).await.unwrap();
+                let batch = batch.with_inactivity_floor(new_commit_loc);
+                let merkleized = batch.merkleize(&db).await.unwrap();
                 db = db.apply_batch(merkleized).await.unwrap();
             }
 

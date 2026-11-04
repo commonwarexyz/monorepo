@@ -1136,8 +1136,8 @@ mod tests {
                 batch = batch.append(U64::new(i * 10 + 1));
             }
             let floor = target_db.inactivity_floor_loc();
-            let merkleized = batch.with_inactivity_floor(floor);
-            let merkleized = merkleized.merkleize(&target_db).await.unwrap();
+            let batch = batch.with_inactivity_floor(floor);
+            let merkleized = batch.merkleize(&target_db).await.unwrap();
             let target_db = target_db.apply_batch(merkleized).await.unwrap();
 
             let target_root = target_db.root();

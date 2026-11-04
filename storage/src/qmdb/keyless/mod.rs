@@ -915,8 +915,8 @@ pub(crate) mod tests {
         assert!(*db.bounds().start > 0, "the prune must remove history");
 
         // The child built before the apply still merkleizes to the same root.
-        let merkleized = child.with_inactivity_floor(parent_floor);
-        let merkleized = merkleized.merkleize(&db).await.unwrap();
+        let child = child.with_inactivity_floor(parent_floor);
+        let merkleized = child.merkleize(&db).await.unwrap();
         assert_eq!(merkleized.root(), expected);
         db.destroy().await.unwrap();
     }
@@ -2243,8 +2243,8 @@ pub(crate) mod tests {
                 batch = batch.append(V::Value::make(i));
             }
             let new_commit = db.bounds().end + ELEMENTS;
-            let merkleized = batch.with_inactivity_floor(new_commit);
-            let merkleized = merkleized.merkleize(&db).await.unwrap();
+            let batch = batch.with_inactivity_floor(new_commit);
+            let merkleized = batch.merkleize(&db).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
         }
         let db = db.commit().await.unwrap();
@@ -2402,8 +2402,8 @@ pub(crate) mod tests {
                 batch = batch.append(V::Value::make(i));
             }
             let new_commit = db.bounds().end + ELEMENTS;
-            let merkleized = batch.with_inactivity_floor(new_commit);
-            let merkleized = merkleized.merkleize(&db).await.unwrap();
+            let batch = batch.with_inactivity_floor(new_commit);
+            let merkleized = batch.merkleize(&db).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
         }
 
@@ -2413,8 +2413,8 @@ pub(crate) mod tests {
                 batch = batch.append(V::Value::make(i));
             }
             let new_commit = db.bounds().end + ELEMENTS;
-            let merkleized = batch.with_inactivity_floor(new_commit);
-            let merkleized = merkleized.merkleize(&db).await.unwrap();
+            let batch = batch.with_inactivity_floor(new_commit);
+            let merkleized = batch.merkleize(&db).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
         }
         let root = db.root();
