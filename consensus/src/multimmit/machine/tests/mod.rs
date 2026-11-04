@@ -13,6 +13,7 @@ mod finality;
 pub(super) mod fixtures;
 mod floors;
 mod forwarding;
+mod history;
 mod producer;
 mod properties;
 mod proposal;
