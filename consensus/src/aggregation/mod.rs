@@ -19,16 +19,14 @@
 //! header binds the journal to its committee, epoch, and range. Replay revalidates each
 //! certificate because the header cannot fingerprint all scheme verification material.
 //!
-//! ## Epoch-independent signatures
+//! ## Epoch-bound signatures
 //!
-//! An [`Item`](types::Item) signature covers only its position and digest. Acknowledgments travel
-//! over an epoch-specific channel, which associates each share with the engine's epoch. The epoch
-//! in an exported [`Certificate`](types::Certificate) is unsigned lookup metadata. Before
-//! verification, a consumer must derive the expected epoch, inclusive position range, and signing
-//! scheme from authenticated history. [`Certificate::verify_for`](types::Certificate::verify_for)
-//! checks the epoch and range before verifying the signature.
-//! Epochs that share verification keys must use disjoint global position ranges. A threshold
-//! key keeps the same verification identity across reshares.
+//! An [`Item`](types::Item) signature covers its epoch, position, and digest, so a share or
+//! certificate for one epoch does not verify for another, even when the epochs share verification
+//! keys. Before verification, a consumer must derive the expected [`Scope`](types::Scope) and
+//! signing scheme from authenticated history.
+//! [`Certificate::verify_for`](types::Certificate::verify_for) checks the scope before verifying
+//! the signature.
 //!
 //! Active engines recover missing certificates through a shared [`RecoveryCoordinator`]. The
 //! coordinator bounds and deduplicates logical resolver requests across engine scopes and routes
@@ -36,7 +34,7 @@
 //! [`Consumer`], then start the coordinator with the resolver's mailbox. [`Engine::new`] registers
 //! the engine's recovery namespace and epoch, and the registration lasts until the engine is
 //! dropped. Only one engine can hold a scope at a time. Each engine decodes responses with its own
-//! bounded `certificate_codec_config()` and checks the key, range, and signature. Engines do not
+//! bounded `certificate_codec_config()` and checks the key, scope, and signature. Engines do not
 //! serve certificates to peers. A resolver producer serves them from the application's archive.
 //!
 //! ## Retirement
@@ -68,9 +66,9 @@
 //! ```text
 //! Ack:
 //!
-//! +-------------------------+------------------+----------------------+--------------------------------+
-//! | position (varint, 1-10) | digest (D::SIZE) | signer (varint, 1-5) | signature (S::Signature::SIZE) |
-//! +-------------------------+------------------+----------------------+--------------------------------+
+//! +----------------------+-------------------------+------------------+----------------------+--------------------------------+
+//! | epoch (varint, 1-10) | position (varint, 1-10) | digest (D::SIZE) | signer (varint, 1-5) | signature (S::Signature::SIZE) |
+//! +----------------------+-------------------------+------------------+----------------------+--------------------------------+
 //! ```
 //!
 //! [`max_payload_size`] sums every box at its widest. Recovery requests and responses travel over

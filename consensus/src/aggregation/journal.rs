@@ -2,7 +2,7 @@
 
 use super::{
     scheme,
-    types::{Certificate, RecoveryNamespace},
+    types::{Certificate, RecoveryNamespace, Scope},
 };
 use crate::types::{Epoch, Height};
 use bytes::BufMut;
@@ -29,9 +29,7 @@ const COMMITTEE_DOMAIN: &[u8] = b"_COMMONWARE_CONSENSUS_AGGREGATION_JOURNAL_COMM
 struct Identity {
     namespace: RecoveryNamespace,
     committee: Sha256Digest,
-    epoch: Epoch,
-    first: Height,
-    last: Height,
+    scope: Scope,
 }
 
 impl Identity {
@@ -40,20 +38,19 @@ impl Identity {
         Self {
             namespace: scheme.recovery_namespace(),
             committee: Sha256::hash(&[COMMITTEE_DOMAIN, participants.as_ref()]),
-            epoch: config.epoch,
-            first: config.first,
-            last: config.last,
+            scope: config.scope,
         }
     }
 }
 
+// The scope is written as its flattened epoch, first, and last fields.
 impl Write for Identity {
     fn write(&self, writer: &mut impl BufMut) {
         self.namespace.write(writer);
         self.committee.write(writer);
-        self.epoch.write(writer);
-        self.first.write(writer);
-        self.last.write(writer);
+        self.scope.epoch().write(writer);
+        self.scope.first().write(writer);
+        self.scope.last().write(writer);
     }
 }
 
@@ -61,12 +58,17 @@ impl Read for Identity {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let namespace = RecoveryNamespace::read(reader)?;
+        let committee = Sha256Digest::read(reader)?;
+        let epoch = Epoch::read(reader)?;
+        let first = Height::read(reader)?;
+        let last = Height::read(reader)?;
+        let scope = Scope::new(epoch, first, last)
+            .ok_or(CodecError::Invalid("aggregation::Identity", "empty range"))?;
         Ok(Self {
-            namespace: RecoveryNamespace::read(reader)?,
-            committee: Sha256Digest::read(reader)?,
-            epoch: Epoch::read(reader)?,
-            first: Height::read(reader)?,
-            last: Height::read(reader)?,
+            namespace,
+            committee,
+            scope,
         })
     }
 }
@@ -75,9 +77,9 @@ impl EncodeSize for Identity {
     fn encode_size(&self) -> usize {
         self.namespace.encode_size()
             + self.committee.encode_size()
-            + self.epoch.encode_size()
-            + self.first.encode_size()
-            + self.last.encode_size()
+            + self.scope.epoch().encode_size()
+            + self.scope.first().encode_size()
+            + self.scope.last().encode_size()
     }
 }
 
@@ -86,18 +88,14 @@ impl EncodeSize for Identity {
 pub(crate) struct JournalConfig {
     /// Storage partition.
     pub partition: String,
-    /// Epoch represented by the journal.
-    pub epoch: Epoch,
-    /// First mandatory position, inclusive.
-    pub first: Height,
-    /// Last mandatory position, inclusive.
-    pub last: Height,
+    /// Epoch and inclusive range represented by the journal.
+    pub scope: Scope,
     /// Write-buffer size.
     pub write_buffer: NonZeroUsize,
     /// Replay-buffer size.
     pub replay_buffer: NonZeroUsize,
     /// Number of positions assigned to each journal section.
-    pub heights_per_section: NonZeroU64,
+    pub positions_per_section: NonZeroU64,
     /// Compression level.
     pub compression: Option<u8>,
     /// Page cache.
@@ -178,7 +176,7 @@ where
     D: Digest,
 {
     inner: Option<StorageJournal<E, Record<S, D>>>,
-    heights_per_section: NonZeroU64,
+    positions_per_section: NonZeroU64,
     restarted: bool,
 }
 
@@ -234,14 +232,7 @@ where
                 (false, Record::Certificate(_)) => return Err(JournalError::MissingHeader),
                 (true, Record::Header(..)) => return Err(JournalError::DuplicateHeader),
                 (true, Record::Certificate(certificate)) => {
-                    if !certificate.verify_for(
-                        verifier,
-                        scheme,
-                        identity.epoch,
-                        identity.first,
-                        identity.last,
-                        strategy,
-                    ) {
+                    if !certificate.verify_for(verifier, scheme, identity.scope, strategy) {
                         return Err(JournalError::InvalidCertificate);
                     }
                     certificates.push(certificate);
@@ -260,7 +251,7 @@ where
         Ok((
             Self {
                 inner: Some(journal),
-                heights_per_section: config.heights_per_section,
+                positions_per_section: config.positions_per_section,
                 restarted,
             },
             certificates,
@@ -272,7 +263,7 @@ where
     }
 
     pub async fn append(&mut self, certificate: Certificate<S, D>) -> Result<(), JournalError> {
-        let section = certificate.item.position.get() / self.heights_per_section.get();
+        let section = certificate.item.position.get() / self.positions_per_section.get();
         let record = Record::Certificate(certificate);
         rebind(&mut self.inner, |journal| journal.append(section, &record)).await?;
         rebind(&mut self.inner, |journal| journal.sync(section)).await?;
@@ -287,6 +278,7 @@ mod tests {
         scheme::ed25519,
         types::{Ack, Item},
     };
+    use commonware_codec::DecodeExt as _;
     use commonware_cryptography::certificate::{Verifier, mocks::Fixture};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
@@ -300,15 +292,17 @@ mod tests {
     const FIRST: Height = Height::new(10);
     const LAST: Height = Height::new(12);
 
+    fn scope(epoch: Epoch, first: Height, last: Height) -> Scope {
+        Scope::new(epoch, first, last).unwrap()
+    }
+
     fn config(_context: &deterministic::Context, partition: &str) -> JournalConfig {
         JournalConfig {
             partition: partition.into(),
-            epoch: EPOCH,
-            first: FIRST,
-            last: LAST,
+            scope: scope(EPOCH, FIRST, LAST),
             write_buffer: NZUsize!(4096),
             replay_buffer: NZUsize!(4096),
-            heights_per_section: NonZeroU64::new(2).unwrap(),
+            positions_per_section: NonZeroU64::new(2).unwrap(),
             compression: None,
             page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
         }
@@ -319,6 +313,7 @@ mod tests {
         position: Height,
     ) -> Certificate<ed25519::Scheme, Sha256Digest> {
         let item = Item {
+            epoch: EPOCH,
             position,
             digest: Sha256::hash(&[&position.get().to_be_bytes()]),
         };
@@ -330,13 +325,7 @@ mod tests {
             .iter()
             .map(|scheme| Ack::sign(scheme, item.clone()).unwrap())
             .collect();
-        Certificate::from_acks(
-            &fixture.schemes[0],
-            EPOCH,
-            non_empty![@acks.iter()],
-            &Sequential,
-        )
-        .unwrap()
+        Certificate::from_acks(&fixture.schemes[0], non_empty![@acks.iter()], &Sequential).unwrap()
     }
 
     async fn open(
@@ -391,6 +380,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_identity_flattens_scope() {
+        let mut rng = commonware_utils::test_rng();
+        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 4);
+        let config = JournalConfig {
+            partition: "unused".into(),
+            write_buffer: NZUsize!(4096),
+            replay_buffer: NZUsize!(4096),
+            positions_per_section: NonZeroU64::new(2).unwrap(),
+            compression: None,
+            page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
+            scope: scope(EPOCH, FIRST, LAST),
+        };
+        let identity = Identity::new::<_, Sha256Digest>(&fixture.schemes[0], &config);
+
+        // The header layout is the namespace, committee, epoch, first, and last.
+        let mut expected = Vec::new();
+        identity.namespace.write(&mut expected);
+        identity.committee.write(&mut expected);
+        EPOCH.write(&mut expected);
+        FIRST.write(&mut expected);
+        LAST.write(&mut expected);
+        let encoded = identity.encode();
+        assert_eq!(encoded.as_ref(), expected.as_slice());
+        assert_eq!(identity.encode_size(), expected.len());
+        assert_eq!(Identity::decode(encoded).unwrap(), identity);
+
+        // A header with an empty range does not decode.
+        let mut empty = Vec::new();
+        identity.namespace.write(&mut empty);
+        identity.committee.write(&mut empty);
+        EPOCH.write(&mut empty);
+        LAST.write(&mut empty);
+        FIRST.write(&mut empty);
+        assert!(matches!(
+            Identity::decode(bytes::Bytes::from(empty)),
+            Err(CodecError::Invalid(_, _))
+        ));
+    }
+
     #[test_traced]
     fn test_replays_verified_certificates() {
         deterministic::Runner::default().start(|mut context| async move {
@@ -435,7 +464,7 @@ mod tests {
                 // Bypass the aggregation wrapper's sync to model an interrupted append.
                 let mut raw = journal.inner.take().unwrap();
                 for position in [FIRST, LAST] {
-                    let section = position.get() / config.heights_per_section.get();
+                    let section = position.get() / config.positions_per_section.get();
                     let (next, _, _) = raw
                         .append(
                             section,
@@ -508,7 +537,7 @@ mod tests {
                 )
                 .await;
                 if invalid_identity {
-                    config.epoch = EPOCH.next();
+                    config.scope = scope(EPOCH.next(), FIRST, LAST);
                 }
                 let faulty = SyncFaultContext {
                     inner: context.child("reopen"),
@@ -590,21 +619,21 @@ mod tests {
                 (
                     "epoch",
                     JournalConfig {
-                        epoch: EPOCH.next(),
+                        scope: scope(EPOCH.next(), FIRST, LAST),
                         ..config.clone()
                     },
                 ),
                 (
                     "first",
                     JournalConfig {
-                        first: FIRST.next(),
+                        scope: scope(EPOCH, FIRST.next(), LAST),
                         ..config.clone()
                     },
                 ),
                 (
                     "last",
                     JournalConfig {
-                        last: LAST.next(),
+                        scope: scope(EPOCH, FIRST, LAST.next()),
                         ..config.clone()
                     },
                 ),

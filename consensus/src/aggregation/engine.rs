@@ -4,11 +4,11 @@ use super::{
     Config, Fetcher as _, Recoverer, RegistrationError,
     journal::{Journal, JournalConfig},
     metrics, scheme,
-    types::{Ack, Certificate, Error, Item, RecoveryKey, RecoveryNamespace},
+    types::{Ack, Certificate, Error, Item, RecoveryKey, RecoveryNamespace, Scope},
 };
 use crate::{
     Automaton, Reporter,
-    types::{Epoch, Height, Participant},
+    types::{Height, Participant},
 };
 use bytes::Bytes;
 use commonware_actor::{
@@ -48,11 +48,22 @@ use std::{
     num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 enum Shares<S: commonware_cryptography::certificate::Scheme, D: Digest> {
     AwaitingDigest(BTreeMap<Participant, Ack<S, D>>),
     Known(D, BTreeMap<Participant, Ack<S, D>>),
+}
+
+/// Recovery state of one uncertified position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Recovery {
+    /// Counts rebroadcast ticks until the recovery threshold.
+    Waiting { ticks: u64 },
+    /// Requests recovery on the next opportunity. A rejected fetch stays ready.
+    Ready,
+    /// The recoverer admitted the fetch.
+    Requested,
 }
 
 /// State of one uncertified position in the window.
@@ -60,8 +71,7 @@ struct Pending<S: commonware_cryptography::certificate::Scheme, D: Digest> {
     shares: Shares<S, D>,
     /// Aborts the digest request, if still outstanding, when the position leaves the window.
     _digest_request: Aborter,
-    rebroadcasts: u64,
-    recovering: bool,
+    recovery: Recovery,
 }
 
 struct DigestRequest<D: Digest> {
@@ -92,7 +102,7 @@ impl From<CertificateOutcome> for Outcome {
             CertificateOutcome::Accepted => Self::Resolved(Resolution::Complete),
             CertificateOutcome::Ignored => Self::Ignored,
             CertificateOutcome::Invalid => Self::Invalid,
-            // Retry without penalizing the peer while ingress is full.
+            // Not judged: retry later without scoring the peer.
             CertificateOutcome::Backpressured => Self::Unresolved,
         }
     }
@@ -203,17 +213,15 @@ where
     R: Recoverer,
 {
     context: ContextCell<E>,
-    epoch: Epoch,
-    first: Height,
-    last: Height,
+    scope: Scope,
     scheme: S,
     automaton: A,
     reporter: Z,
     blocker: B,
     strategy: T,
     window: u64,
-    frontier: Height,
-    complete: bool,
+    /// Lowest uncertified position, or `None` once the full range is certified.
+    frontier: Option<Height>,
     digest_requests: FuturesPool<'static, DigestRequest<D>>,
     pending: BTreeMap<Height, Pending<S, D>>,
     confirmed: BTreeMap<Height, D>,
@@ -256,9 +264,8 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the range is empty or the scheme's quorum is invalid.
+    /// Panics if the scheme's quorum is invalid.
     pub fn new(context: E, cfg: Config<S, D, A, Z, B, T, R>) -> Result<Self, RegistrationError> {
-        assert!(cfg.first <= cfg.last, "aggregation range must not be empty");
         let participants = cfg.scheme.participants();
         let faults: usize = Widen::widen(participants.max_faults::<S::Faults>());
         let quorum: usize = Widen::widen(participants.quorum::<S::Faults>());
@@ -271,35 +278,30 @@ where
         let (mailbox, certificate_mailbox) =
             Mailbox::new(context.child("mailbox"), mailbox_capacity);
         let recovery_namespace = cfg.scheme.recovery_namespace();
-        let recovery = cfg
-            .recoverer
-            .register(recovery_namespace, cfg.epoch, mailbox.clone())?;
+        let recovery =
+            cfg.recoverer
+                .register(recovery_namespace, cfg.scope.epoch(), mailbox.clone())?;
         let certificate_codec = cfg.scheme.certificate_codec_config();
         let metrics = metrics::Metrics::init(&context);
         let journal_config = JournalConfig {
             partition: cfg.journal_partition,
-            epoch: cfg.epoch,
-            first: cfg.first,
-            last: cfg.last,
+            scope: cfg.scope,
             write_buffer: cfg.journal_write_buffer,
             replay_buffer: cfg.journal_replay_buffer,
-            heights_per_section: cfg.journal_heights_per_section,
+            positions_per_section: cfg.journal_positions_per_section,
             compression: cfg.journal_compression,
             page_cache: cfg.journal_page_cache,
         };
         let engine = Self {
             context: ContextCell::new(context),
-            epoch: cfg.epoch,
-            first: cfg.first,
-            last: cfg.last,
+            scope: cfg.scope,
             scheme: cfg.scheme,
             automaton: cfg.automaton,
             reporter: cfg.reporter,
             blocker: cfg.blocker,
             strategy: cfg.strategy,
             window: cfg.window.get(),
-            frontier: cfg.first,
-            complete: false,
+            frontier: Some(cfg.scope.first()),
             digest_requests: FuturesPool::default(),
             pending: BTreeMap::new(),
             confirmed: BTreeMap::new(),
@@ -389,13 +391,13 @@ where
         let (mut sender, mut receiver) = wrap((), network.0, network.1);
         let restarted = self.init_journal().await;
         self.fill_window(restarted);
-        let _ = self.metrics.frontier.try_set(self.frontier.get());
+        self.set_frontier_metric();
         let mut shutdown = self.context.stopped();
         futures::pin_mut!(stopping);
         // `select!` is biased, so alternate network and maintenance priority to prevent starvation.
         let mut network_first = true;
         loop {
-            if self.complete {
+            if self.frontier.is_none() {
                 break EngineOutcome::Completed;
             }
             let rebroadcast = match self.rebroadcast_deadlines.peek() {
@@ -451,6 +453,8 @@ where
                                 ?err,
                                 "ack validation failed"
                             );
+                        } else {
+                            trace!(?err, ?peer, "ack ignored");
                         }
                         continue;
                     }
@@ -508,15 +512,14 @@ where
     }
 
     fn fill_window(&mut self, recover_immediately: bool) {
-        if self.complete {
+        let Some(frontier) = self.frontier else {
             return;
-        }
-        let end = self
-            .frontier
+        };
+        let end = frontier
             .get()
             .saturating_add(self.window - 1)
-            .min(self.last.get());
-        for raw in self.frontier.get()..=end {
+            .min(self.scope.last().get());
+        for raw in frontier.get()..=end {
             let position = Height::new(raw);
             if self.pending.contains_key(&position) || self.confirmed.contains_key(&position) {
                 continue;
@@ -527,12 +530,11 @@ where
                 Pending {
                     shares: Shares::AwaitingDigest(BTreeMap::new()),
                     _digest_request: digest_request,
-                    rebroadcasts: if recover_immediately {
-                        self.recovery_after_rebroadcasts
+                    recovery: if recover_immediately {
+                        Recovery::Ready
                     } else {
-                        0
+                        Recovery::Waiting { ticks: 0 }
                     },
-                    recovering: false,
                 },
             );
             self.rebroadcast_deadlines
@@ -576,7 +578,12 @@ where
         let mut matching = std::mem::take(shares);
         matching.retain(|_, ack| ack.item.digest == digest);
         pending.shares = Shares::Known(digest, matching);
-        let Some(ack) = Ack::sign(&self.scheme, Item { position, digest }) else {
+        let item = Item {
+            epoch: self.scope.epoch(),
+            position,
+            digest,
+        };
+        let Some(ack) = Ack::sign(&self.scheme, item) else {
             return;
         };
         sender.send(Recipients::All, ack.clone(), self.priority_acks);
@@ -589,6 +596,11 @@ where
         peer: &<S as Verifier>::PublicKey,
     ) -> Result<(), Error> {
         let position = ack.item.position;
+        // Shares signed for another epoch can verify, so reject them before the pending check.
+        // Honest peers never send them on this epoch's channel, but they are not blocked.
+        if !self.scope.contains(&ack.item) {
+            return Err(Error::AckScope(ack.item.epoch, position));
+        }
         if !self.pending.contains_key(&position) {
             return Err(Error::AckPosition(position));
         }
@@ -643,13 +655,9 @@ where
             .values()
             .filter(|ack| ack.item.digest == digest)
             .collect();
-        let certificate = Certificate::from_acks(
-            &self.scheme,
-            self.epoch,
-            non_empty![@matching],
-            &self.strategy,
-        )
-        .expect("verified signer-unique quorum must assemble");
+        let certificate =
+            Certificate::from_acks(&self.scheme, non_empty![@matching], &self.strategy)
+                .expect("verified signer-unique quorum must assemble");
         self.accept_certificate(certificate, false).await;
         true
     }
@@ -660,7 +668,7 @@ where
             .pending
             .remove(&position)
             .expect("accepted certificate must be pending");
-        if pending.recovering {
+        if pending.recovery == Recovery::Requested {
             self.recovery.cancel(position);
         }
         self.rebroadcast_deadlines.remove(&position);
@@ -669,21 +677,19 @@ where
         self.reporter.report(certificate);
         self.metrics.certificates.inc();
         self.advance_frontier();
-        let _ = self.metrics.frontier.try_set(self.frontier.get());
+        self.set_frontier_metric();
         self.fill_window(recovered);
     }
 
+    /// Admits a recovered certificate in this order: exact recovery key, scope, pending
+    /// position, then signature.
     async fn handle_external_certificate(
         &mut self,
         key: RecoveryKey,
         certificate: Certificate<S, D>,
     ) -> CertificateOutcome {
         let position = certificate.item.position;
-        if key != self.recovery_key(position)
-            || certificate.epoch != self.epoch
-            || position < self.first
-            || position > self.last
-        {
+        if key != self.recovery_key(position) || !self.scope.contains(&certificate.item) {
             return CertificateOutcome::Invalid;
         }
         if !self.pending.contains_key(&position) {
@@ -692,9 +698,7 @@ where
         if !certificate.verify_for(
             self.context.as_mut(),
             &self.scheme,
-            self.epoch,
-            self.first,
-            self.last,
+            self.scope,
             &self.strategy,
         ) {
             return CertificateOutcome::Invalid;
@@ -713,8 +717,13 @@ where
         };
         self.rebroadcast_deadlines
             .put(position, self.context.current() + self.rebroadcast_timeout);
-        pending.rebroadcasts = pending.rebroadcasts.saturating_add(1);
-        let recover = pending.rebroadcasts >= self.recovery_after_rebroadcasts;
+        if let Recovery::Waiting { ticks } = &mut pending.recovery {
+            *ticks = ticks.saturating_add(1);
+            if *ticks >= self.recovery_after_rebroadcasts {
+                pending.recovery = Recovery::Ready;
+            }
+        }
+        let recover = pending.recovery == Recovery::Ready;
         let ack = match (&pending.shares, self.scheme.me().and_then(|me| me.signer())) {
             (Shares::Known(_, shares), Some(signer)) => shares.get(&signer).cloned(),
             _ => None,
@@ -734,31 +743,36 @@ where
         let Some(pending) = self.pending.get_mut(&position) else {
             return;
         };
-        pending.rebroadcasts = pending.rebroadcasts.max(self.recovery_after_rebroadcasts);
+        if let Recovery::Waiting { .. } = pending.recovery {
+            pending.recovery = Recovery::Ready;
+        }
         self.fetch_recovery(position);
     }
 
     const fn recovery_key(&self, position: Height) -> RecoveryKey {
         RecoveryKey {
             namespace: self.recovery_namespace,
-            epoch: self.epoch,
+            epoch: self.scope.epoch(),
             position,
         }
     }
 
+    /// Requests recovery for a ready position. A rejected fetch stays ready for the next tick.
     fn fetch_recovery(&mut self, position: Height) {
         let pending = self
             .pending
             .get_mut(&position)
             .expect("recovery requested for an inactive position");
-        if pending.recovering {
+        if pending.recovery != Recovery::Ready {
             return;
         }
         match self.recovery.fetch(position) {
-            Unreliable::Outcome(feedback) if feedback.accepted() => pending.recovering = true,
+            Unreliable::Outcome(feedback) if feedback.accepted() => {
+                pending.recovery = Recovery::Requested;
+            }
             Unreliable::Outcome(Feedback::Closed) if !self.recovery_closed => {
                 self.recovery_closed = true;
-                warn!(epoch = %self.epoch, "certificate recovery is closed");
+                warn!(epoch = %self.scope.epoch(), "certificate recovery is closed");
             }
             _ => {}
         }
@@ -780,13 +794,22 @@ where
             self.replay_certificate(certificate);
         }
         self.journal = Some(journal);
-        info!(epoch = %self.epoch, first = %self.first, last = %self.last, frontier = %self.frontier, "replayed aggregation journal");
+        info!(
+            epoch = %self.scope.epoch(),
+            first = %self.scope.first(),
+            last = %self.scope.last(),
+            frontier = ?self.frontier,
+            "replayed aggregation journal"
+        );
         restarted
     }
 
+    /// Reports every journaled certificate and tracks only those at or above the frontier.
     fn replay_certificate(&mut self, certificate: Certificate<S, D>) {
         let position = certificate.item.position;
-        if position >= self.frontier {
+        if let Some(frontier) = self.frontier
+            && position >= frontier
+        {
             if let Some(existing) = self.confirmed.insert(position, certificate.item.digest) {
                 assert_eq!(
                     existing, certificate.item.digest,
@@ -798,16 +821,21 @@ where
         self.reporter.report(certificate);
     }
 
-    /// Advances the frontier past consecutive confirmed positions.
+    /// Advances the frontier past consecutive confirmed positions, clearing it after the last.
     fn advance_frontier(&mut self) {
-        while self.confirmed.remove(&self.frontier).is_some() {
-            if self.frontier == self.last {
-                self.complete = true;
-                let _ = self.metrics.complete.try_set(1);
-                break;
-            }
-            self.frontier = self.frontier.next();
+        while let Some(frontier) = self.frontier
+            && self.confirmed.remove(&frontier).is_some()
+        {
+            self.frontier = (frontier < self.scope.last()).then(|| frontier.next());
         }
+        if self.frontier.is_none() {
+            let _ = self.metrics.complete.try_set(1);
+        }
+    }
+
+    fn set_frontier_metric(&self) {
+        let frontier = self.frontier.unwrap_or(self.scope.last());
+        let _ = self.metrics.frontier.try_set(frontier.get());
     }
 
     async fn record_certificate(&mut self, certificate: Certificate<S, D>) {
@@ -826,6 +854,7 @@ mod tests {
     use crate::{
         aggregation::{Fetcher, scheme::ed25519},
         simplex::mocks::wrapped::{Behavior, Scheme as WrappedScheme},
+        types::Epoch,
     };
     use commonware_actor::{Feedback, Unreliable};
     use commonware_cryptography::{Hasher, Sha256, certificate::mocks::Fixture};
@@ -924,9 +953,7 @@ mod tests {
             let mut engine = Engine::new(
                 context.child("engine"),
                 Config {
-                    epoch,
-                    first: position,
-                    last: position,
+                    scope: Scope::new(epoch, position, position).unwrap(),
                     scheme,
                     automaton: NoopAutomaton,
                     reporter: NoopReporter(std::marker::PhantomData),
@@ -939,7 +966,7 @@ mod tests {
                     journal_partition: "aggregation-recovery-failure".to_string(),
                     journal_write_buffer: NZUsize!(4096),
                     journal_replay_buffer: NZUsize!(4096),
-                    journal_heights_per_section: NonZeroU64::new(4).unwrap(),
+                    journal_positions_per_section: NonZeroU64::new(4).unwrap(),
                     journal_compression: None,
                     journal_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                     strategy: Sequential,
@@ -952,14 +979,18 @@ mod tests {
                 Pending {
                     shares: Shares::Known(digest, BTreeMap::new()),
                     _digest_request: digest_request,
-                    rebroadcasts: 0,
-                    recovering: false,
+                    recovery: Recovery::Waiting { ticks: 0 },
                 },
             );
 
             for scheme in schemes.iter().take(3) {
                 let scheme = WrappedScheme::new(scheme.clone(), Behavior::Honest);
-                let ack = Ack::sign(&scheme, Item { position, digest }).unwrap();
+                let item = Item {
+                    epoch,
+                    position,
+                    digest,
+                };
+                let ack = Ack::sign(&scheme, item).unwrap();
                 assert!(engine.insert_ack(ack).await);
             }
         });
