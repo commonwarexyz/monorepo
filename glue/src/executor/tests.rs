@@ -955,13 +955,25 @@ fn certificate(
 
 #[test]
 fn checkpoints_certify_the_last_block_of_each_interval() {
-    deterministic::Runner::default().start(|context| async move {
+    deterministic::Runner::default().start(|mut context| async move {
         let parts = Parts::default();
         let (_executor, _, mailbox) = parts.start(&context).await;
-        let checkpoints = TestCheckpoints::new(mailbox, NZU64!(4));
+        let mut checkpoints = TestCheckpoints::new(mailbox, NZU64!(4));
         assert_eq!(checkpoints.height(Height::zero()), Some(Height::new(3)));
         assert_eq!(checkpoints.height(Height::new(1)), Some(Height::new(7)));
-        assert_eq!(checkpoints.height(Height::new(u64::MAX)), None);
+        // Neither addition nor multiplication overflow can produce a checkpoint.
+        let digest = Sha256::hash(&[b"overflow"]);
+        for position in [u64::MAX, u64::MAX / 4] {
+            let height = Height::new(position);
+            assert_eq!(checkpoints.height(height), None);
+            assert!(checkpoints.propose(height).await.await.is_err());
+            assert!(checkpoints.verify(height, digest).await.await.is_err());
+            assert_eq!(
+                checkpoints.report(certificate(&mut context, position, digest)),
+                Feedback::Ok
+            );
+            assert!(checkpoints.latest().is_none());
+        }
     });
 }
 
