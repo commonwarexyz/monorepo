@@ -2,6 +2,7 @@
 //!
 //! Everything derives from a seed with no attempt to protect key material.
 
+use super::suite::{self, Ledger};
 use crate::{
     multimmit::{
         config::{Parameters, Protocol},
@@ -25,6 +26,9 @@ pub type Sas<V, Q = Available> = bls12381_sas::Scheme<ed25519::PublicKey, V, Q>;
 
 /// The Ed25519 suite.
 pub type Ed25519<Q = Available> = ed25519_suite::Scheme<Q>;
+
+/// The ledger-backed mock suite (see [`suite`]).
+pub type Mock<Q = Available> = suite::Scheme<Q>;
 
 /// A suite whose committees the mocks can deal.
 pub trait Fixture: Scheme<PublicKey = ed25519::PublicKey> {
@@ -87,6 +91,27 @@ impl<Q: ed25519_suite::Quorum> Fixture for Ed25519<Q> {
             })
             .collect();
         let verifier = Self::verifier(parameters, participants)
+            .expect("mock committee material is consistent");
+        (signers, verifier)
+    }
+}
+
+impl<Q: suite::Quorum> Fixture for Mock<Q> {
+    fn committee(
+        rng: &mut TestRng,
+        parameters: &Arc<Parameters>,
+        network_keys: &[ed25519::PrivateKey],
+    ) -> (Vec<Generic<Self>>, Generic<Self>) {
+        let participants = identities(network_keys);
+        let ledger = Ledger::dealt(rng, &participants);
+        let signers = (0..network_keys.len())
+            .map(|index| {
+                let me = Participant::new(u32::try_from(index).expect("committee fits in u32"));
+                Self::signer(parameters, participants.clone(), me, &ledger)
+                    .expect("mock committee material is consistent")
+            })
+            .collect();
+        let verifier = Self::verifier(parameters, participants, &ledger)
             .expect("mock committee material is consistent");
         (signers, verifier)
     }
