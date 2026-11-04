@@ -38,6 +38,8 @@
 /// tasks by about one budget of wakes or cancellations.
 /// Refiles count too, so when expiry reaches a bucket of N later slots, other
 /// due slots can wait about N / BUDGET passes.
+/// A pool worker whose pass leaves due slots behind serves again after a
+/// short slice of task polls, so a backlog drains one budget per slice.
 pub const BUDGET: u32 = 256;
 
 /// Number of wheel levels.

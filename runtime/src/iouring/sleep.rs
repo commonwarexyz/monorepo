@@ -48,8 +48,10 @@
 //! The owner expires due registrations in its service pass, at most
 //! [`BUDGET`] per pass. A pass that leaves due registrations behind keeps the
 //! shard's bound at or below its time, so the worker serves again before it
-//! parks. A pending poll on a worker whose latest service time has reached the
-//! deadline completes the sleep at once, wherever it was registered.
+//! parks, and a pool worker serves again after a short slice of task polls
+//! rather than a full batch (see [`super::runtime`]). A pending poll on a
+//! worker whose latest service time has reached the deadline completes the
+//! sleep at once, wherever it was registered.
 //!
 //! A poll that does not return freezes its worker's service, timers included.
 //! A busy pool worker therefore checks its peers' published bounds in its

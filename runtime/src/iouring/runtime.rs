@@ -103,6 +103,8 @@
 //!
 //! Each turn polls a bounded batch of tasks and checks the root's wake flag,
 //! services I/O and timers, and applies a bounded batch of mailbox messages.
+//! While the latest service pass left due sleeps or request deadlines behind,
+//! a pool worker ends its batch once it has polled for [`BACKLOG_SLICE`].
 //! Deferred callbacks run between these phases. A pool worker's service also
 //! expires the due timers of a peer stalled in a long poll (see
 //! [`super::sleep`]). A pool worker takes a share of the global queue every
@@ -235,6 +237,14 @@ use std::{
 
 /// Maximum task polls or mailbox messages processed before yielding to other work.
 const BATCH_SIZE: usize = 64;
+
+/// Polling time after which a pool worker ends its batch while the latest
+/// service pass left due sleeps or request deadlines behind. A pass fires at
+/// most [`BUDGET`](super::wheel::BUDGET) deadlines, so a backlog drains one
+/// budget per turn, and a full batch of long polls would hold each later pass
+/// back by [`BATCH_SIZE`] of them. A budget's pass is short next to this
+/// slice, so tasks keep most of the worker while a backlog drains.
+const BACKLOG_SLICE: Duration = Duration::from_micros(50);
 
 /// Largest network timeout, 30 years of 365 days, which keeps every request
 /// deadline representable.
@@ -1518,6 +1528,9 @@ pub struct Worker {
     global_queue_interval: u32,
     /// Earliest time of this pool worker's next check of its peers' timers.
     rescue_at: Instant,
+    /// Whether the latest service pass left due sleeps or request deadlines
+    /// behind, which ends the next polling batch after [`BACKLOG_SLICE`].
+    backlog: bool,
     /// False until kernel retirement and callback cleanup have finished.
     finished: bool,
 }
@@ -1542,6 +1555,7 @@ impl Worker {
             until_global: global_queue_interval,
             global_queue_interval,
             rescue_at: Instant::now(),
+            backlog: false,
             finished: false,
         };
         worker.scope = Some(Scope::install(local));
@@ -1961,6 +1975,15 @@ impl Worker {
             *timers_next = timers.expire(nanos, deferred);
         }
 
+        // A pass that ran out of budget leaves its bound at or before this
+        // time, and a pass that reached every due deadline leaves it later.
+        self.backlog = *timers_next <= nanos
+            || driver
+                .as_ref()
+                .unwrap()
+                .next_deadline()
+                .is_some_and(|deadline| deadline <= *now);
+
         // A peer stalled in a long poll cannot serve its own timers. A closing
         // worker runs no more tasks, so it leaves them to the others.
         if let Some(seat) = seat
@@ -2092,6 +2115,9 @@ impl Worker {
             // mailbox, or io_uring service. A dedicated worker polls only its
             // root.
             if let (Some(pool), Some(searcher)) = (pool, &mut searcher) {
+                // While expiry is behind, a slice of polling ends the batch,
+                // so budgeted passes keep pace however long each poll runs.
+                let slice_end = self.backlog.then(|| Instant::now() + BACKLOG_SLICE);
                 for _ in 0..BATCH_SIZE {
                     let Some(runnable) = self.next_runnable(pool) else {
                         break;
@@ -2114,6 +2140,10 @@ impl Worker {
                         // The future is gone, so releasing the set's reference and
                         // the runnable's runs no user code.
                         AfterPoll::Retire(task) => drop(shared.tasks.remove(&task)),
+                    }
+
+                    if slice_end.is_some_and(|end| Instant::now() >= end) {
+                        break;
                     }
                 }
             }
