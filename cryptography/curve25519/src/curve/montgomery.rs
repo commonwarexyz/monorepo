@@ -16,9 +16,11 @@ const A24: F = F([121665, 0, 0, 0, 0]);
 /// point has low order.
 ///
 /// The Montgomery ladder performs the same field operations for every scalar, selecting
-/// values with masks rather than secret-dependent branches or indexing.
+/// values with masks rather than secret-dependent branches or indexing. It stays out of line
+/// so that callers can clear its frames with [`zeroize::zeroize_stack`] once it returns.
 ///
 /// [RFC 7748]: https://www.rfc-editor.org/rfc/rfc7748#section-5
+#[inline(never)]
 pub fn x25519(scalar: &[u8; 32], u: &[u8; 32], out: &mut [u8; 32]) {
     let mut scalar = Zeroizing::new(*scalar);
     // Clearing the three low bits makes the scalar a multiple of the cofactor, 8. Forcing bit

@@ -138,6 +138,9 @@ fn barrett_reduce(x: [u64; 8]) -> Scalar {
 impl Scalar {
     pub const ZERO: Self = Self([0, 0, 0, 0]);
 
+    /// `L - 1`, the largest canonical scalar.
+    pub const MINUS_ONE: Self = Self([L[0] - 1, L[1], L[2], L[3]]);
+
     /// Returns the additive inverse modulo `L`.
     pub fn neg_mod_l(&self) -> Self {
         Self(limbs_conditional_sub(&limbs_sub(&L, &self.0), &L))

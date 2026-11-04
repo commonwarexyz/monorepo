@@ -553,6 +553,33 @@ fn noncanonical_field_encodings() {
     assert_eq!(F::ZERO.sub(F::ONE).to_bytes(), p_minus_one);
 }
 
+/// The identity test accepts every projective scaling of the identity and rejects the all-zero
+/// coordinates: they satisfy `X = 0` and `Y = Z` but represent no point.
+#[test]
+fn identity_test_requires_nonzero_z() {
+    for scale in [F::ONE, F::EDWARDS_D, F::ZERO.sub(F::ONE)] {
+        let identity = G {
+            x: F::ZERO,
+            y: scale,
+            t: F::ZERO,
+            z: scale,
+        };
+        assert!(identity.is_identity());
+        assert!(identity.to_projective().is_identity());
+    }
+    for t in [F::ZERO, F::ONE] {
+        let no_point = G {
+            x: F::ZERO,
+            y: F::ZERO,
+            t,
+            z: F::ZERO,
+        };
+        assert!(!no_point.is_identity());
+        assert!(!no_point.to_projective().is_identity());
+    }
+    assert!(!GAffine::BASEPOINT.to_extended().is_identity());
+}
+
 #[cfg(test)]
 #[test]
 fn zip215_decompression_and_group_laws() {
