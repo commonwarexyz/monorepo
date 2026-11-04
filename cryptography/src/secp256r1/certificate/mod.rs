@@ -7,8 +7,11 @@
 pub mod mocks;
 
 use crate::{
-    Signer as _, Verifier as _,
-    certificate::{AssemblyError, Attestation, Namespace, Scheme, Signers, Subject, Verification},
+    Digest, Signer as _, Verifier as _,
+    certificate::{
+        Aggregator, AssemblyError, Attestation, Item, Namespace, Scheme, Signers, Subject,
+        Verification, list_signatures, listed_codec_config, max_listed_size, stage_listed,
+    },
     secp256r1::standard::{PrivateKey, PublicKey, Signature as Secp256r1Signature},
 };
 #[cfg(not(feature = "std"))]
@@ -264,6 +267,65 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     pub const fn certificate_codec_config_unbounded() -> <Certificate as commonware_codec::Read>::Cfg
     {
         u32::MAX as usize
+    }
+
+    /// Lists the signatures of attestations over any subjects, in input order.
+    pub fn aggregate<'a, S, I>(
+        &self,
+        attestations: NonEmpty<I>,
+    ) -> Result<Vec<Lazy<Secp256r1Signature>>, AssemblyError>
+    where
+        S: Scheme<Signature = Secp256r1Signature>,
+        I: Iterator<Item = &'a Attestation<S>>,
+    {
+        list_signatures(self.participants.len(), attestations)
+    }
+
+    /// Verifies attestations and aggregates over any subjects one signature at a time, and returns
+    /// one verdict per item.
+    ///
+    /// Listed signatures equal to their term's known attestation are not verified again.
+    pub fn verify_aggregates<'a, S, R, D>(
+        &self,
+        _rng: &mut R,
+        items: &[Item<'_, 'a, S, D>],
+    ) -> Vec<bool>
+    where
+        S: Aggregator<Signature = Secp256r1Signature, Aggregate = Vec<Lazy<Secp256r1Signature>>>,
+        S::Subject<'a, D>: Subject<Namespace = N>,
+        R: CryptoRng,
+        D: Digest,
+    {
+        items
+            .iter()
+            .map(|item| {
+                stage_listed(
+                    self.participants.len(),
+                    item,
+                    |signer, subject, signature| {
+                        self.participants
+                            .value(signer.into())
+                            .is_some_and(|public_key| {
+                                public_key.verify(
+                                    subject.namespace(&self.namespace),
+                                    &subject.message(),
+                                    signature,
+                                )
+                            })
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Returns the maximum encoded size of an aggregate over at most `terms` terms.
+    pub fn max_aggregate_size(terms: u32) -> usize {
+        max_listed_size(terms, Secp256r1Signature::SIZE)
+    }
+
+    /// Returns the configuration that decodes an aggregate over at most `terms` terms.
+    pub fn aggregate_codec_config(terms: u32) -> <Vec<Lazy<Secp256r1Signature>> as Read>::Cfg {
+        listed_codec_config(terms)
     }
 }
 
@@ -609,6 +671,46 @@ macro_rules! impl_certificate_secp256r1 {
                 $crate::secp256r1::certificate::Generic::<P, $namespace>::is_attributable()
             }
         }
+
+        impl<P: $crate::PublicKey> $crate::certificate::Aggregator for Scheme<P> {
+            type Aggregate =
+                Vec<commonware_codec::types::lazy::Lazy<$crate::secp256r1::standard::Signature>>;
+
+            fn aggregate<'a, I>(
+                &self,
+                attestations: commonware_utils::iter::NonEmpty<I>,
+            ) -> Result<Self::Aggregate, $crate::certificate::AssemblyError>
+            where
+                I: Iterator<Item = &'a $crate::certificate::Attestation<Self>>,
+            {
+                self.generic.aggregate::<Self, _>(attestations)
+            }
+
+            fn verify_aggregates<R, D>(
+                &self,
+                rng: &mut R,
+                items: &[$crate::certificate::Item<'_, '_, Self, D>],
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> Vec<bool>
+            where
+                R: rand_core::CryptoRng,
+                D: $crate::Digest,
+            {
+                self.generic.verify_aggregates(rng, items)
+            }
+
+            fn max_aggregate_size(terms: u32) -> usize {
+                $crate::secp256r1::certificate::Generic::<P, $namespace>::max_aggregate_size(terms)
+            }
+
+            fn aggregate_codec_config(
+                terms: u32,
+            ) -> <Self::Aggregate as commonware_codec::Read>::Cfg {
+                $crate::secp256r1::certificate::Generic::<P, $namespace>::aggregate_codec_config(
+                    terms,
+                )
+            }
+        }
     };
 }
 
@@ -616,7 +718,10 @@ macro_rules! impl_certificate_secp256r1 {
 mod tests {
     use super::*;
     use crate::{
-        certificate::{Membership, Scheme as _, Verifier as _},
+        certificate::{
+            Membership, Scheme as _, Term, Verifier as _,
+            aggregator_tests::{Suite, malformed},
+        },
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;
@@ -1685,6 +1790,52 @@ mod tests {
             &certificate,
             &Sequential,
         ));
+    }
+
+    fn subject(index: usize) -> TestSubject {
+        TestSubject {
+            message: Bytes::from(format!("subject {index}")),
+        }
+    }
+
+    #[test]
+    fn test_aggregator_suite() {
+        let (schemes, verifier) = setup_signers(&mut test_rng(), 5);
+        Suite {
+            schemes: &schemes,
+            verifier: &verifier,
+            subject,
+            unique: false,
+        }
+        .run();
+    }
+
+    /// A malformed listed signature fails its aggregate, whether or not its term is known.
+    #[test]
+    fn test_aggregate_rejects_malformed_listed_signature() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_signers(&mut rng, 4);
+        let attestations: Vec<_> = schemes
+            .iter()
+            .enumerate()
+            .map(|(i, scheme)| scheme.sign::<Sha256Digest>(subject(i)).unwrap())
+            .collect();
+        let mut terms: Vec<Term<'_, Scheme<PublicKey>, Sha256Digest>> = attestations
+            .iter()
+            .enumerate()
+            .map(|(i, attestation)| Term {
+                signer: attestation.signer,
+                subject: subject(i),
+                known: None,
+            })
+            .collect();
+        let mut aggregate = verifier.aggregate(non_empty![@&attestations]).unwrap();
+        assert!(verifier.verify_aggregate(&mut rng, &terms, &aggregate, &Sequential));
+
+        aggregate[1] = malformed::<Scheme<PublicKey>>();
+        assert!(!verifier.verify_aggregate(&mut rng, &terms, &aggregate, &Sequential));
+        terms[1].known = Some(&attestations[1]);
+        assert!(!verifier.verify_aggregate(&mut rng, &terms, &aggregate, &Sequential));
     }
 
     #[cfg(feature = "arbitrary")]
