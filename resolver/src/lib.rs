@@ -135,7 +135,7 @@ commonware_macros::stability_scope!(BETA {
         /// retries the key. Network resolvers may credit the serving peer in either case.
         Resolved(Resolution),
 
-        /// The response is valid for the peer-visible key but resolves no delivered subscribers.
+        /// The response resolves no delivered subscribers and may not have been validated.
         ///
         /// The resolver retries without crediting or penalizing the serving peer.
         Unresolved,

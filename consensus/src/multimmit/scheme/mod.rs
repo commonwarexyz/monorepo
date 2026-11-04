@@ -15,7 +15,7 @@
 //! # Periods
 //!
 //! Ordinary keys sign synchronized aggregate signatures, which aggregate cheaply across signers
-//! that share a [`Period`]. A key must sign at most one message per period, or anyone can forge
+//! that share a period. A key must sign at most one message per period, or anyone can forge
 //! its signature on any message in that period. Each period matches a durable local choice:
 //!
 //! - votes and novotes share one view period, because a node durably takes exactly one stance per

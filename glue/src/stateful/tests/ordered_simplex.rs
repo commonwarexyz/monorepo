@@ -7,6 +7,7 @@
 //! finalization they serve, instead of executing the chain from genesis.
 
 use super::{
+    checkpoint_recovery::archive as checkpoint_archive,
     common::{EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config},
     mocks::digested,
     ordered::{State, Tally, Worth, read_counter, until_applied},
@@ -29,7 +30,8 @@ use commonware_codec::{
     Buf, Encode as _, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
-    Application, Block, Heightable, aggregation,
+    Application, Block, Heightable,
+    aggregation::{self, types::Scope},
     ancestry::Ancestry,
     simplex::{
         self,
@@ -44,7 +46,7 @@ use commonware_consensus::{
         scheme::ed25519 as simplex_ed25519,
         types::Context as Producing,
     },
-    types::{Epoch, EpochDelta, FixedEpocher, Height, HeightDelta, ViewDelta},
+    types::{Epoch, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
     Digest as _, Digested, Digestible, Hasher as _, Sha256,
@@ -54,9 +56,10 @@ use commonware_cryptography::{
 };
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network, Oracle};
 use commonware_parallel::Sequential;
+use commonware_resolver::p2p as resolver;
 use commonware_runtime::{
-    Clock as _, Handle, Quota, Runner as _, Spawner as _, Supervisor as _, buffer::paged::CacheRef,
-    deterministic,
+    Clock as _, Handle, Metrics as _, Quota, Runner as _, Spawner as _, Supervisor as _,
+    buffer::paged::CacheRef, deterministic, telemetry::metrics::metric_sum,
 };
 use commonware_storage::{archive::prunable, mmr, translator::TwoCap};
 use commonware_utils::{
@@ -92,6 +95,7 @@ const MARSHAL_BROADCAST: u64 = 4;
 const AGGREGATION: u64 = 5;
 const QMDB: u64 = 6;
 const PROBE: u64 = 7;
+const CHECKPOINT_RESOLVER: u64 = 8;
 
 type ConsensusScheme = simplex_ed25519::Scheme;
 type CheckpointScheme = aggregation::scheme::ed25519::Scheme;
@@ -204,6 +208,7 @@ struct Validator {
     checkpoints: Checkpoints<CheckpointScheme, State>,
     tally: Tally<Input>,
     _handles: Vec<Handle<()>>,
+    _recovery: aggregation::Recovery,
     _executor: Handle<Result<(), Halt>>,
 }
 
@@ -275,6 +280,7 @@ impl Cluster {
             AGGREGATION,
             QMDB,
             PROBE,
+            CHECKPOINT_RESOLVER,
         ] {
             channels.push(Some(control.register(channel, QUOTA).await.unwrap()));
         }
@@ -399,7 +405,6 @@ impl Cluster {
                     execute: stateful_mailbox.clone(),
                     consumer: stateful_mailbox.clone(),
                     ack_window: ACK_WINDOW,
-                    epoch: Epoch::zero(),
                     start: if joining {
                         executor::Start::Checkpoint
                     } else {
@@ -430,34 +435,81 @@ impl Cluster {
             self.fixture.private_keys[index].clone(),
         )
         .expect("validator is a participant");
+        let checkpoint_scope = Scope::new(
+            Epoch::zero(),
+            Height::zero(),
+            Height::new(u64::MAX / INTERVAL.get() - 1),
+        )
+        .unwrap();
         let checkpoints = Checkpoints::<CheckpointScheme, State>::new(chain.clone(), INTERVAL);
+        let (reporter, archive, writer) = checkpoint_archive(
+            context.child("checkpoint_archive"),
+            format!("{prefix}_checkpoint_archive"),
+            page_cache.clone(),
+            &checkpoint_scheme,
+            checkpoint_scope,
+            checkpoints.clone(),
+        )
+        .await;
+        handles.push(writer);
+        let (coordinator, recovery, consumer) = aggregation::RecoveryCoordinator::new(
+            context.child("checkpoint_recovery"),
+            NZUsize!(8),
+            NZUsize!(16),
+        );
+        let (recovery_resolver, resolver_mailbox) = resolver::Engine::new(
+            context.child("checkpoint_resolver"),
+            resolver::Config {
+                peer_provider: self.oracle.manager(),
+                blocker: control.clone(),
+                consumer,
+                producer: archive,
+                mailbox_size: NZUsize!(256),
+                me: Some(identity.clone()),
+                fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                fetch_retry_delay: Duration::from_millis(100),
+                priority_requests: false,
+                priority_responses: false,
+            },
+        );
+        handles.push(coordinator.start(resolver_mailbox));
         let aggregation = aggregation::Engine::new(
             context.child("aggregation"),
             aggregation::Config {
-                monitor: checkpoints.clone(),
-                provider: ConstantProvider::new(checkpoint_scheme.clone()),
+                scope: checkpoint_scope,
+                scheme: checkpoint_scheme.clone(),
                 automaton: checkpoints.clone(),
-                reporter: checkpoints.clone(),
+                reporter,
                 blocker: control.clone(),
                 priority_acks: false,
                 rebroadcast_timeout: NZDuration!(Duration::from_millis(500)),
-                epoch_bounds: (EpochDelta::zero(), EpochDelta::zero()),
+                recovery_after_rebroadcasts: NZU64!(2),
+                recoverer: recovery.clone(),
                 window: NZU64!(8),
-                activity_timeout: HeightDelta::new(64),
                 journal_partition: format!("{prefix}_aggregation"),
                 journal_write_buffer: NZUsize!(4_096),
                 journal_replay_buffer: NZUsize!(4_096),
-                journal_heights_per_section: NZU64!(8),
+                journal_positions_per_section: NZU64!(8),
                 journal_compression: None,
                 journal_page_cache: page_cache.clone(),
                 strategy: Sequential,
             },
+        )
+        .expect("checkpoint scope is not registered");
+        handles.push(recovery_resolver.start(channel(CHECKPOINT_RESOLVER)));
+        let aggregation = aggregation.start(channel(AGGREGATION));
+        handles.push(
+            context
+                .child("aggregation_result")
+                .spawn(move |_| async move {
+                    aggregation.await.expect("aggregation runs");
+                }),
         );
-        handles.push(aggregation.start(channel(AGGREGATION)));
 
         // Every validator serves its newest checkpoint; a joining one also samples its peers'.
         let (probe, sampler) = Probe::new(probe::Config {
             context: context.child("probe"),
+            scope: checkpoint_scope,
             scheme: checkpoint_scheme,
             strategy: Sequential,
             blocker: control.clone(),
@@ -542,6 +594,7 @@ impl Cluster {
             checkpoints,
             tally,
             _handles: handles,
+            _recovery: recovery,
             _executor: executor,
         }
     }
@@ -570,7 +623,7 @@ fn validators_execute_certify_and_prune_one_chain() {
                 .checkpoints
                 .latest()
                 .expect("a checkpoint is certified");
-            let height = validator.checkpoints.height(latest.item.height).unwrap();
+            let height = validator.checkpoints.height(latest.item.position).unwrap();
             if let Some(block) = validator.chain.block_at(height).await {
                 assert_eq!(block.digest(), latest.item.digest);
             }
@@ -628,6 +681,50 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
         assert_eq!(
             late.chain.block_at(Height::new(target)).await.unwrap(),
             reference
+        );
+        let sync_base = first - 1;
+        loop {
+            if let Some(certificate) = late.checkpoints.latest() {
+                let height = late.checkpoints.height(certificate.item.position).unwrap();
+                if height.get() >= sync_base {
+                    break;
+                }
+            }
+            context.sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            late.checkpoints
+                .height(late.checkpoints.latest().unwrap().item.position)
+                .unwrap()
+                .get()
+                >= sync_base
+        );
+        let recovered = late.checkpoints.latest().unwrap().item.position;
+        while late.checkpoints.latest().unwrap().item.position.get() < recovered.get() + 2 {
+            context.sleep(Duration::from_millis(50)).await;
+        }
+        // Every mandatory checkpoint through the sync base was recovered. Progress in `latest`
+        // alone could hide holes below the active window's end.
+        let index = (VALIDATORS - 1).to_string();
+        let base_position = (sync_base + 1) / INTERVAL.get() - 1;
+        while metric_sum(
+            &context.encode(),
+            "aggregation_frontier",
+            &[("index", &index)],
+        ) <= base_position as f64
+        {
+            context.sleep(Duration::from_millis(50)).await;
+        }
+        // Only locally signed acknowledgements use the aggregation channel. The late validator
+        // participates in new checkpoints after recovering its skipped history.
+        let origin = committee.fixture.participants[VALIDATORS as usize - 1].to_string();
+        let channel = AGGREGATION.to_string();
+        assert!(
+            metric_sum(
+                &context.encode(),
+                "messages_sent_total",
+                &[("origin", &origin), ("channel", &channel)],
+            ) > 0.0
         );
     });
 }

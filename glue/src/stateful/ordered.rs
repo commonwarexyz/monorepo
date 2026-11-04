@@ -137,6 +137,9 @@ where
     type Captured: Send;
 
     /// Returns the per-database sync targets `block` commits to.
+    ///
+    /// The block's digest must commit to every target, including each database's root and range,
+    /// so that a checkpoint certificate authenticates the state requested during sync.
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets;
 
     /// Returns the block at height zero, which commits to the databases' initial state.

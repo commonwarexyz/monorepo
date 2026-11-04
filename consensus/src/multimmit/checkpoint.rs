@@ -23,11 +23,13 @@
 //!
 //! # Caveats
 //!
-//! Aggregation signatures do not cover the epoch, so a checkpoint certificate verifies under
-//! every epoch that shares its nullification identity. A reshare keeps that identity, so this is
-//! every epoch of the deployment. And because a quorum is only `2f + 1`, a bug that makes `f + 1`
-//! honest validators compute the same wrong digest, together with `f` faulty ones, certifies that
-//! digest, where an `n - f` quorum would need `3f + 1` of them.
+//! Aggregation signatures cover the epoch, including when a reshare keeps the nullification
+//! identity. A consumer derives the expected scope from authenticated history and checks it with
+//! [`Certificate::verify_for`](crate::aggregation::types::Certificate::verify_for).
+//!
+//! Because a quorum is only `2f + 1`, a bug that makes `f + 1` honest validators compute the
+//! same wrong digest, together with `f` faulty ones, certifies that digest, where an `n - f`
+//! quorum would need `3f + 1` of them.
 
 use crate::aggregation::types::{Item, Namespace};
 use commonware_cryptography::impl_certificate_bls12381_threshold;
@@ -35,11 +37,21 @@ use commonware_utils::faults::N5f1Nullification;
 
 impl_certificate_bls12381_threshold!(&'a Item<D>, Namespace, N5f1Nullification);
 
+impl<D: commonware_cryptography::Digest, P: commonware_cryptography::PublicKey, V>
+    crate::aggregation::scheme::Scheme<D> for Scheme<P, V>
+where
+    V: commonware_cryptography::bls12381::primitives::variant::Variant,
+{
+    fn recovery_namespace(&self) -> crate::aggregation::types::RecoveryNamespace {
+        self.generic.namespace().recovery_namespace()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        aggregation::types::{Ack, Certificate},
+        aggregation::types::{Ack, Certificate, Scope},
         multimmit::{mocks::Committee, types::PathLimits},
         types::{Epoch, Height},
     };
@@ -59,12 +71,13 @@ mod tests {
             .map(|signer| signer.checkpoint(NAMESPACE))
             .collect::<Vec<_>>();
         let item = Item {
-            height: Height::new(9),
+            epoch: Epoch::zero(),
+            position: Height::new(9),
             digest: Sha256::hash(&[b"state root"]),
         };
         let acks = schemes
             .iter()
-            .map(|scheme| Ack::sign(scheme, Epoch::zero(), item.clone()).unwrap())
+            .map(|scheme| Ack::sign(scheme, item.clone()).unwrap())
             .collect::<Vec<_>>();
 
         // Of six validators, 2f + 1 = 3 certify and two do not.
@@ -79,12 +92,13 @@ mod tests {
         // A full verifier checks shares, and anyone with the nullification identity checks the
         // certificate, but only under the same namespace.
         let verifier = committee.verifier.checkpoint(NAMESPACE);
+        let scope = Scope::new(Epoch::zero(), Height::zero(), Height::new(100)).unwrap();
         assert!(acks[0].verify(&mut test_rng(), &verifier, &Sequential));
-        assert!(certificate.verify(&mut test_rng(), &verifier, &Sequential));
+        assert!(certificate.verify_for(&mut test_rng(), &verifier, scope, &Sequential));
         let identity = *committee.verifier.nullification_identity();
         let observer = Scheme::<_, MinPk>::certificate_verifier(NAMESPACE, identity);
-        assert!(certificate.verify(&mut test_rng(), &observer, &Sequential));
+        assert!(certificate.verify_for(&mut test_rng(), &observer, scope, &Sequential));
         let other = Scheme::<_, MinPk>::certificate_verifier(b"other", identity);
-        assert!(!certificate.verify(&mut test_rng(), &other, &Sequential));
+        assert!(!certificate.verify_for(&mut test_rng(), &other, scope, &Sequential));
     }
 }
