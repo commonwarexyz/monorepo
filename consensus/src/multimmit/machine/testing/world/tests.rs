@@ -180,7 +180,7 @@ mod successor_matrix {
     }
 
     fn find_publication(
-        effects: &[Capability<MinPk, Digest>],
+        effects: &[Capability<Bls<MinPk>, Digest>],
         id: EffectId,
     ) -> Option<PublicationWitness> {
         effects.iter().find_map(|effect| {
