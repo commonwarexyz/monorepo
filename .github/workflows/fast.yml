@@ -92,6 +92,10 @@ jobs:
     name: "Tests (os: ${{ matrix.os }}) (build)"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
+    # Optimize the test binaries like release builds, keeping debug assertions and overflow
+    # checks. Setting it here instead of in Cargo.toml leaves local test builds unchanged.
+    env:
+      CARGO_PROFILE_TEST_OPT_LEVEL: 3
     strategy:
       matrix:
         include:
@@ -107,6 +111,8 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
+        # Keeps this build's kache manifest apart from the one other runs prefetch.
+        additional-cache-key: opt3
         kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
         kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
         kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}

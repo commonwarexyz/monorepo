@@ -27,8 +27,12 @@ jobs:
   # same paths.
   Build:
     name: "Coverage (build)"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16
     timeout-minutes: 90
+    # Optimize the test binaries like release builds, keeping debug assertions and overflow
+    # checks. Setting it here instead of in Cargo.toml leaves local test builds unchanged.
+    env:
+      CARGO_PROFILE_TEST_OPT_LEVEL: 3
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -39,6 +43,8 @@ jobs:
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
         additional-components: llvm-tools-preview
+        # Keeps this build's kache manifest apart from the one other runs prefetch.
+        additional-cache-key: opt3
         kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
         kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
         kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
