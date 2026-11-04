@@ -181,17 +181,10 @@ impl<P: PublicKey> Tracker<P> {
         true
     }
 
-    /// Track `primary` and `secondary` at an accepted `id`, evicting the oldest sets beyond
-    /// `limit`.
-    ///
-    /// Returns the secondary peers not also listed as primary.
-    fn track(
-        &mut self,
-        id: u64,
-        primary: Set<P>,
-        secondary: Set<P>,
-        limit: NonZeroUsize,
-    ) -> Set<P> {
+    /// Track `peers` at an accepted `id`, evicting the oldest sets beyond `limit`.
+    fn track(&mut self, id: u64, peers: TrackedPeers<P>, limit: NonZeroUsize) {
+        let TrackedPeers { primary, secondary } = peers;
+
         // Track primary peers.
         for public_key in primary.iter() {
             self.counts.entry(public_key.clone()).or_default().primary += 1;
@@ -207,13 +200,7 @@ impl<P: PublicKey> Tracker<P> {
         for public_key in secondary.iter() {
             self.counts.entry(public_key.clone()).or_default().secondary += 1;
         }
-        self.sets.insert(
-            id,
-            PeerSetsAtIndex {
-                primary,
-                secondary: secondary.clone(),
-            },
-        );
+        self.sets.insert(id, PeerSetsAtIndex { primary, secondary });
 
         // Remove oldest tracked peer sets if we exceed the limit.
         while self.sets.len() > limit.get() {
@@ -256,7 +243,6 @@ impl<P: PublicKey> Tracker<P> {
                 }
             }
         }
-        secondary
     }
 
     /// Primary and secondary peers across all tracked peer sets (reference-counted union).
@@ -331,9 +317,8 @@ pub struct Config {
     pub disconnect_on_block: bool,
 
     /// The maximum number of peer sets to track (`tracked_peer_sets`). When a new peer set is
-    /// tracked and this limit is exceeded, the oldest peer set is removed. Peers that are no
-    /// longer in any tracked peer set will have their links removed and messages to them will be
-    /// dropped.
+    /// tracked and this limit is exceeded, the oldest peer set is removed. Messages between peers
+    /// that do not each track the other are dropped.
     ///
     /// The limit applies separately to the network-wide peer sets and to each peer's own (see
     /// [`ingress::Control::manager`]).
@@ -496,34 +481,35 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Apply a tracked peer set to the network-wide tracker, or to `owner`'s own tracker.
     async fn register_tracked_peer_set(
         &mut self,
-        owner: Option<P>,
+        owner: Option<&P>,
         id: u64,
         peers: TrackedPeers<P>,
     ) -> bool {
-        if !self.tracker_mut(owner.as_ref()).accepts(id) {
+        if !self.tracker_mut(owner).accepts(id) {
             return false;
         }
 
-        // Validate and unpack the peer set.
+        // Validate the peer set and create its peers.
         self.assert_peer_set_size(&peers);
-        let primary = peers.primary;
-        let limit = self.tracked_peer_sets;
-        let secondary =
-            self.tracker_mut(owner.as_ref())
-                .track(id, primary.clone(), peers.secondary, limit);
-        for public_key in primary.iter().chain(secondary.iter()) {
+        for public_key in peers.primary.iter().chain(peers.secondary.iter()) {
             self.ensure_peer_exists(public_key).await;
         }
+
+        let limit = self.tracked_peer_sets;
+        self.tracker_mut(owner).track(id, peers, limit);
         true
     }
 
-    /// The network-wide tracker, or `owner`'s own tracker (created if missing).
+    /// The network-wide tracker, or `owner`'s own tracker.
+    ///
+    /// Panics if `owner` has no tracker. [`ingress::Message::OwnPeerSets`] creates it before any
+    /// other message names `owner`.
     fn tracker_mut(&mut self, owner: Option<&P>) -> &mut Tracker<P> {
         match owner {
             Some(owner) => self
                 .own_trackers
-                .entry(owner.clone())
-                .or_insert_with(Tracker::new),
+                .get_mut(owner)
+                .expect("own peer sets must be created before use"),
             None => &mut self.tracker,
         }
     }
@@ -537,7 +523,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Returns whether `origin` and `recipient` each track the other, as an authenticated network
     /// requires to keep a connection.
     fn is_connectable(&self, origin: &P, recipient: &P) -> bool {
-        self.view(origin).contains(recipient) && self.view(recipient).contains(origin)
+        self.tracks(origin, recipient) && self.tracks(recipient, origin)
+    }
+
+    /// Returns whether `peer` tracks `other`. A peer without its own sets tracks `other` only
+    /// while both are in a network-wide set.
+    fn tracks(&self, peer: &P, other: &P) -> bool {
+        self.own_trackers.get(peer).map_or_else(
+            || self.tracker.contains(peer) && self.tracker.contains(other),
+            |tracker| tracker.contains(other),
+        )
     }
 
     /// Enforces the configured maximum over one peer set.
@@ -605,7 +600,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
             ingress::Message::Track { owner, id, peers } => {
                 if !self
-                    .register_tracked_peer_set(owner.clone(), id, peers)
+                    .register_tracked_peer_set(owner.as_ref(), id, peers)
                     .await
                 {
                     return;
@@ -832,7 +827,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     fn connected_peers_for(&self, sender: &P) -> Vec<P> {
         self.view(sender)
             .peers()
-            .filter(|peer| *peer != sender && self.view(peer).contains(sender))
+            .filter(|peer| *peer != sender && self.is_connectable(sender, peer))
             .cloned()
             .collect()
     }
@@ -873,16 +868,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// any peer in the network.
     fn handle_task(&mut self, task: Task<P>) {
         let (channel, origin, recipients, message) = task;
-
-        // A sender without its own peer sets must be in a network-wide one
-        if !self.own_trackers.contains_key(&origin) && !self.tracker.contains(&origin) {
-            warn!(
-                ?origin,
-                reason = "not primary or secondary",
-                "dropping message"
-            );
-            return;
-        }
 
         // Collect recipients
         let recipients = match recipients {

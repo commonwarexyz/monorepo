@@ -97,18 +97,23 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
         match self {
             Self::Register { .. } => f.debug_struct("Register").finish_non_exhaustive(),
             Self::Send { .. } => f.debug_struct("Send").finish_non_exhaustive(),
-            Self::Track { id, .. } => f
+            Self::Track { owner, id, .. } => f
                 .debug_struct("Track")
+                .field("owner", owner)
                 .field("id", id)
                 .finish_non_exhaustive(),
             Self::OwnPeerSets { owner } => {
                 f.debug_struct("OwnPeerSets").field("owner", owner).finish()
             }
-            Self::PeerSet { id, .. } => f
+            Self::PeerSet { owner, id, .. } => f
                 .debug_struct("PeerSet")
+                .field("owner", owner)
                 .field("id", id)
                 .finish_non_exhaustive(),
-            Self::Subscribe { .. } => f.debug_struct("Subscribe").finish_non_exhaustive(),
+            Self::Subscribe { owner, .. } => f
+                .debug_struct("Subscribe")
+                .field("owner", owner)
+                .finish_non_exhaustive(),
             Self::SubscribePeers { exclude, .. } => f
                 .debug_struct("SubscribePeers")
                 .field("exclude", exclude)
@@ -504,7 +509,9 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
     ///
     /// From then on, this peer exchanges messages with another peer only while each tracks the
     /// other, as an authenticated network keeps a connection only between peers that track each
-    /// other. Peers without their own managers use the network-wide peer sets.
+    /// other. Peers without their own managers use the network-wide peer sets. This peer starts
+    /// with no peer sets, so it reaches no one until it tracks one, and it never returns to the
+    /// network-wide sets.
     ///
     /// Useful for mocking [crate::authenticated::discovery].
     pub fn manager(&self) -> Manager<P, E> {
