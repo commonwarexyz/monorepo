@@ -9,8 +9,9 @@ use commonware_consensus::{
     Automaton, Reporter,
     multimmit::{
         FinalityFact,
-        types::{Activity, BlockRef, ChainId, Context},
+        types::{Activity, BlockRef, ChainId, Context, Placement},
     },
+    types::View,
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_runtime::Clock;
@@ -40,6 +41,13 @@ pub(super) enum Message {
         fact: FinalityFact<Sha256Digest>,
         at: SystemTime,
     },
+    /// Finality of the leader of `view` placed runs of this node's blocks in the total order at
+    /// `at`.
+    Placed {
+        placed: Vec<Placement<Sha256Digest>>,
+        view: View,
+        at: SystemTime,
+    },
     /// Marshal delivered one of this node's blocks in the total order at `at`.
     Ordered {
         block: BlockRef<Sha256Digest>,
@@ -53,7 +61,7 @@ impl Message {
         match self {
             Self::Propose { response, .. } => response.is_closed(),
             Self::Verify { response, .. } => response.is_closed(),
-            Self::Finalized { .. } | Self::Ordered { .. } => false,
+            Self::Finalized { .. } | Self::Placed { .. } | Self::Ordered { .. } => false,
         }
     }
 }
@@ -99,9 +107,9 @@ impl Policy for Message {
 /// Handle consensus and marshal use to reach the application actor.
 ///
 /// It implements the consensus [`Automaton`] and [`Reporter`]. The reporter forwards only
-/// finality facts; consensus reports every activity to marshal separately. Finality and ordered
-/// delivery are timestamped here, when they are reported, so latency samples exclude time spent
-/// in the actor's queue.
+/// finality facts and, on a producer, the placement of its own chain; consensus reports every
+/// activity to marshal separately. Finality, placement, and ordered delivery are timestamped here,
+/// when they are reported, so latency samples exclude time spent in the actor's queue.
 pub struct Mailbox<C> {
     sender: Sender<Message>,
     clock: Arc<C>,
@@ -183,11 +191,27 @@ impl<C: Clock> Reporter for Mailbox<C> {
                     at: self.clock.current(),
                 }
             }
+            Activity::Placed {
+                view, mut placed, ..
+            } => {
+                // Only a producer measures placement, and only of its own blocks.
+                let Some(chain) = self.producer_chain else {
+                    return Feedback::Ok;
+                };
+                placed.retain(|run| run.tip().chain() == chain);
+                if placed.is_empty() {
+                    return Feedback::Ok;
+                }
+                Message::Placed {
+                    placed,
+                    view,
+                    at: self.clock.current(),
+                }
+            }
             Activity::ProtocolAccepted { .. }
             | Activity::TransactionProposed { .. }
             | Activity::CommitmentsAccepted { .. }
             | Activity::HistoryAccepted { .. }
-            | Activity::Placed { .. }
             | Activity::CertificateRecorded { .. } => return Feedback::Ok,
         };
         self.sender.enqueue(message)
