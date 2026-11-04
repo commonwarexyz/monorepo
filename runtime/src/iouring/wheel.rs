@@ -11,15 +11,16 @@
 //! identity while it cascades and removal unlinks it in O(1). Occupancy
 //! bitmaps let expiry and bounds visit only occupied buckets.
 //!
-//! Expiry is budgeted: one pass fires or refiles at most a given number of
-//! slots. Reaching a bucket detaches it in O(1) by clearing its occupancy bit.
-//! The bucket keeps its list, so removals still find their slots, and passes
-//! drain it one slot per budget unit, firing due slots and refiling the others
-//! onto lower levels. The base moves to the detached bucket's start, so a new
-//! insertion lands in that bucket only at its own tick, which is due.
-//! A detached bucket drains before any other level bucket, and its refiles
-//! share the budget with fires, so a detached bucket of N slots holds back due
-//! slots in other buckets for about N divided by the budget passes.
+//! Expiry is budgeted: one pass spends one budget unit per slot it fires and
+//! one per [`REFILES_PER_UNIT`] slots it refiles. Reaching a bucket detaches
+//! it in O(1) by clearing its occupancy bit. The bucket keeps its list, so
+//! removals still find their slots, and passes drain it, firing due slots and
+//! refiling the others onto lower levels. The base moves to the detached
+//! bucket's start, so a new insertion lands in that bucket only at its own
+//! tick, which is due. A detached bucket drains before any other level
+//! bucket, including the lower buckets its refiles land in, so a detached
+//! bucket of N later slots holds back due slots elsewhere for about N divided
+//! by [`REFILES_PER_UNIT`] times the budget passes.
 //!
 //! [`Wheel::bound`] never walks a bucket. Each bucket keeps a lower bound of
 //! its ticks, exact until a slot holding the minimum is removed. A removed
@@ -33,14 +34,23 @@
 //! driver's request deadlines ([`super::deadlines::Deadlines`], 2^20 ns ticks)
 //! own an instance.
 
-/// Slots fired or refiled per expiry pass, by every owner. Bounds the work
-/// between two task polls, so a storm of simultaneous deadlines delays other
-/// tasks by about one budget of wakes or cancellations.
-/// Refiles count too, so when expiry reaches a bucket of N later slots, other
-/// due slots can wait about N / BUDGET passes.
+/// Budget units per expiry pass, by every owner: one per slot fired, one per
+/// [`REFILES_PER_UNIT`] slots refiled. Bounds the work between two task
+/// polls, so a storm of simultaneous deadlines delays other tasks by about
+/// one budget of wakes or cancellations.
+/// Refiles count at [`REFILES_PER_UNIT`] per unit, so when expiry reaches a
+/// bucket of N later slots, other due slots can wait about
+/// N / (REFILES_PER_UNIT * BUDGET) passes.
 /// A pool worker whose pass leaves due slots behind serves again after a
 /// short slice of task polls, so a backlog drains one budget per slice.
 pub const BUDGET: u32 = 256;
+
+/// Refiles that cost one unit of an expiry budget. A refile only moves a slot
+/// between two lists, while a fire also starts a wake or a cancellation, so
+/// a budget's refiles take about as long as its fires. Spreads of deadlines
+/// registered long before them cascade in large buckets, whose refiles would
+/// otherwise hold back the due slots behind them for many passes.
+pub const REFILES_PER_UNIT: u32 = 16;
 
 /// Number of wheel levels.
 const LEVELS: usize = 9;
@@ -320,11 +330,12 @@ impl<const RES: u64> Wheel<RES> {
     }
 
     /// Pass to `fire` the slots whose firing time is at most `now`, spending
-    /// one unit of `budget` per slot fired or refiled. Due slots go first,
-    /// then the detached bucket, then buckets in time order. A pass that runs
-    /// out of budget leaves the rest for the next one, and [`Self::bound`] then
-    /// stays at or below `now` while any reached slot is due, and possibly
-    /// while only reached slots to refile remain (see [`Self::bound`]).
+    /// one unit of `budget` per slot fired and one per [`REFILES_PER_UNIT`]
+    /// slots refiled. Due slots go first, then the detached bucket, then
+    /// buckets in time order. A pass that runs out of budget leaves the rest
+    /// for the next one, and [`Self::bound`] then stays at or below `now`
+    /// while any reached slot is due, and possibly while only reached slots
+    /// to refile remain (see [`Self::bound`]).
     pub fn expire(&mut self, now: u64, budget: &mut u32, fire: &mut impl FnMut(u32)) {
         // An older time is treated as the base, which never exceeds a time an
         // earlier caller passed.
@@ -338,22 +349,28 @@ impl<const RES: u64> Wheel<RES> {
             fire(slot);
             *budget -= 1;
         }
+        let mut refiles = 0;
         loop {
             while self.pending != NONE {
                 if *budget == 0 {
                     return;
                 }
-                *budget -= 1;
                 let slot = self.buckets[self.pending as usize].head;
                 let tick = self.links[slot as usize].tick;
                 if tick <= target {
                     self.detach(slot);
                     fire(slot);
+                    *budget -= 1;
                 } else {
                     // The detached bucket's ticks are at least the base, which
                     // is its start, so a refile lands on a lower level.
                     self.unlink(slot);
                     self.link(slot, Self::bucket_for(tick, self.base));
+                    refiles += 1;
+                    if refiles == REFILES_PER_UNIT {
+                        refiles = 0;
+                        *budget -= 1;
+                    }
                 }
             }
             if *budget == 0 || self.buckets[DUE].head != NIL {
@@ -687,6 +704,35 @@ mod tests {
         // The storm drained completely within a few passes.
         assert_eq!(fired.len(), 1000);
         assert!((4..=6).contains(&passes), "{passes} passes");
+    }
+
+    #[test]
+    fn test_refiles_cost_a_fraction_of_the_budget() {
+        // One high bucket lists a budget's worth of later slots ahead of the
+        // one due first, so expiry refiles them all before it reaches it.
+        let mut wheel = Wheel::<FINE>::new(0);
+        let deadline = 50_000_000;
+        let later = REFILES_PER_UNIT * (BUDGET - 1);
+        for slot in 0..later {
+            wheel.insert(slot, deadline + FINE + u64::from(slot) * 64);
+        }
+        wheel.insert(later, deadline);
+
+        // Once it is due, one pass refiles the later slots and still fires it.
+        let now = Wheel::<FINE>::rounded(deadline);
+        let mut fired = Vec::new();
+        let mut budget = BUDGET;
+        wheel.expire(now, &mut budget, &mut |slot| fired.push(slot));
+        assert_eq!(fired, [later]);
+        assert_eq!(budget, 0);
+
+        // The refiled slots fire at their own times.
+        let end = Wheel::<FINE>::rounded(deadline + FINE + u64::from(later) * 64);
+        while !wheel.is_empty() {
+            let mut budget = BUDGET;
+            wheel.expire(end, &mut budget, &mut |slot| fired.push(slot));
+        }
+        assert_eq!(fired.len(), later as usize + 1);
     }
 
     #[test]
