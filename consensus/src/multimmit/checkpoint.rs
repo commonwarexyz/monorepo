@@ -40,23 +40,58 @@ mod tests {
     use super::*;
     use crate::{
         aggregation::types::{Ack, Certificate},
-        multimmit::{mocks::Committee, types::PathLimits},
+        multimmit::{
+            mocks::{Bls, Committee, Fixture, Sas},
+            scheme::Generic,
+            types::PathLimits,
+        },
         types::{Epoch, Height},
     };
-    use commonware_cryptography::{Hasher as _, Sha256, bls12381::primitives::variant::MinPk};
+    use commonware_cryptography::{
+        Hasher as _, Sha256,
+        bls12381::primitives::variant::{MinPk, MinSig, Variant},
+        ed25519,
+    };
     use commonware_parallel::Sequential;
     use commonware_utils::{Faults as _, non_empty, test_rng};
 
+    const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_CHECKPOINT_TEST";
+
     #[test]
     fn committee_nullification_keys_certify_checkpoints() {
-        const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_CHECKPOINT_TEST";
-        let committee = Committee::<Bls<MinPk>>::builder(7, 6)
+        certifies_checkpoints::<Bls<MinPk>, MinPk>(
+            |scheme, namespace| scheme.checkpoint(namespace),
+            |scheme| *scheme.nullify().identity(),
+        );
+        certifies_checkpoints::<Bls<MinSig>, MinSig>(
+            |scheme, namespace| scheme.checkpoint(namespace),
+            |scheme| *scheme.nullify().identity(),
+        );
+        certifies_checkpoints::<Sas<MinPk>, MinPk>(
+            |scheme, namespace| scheme.checkpoint(namespace),
+            |scheme| *scheme.nullify().identity(),
+        );
+        certifies_checkpoints::<Sas<MinSig>, MinSig>(
+            |scheme, namespace| scheme.checkpoint(namespace),
+            |scheme| *scheme.nullify().identity(),
+        );
+    }
+
+    /// Certifies a checkpoint with the nullification keys of a committee of suite `S`.
+    fn certifies_checkpoints<S, V>(
+        checkpoint: impl Fn(&Generic<S>, &[u8]) -> Scheme<ed25519::PublicKey, V>,
+        nullification_identity: impl Fn(&Generic<S>) -> V::Public,
+    ) where
+        S: Fixture,
+        V: Variant,
+    {
+        let committee = Committee::<S>::builder(7, 6)
             .limits(PathLimits::new(1, 0))
             .build();
         let schemes = committee
             .signers
             .iter()
-            .map(|signer| signer.checkpoint(NAMESPACE))
+            .map(|signer| checkpoint(signer, NAMESPACE))
             .collect::<Vec<_>>();
         let item = Item {
             height: Height::new(9),
@@ -78,13 +113,13 @@ mod tests {
 
         // A full verifier checks shares, and anyone with the nullification identity checks the
         // certificate, but only under the same namespace.
-        let verifier = committee.verifier.checkpoint(NAMESPACE);
+        let verifier = checkpoint(&committee.verifier, NAMESPACE);
         assert!(acks[0].verify(&mut test_rng(), &verifier, &Sequential));
         assert!(certificate.verify(&mut test_rng(), &verifier, &Sequential));
-        let identity = *committee.verifier.nullification_identity();
-        let observer = Scheme::<_, MinPk>::certificate_verifier(NAMESPACE, identity);
+        let identity = nullification_identity(&committee.verifier);
+        let observer = Scheme::<_, V>::certificate_verifier(NAMESPACE, identity);
         assert!(certificate.verify(&mut test_rng(), &observer, &Sequential));
-        let other = Scheme::<_, MinPk>::certificate_verifier(b"other", identity);
+        let other = Scheme::<_, V>::certificate_verifier(b"other", identity);
         assert!(!certificate.verify(&mut test_rng(), &other, &Sequential));
     }
 }

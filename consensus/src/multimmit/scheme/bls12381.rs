@@ -25,7 +25,7 @@
 //! checks ordinary signatures and recovered certificates but cannot check or recover shares.
 
 use super::{Available, Binding, DaFaults, DaSubject, Error, Generic, Marker, RoleDigest};
-use crate::multimmit::config::Parameters;
+use crate::multimmit::{checkpoint, config::Parameters};
 use bytes::BytesMut;
 use commonware_codec::{Read as _, Write as _};
 use commonware_cryptography::{
@@ -79,11 +79,243 @@ pub mod da_binding {
 }
 
 /// `2f+1` threshold nullification keys.
+///
+/// [`Scheme`](nullify::Scheme) is the threshold scheme that
+/// [`impl_certificate_bls12381_threshold!`](commonware_cryptography::impl_certificate_bls12381_threshold)
+/// generates, written out so the same sharing can also certify
+/// [`checkpoint`]s.
 pub mod nullify {
-    use crate::multimmit::scheme::{Namespace, NullifyFaults, NullifySubject};
-    use commonware_cryptography::impl_certificate_bls12381_threshold;
+    use crate::multimmit::{
+        checkpoint,
+        scheme::{Namespace, NullifySubject},
+    };
+    use commonware_cryptography::{
+        Digest, PublicKey,
+        bls12381::{
+            certificate::threshold::{self, Generic},
+            primitives::{group::Share, sharing::Sharing, variant::Variant},
+        },
+        certificate::{self, AssemblyError, Attestation, Membership, Verification},
+    };
+    use commonware_parallel::Strategy;
+    use commonware_utils::{faults::N5f1Nullification, iter::NonEmpty, ordered::Set};
+    use rand_core::CryptoRng;
 
-    impl_certificate_bls12381_threshold!(NullifySubject, Namespace, NullifyFaults);
+    /// BLS12-381 threshold nullification scheme at the `2f+1` quorum.
+    #[derive(Clone, Debug)]
+    pub struct Scheme<P: PublicKey, V: Variant>(Generic<P, V, Namespace>);
+
+    impl<P: PublicKey, V: Variant> Scheme<P, V> {
+        /// Creates a signer from the nullification sharing and the local share.
+        ///
+        /// Returns `None` if the share does not belong to the sharing.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the sharing does not have one share per participant at the `2f+1`
+        /// threshold, or if the share index is not a participant.
+        pub fn signer(
+            namespace: &[u8],
+            participants: Set<P>,
+            sharing: Sharing<V>,
+            share: Share,
+        ) -> Option<Self> {
+            Generic::signer::<N5f1Nullification>(namespace, participants, sharing, share).map(Self)
+        }
+
+        /// Creates a verifier that can check and recover nullify shares.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the sharing does not have one share per participant at the `2f+1`
+        /// threshold.
+        pub fn verifier(namespace: &[u8], participants: Set<P>, sharing: Sharing<V>) -> Self {
+            Self(Generic::verifier::<N5f1Nullification>(
+                namespace,
+                participants,
+                sharing,
+            ))
+        }
+
+        /// Creates a verifier that only checks recovered nullifications.
+        pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
+            Self(Generic::certificate_verifier(namespace, identity))
+        }
+
+        /// Returns the group identity of the nullification sharing.
+        pub fn identity(&self) -> &V::Public {
+            self.0.identity()
+        }
+
+        /// Returns the local share if this instance can sign.
+        pub const fn share(&self) -> Option<&Share> {
+            self.0.share()
+        }
+
+        /// Returns the scheme that certifies checkpoints with the same key material, under the
+        /// aggregation namespace `namespace`.
+        ///
+        /// A signer signs checkpoints with its share, a verifier also verifies individual
+        /// checkpoint shares, and a certificate verifier verifies recovered certificates.
+        pub fn checkpoint(&self, namespace: &[u8]) -> checkpoint::Scheme<P, V> {
+            match &self.0 {
+                Generic::Signer {
+                    participants,
+                    polynomial,
+                    share,
+                    ..
+                } => checkpoint::Scheme::signer(
+                    namespace,
+                    participants.clone(),
+                    polynomial.clone(),
+                    share.clone(),
+                )
+                .expect("a signer's share belongs to its sharing"),
+                Generic::Verifier {
+                    participants,
+                    polynomial,
+                    ..
+                } => checkpoint::Scheme::verifier(
+                    namespace,
+                    participants.clone(),
+                    polynomial.clone(),
+                ),
+                Generic::CertificateVerifier { identity, .. } => {
+                    checkpoint::Scheme::certificate_verifier(namespace, *identity)
+                }
+            }
+        }
+    }
+
+    impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
+        type Subject<'a, D: Digest> = NullifySubject;
+        type Faults = N5f1Nullification;
+        type PublicKey = P;
+        type Certificate = threshold::Certificate<V>;
+
+        fn verify_certificate<R, D>(
+            &self,
+            rng: &mut R,
+            subject: NullifySubject,
+            certificate: &Self::Certificate,
+            _strategy: &impl Strategy,
+        ) -> bool
+        where
+            R: CryptoRng,
+            D: Digest,
+        {
+            self.0.verify_certificate(rng, subject, certificate)
+        }
+
+        fn verify_certificates<'a, R, D, I>(
+            &self,
+            rng: &mut R,
+            certificates: NonEmpty<I>,
+            strategy: &impl Strategy,
+        ) -> bool
+        where
+            R: CryptoRng,
+            D: Digest,
+            I: Iterator<Item = (NullifySubject, &'a Self::Certificate)>,
+        {
+            self.0.verify_certificates(rng, certificates, strategy)
+        }
+
+        fn is_batchable() -> bool {
+            Generic::<P, V, Namespace>::is_batchable()
+        }
+
+        fn max_certificate_size(_participants: u32) -> usize {
+            <Self::Certificate as commonware_codec::FixedSize>::SIZE
+        }
+
+        fn certificate_codec_config(&self) {}
+
+        fn certificate_codec_config_unbounded() {}
+    }
+
+    impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
+        type Signature = V::Signature;
+
+        fn me(&self) -> Option<Membership> {
+            self.0.signer_index().map(Membership::Signer)
+        }
+
+        fn participants(&self) -> &Set<P> {
+            self.0.participants()
+        }
+
+        fn sign<D: Digest>(&self, subject: NullifySubject) -> Option<Attestation<Self>> {
+            self.0.sign(subject)
+        }
+
+        fn verify_attestation<R, D>(
+            &self,
+            _rng: &mut R,
+            subject: NullifySubject,
+            attestation: &Attestation<Self>,
+            _strategy: &impl Strategy,
+        ) -> bool
+        where
+            R: CryptoRng,
+            D: Digest,
+        {
+            self.0.verify_attestation(subject, attestation)
+        }
+
+        fn verify_attestations<R, D, I>(
+            &self,
+            rng: &mut R,
+            subject: NullifySubject,
+            attestations: I,
+            strategy: &impl Strategy,
+        ) -> Verification<Self>
+        where
+            R: CryptoRng,
+            D: Digest,
+            I: IntoIterator<Item = Attestation<Self>>,
+            I::IntoIter: Send,
+        {
+            self.0
+                .verify_attestations(rng, subject, attestations, strategy)
+        }
+
+        fn optimistic_assemble<'a, R, D, I, J>(
+            &self,
+            rng: &mut R,
+            subject: NullifySubject,
+            pending: I,
+            verified: J,
+            strategy: &impl Strategy,
+        ) -> Result<Self::Certificate, Verification<Self>>
+        where
+            R: CryptoRng,
+            D: Digest,
+            I: IntoIterator<Item = Attestation<Self>>,
+            I::IntoIter: ExactSizeIterator + Send,
+            J: IntoIterator<Item = &'a Attestation<Self>>,
+            J::IntoIter: Send,
+        {
+            certificate::optimistic_assemble::<Self, _, D, _, _>(
+                self, rng, subject, pending, verified, strategy,
+            )
+        }
+
+        fn assemble<I>(
+            &self,
+            attestations: NonEmpty<I>,
+            strategy: &impl Strategy,
+        ) -> Result<Self::Certificate, AssemblyError>
+        where
+            I: Iterator<Item = Attestation<Self>> + Send,
+        {
+            self.0.assemble::<Self, _>(attestations, strategy)
+        }
+
+        fn is_attributable() -> bool {
+            Generic::<P, V, Namespace>::is_attributable()
+        }
+    }
 }
 
 /// A data-availability fault model with a BLS12-381 threshold DA role.
@@ -363,6 +595,19 @@ impl<P: PublicKey, V: Variant, Q: Quorum> Scheme<P, V, Q> {
             signers,
             verifier,
         })
+    }
+}
+
+/// Checkpoint certificates from the committee's nullification key.
+impl<P: PublicKey, V: Variant, Q: Quorum> Generic<Scheme<P, V, Q>> {
+    /// Returns the scheme that certifies [`aggregation`](crate::aggregation) checkpoints with
+    /// this committee's `2f+1` nullification key, under the aggregation namespace `namespace`.
+    ///
+    /// A signer signs checkpoints with its nullification share, a verifier also verifies
+    /// individual shares, and a certificate verifier verifies recovered certificates. See
+    /// [`checkpoint`].
+    pub fn checkpoint(&self, namespace: &[u8]) -> checkpoint::Scheme<P, V> {
+        self.nullify().checkpoint(namespace)
     }
 }
 

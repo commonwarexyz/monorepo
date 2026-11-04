@@ -17,7 +17,7 @@ fn fault_models_match_the_codec_quorums() {
         assert_eq!(Binding::QUORUM, binding.da_quorum_kind());
         for codec in [available, binding] {
             assert_eq!(
-                NullifyFaults::quorum(n) as usize,
+                N5f1Nullification::quorum(n) as usize,
                 codec.nullification_quorum(),
                 "n = {n}"
             );
