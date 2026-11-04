@@ -650,66 +650,72 @@ impl std::fmt::Debug for Groups {
 
 /// Counts one call or job against a group, or against every group for a Wide claim, until the
 /// lease is dropped. An unhomed group with tracked work in flight cannot acquire a home.
-///
-/// With only one group, a claim from a thread with no known domain is not tracked, since there is
-/// no other group to pick and that thread cannot home this one.
 #[derive(Debug)]
-pub(crate) struct Lease {
-    /// The strategy's groups and the thread that made the claim, or `None` when the claim is not
-    /// tracked.
-    claim: Option<(Arc<Groups>, ThreadId)>,
+pub(crate) enum Lease {
+    /// A claim on a strategy's only group from a thread with no known domain. It records nothing,
+    /// since there is no other group to pick and that thread cannot home this one.
+    Untracked,
 
-    /// The leased group, or for a Wide claim the group its work is offered to first.
-    index: usize,
+    /// A claim recorded in the state of every group it counts against.
+    Tracked {
+        /// The strategy's groups.
+        groups: Arc<Groups>,
 
-    /// Whether the claim counts against every group.
-    wide: bool,
+        /// The thread that made the claim.
+        submitter: ThreadId,
 
-    /// Whether the lease holds one of its group's root admissions.
-    admitted: bool,
+        /// The leased group, or for a Wide claim the group its work is offered to first.
+        index: usize,
+
+        /// Whether the claim counts against every group.
+        wide: bool,
+
+        /// Whether the lease holds one of its group's root admissions.
+        admitted: bool,
+    },
 }
 
 impl Lease {
     /// A lease for a claim of `submitter` that the caller has already recorded in `groups`.
     fn tracked(groups: &Arc<Groups>, submitter: ThreadId, index: usize, wide: bool) -> Self {
-        Self {
-            claim: Some((Arc::clone(groups), submitter)),
+        Self::Tracked {
+            groups: Arc::clone(groups),
+            submitter,
             index,
             wide,
             admitted: false,
         }
     }
 
-    /// A lease for an untracked claim on a strategy's only group.
-    const fn untracked() -> Self {
-        Self {
-            claim: None,
-            index: 0,
-            wide: false,
-            admitted: false,
-        }
-    }
-
     /// The leased group's index among the pool's groups.
     pub(crate) const fn group(&self) -> usize {
-        self.index
+        match self {
+            Self::Untracked => 0,
+            Self::Tracked { index, .. } => *index,
+        }
     }
 
     /// Extends this claim to every group while retaining its root admission, if any.
     pub(crate) fn into_wide(mut self) -> Self {
-        if let Some((groups, submitter)) = &self.claim
-            && !self.wide
+        if let Self::Tracked {
+            groups,
+            submitter,
+            index,
+            wide,
+            ..
+        } = &mut self
+            && !*wide
         {
             let tick = groups.ticks.fetch_add(1, Ordering::Relaxed);
-            for (index, group) in groups.groups.iter().enumerate() {
+            for (other, group) in groups.groups.iter().enumerate() {
                 let mut state = group.state.lock();
-                if index == self.index {
+                if other == *index {
                     state.last_used = tick;
                 } else {
                     state.claim(tick, *submitter);
                 }
             }
-            self.wide = true;
+            *wide = true;
         }
         self
     }
@@ -717,25 +723,28 @@ impl Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        let Some((groups, submitter)) = &self.claim else {
-            assert!(
-                !self.admitted,
-                "an untracked lease must hold no root admission"
-            );
+        let Self::Tracked {
+            groups,
+            submitter,
+            index,
+            wide,
+            admitted,
+        } = self
+        else {
             return;
         };
         let groups = &groups.groups;
         {
-            let mut state = groups[self.index].state.lock();
-            if self.admitted {
+            let mut state = groups[*index].state.lock();
+            if *admitted {
                 assert!(state.admitted_roots > 0);
                 state.admitted_roots -= 1;
             }
             state.release(*submitter);
         }
-        if self.wide {
-            for (index, group) in groups.iter().enumerate() {
-                if index != self.index {
+        if *wide {
+            for (other, group) in groups.iter().enumerate() {
+                if other != *index {
                     group.state.lock().release(*submitter);
                 }
             }
@@ -1011,11 +1020,11 @@ impl Groups {
     /// Claims every group for a call that may run on any of them. The lease names the group homed
     /// in the calling thread's domain, or the first group, so the caller can offer its work there
     /// first. Any worker may take the call's work. The lease counts it on every group until the
-    /// call finishes, except in the untracked case described on [`Lease`].
+    /// call finishes, unless it is [`Lease::Untracked`].
     pub(crate) fn wide(self: &Arc<Self>) -> Lease {
         let domain = self.current_domain();
         if !self.must_track(|| domain) {
-            return Lease::untracked();
+            return Lease::Untracked;
         }
         let home = domain.and_then(|domain| {
             self.groups
@@ -1033,7 +1042,7 @@ impl Groups {
     /// Claims an existing placement's group without changing its home.
     pub(crate) fn lease(self: &Arc<Self>, index: usize) -> Lease {
         if !self.must_track(|| self.current_domain()) {
-            return Lease::untracked();
+            return Lease::Untracked;
         }
         let submitter = std::thread::current().id();
         let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
@@ -1122,14 +1131,20 @@ impl Groups {
         if self.groups.len() == 1 {
             return (lease, true);
         }
-        let group = &self.groups[lease.index];
+        let Lease::Tracked {
+            index, admitted, ..
+        } = &mut lease
+        else {
+            unreachable!("a strategy with several groups must track every claim");
+        };
+        let group = &self.groups[*index];
         let mut state = group.state.lock();
         if state.admitted_roots == group.width {
             return (lease, false);
         }
         assert!(state.admitted_roots < group.width);
         state.admitted_roots += 1;
-        lease.admitted = true;
+        *admitted = true;
         (lease, true)
     }
 
@@ -1210,7 +1225,7 @@ mod tests {
         let again = groups
             .local()
             .expect("the homed group must be reused while busy");
-        assert_eq!(again.index, lease.index);
+        assert_eq!(again.group(), lease.group());
         assert_eq!(leased(&groups, &lease).state.lock().in_flight(), 2);
 
         // Both claims are released.
@@ -1231,7 +1246,7 @@ mod tests {
         let a = groups.local().unwrap();
         Groups::fake_domain(Some(1));
         let b = groups.local().unwrap();
-        assert_ne!(a.index, b.index);
+        assert_ne!(a.group(), b.group());
 
         // A third domain has no home, even after the existing groups become idle.
         Groups::fake_domain(Some(2));
@@ -1329,7 +1344,8 @@ mod tests {
             [first.join().unwrap(), second.join().unwrap()]
         });
         assert_eq!(
-            leases[0].index, leases[1].index,
+            leases[0].group(),
+            leases[1].group(),
             "both callers must share one group"
         );
         let homes = groups
@@ -1354,7 +1370,7 @@ mod tests {
         // The caller's own Local call homes the second group in its domain.
         Groups::fake_domain(Some(0));
         let local = groups.local().unwrap();
-        let homed = local.index;
+        let homed = local.group();
         assert_eq!(homed, 1);
 
         // A Wide claim from that domain counts once against every group and names the home first.
@@ -1405,10 +1421,11 @@ mod tests {
         // The submitter's own Local call keeps its root's wakeup preference at home.
         Groups::fake_domain(Some(0));
         let own = groups.local().unwrap();
-        let home = own.index;
+        let home = own.group();
         let (job, _) = groups.root();
         assert_eq!(
-            job.index, home,
+            job.group(),
+            home,
             "the submitter's own work must keep the wakeup preference at home"
         );
         drop(job);
@@ -1421,12 +1438,13 @@ mod tests {
                     Groups::fake_domain(Some(0));
                     let (away, _) = groups.root();
                     assert_ne!(
-                        away.index, home,
+                        away.group(),
+                        home,
                         "another caller's work must redirect the wakeup preference"
                     );
                     drop(away);
                     let lease = groups.local().unwrap();
-                    assert_eq!(lease.index, home);
+                    assert_eq!(lease.group(), home);
                     lease
                 })
                 .join()
@@ -1436,14 +1454,16 @@ mod tests {
         // The other thread's Local call redirects this thread's root until it finishes.
         let (job, _) = groups.root();
         assert_ne!(
-            job.index, home,
+            job.group(),
+            home,
             "the other caller's work must redirect this wakeup preference"
         );
         drop(job);
         drop(other);
         let (job, _) = groups.root();
         assert_eq!(
-            job.index, home,
+            job.group(),
+            home,
             "the wakeup preference must return home once the other work drains"
         );
         drop(job);
@@ -1470,10 +1490,11 @@ mod tests {
 
         // A job without a known domain takes the other, idle group.
         Groups::fake_domain(None);
-        let busy_index = job.index;
+        let busy_index = job.group();
         let (other, _) = groups.root();
         assert_ne!(
-            other.index, busy_index,
+            other.group(),
+            busy_index,
             "an unknown domain must take the idle group"
         );
         drop(other);
