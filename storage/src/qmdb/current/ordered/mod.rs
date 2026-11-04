@@ -46,7 +46,6 @@ pub mod tests {
                 proof::{RangeProof, constant::OperationProof},
                 tests::apply_random_ops,
             },
-            floor::Proportional,
             store::tests::{TestKey, TestValue},
         },
         translator::OneCap,
@@ -109,7 +108,7 @@ pub mod tests {
         let merkleized = db
             .new_batch()
             .write(k1, Some(v1.clone()))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
@@ -132,7 +131,8 @@ pub mod tests {
         let merkleized = db
             .new_batch()
             .write(k1, None)
-            .merkleize(&db, Some(metadata.clone()), &mut Proportional)
+            .with_metadata(Some(metadata.clone()))
+            .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
@@ -147,11 +147,7 @@ pub mod tests {
 
         // Repeated delete of same key should fail (key already deleted).
         assert!(db.get(&k1).await.unwrap().is_none());
-        let merkleized = db
-            .new_batch()
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
+        let merkleized = db.new_batch().merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         let root3 = db.root();
@@ -168,7 +164,7 @@ pub mod tests {
         let merkleized = db
             .new_batch()
             .write(k1, Some(v1))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
@@ -203,7 +199,7 @@ pub mod tests {
             let merkleized = db
                 .new_batch()
                 .write(k, Some(v1))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -228,7 +224,7 @@ pub mod tests {
             let merkleized = db
                 .new_batch()
                 .write(k, Some(v2))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -354,11 +350,7 @@ pub mod tests {
             let db = apply_random_ops::<F, TestDb<F, C, V>>(200, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let merkleized = db
-                .new_batch()
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
+            let merkleized = db.new_batch().merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
@@ -412,11 +404,7 @@ pub mod tests {
             let db = apply_random_ops::<F, TestDb<F, C, V>>(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let merkleized = db
-                .new_batch()
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
+            let merkleized = db.new_batch().merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
@@ -499,7 +487,7 @@ pub mod tests {
                 let merkleized = db
                     .new_batch()
                     .write(k, Some(v))
-                    .merkleize(&db, None, &mut Proportional)
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 db = db.apply_batch(merkleized).await.unwrap();
@@ -583,7 +571,7 @@ pub mod tests {
             let merkleized = db
                 .new_batch()
                 .write(key_exists_1, Some(v1))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -615,7 +603,7 @@ pub mod tests {
             let merkleized = db
                 .new_batch()
                 .write(key_exists_2, Some(v2))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -658,7 +646,7 @@ pub mod tests {
                 .new_batch()
                 .write(key_exists_1, None)
                 .write(key_exists_2, None)
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();

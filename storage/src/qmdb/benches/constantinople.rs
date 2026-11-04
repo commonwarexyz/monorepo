@@ -45,7 +45,7 @@ use commonware_storage::{
     qmdb::{
         any::{FixedConfig, batch::Slot},
         current::FixedConfig as CurrentFixedConfig,
-        floor::{Bounded, Proportional},
+        floor::Bounded,
     },
     translator::EightCap,
 };
@@ -263,7 +263,7 @@ macro_rules! run_pipeline {
         for i in 0..args.num_keys {
             batch = batch.write(key(i), Some(Sha256::hash(&[&rng.next_u32().to_be_bytes()])));
         }
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let mut db = db.commit().await.unwrap();
 
@@ -273,7 +273,7 @@ macro_rules! run_pipeline {
             for (k, v) in gen_muts(&mut rng, args.num_updates, args.num_keys) {
                 batch = batch.write(k, Some(v));
             }
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
         }
         let db = db.commit().await.unwrap();
@@ -294,7 +294,7 @@ macro_rules! run_pipeline {
                 for (k, v) in gen_muts(&mut rng, args.num_updates, args.num_keys) {
                     b = b.write(k, Some(v));
                 }
-                chain.push(b.merkleize(&db, None, &mut Proportional).await.unwrap());
+                chain.push(b.merkleize(&db).await.unwrap());
             }
 
             let reads = gen_muts(&mut rng, args.num_reads, args.num_keys);
@@ -337,12 +337,9 @@ macro_rules! run_pipeline {
             black_box(&values);
             let t_load = start.elapsed();
             let merkleized = match args.policy.fixed(distinct_keys, args.num_updates) {
-                None => staged
-                    .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
-                    .await
-                    .unwrap(),
+                None => staged.merkleize(slots, Vec::new(), &db).await.unwrap(),
                 Some(mut bounded) => staged
-                    .merkleize(slots, Vec::new(), None, &db, &mut bounded)
+                    .merkleize_with(slots, Vec::new(), &db, &mut bounded)
                     .await
                     .unwrap(),
             };
