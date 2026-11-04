@@ -12,7 +12,7 @@
 //! expires it, since expiry must cancel kernel work on the owner's ring.
 //! Times are nanoseconds since the driver's creation. A node fires at its
 //! deadline rounded up to [`RES`], never before it, and one expiry pass fires
-//! or refiles at most [`BUDGET`] nodes.
+//! at most [`BUDGET`] nodes and refiles a bounded multiple of that.
 
 use super::{
     waiter::WaiterId,
