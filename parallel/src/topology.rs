@@ -1,34 +1,44 @@
-//! Last-level-cache topology and the groups a strategy splits its threads into.
+//! Places a call's work on workers that share a last-level cache with the calling thread.
 //!
-//! Exchanging cache lines costs far more between threads in different last-level cache (LLC)
-//! domains, and the scheduler places threads without knowing which of them share data. A strategy
-//! therefore splits the workers of its one pool into groups sized to the widest domain.
+//! Threads in different last-level cache (LLC) domains pay far more to exchange cache lines than
+//! threads in one domain. The scheduler places threads without knowing which of them share data.
 //!
-//! A pool filling all allowed CPUs across multiple equally sized domains, each allowing at least
-//! two CPUs, gives each group one domain at startup. Otherwise the first local call can give an
-//! idle group a permanent home in a domain with enough allowed CPUs for its workers. Groups homed
-//! on demand use one fewer worker than the widest domain when it allows six CPUs or more.
+//! A strategy owns one pool and splits its workers into groups sized to the widest domain. Allowed
+//! CPUs are the CPUs the building thread may use, and the widest domain is the one with the most of
+//! them. A call places its work on one group as local work, or on the whole pool as wide work.
 //!
-//! Each worker's requested mask stays within its inherited mask. Fixed groups request their masks
-//! before running jobs. Groups homed on demand apply the request asynchronously. The operating
-//! system may reject either request, so placement remains advisory.
+//! A group's home is the domain its workers request to run in. Homes are fixed when the pool has
+//! one worker for every allowed CPU and those CPUs split evenly across two or more domains, each
+//! allowing at least two CPUs. Every group then takes one of those domains as its home at startup.
 //!
-//! A caller's local work first tries to use or establish a home in the caller's domain, then falls
-//! back to the least loaded full-width group. Only that group's workers take the work. Work placed
-//! on the whole pool runs on any worker and is offered first to the caller's home group.
+//! Otherwise groups start without a home. A group without a home is a floating group. A full group
+//! then has one fewer worker than the widest domain allows, if that domain allows six CPUs or more,
+//! which leaves room for the caller and other threads. The first local call from a domain can give
+//! an idle group a permanent home there, when that domain allows at least as many CPUs as a full
+//! group has workers.
 //!
-//! A local call may temporarily restrict the calling thread to the selected group's home domain,
-//! within the thread's current mask. Workers of any `ThreadPool` keep their masks. The caller
-//! requests its original mask on return or unwind, which writes that mask explicitly with the
-//! limits described below. These affinity changes are best effort.
+//! Every mask a worker requests stays within the mask it inherited. Groups with fixed homes request
+//! their masks before running jobs. Groups homed on demand apply their requests asynchronously. The
+//! operating system may reject any request, so placement is advisory.
 //!
-//! All groups share the pool's fixed worker budget, however many domains have callers. When
-//! that budget is not a multiple of the group width, the last group is narrower. Local work
-//! there would run narrower than the policy planned, so the group is never homed or leased for
-//! local work and takes only work placed on the whole pool.
+//! Local work first tries to use or establish a home in the caller's domain. If that fails, it
+//! falls back to the least loaded full group. The call leases that group until it returns,
+//! and only that group's workers take its work. Wide work runs on any worker. It is offered first
+//! to the group homed in the caller's domain.
 //!
-//! These mask requests illustrate two homed groups and a narrower floating group. All 24 host
-//! CPUs are initially allowed, so the floating group's mask is the eight CPUs outside the homes.
+//! A local call may temporarily restrict the calling thread to the chosen group's home domain,
+//! within the thread's current mask. Workers of any `ThreadPool` keep their masks. On return or
+//! unwind, the caller requests its original mask back. That request writes the mask explicitly, so
+//! the kernel limits described below apply. These affinity changes are best effort.
+//!
+//! All groups share the pool's fixed worker budget, however many domains have callers. When that
+//! budget is not a multiple of the group width, the last group is narrower. Local work there would
+//! run narrower than the policy planned. That group is therefore never homed or leased for local
+//! work, and it takes only wide work.
+//!
+//! The diagram below shows the mask requests for two homed groups and a narrower floating group.
+//! The host has 24 CPUs, all allowed at first, so the floating group's mask is the eight CPUs
+//! outside the two homes.
 //!
 //! ```text
 //! host: three eight-CPU LLCs     strategy(16): one pool, groups of 7 + 7 + 2
