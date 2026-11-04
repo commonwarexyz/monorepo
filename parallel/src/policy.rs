@@ -69,9 +69,12 @@
 //! planning width within an entry, and the key includes the strategy's parallelism override.
 //!
 //! Timing is coarse, with one wall-clock sample per measured call. A parallel sample includes any
-//! queueing behind other work on a group, so contention pushes the parallel estimate up and steers
-//! concurrent callers back toward serial. When contention inflates the projection past the budget,
-//! the same pressure instead biases the entry to parallel until the contention subsides.
+//! queueing behind other work on a group, since the caller waits through it. Contention therefore
+//! pushes the parallel estimate up and steers concurrent callers back toward serial. The serial
+//! projection inherits that queueing even though a serial run never waits on the pool, so once
+//! contention lifts the projection past the budget it gates serial out until the queue drains.
+//! One wall-clock sample cannot separate queueing from a larger input within the bucket, and the
+//! gate exists to catch the larger input (#5548).
 //!
 //! Fallible operations record samples only on success. Error paths often abort early, and recording
 //! their short wall time would let garbage inputs drag an estimate down and unlock a serial sample
