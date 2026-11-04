@@ -1,11 +1,22 @@
 //! BLS12-381 certificate scheme implementations.
 //!
-//! This module provides two signing scheme implementations:
+//! This module provides three signing scheme implementations:
 //!
 //! - [`multisig`]: Multi-signature scheme with attributable signatures
 //! - [`threshold`]: Threshold signature scheme with non-attributable signatures
+//! - [`sas`]: Synchronized aggregate signature scheme with attributable signatures
 
+commonware_macros::stability_mod!(ALPHA, mod claims);
 pub mod multisig;
+// Modules containing #[macro_export] macros must use verbose cfg.
+#[cfg(not(any(
+    commonware_stability_BETA,
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // ALPHA
+pub mod sas;
 pub mod threshold;
 
 use crate::{
