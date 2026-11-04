@@ -21,7 +21,7 @@ use crate::{
         },
         bitmap::{Candidates, Shared, fill_from},
         chain::Bounds,
-        current::{db::compute_ops_root_witness, grafting},
+        current::{db::compute_ops_root_witness, grafting, proof::OpsRootWitness},
         floor::Policy,
         operation::Key,
     },
@@ -239,6 +239,32 @@ where
     bitmap_parent: BitmapBatch<N>,
 }
 
+/// What one batch changed in the current-state commitment: the bitmap chunks it wrote and the
+/// grafted nodes it appended or overwrote, with the canonical root and witness they produce.
+///
+/// A delta is relative to the batch's immediate parent. Replaying a chain's deltas in order onto
+/// the state the chain was built on yields each batch's chunks and grafted nodes, and anything a
+/// delta omits is unchanged. A batch from [`super::db::Db::to_batch`] has no chunks or grafted
+/// nodes in its delta.
+///
+/// Chunks below [`Self::pruned_chunks`] never appear. They are all zero, so each one's grafted
+/// leaf equals the operations-tree subtree root it covers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Delta<F: Graftable, D: Digest, const N: usize> {
+    /// Canonical current root at the batch's tip.
+    pub root: D,
+    /// Witness binding the operations root to `root`.
+    pub witness: OpsRootWitness<F, D>,
+    /// Bitmap chunks below this index were pruned when the batch was merkleized.
+    pub pruned_chunks: u64,
+    /// Every bitmap chunk the batch wrote, including chunks it completed and its last chunk, in
+    /// ascending chunk index. Every index is at least `pruned_chunks`.
+    pub chunks: Vec<(u64, [u8; N])>,
+    /// Every grafted node the batch appended or overwrote, in ascending operations-tree
+    /// position.
+    pub grafted_nodes: Vec<(Position<F>, D)>,
+}
+
 /// A speculative batch of operations whose root digest has been computed, in contrast to
 /// [`UnmerkleizedBatch`].
 ///
@@ -266,8 +292,14 @@ pub struct MerkleizedBatch<F: Graftable, D: Digest, U: update::Update, const N: 
     /// COW bitmap state (for use as a parent in speculative batches).
     pub(crate) bitmap: BitmapBatch<N>,
 
-    /// The canonical root (ops root + grafted root + partial chunk).
+    /// The canonical root, including the ops, grafted, pending, and partial contributions.
     pub(crate) canonical_root: D,
+
+    /// Witness computed from the same snapshot as `canonical_root`.
+    pub(crate) ops_root_witness: OpsRootWitness<F, D>,
+
+    /// Physical bitmap pruning boundary captured with the root.
+    pruned_chunks: u64,
 }
 
 impl<F, H, U, const N: usize, S: Strategy> UnmerkleizedBatch<F, H, U, N, S>
@@ -857,7 +889,7 @@ where
     let graftable_overlay = grafting::graftable_chunks::<F>(*overlay_ops_leaves, grafting_height)
         .min(new_complete_chunks as u64) as usize;
     let graftable_parent = *grafted_parent.leaves() as usize;
-    let pruned_chunks = bitmap_parent.pruned_chunks();
+    let pruned_chunks = overlay.parent.pruned_chunks;
     assert!(
         pruned_chunks <= graftable_parent
             && graftable_parent <= graftable_overlay
@@ -929,20 +961,22 @@ where
     let grafted_storage =
         grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting_height, &ops_tree);
 
-    let canonical_root = compute_ops_root_witness::<F, H, _, _, N>(
+    let ops_root_witness = compute_ops_root_witness::<F, H, _, _, N>(
         &bitmap_batch,
         &grafted_storage,
         overlay_ops_leaves,
         inner.bounds.inactivity_floor,
     )
-    .await?
-    .root::<H>(&ops_root);
+    .await?;
+    let canonical_root = ops_root_witness.root::<H>(&ops_root);
 
     Ok(Arc::new(MerkleizedBatch {
         inner,
         grafted: grafted_batch,
         bitmap: bitmap_batch,
         canonical_root,
+        ops_root_witness,
+        pruned_chunks: pruned_chunks as u64,
     }))
 }
 
@@ -1084,6 +1118,69 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
         self.inner.root()
     }
 
+    /// Return the cached witness binding [`Self::ops_root`] to [`Self::root`].
+    ///
+    /// This value remains valid when the database advances or the batch becomes stale.
+    pub const fn ops_root_witness(&self) -> &OpsRootWitness<F, D> {
+        &self.ops_root_witness
+    }
+
+    /// Return this batch's [`Delta`].
+    ///
+    /// It copies state the batch owns, so it returns the same value after the database advances or
+    /// prunes, the batch becomes stale, or its ancestors are dropped.
+    pub fn delta(&self) -> Delta<F, D, N> {
+        // Both lists are sorted so equal deltas compare and encode identically regardless of the
+        // hash maps' iteration order.
+        let mut chunks: Vec<(u64, [u8; N])> = match &self.bitmap {
+            BitmapBatch::Base(_) => Vec::new(),
+            BitmapBatch::Layer(layer) => layer
+                .overlay
+                .chunks
+                .iter()
+                .map(|(&index, &chunk)| (index as u64, chunk))
+                .collect(),
+        };
+        chunks.sort_unstable_by_key(|(index, _)| *index);
+        let mut grafted_nodes: Vec<(Position<F>, D)> = self
+            .grafted
+            .local_nodes()
+            .map(|(pos, digest)| {
+                (
+                    grafting::grafted_to_ops_pos::<F>(pos, grafting::height::<N>()),
+                    digest,
+                )
+            })
+            .collect();
+        grafted_nodes.sort_unstable_by_key(|(pos, _)| *pos);
+        Delta {
+            root: self.canonical_root,
+            witness: self.ops_root_witness.clone(),
+            pruned_chunks: self.pruned_chunks,
+            chunks,
+            grafted_nodes,
+        }
+    }
+
+    /// Return the operations-tree frontier at this batch's first operation.
+    ///
+    /// It has the staleness and retention requirements of
+    /// [`any::batch::MerkleizedBatch::pinned_nodes`], so read it before the batch's changes are
+    /// flushed. With the batch's operations, the nodes verify against [`Self::ops_root`].
+    pub fn ops_pinned_nodes<E, C, I, H>(
+        &self,
+        db: &super::db::Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Vec<D>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+        Operation<F, U>: Codec,
+    {
+        self.inner.pinned_nodes(&db.any)
+    }
+
     /// Return the [`Bounds`] of the batch.
     pub fn bounds(&self) -> &Bounds<F, D> {
         self.inner.bounds()
@@ -1092,9 +1189,9 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
     /// Return the operations this batch appends to the ops log and the location of the first.
     ///
     /// Delegates to the wrapped ops-level batch. The bitmap state contributes to the
-    /// canonical root but appends no log operations. There are no matching proof or
-    /// pinned-node methods: an ops-level proof verifies only against [`Self::ops_root`],
-    /// never the grafted [`Self::root`] that blocks commit to.
+    /// canonical root but appends no log operations. The operations and
+    /// [`Self::ops_pinned_nodes`] verify against [`Self::ops_root`], and
+    /// [`Self::ops_root_witness`] binds that root to the canonical [`Self::root`].
     pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, U>>>) {
         self.inner.operations()
     }
@@ -1253,6 +1350,8 @@ where
             grafted,
             bitmap: BitmapBatch::Base(Arc::clone(&self.any.bitmap)),
             canonical_root: self.root,
+            ops_root_witness: self.ops_root_witness.clone(),
+            pruned_chunks: self.any.bitmap.pruned_chunks() as u64,
         })
     }
 }
@@ -1260,12 +1359,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{mmb, mmr, utils::detached::block_strategy};
-    use commonware_cryptography::Sha256;
+    use crate::{
+        mmb, mmr,
+        qmdb::{
+            current::{tests::fixed_config, unordered::fixed},
+            floor::{Hold, Proportional},
+        },
+        translator::OneCap,
+        utils::detached::block_strategy,
+    };
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_parallel::{Rayon, mocks::Explorer};
+    use commonware_parallel::{Rayon, Sequential, mocks::Explorer};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, bitmap::Prunable as BitMap};
     use std::{
+        collections::BTreeMap,
         future::Future as _,
         task::Context as TaskContext,
         time::{Duration, Instant},
@@ -1926,5 +2035,371 @@ mod tests {
 
         // Every reconstructed layer must still cache the original shared terminal.
         assert!(Arc::ptr_eq(result.shared(), &shared));
+    }
+
+    type TestDb<F, const N: usize> =
+        fixed::Db<F, deterministic::Context, Digest, Digest, Sha256, OneCap, N, Sequential>;
+
+    /// A mirror built only from published deltas: bitmap chunks by chunk index and grafted
+    /// nodes by operations-tree position.
+    struct Published<F: Graftable, const N: usize> {
+        chunks: BTreeMap<u64, [u8; N]>,
+        nodes: BTreeMap<Position<F>, Digest>,
+    }
+
+    impl<F: Graftable, const N: usize> Published<F, N> {
+        /// Seed a mirror with the database's unpruned bitmap chunks and grafted nodes.
+        fn from_db(db: &TestDb<F, N>) -> Self {
+            let bitmap = db.bitmap();
+            let chunks = (bitmap.pruned_chunks() as u64..bitmap.len().div_ceil((N * 8) as u64))
+                .map(|idx| (idx, bitmap.get_chunk(idx as usize)))
+                .collect();
+            let nodes = (0..*db.grafted_tree.size())
+                .filter_map(|pos| {
+                    db.grafted_tree.get_node(Position::new(pos)).map(|digest| {
+                        (
+                            grafting::grafted_to_ops_pos::<F>(
+                                Position::new(pos),
+                                grafting::height::<N>(),
+                            ),
+                            digest,
+                        )
+                    })
+                })
+                .collect();
+            Self { chunks, nodes }
+        }
+
+        /// Overwrite the mirror's entry for every chunk and grafted node in a delta.
+        fn apply(&mut self, delta: &Delta<F, Digest, N>) {
+            self.chunks.extend(delta.chunks.iter().copied());
+            self.nodes.extend(delta.grafted_nodes.iter().copied());
+        }
+
+        /// Check `delta` and the mirror against `db`. The database must be at the state that
+        /// produced `delta`.
+        fn check(&self, db: &TestDb<F, N>, delta: &Delta<F, Digest, N>) {
+            // The delta's root, witness, and pruning boundary describe the database's state.
+            assert_eq!(delta.root, db.root());
+            assert!(delta.witness.verify::<Sha256>(&db.ops_root(), &db.root()));
+            assert_eq!(delta.pruned_chunks, db.bitmap().pruned_chunks() as u64);
+
+            // The delta's lists are canonical: ascending, without repeats, and never below
+            // the pruning boundary.
+            assert!(delta.chunks.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            assert!(
+                delta
+                    .chunks
+                    .iter()
+                    .all(|(idx, _)| *idx >= delta.pruned_chunks)
+            );
+            assert!(
+                delta
+                    .grafted_nodes
+                    .windows(2)
+                    .all(|pair| pair[0].0 < pair[1].0)
+            );
+
+            // Every unpruned chunk in the mirror matches the database's bitmap.
+            let bitmap = db.bitmap();
+            let chunks = bitmap.len().div_ceil((N * 8) as u64) as usize;
+            for idx in bitmap.pruned_chunks()..chunks {
+                assert_eq!(self.chunks.get(&(idx as u64)), Some(&bitmap.get_chunk(idx)));
+            }
+
+            // Every grafted node the database holds is in the mirror at its operations-tree
+            // position.
+            for raw_pos in 0..*db.grafted_tree.size() {
+                let pos = Position::new(raw_pos);
+                if let Some(expected) = db.grafted_tree.get_node(pos) {
+                    let ops_pos = grafting::grafted_to_ops_pos::<F>(pos, grafting::height::<N>());
+                    assert_eq!(self.nodes.get(&ops_pos), Some(&expected));
+                }
+            }
+        }
+    }
+
+    /// Check that a batch's operations, pinned nodes, and proof verify against its operations
+    /// root, as a consumer of the published frontier would.
+    fn check_frontier<F: Graftable, const N: usize>(
+        batch: &MerkleizedBatch<
+            F,
+            Digest,
+            update::Unordered<Digest, any::value::FixedEncoding<Digest>>,
+            N,
+            Sequential,
+        >,
+        db: &TestDb<F, N>,
+    ) {
+        let (start, operations) = batch.operations();
+        let proof = batch.inner.proof(&db.any).unwrap();
+        let pins = batch.ops_pinned_nodes(db).unwrap();
+        assert!(crate::qmdb::verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &proof,
+            start,
+            &operations,
+            &pins,
+            &batch.ops_root(),
+        ));
+    }
+
+    /// Replay three rounds of rewrites and a reopen into a mirror, checking it against the
+    /// database at every boundary.
+    async fn replay<F: Graftable, const N: usize>(ctx: deterministic::Context) {
+        // A batch at the database's own state has an empty delta, and a mirror seeded from the
+        // database matches it.
+        let mut db = TestDb::<F, N>::init(
+            ctx.child("storage"),
+            fixed_config::<OneCap>("publication"),
+            None,
+        )
+        .await
+        .unwrap();
+        let initial = db.to_batch();
+        let delta = initial.delta();
+        assert!(delta.chunks.is_empty());
+        assert!(delta.grafted_nodes.is_empty());
+        let mut published = Published::from_db(&db);
+        published.check(&db, &delta);
+
+        // Each round writes more than two chunks of operations, and every round after the first
+        // supersedes the previous round's writes, so deltas clear bits in earlier chunks as
+        // well as setting new ones. Each batch's frontier verifies against its operations root.
+        let count = (N * 16 + 5) as u64;
+        for round in 0..3u64 {
+            let mut batch = db.new_batch();
+            for key in 0..count {
+                batch = batch.write(
+                    Sha256::hash(&[&key.to_be_bytes()]),
+                    Some(Sha256::hash(&[&round.to_be_bytes()])),
+                );
+            }
+            let batch = batch.merkleize(&db, None, &mut Hold).await.unwrap();
+            let delta = batch.delta();
+            check_frontier(&batch, &db);
+            db = db.apply_batch(batch).await.unwrap();
+            published.apply(&delta);
+            published.check(&db, &delta);
+        }
+
+        // Rewriting every key leaves an earlier complete chunk all zero, so its grafted leaf is
+        // the operations-tree subtree root (the zero-chunk identity). The mirror must hold that
+        // root in place of the nonzero-chunk leaf an earlier round published.
+        let zero = published
+            .chunks
+            .iter()
+            .find(|(idx, chunk)| **idx < db.bitmap().complete_chunks() as u64 && **chunk == [0; N])
+            .map(|(&idx, _)| idx)
+            .expect("a complete chunk must be all zero after every key is rewritten");
+        let pos = F::subtree_root_position(
+            merkle::Location::new(zero * (N * 8) as u64),
+            grafting::height::<N>(),
+        );
+        let raw = db.any.log.merkle.get_node(pos).await.unwrap().unwrap();
+        assert_eq!(published.nodes.get(&pos), Some(&raw));
+
+        // Reopening rebuilds the same root and witness, and the mirror matches the reopened
+        // database.
+        let root = db.root();
+        let witness = db.ops_root_witness().clone();
+        db = db.sync().await.unwrap();
+        drop(db);
+        let db = TestDb::<F, N>::init(
+            ctx.child("reopen"),
+            fixed_config::<OneCap>("publication"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.root(), root);
+        let reopened = db.to_batch().delta();
+        assert_eq!(reopened.witness.grafted_root, witness.grafted_root);
+        assert_eq!(
+            reopened.witness.pending_chunk_digest,
+            witness.pending_chunk_digest
+        );
+        assert_eq!(reopened.witness.partial_chunk, witness.partial_chunk);
+        published.check(&db, &reopened);
+        db.destroy().await.unwrap();
+    }
+
+    /// Replaying deltas reproduces the database for both merkle families.
+    #[test_traced]
+    fn test_publication_replays_mmr_and_mmb() {
+        deterministic::Runner::default().start(|ctx| async move {
+            replay::<mmr::Family, 32>(ctx.child("mmr")).await;
+            replay::<mmb::Family, 32>(ctx.child("mmb")).await;
+        });
+    }
+
+    /// A chunk that becomes graftable through operations-tree growth alone still exports its
+    /// grafted leaf.
+    #[test_traced]
+    fn test_publication_pending_chunk_becomes_graftable_without_bitmap_write() {
+        deterministic::Runner::default().start(|ctx| async move {
+            // In MMB, chunk 0 becomes graftable only once the operations tree reaches
+            // `graftable_at` operations.
+            let mut db = TestDb::<mmb::Family, 32>::init(
+                ctx.child("pending"),
+                fixed_config::<OneCap>("pending"),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut published = Published::from_db(&db);
+            let height = grafting::height::<32>();
+            let chunk_root = mmb::Family::subtree_root_position(mmb::Location::new(0), height);
+            let graftable_at = mmb::Family::peak_birth_size(chunk_root, height);
+
+            // With the genesis commit and its own commit, the parent ends two operations short
+            // of `graftable_at`, leaving chunk 0 complete but pending and a partial chunk after
+            // it. Its delta keeps the mirror in step.
+            let mut batch = db.new_batch();
+            for key in 0..graftable_at - 4 {
+                batch = batch.write(
+                    Sha256::hash(&[&key.to_be_bytes()]),
+                    Some(Digest::from([0; 32])),
+                );
+            }
+            let parent = batch.merkleize(&db, None, &mut Hold).await.unwrap();
+            assert_eq!(*parent.bounds().tip.size, graftable_at - 2);
+            assert!(parent.ops_root_witness().pending_chunk_digest.is_some());
+            assert!(parent.ops_root_witness().partial_chunk.is_some());
+            let delta = parent.delta();
+            db = db.apply_batch(Arc::clone(&parent)).await.unwrap();
+            published.apply(&delta);
+            published.check(&db, &delta);
+
+            // Two empty batches add one commit each, so the second reaches `graftable_at` and
+            // grafts chunk 0.
+            let child = parent
+                .new_batch::<Sha256>()
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let transition = child
+                .new_batch::<Sha256>()
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            assert_eq!(*transition.bounds().tip.size, graftable_at);
+            assert!(transition.ops_root_witness().pending_chunk_digest.is_none());
+
+            // The first empty batch's delta keeps the mirror in step.
+            let child_delta = child.delta();
+            db = db.apply_batch(Arc::clone(&child)).await.unwrap();
+            published.apply(&child_delta);
+            published.check(&db, &child_delta);
+
+            // The second writes none of chunk 0's bits, yet its delta carries exactly one
+            // grafted node, the leaf that grafts chunk 0. The mirror has no grafted nodes until
+            // it applies that delta, and then matches the database.
+            let delta = transition.delta();
+            assert!(!delta.chunks.iter().any(|(idx, _)| *idx == 0));
+            assert_eq!(delta.grafted_nodes.len(), 1);
+            assert!(published.nodes.is_empty());
+            db = db.apply_batch(transition).await.unwrap();
+            published.apply(&delta);
+            published.check(&db, &delta);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A saved delta is unchanged after apply, prune, staleness, and dropped ancestors, and a
+    /// batch merkleized after pruning records the new pruning boundary.
+    #[test_traced]
+    fn test_publication_survives_apply_prune_and_stale_ancestors() {
+        deterministic::Runner::default().start(|ctx| async move {
+            // Four rounds of rewriting the same 256 keys under a proportional floor policy
+            // leave enough inactive operations below the floor for a later prune to remove
+            // whole chunks.
+            let mut db = TestDb::<mmr::Family, 32>::init(
+                ctx.child("lifecycle"),
+                fixed_config::<OneCap>("lifecycle"),
+                None,
+            )
+            .await
+            .unwrap();
+            for round in 0..4u64 {
+                let mut batch = db.new_batch();
+                for key in 0..256u64 {
+                    batch = batch.write(
+                        Sha256::hash(&[&key.to_be_bytes()]),
+                        Some(Sha256::hash(&[&round.to_be_bytes()])),
+                    );
+                }
+                let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                db = db.apply_batch(batch).await.unwrap();
+            }
+
+            // Save the deltas of an unapplied parent and child, and seed a mirror, before
+            // anything is pruned.
+            let parent = db
+                .new_batch()
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            let child = parent
+                .new_batch::<Sha256>()
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let saved = child.delta();
+            let saved_parent = parent.delta();
+            let mut published = Published::from_db(&db);
+            assert_eq!(saved.pruned_chunks, 0);
+
+            // The parent's saved delta keeps the mirror in step.
+            db = db.apply_batch(Arc::clone(&parent)).await.unwrap();
+            published.apply(&saved_parent);
+            published.check(&db, &saved_parent);
+
+            // Pruning to the sync boundary removes at least one chunk and leaves both saved
+            // deltas unchanged.
+            let boundary = db.sync_boundary();
+            assert!(*boundary >= 256);
+            db = db.prune(boundary).await.unwrap();
+            assert!(db.bitmap().pruned_chunks() > 0);
+            assert_eq!(child.delta(), saved);
+            assert_eq!(parent.delta(), saved_parent);
+
+            // An empty child of the parent merkleized after pruning has the saved child's root
+            // and witness but records the new pruning boundary. The saved child's frontier still
+            // verifies.
+            let post_prune = parent
+                .new_batch::<Sha256>()
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            assert_eq!(post_prune.root(), child.root());
+            assert_eq!(
+                post_prune.delta().pruned_chunks,
+                db.bitmap().pruned_chunks() as u64,
+            );
+            assert_ne!(post_prune.delta().pruned_chunks, saved.pruned_chunks);
+            assert_eq!(post_prune.ops_root_witness(), child.ops_root_witness());
+            check_frontier(&child, &db);
+
+            // The post-prune child's delta keeps the mirror in step.
+            let post_delta = post_prune.delta();
+            db = db.apply_batch(Arc::clone(&post_prune)).await.unwrap();
+            published.apply(&post_delta);
+            published.check(&db, &post_delta);
+
+            // Once the database moves past the saved child's chain, its pinned nodes are a
+            // stale read, but its delta is unchanged after its ancestors are dropped and the
+            // database is destroyed.
+            let successor = db
+                .new_batch()
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            db = db.apply_batch(successor).await.unwrap();
+            assert!(matches!(child.ops_pinned_nodes(&db), Err(Error::StaleRead)));
+            drop(parent);
+            drop(post_prune);
+            db.destroy().await.unwrap();
+            assert_eq!(child.delta(), saved);
+        });
     }
 }
