@@ -137,10 +137,6 @@ impl<F> Fp2<F> {
 
     /// Stores each lane's components in the representation's own form, as for
     /// [`Field::store_raw`], dropping lanes beyond `elements`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Used by multi-scalar multiplication.")
-    )]
     #[inline(always)]
     pub fn store_raw<const A: u64, S: Simd>(self, simd: S, elements: &mut [[F::Raw; 2]])
     where
@@ -158,10 +154,6 @@ impl<F> Fp2<F> {
 
     /// Loads lane `i` from `elements[i]`, as [`Self::store_raw`] stored it, for at least
     /// [`Field::LANES`] entries.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Used by multi-scalar multiplication.")
-    )]
     #[inline(always)]
     pub fn load_raw<const A: u64, S: Simd>(simd: S, elements: &[&[F::Raw; 2]]) -> Self
     where

@@ -7,6 +7,11 @@
 //! [`pairings`]) hold one element per lane, so they fill every lane and amortize the
 //! conversions at the kernel boundary that single operations pay every time.
 //!
+//! Multiplications by scalars run in constant time, except
+//! [`Space::msm`](commonware_math::algebra::Space::msm), which runs in variable time because its
+//! scalars are public in every intended use (Lagrange coefficients in threshold recovery and
+//! random weights in batch verification).
+//!
 //! Elements arise only from the generators through the group operations, so every element lies
 //! in the subgroup of prime order `r`.
 
@@ -16,14 +21,16 @@ mod kernel;
 mod pairing;
 mod scalar;
 
+use core::num::NonZeroUsize;
 pub use g1::G1;
 pub use g2::G2;
 pub use pairing::{GT, multi_pairing, pairing, pairings};
 pub use scalar::Scalar;
 
-/// Most elements of [`Space::msm`](commonware_math::algebra::Space::msm) that one kernel
-/// multiplies, so that a parallel strategy can split larger inputs.
-const MSM_CHUNK: usize = 64;
+/// Fewest elements of [`Space::msm`](commonware_math::algebra::Space::msm) that a parallel
+/// strategy gives one kernel. Every kernel pays for its own bucket sums and doublings, which
+/// cost about as much as adding a few hundred elements.
+const MSM_BATCH: NonZeroUsize = NonZeroUsize::new(256).unwrap();
 
 /// Decodes a hexadecimal string at compile time.
 const fn hex<const N: usize>(digits: &str) -> [u8; N] {
@@ -159,25 +166,37 @@ macro_rules! group_traits {
         }
 
         impl commonware_math::algebra::Space<$crate::group::Scalar> for $group {
+            /// Returns the sum of the points times their scalars, in variable time.
+            ///
+            /// The scalars must be public, as Lagrange coefficients and batch-verification
+            /// weights are: the running time and memory accesses depend on them. A sequential
+            /// strategy runs one kernel over all points, and a parallel one splits them into
+            /// batches of at least 256 points.
             fn msm(
                 points: &[Self],
                 scalars: &[$crate::group::Scalar],
                 strategy: &impl commonware_parallel::Strategy,
             ) -> Self {
                 let count = points.len().min(scalars.len());
-                strategy.fold(
-                    points[..count]
-                        .chunks($crate::group::MSM_CHUNK)
-                        .zip(scalars[..count].chunks($crate::group::MSM_CHUNK)),
-                    <Self as commonware_math::algebra::Additive>::zero,
-                    |sum, (elements, scalars)| {
-                        sum + &$crate::group::kernel::dispatch($crate::group::kernel::Msm {
-                            elements,
-                            scalars,
-                        })
-                    },
-                    |a, b| a + &b,
-                )
+                let (points, scalars) = (&points[..count], &scalars[..count]);
+                strategy.run_batches(count, $crate::group::MSM_BATCH, 1, |batches| {
+                    batches
+                        .map_collect_vec(
+                            |ranges| ranges,
+                            |range| {
+                                $crate::group::kernel::dispatch($crate::group::kernel::Msm {
+                                    elements: &points[range.clone()],
+                                    scalars: &scalars[range],
+                                    plan: None,
+                                })
+                            },
+                        )
+                        .iter()
+                        .fold(
+                            <Self as commonware_math::algebra::Additive>::zero(),
+                            |sum, batch| sum + batch,
+                        )
+                })
             }
         }
 
@@ -218,13 +237,17 @@ use group_traits;
 #[cfg(test)]
 mod tests {
     use super::{
-        MSM_CHUNK, Scalar,
-        kernel::{Group, Kernel, MAX_LANES, Msm, Multiply, MultiplyEach, Sum},
+        MSM_BATCH, Scalar,
+        kernel::{Group, Kernel, MAX_LANES, Msm, Multiply, MultiplyEach, Plan, Sum, dispatch},
     };
     use crate::core::field::fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49};
     use commonware_math::algebra::CryptoGroup;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{
+        Sequential,
+        mocks::{Explorer, pooled},
+    };
     use commonware_simd::{Operation, Simd, check_consistent};
+    use commonware_utils::NZUsize;
     use std::{fmt::Debug, vec, vec::Vec};
 
     /// Elements of a slice operation, more than the lanes of the widest representation.
@@ -289,28 +312,121 @@ mod tests {
         }
     }
 
-    /// Checks [`Space::msm`] against a sum of multiplications, across chunk boundaries.
-    pub fn check_msm<G: CryptoGroup<Scalar = Scalar>>() {
-        let generator = G::generator();
-        let count = MSM_CHUNK + 3;
-        let (points, scalars) = multiples::<G>(count);
-        for count in [0, 1, 5, count] {
-            let exponent = scalars[..count]
-                .iter()
-                .enumerate()
-                .fold(Scalar::ZERO, |sum, (i, scalar)| {
-                    sum + &(Scalar::from_u64(i as u64 + 1) * scalar)
-                });
-            let expected = generator.clone() * &exponent;
+    /// Returns `count` elements of a multi-scalar multiplication with their discrete logarithms:
+    /// positive multiples of the generator, with identities and repeated elements.
+    fn msm_elements<G: CryptoGroup<Scalar = Scalar>>(count: usize) -> (Vec<G>, Vec<u64>) {
+        let (mut elements, _) = multiples::<G>(count);
+        let mut logarithms: Vec<u64> = (1..=count as u64).collect();
+        for i in (3..count).step_by(10) {
+            elements[i] = G::zero();
+            logarithms[i] = 0;
+        }
+        for i in (9..count).step_by(10) {
+            elements[i] = elements[i - 5].clone();
+            logarithms[i] = logarithms[i - 5];
+        }
+        (elements, logarithms)
+    }
+
+    /// Returns `count` scalars of a multi-scalar multiplication: every third is zero, one, `r - 1`,
+    /// or has mostly zero digits or digits that carry through every window, and the rest are
+    /// full-width values.
+    fn msm_scalars(count: usize) -> Vec<Scalar> {
+        let mut patterns = scalars();
+        patterns.push(Scalar::from_u64(1 << 40));
+        patterns.push(Scalar::from_words([0, 0, 0, 1 << 62]).unwrap());
+        patterns.push(Scalar::from_words([0, 0, 0, 1 << 8]).unwrap() - &Scalar::ONE);
+        patterns.push(Scalar::from_words([u64::MAX, 0, u64::MAX, 0]).unwrap());
+        let mut value = Scalar::from_u64(11);
+        (0..count)
+            .map(|i| {
+                if i % 3 == 0 {
+                    patterns[(i / 3) % patterns.len()]
+                } else {
+                    value = value * &value + &Scalar::from_u64(i as u64);
+                    value
+                }
+            })
+            .collect()
+    }
+
+    /// Returns the sum of the elements with discrete logarithms `logarithms` times `scalars`.
+    fn msm_expected<G: CryptoGroup<Scalar = Scalar>>(logarithms: &[u64], scalars: &[Scalar]) -> G {
+        let exponent = logarithms
+            .iter()
+            .zip(scalars)
+            .fold(Scalar::ZERO, |sum, (logarithm, scalar)| {
+                sum + &(Scalar::from_u64(*logarithm) * scalar)
+            });
+        G::generator() * &exponent
+    }
+
+    /// Checks [`Space::msm`] against a sum of multiplications, across lane boundaries, the
+    /// crossover between methods, every window width, and parallel batches.
+    pub fn check_msm<G: CryptoGroup<Scalar = Scalar> + Group>() {
+        let count = 2 * MSM_BATCH.get() + 5;
+        let (elements, logarithms) = msm_elements::<G>(count);
+        let scalars = msm_scalars(count);
+
+        // A sum of individual multiplications.
+        let products = elements[..12]
+            .iter()
+            .zip(&scalars)
+            .fold(G::zero(), |sum, (element, scalar)| {
+                sum + &(*element * scalar)
+            });
+        assert_eq!(
+            G::msm(&elements[..12], &scalars[..12], &Sequential),
+            products
+        );
+
+        // Sizes around every lane count and around the crossover from Straus's method to
+        // Pippenger's for each lane count.
+        let mut sizes = vec![0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 33];
+        for lanes in [1, 4, 8, 16] {
+            let crossover = (1..count)
+                .find(|&n| matches!(Plan::choose(n, lanes), Plan::Pippenger(_)))
+                .unwrap();
+            sizes.extend([crossover - 1, crossover]);
+        }
+        for n in sizes {
             assert_eq!(
-                G::msm(&points[..count], &scalars[..count], &Sequential),
-                expected
+                G::msm(&elements[..n], &scalars[..n], &Sequential),
+                msm_expected::<G>(&logarithms[..n], &scalars[..n]),
+                "n={n}"
             );
         }
+
+        // The window widths of both methods up to eight bits; wider ones only add buckets.
+        let n = 37;
+        let expected = msm_expected::<G>(&logarithms[..n], &scalars[..n]);
+        let plans = (2..=8)
+            .map(Plan::Straus)
+            .chain((2..=8).map(Plan::Pippenger));
+        for plan in plans {
+            let msm = Msm {
+                elements: &elements[..n],
+                scalars: &scalars[..n],
+                plan: Some(plan),
+            };
+            assert_eq!(dispatch(msm), expected, "{plan:?}");
+        }
+
+        // Batches split across threads.
+        let strategy = Explorer::parallel(&pooled(NZUsize!(2), NZUsize!(3)));
+        assert_eq!(
+            G::msm(&elements, &scalars, &strategy),
+            msm_expected::<G>(&logarithms, &scalars)
+        );
+
         // The longer input is truncated.
         assert_eq!(
-            G::msm(&points[..3], &scalars[..5], &Sequential),
-            G::msm(&points[..3], &scalars[..3], &Sequential)
+            G::msm(&elements[..3], &scalars[..5], &Sequential),
+            G::msm(&elements[..3], &scalars[..3], &Sequential)
+        );
+        assert_eq!(
+            G::msm(&elements[..5], &scalars[..3], &Sequential),
+            G::msm(&elements[..3], &scalars[..3], &Sequential)
         );
     }
 
@@ -389,12 +505,15 @@ mod tests {
         let generator = G::generator();
         let scalars = scalars();
         let elements: Vec<G> = scalars.iter().map(|scalar| generator * scalar).collect();
-        check_consistent(|| {
-            Representations(Msm {
-                elements: &elements,
-                scalars: &scalars,
-            })
-        });
+        for plan in [Plan::Straus(5), Plan::Pippenger(3)] {
+            check_consistent(|| {
+                Representations(Msm {
+                    elements: &elements,
+                    scalars: &scalars,
+                    plan: Some(plan),
+                })
+            });
+        }
         check_consistent(|| Representations(Sum(&elements)));
         let words = scalars[5].to_words();
         check_consistent(|| {

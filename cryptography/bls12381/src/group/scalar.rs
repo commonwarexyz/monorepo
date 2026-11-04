@@ -106,6 +106,36 @@ impl Scalar {
         montgomery::mul(&self.0, &[1, 0, 0, 0], &MODULUS, INV)
     }
 
+    /// Writes the signed digits of the canonical integer in base `2^width`, least significant
+    /// first, one per entry of `digits`.
+    ///
+    /// Each digit lies in `(-2^(width - 1), 2^(width - 1)]`, and the digits weighted by
+    /// `2^(width * i)` sum to the integer. Requires `2 <= width <= 15` and digits covering at
+    /// least `256` bits, so that the integer, below `2^255`, carries nothing out of the last
+    /// digit. Runs in variable time, so the scalar must be public.
+    pub(crate) fn signed_digits(self, width: u32, digits: &mut [i16]) {
+        debug_assert!((2..=15).contains(&width));
+        debug_assert!(digits.len() * width as usize >= 256);
+        let words = self.to_words();
+        let width = width as usize;
+        let half = 1i32 << (width - 1);
+        let mut carry = 0;
+        for (i, digit) in digits.iter_mut().enumerate() {
+            let (word, shift) = (i * width / 64, i * width % 64);
+            let mut bits = 0;
+            if word < WORDS {
+                bits = words[word] >> shift;
+                if shift + width > 64 && word + 1 < WORDS {
+                    bits |= words[word + 1] << (64 - shift);
+                }
+            }
+            let raw = (bits & ((1 << width) - 1)) as i32 + carry;
+            carry = i32::from(raw > half);
+            *digit = (raw - (carry << width)) as i16;
+        }
+        debug_assert_eq!(carry, 0);
+    }
+
     /// Parses the canonical big-endian encoding.
     ///
     /// Returns `None` when the encoded integer is not below the group order.
@@ -627,6 +657,35 @@ mod tests {
             format!("{:?}", Scalar::from_u64(0xabc)),
             "Scalar(0x0000000000000000000000000000000000000000000000000000000000000abc)"
         );
+    }
+
+    #[test]
+    fn signed_digits_reconstruct_value() {
+        let mut rng = test_rng();
+        let mut values = vec![
+            Scalar::ZERO,
+            Scalar::ONE,
+            -Scalar::ONE,
+            Scalar::from_u64(u64::MAX),
+            Scalar::from_words([0, 0, 0, 1 << 62]).unwrap(),
+        ];
+        values.extend((0..4).map(|_| Scalar::random(&mut rng)));
+        for value in values {
+            for width in 2..=15 {
+                let mut digits = vec![0; 256usize.div_ceil(width as usize)];
+                value.signed_digits(width, &mut digits);
+                let half = 1 << (width - 1);
+                let base = Scalar::from_u64(1 << width);
+                let mut sum = Scalar::ZERO;
+                for &digit in digits.iter().rev() {
+                    assert!(-half < i32::from(digit) && i32::from(digit) <= half);
+                    let magnitude = Scalar::from_u64(digit.unsigned_abs().into());
+                    let term = if digit < 0 { -magnitude } else { magnitude };
+                    sum = sum * &base + &term;
+                }
+                assert_eq!(sum, value, "width={width}");
+            }
+        }
     }
 
     #[test]
