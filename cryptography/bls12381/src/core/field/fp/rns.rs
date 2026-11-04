@@ -56,11 +56,11 @@
 //! accumulators of both bases, and one reduction, the second half of [`Rns::mul`], serves a whole sum.
 //! Sums carry an integer bound in units of `p^2`: a product of bounds `A` and `B` contributes `A * B`, a
 //! lift multiplies by the representative of one, below `p`, and so contributes `A`, and a sum
-//! reduces to at most `REDUCED` when its bound is at most `BUDGET`. A subtraction first reduces
-//! the subtrahend's accumulators residue-wise to at most `2q`, keeping their congruence, and
-//! subtracts them from a constant congruent to `SUB_BIAS * p^2`; the subtrahend's bound must be at
-//! most `SUB_BIAS`, which the result's bound gains. Accumulators hold at most `TERMS` terms, a
-//! product or lift counting one and a subtraction `SUB_TERMS`.
+//! reduces to at most `REDUCED` when its bound is at most `BUDGET`. A subtraction adds a constant
+//! congruent to `SUB_BIAS * p^2` whose words cover the accumulators of a subtrahend of at most
+//! `SUB_TERMS` terms, and subtracts those accumulators; the subtrahend's bound must be at most
+//! `SUB_BIAS`, which the result's bound gains. Accumulators hold at most `TERMS` terms, a product
+//! or lift counting one and a subtraction `SUB_TERMS + 1`.
 
 pub(crate) mod parameters;
 
@@ -114,8 +114,10 @@ pub(crate) const SUB_BIAS: u64 = SUM_PRODUCTS as u64 * (2 * REDUCED) * (2 * REDU
 /// Most terms a sum of products may hold.
 const TERMS: u64 = 1 << 10;
 
-/// Terms a subtraction adds to its minuend.
-const SUB_TERMS: u64 = 3;
+/// Most terms a subtrahend may hold, which the subtraction bias covers: a full sum of products
+/// and lifts beside them. A subtraction adds one more than this to its minuend's terms, so a
+/// minuend of a few terms can be subtracted from twice.
+const SUB_TERMS: u64 = 3 * SUM_PRODUCTS as u64 / 2;
 
 /// Raw products of factors summing at most two reduced values that a sum may hold.
 /// Subtraction biases must also fit the integer budget.
@@ -173,16 +175,20 @@ const fn radix_inverse(q: u64, inverse: u64) -> u64 {
     (q - k % q) % q
 }
 
-/// Per basis, `2q + c` with `c < q` and `c * 2^52` congruent to `SUB_BIAS * p^2` at the scale of
-/// a product.
+/// Low word of the subtraction bias in every residue: the largest low accumulator of a
+/// subtrahend of [`SUB_TERMS`] terms.
+const WIDE_BIAS_LOW: u64 = SUB_TERMS * MASK;
+
+/// Per basis, the high word `SUB_TERMS * q + c` of the subtraction bias, with `c < q` and
+/// `c * 2^52 + WIDE_BIAS_LOW` congruent to `SUB_BIAS * p^2` at the scale of a product.
 ///
 /// A product of residues `x * s` and `y * s` of integers `x` and `y` carries the factor `s^2`,
-/// so the residue of `p^2` at that scale is the square of [`ENCODED_P`]. As a high word, the
-/// constant covers any subtrahend reduced to at most `2q` and adds less than `3q`.
-const WIDE_BIAS: [[u64; MODULI]; 2] = {
+/// so the residue of `p^2` at that scale is the square of [`ENCODED_P`]. The word covers the high
+/// accumulator of a subtrahend of [`SUB_TERMS`] terms and adds less than `(SUB_TERMS + 1) q`.
+const WIDE_BIAS_HIGH: [[u64; MODULI]; 2] = {
     let moduli = [M.moduli, N.moduli];
     let inverses = [M.inverse, N.inverse];
-    let mut bias = [TWICE_M, TWICE_N];
+    let mut bias = [[0; MODULI]; 2];
     let mut half = 0;
     while half < 2 {
         let mut i = 0;
@@ -190,7 +196,8 @@ const WIDE_BIAS: [[u64; MODULI]; 2] = {
             let q = moduli[half][i];
             let p = ENCODED_P[half][i] % q;
             let target = mul_mod(SUB_BIAS % q, mul_mod(p, p, q), q);
-            bias[half][i] += mul_mod(target, radix_inverse(q, inverses[half][i]), q);
+            let high = (target + q - WIDE_BIAS_LOW % q) % q;
+            bias[half][i] = SUB_TERMS * q + mul_mod(high, radix_inverse(q, inverses[half][i]), q);
             i += 1;
         }
         half += 1;
@@ -366,8 +373,8 @@ const _: () = {
         let (q_m, q_n) = (M.moduli[i], N.moduli[i]);
         let full_m = (TERMS as u128 * (q_m as u128 + 1)) << WORD;
         let full_n = (TERMS as u128 * (q_n as u128 + 1)) << WORD;
-        // A full sum reduces and folds to at most 2q in either basis: the quotient of a reduction
-        // and a normalized subtrahend.
+        // A full sum reduces and folds to at most 2q in either basis: the quotient of a
+        // reduction.
         assert!(fold_bound(reduce_bound(full_m, q_m), q_m) <= 2 * q_m as u128);
         assert!(fold_bound(reduce_bound(full_n, q_n), q_n) <= 2 * q_n as u128);
         // The second basis also adds the converted quotient.
@@ -378,14 +385,18 @@ const _: () = {
             row += 1;
         }
         assert!(fold_bound(reduce_bound(total, q_n), q_n) <= 2 * q_n as u128);
-        // The bias covers a subtrahend at most 2q and adds less than 3q to a high word.
-        assert!(WIDE_BIAS[0][i] >= 2 * q_m && WIDE_BIAS[0][i] < 3 * q_m);
-        assert!(WIDE_BIAS[1][i] >= 2 * q_n && WIDE_BIAS[1][i] < 3 * q_n);
+        // The bias covers the high word of a subtrahend of SUB_TERMS terms and adds less than
+        // (SUB_TERMS + 1) q.
+        assert!(
+            WIDE_BIAS_HIGH[0][i] >= SUB_TERMS * q_m && WIDE_BIAS_HIGH[0][i] < (SUB_TERMS + 1) * q_m
+        );
+        assert!(
+            WIDE_BIAS_HIGH[1][i] >= SUB_TERMS * q_n && WIDE_BIAS_HIGH[1][i] < (SUB_TERMS + 1) * q_n
+        );
         assert!(ONE[i] < q_m && ONE[MODULI + i] < q_n);
         i += 1;
     }
-    // Products are at most (2q)^2 < q * 2^52, a term each, and a subtraction adds less than 3q.
-    assert!(SUB_TERMS >= 3);
+    // Products are at most (2q)^2 < q * 2^52, a term each.
     // Low words of a full sum and the conversion's products never wrap; high words stay below
     // 2^61 and so do the reductions of either.
     assert!((TERMS + MODULI as u64) as u128 * MASK as u128 <= u64::MAX as u128);
@@ -397,8 +408,11 @@ const _: () = {
     assert!(SUB_BIAS == 295_936);
     // The default Karatsuba cross of factors summing two reduced values subtracts twice and fits.
     assert!((2 * REDUCED) * (2 * REDUCED) + 2 * SUB_BIAS <= BUDGET);
-    // The declared product count fits both budgets for factors of at most two reduced values.
-    assert!(SUM_PRODUCTS as u64 * (1 + SUB_TERMS) <= TERMS);
+    // The declared product count fits both budgets for factors of at most two reduced values,
+    // including one subtraction of a subtrahend at the term limit.
+    assert!(SUM_PRODUCTS as u64 + SUB_TERMS < TERMS);
+    assert!(SUM_PRODUCTS as u64 <= SUB_TERMS);
+    assert!(2 * (SUB_TERMS + 1) + 2 <= TERMS);
     assert!(SUM_PRODUCTS as u64 * (2 * REDUCED) * (2 * REDUCED) <= BUDGET);
 };
 
@@ -824,23 +838,20 @@ fn add_wide<S: Simd>(simd: S, a: (S::U64, S::U64), b: (S::U64, S::U64)) -> (S::U
     (simd.u64_add(a.0, b.0), simd.u64_add(a.1, b.1))
 }
 
-/// Adds `bias` less the normalized `subtrahend` to the high word of `minuend`, in one basis.
+/// Returns `minuend` plus the bias with high words `bias_high` less `subtrahend`, in one basis.
 ///
-/// The subtrahend reduces and folds to residues at most `2q`, each times `2^52` congruent to its
-/// accumulator.
+/// The subtrahend holds at most [`SUB_TERMS`] terms, so the bias words cover its accumulators and
+/// no word wraps.
 #[inline(always)]
 fn sub_wide<S: X86V4C>(
     simd: S,
-    (high, low): (S::U64, S::U64),
+    minuend: (S::U64, S::U64),
     subtrahend: (S::U64, S::U64),
-    basis: &Basis,
-    bias: &[u64; MODULI],
+    bias_high: &[u64; MODULI],
 ) -> (S::U64, S::U64) {
-    let modulus = constant(simd, &basis.moduli);
-    let reduced = reduce(simd, subtrahend, modulus, constant(simd, &basis.inverse));
-    let residue = fold(simd, reduced, constant(simd, &basis.complement));
-    let high = simd.u64_add(high, simd.u64_sub(constant(simd, bias), residue));
-    (high, low)
+    let high = simd.u64_sub(constant(simd, bias_high), subtrahend.0);
+    let low = simd.u64_sub(simd.u64_splat(WIDE_BIAS_LOW), subtrahend.1);
+    add_wide(simd, minuend, (high, low))
 }
 
 impl<S: X86V4C> Field<S> for Rns<S> {
@@ -950,19 +961,20 @@ impl<S: X86V4C> Field<S> for Rns<S> {
 
     /// Returns `a + SUB_BIAS * p^2 - b`.
     ///
-    /// Each residue of `b` reduces and folds to `r <= 2q` with `r * 2^52` congruent to it, and
-    /// the high word of `a` gains `2q + c - r` for the bias constant `2q + c`, which never wraps and
-    /// adds less than `3q`. The integer is at least that of `a`, since `b`'s is below
-    /// `SUB_BIAS * p^2`. The fixed bias ignores `K`.
+    /// The accumulators of `a` gain the bias words less those of `b`, which holds at most
+    /// [`SUB_TERMS`] terms, so no word wraps and the result holds `SUB_TERMS + 1` more terms than
+    /// `a`. The integer is at least that of `a`, since `b`'s is below `SUB_BIAS * p^2`. The fixed
+    /// bias ignores `K`.
     #[inline(always)]
     fn product_sub<const K: u64>(simd: S, a: Wide<S>, b: Wide<S>) -> Wide<S> {
         let mut bound = a.bound;
         bound.sub_with_bias(b.bound, SUB_BIAS);
+        b.terms.assert_le(SUB_TERMS);
         let mut terms = a.terms;
-        terms.add(DebugCounter::new(SUB_TERMS));
-        let [bias_m, bias_n] = &WIDE_BIAS;
-        let m = sub_wide(simd, a.m, b.m, &M, bias_m);
-        let n = sub_wide(simd, a.n, b.n, &N, bias_n);
+        terms.add(DebugCounter::new(SUB_TERMS + 1));
+        let [bias_m, bias_n] = &WIDE_BIAS_HIGH;
+        let m = sub_wide(simd, a.m, b.m, bias_m);
+        let n = sub_wide(simd, a.n, b.n, bias_n);
         Wide::new(m, n, bound, terms)
     }
 
@@ -1623,25 +1635,24 @@ mod tests {
         }
         assert_reduced(simd, Rns::reduce(simd, sum), multiple(TERMS));
 
-        // Normalize a full accumulator when it is the subtrahend.
+        // A subtrahend with every term the bias covers.
         let factor = loose(simd, largest, 1, 1);
         let product = factor.product(simd, factor);
         let mut subtrahend = product;
-        for _ in 1..TERMS {
+        for _ in 1..SUB_TERMS {
             subtrahend = Rns::accumulate(simd, subtrahend, product);
         }
         let difference = Rns::product_sub::<64>(simd, product, subtrahend);
         assert_reduced(
             simd,
             Rns::reduce(simd, difference),
-            reference::sub(square, multiple(TERMS)),
+            reference::sub(square, multiple(SUB_TERMS)),
         );
 
-        // Subtractions of the largest subtrahend, 544^2 = SUB_BIAS, filling the term budget.
-        const SUBTRACTIONS: u64 = 2;
-        const PRODUCTS: u64 = TERMS - SUB_TERMS * SUBTRACTIONS;
+        // A subtraction of the largest subtrahend, 544^2 = SUB_BIAS, filling the term budget.
+        const PRODUCTS: u64 = TERMS - SUB_TERMS - 1;
         const { assert!(544 * 544 == SUB_BIAS) };
-        const { assert!(PRODUCTS + SUBTRACTIONS * SUB_BIAS <= BUDGET) };
+        const { assert!(PRODUCTS + SUB_BIAS <= BUDGET) };
         let small = loose(simd, largest, 1, 1);
         let small = small.product(simd, small);
         let mut sum = small;
@@ -1650,10 +1661,8 @@ mod tests {
         }
         let factor = loose(simd, largest, 544, 2);
         let subtrahend = factor.product(simd, factor);
-        for _ in 0..SUBTRACTIONS {
-            sum = Rns::product_sub::<64>(simd, sum, subtrahend);
-        }
-        let expected = reference::sub(multiple(PRODUCTS), multiple(SUBTRACTIONS));
+        let sum = Rns::product_sub::<64>(simd, sum, subtrahend);
+        let expected = reference::sub(multiple(PRODUCTS), square);
         assert_reduced(simd, Rns::reduce(simd, sum), expected);
 
         // A zero integer less the largest subtrahend leaves a small nonnegative integer.
@@ -1685,12 +1694,25 @@ mod tests {
         let product = |a, b| at(a).product(simd, at(b));
         assert!(catch_unwind(|| Rns::reduce(simd, product(803, 803))).is_ok());
         assert!(catch_unwind(|| Rns::reduce(simd, product(804, 803))).is_err());
-        assert!(catch_unwind(|| Rns::product_sub::<64>(simd, product(1, 1), product(544, 544))).is_ok());
-        assert!(catch_unwind(|| Rns::product_sub::<64>(simd, product(1, 1), product(545, 544))).is_err());
+        assert!(
+            catch_unwind(|| Rns::product_sub::<64>(simd, product(1, 1), product(544, 544))).is_ok()
+        );
+        assert!(
+            catch_unwind(|| Rns::product_sub::<64>(simd, product(1, 1), product(545, 544)))
+                .is_err()
+        );
         let one = product(1, 1);
         let sum = |count| (1..count).fold(one, |sum, _| Rns::accumulate(simd, sum, one));
         assert!(catch_unwind(|| sum(TERMS)).is_ok());
         assert!(catch_unwind(|| sum(TERMS + 1)).is_err());
+        assert!(catch_unwind(|| Rns::product_sub::<64>(simd, one, sum(SUB_TERMS))).is_ok());
+        assert!(catch_unwind(|| Rns::product_sub::<64>(simd, one, sum(SUB_TERMS + 1))).is_err());
+        assert!(
+            catch_unwind(|| Rns::product_sub::<64>(simd, sum(TERMS - SUB_TERMS - 1), one)).is_ok()
+        );
+        assert!(
+            catch_unwind(|| Rns::product_sub::<64>(simd, sum(TERMS - SUB_TERMS), one)).is_err()
+        );
         assert!(catch_unwind(|| Field::mul(at(REDUCED), simd, at(REDUCED))).is_ok());
         assert!(catch_unwind(|| Field::mul(at(803), simd, at(804))).is_err());
     }

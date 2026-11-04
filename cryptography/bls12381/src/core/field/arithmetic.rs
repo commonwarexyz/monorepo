@@ -72,7 +72,7 @@
 //! | Operation | Eager products, in units of `p` | Wide products, in units of `p^2` |
 //! |---|---|---|
 //! | [`accumulate`](Field::accumulate) | Integer and limb bounds add | Bound `C + D`, terms `T + V` |
-//! | [`product_sub::<K>`](Field::product_sub) | Requires `D < K`; carries the subtrahend; returns integer bound `C + K`, minuend limb bound plus `3` | Ignores `K`; requires `D <= 295936`; returns bound `C + 295936`, terms `T + 3` |
+//! | [`product_sub::<K>`](Field::product_sub) | Requires `D < K`; carries the subtrahend; returns integer bound `C + K`, minuend limb bound plus `3` | Ignores `K`; requires `D <= 295936` and `V <= 384`; returns bound `C + 295936`, terms `T + 385` |
 //! | [`lift`](Field::lift) | Preserves the value's integer and limb bounds | Integer bound `A`, one term |
 //! | [`carry_product`](Field::carry_product) | Preserves integer bound `C`, carries to limb bound `1` | No-op |
 //! | [`reduce`](Field::reduce) | Preserves integer bound `C`, carries to limb bound `1` | Returns value bound `ceil(C / 645173) + 16 <= 17` |
