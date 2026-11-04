@@ -137,7 +137,7 @@ where
             // pushed on top of it in the stack, and we will have to pop
             // those off to get to it.
             while !job_b.latch.probe() {
-                let Some(job) = worker_thread.take_local_job() else {
+                let Some(job) = worker_thread.take_own_job() else {
                     // Local deque is empty. Time to steal from other
                     // threads.
                     worker_thread.wait_until(&job_b.latch);
