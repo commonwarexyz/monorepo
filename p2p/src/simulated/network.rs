@@ -489,7 +489,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         // Validate the peer set and create its peers.
-        self.assert_peer_set_size(&peers);
+        self.assert_peer_set_size(owner, &peers);
         for public_key in peers.primary.iter().chain(peers.secondary.iter()) {
             self.ensure_peer_exists(public_key).await;
         }
@@ -535,9 +535,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         self.tracks(origin, recipient) && self.tracks(recipient, origin)
     }
 
-    /// Enforces the configured maximum over one peer set.
-    fn assert_peer_set_size(&self, peers: &TrackedPeers<P>) {
-        let peer_count = peer_set_size(peers.primary.iter(), peers.secondary.iter(), None);
+    /// Enforces the configured maximum over one peer set, counting `owner` when the set omits it,
+    /// as an authenticated network counts its local identity.
+    fn assert_peer_set_size(&self, owner: Option<&P>, peers: &TrackedPeers<P>) {
+        let peer_count = peer_set_size(peers.primary.iter(), peers.secondary.iter(), owner);
         assert!(
             peer_count <= self.max_peers_per_set,
             "peer set too large: {peer_count} > {}",
@@ -612,6 +613,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     entry.insert(Tracker::new());
                     self.broadcast_peer_list();
                 }
+            }
+            ingress::Message::ResetPeerSets { owner } => {
+                self.own_trackers.insert(owner, Tracker::new());
+                self.broadcast_peer_list();
             }
             ingress::Message::Register {
                 channel,
@@ -804,9 +809,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Broadcast updated peer list to all connected peer subscribers.
     ///
-    /// This runs when tracked membership changes ([`ingress::Message::Track`] or
-    /// [`ingress::Message::OwnPeerSets`]), not when peers are first discovered via register,
-    /// links, or bandwidth limits.
+    /// This runs when tracked membership changes ([`ingress::Message::Track`],
+    /// [`ingress::Message::OwnPeerSets`] or [`ingress::Message::ResetPeerSets`]), not when peers
+    /// are first discovered via register, links, or bandwidth limits.
     ///
     /// Subscribers whose receivers have been dropped are removed to prevent
     /// memory leaks.
@@ -1897,6 +1902,48 @@ mod tests {
                         Set::try_from([peer_1, peer_2.clone()]).unwrap(),
                         Set::try_from([peer_2, peer_3]).unwrap(),
                     ),
+                )
+                .await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "peer set too large: 3 > 2")]
+    fn test_max_peers_per_set_counts_owner() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(2),
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(1),
+            };
+            let (mut network, _oracle) = Network::new(context.child("network"), cfg);
+            let peer_1 = ed25519::PrivateKey::from_seed(1).public_key();
+            let peer_2 = ed25519::PrivateKey::from_seed(2).public_key();
+            let peer_3 = ed25519::PrivateKey::from_seed(3).public_key();
+            network.own_trackers.insert(peer_1.clone(), Tracker::new());
+
+            // A set that lists the owner counts it once
+            assert!(
+                network
+                    .register_tracked_peer_set(
+                        Some(&peer_1),
+                        0,
+                        TrackedPeers::new(
+                            Set::try_from([peer_1.clone(), peer_2.clone()]).unwrap(),
+                            Set::default(),
+                        ),
+                    )
+                    .await
+            );
+
+            // A set that omits the owner counts it as well
+            network
+                .register_tracked_peer_set(
+                    Some(&peer_1),
+                    1,
+                    TrackedPeers::new(Set::try_from([peer_2, peer_3]).unwrap(), Set::default()),
                 )
                 .await;
         });

@@ -925,6 +925,10 @@ impl EngineDefinition for ReshareEngine {
         self.initial
             .register_epoch_zero(public_key, &provider, &store)
             .await;
+        // A restarted node starts with no peer sets, as a real node does.
+        if restarted {
+            oracle.control(public_key.clone()).reset_peer_sets();
+        }
         let dkg_manager = self.network.manager(oracle, public_key);
 
         let resolver = marshal_resolver::init(

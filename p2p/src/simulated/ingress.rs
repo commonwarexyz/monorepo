@@ -37,6 +37,8 @@ pub enum Message<P: PublicKey, E: Clock> {
     },
     /// Switch `owner` to the peer sets tracked through its own managers.
     OwnPeerSets { owner: P },
+    /// Replace `owner`'s own peer sets with empty ones.
+    ResetPeerSets { owner: P },
     PeerSet {
         owner: Option<P>,
         id: u64,
@@ -105,6 +107,10 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
             Self::OwnPeerSets { owner } => {
                 f.debug_struct("OwnPeerSets").field("owner", owner).finish()
             }
+            Self::ResetPeerSets { owner } => f
+                .debug_struct("ResetPeerSets")
+                .field("owner", owner)
+                .finish(),
             Self::PeerSet { owner, id, .. } => f
                 .debug_struct("PeerSet")
                 .field("owner", owner)
@@ -511,11 +517,10 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
 
     /// Create a [Manager] that tracks peer sets for this peer alone.
     ///
-    /// From then on, this peer exchanges messages with another peer only while each tracks the
-    /// other, as an authenticated network keeps a connection only between peers that track each
-    /// other. Peers without their own managers use the network-wide peer sets. This peer starts
-    /// with no peer sets, so it reaches no one until it tracks one, and it never returns to the
-    /// network-wide sets.
+    /// The first call switches this peer to its own peer sets, as a node on an authenticated
+    /// network has, and the peer never returns to the network-wide sets. Its sets start empty, so
+    /// it reaches no one until it tracks one. Later calls, from any [Control] for this peer,
+    /// return handles to the same sets. Use [Self::reset_peer_sets] when the peer restarts.
     ///
     /// Useful for mocking [crate::authenticated::discovery].
     pub fn manager(&self) -> Manager<P, E> {
@@ -537,6 +542,20 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
             oracle: Oracle::new(self.sender.clone()),
             owner: Some(self.me.clone()),
         }
+    }
+
+    /// Clear the peer sets this peer tracks through its own managers, as a node does when it
+    /// restarts.
+    ///
+    /// The peer then follows its own sets, now empty, so it reaches no one until it tracks one
+    /// again. Existing managers keep working, but their subscriptions end.
+    pub fn reset_peer_sets(&self) {
+        let _ = enqueue(
+            &self.sender,
+            Message::ResetPeerSets {
+                owner: self.me.clone(),
+            },
+        );
     }
 
     /// Switch this peer to the peer sets tracked through its own managers.
