@@ -535,20 +535,53 @@ const MAIN_SHARE: usize = 2;
 /// Ranges are admitted in order until one covers more pages than remain, after which the rest are
 /// skipped, so one oversized prefetch does not evict its own pages before they are read. Every
 /// page a range covers counts, whether the warm reads it, joins another read of it, or finds it
-/// resident.
+/// resident. A sealed blob's partial last page is held in memory and never warmed, so it is free.
+/// Pages are deduplicated within one call, so a page covered by ranges offered in separate calls
+/// can be charged once per call, which only makes the budget stricter.
 #[commonware_macros::stability(ALPHA)]
 #[derive(Default)]
 pub(super) struct Budget {
-    /// The page cache's Main capacity and the remaining pages, once the first range is admitted.
-    state: Option<(usize, usize)>,
-    /// Whether a range was skipped, after which every later one is.
+    /// The page cache's Main capacity, the budget, and the pages it has left, once the first
+    /// range is offered.
+    state: Option<BudgetState>,
+    /// Whether [Self::admit] skipped a range, after which it skips every later one.
     exhausted: bool,
-    /// Pages the skipped ranges cover.
+    /// Pages the skipped ranges cover, each counted once per call.
     skipped: u64,
+}
+
+/// See [Budget::state].
+#[commonware_macros::stability(ALPHA)]
+struct BudgetState {
+    main: usize,
+    limit: usize,
+    remaining: usize,
+}
+
+/// A share of a [Budget] set aside by [Budget::reserve] for ranges admitted across several calls.
+#[commonware_macros::stability(ALPHA)]
+pub(super) struct Share {
+    /// Pages left in the share.
+    pages: usize,
+    /// Whether a range was skipped, after which every later one is.
+    skipping: bool,
 }
 
 #[commonware_macros::stability(ALPHA)]
 impl Budget {
+    /// The budget's state, read from `blob`'s page cache when first needed.
+    fn state<B: RBlob>(&mut self, blob: &Sealed<B>) -> &mut BudgetState {
+        self.state.get_or_insert_with(|| {
+            let main = blob.page_cache().main_capacity();
+            let limit = (main / MAIN_SHARE).max(1);
+            BudgetState {
+                main,
+                limit,
+                remaining: limit,
+            }
+        })
+    }
+
     /// Keep the ranges (ascending by offset) of `blob` that fit, counting a page shared by
     /// consecutive ranges once. Once a range does not fit, every later range is skipped.
     pub(super) fn admit<B: RBlob>(
@@ -556,59 +589,73 @@ impl Budget {
         blob: &Sealed<B>,
         ranges: impl IntoIterator<Item = (u64, u64)>,
     ) -> ByteRanges {
-        self.admit_share(blob, ranges, 1)
+        let mut share = Share {
+            pages: usize::MAX,
+            skipping: self.exhausted,
+        };
+        let admitted = self.admit_within(blob, ranges, &mut share);
+        self.exhausted = share.skipping;
+        admitted
     }
 
-    /// Like [Self::admit], spending at most `1 / share` of the remaining pages, so a later
-    /// [Self::admit] keeps the rest. Skipping a range here skips only this call's later ranges.
-    pub(super) fn admit_share<B: RBlob>(
+    /// Set aside `1 / divisor` of the pages left, for ranges admitted with
+    /// [Self::admit_within]. The rest stays available to [Self::admit]. `blob` supplies the page
+    /// cache if no range was offered yet.
+    pub(super) fn reserve<B: RBlob>(&mut self, blob: &Sealed<B>, divisor: usize) -> Share {
+        let skipping = self.exhausted;
+        Share {
+            pages: self.state(blob).remaining / divisor,
+            skipping,
+        }
+    }
+
+    /// Like [Self::admit], drawing on `share` as well as the budget. A range that does not fit
+    /// in either skips the share's later ranges, in this call and later ones, but not those of
+    /// [Self::admit].
+    pub(super) fn admit_within<B: RBlob>(
         &mut self,
         blob: &Sealed<B>,
         ranges: impl IntoIterator<Item = (u64, u64)>,
-        share: usize,
+        share: &mut Share,
     ) -> ByteRanges {
         let page_size = u64::from(blob.page_cache().page_size().get());
-        let size = blob.size();
-        let (_, remaining) = self.state.get_or_insert_with(|| {
-            let main = blob.page_cache().main_capacity();
-            (main, (main / MAIN_SHARE).max(1))
-        });
-        let mut allowance = *remaining / share;
-        let mut skipping = self.exhausted;
+        let full_pages_end = blob.size() / page_size * page_size;
+        let state = self.state(blob);
         let mut admitted = Vec::new();
+        let mut skipped = 0;
         let mut next_page = 0;
         for (offset, len) in ranges {
-            let end = offset.saturating_add(len).min(size);
+            let end = offset.saturating_add(len).min(full_pages_end);
             if offset >= end {
                 continue;
             }
             let first = (offset / page_size).max(next_page);
             let last = (end - 1) / page_size;
             let pages = (last + 1).saturating_sub(first);
-            if skipping || usize::try_from(pages).map_or(true, |pages| pages > allowance) {
-                skipping = true;
-                self.skipped += pages;
+            next_page = next_page.max(last + 1);
+            let fits = usize::try_from(pages)
+                .is_ok_and(|pages| pages <= share.pages && pages <= state.remaining);
+            if share.skipping || !fits {
+                share.skipping = true;
+                skipped += pages;
                 continue;
             }
-            allowance -= pages as usize;
-            *remaining -= pages as usize;
-            next_page = next_page.max(last + 1);
+            share.pages -= pages as usize;
+            state.remaining -= pages as usize;
             admitted.push((offset, len));
         }
-        if share == 1 {
-            self.exhausted = skipping;
-        }
+        self.skipped += skipped;
         admitted
     }
 
     /// Log, once, how many pages the budget skipped, if any.
     pub(super) fn finish(&self) {
-        if let Some((main, _)) = self.state
+        if let Some(state) = &self.state
             && self.skipped > 0
         {
             warn!(
-                main_capacity = main,
-                budget = (main / MAIN_SHARE).max(1),
+                main_capacity = state.main,
+                budget = state.limit,
                 skipped_pages = self.skipped,
                 "prefetch truncated by its page budget"
             );
@@ -1074,6 +1121,118 @@ mod tests {
                 self.partition.write_buffer,
             )
         }
+    }
+
+    /// A sealed view of `len` bytes, read through `cache`, whose pages are 64 bytes.
+    async fn sealed_view(
+        context: &deterministic::Context,
+        name: &[u8],
+        len: usize,
+        cache: &CacheRef,
+    ) -> Sealed<<deterministic::Context as commonware_runtime::Storage>::Blob> {
+        let (blob, size) = context.open("budget", name).await.unwrap();
+        let writer = Writer::new(blob, size, 1024, cache.clone()).await.unwrap();
+        let (writer, _) = writer.append(&vec![7u8; len]).await.unwrap();
+        writer.seal().await.unwrap().0
+    }
+
+    /// A 50-page cache whose Main holds 45 pages, giving each prefetch a budget of 22.
+    fn budget_cache() -> CacheRef {
+        CacheRef::new(NZU16!(64), NZUsize!(50))
+    }
+
+    const PAGE: u64 = 64;
+
+    #[test]
+    fn test_budget_counts_each_page_once_and_stops_at_the_first_misfit() {
+        deterministic::Runner::default().start(|context| async move {
+            let cache = budget_cache();
+            let view = sealed_view(&context, b"a", 40 * PAGE as usize, &cache).await;
+            let mut budget = Budget::default();
+
+            // Two ranges on one page cost one page, and 20 more fit, leaving one. A two-page range
+            // then does not fit, and every later range is skipped even when it would fit.
+            let ranges = [
+                (0, 10),
+                (10, 10),
+                (PAGE, 20 * PAGE),
+                (21 * PAGE, 2 * PAGE),
+                (30 * PAGE, 10),
+            ];
+            let admitted = budget.admit(&view, ranges);
+            assert_eq!(admitted, ranges[..3]);
+            assert_eq!(budget.state.as_ref().unwrap().remaining, 1);
+            assert_eq!(budget.skipped, 3);
+            assert!(budget.admit(&view, [(39 * PAGE, 10)]).is_empty());
+        });
+    }
+
+    #[test]
+    fn test_budget_counts_a_skipped_page_once() {
+        deterministic::Runner::default().start(|context| async move {
+            let cache = budget_cache();
+            let view = sealed_view(&context, b"b", 40 * PAGE as usize, &cache).await;
+            let mut budget = Budget::default();
+
+            // Exhaust the budget, then offer eight ranges on the next page.
+            assert_eq!(budget.admit(&view, [(0, 22 * PAGE)]).len(), 1);
+            let ranges = (0..8).map(|i| (22 * PAGE + 8 * i, 8));
+            assert!(budget.admit(&view, ranges).is_empty());
+            assert_eq!(budget.skipped, 1);
+        });
+    }
+
+    #[test]
+    fn test_budget_does_not_charge_a_partial_last_page() {
+        deterministic::Runner::default().start(|context| async move {
+            // Three full pages and a 30-byte partial page, which is held in memory.
+            let cache = budget_cache();
+            let view = sealed_view(&context, b"c", 3 * PAGE as usize + 30, &cache).await;
+            let mut budget = Budget::default();
+
+            // A range inside the partial page costs nothing and warms nothing, and one ending in
+            // it is charged only for its full pages.
+            assert!(budget.admit(&view, [(3 * PAGE + 4, 20)]).is_empty());
+            assert_eq!(budget.state.as_ref().unwrap().remaining, 22);
+            assert_eq!(budget.admit(&view, [(2 * PAGE, PAGE + 30)]).len(), 1);
+            assert_eq!(budget.state.as_ref().unwrap().remaining, 21);
+            assert_eq!(budget.skipped, 0);
+        });
+    }
+
+    #[test]
+    fn test_budget_share_spans_calls() {
+        deterministic::Runner::default().start(|context| async move {
+            let cache = budget_cache();
+            let first = sealed_view(&context, b"d", 40 * PAGE as usize, &cache).await;
+            let second = sealed_view(&context, b"e", 40 * PAGE as usize, &cache).await;
+            let mut budget = Budget::default();
+
+            // Half of the 22 pages are set aside once. The first blob spends 8 of them, so 5 pages
+            // of the second blob do not fit in the 3 left, and the share skips its later ranges
+            // in later calls too.
+            let mut share = budget.reserve(&first, 2);
+            assert_eq!(
+                budget
+                    .admit_within(&first, [(0, 8 * PAGE)], &mut share)
+                    .len(),
+                1
+            );
+            assert!(
+                budget
+                    .admit_within(&second, [(0, 5 * PAGE)], &mut share)
+                    .is_empty()
+            );
+            assert!(
+                budget
+                    .admit_within(&second, [(10 * PAGE, 10)], &mut share)
+                    .is_empty()
+            );
+
+            // The rest of the budget stays available outside the share.
+            assert_eq!(budget.admit(&first, [(8 * PAGE, 14 * PAGE)]).len(), 1);
+            assert_eq!(budget.state.as_ref().unwrap().remaining, 0);
+        });
     }
 
     fn assert_insufficient_length(result: Result<(IoBufMut, usize), Error>) {
