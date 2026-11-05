@@ -407,12 +407,51 @@ struct VotePool<S: Scheme, D: Digest> {
     /// Remembering the signer keeps a rejected share out of every later selection. Bounded by the
     /// committee.
     rejected: BTreeSet<Participant>,
+    /// Signers whose shares were part of a recovery that failed without attributing a share.
+    ///
+    /// A failure no share is blamed for would repeat on the same shares, so every later attempt
+    /// includes a share outside this set, and the pool waits for one when it holds none. Shares
+    /// that arrive while a recovery runs are not in it. Bounded by the committee.
+    tried: BTreeSet<Participant>,
+}
+
+impl<S: Scheme, D: Digest> VotePool<S, D> {
+    /// Returns whether the pool holds a quorum with a share no unattributed failure has used.
+    fn armed(&self, quorum: usize) -> bool {
+        self.shares.len() >= quorum
+            && self.shares.keys().any(|signer| !self.tried.contains(signer))
+    }
+
+    /// Returns the quorum the next recovery assembles and its signers: the shares no
+    /// unattributed failure has used first, then the others, each in signer order.
+    fn select(&self, quorum: usize) -> (Vec<Participant>, Vec<DaVote<S, D>>) {
+        let untried = self
+            .shares
+            .iter()
+            .filter(|(signer, _)| !self.tried.contains(signer));
+        let tried = self
+            .shares
+            .iter()
+            .filter(|(signer, _)| self.tried.contains(signer));
+        untried
+            .chain(tried)
+            .take(quorum)
+            .map(|(signer, vote)| (*signer, vote.as_ref().clone()))
+            .unzip()
+    }
+
+    /// Records a recovery over `signers` that failed without attributing a share.
+    fn unattributed(&mut self, signers: &[Participant]) {
+        self.tried.extend(signers.iter().copied());
+    }
 }
 
 /// One completed recovery dispatch, correlated to its header digest.
 struct Recovery<S: Scheme, D: Digest> {
     header: D,
     block: BlockRef<D>,
+    /// Signers of the shares the recovery assembled.
+    signers: Vec<Participant>,
     started_at: SystemTime,
     outcome: RecoveryOutcome<S, D>,
 }
@@ -474,6 +513,7 @@ impl<S: Scheme, D: Digest> RecoveryState<S, D> {
             header: header.clone(),
             shares: BTreeMap::new(),
             rejected: BTreeSet::new(),
+            tried: BTreeSet::new(),
         });
         if pool.header != *header {
             return None;
@@ -662,7 +702,7 @@ where
         let ready = state.pools.get(&digest).is_some_and(|pool| {
             pool.header.height() > state.certified_through
                 && !state.pending.contains(&digest)
-                && pool.shares.len() >= self.config.da_quorum
+                && pool.armed(self.config.da_quorum)
         });
         if ready {
             state.ready.insert(digest);
@@ -682,16 +722,11 @@ where
             let Some(pool) = state.pools.get(&digest) else {
                 continue;
             };
-            if pool.shares.len() < self.config.da_quorum {
+            if !pool.armed(self.config.da_quorum) {
                 continue;
             }
             let block = pool.header.block_ref::<H>();
-            let votes = pool
-                .shares
-                .values()
-                .take(self.config.da_quorum)
-                .map(|vote| vote.as_ref().clone())
-                .collect::<Vec<_>>();
+            let (signers, votes) = pool.select(self.config.da_quorum);
             state.pending.insert(digest);
             let scheme = Arc::clone(&self.config.scheme);
             let strategy = self.config.strategy.clone();
@@ -724,6 +759,7 @@ where
                 Recovery {
                     header: digest,
                     block,
+                    signers,
                     started_at,
                     outcome,
                 }
@@ -765,6 +801,9 @@ where
             }
             RecoveryOutcome::Unattributed => {
                 self.config.fallbacks.inc();
+                if let Some(pool) = self.state.pools.get_mut(&done.header) {
+                    pool.unattributed(&done.signers);
+                }
                 self.state.pending.remove(&done.header);
                 self.refresh(done.header);
                 ControlFlow::Continue(())
@@ -1252,6 +1291,48 @@ mod tests {
             }) => *state = RecoveryState::new(generation, certified),
             DaCommand::Settled => {}
         }
+    }
+
+    #[test]
+    fn an_unattributed_failure_waits_for_a_share_it_did_not_use() {
+        let (signers, verifier) = fixture();
+        let quorum = verifier.codec_config().da_quorum();
+        assert!(signers.len() >= quorum + 2);
+        let header = own_header();
+        let mut state = fresh_state();
+        let add = |state: &mut RecoveryState<_, _>, index: usize| {
+            let vote = Arc::new(signers[index].sign_da_vote(header.clone()).unwrap());
+            state.pool::<Sha256>(ChainId::new(0), &vote).unwrap()
+        };
+        // The highest signers form the first quorum.
+        let mut digest = None;
+        for index in signers.len() - quorum..signers.len() {
+            digest = Some(add(&mut state, index));
+        }
+        let digest = digest.unwrap();
+        let pool = &state.pools[&digest];
+        assert!(pool.armed(quorum));
+        let (first, _) = pool.select(quorum);
+
+        // A lower signer's share arrives while that recovery runs, then it fails unattributed:
+        // the new share was not used, so the pool stays armed and the retry includes it.
+        let late = signers.len() - quorum - 1;
+        add(&mut state, late);
+        let pool = state.pools.get_mut(&digest).unwrap();
+        pool.unattributed(&first);
+        assert!(pool.armed(quorum));
+        let (second, votes) = pool.select(quorum);
+        assert_eq!(votes.len(), quorum);
+        assert!(second.contains(&Participant::from_usize(late)));
+
+        // Once every held share was used by a failure, the pool waits for another one.
+        pool.unattributed(&second);
+        assert!(!pool.armed(quorum));
+        let lower = signers.len() - quorum - 2;
+        add(&mut state, lower);
+        let pool = &state.pools[&digest];
+        assert!(pool.armed(quorum));
+        assert!(pool.select(quorum).0.contains(&Participant::from_usize(lower)));
     }
 
     #[test]
