@@ -104,8 +104,9 @@
 //! a boundary block does not carry the [`EpochInfo`] of the epoch it introduces,
 //! if a finalized block is above the active epoch's final block, if the
 //! [`Provider`] has no scheme for an entered epoch, if the [`SimplexConfig`] is
-//! invalid, if an epoch's Simplex engine fails, or if the [`state_sync::Plan`]
-//! cannot access storage.
+//! invalid, if an epoch's Simplex engine fails, if the [`state_sync::Plan`]
+//! cannot access storage, or if a boundary block's [`EpochInfo`] exceeds the
+//! plan's codec limits.
 //!
 //! # Configuration
 //!

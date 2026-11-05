@@ -7,7 +7,9 @@
 //! [Marshal Retention](crate::dkg#marshal-retention) describes how restart uses them:
 //!
 //! - [`StateSync`] material is persisted by [`Plan::init`] and deleted by a later startup
-//!   once marshal's recovered epoch is past the synced epoch.
+//!   once marshal's recovered epoch is past the synced epoch. The reshare actor records the
+//!   height of the material's floor block with it, so a later startup in the synced epoch
+//!   can skip reading the block once marshal has processed it.
 //! - A [`Checkpoint`] is recorded for each epoch the orchestrator enters from its boundary
 //!   block. At an epoch's final block, the next epoch's checkpoint is recorded before the
 //!   block is acknowledged.
@@ -21,7 +23,7 @@ use commonware_consensus::{
     Epochable as _,
     marshal::core::Processed,
     simplex::{scheme::Scheme, types::Finalization},
-    types::{Epoch, Epocher, FixedEpocher},
+    types::{Epoch, Epocher, FixedEpocher, Height},
 };
 #[cfg(feature = "arbitrary")]
 use commonware_cryptography::bls12381::dkg::feldman_desmedt::Output;
@@ -46,6 +48,10 @@ const CHECKPOINT_SUFFIX: &str = "_dkg_checkpoint";
 type EpochInfoCodecConfig = (NonZeroU32, ModeVersion);
 
 /// Storage settings for a DKG state-sync recovery plan.
+///
+/// The limits bound every [`EpochInfo`] the plan persists, including the info of each
+/// boundary block the orchestrator checkpoints. They must admit every epoch info the
+/// application's block codec accepts, or recording that block's checkpoint panics.
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Stable node-wide partition prefix.
@@ -337,6 +343,136 @@ pub(crate) fn recovered_epoch(processed: Processed, epocher: &FixedEpocher) -> E
         .epoch()
 }
 
+/// Persisted state-sync material and the height of its floor block, once a startup has
+/// received that block from marshal.
+///
+/// A restart in the synced epoch that finds the floor block processed takes the height from
+/// here and resumes from marshal's processed position, so marshal may prune the block.
+/// Material provided to [`Plan::init`] starts with no height.
+struct Record<S, D, V, Dir = Unit>
+where
+    S: Scheme<D>,
+    D: Digest,
+    V: Variant,
+    Dir: Directory<S::PublicKey>,
+{
+    material: StateSync<S, D, V, Dir>,
+    floor_height: Option<Height>,
+}
+
+impl<S, D, V, Dir> Clone for Record<S, D, V, Dir>
+where
+    S: Scheme<D>,
+    D: Digest,
+    V: Variant,
+    Dir: Directory<S::PublicKey>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            material: self.material.clone(),
+            floor_height: self.floor_height,
+        }
+    }
+}
+
+impl<S, D, V, Dir> fmt::Debug for Record<S, D, V, Dir>
+where
+    S: Scheme<D>,
+    D: Digest,
+    V: Variant,
+    Dir: Directory<S::PublicKey>,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Record")
+            .field("material", &self.material)
+            .field("floor_height", &self.floor_height)
+            .finish()
+    }
+}
+
+impl<S, D, V, Dir> PartialEq for Record<S, D, V, Dir>
+where
+    S: Scheme<D>,
+    D: Digest,
+    V: Variant,
+    Dir: Directory<S::PublicKey>,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.material == other.material && self.floor_height == other.floor_height
+    }
+}
+
+impl<S, D, V, Dir> Eq for Record<S, D, V, Dir>
+where
+    S: Scheme<D>,
+    D: Digest,
+    V: Variant,
+    Dir: Directory<S::PublicKey>,
+{
+}
+
+impl<S, D, V, Dir> Write for Record<S, D, V, Dir>
+where
+    S: Scheme<D>,
+    D: Digest,
+    V: Variant,
+    Dir: Directory<S::PublicKey>,
+{
+    fn write(&self, writer: &mut impl BufMut) {
+        self.material.write(writer);
+        self.floor_height.write(writer);
+    }
+}
+
+impl<S, D, V, Dir> EncodeSize for Record<S, D, V, Dir>
+where
+    S: Scheme<D>,
+    D: Digest,
+    V: Variant,
+    Dir: Directory<S::PublicKey>,
+{
+    fn encode_size(&self) -> usize {
+        self.material.encode_size() + self.floor_height.encode_size()
+    }
+}
+
+impl<S, D, V, Dir> Read for Record<S, D, V, Dir>
+where
+    S: Scheme<D>,
+    D: Digest,
+    V: Variant,
+    Dir: Directory<S::PublicKey>,
+{
+    type Cfg = <StateSync<S, D, V, Dir> as Read>::Cfg;
+
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            material: StateSync::read_cfg(reader, cfg)?,
+            floor_height: Option::<Height>::read_cfg(reader, &())?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<S, D, V, Dir> arbitrary::Arbitrary<'_> for Record<S, D, V, Dir>
+where
+    S: Scheme<D>,
+    D: Digest + for<'a> arbitrary::Arbitrary<'a>,
+    V: Variant,
+    Dir: Directory<S::PublicKey> + for<'a> arbitrary::Arbitrary<'a>,
+    S::PublicKey: for<'a> arbitrary::Arbitrary<'a>,
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
+    Output<V, S::PublicKey>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            material: u.arbitrary()?,
+            floor_height: u.arbitrary()?,
+        })
+    }
+}
+
 /// Partition prefix and codec limits shared by the plan's records.
 #[derive(Clone)]
 struct Storage {
@@ -351,8 +487,8 @@ where
     V: Variant,
     Dir: Directory<S::PublicKey>,
 {
-    Pending(Option<StateSync<S, D, V, Dir>>),
-    Resolved(Option<StateSync<S, D, V, Dir>>),
+    Pending(Option<Record<S, D, V, Dir>>),
+    Resolved(Option<Record<S, D, V, Dir>>),
 }
 
 /// Shared startup recovery plan for DKG actors.
@@ -413,9 +549,10 @@ where
 {
     /// Initializes and durably records a DKG state-sync recovery candidate.
     ///
-    /// Provided material replaces any existing record and is durable when this
-    /// method returns. Without provided material, the existing record (if any)
-    /// is loaded. The returned plan may be passed to the actors immediately.
+    /// Provided material replaces any existing material and the floor height
+    /// recorded for it, and is durable when this method returns. Without provided
+    /// material, the existing material (if any) is loaded. The returned plan may be
+    /// passed to the actors immediately.
     ///
     /// # Panics
     ///
@@ -437,7 +574,13 @@ where
         };
         let mut store = open_state_sync::<E, S, D, V, Dir>(context, &storage).await;
         if let Some(provided) = provided {
-            store.put(STATE_SYNC_KEY, provided);
+            store.put(
+                STATE_SYNC_KEY,
+                Record {
+                    material: provided,
+                    floor_height: None,
+                },
+            );
             store = store
                 .sync()
                 .await
@@ -445,7 +588,7 @@ where
         }
         let candidate = store.get(&STATE_SYNC_KEY).cloned();
         if let Some(candidate) = &candidate {
-            assert_epoch(candidate);
+            assert_epoch(&candidate.material);
         }
         drop(store);
 
@@ -477,7 +620,9 @@ where
     ) -> Option<StateSync<S, D, V, Dir>> {
         let mut state = self.state.lock().await;
         let candidate = match &*state {
-            PlanState::Resolved(resolved) => return resolved.clone(),
+            PlanState::Resolved(resolved) => {
+                return resolved.as_ref().map(|record| record.material.clone());
+            }
             PlanState::Pending(candidate) => candidate.clone(),
         };
 
@@ -485,9 +630,10 @@ where
             *state = PlanState::Resolved(None);
             return None;
         };
-        if recovered_epoch.is_none_or(|epoch| epoch <= candidate.floor.epoch()) {
-            *state = PlanState::Resolved(Some(candidate.clone()));
-            return Some(candidate);
+        if recovered_epoch.is_none_or(|epoch| epoch <= candidate.material.floor.epoch()) {
+            let material = candidate.material.clone();
+            *state = PlanState::Resolved(Some(candidate));
+            return Some(material);
         }
 
         let storage = self
@@ -502,6 +648,37 @@ where
             .expect("failed to delete stale DKG state sync metadata");
         *state = PlanState::Resolved(None);
         None
+    }
+
+    /// Returns the floor block height recorded with the material [`Self::resolve`]
+    /// kept, if any.
+    pub(crate) async fn floor_height(&self) -> Option<Height> {
+        match &*self.state.lock().await {
+            PlanState::Resolved(Some(record)) => record.floor_height,
+            _ => None,
+        }
+    }
+
+    /// Durably records `height` as the floor block height of the material
+    /// [`Self::resolve`] kept.
+    ///
+    /// Does nothing unless [`Self::resolve`] has kept material. Panics if storage fails.
+    pub(crate) async fn record_floor_height<E: Context>(&self, context: E, height: Height) {
+        let mut state = self.state.lock().await;
+        let PlanState::Resolved(Some(record)) = &mut *state else {
+            return;
+        };
+        record.floor_height = Some(height);
+        let storage = self
+            .storage
+            .as_ref()
+            .expect("kept material must have storage");
+        let mut store = open_state_sync::<E, S, D, V, Dir>(context, storage).await;
+        store.put(STATE_SYNC_KEY, record.clone());
+        store
+            .sync()
+            .await
+            .expect("DKG state sync floor height must persist");
     }
 
     /// Returns the checkpoint recorded for `epoch`, if any.
@@ -555,7 +732,7 @@ where
 async fn open_state_sync<E, S, D, V, Dir>(
     context: E,
     storage: &Storage,
-) -> Metadata<E, FixedBytes<1>, StateSync<S, D, V, Dir>>
+) -> Metadata<E, FixedBytes<1>, Record<S, D, V, Dir>>
 where
     E: Context,
     S: Scheme<D>,
@@ -879,6 +1056,118 @@ mod tests {
         });
     }
 
+    /// A recorded floor height survives reopening the plan until provided material replaces
+    /// the material it was recorded for.
+    #[test]
+    fn floor_height_persists_until_material_is_replaced() {
+        deterministic::Runner::default().start(|mut context| async move {
+            // A height recorded for kept material is visible at once.
+            let material = state_sync(&mut context, Epoch::new(2));
+            let first = plan(
+                context.child("first"),
+                "floor-height",
+                Some(material.clone()),
+            )
+            .await;
+            assert_state_sync(
+                first
+                    .resolve(context.child("resolve"), Some(Epoch::new(2)))
+                    .await,
+                &material,
+            );
+            assert!(first.floor_height().await.is_none());
+            first
+                .record_floor_height(context.child("record"), Height::new(70))
+                .await;
+            assert_eq!(first.floor_height().await, Some(Height::new(70)));
+            drop(first);
+
+            // Reopening the plan loads the height with the material.
+            let reopened = plan(context.child("reopened"), "floor-height", None).await;
+            assert_state_sync(
+                reopened
+                    .resolve(context.child("resolve"), Some(Epoch::new(2)))
+                    .await,
+                &material,
+            );
+            assert_eq!(reopened.floor_height().await, Some(Height::new(70)));
+            drop(reopened);
+
+            // New material replaces the record, so it starts with no height.
+            let replacement = state_sync(&mut context, Epoch::new(3));
+            let replaced = plan(
+                context.child("replaced"),
+                "floor-height",
+                Some(replacement.clone()),
+            )
+            .await;
+            assert_state_sync(
+                replaced
+                    .resolve(context.child("resolve"), Some(Epoch::new(2)))
+                    .await,
+                &replacement,
+            );
+            assert!(replaced.floor_height().await.is_none());
+        });
+    }
+
+    /// Recording a floor height does nothing without kept material, and a disabled plan
+    /// reports no height.
+    #[test]
+    fn floor_height_requires_kept_material() {
+        deterministic::Runner::default().start(|context| async move {
+            // A plan with no stored material ignores a recorded height.
+            let empty = plan(context.child("empty"), "no-material", None).await;
+            assert!(
+                empty
+                    .resolve(context.child("resolve"), None)
+                    .await
+                    .is_none()
+            );
+            empty
+                .record_floor_height(context.child("record"), Height::new(5))
+                .await;
+            assert!(empty.floor_height().await.is_none());
+
+            // A disabled plan stores no material, so it has no height.
+            let disabled = TestPlan::disabled();
+            assert!(disabled.floor_height().await.is_none());
+        });
+    }
+
+    /// Provided material leaves every checkpoint in place, so once startup deletes stale
+    /// material, the recovered epoch still starts from its checkpoint.
+    #[test]
+    fn provided_material_keeps_checkpoints() {
+        deterministic::Runner::default().start(|mut context| async move {
+            // A plan without material records a checkpoint for epoch three.
+            let recorded = checkpoint(&mut context, Epoch::new(3));
+            let recorder = plan(context.child("recorder"), "kept", None).await;
+            recorder
+                .record(context.child("record"), recorded.clone(), Epoch::new(3))
+                .await;
+            drop(recorder);
+
+            // Material for epoch two is stale once epoch three is recovered, so resolving
+            // deletes it and the epoch-three checkpoint remains.
+            let material = state_sync(&mut context, Epoch::new(2));
+            let provided = plan(context.child("provided"), "kept", Some(material)).await;
+            assert!(
+                provided
+                    .resolve(context.child("resolve"), Some(Epoch::new(3)))
+                    .await
+                    .is_none()
+            );
+            assert_eq!(
+                provided
+                    .checkpoint(context.child("read"), Epoch::new(3))
+                    .await
+                    .as_ref(),
+                Some(&recorded)
+            );
+        });
+    }
+
     #[test]
     #[should_panic(expected = "state sync artifact and floor must be in the same epoch")]
     fn artifact_beyond_floor_panics_at_init() {
@@ -980,6 +1269,8 @@ mod conformance {
     commonware_conformance::conformance_tests! {
         CodecConformance<StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>> => 8192,
         CodecConformance<StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant, Addresses<mocks::TestPublicKey>>> => 8192,
+        CodecConformance<Record<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>> => 8192,
+        CodecConformance<Record<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant, Addresses<mocks::TestPublicKey>>> => 8192,
         CodecConformance<Checkpoint<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>> => 8192,
         CodecConformance<Checkpoint<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant, Addresses<mocks::TestPublicKey>>> => 8192,
     }

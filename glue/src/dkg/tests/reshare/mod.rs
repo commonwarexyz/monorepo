@@ -8,7 +8,7 @@ use rstest::rstest;
 use std::time::Duration;
 
 mod harness;
-use harness::{EPOCH_LENGTH, Network, ReshareEngine, final_height, height_round};
+use harness::{EPOCH_LENGTH, Network, PrunedRestart, ReshareEngine, final_height, height_round};
 
 mod properties;
 use properties::{
@@ -464,9 +464,18 @@ fn reshare_e2e_restart_after_boundary_pruned_participates(#[case] network: Netwo
         .pop()
         .unwrap();
 
-    // The node restarted once, in epoch one, after its boundary block was pruned.
+    // The node restarted once, in epoch one, after its boundary block was pruned,
+    // and participated in the epoch.
     assert_eq!(result.crashes, 1);
-    assert_eq!(*pruned_restarts.lock(), vec![(epoch, false)]);
+    assert_eq!(
+        *pruned_restarts.lock(),
+        vec![PrunedRestart {
+            epoch,
+            boundary_held: false,
+            floor_held: None,
+            following: Some(false),
+        }]
+    );
 
     // The node registers its epoch-one share once when the epoch begins and again
     // when its restart takes its role. A follower would not register it again.
@@ -480,6 +489,148 @@ fn reshare_e2e_restart_after_boundary_pruned_participates(#[case] network: Netwo
         .filter(|registration| registration.epoch == epoch && registration.signs())
         .count();
     assert_eq!(signed, 2, "{registrations:?}");
+}
+
+/// Builds a run through the final block of `final_epoch` in which the last of four
+/// participants state syncs to `floor` in epoch one, prunes marshal after every
+/// block, and restarts once within epoch one, at the first height at or above
+/// `restart`.
+///
+/// Failure in epoch zero carries the genesis output and share into epoch one, so
+/// the synced node holds a share of the epoch it joins. Marshal archives prune in
+/// sections of ten heights once stateful pruning reaches a section boundary, so a
+/// restart far enough past `floor` finds the floor block pruned.
+/// [`PrunedRestart::floor_held`] reports whether it did.
+fn pruned_state_sync_restart_plan(
+    network: Network,
+    floor: Height,
+    restart: Height,
+    final_epoch: u64,
+) -> (PlanBuilder<ReshareEngine>, ReshareEngine) {
+    let epoch = Epoch::new(1);
+    let engine = ReshareEngine::with_committee(network, 4, 4)
+        .with_failures([0])
+        .with_state_sync_floor(floor);
+    let synced = engine.participants[3].clone();
+    let engine = engine
+        .with_marshal_pruning(synced.clone())
+        .with_processed_hold(synced.clone(), restart);
+    let state_syncs = engine.state_syncs.clone();
+
+    // Start the node a few heights past its floor, so the marshal that supplies
+    // the floor's finalization has already finalized it.
+    let start = Height::new(floor.get() + 4);
+    let plan = PlanBuilder::new(engine.clone())
+        .seed(0)
+        .exit_condition(ProcessedHeightAtLeast::new(final_height(final_epoch).get()))
+        .link(Link {
+            latency: Duration::from_millis(4),
+            jitter: Duration::from_millis(1),
+            success_rate: probability!(1.0),
+        })
+        .crash(Crash::DelayRound {
+            participants: vec![synced.clone()],
+            round: height_round(start),
+        })
+        .crash(Crash::ProcessedHeight {
+            participant: synced.clone(),
+            heights: restart.get()..=final_height(epoch.get()).get() - 1,
+            downtime: Duration::from_millis(250),
+        })
+        .property(StateSyncedAtHeight::new(synced, floor, floor, state_syncs))
+        .timeout(Duration::from_secs(120));
+    (plan, engine)
+}
+
+/// A validator state synced to the first block of an epoch restarts in the epoch's
+/// dealing or inclusion window after its marshal pruned the floor block. The
+/// restart reads the floor's height from the state-sync plan, so it participates in
+/// the epoch and receives a share of the next one.
+///
+/// Waiting for the pruned floor block would stall the node's marshal and the run.
+/// In the inclusion cases, marshal's processed height lies past the midpoint, so
+/// treating it as the floor would make the node follow the epoch.
+#[rstest]
+#[case::discovery_dealing(Network::Discovery, -2)]
+#[case::lookup_dealing(Network::Lookup, -2)]
+#[case::discovery_inclusion(Network::Discovery, 2)]
+#[case::lookup_inclusion(Network::Lookup, 2)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_state_sync_restart_after_floor_pruned_participates(
+    #[case] network: Network,
+    #[case] restart_offset: i64,
+) {
+    // Sync to the epoch's first block and restart near its midpoint, before it in
+    // the dealing cases and after it in the inclusion cases.
+    let epoch = Epoch::new(1);
+    let epocher = FixedEpocher::new(EPOCH_LENGTH);
+    let floor = epocher.first(epoch).expect("test epoch must be supported");
+    let midpoint = epocher
+        .midpoint(epoch)
+        .expect("test epoch must be supported");
+    let restart = Height::new(midpoint.get().checked_add_signed(restart_offset).unwrap());
+    let (plan, engine) = pruned_state_sync_restart_plan(network, floor, restart, 1);
+    let synced = engine.participants[3].clone();
+    let result = plan
+        .property(SchemesRegistered::new(vec![synced.clone()], epoch.next()))
+        .run()
+        .unwrap()
+        .pop()
+        .unwrap();
+
+    // The node synced once and restarted once in its synced epoch after its floor
+    // block was pruned, and participated in the epoch. It never held the boundary
+    // block.
+    assert_eq!(result.crashes, 1);
+    assert_eq!(engine.state_sync_starts.lock().get(&synced), Some(&1));
+    assert_eq!(
+        *engine.pruned_restarts.lock(),
+        vec![PrunedRestart {
+            epoch,
+            boundary_held: false,
+            floor_held: Some(false),
+            following: Some(false),
+        }]
+    );
+}
+
+/// A validator state synced past an epoch's midpoint restarts in that epoch after
+/// its marshal pruned the floor block. The restart reads the floor's height from
+/// the state-sync plan, so it keeps following the epoch whose dealer-log window
+/// the floor partly skipped.
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_late_state_sync_restart_after_floor_pruned_follows(#[case] network: Network) {
+    // Sync just past the midpoint and restart far enough later for marshal to prune
+    // the floor block.
+    let epoch = Epoch::new(1);
+    let epocher = FixedEpocher::new(EPOCH_LENGTH);
+    let midpoint = epocher
+        .midpoint(epoch)
+        .expect("test epoch must be supported");
+    let floor = midpoint.next();
+    let restart = Height::new(floor.get() + 7);
+    let (plan, engine) = pruned_state_sync_restart_plan(network, floor, restart, 2);
+    let synced = engine.participants[3].clone();
+    let result = plan.run().unwrap().pop().unwrap();
+
+    // The node synced once and restarted once, in its synced epoch, after its floor
+    // block was pruned, and still followed the epoch.
+    assert_eq!(result.crashes, 1);
+    assert_eq!(engine.state_sync_starts.lock().get(&synced), Some(&1));
+    assert_eq!(
+        *engine.pruned_restarts.lock(),
+        vec![PrunedRestart {
+            epoch,
+            boundary_held: false,
+            floor_held: Some(false),
+            following: Some(true),
+        }]
+    );
 }
 
 #[rstest]
