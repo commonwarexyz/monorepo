@@ -18,15 +18,10 @@
 //! [`SERIAL_SAMPLE_BUDGET_NS`], and preferred only while the serial estimate fits too.
 //!
 //! Parallel samples keep the busy-time estimate current. A shorter busy time can make serial
-//! eligible again, and a longer one stops a stale serial estimate from winning after the input
-//! grows within its bucket. Queueing behind other work on a group lengthens a parallel run's wall
+//! eligible again, and one at or over the budget stops a stale serial estimate from winning after
+//! the input grows within its bucket. Queueing behind other work on a group lengthens a parallel run's wall
 //! time but not its busy time, so contention steers callers toward serial while it stays
 //! affordable.
-//!
-//! A serial sample at or over the budget records the busy time of each placement serial was probed
-//! against, and serial is probed from that placement again only once its busy time falls below
-//! that level. A sample records nothing for a placement that serial is preferred over, since only
-//! parallel probes refresh that placement's busy time and it may understate the work.
 //!
 //! # Placement
 //!
@@ -296,7 +291,7 @@ impl Policy {
         let key = Key::new(caller, len, work, parallelism);
         let mut entry = self.run_entries.entry(key).or_default();
         match plan.execution {
-            RunExecution::Serial => entry.record_serial(nanos(sample.wall)),
+            RunExecution::Serial => entry.serial_ns.record(nanos(sample.wall)),
             RunExecution::Parallel => {
                 entry.placement.record(plan.placement, nanos(sample.wall));
                 entry.busy_ns[plan.placement].record(nanos(sample.busy));
@@ -754,10 +749,6 @@ struct RunEntry {
     /// Every caller on one cadence compares serial against the same placement, so each probe lands
     /// on a caller that can act on it.
     cadences: [Cadence<RunExecution>; 2],
-    /// Each placement's busy-time estimate when the last serial sample was an over-budget probe
-    /// against it, or `None` otherwise. Serial is probed from a placement again only while its
-    /// busy time is below this level.
-    refuted_ns: [Option<u64>; 2],
 }
 
 impl RunEntry {
@@ -777,25 +768,6 @@ impl RunEntry {
             (Some(parallel_ns), Some(busy_ns)) => Some((parallel_ns, busy_ns)),
             _ => None,
         }
-    }
-
-    /// Records a serial sample. A sample at or over the budget refutes serial at the busy time of
-    /// each placement serial was probed against, and one within it clears the refutations. No
-    /// sample refutes serial where it was preferred, since that placement's busy time may be stale.
-    fn record_serial(&mut self, wall_ns: u64) {
-        let probed = [Placement::Wide, Placement::Local]
-            .map(|placement| self.serial_rival_ns(placement).is_none());
-        self.serial_ns.record(wall_ns);
-        let refuted = |placement: Placement| {
-            probed[placement]
-                .then(|| self.busy_ns[placement].get())
-                .flatten()
-        };
-        self.refuted_ns = if wall_ns >= SERIAL_SAMPLE_BUDGET_NS {
-            [refuted(Placement::Wide), refuted(Placement::Local)]
-        } else {
-            [None; 2]
-        };
     }
 
     /// Prefers the path with the lower wall-time estimate, allowing serial only when its estimate
@@ -826,7 +798,6 @@ impl RunEntry {
     fn choose(&mut self, placement: Placement) -> (RunExecution, bool) {
         let serial_ns = self.serial_ns;
         let estimates = self.estimates(placement);
-        let refuted_ns = self.refuted_ns[placement];
         let cadence = &mut self.cadences[placement];
 
         // Seed this placement's estimate with its first call. Until serial is measured, saturating
@@ -842,10 +813,9 @@ impl RunEntry {
             return (RunExecution::Parallel, true);
         };
 
-        // Serial is eligible only while the parallel busy time is below both the budget and the
-        // refuted level.
-        let can_sample_serial = busy_ns < SERIAL_SAMPLE_BUDGET_NS
-            && refuted_ns.is_none_or(|refuted_ns| busy_ns < refuted_ns);
+        // Serial is eligible only while the parallel busy time is below the budget. Periodic
+        // parallel samples refresh it, so a shorter busy time can make serial eligible again.
+        let can_sample_serial = busy_ns < SERIAL_SAMPLE_BUDGET_NS;
 
         // Until serial is sampled, parallel is preferred by default and each boundary doubles as
         // the seed slot. The tie adds no gap, and each boundary confirms parallel like any held
@@ -1133,7 +1103,7 @@ mod tests {
         /// Records a serial run, or a Wide parallel run with its busy time from [`perfect_busy`].
         pub(super) fn record(&mut self, execution: RunExecution, elapsed: Duration) {
             match execution {
-                RunExecution::Serial => self.record_serial(nanos(elapsed)),
+                RunExecution::Serial => self.serial_ns.record(nanos(elapsed)),
                 RunExecution::Parallel => {
                     self.record_parallel(Placement::Wide, elapsed, perfect_busy(elapsed))
                 }
@@ -1628,169 +1598,89 @@ mod tests {
         assert_eq!(choose(&mut entry).0, RunExecution::Parallel);
     }
 
-    /// After an over-budget serial sample, serial is probed again only once the busy time falls
-    /// below its level at that sample.
+    /// Serial is probed at the capped interval while the parallel busy time fits the budget, even
+    /// when its own estimate is over the budget, so a stale estimate can recover.
     #[test]
-    fn reprobes_refuted_serial_once_busy_time_falls() {
-        // Parallel runs at 500us wall and 2ms busy, and serial was sampled at 15ms.
+    fn probes_big_serial_when_busy_time_is_affordable() {
         let mut entry = RunEntry::default();
         for _ in 0..2 {
             entry.record(RunExecution::Parallel, Duration::from_micros(500));
             entry.record(RunExecution::Serial, Duration::from_millis(15));
         }
         assert_eq!(preferred(&entry), RunExecution::Parallel);
-        assert_eq!(entry.refuted_ns[Placement::Wide], Some(2_000_000));
 
-        // The busy time is unchanged, so no boundary probes serial.
+        // Slowdown 15ms / 500us = 30 caps the shift, so the probe fires at 100 << 5 calls.
         let interval = RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT;
-        for _ in 0..(4 * interval) {
-            assert_eq!(choose(&mut entry).0, RunExecution::Parallel);
+        for i in 1..interval {
+            assert_eq!(
+                choose(&mut entry),
+                (RunExecution::Parallel, i % PREFERRED_SAMPLE_INTERVAL == 0)
+            );
         }
-
-        // A lower busy time makes serial eligible, and the next boundary probes it.
-        entry.record_parallel(
-            Placement::Wide,
-            Duration::from_micros(500),
-            Duration::from_millis(1),
-        );
-        let probed = (0..interval).any(|_| choose(&mut entry) == (RunExecution::Serial, true));
-        assert!(
-            probed,
-            "serial must be probed once the busy time falls below the refuted level"
-        );
-
-        // A serial sample within the budget clears the refutation.
-        entry.record(RunExecution::Serial, Duration::from_micros(300));
-        assert_eq!(entry.refuted_ns, [None; 2]);
-    }
-
-    /// A call site whose busy time understates its serial cost pays one over-budget serial sample
-    /// and is not offered serial again while its busy-time estimate stays at the refuted level.
-    #[test]
-    fn refuted_serial_is_not_reprobed_on_unchanged_busy_time() {
-        // A 25ms parallel run reports 2ms busy, so serial is seeded, and the sample takes 50ms.
-        let mut entry = RunEntry::default();
-        assert_eq!(choose(&mut entry), (RunExecution::Parallel, true));
-        entry.record_parallel(
-            Placement::Wide,
-            Duration::from_millis(25),
-            Duration::from_millis(2),
-        );
         assert_eq!(choose(&mut entry), (RunExecution::Serial, true));
-        entry.record(RunExecution::Serial, Duration::from_millis(50));
 
-        // Every later call runs parallel while the busy time stays at 2ms.
-        for _ in 0..(4 * (RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT)) {
-            let (execution, measure) = choose(&mut entry);
-            assert_eq!(execution, RunExecution::Parallel);
-            if measure {
-                entry.record_parallel(
-                    Placement::Wide,
-                    Duration::from_millis(25),
-                    Duration::from_millis(2),
-                );
-            }
-        }
+        entry.record(RunExecution::Serial, Duration::from_micros(300));
+        assert_eq!(entry.serial_ns.get(), Some(12_060_000));
     }
 
-    /// Over-budget samples of the preferred serial path do not refute serial, since only parallel
-    /// probes refresh the placement's busy time and it can understate the work. Serial is probed
-    /// and preferred again once the work settles where it is affordable and faster.
+    /// Work that grows within its bucket until serial exceeds the budget, and later settles where
+    /// serial is affordable and faster, has serial probed within one capped interval and preferred
+    /// again by the next. No busy level recorded while the work was grown may suppress the probes.
     #[test]
-    fn preferred_serial_samples_over_budget_do_not_refute() {
-        let ms = Duration::from_millis;
-        let mut entry = RunEntry::default();
-        for _ in 0..2 {
-            entry.record_parallel(Placement::Wide, ms(25), ms(2));
-            entry.record(RunExecution::Serial, ms(5));
-        }
-        assert_eq!(preferred(&entry), RunExecution::Serial);
-
-        // The input grows within its bucket, so serial samples read 11ms until the preference
-        // flips. Only parallel probes refresh the busy-time estimate, so it understates that work.
-        while preferred(&entry) == RunExecution::Serial {
-            let (execution, measure) = choose(&mut entry);
-            match execution {
-                RunExecution::Serial if measure => entry.record(RunExecution::Serial, ms(11)),
-                RunExecution::Serial => {}
-                RunExecution::Parallel => {
-                    entry.record_parallel(Placement::Wide, ms(25), Duration::from_micros(4_400));
-                }
-            }
-        }
-        assert_eq!(entry.refuted_ns, [None; 2]);
-
-        // The input settles where serial takes 7.5ms and parallel is busy for 3ms, so serial is
-        // probed within the capped interval and preferred again.
-        let mut serial_runs = 0;
-        for _ in 0..(RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT) {
-            let (execution, measure) = choose(&mut entry);
-            match execution {
-                RunExecution::Serial => {
-                    serial_runs += 1;
-                    if measure {
-                        entry.record(RunExecution::Serial, Duration::from_micros(7_500));
-                    }
-                }
-                RunExecution::Parallel if measure => {
-                    entry.record_parallel(Placement::Wide, ms(25), ms(3));
-                }
-                RunExecution::Parallel => {}
-            }
-        }
-        assert!(
-            serial_runs > 0,
-            "serial must be rediscovered once affordable"
-        );
-        assert_eq!(preferred(&entry), RunExecution::Serial);
-    }
-
-    /// An over-budget serial seed refutes serial at each placement's busy time, so neither a Wide
-    /// nor a Local caller probes it again while their busy times hold.
-    #[test]
-    fn serial_refutation_covers_both_placements() {
+    fn serial_is_rediscovered_after_growth_settles() {
         let policy = Policy::default();
         let location = Location::caller();
-        let record = |plan: RunPlan| {
-            let (wall, busy) = match (plan.execution, plan.placement) {
-                (RunExecution::Serial, _) => (20, 20),
-                (RunExecution::Parallel, Placement::Wide) => (1, 4),
-                (RunExecution::Parallel, Placement::Local) => (1, 3),
-            };
-            let sample = RunSample {
-                wall: Duration::from_millis(wall),
-                busy: Duration::from_millis(busy),
-            };
-            policy.record_run(location, 10, 10, PARALLELISM, plan, sample);
+        let ms = Duration::from_millis;
+        let us = Duration::from_micros;
+        let interval = RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT;
+        let run = |serial: Duration, parallel: Duration, busy: Duration| {
+            let plan = policy.choose_run(location, 10, 10, PARALLELISM, confined(Placement::Wide));
+            if plan.measure {
+                let sample = match plan.execution {
+                    RunExecution::Serial => RunSample {
+                        wall: serial,
+                        busy: serial,
+                    },
+                    RunExecution::Parallel => RunSample {
+                        wall: parallel,
+                        busy,
+                    },
+                };
+                policy.record_run(location, 10, 10, PARALLELISM, plan, sample);
+            }
+            plan.execution
         };
 
-        // Each placement seeds parallel, and the Local caller then seeds serial over the budget.
-        for placement in [Placement::Wide, Placement::Local] {
-            let plan = policy.choose_run(location, 10, 10, PARALLELISM, confined(placement));
-            assert_eq!(
-                (plan.execution, plan.measure),
-                (RunExecution::Parallel, true)
-            );
-            record(plan);
+        // Serial at 5ms is preferred over parallel at 25ms wall and 2ms busy.
+        for _ in 0..(2 * PREFERRED_SAMPLE_INTERVAL) {
+            run(ms(5), ms(25), ms(2));
         }
-        let plan = policy.choose_run(location, 10, 10, PARALLELISM, confined(Placement::Local));
-        assert_eq!(plan.execution, RunExecution::Serial);
-        record(plan);
+        assert_eq!(run(ms(5), ms(25), ms(2)), RunExecution::Serial);
 
-        // Neither placement offers serial again within the capped interval.
-        for placement in [Placement::Wide, Placement::Local] {
-            for _ in 0..(RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT) {
-                let plan = policy.choose_run(location, 10, 10, PARALLELISM, confined(placement));
-                assert_eq!(
-                    plan.execution,
-                    RunExecution::Parallel,
-                    "serial must stay refuted at {placement:?}"
-                );
-                if plan.measure {
-                    record(plan);
-                }
-            }
+        // The work grows: serial reads 11.5ms, and the preference flips one parallel sample before
+        // the next boundary, so the first probe of serial sees a busy estimate refreshed once. The
+        // grown work persists through the later probes.
+        for _ in 0..interval {
+            run(us(11_500), ms(25), us(4_600));
         }
+        assert_eq!(run(us(11_500), ms(25), us(4_600)), RunExecution::Parallel);
+
+        // The work settles where serial takes 7ms and parallel is busy for 2.8ms.
+        let settled: Vec<_> = (0..(2 * interval))
+            .map(|_| run(ms(7), ms(25), us(2_800)))
+            .collect();
+        let probe = settled
+            .iter()
+            .position(|&execution| execution == RunExecution::Serial);
+        assert!(
+            probe.is_some_and(|call| call < interval as usize),
+            "serial must be probed within one capped interval once affordable"
+        );
+        assert_eq!(
+            settled.last(),
+            Some(&RunExecution::Serial),
+            "serial must be preferred again"
+        );
     }
 
     /// The established serial estimate stays above parallel after one unusually fast sample.
