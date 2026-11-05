@@ -625,7 +625,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                             .map(|&pos| ((pos - first).saturating_mul(item_size), item_size))
                             .collect();
                         let warm = blob.warm(&ranges).await;
-                        let warmed = warm.is_ok();
+                        let warm_failed = warm.is_err();
                         offset_metrics.record(warm);
 
                         // Only offsets the view holds entirely can be read from it.
@@ -638,19 +638,21 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                             .map(|&idx| (lookups[idx] - first) * item_size)
                             .collect();
                         let mut buf = vec![0u8; items.len() * offset_size.get()];
-                        let result = blob.read_many_into(&mut buf, &items, offset_size).await;
-                        (missing, buf, result, warmed)
-                    });
-                for (missing, buf, result, warmed) in join_all(reads).await {
-                    // The reads are served from the pages just warmed, so only a failure counts,
-                    // and only after a successful warm, since a failed warm already counted the
-                    // pages that the read then fails on.
-                    if let Err(err) = result {
-                        if warmed {
-                            offset_metrics.record(Err(err));
+
+                        // The read is served from the pages just warmed, so only its failure
+                        // counts, and only after a successful warm, which would otherwise have
+                        // counted the pages the read then fails on.
+                        match blob.read_many_into(&mut buf, &items, offset_size).await {
+                            Ok(_) => Some((missing, buf)),
+                            Err(err) => {
+                                if !warm_failed {
+                                    offset_metrics.record(Err(err));
+                                }
+                                None
+                            }
                         }
-                        continue;
-                    }
+                    });
+                for (missing, buf) in join_all(reads).await.into_iter().flatten() {
                     for (idx, item) in missing.into_iter().zip(buf.chunks(offset_size.get())) {
                         offsets[idx] = <u64 as DecodeExt<()>>::decode(Copying(item)).ok();
                     }
