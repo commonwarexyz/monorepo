@@ -120,7 +120,7 @@ where
     }
 
     pub(super) unsafe fn run_inline(self, stolen: bool) -> R {
-        assert_eq!(
+        debug_assert_eq!(
             Context::current(),
             self.context,
             "a job must run inline in the context it captured"
