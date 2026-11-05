@@ -2657,10 +2657,50 @@ fn own_message_duties_from_the_retired_view_through_the_current_one_fit_their_fa
 }
 
 #[test]
+fn each_chain_bounds_its_own_data_availability_duties() {
+    let (mut machine, _) = start_profile(Harness::observer().participants(6).profile());
+    let epoch = machine.profile().protocol().epoch();
+    let tips = machine.profile().protocol().genesis().tips().to_vec();
+    let blocks = |chain: u32, heights: std::ops::RangeInclusive<u64>| {
+        let tip = tips[chain as usize];
+        SignEffect::new(
+            heights
+                .map(|height| {
+                    SignRequest::TransactionBlock(
+                        TransactionBlockHeader::new(
+                            epoch,
+                            ChainId::new(chain),
+                            Height::new(height),
+                            tip.digest(),
+                            digest(&height.to_be_bytes()),
+                        )
+                        .unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        )
+    };
+    let bound = machine.obligation_family_bounds().da[0] as u64;
+    machine
+        .durable
+        .state
+        .signing_reservations
+        .insert(EffectId::from_cursor(Cursor::new(1)), blocks(0, 1..=bound));
+
+    // Chain zero is full; another chain still admits its duties.
+    assert!(!machine.sign_fits(&blocks(0, bound + 1..=bound + 1)));
+    assert!(machine.sign_fits(&blocks(1, 1..=bound)));
+    let credit = machine.da_credit();
+    assert_eq!(credit[0], 0);
+    assert_eq!(credit[1], bound as usize);
+}
+
+#[test]
 fn signing_reservations_count_toward_the_duties_their_publications_will_carry() {
     let mut machine = active_machine(Role::Observer);
-    let bound = machine.obligation_family_bounds().da;
     let tip = machine.profile().protocol().genesis().tips()[0];
+    let bound = machine.obligation_family_bounds().da[tip.chain().index()];
     let epoch = machine.profile().protocol().epoch();
     let header = |height: u64| {
         TransactionBlockHeader::new(
