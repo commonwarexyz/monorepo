@@ -1024,8 +1024,7 @@ pub(super) fn record_protocol_acceptances(
 ) {
     accepted.extend(activities.iter().filter_map(|activity| match activity {
         Activity::ProtocolAccepted { artifact_id, .. } => Some(*artifact_id),
-        Activity::CommitmentsAccepted { .. }
-        | Activity::HistoryAccepted { .. }
+        Activity::HistoryAccepted { .. }
         | Activity::TransactionProposed { .. }
         | Activity::CertificateRecorded { .. }
         | Activity::Placed { .. }

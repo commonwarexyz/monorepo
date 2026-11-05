@@ -1,213 +1,473 @@
-//! Peer-visible resolver keys for Multimmit marshal data.
+//! Peer-visible resolver keys and the responses that answer them.
 //!
-//! A key identifies only the object requested from a peer. Local resolver annotations and
-//! subscriber state belong to the marshal actor and are deliberately not encoded here.
+//! A key names only the object requested; every response is authenticated by the requester
+//! against the key before anything is stored:
+//!
+//! - [`Key::Blocks`]: complete blocks, newest first, starting at the exact head and following
+//!   parent links. Each decoded block's body matches its header, and each header's digest is the
+//!   reference that names it.
+//! - [`Key::Records`]: tip-history records, newest first, starting at the record whose commitment
+//!   is `before` and following parent links, or [`Records::Pruned`] when the server no longer
+//!   retains that part of the history.
+//! - [`Key::Proofs`]: an L-QC with the history record its leader commits to. The requester
+//!   verifies the certificate before using it.
+//! - [`Key::Lqc`]: the L-QC with exactly that identifier.
 
-use crate::multimmit::types::{BlockRef, CertificateId, ChainId};
-use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write};
-use commonware_cryptography::Digest;
+use super::store::blocks::Block;
+use crate::multimmit::types::{
+    BlockRef, Body, CertificateId, CodecConfig, Lqc, TipRecord, TransactionBlock,
+};
+use bytes::{BufMut, Bytes};
+use commonware_codec::{Buf, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::Span;
 use core::{fmt, num::NonZeroU16};
+use std::sync::Arc;
 
-const LQC_BY_ID: u8 = 0;
-const TIP_RECORD: u8 = 1;
-const PRODUCER_BLOCK: u8 = 2;
-const PRODUCER_HEADERS: u8 = 3;
-const PRODUCER_BLOCKS: u8 = 4;
+const BLOCKS: u8 = 0;
+const RECORDS: u8 = 1;
+const PROOFS: u8 = 2;
+const LQC: u8 = 3;
 
-/// Maximum number of items carried by one bounded resolver value.
-pub(crate) const MAX_SEGMENT_ITEMS: usize = 1024;
+/// Most blocks one request names.
+pub(crate) const MAX_BLOCKS: u16 = 1024;
 
-/// Returns whether a segment of `items` values totaling `item_bytes`, plus its length prefix, fits
-/// in `max_value_bytes`.
-pub(crate) fn segment_fits(items: usize, item_bytes: usize, max_value_bytes: usize) -> bool {
-    item_bytes
-        .checked_add(items.encode_size())
-        .is_some_and(|bytes| bytes <= max_value_bytes)
-}
+/// Most records one response carries.
+pub(crate) const MAX_RECORDS: usize = 4096;
 
-/// Returns the largest block segment whose worst-case encoding fits one resolver value.
-pub(crate) fn max_block_segment_items(max_block_bytes: usize, max_value_bytes: usize) -> usize {
-    (1..=MAX_SEGMENT_ITEMS)
-        .take_while(|items| {
-            items
-                .checked_mul(max_block_bytes)
-                .is_some_and(|bytes| segment_fits(*items, bytes, max_value_bytes))
-        })
-        .last()
-        .unwrap_or(1)
-}
-
-/// A peer-visible request for one Multimmit marshal object.
-///
-/// Exact objects are addressed by their canonical cryptographic identity.
+/// A peer-visible request for marshal data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum BackfillKey<D: Digest> {
-    /// Fetch an exact L-QC by its certificate identifier.
-    LqcById {
-        /// Canonical identifier of the L-QC.
+pub enum Key<D: Digest> {
+    /// Complete blocks: `head` and up to `len - 1` of its ancestors, newest first.
+    Blocks {
+        /// The newest block requested.
+        head: BlockRef<D>,
+        /// Most blocks requested.
+        len: NonZeroU16,
+    },
+    /// Tip-history records: the record whose commitment is `before`, then its ancestors.
+    Records {
+        /// Commitment of the newest record requested.
+        before: D,
+    },
+    /// An L-QC with its leader's history record: the server's strongest, or with `after`, the
+    /// first the server retains whose leader history is `after` or descends from it.
+    Proofs {
+        /// The history the proof must not precede.
+        after: Option<D>,
+    },
+    /// The L-QC with exactly this identifier.
+    Lqc {
+        /// The certificate's identifier.
         id: CertificateId<D>,
     },
-    /// Fetch the authenticated tip-history opening for a commitment.
-    TipRecord {
-        /// Commitment of the tip-history record.
-        commitment: D,
-    },
-    /// Fetch a complete producer block by its canonical header digest.
-    ProducerBlock {
-        /// Producer chain used to route the temporary-archive lookup.
-        chain: ChainId,
-        /// Canonical digest of the producer block header.
-        digest: D,
-    },
-    /// Fetch a bounded producer-header segment beginning at an exact block reference.
-    ProducerHeaders {
-        /// Newest header requested by the consumer.
-        head: BlockRef<D>,
-    },
-    /// Fetch a bounded finalized producer-block range beginning at an exact block reference.
-    ProducerBlocks {
-        /// Newest block requested by the consumer.
-        head: BlockRef<D>,
-        /// Maximum number of consecutive blocks in the response.
-        max_items: NonZeroU16,
-    },
 }
 
-impl<D: Digest> BackfillKey<D> {
-    /// Creates an exact L-QC lookup.
-    pub const fn lqc_by_id(id: CertificateId<D>) -> Self {
-        Self::LqcById { id }
-    }
-
-    /// Creates a tip-history opening lookup.
-    pub const fn tip_record(commitment: D) -> Self {
-        Self::TipRecord { commitment }
-    }
-
-    /// Creates a producer-block lookup by canonical header digest.
-    pub const fn producer_block(chain: ChainId, digest: D) -> Self {
-        Self::ProducerBlock { chain, digest }
-    }
-
-    /// Creates a bounded producer-header segment lookup.
-    pub const fn producer_headers(head: BlockRef<D>) -> Self {
-        Self::ProducerHeaders { head }
-    }
-
-    /// Creates a bounded finalized producer-block range lookup.
-    pub const fn producer_blocks(head: BlockRef<D>, max_items: NonZeroU16) -> Self {
-        Self::ProducerBlocks { head, max_items }
-    }
-}
-
-impl<D: Digest> Write for BackfillKey<D> {
+impl<D: Digest> Write for Key<D> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Self::LqcById { id } => {
-                LQC_BY_ID.write(buf);
+            Self::Blocks { head, len } => {
+                BLOCKS.write(buf);
+                head.write(buf);
+                len.write(buf);
+            }
+            Self::Records { before } => {
+                RECORDS.write(buf);
+                before.write(buf);
+            }
+            Self::Proofs { after } => {
+                PROOFS.write(buf);
+                after.write(buf);
+            }
+            Self::Lqc { id } => {
+                LQC.write(buf);
                 id.write(buf);
             }
-            Self::TipRecord { commitment } => {
-                TIP_RECORD.write(buf);
-                commitment.write(buf);
-            }
-            Self::ProducerBlock { chain, digest } => {
-                PRODUCER_BLOCK.write(buf);
-                chain.write(buf);
-                digest.write(buf);
-            }
-            Self::ProducerHeaders { head } => {
-                PRODUCER_HEADERS.write(buf);
-                head.write(buf);
-            }
-            Self::ProducerBlocks { head, max_items } => {
-                PRODUCER_BLOCKS.write(buf);
-                head.write(buf);
-                max_items.write(buf);
-            }
         }
     }
 }
 
-impl<D: Digest> EncodeSize for BackfillKey<D> {
+impl<D: Digest> EncodeSize for Key<D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::LqcById { id } => id.encode_size(),
-            Self::TipRecord { commitment } => commitment.encode_size(),
-            Self::ProducerBlock { chain, digest } => chain.encode_size() + digest.encode_size(),
-            Self::ProducerHeaders { head } => head.encode_size(),
-            Self::ProducerBlocks { head, max_items } => {
-                head.encode_size() + max_items.encode_size()
-            }
+            Self::Blocks { head, len } => head.encode_size() + len.encode_size(),
+            Self::Records { before } => before.encode_size(),
+            Self::Proofs { after } => after.encode_size(),
+            Self::Lqc { id } => id.encode_size(),
         }
     }
 }
 
-impl<D: Digest> Read for BackfillKey<D> {
+impl<D: Digest> Read for Key<D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         match u8::read(buf)? {
-            LQC_BY_ID => Ok(Self::lqc_by_id(CertificateId::read(buf)?)),
-            TIP_RECORD => Ok(Self::tip_record(D::read(buf)?)),
-            PRODUCER_BLOCK => Ok(Self::producer_block(ChainId::read(buf)?, D::read(buf)?)),
-            PRODUCER_HEADERS => Ok(Self::producer_headers(BlockRef::read(buf)?)),
-            PRODUCER_BLOCKS => {
+            BLOCKS => {
                 let head = BlockRef::read(buf)?;
-                let max_items = NonZeroU16::read(buf)?;
-                if usize::from(max_items.get()) > MAX_SEGMENT_ITEMS {
-                    return Err(Error::InvalidLength(usize::from(max_items.get())));
+                let len = NonZeroU16::read(buf)?;
+                if len.get() > MAX_BLOCKS {
+                    return Err(Error::InvalidLength(usize::from(len.get())));
                 }
-                Ok(Self::producer_blocks(head, max_items))
+                Ok(Self::Blocks { head, len })
             }
+            RECORDS => Ok(Self::Records {
+                before: D::read(buf)?,
+            }),
+            PROOFS => Ok(Self::Proofs {
+                after: Option::<D>::read(buf)?,
+            }),
+            LQC => Ok(Self::Lqc {
+                id: CertificateId::read(buf)?,
+            }),
             tag => Err(Error::InvalidEnum(tag)),
         }
     }
 }
 
-impl<D: Digest> Span for BackfillKey<D> {}
+impl<D: Digest> Span for Key<D> {}
 
-impl<D: Digest> fmt::Display for BackfillKey<D> {
+impl<D: Digest> fmt::Display for Key<D> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::LqcById { id } => write!(formatter, "LqcById({id:?})"),
-            Self::TipRecord { commitment } => write!(formatter, "TipRecord({commitment:?})"),
-            Self::ProducerBlock { chain, digest } => {
-                write!(formatter, "ProducerBlock({chain:?}, {digest:?})")
-            }
-            Self::ProducerHeaders { head } => write!(formatter, "ProducerHeaders({head:?})"),
-            Self::ProducerBlocks { head, max_items } => {
-                write!(formatter, "ProducerBlocks({head:?}, {max_items})")
-            }
+            Self::Blocks { head, len } => write!(formatter, "Blocks({head:?}, {len})"),
+            Self::Records { before } => write!(formatter, "Records({before:?})"),
+            Self::Proofs { after } => write!(formatter, "Proofs({after:?})"),
+            Self::Lqc { id } => write!(formatter, "Lqc({id:?})"),
         }
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<'a, D> arbitrary::Arbitrary<'a> for BackfillKey<D>
+impl<'a, D> arbitrary::Arbitrary<'a> for Key<D>
 where
     D: Digest + arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        match u.int_in_range(0..=4u8)? {
-            LQC_BY_ID => Ok(Self::lqc_by_id(CertificateId::new(u.arbitrary()?))),
-            TIP_RECORD => Ok(Self::tip_record(u.arbitrary()?)),
-            PRODUCER_BLOCK => Ok(Self::producer_block(
-                ChainId::new(u.arbitrary()?),
-                u.arbitrary()?,
-            )),
-            PRODUCER_HEADERS => Ok(Self::producer_headers(u.arbitrary()?)),
-            PRODUCER_BLOCKS => {
-                let limit = u16::try_from(MAX_SEGMENT_ITEMS).expect("segment limit fits in u16");
-                let max_items = u.int_in_range(1..=limit)?;
-                Ok(Self::producer_blocks(
-                    u.arbitrary()?,
-                    NonZeroU16::new(max_items).expect("range excludes zero"),
-                ))
+        Ok(match u.int_in_range(0..=3u8)? {
+            BLOCKS => Self::Blocks {
+                head: u.arbitrary()?,
+                len: NonZeroU16::new(u.int_in_range(1..=MAX_BLOCKS)?).expect("nonzero"),
+            },
+            RECORDS => Self::Records {
+                before: u.arbitrary()?,
+            },
+            PROOFS => Self::Proofs {
+                after: u.arbitrary()?,
+            },
+            _ => Self::Lqc {
+                id: CertificateId::new(u.arbitrary()?),
+            },
+        })
+    }
+}
+
+/// A history record with its commitment.
+pub(crate) type Committed<D> = (D, Arc<TipRecord<D>>);
+
+/// Encodes blocks answering a [`Key::Blocks`] request.
+pub(crate) fn encode_blocks<H: Hasher, B: Body<H>>(blocks: &[Block<H, B>]) -> Bytes {
+    let mut buf = Vec::with_capacity(
+        blocks.len().encode_size()
+            + blocks
+                .iter()
+                .map(|block| block.encode_size())
+                .sum::<usize>(),
+    );
+    blocks.len().write(&mut buf);
+    for block in blocks {
+        block.write(&mut buf);
+    }
+    buf.into()
+}
+
+/// Decodes and authenticates blocks answering a request for `len` blocks from `head`.
+///
+/// Returns the blocks newest first: a non-empty, parent-linked prefix ending at `head`.
+pub(crate) fn decode_blocks<H: Hasher, B: Body<H>>(
+    mut bytes: Bytes,
+    head: BlockRef<H::Digest>,
+    len: NonZeroU16,
+    codec: &B::Cfg,
+) -> Option<Vec<Block<H, B>>> {
+    let count = usize::read_cfg(&mut bytes, &RangeCfg::from(1..=usize::from(len.get()))).ok()?;
+    let mut blocks: Vec<Block<H, B>> = Vec::with_capacity(count);
+    let mut expected = head;
+    for _ in 0..count {
+        let block = Arc::new(TransactionBlock::<H, B>::read_cfg(&mut bytes, codec).ok()?);
+        if block.reference() != expected {
+            return None;
+        }
+        expected = block.header().parent_ref();
+        blocks.push(block);
+    }
+    bytes.is_empty().then_some(blocks)
+}
+
+/// A response to a [`Key::Records`] request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Records<D: Digest> {
+    /// Records newest first.
+    Records(Vec<Arc<TipRecord<D>>>),
+    /// The server no longer retains the requested part of the history.
+    Pruned,
+}
+
+impl<D: Digest> Write for Records<D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Records(records) => {
+                0u8.write(buf);
+                records.len().write(buf);
+                for record in records {
+                    record.write(buf);
+                }
             }
-            _ => unreachable!(),
+            Self::Pruned => 1u8.write(buf),
+        }
+    }
+}
+
+impl<D: Digest> EncodeSize for Records<D> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Records(records) => {
+                records.len().encode_size()
+                    + records
+                        .iter()
+                        .map(|record| record.encode_size())
+                        .sum::<usize>()
+            }
+            Self::Pruned => 0,
+        }
+    }
+}
+
+impl<D: Digest> Read for Records<D> {
+    type Cfg = CodecConfig;
+
+    fn read_cfg(buf: &mut impl Buf, config: &CodecConfig) -> Result<Self, Error> {
+        match u8::read(buf)? {
+            0 => {
+                let count = usize::read_cfg(buf, &RangeCfg::from(1..=MAX_RECORDS))?;
+                let records = (0..count)
+                    .map(|_| TipRecord::read_cfg(buf, config).map(Arc::new))
+                    .collect::<Result<_, _>>()?;
+                Ok(Self::Records(records))
+            }
+            1 => Ok(Self::Pruned),
+            tag => Err(Error::InvalidEnum(tag)),
+        }
+    }
+}
+
+/// Authenticates records answering a [`Key::Records`] request for `before`.
+///
+/// Returns the records newest first with their commitments: the first is `before`, and each
+/// next one is the parent of the one before it.
+pub(crate) fn authenticate_records<H: Hasher>(
+    records: Vec<Arc<TipRecord<H::Digest>>>,
+    before: H::Digest,
+) -> Option<Vec<Committed<H::Digest>>> {
+    let mut expected = before;
+    let mut authenticated = Vec::with_capacity(records.len());
+    for record in records {
+        let commitment = record.commitment::<H>();
+        if commitment != expected {
+            return None;
+        }
+        expected = record.parent();
+        authenticated.push((commitment, record));
+    }
+    Some(authenticated)
+}
+
+/// An L-QC and the history record its leader commits to, answering a [`Key::Proofs`] request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Proof<S: crate::multimmit::scheme::Scheme, D: Digest> {
+    pub(crate) lqc: Arc<Lqc<S, D>>,
+    pub(crate) record: Arc<TipRecord<D>>,
+}
+
+impl<S: crate::multimmit::scheme::Scheme, D: Digest> Write for Proof<S, D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.lqc.write(buf);
+        self.record.write(buf);
+    }
+}
+
+impl<S: crate::multimmit::scheme::Scheme, D: Digest> EncodeSize for Proof<S, D> {
+    fn encode_size(&self) -> usize {
+        self.lqc.encode_size() + self.record.encode_size()
+    }
+}
+
+impl<S: crate::multimmit::scheme::Scheme, D: Digest> Read for Proof<S, D> {
+    type Cfg = CodecConfig;
+
+    fn read_cfg(buf: &mut impl Buf, config: &CodecConfig) -> Result<Self, Error> {
+        Ok(Self {
+            lqc: Arc::new(Lqc::read_cfg(buf, config)?),
+            record: Arc::new(TipRecord::read_cfg(buf, config)?),
+        })
+    }
+}
+
+/// Encodes a value for the wire.
+pub(crate) fn encode(value: &impl commonware_codec::Encode) -> Bytes {
+    value.encode()
+}
+
+/// Malformed-response campaign over every marshal request and response, the body of the
+/// `fuzz_marshal_wire` target.
+#[cfg(any(test, feature = "mocks"))]
+pub(crate) mod fuzz {
+    use super::{
+        Key, MAX_BLOCKS, Proof, Records, authenticate_records, decode_blocks, encode_blocks,
+    };
+    use crate::multimmit::{
+        mocks::Bls,
+        types::{CodecConfig, PathLimits, TransactionBlock},
+    };
+    use bytes::{BufMut, Bytes};
+    use commonware_codec::{
+        Buf, Codec, Copying, Decode as _, EncodeSize, Error, RangeCfg, Read, Write,
+    };
+    use commonware_cryptography::{
+        Digestible, Hasher as _, Sha256, bls12381::primitives::variant::MinPk, sha256::Digest as D,
+    };
+    use core::{fmt::Debug, num::NonZeroU16};
+
+    /// A small opaque body.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Body(Vec<u8>);
+
+    impl Write for Body {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.0.write(buf);
+        }
+    }
+
+    impl EncodeSize for Body {
+        fn encode_size(&self) -> usize {
+            self.0.encode_size()
+        }
+    }
+
+    impl Read for Body {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+            Vec::<u8>::read_cfg(buf, &(RangeCfg::from(..=64), ())).map(Self)
+        }
+    }
+
+    impl Digestible for Body {
+        type Digest = D;
+
+        fn digest(&self) -> D {
+            Sha256::hash(&[&self.0])
+        }
+    }
+
+    /// Decodes `input` as every request and response a peer may send, checking that accepted
+    /// values re-encode canonically and that authenticated responses keep their linkage.
+    pub(crate) fn exercise(input: &[u8]) {
+        let config = CodecConfig::new(6, 2, PathLimits::new(2, 1)).unwrap();
+        roundtrip::<Key<D>>(input, &());
+        roundtrip::<Records<D>>(input, &config);
+        roundtrip::<Proof<Bls<MinPk>, D>>(input, &config);
+        if let Ok(Records::Records(records)) = Records::<D>::decode_cfg(Copying(input), &config) {
+            // A walk asks for the newest record's commitment; records that do not chain from it
+            // are rejected, and accepted ones keep their linkage.
+            let before = records[0].commitment::<Sha256>();
+            if let Some(authenticated) = authenticate_records::<Sha256>(records, before) {
+                for pair in authenticated.windows(2) {
+                    assert_eq!(pair[0].1.parent(), pair[1].0);
+                }
+            }
+        }
+        blocks(input);
+    }
+
+    /// Decodes `input` as a block response for the head its first block names.
+    fn blocks(input: &[u8]) {
+        let mut peek = Bytes::copy_from_slice(input);
+        let Ok(count) = usize::read_cfg(&mut peek, &RangeCfg::from(1..=usize::from(MAX_BLOCKS)))
+        else {
+            return;
+        };
+        let Ok(first) = TransactionBlock::<Sha256, Body>::read_cfg(&mut peek, &()) else {
+            return;
+        };
+        let head = first.reference();
+        let lens = [count, usize::from(MAX_BLOCKS)];
+        for len in lens {
+            let len = NonZeroU16::new(len as u16).expect("lengths are positive and bounded");
+            let Some(blocks) =
+                decode_blocks::<Sha256, Body>(Bytes::copy_from_slice(input), head, len, &())
+            else {
+                continue;
+            };
+            assert!(!blocks.is_empty() && blocks.len() <= usize::from(len.get()));
+            assert_eq!(blocks[0].reference(), head);
+            for pair in blocks.windows(2) {
+                assert_eq!(pair[0].header().parent_ref(), pair[1].reference());
+            }
+            assert_eq!(encode_blocks(&blocks).as_ref(), input);
+        }
+    }
+
+    fn roundtrip<M>(input: &[u8], config: &M::Cfg)
+    where
+        M: Codec + PartialEq + Debug,
+    {
+        if let Ok(value) = M::decode_cfg(Copying(input), config) {
+            assert_eq!(commonware_codec::Encode::encode(&value).as_ref(), input);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{CodecConfig, D, PathLimits, Records, exercise};
+        use crate::{
+            multimmit::types::{BlockRef, ChainId, TipRecord},
+            types::Height,
+        };
+        use commonware_codec::{Decode as _, Encode as _};
+        use commonware_cryptography::{Hasher as _, Sha256};
+        use proptest::prelude::*;
+        use std::sync::Arc;
+
+        #[test]
+        fn records_that_do_not_chain_are_rejected() {
+            let record = |seed: u8| {
+                let tips = (0..2u32)
+                    .map(|chain| {
+                        BlockRef::<D>::new(
+                            ChainId::new(chain),
+                            Height::new(1),
+                            Sha256::hash(&[&[seed], &chain.to_be_bytes()]),
+                        )
+                    })
+                    .collect();
+                Arc::new(TipRecord::at_tips(Sha256::hash(&[&[seed]]), tips).unwrap())
+            };
+            // Both records decode, but the second is not the first's parent.
+            let input = Records::Records(vec![record(1), record(2)]).encode();
+            let config = CodecConfig::new(6, 2, PathLimits::new(2, 1)).unwrap();
+            assert!(Records::<D>::decode_cfg(input.clone(), &config).is_ok());
+            exercise(&input);
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+            #[test]
+            fn accepted_responses_reencode_and_keep_their_linkage(
+                input in proptest::collection::vec(any::<u8>(), 0..2048),
+            ) {
+                exercise(&input);
+            }
         }
     }
 }
@@ -215,170 +475,223 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{Copying, DecodeExt, Encode, FixedSize};
-    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest as Sha256Digest};
+    use crate::{
+        multimmit::{
+            testing::TestBody,
+            types::{ChainId, PathLimits, TransactionBlockHeader},
+        },
+        types::{Epoch, Height},
+    };
+    use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
+    use commonware_cryptography::{Digestible as _, Sha256, sha256::Digest as D};
 
-    type D = Sha256Digest;
-
-    fn digest(value: &'static [u8]) -> D {
-        Sha256::hash(&[value])
+    fn chain(len: u64) -> Vec<Block<Sha256, TestBody>> {
+        let mut parent = Sha256::hash(&[b"genesis"]);
+        (1..=len)
+            .map(|height| {
+                let body = TestBody::new(Sha256::hash(&[b"app"]), Height::new(height), 0);
+                let header = TransactionBlockHeader::new(
+                    Epoch::new(1),
+                    ChainId::new(2),
+                    Height::new(height),
+                    parent,
+                    body.digest(),
+                )
+                .unwrap();
+                let block = Arc::new(TransactionBlock::new(header, body).unwrap());
+                parent = block.reference().digest();
+                block
+            })
+            .collect()
     }
 
     #[test]
-    fn segment_fits_counts_the_length_prefix() {
-        assert!(segment_fits(1, 9, 10));
-        assert!(!segment_fits(1, 10, 10));
-        assert!(!segment_fits(1, usize::MAX, usize::MAX));
-        assert_eq!(max_block_segment_items(4, 13), 3);
-        assert_eq!(max_block_segment_items(usize::MAX, 13), 1);
-    }
-
-    #[test]
-    fn round_trip_and_exact_sizes() {
+    fn keys_round_trip_and_bound_their_lengths() {
+        let head = BlockRef::new(ChainId::new(1), Height::new(9), Sha256::hash(&[b"head"]));
         let keys = [
-            BackfillKey::lqc_by_id(CertificateId::new(digest(b"lqc"))),
-            BackfillKey::tip_record(digest(b"history")),
-            BackfillKey::producer_block(ChainId::new(3), digest(b"block")),
-            BackfillKey::producer_headers(BlockRef::new(
-                ChainId::new(3),
-                crate::types::Height::new(9),
-                digest(b"headers"),
-            )),
-            BackfillKey::producer_blocks(
-                BlockRef::new(
-                    ChainId::new(4),
-                    crate::types::Height::new(11),
-                    digest(b"blocks-min"),
-                ),
-                NonZeroU16::new(1).unwrap(),
-            ),
-            BackfillKey::producer_blocks(
-                BlockRef::new(
-                    ChainId::new(5),
-                    crate::types::Height::new(13),
-                    digest(b"blocks-max"),
-                ),
-                NonZeroU16::new(u16::try_from(MAX_SEGMENT_ITEMS).unwrap()).unwrap(),
-            ),
+            Key::Blocks {
+                head,
+                len: NonZeroU16::new(MAX_BLOCKS).unwrap(),
+            },
+            Key::Records {
+                before: Sha256::hash(&[b"before"]),
+            },
+            Key::Proofs { after: None },
+            Key::Proofs {
+                after: Some(Sha256::hash(&[b"after"])),
+            },
+            Key::Lqc {
+                id: CertificateId::new(Sha256::hash(&[b"lqc"])),
+            },
         ];
-
         for key in keys {
             let encoded = key.encode();
-            assert_eq!(key.encode_size(), encoded.len());
-            assert_eq!(BackfillKey::decode(encoded).unwrap(), key);
+            assert_eq!(encoded.len(), key.encode_size());
+            assert_eq!(Key::<D>::decode(encoded).unwrap(), key);
         }
+        let mut too_long = Vec::new();
+        BLOCKS.write(&mut too_long);
+        head.write(&mut too_long);
+        (MAX_BLOCKS + 1).write(&mut too_long);
+        assert!(Key::<D>::decode(Bytes::from(too_long)).is_err());
+        assert!(Key::<D>::decode(Bytes::from_static(&[9])).is_err());
+    }
 
-        assert_eq!(keys[0].encode().len(), 1 + D::SIZE);
-        assert_eq!(keys[1].encode().len(), 1 + D::SIZE);
+    #[test]
+    fn blocks_authenticate_against_the_head() {
+        let blocks = chain(4);
+        let newest_first = blocks.iter().rev().cloned().collect::<Vec<_>>();
+        let head = newest_first[0].reference();
+        let len = NonZeroU16::new(4).unwrap();
+        let encoded = encode_blocks::<Sha256, TestBody>(&newest_first);
         assert_eq!(
-            keys[2].encode().len(),
-            1 + ChainId::new(3).encode_size() + D::SIZE
+            decode_blocks::<Sha256, TestBody>(encoded.clone(), head, len, &()),
+            Some(newest_first.clone())
         );
+        // A prefix is accepted; more blocks than requested are not.
+        let prefix = encode_blocks::<Sha256, TestBody>(&newest_first[..2]);
         assert_eq!(
-            keys[4].encode().len(),
-            1 + ChainId::new(4).encode_size()
-                + crate::types::Height::new(11).encode_size()
-                + D::SIZE
-                + <NonZeroU16 as FixedSize>::SIZE
+            decode_blocks::<Sha256, TestBody>(prefix, head, len, &()).map(|b| b.len()),
+            Some(2)
+        );
+        assert!(
+            decode_blocks::<Sha256, TestBody>(
+                encoded.clone(),
+                head,
+                NonZeroU16::new(3).unwrap(),
+                &()
+            )
+            .is_none()
+        );
+        // Another head, a gap, or trailing bytes are rejected.
+        assert!(
+            decode_blocks::<Sha256, TestBody>(
+                encoded.clone(),
+                newest_first[1].reference(),
+                len,
+                &()
+            )
+            .is_none()
+        );
+        let gapped =
+            encode_blocks::<Sha256, TestBody>(&[newest_first[0].clone(), newest_first[2].clone()]);
+        assert!(decode_blocks::<Sha256, TestBody>(gapped, head, len, &()).is_none());
+        let mut trailing = encoded.to_vec();
+        trailing.push(0);
+        assert!(decode_blocks::<Sha256, TestBody>(trailing.into(), head, len, &()).is_none());
+        assert!(
+            decode_blocks::<Sha256, TestBody>(
+                encode_blocks::<Sha256, TestBody>(&[]),
+                head,
+                len,
+                &()
+            )
+            .is_none()
         );
     }
 
     #[test]
-    fn tags_are_canonical_and_invalid_tags_are_rejected() {
-        let keys = [
-            (
-                0,
-                BackfillKey::lqc_by_id(CertificateId::new(digest(b"lqc"))),
-            ),
-            (1, BackfillKey::tip_record(digest(b"history"))),
-            (
-                2,
-                BackfillKey::producer_block(ChainId::new(3), digest(b"block")),
-            ),
-            (
-                3,
-                BackfillKey::producer_headers(BlockRef::new(
-                    ChainId::new(3),
-                    crate::types::Height::new(9),
-                    digest(b"headers"),
-                )),
-            ),
-            (
-                4,
-                BackfillKey::producer_blocks(
-                    BlockRef::new(
-                        ChainId::new(4),
-                        crate::types::Height::new(11),
-                        digest(b"blocks"),
-                    ),
-                    NonZeroU16::new(7).unwrap(),
-                ),
-            ),
-        ];
-
-        for (tag, key) in keys {
-            assert_eq!(key.encode()[0], tag);
+    fn records_authenticate_newest_first() {
+        let config = CodecConfig::new(4, 1, PathLimits::new(2, 1)).unwrap();
+        let mut parent = Sha256::hash(&[b"base"]);
+        let mut records = Vec::new();
+        for height in 1..=3u64 {
+            let record = TipRecord::at_tips(
+                parent,
+                vec![BlockRef::new(
+                    ChainId::new(0),
+                    Height::new(height),
+                    Sha256::hash(&[&height.to_be_bytes()]),
+                )],
+            )
+            .unwrap();
+            parent = record.commitment::<Sha256>();
+            records.push(Arc::new(record));
         }
-
-        assert!(matches!(
-            BackfillKey::<D>::decode(Copying(&[5u8])),
-            Err(commonware_codec::Error::InvalidEnum(5))
-        ));
-    }
-
-    #[test]
-    fn producer_blocks_rejects_invalid_bounds() {
-        let head = BlockRef::<D>::new(
-            ChainId::new(4),
-            crate::types::Height::new(11),
-            digest(b"blocks"),
+        records.reverse();
+        let response = Records::Records(records.clone());
+        let decoded = Records::<D>::decode_cfg(response.encode(), &config).unwrap();
+        assert_eq!(decoded, response);
+        assert_eq!(
+            Records::<D>::decode_cfg(Records::<D>::Pruned.encode(), &config).unwrap(),
+            Records::Pruned
         );
-        let mut encoded = Vec::new();
-        PRODUCER_BLOCKS.write(&mut encoded);
-        head.write(&mut encoded);
-        0u16.write(&mut encoded);
-        assert!(matches!(
-            BackfillKey::<D>::decode(encoded),
-            Err(commonware_codec::Error::Invalid("NonZeroU16", _))
-        ));
-
-        let mut encoded = Vec::new();
-        PRODUCER_BLOCKS.write(&mut encoded);
-        head.write(&mut encoded);
-        let over_max = u16::try_from(MAX_SEGMENT_ITEMS + 1).unwrap();
-        over_max.write(&mut encoded);
-        assert!(matches!(
-            BackfillKey::<D>::decode(encoded),
-            Err(commonware_codec::Error::InvalidLength(value)) if value == usize::from(over_max)
-        ));
-    }
-
-    #[test]
-    fn display_and_debug_include_the_peer_subject() {
-        let key = BackfillKey::<D>::lqc_by_id(CertificateId::new(digest(b"lqc")));
-        assert!(key.to_string().starts_with("LqcById("));
-        assert!(format!("{key:?}").contains("LqcById"));
-
-        let key = BackfillKey::<D>::producer_blocks(
-            BlockRef::new(
-                ChainId::new(4),
-                crate::types::Height::new(11),
-                digest(b"blocks"),
-            ),
-            NonZeroU16::new(7).unwrap(),
+        let authenticated = authenticate_records::<Sha256>(records.clone(), parent).unwrap();
+        assert_eq!(authenticated.len(), 3);
+        assert_eq!(authenticated[0].0, parent);
+        // Any other starting commitment, or a gap, is rejected.
+        assert!(authenticate_records::<Sha256>(records.clone(), records[1].parent()).is_none());
+        assert!(
+            authenticate_records::<Sha256>(vec![records[0].clone(), records[2].clone()], parent)
+                .is_none()
         );
-        assert!(key.to_string().starts_with("ProducerBlocks("));
-        assert!(key.to_string().ends_with(", 7)"));
-        assert!(format!("{key:?}").contains("ProducerBlocks"));
     }
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
-        use commonware_codec::conformance::CodecConformance;
+        use crate::multimmit::{mocks::Bls, types::arbitrary_codec_config};
+        use arbitrary::{Arbitrary, Unstructured};
+        use commonware_codec::conformance::{CodecConformance, generate_value};
+        use commonware_conformance::Conformance;
+        use commonware_cryptography::bls12381::primitives::variant::MinSig;
+
+        type TestProof = Proof<Bls<MinSig>, D>;
+
+        impl<'a> Arbitrary<'a> for Records<D> {
+            fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+                if u.arbitrary()? {
+                    return Ok(Self::Pruned);
+                }
+                let count = u.int_in_range(1..=4usize)?;
+                let records = (0..count)
+                    .map(|_| u.arbitrary().map(Arc::new))
+                    .collect::<arbitrary::Result<_>>()?;
+                Ok(Self::Records(records))
+            }
+        }
+
+        impl<'a> Arbitrary<'a> for TestProof {
+            fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+                Ok(Self {
+                    lqc: Arc::new(u.arbitrary()?),
+                    record: Arc::new(u.arbitrary()?),
+                })
+            }
+        }
+
+        struct RecordsConformance;
+
+        impl Conformance for RecordsConformance {
+            async fn commit(seed: u64) -> Vec<u8> {
+                let records = generate_value::<Records<D>>(seed);
+                let encoded = records.encode();
+                assert_eq!(
+                    Records::decode_cfg(encoded.clone(), &arbitrary_codec_config()).unwrap(),
+                    records
+                );
+                encoded.to_vec()
+            }
+        }
+
+        struct ProofConformance;
+
+        impl Conformance for ProofConformance {
+            async fn commit(seed: u64) -> Vec<u8> {
+                let proof = generate_value::<TestProof>(seed);
+                let encoded = proof.encode();
+                assert_eq!(
+                    TestProof::decode_cfg(encoded.clone(), &arbitrary_codec_config()).unwrap(),
+                    proof
+                );
+                encoded.to_vec()
+            }
+        }
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<BackfillKey<D>> => 128,
+            CodecConformance<Key<D>> => 128,
+            RecordsConformance => 128,
+            ProofConformance => 128,
         }
     }
 }

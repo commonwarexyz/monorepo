@@ -31,7 +31,6 @@ pub(crate) struct RecordedSpan {
     pub(crate) id: u64,
     pub(crate) name: &'static str,
     pub(crate) parent: Option<u64>,
-    pub(crate) parent_name: Option<&'static str>,
     /// Fields recorded at creation and by later `record` calls, rendered as strings.
     pub(crate) fields: EventMetadata,
     /// Names of the fields recorded as signed integers.
@@ -62,7 +61,6 @@ pub(crate) struct RecordedEvent {
 struct Records {
     spans: Vec<RecordedSpan>,
     events: Vec<RecordedEvent>,
-    links: Vec<(u64, u64)>,
     clock: usize,
 }
 
@@ -161,11 +159,6 @@ impl SpanRecorder {
     pub(crate) fn events(&self) -> Vec<RecordedEvent> {
         self.0.lock().events.clone()
     }
-
-    /// Returns every `follows_from` link as `(span, cause)`, in recording order.
-    pub(crate) fn links(&self) -> Vec<(u64, u64)> {
-        self.0.lock().links.clone()
-    }
 }
 
 impl<S: Subscriber + for<'lookup> LookupSpan<'lookup>> Layer<S> for SpanRecorder {
@@ -173,7 +166,6 @@ impl<S: Subscriber + for<'lookup> LookupSpan<'lookup>> Layer<S> for SpanRecorder
         let mut visitor = FieldVisitor::default();
         attributes.record(&mut visitor);
         let parent = context.span(id).and_then(|span| span.parent());
-        let parent_name = parent.as_ref().map(|parent| parent.name());
         let parent = parent.map(|parent| parent.id().into_u64());
         let mut records = self.0.lock();
         let opened_at = records.tick();
@@ -181,7 +173,6 @@ impl<S: Subscriber + for<'lookup> LookupSpan<'lookup>> Layer<S> for SpanRecorder
             id: id.into_u64(),
             name: attributes.metadata().name(),
             parent,
-            parent_name,
             fields: visitor.fields,
             signed: visitor.signed,
             opened_at,
@@ -196,13 +187,6 @@ impl<S: Subscriber + for<'lookup> LookupSpan<'lookup>> Layer<S> for SpanRecorder
             span.fields.fields.extend(visitor.fields.fields);
             span.signed.extend(visitor.signed);
         }
-    }
-
-    fn on_follows_from(&self, id: &Id, follows: &Id, _: Context<'_, S>) {
-        self.0
-            .lock()
-            .links
-            .push((id.into_u64(), follows.into_u64()));
     }
 
     fn on_event(&self, event: &Event<'_>, context: Context<'_, S>) {
