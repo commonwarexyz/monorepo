@@ -6,7 +6,7 @@ use crate::{
         Cursor, Unordered as Index,
         partitioned::{PartitionRange, Partitioned},
     },
-    journal::contiguous::Contiguous,
+    journal::{authenticated::LeafSink, contiguous::Contiguous},
     merkle::{Family, Location},
     qmdb::operation::{Floored, Operation},
     translator::Translator,
@@ -286,15 +286,61 @@ const SNAPSHOT_DECODE_CHUNK: u64 = 1 << 17;
 #[cfg(test)]
 const SNAPSHOT_DECODE_CHUNK: u64 = 64;
 
-/// Replay `range` and send each worker's keyed operations in log order, in batches of at most
-/// [SNAPSHOT_ROUTE_BATCH] operations.
+/// Send the leaf digest of every operation from `leaves`' start to the end of `log` to `leaves`, in
+/// chunks of [SNAPSHOT_DECODE_CHUNK] operations, for builds that do not hash on decode tasks.
+async fn hash_leaves<F, C, D>(
+    log: &C,
+    init_buffer: NonZeroUsize,
+    leaves: LeafSink<F, C::Item, D>,
+) -> Result<(), Error<F>>
+where
+    F: Family,
+    C: Contiguous<Item: Operation<F>>,
+    D: Send + 'static,
+{
+    let hash = leaves.hasher();
+    let stream = log
+        .replay(
+            *leaves.start()..log.bounds().end,
+            init_buffer,
+            ReadOptions::DONT_CACHE,
+        )
+        .await?;
+    pin_mut!(stream);
+    let mut digests = Vec::new();
+    let mut scratch = Vec::new();
+    while let Some(batch) = stream.next().await {
+        for (loc, op) in batch? {
+            digests.push(hash(
+                F::location_to_position(Location::new(loc)),
+                &op,
+                &mut scratch,
+            ));
+            if digests.len() as u64 >= SNAPSHOT_DECODE_CHUNK
+                && !leaves.send(std::mem::take(&mut digests)).await
+            {
+                return Ok(());
+            }
+        }
+    }
+    if !digests.is_empty() {
+        leaves.send(digests).await;
+    }
+    Ok(())
+}
+
+/// Replay `range` and send each worker's keyed operations at or after `floor` in log order, in
+/// batches of at most [SNAPSHOT_ROUTE_BATCH] operations. `tap` sees every replayed operation,
+/// including those before `floor`, before it is routed.
 ///
 /// Stop if `send` returns false. The caller owns the receiving tasks and observes their errors when
 /// joining them.
 async fn route_snapshot<F, C, Fut>(
     log: &C,
     range: Range<u64>,
+    floor: u64,
     routing: SnapshotRouting,
+    mut tap: impl FnMut(u64, &C::Item) + Send,
     mut send: impl FnMut(usize, RoutedBatch<<C::Item as Operation<F>>::Key>) -> Fut + Send,
 ) -> Result<(), Error<F>>
 where
@@ -313,6 +359,10 @@ where
         .collect();
     while let Some(batch) = stream.next().await {
         for (loc, op) in batch? {
+            tap(loc, &op);
+            if loc < floor {
+                continue;
+            }
             let is_delete = op.is_delete();
             let Some(key) = op.into_key() else { continue };
             let w = (routing.partition_of)(key.as_ref()) / routing.range_size;
@@ -527,7 +577,8 @@ impl ParallelPlan {
 /// and routing each keyed operation to the parallel insert worker owning its partition range
 /// (see [Partitioned]). Returns the number of active keys and the activity bitmap (see
 /// [SnapshotBuild::build_snapshot]).
-async fn build_snapshot_parallel<F, E, C, I>(
+#[allow(clippy::too_many_arguments)]
+async fn build_snapshot_parallel<F, E, C, I, D>(
     snapshot: &mut I,
     context: E,
     inactivity_floor_loc: Location<F>,
@@ -535,27 +586,43 @@ async fn build_snapshot_parallel<F, E, C, I>(
     init_concurrency: NonZeroUsize,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
+    leaves: Option<LeafSink<F, C::Item, D>>,
 ) -> Result<(usize, BitMap), Error<F>>
 where
     F: Family,
     E: Spawner,
     C: Contiguous<Item: Operation<F>> + 'static,
     I: Partitioned + Index<Value = Location<F>>,
+    D: Send + 'static,
 {
     let Some(plan) = ParallelPlan::new(snapshot.partition_count(), init_concurrency, cache_size)
     else {
-        return build_snapshot_serial(
+        let built = build_snapshot_serial(
             inactivity_floor_loc,
             &**log,
             snapshot,
             init_buffer,
             cache_size,
         )
-        .await;
+        .await?;
+        if let Some(leaves) = leaves {
+            hash_leaves(&**log, init_buffer, leaves).await?;
+        }
+        return Ok(built);
     };
 
     let floor = *inactivity_floor_loc;
     let end = log.bounds().end;
+
+    // A build that hashes the journal's leaves scans from the journal's boundary on decode tasks,
+    // which hash every operation and route only those at or after the floor.
+    let scan_start = leaves.as_ref().map_or(floor, |leaves| *leaves.start());
+    let leaf_hash = leaves.as_ref().map(LeafSink::hasher);
+    let decoders = if leaves.is_some() {
+        plan.decoders.max(1)
+    } else {
+        plan.decoders
+    };
 
     // All workers share one atomic bitmap to track the activity bits.
     let active = Arc::new(Atomic::zeroes(end - floor));
@@ -608,24 +675,30 @@ where
     let routing_result: Result<(), Error<F>> = async {
         // With no decode tasks, decode and route on this task over one continuous replay to avoid
         // per-chunk buffered-reader overhead (measured 265s vs 369s on a 1.66B-op log).
-        if plan.decoders == 0 {
+        if decoders == 0 {
             let senders = &senders;
-            return route_snapshot::<F, C, _>(&**log, floor..end, routing, |w, batch| async move {
-                senders[w].send(batch).await.is_ok()
-            })
+            return route_snapshot::<F, C, _>(
+                &**log,
+                floor..end,
+                floor,
+                routing,
+                |_, _| {},
+                |w, batch| async move { senders[w].send(batch).await.is_ok() },
+            )
             .await;
         }
 
         // Each chunk's channel holds the whole chunk (full sub-batches plus a final partial per
         // worker), so every decoder can finish regardless of which chunk is being forwarded.
         let chunk_capacity = SNAPSHOT_DECODE_CHUNK as usize / SNAPSHOT_ROUTE_BATCH + plan.workers;
-        let mut starts = (floor..end)
+        let mut starts = (scan_start..end)
             .step_by(usize::try_from(SNAPSHOT_DECODE_CHUNK).expect("chunk size fits usize"));
         let mut spawn_next = |pending: &mut VecDeque<_>| {
             let Some(start) = starts.next() else {
                 return false;
             };
             let log = log.clone();
+            let leaf_hash = leaf_hash.clone();
             let len = SNAPSHOT_DECODE_CHUNK.min(end - start);
             let (tx, rx) = mpsc::channel(chunk_capacity);
             let handle = context
@@ -633,20 +706,30 @@ where
                 .dedicated()
                 .spawn(move |_| async move {
                     let tx = &tx;
+                    let mut digests = Vec::new();
+                    let mut scratch = Vec::new();
                     route_snapshot::<F, C, _>(
                         &*log,
                         start..start + len,
+                        floor,
                         routing,
+                        |loc, op| {
+                            if let Some(hash) = &leaf_hash {
+                                let pos = F::location_to_position(Location::new(loc));
+                                digests.push(hash(pos, op, &mut scratch));
+                            }
+                        },
                         |w, batch| async move { tx.send((w, batch)).await.is_ok() },
                     )
-                    .await
+                    .await?;
+                    Ok::<_, Error<F>>(digests)
                 });
             pending.push_back((rx, handle.abort_on_drop()));
             true
         };
 
         // Start decoding ahead of forwarding, with at most `plan.decoders` chunks in flight.
-        for _ in 0..plan.decoders {
+        for _ in 0..decoders {
             if !spawn_next(&mut pending) {
                 break;
             }
@@ -661,8 +744,13 @@ where
                 }
             }
             let (_, decoder) = pending.pop_front().expect("front exists");
-            decoder.join().await??;
+            let digests = decoder.join().await??;
             spawn_next(&mut pending);
+            if let Some(leaves) = &leaves
+                && !leaves.send(digests).await
+            {
+                return Ok(());
+            }
         }
         Ok(())
     }
@@ -743,6 +831,47 @@ pub trait SnapshotBuild<F: Family>:
             build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
         }
     }
+
+    /// Whether [Self::build_snapshot_sharing] hashes the journal's leaves on the build's own
+    /// concurrent decode tasks at `init_concurrency`, rather than in a scan of their own.
+    fn shares_scan(&self, _init_concurrency: Self::Concurrency) -> bool {
+        false
+    }
+
+    /// Like [Self::build_snapshot], but also sends the leaf digest of every operation from
+    /// `leaves`' start, which is at or before `inactivity_floor_loc`, to `leaves` in position
+    /// order.
+    #[allow(clippy::too_many_arguments)]
+    fn build_snapshot_sharing<E, C, D>(
+        &mut self,
+        context: E,
+        inactivity_floor_loc: Location<F>,
+        log: &Arc<C>,
+        init_concurrency: Self::Concurrency,
+        init_buffer: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+        leaves: LeafSink<F, C::Item, D>,
+    ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F>> + 'static,
+        D: Send + 'static,
+    {
+        async move {
+            let built = self
+                .build_snapshot(
+                    context,
+                    inactivity_floor_loc,
+                    log,
+                    init_concurrency,
+                    init_buffer,
+                    cache_size,
+                )
+                .await?;
+            hash_leaves(&**log, init_buffer, leaves).await?;
+            Ok(built)
+        }
+    }
 }
 
 mod sealed {
@@ -794,6 +923,39 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             init_concurrency,
             init_buffer,
             cache_size,
+            None::<LeafSink<F, C::Item, ()>>,
+        )
+        .await
+    }
+
+    fn shares_scan(&self, init_concurrency: NonZeroUsize) -> bool {
+        ParallelPlan::new(self.partition_count(), init_concurrency, None).is_some()
+    }
+
+    async fn build_snapshot_sharing<E, C, D>(
+        &mut self,
+        context: E,
+        inactivity_floor_loc: Location<F>,
+        log: &Arc<C>,
+        init_concurrency: NonZeroUsize,
+        init_buffer: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+        leaves: LeafSink<F, C::Item, D>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F>> + 'static,
+        D: Send + 'static,
+    {
+        build_snapshot_parallel(
+            self,
+            context,
+            inactivity_floor_loc,
+            log,
+            init_concurrency,
+            init_buffer,
+            cache_size,
+            Some(leaves),
         )
         .await
     }
@@ -825,6 +987,39 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             init_concurrency,
             init_buffer,
             cache_size,
+            None::<LeafSink<F, C::Item, ()>>,
+        )
+        .await
+    }
+
+    fn shares_scan(&self, init_concurrency: NonZeroUsize) -> bool {
+        ParallelPlan::new(self.partition_count(), init_concurrency, None).is_some()
+    }
+
+    async fn build_snapshot_sharing<E, C, D>(
+        &mut self,
+        context: E,
+        inactivity_floor_loc: Location<F>,
+        log: &Arc<C>,
+        init_concurrency: NonZeroUsize,
+        init_buffer: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+        leaves: LeafSink<F, C::Item, D>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F>> + 'static,
+        D: Send + 'static,
+    {
+        build_snapshot_parallel(
+            self,
+            context,
+            inactivity_floor_loc,
+            log,
+            init_concurrency,
+            init_buffer,
+            cache_size,
+            Some(leaves),
         )
         .await
     }

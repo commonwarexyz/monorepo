@@ -43,12 +43,12 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use commonware_codec::{Encode, EncodeShared};
+use commonware_codec::{Encode, EncodeShared, Write as _};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, ReadOptions, Spawner};
-use commonware_utils::NZU64;
+use commonware_utils::{NZU64, channel::mpsc};
 use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -911,6 +911,71 @@ where
         ))
     }
 
+    /// Like [Self::finish_with], but `read` scans the selected operations for the journal: it
+    /// must send the leaf digest of every selected operation from the sink's start, in position
+    /// order, to the [LeafSink] it receives. A task of its own applies them to the Merkle
+    /// structure, so the operations are read once.
+    pub(crate) async fn finish_sharing<T, X, Fut>(
+        self,
+        read: impl FnOnce(Arc<C>, LeafSink<F, C::Item, H::Digest>) -> Fut,
+    ) -> Result<(Journal<F, E, C, H, S>, T), X>
+    where
+        E: Spawner,
+        C: 'static,
+        Fut: Future<Output = Result<T, X>>,
+        X: From<Error<F>>,
+    {
+        let journal = Arc::new(Self::persist(self.journal, self.selected_end).await?);
+        let end = Location::new(journal.bounds().end);
+        let (tx, mut rx) = mpsc::channel(LEAF_CHUNKS_IN_FLIGHT);
+        let leaf_hasher = self.hasher.clone();
+        let hash: LeafHash<F, C::Item, H::Digest> = Arc::new(move |pos, item, scratch| {
+            scratch.clear();
+            item.write(scratch);
+            merkle::hasher::Hasher::<F>::leaf_digest(&leaf_hasher, pos, scratch)
+        });
+        let sink = LeafSink {
+            start: self.merkle.leaves(),
+            hash,
+            tx,
+        };
+
+        // Apply each chunk's digests in order as the reader sends them.
+        let apply = {
+            let (merkle, hasher) = (self.merkle, self.hasher.clone());
+            self.context
+                .dedicated()
+                .spawn(move |_| async move {
+                    let mut merkle = merkle;
+                    while let Some(digests) = rx.recv().await {
+                        merkle = merkle.apply_digests(&hasher, digests).await?;
+                    }
+                    if merkle.leaves() != end {
+                        return Err(merkle::Error::DataCorrupted(
+                            "leaf digests ended before the journal",
+                        )
+                        .into());
+                    }
+                    Ok::<_, Error<F>>(merkle)
+                })
+                .abort_on_drop()
+        };
+        let value = match read(journal.clone(), sink).await {
+            Ok(value) => value,
+            Err(error) => {
+                apply.abort().await;
+                return Err(error);
+            }
+        };
+        let merkle = apply.join().await.map_err(JournalError::from);
+        let merkle = merkle.map_err(Error::from)??;
+        let journal = Arc::into_inner(journal).expect("read must drop every journal clone");
+        Ok((
+            Self::assemble(journal, merkle, self.frontier, self.hasher).await?,
+            value,
+        ))
+    }
+
     /// Persist the selected operations.
     async fn persist(journal: C::Recovery, selected_end: u64) -> Result<C, Error<F>> {
         let bounds = journal.bounds();
@@ -945,6 +1010,42 @@ where
 
 /// The number of items to apply to the Merkle structure in a single batch.
 const APPLY_BATCH_SIZE: NonZeroU64 = NZU64!(1 << 16);
+
+/// Chunks of leaf digests a [LeafSink] buffers ahead of the Merkle structure applying them.
+const LEAF_CHUNKS_IN_FLIGHT: usize = 8;
+
+/// Encodes an operation into the scratch buffer and returns its leaf digest at the position.
+pub(crate) type LeafHash<F, Item, D> =
+    Arc<dyn Fn(Position<F>, &Item, &mut Vec<u8>) -> D + Send + Sync>;
+
+/// Where a reader that scans a recovering journal's operations sends their leaf digests, so the
+/// journal rebuilds its Merkle structure without reading them again. Only this crate creates and
+/// uses one.
+#[commonware_macros::stability(ALPHA)]
+pub struct LeafSink<F: Family, Item, D> {
+    start: Location<F>,
+    hash: LeafHash<F, Item, D>,
+    tx: mpsc::Sender<Vec<D>>,
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<F: Family, Item, D> LeafSink<F, Item, D> {
+    /// The first operation whose leaf digest the sink expects, the journal's pruning boundary.
+    pub(crate) const fn start(&self) -> Location<F> {
+        self.start
+    }
+
+    /// The function that encodes an operation and returns its leaf digest.
+    pub(crate) fn hasher(&self) -> LeafHash<F, Item, D> {
+        self.hash.clone()
+    }
+
+    /// Send the leaf digests of the next operations, in position order. Returns false if the
+    /// journal stopped receiving them.
+    pub(crate) async fn send(&self, digests: Vec<D>) -> bool {
+        self.tx.send(digests).await.is_ok()
+    }
+}
 
 impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where

@@ -446,7 +446,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     }
 
     /// Append leaves with `digests`, hashing their parents on the strategy.
-    async fn apply_digests<H>(
+    pub(crate) async fn apply_digests<H>(
         mut self,
         hasher: &H,
         digests: Vec<D>,
