@@ -1234,6 +1234,7 @@ mod tests {
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: (),
+            init_graft_readers: NZUsize!(1),
         }
     }
 
@@ -1265,6 +1266,7 @@ mod tests {
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: (),
+            init_graft_readers: NZUsize!(1),
         }
     }
 

@@ -776,6 +776,7 @@ fn current_config(suffix: &str) -> current::Config<TwoCap, FixedJournalConfig, S
         init_cache: any.init_cache,
         init_buffer: any.init_buffer,
         init_concurrency: (),
+        init_graft_readers: NZUsize!(1),
     }
 }
 
