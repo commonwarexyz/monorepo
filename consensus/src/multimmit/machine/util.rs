@@ -162,6 +162,11 @@ impl<K: Copy + Ord, R> ObservedList<K, R> {
         Some(self.entries.remove(index).1)
     }
 
+    /// Returns whether a record is held for `key`.
+    pub(crate) fn contains(&self, key: K) -> bool {
+        self.position(key).is_some()
+    }
+
     /// Returns how many records are held.
     pub(crate) const fn len(&self) -> usize {
         self.entries.len()

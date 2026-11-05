@@ -226,20 +226,18 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
         observation: Observation,
         message: Held<ViewMessageKind, S, D>,
     ) {
+        // A message's identity determines its author, so its records are found by author.
         let (view, signer) = message.author();
-        if let Some(location) = self.message_locations.get(&id).copied() {
-            debug_assert_eq!(location, (view, signer));
-            self.views
-                .get_mut(&view)
-                .expect("indexed view exists")
-                .messages
-                .get_mut(&signer)
-                .expect("indexed signer exists")
-                .upsert_min(id, observation, || message);
+        let entry = self.entry_mut(view);
+        if let Some(records) = entry
+            .messages
+            .get_mut(&signer)
+            .filter(|records| records.contains(id))
+        {
+            records.upsert_min(id, observation, || message);
             return;
         }
 
-        let entry = self.entry_mut(view);
         let opposes_local_vote = entry
             .slot
             .vote()
@@ -252,23 +250,20 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
         if opposes_local_vote {
             entry.post_vote_evidence.insert(signer);
         }
-        self.message_locations.insert(id, (view, signer));
     }
 
     /// Removes a view message from the records of `view` and `signer`.
     pub(super) fn remove_message(&mut self, id: ArtifactId<D>, view: View, signer: Participant) {
-        let Some(location) = self.message_locations.remove(&id) else {
-            return;
-        };
-        debug_assert_eq!(location, (view, signer));
-
         let Some(entry) = self.views.get_mut(&view) else {
             return;
         };
-        if entry.messages.get_mut(&signer).is_some_and(|records| {
-            records.remove(id);
-            records.is_empty()
-        }) {
+        let Some(records) = entry.messages.get_mut(&signer) else {
+            return;
+        };
+        if records.remove(id).is_none() {
+            return;
+        }
+        if records.is_empty() {
             entry.messages.remove(&signer);
         }
         if entry
