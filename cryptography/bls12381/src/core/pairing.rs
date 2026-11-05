@@ -212,7 +212,7 @@ fn add_step<S: Simd, F: Field<S>>(simd: S, t: Point<F>, pair: &Pair<F>) -> (Poin
             let (qx, qy) = (pair.q.x, pair.q.y);
             let l0 = Fp2::<F>::reduce::<7, S>(
                 simd,
-                Fp2::<F>::product_sub(simd, qx.product(simd, y), qy.product(simd, x)),
+                Fp2::<F>::subtract_product(simd, qx.product(simd, y), qy, x),
             );
             let qyz = qy.mul::<5, S>(simd, z);
             let qxz = qx.mul::<5, S>(simd, z);

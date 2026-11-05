@@ -1031,6 +1031,18 @@ impl<S: X86V4C> Clone for Wide<S> {
 impl<S: X86V4C> Copy for Wide<S> {}
 
 impl<S: X86V4C> Wide<S> {
+    /// Returns the empty sum.
+    #[inline(always)]
+    fn zero(simd: S) -> Self {
+        let zero = simd.u64_splat(0);
+        Self {
+            m: (zero, zero),
+            n: (zero, zero),
+            bound: DebugCounter::new(0),
+            terms: DebugCounter::new(0),
+        }
+    }
+
     /// Returns a sum holding the accumulators of both bases.
     #[inline(always)]
     fn new(
@@ -1146,20 +1158,10 @@ impl<S: X86V4C> Field<S> for Rns<S> {
         self
     }
 
-    /// Multiplies residue-wise in both bases.
-    ///
-    /// Residues at most `2q < 2^51` give a product at most `4q^2 < q * 2^52`, so the high word is
-    /// below `q` and the low word below `2^52`: one term.
+    /// Multiplies residue-wise in both bases into the empty sum.
     #[inline(always)]
     fn product(self, simd: S, rhs: Self) -> Wide<S> {
-        self.bound.assert_le(LIMIT);
-        rhs.bound.assert_le(LIMIT);
-        let mut bound = self.bound;
-        bound.mul(rhs.bound);
-        let zero = simd.u64_splat(0);
-        let m = madd(simd, (zero, zero), self.m, rhs.m);
-        let n = madd(simd, (zero, zero), self.n, rhs.n);
-        Wide::new(m, n, bound, DebugCounter::new(1))
+        Self::accumulate_product(simd, Wide::zero(simd), self, rhs)
     }
 
     #[inline(always)]
@@ -1170,6 +1172,24 @@ impl<S: X86V4C> Field<S> for Rns<S> {
         terms.add(b.terms);
         let m = add_wide(simd, a.m, b.m);
         let n = add_wide(simd, a.n, b.n);
+        Wide::new(m, n, bound, terms)
+    }
+
+    /// Multiplies residue-wise in both bases, adding into the sum's accumulators.
+    ///
+    /// Residues at most `2q < 2^51` give a product at most `4q^2 < q * 2^52`, so the high word is
+    /// below `q` and the low word below `2^52`: one term.
+    #[inline(always)]
+    fn accumulate_product(simd: S, sum: Wide<S>, a: Self, b: Self) -> Wide<S> {
+        a.bound.assert_le(LIMIT);
+        b.bound.assert_le(LIMIT);
+        let mut bound = a.bound;
+        bound.mul(b.bound);
+        bound.add(sum.bound);
+        let mut terms = sum.terms;
+        terms.add(DebugCounter::new(1));
+        let m = madd(simd, sum.m, a.m, b.m);
+        let n = madd(simd, sum.n, a.n, b.n);
         Wide::new(m, n, bound, terms)
     }
 
@@ -1273,13 +1293,70 @@ impl<S: X86V4C> Field<S> for Rns<S> {
         product
     }
 
-    /// Uses the two products: a subtraction costs about as much as a product here.
+    /// Uses the two products, accumulated as they form: a subtraction costs about as much as a
+    /// product here.
     #[inline(always)]
     fn cross(simd: S, a: [Self; 2], b: [Self; 2], _p0: Wide<S>, _p1: Wide<S>) -> Signed<Wide<S>> {
         let high = Field::product(a[0], simd, b[1]);
-        let low = Field::product(a[1], simd, b[0]);
-        Signed::positive(Self::accumulate(simd, high, low))
+        Signed::positive(Self::accumulate_product(simd, high, a[1], b[0]))
     }
+
+    /// Multiply-adds each of the four products into the sum it belongs to: the real component
+    /// gains `a[0] b[0]` and loses `a[1] b[1]`, and the imaginary component gains the cross
+    /// products.
+    #[inline(always)]
+    fn accumulate_quadratic(
+        simd: S,
+        sum: [Signed<Wide<S>>; 2],
+        a: [Self; 2],
+        b: [Self; 2],
+    ) -> [Signed<Wide<S>>; 2] {
+        let [real, imaginary] = sum;
+        let pos = Self::accumulate_product(simd, imaginary.pos, a[0], b[1]);
+        [
+            Signed {
+                pos: Self::accumulate_product(simd, real.pos, a[0], b[0]),
+                neg: Some(accumulate_into(simd, real.neg, a[1], b[1])),
+            },
+            Signed {
+                pos: Self::accumulate_product(simd, pos, a[1], b[0]),
+                neg: imaginary.neg,
+            },
+        ]
+    }
+
+    /// Multiply-adds each of the four products into the sum it belongs to: the real component
+    /// loses `a[0] b[0]` and gains `a[1] b[1]`, and the imaginary component loses the cross
+    /// products.
+    #[inline(always)]
+    fn subtract_quadratic(
+        simd: S,
+        sum: [Signed<Wide<S>>; 2],
+        a: [Self; 2],
+        b: [Self; 2],
+    ) -> [Signed<Wide<S>>; 2] {
+        let [real, imaginary] = sum;
+        let neg = accumulate_into(simd, imaginary.neg, a[0], b[1]);
+        [
+            Signed {
+                pos: Self::accumulate_product(simd, real.pos, a[1], b[1]),
+                neg: Some(accumulate_into(simd, real.neg, a[0], b[0])),
+            },
+            Signed {
+                pos: imaginary.pos,
+                neg: Some(Self::accumulate_product(simd, neg, a[1], b[0])),
+            },
+        ]
+    }
+}
+
+/// Returns `sum + a * b`, starting the sum from the product when there is none.
+#[inline(always)]
+fn accumulate_into<S: X86V4C>(simd: S, sum: Option<Wide<S>>, a: Rns<S>, b: Rns<S>) -> Wide<S> {
+    let Some(sum) = sum else {
+        return Field::product(a, simd, b);
+    };
+    <Rns<S> as Field<S>>::accumulate_product(simd, sum, a, b)
 }
 
 #[cfg(test)]
