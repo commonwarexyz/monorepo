@@ -24,10 +24,11 @@
 //! distinct sets with the same hash in time polynomial in the number of state elements.
 //!
 //! For these parameters, the attack is expected to make about 2^81 hash evaluations, perform at
-//! most 2^101 bit operations, and use roughly 2^88 bits of memory. The colliding sets it produces
-//! contain at least 2^72 elements combined. Collision resistance is therefore far below 128 bits
-//! and well below the 200 bits that the original analysis estimated against generalized birthday
-//! attacks. These costs are still beyond practical reach.
+//! most 2^101 bit operations, and use roughly 2^88 bits of memory. Collision resistance is
+//! therefore far below 128 bits and well below the 200 bits that the original analysis estimated
+//! against generalized birthday attacks. The attack's colliding sets contain at least 2^72 elements
+//! combined, and the paper estimates every other known attack at over 2^180 operations, so usage
+//! remains safe when the adversary cannot control 2^72 elements across the hashed sets.
 //!
 //! # Warning
 //!
