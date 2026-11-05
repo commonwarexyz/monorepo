@@ -460,14 +460,17 @@ impl Registry {
                 LatchRef::new(l),
             );
 
-            // The thread blocks with its context suspended, so the run is charged for the job but
-            // not for the wait. The wait also resets this thread's latch for its next call.
+            // The thread hands off the job and blocks with its context suspended, so the run is
+            // charged for the job but not for the hand-off or the wait. The wait also resets this
+            // thread's latch for its next call.
             //
             // SAFETY: the job stays on this stack frame until its latch is set, which happens
             // once it has executed.
             unsafe {
-                self.inject(placement, job.as_job_ref());
-                Context::suspend(|| job.latch.wait_and_reset());
+                Context::suspend(|| {
+                    self.inject(placement, job.as_job_ref());
+                    job.latch.wait_and_reset();
+                });
 
                 job.into_result()
             }
@@ -503,11 +506,16 @@ impl Registry {
             },
             latch,
         );
+        // The hand-off and the wait run with the context suspended, so the run is charged for the
+        // job alone, and the jobs this worker runs meanwhile charge their own contexts.
+        //
         // SAFETY: the job stays on this stack frame until its latch is set, which happens once it
         // has executed, and `current_thread` is this thread's worker state.
         unsafe {
-            self.inject(placement, job.as_job_ref());
-            current_thread.wait_until(&job.latch);
+            Context::suspend(|| {
+                self.inject(placement, job.as_job_ref());
+                current_thread.wait_until(&job.latch);
+            });
             job.into_result()
         }
     }
@@ -942,7 +950,8 @@ impl WorkerThread {
     }
 
     pub(super) fn yield_now(&self) -> Yield {
-        self.find_work().map_or(Yield::Idle, |job| {
+        // The search runs with the context suspended, and the job found enters its own.
+        Context::suspend(|| self.find_work()).map_or(Yield::Idle, |job| {
             // SAFETY: a job taken from a queue executes once, on a worker of its pool.
             unsafe { self.execute(job) };
             Yield::Executed

@@ -1731,14 +1731,17 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             // A measured run is timed, and a measured parallel run also meters the busy time of the
             // threads that execute it. A serial run's busy time is its wall time.
             let start = plan.measure.then(Instant::now);
-            let meter = (plan.measure && plan.execution == policy::RunExecution::Parallel)
-                .then(rayon::Meter::new);
-            let result = {
+            let (result, busy) = {
                 // The guard requests the caller's original mask when the body returns or unwinds.
                 let _nudge = nudge;
-                match &meter {
-                    Some(meter) => meter.measure(|| run(plan.execution, placement)),
-                    None => run(plan.execution, placement),
+                match plan.execution {
+                    policy::RunExecution::Parallel if plan.measure => {
+                        let (result, busy) = rayon::measure(|| run(plan.execution, placement));
+                        (result, Some(busy))
+                    }
+                    policy::RunExecution::Parallel | policy::RunExecution::Serial => {
+                        (run(plan.execution, placement), None)
+                    }
                 }
             };
             drop(lease);
@@ -1746,7 +1749,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             // Record only successful runs. An error can skip work and bias the estimates down.
             if let (Some(start), Ok(_)) = (start, &result) {
                 let wall = start.elapsed();
-                let busy = meter.map_or(wall, |meter| meter.busy());
+                let busy = busy.unwrap_or(wall);
                 let sample = policy::RunSample { wall, busy };
                 policy.record_run(caller, len, work, self.parallelism, plan, sample);
             }
@@ -1887,6 +1890,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         None
                     };
                     let worker_recorder = recorder.clone();
+                    let handle = rayon::MeterHandle::capture();
                     let job = move || {
                         let job_start = worker_recorder.is_some().then(Instant::now);
 
@@ -1913,10 +1917,14 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         };
 
                         // The pool aborts on an uncaught panic in a spawned job, so catch the
-                        // panic and propagate it to the awaiting task.
-                        let result = panic::catch_unwind(AssertUnwindSafe(|| {
-                            worker_pool.install_in(placement, || f(s))
-                        }));
+                        // panic and propagate it to the awaiting task. The job's work is charged
+                        // to the spawning run before the result is sent, so a run that awaits it
+                        // observes the charge.
+                        let result = handle.enter(|| {
+                            panic::catch_unwind(AssertUnwindSafe(|| {
+                                worker_pool.install_in(placement, || f(s))
+                            }))
+                        });
                         let job = job_start.map(|start| start.elapsed());
                         let ok = result.is_ok();
                         let _ = tx.send((result, job));
@@ -3799,7 +3807,7 @@ mod test {
     /// covers the 32ms the items spin, and the caller and four workers each charge disjoint
     /// intervals within the run, so it stays within five times the wall time.
     #[test]
-    fn measured_run_records_busy_time_of_every_worker() {
+    fn measured_run_records_busy_time_of_all_items() {
         // Map 32 items that each spin for 1ms.
         let strategy = parallel_strategy();
         let len = 32;

@@ -141,9 +141,11 @@ where
     unsafe fn execute(this: *const ()) {
         // SAFETY: `this` came from `as_job_ref` on a job its owner keeps in place until the latch
         // is set, and a job reference executes once, so nothing else touches the cells. The job
-        // runs in the context it captured from its owner and leaves that context before setting
-        // the latch. The owner waits on the latch, so the meter outlives every charge the job
-        // makes.
+        // runs in the context it captured from its owner. On a thread that was in another
+        // context it leaves that context, charging the meter, before setting the latch. On a
+        // thread already in that context it charges nothing itself, and the activation that put
+        // the thread there charges the meter before setting its own latch or returning from
+        // `measure`. The owner waits on the latch, so the meter outlives every charge.
         unsafe {
             let this = &*(this as *const Self);
             let abort = unwind::AbortIfPanic;
@@ -162,7 +164,10 @@ where
 ///
 /// (Probably `StackJob` should be refactored in a similar fashion.)
 ///
-/// The job may outlive the run that spawned it, so it executes without a context.
+/// The job may outlive the run that spawned it, so it executes without a context. A spawner that
+/// wants the job's work charged to its run holds a [`MeterHandle`] and enters it around that work.
+///
+/// [`MeterHandle`]: super::meter::MeterHandle
 pub(super) struct HeapJob<BODY>
 where
     BODY: FnOnce() + Send,
@@ -211,7 +216,8 @@ where
 /// Represents a job stored in an `Arc`. Like `HeapJob`, but may be
 /// turned into multiple `JobRef`s and called multiple times.
 ///
-/// The job may outlive the run that spawned it, so it executes without a context.
+/// The job may outlive the run that spawned it, so it executes without a context, like
+/// [`HeapJob`].
 pub(super) struct ArcJob<BODY>
 where
     BODY: Fn() + Send + Sync,

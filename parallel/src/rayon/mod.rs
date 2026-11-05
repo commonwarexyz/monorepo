@@ -77,9 +77,10 @@
 //!   available.
 //! - Added group eligibility, wake propagation, and placement-restoration tests, plus Loom
 //!   models of the wake protocol.
-//! - Added a busy-time meter for measured runs. Stack jobs execute in their creator's context, and
-//!   detached jobs and scheduler waits run without one, so a run's busy time excludes its waits for
-//!   the pool.
+//! - Added a busy-time meter for measured runs. Stack jobs execute in their creator's context, a
+//!   handle lets a spawner charge a detached job's work to its run, and hand-offs, scheduler waits,
+//!   and yields run without a context, so a run's busy time covers its work and excludes its waits
+//!   for the pool.
 //!
 //! [rayon-core]: https://crates.io/crates/rayon-core/1.13.0
 //! [rayon]: https://crates.io/crates/rayon/1.12.0
@@ -111,7 +112,7 @@ pub use self::thread_pool::{ThreadPool, Yield};
 pub(crate) use self::{
     bridge::{fold_init, map_collect_vec, map_init_collect_vec, try_fold, try_map_collect_vec},
     join::join,
-    meter::Meter,
+    meter::{MeterHandle, measure},
     registry::Placement,
     sort::{par_mergesort, par_quicksort},
 };

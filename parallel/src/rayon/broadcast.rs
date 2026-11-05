@@ -1,6 +1,7 @@
 use super::{
     job::{ArcJob, StackJob},
     latch::{CountLatch, LatchRef},
+    meter::Context,
     registry::{Registry, WorkerThread},
 };
 use std::{fmt, marker::PhantomData, sync::Arc};
@@ -77,10 +78,14 @@ where
     // executed.
     let job_refs = jobs.iter().map(|job| unsafe { job.as_job_ref() });
 
-    registry.inject_broadcast(job_refs);
+    // The hand-off and the wait run with the context suspended, so the run is charged for the
+    // jobs but not for either.
+    Context::suspend(|| {
+        registry.inject_broadcast(job_refs);
+        latch.wait(current_thread);
+    });
 
-    // Wait for all jobs to complete, then collect the results, maybe propagating a panic.
-    latch.wait(current_thread);
+    // Every job has completed, so collect the results, maybe propagating a panic.
     // SAFETY: every job has executed, so each holds its result.
     jobs.into_iter()
         .map(|job| unsafe { job.into_result() })
