@@ -232,7 +232,8 @@ where
             // placement.
             Activity::TransactionProposed { .. }
             | Activity::CertificateRecorded { .. }
-            | Activity::Placed { .. } => {}
+            | Activity::Placed { .. }
+            | Activity::Proven { .. } => {}
             Activity::CommitmentsAccepted { commitments } => {
                 let _ = self.synchronizer.commitments(commitments);
             }

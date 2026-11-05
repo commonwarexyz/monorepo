@@ -531,7 +531,7 @@ mod tests {
     use crate::{
         multimmit::{
             mocks::{Bls, Committee},
-            types::{ArtifactId, ChainId, Context, FinalityFact, FinalityId, PathLimits},
+            types::{ChainId, Context, FinalityFact, FinalityId, PathLimits},
         },
         simplex::marshal::mocks::block::EmptyBlock,
         types::{Epoch, Height, Round},
@@ -550,7 +550,7 @@ mod tests {
 
     fn fact(view: u64, votes: usize) -> FinalityFact<Sha256Digest> {
         FinalityFact::new(
-            FinalityId::Lqc(ArtifactId::new(Sha256::hash(&[&view.to_be_bytes()]))),
+            FinalityId::Lqc(CertificateId::new(Sha256::hash(&[&view.to_be_bytes()]))),
             Round::new(Epoch::new(1), View::new(view)),
             Sha256::hash(&[b"leader"]),
             CertificateId::new(Sha256::hash(&[b"parent"])),
