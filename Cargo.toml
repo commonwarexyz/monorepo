@@ -176,9 +176,9 @@ ecdsa = { version = "0.17.0", default-features = false }
 ed25519-consensus = "2.1.0"
 either = "1.16.0"
 fixedbitset = { version = "0.5.7", default-features = false }
-futures = "0.3.32"
+futures = "0.3.34"
 futures-timer = "3.0.4"
-futures-util = { version = "0.3.32", default-features = false, features = ["std"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 glob = "0.3.3"
 governor = "0.10.4"
 gungraun = "0.19.4"

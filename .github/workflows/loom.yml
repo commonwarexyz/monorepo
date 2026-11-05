@@ -44,4 +44,4 @@ jobs:
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
     - name: Run loom tests
-      run: just test-loom --partition hash:${{ matrix.partition }} --verbose
+      run: just test-loom --partition slice:${{ matrix.partition }} --verbose
