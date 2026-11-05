@@ -16,7 +16,7 @@ use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_macros::test_traced;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner as _, Supervisor as _, deterministic, deterministic::Context};
-use commonware_utils::{NZU64, NZUsize, non_empty_range};
+use commonware_utils::{NZU64, NZUsize, non_empty_range, probability};
 use rand::Rng as _;
 
 mod harnesses {
@@ -651,6 +651,92 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             .is_some()
         );
         drop(journal);
+    });
+}
+
+/// Persisting a sync result writes the grafted metadata before the operation frontier, so a
+/// failure between the two leaves a database that opens at the target.
+#[test_traced]
+fn test_current_sync_persist_failure_reopens_at_target() {
+    type Db = crate::qmdb::current::unordered::fixed::Db<
+        crate::merkle::mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        crate::translator::TwoCap,
+        32,
+        Sequential,
+    >;
+
+    let executor = deterministic::Runner::default();
+    executor.start(|context: Context| async move {
+        // Build the same history twice, so the local database already holds the target's
+        // operations and recording the boundary prunes the ones before it.
+        let key = Digest::from([9u8; 32]);
+        let populate = |label: &'static str, config| {
+            let context = context.child(label);
+            async move {
+                let mut db: Db = Db::init(context, config, None).await.unwrap();
+                for round in 0..300u64 {
+                    let merkleized = db
+                        .new_batch()
+                        .write(key, Some(Digest::from([round as u8; 32])))
+                        .merkleize(&db)
+                        .await
+                        .unwrap();
+                    db = db.apply_batch(merkleized).await.unwrap();
+                }
+                db.sync().await.unwrap()
+            }
+        };
+        let source = populate(
+            "source",
+            fixed_config::<crate::translator::TwoCap>("source"),
+        )
+        .await;
+        let local_config = fixed_config::<crate::translator::TwoCap>("local");
+        let local = populate("local", local_config.clone()).await;
+        let target = crate::qmdb::sync::Target {
+            root: SyncDatabase::root(&source),
+            range: non_empty_range!(source.sync_boundary(), source.bounds().end),
+        };
+        let canonical_root = source.root();
+        assert!(
+            *target.range.start() >= 256,
+            "the target must prune chunk 0"
+        );
+        assert_eq!(local.root(), canonical_root);
+        drop(local);
+
+        // Failing every blob removal fails the prune that records the boundary, after the
+        // frontier is written.
+        let faults = context.storage_fault_config();
+        faults.write().remove_rate = Some(probability!(1.0));
+        let result = crate::qmdb::sync::sync::<Db, _>(crate::qmdb::sync::Config {
+            context: context.child("sync"),
+            db_config: local_config.clone(),
+            fetch_batch_size: NZU64!(64),
+            target: target.clone(),
+            source: std::sync::Arc::new(source),
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: NZUsize!(4),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+        })
+        .await;
+        assert!(matches!(result, Err(crate::qmdb::sync::Error::Database(_))));
+        faults.write().remove_rate = None;
+
+        // The database opens at the target and finishes the interrupted deletion.
+        let reopened: Db = Db::init(context.child("reopened"), local_config, None)
+            .await
+            .unwrap();
+        assert_eq!(SyncDatabase::root(&reopened), target.root);
+        assert_eq!(reopened.root(), canonical_root);
+        assert_eq!(reopened.bounds().start, target.range.start());
+        reopened.destroy().await.unwrap();
     });
 }
 

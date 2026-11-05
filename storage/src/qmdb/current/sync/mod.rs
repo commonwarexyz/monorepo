@@ -246,8 +246,12 @@ where
     }
 
     async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
+        // Grafted metadata ahead of the operation frontier is recoverable: init rebuilds the
+        // grafted tree from the operations the old frontier still exposes. A frontier ahead of
+        // the metadata is not, since init would need chunk roots below the new boundary.
+        self = self.sync_metadata().await?;
         self.any.log = self.any.log.persist_boundary().await?;
-        self.sync_metadata().await
+        Ok(self)
     }
 
     async fn local_pinned_nodes(
