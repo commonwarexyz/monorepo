@@ -2458,11 +2458,7 @@ mod tests {
 
             // Save the deltas of an unapplied parent and a child that rewrites the first 16 keys,
             // and seed a mirror, before anything is pruned.
-            let parent = db
-                .new_batch()
-                .merkleize(&db)
-                .await
-                .unwrap();
+            let parent = db.new_batch().merkleize(&db).await.unwrap();
             let child = write_keys(parent.new_batch::<Sha256>(), 0..16, 4)
                 .merkleize_with(&db, &mut Hold)
                 .await
@@ -2513,11 +2509,7 @@ mod tests {
             // Once the database moves past the saved child's chain, reading the child's pinned
             // nodes fails as stale, but the child's delta is unchanged after the parent and the
             // post-prune child are dropped and the database is destroyed.
-            let successor = db
-                .new_batch()
-                .merkleize_with(&db, &mut Hold)
-                .await
-                .unwrap();
+            let successor = db.new_batch().merkleize_with(&db, &mut Hold).await.unwrap();
             db = db.apply_batch(successor).await.unwrap();
             assert!(matches!(child.ops_pinned_nodes(&db), Err(Error::StaleRead)));
             drop(parent);
