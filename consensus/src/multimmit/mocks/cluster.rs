@@ -240,6 +240,8 @@ pub enum Plane {
     Consensus,
     /// The certificate plane.
     Certificates,
+    /// The view-proof and DA-certificate resolver plane.
+    Resolver,
 }
 
 /// Per-node state that tests inspect or steer.
@@ -249,7 +251,7 @@ struct TestHooks {
     /// Task label prefix of the running engine.
     task_prefix: Option<String>,
     /// Blocked recipients per [`Plane`].
-    blocked: [Arc<Mutex<Vec<ed25519::PublicKey>>>; 3],
+    blocked: [Arc<Mutex<Vec<ed25519::PublicKey>>>; 4],
 }
 
 /// One engine slot: its application, running engine, and observed finality.
@@ -721,13 +723,14 @@ impl<S: Fixture> Cluster<S> {
                 self.own_sender(slot, certificates, Some(Plane::Certificates)),
                 certificates_receiver,
             ),
-            resolver: (self.own_sender(slot, resolver, None), resolver_receiver),
+            resolver: (
+                self.own_sender(slot, resolver, Some(Plane::Resolver)),
+                resolver_receiver,
+            ),
         }
     }
 
     /// Wraps one of `slot`'s plane senders so tests can block its recipients on `plane`.
-    ///
-    /// The resolver plane passes `None`: tests never block it.
     #[cfg(test)]
     fn own_sender(
         &self,

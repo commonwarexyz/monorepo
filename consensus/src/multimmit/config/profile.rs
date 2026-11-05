@@ -563,7 +563,8 @@ impl<D: Digest> Profile<D> {
         // Every core lane's byte bound is a multiple of the artifact byte limit, and the largest
         // must fit.
         let max_artifact_bytes =
-            max_lane_artifacts(&resources).map_or(0, |per_artifact| usize::MAX / per_artifact);
+            max_lane_artifacts(&resources, protocol.codec_config().chains())
+                .map_or(0, |per_artifact| usize::MAX / per_artifact);
         if resources.max_artifact_bytes() > max_artifact_bytes {
             return Err(Error::ArtifactByteLimitTooLarge {
                 max: max_artifact_bytes,

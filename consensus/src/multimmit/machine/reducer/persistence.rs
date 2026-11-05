@@ -17,7 +17,7 @@ use crate::{
             view::ViewTimer,
         },
         scheme::Scheme,
-        types::{Activity, Artifact, ArtifactId, BlockRef},
+        types::{Activity, Anchor, Artifact, ArtifactId, BlockRef},
     },
     types::{Round, View},
 };
@@ -652,6 +652,23 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
             self.validate_finality(*id, *observation, artifact, None)?;
             self.chain.observe::<H>(*id, *observation, artifact)?;
             self.views.observe::<H>(*id, *observation, artifact, None)?;
+            // Certificates installed from leader blocks are volatile until a durable advance, so
+            // a restart installs them again: a leader block's, which were verified with it, and
+            // a V-QC's or L-QC's, which are admitted like any observed certificate.
+            match artifact.as_ref() {
+                Artifact::LeaderBlock(block) => {
+                    let anchors = block.block().proposals().iter().filter_map(|proposal| {
+                        match proposal.anchor() {
+                            Anchor::Certificate(certificate) => Some(certificate.clone()),
+                            Anchor::Tip(_) => None,
+                        }
+                    });
+                    self.chain.da.install_anchors::<H>(anchors)?;
+                }
+                Artifact::Vqc(certificate) => self.carry_certificates(certificate.leader()),
+                Artifact::Lqc(certificate) => self.carry_certificates(certificate.leader()),
+                _ => {}
+            }
             let provisions = Arc::clone(&self.store.artifacts[id].provisions);
             self.report_leader_history(artifact, &provisions);
         }

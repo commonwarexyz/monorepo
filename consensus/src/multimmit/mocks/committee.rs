@@ -11,7 +11,8 @@ use crate::{
         config::{LeaderSchedule, Protocol},
         scheme::{DaFaults as _, Generic},
         types::{
-            Anchor, CertificateId, ChainId, ChainProposal, CodecConfig, DaVote, DigestedLeader,
+            Anchor, CertificateId, ChainId, ChainProposal, CodecConfig, DaCertificate, DaVote,
+            DigestedLeader,
             Extension, LeaderBlock, Lqc, NoVote, Nullification, Nullify, PathLimits, Position,
             SignedLeaderBlock, SignedTransactionBlock, TipRecord, TransactionBlockHeader,
             ViewMessage, Vote, VoteBody, Vqc, genesis_tip_commitment,
@@ -222,6 +223,27 @@ impl<S: Fixture> Committee<S> {
         self.signers[signer.get() as usize]
             .sign_da_vote(header)
             .expect("signer holds a DA share")
+    }
+
+    /// Returns a DA certificate for `header` recovered from the first DA quorum's shares.
+    pub fn da_certificate(
+        &self,
+        header: TransactionBlockHeader<Sha256Digest>,
+    ) -> DaCertificate<S, Sha256Digest> {
+        let quorum = self.codec().da_quorum();
+        let votes = self
+            .signers
+            .iter()
+            .take(quorum)
+            .map(|signer| {
+                signer
+                    .sign_da_vote(header.clone())
+                    .expect("signer holds a DA share")
+            })
+            .collect::<Vec<_>>();
+        self.verifier
+            .assemble_da_certificate_optimistic(&mut test_rng(), &votes, &Sequential)
+            .expect("a DA quorum recovers its certificate")
     }
 
     /// Returns `signer`'s abstention for `view`.

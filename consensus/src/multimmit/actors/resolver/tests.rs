@@ -2,7 +2,7 @@
 //! worker failures.
 
 use super::{
-    Actor, Config, Mailbox, Message, ResolveRequest,
+    Actor, CertificateRequest, Config, Mailbox, Message, ResolveRequest, ResolverKey,
     actor::{CodecCompletion, State, decode_delivery},
     mailbox::ControlOverflow,
 };
@@ -10,25 +10,27 @@ use crate::{
     Epochable as _,
     multimmit::{
         actors::voter::{Inbox, Mailbox as VoterMailbox, Message as VoterMessage},
-        machine::{Generation, ResolutionJob},
+        machine::{CertificateJob, Generation, ResolutionJob},
         mocks::{
             Bls, Committee, Mock, RecordingBlocker,
             cluster::{QUOTA, link_all, start_network},
         },
         testing::{SpanRecorder, expect_before, expect_within},
-        types::ViewProof,
+        types::{ChainId, DaCertificate, TransactionBlockHeader, ViewProof},
     },
-    types::{Epoch, Round, View},
+    types::{Epoch, Height, Round, View},
 };
 use bytes::{Bytes, BytesMut};
 use commonware_actor::{
     Feedback, Unreliable,
     mailbox::{Overflow as _, Policy},
 };
-use commonware_codec::{Copying, Encode as _, ReadExt as _, Write as _};
+use commonware_codec::{
+    Copying, Decode as _, Encode as _, RangeCfg, Read as _, ReadExt as _, Write as _,
+};
 use commonware_cryptography::{
-    Sha256, bls12381::primitives::variant::MinPk, ed25519::PublicKey as Ed25519PublicKey,
-    sha256::Digest,
+    Hasher as _, Sha256, bls12381::primitives::variant::MinPk,
+    ed25519::PublicKey as Ed25519PublicKey, sha256::Digest,
 };
 use commonware_macros::select;
 use commonware_p2p::{CheckedSender, LimitedSender, Receiver as _, Recipients, Sender as _};
@@ -39,7 +41,6 @@ use commonware_runtime::{
 use commonware_utils::{
     NZDuration,
     channel::oneshot,
-    sequence::U64,
     sync::{Condvar, Mutex},
 };
 use std::{
@@ -109,8 +110,8 @@ fn resolver_response(
     let id = u64::read(&mut request).expect("resolver request id");
     assert_eq!(u8::read(&mut request).expect("resolver request tag"), 0);
     assert_eq!(
-        u64::from(U64::read(&mut request).expect("resolver request view")),
-        requested.get()
+        ResolverKey::read(&mut request).expect("resolver request key"),
+        ResolverKey::View(requested)
     );
     assert!(request.0.is_empty());
 
@@ -212,7 +213,7 @@ fn resolver_responses_are_prioritized() {
         let mut request = BytesMut::new();
         0u64.write(&mut request);
         0u8.write(&mut request);
-        U64::new(3).write(&mut request);
+        ResolverKey::View(View::new(3)).write(&mut request);
         assert_eq!(
             peer_sender.send(Recipients::One(local), request.freeze(), false),
             vec![committee.identities[0].clone()]
@@ -365,7 +366,9 @@ fn local_cache_materialization_keeps_request_trace_parent_and_root_until_cancel(
                     .accepted()
             );
             let completion = voter_receiver.recv().await.expect("cached proof completes");
-            let VoterMessage::Resolution { root, .. } = &completion;
+            let VoterMessage::Resolution { root, .. } = &completion else {
+                panic!("expected a view-proof completion");
+            };
             assert_eq!(root.id(), Some(root_id));
 
             let request = spans.last("test.resolver.request").expect("request span");
@@ -607,10 +610,9 @@ fn wrong_view_response_is_rejected_without_blocking_its_peer() {
             resolver_response(request, requested, expected.clone()),
             true,
         );
-        let VoterMessage::Resolution { completion, .. } = voter_receiver
-            .recv()
-            .await
-            .expect("correct proof completes");
+        let Some(VoterMessage::Resolution { completion, .. }) = voter_receiver.recv().await else {
+            panic!("correct proof completes");
+        };
         assert_eq!(completion.issued().id(), job.issued().id());
         assert_eq!(completion.issued().generation(), job.issued().generation());
         assert_eq!(completion.view(), requested);
@@ -709,6 +711,10 @@ fn control_overflow_coalesces_only_between_job_barriers() {
                 observed.retain(proof);
             }
             Message::Prune { through } => observed.prune(through),
+            Message::ResolveCertificate(_)
+            | Message::CancelCertificate { .. }
+            | Message::RejectCertificate { .. }
+            | Message::RetainCertificate { .. } => unreachable!("no certificate controls"),
         }
     }
     assert_eq!(controls, vec![(0, first), (1, first), (2, second)]);
@@ -806,4 +812,217 @@ fn panicked_decode_is_an_invalid_response() {
             "a panicked decode must complete without proofs"
         );
     }
+}
+
+/// Answers a resolver request for `key` with `value`, checking the request.
+fn resolver_value_response(request: impl AsRef<[u8]>, key: ResolverKey, value: Bytes) -> Bytes {
+    let mut request = Copying(request.as_ref());
+    let id = u64::read(&mut request).expect("resolver request id");
+    assert_eq!(u8::read(&mut request).expect("resolver request tag"), 0);
+    assert_eq!(
+        ResolverKey::read(&mut request).expect("resolver request key"),
+        key
+    );
+    assert!(request.0.is_empty());
+    let mut response = BytesMut::new();
+    id.write(&mut response);
+    1u8.write(&mut response);
+    value.write(&mut response);
+    response.freeze()
+}
+
+/// Returns a height-`height` header on `chain`; DA certificates do not check parent links.
+fn header_at(
+    committee: &Committee<Bls<MinPk>>,
+    chain: ChainId,
+    height: u64,
+) -> TransactionBlockHeader<Digest> {
+    TransactionBlockHeader::new(
+        committee.config.epoch(),
+        chain,
+        Height::new(height),
+        Sha256::hash(&[&height.to_be_bytes()]),
+        Sha256::hash(&[b"body", &height.to_be_bytes()]),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_fetched_certificate_must_lie_above_the_requested_height() {
+    Runner::timed(Duration::from_secs(10)).start(|context| async move {
+        let committee = committee();
+        let local = committee.identities[0].clone();
+        let stale = committee.identities[1].clone();
+        let correct = committee.identities[2].clone();
+        let oracle = start_network(&context, committee.identities.clone(), 2 * 1024 * 1024).await;
+        link_all(&oracle, &[local.clone(), stale.clone()]).await;
+        let local_network = oracle
+            .control(local.clone())
+            .register(3, QUOTA)
+            .await
+            .expect("local resolver network registered");
+        let (mut stale_sender, mut stale_receiver) = oracle
+            .control(stale.clone())
+            .register(3, QUOTA)
+            .await
+            .expect("stale resolver network registered");
+        let (mut correct_sender, mut correct_receiver) = oracle
+            .control(correct.clone())
+            .register(3, QUOTA)
+            .await
+            .expect("correct resolver network registered");
+        let blocker = RecordingBlocker::default();
+        let (actor, endpoints): (Actor<_, Sha256, _, Bls<MinPk>, _, _>, _) = Actor::new(
+            context.child("resolver"),
+            Config {
+                scheme: committee.signers[0].clone(),
+                blocker: blocker.clone(),
+                strategy: Sequential,
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                mailbox_size: NonZeroUsize::new(8).unwrap(),
+            },
+        );
+        let voter_context = context.child("voter");
+        let (
+            voter,
+            Inbox {
+                resolutions: mut voter_receiver,
+                ..
+            },
+        ) = VoterMailbox::<Ed25519PublicKey, Bls<MinPk>, Digest>::new(
+            &voter_context,
+            &context,
+            NonZeroUsize::new(8).unwrap(),
+        );
+        let task = actor.start(voter.into_endpoints().resolutions, local_network);
+
+        let chain = ChainId::new(2);
+        let job = CertificateJob::issue(5, Generation::new(1), chain, Height::new(3));
+        let key = ResolverKey::Certificate {
+            chain,
+            after: Height::new(3),
+        };
+        assert!(
+            endpoints
+                .resolve_certificate(CertificateRequest {
+                    root: Span::none(),
+                    span: Span::none(),
+                    job,
+                })
+                .accepted()
+        );
+
+        // A peer whose certificate is not above the requested height is not used or blocked.
+        let (_, request) = stale_receiver.recv().await.expect("stale peer is asked");
+        let stale_certificate = committee.da_certificate(header_at(&committee, chain, 3));
+        let _ = stale_sender.send(
+            Recipients::One(local.clone()),
+            resolver_value_response(request, key, stale_certificate.encode()),
+            true,
+        );
+        context.sleep(Duration::from_millis(10)).await;
+        assert!(blocker.blocked().is_empty());
+        assert!(context.encode().contains("resolver_mismatched_total 1\n"));
+
+        // A certificate above it reaches the voter.
+        link_all(&oracle, &[local.clone(), correct.clone()]).await;
+        let (_, request) = correct_receiver.recv().await.expect("correct peer is asked");
+        let expected = committee.da_certificate(header_at(&committee, chain, 4));
+        let _ = correct_sender.send(
+            Recipients::One(local),
+            resolver_value_response(request, key, expected.encode()),
+            true,
+        );
+        let Some(VoterMessage::Certificate { completion, .. }) = voter_receiver.recv().await
+        else {
+            panic!("the certificate completes");
+        };
+        assert_eq!(completion.job(), job);
+        assert_eq!(completion.certificate(), &expected);
+
+        task.abort();
+        let _ = task.await;
+    });
+}
+
+#[test]
+fn a_retained_certificate_is_served_only_above_the_requested_height() {
+    Runner::timed(Duration::from_secs(10)).start(|context| async move {
+        let committee = committee();
+        let local = committee.identities[0].clone();
+        let peer = committee.identities[1].clone();
+        let oracle = start_network(&context, committee.identities.clone(), 2 * 1024 * 1024).await;
+        link_all(&oracle, &[local.clone(), peer.clone()]).await;
+        let local_network = oracle
+            .control(local.clone())
+            .register(3, QUOTA)
+            .await
+            .expect("local resolver network registered");
+        let (mut peer_sender, mut peer_receiver) = oracle
+            .control(peer.clone())
+            .register(3, QUOTA)
+            .await
+            .expect("peer resolver network registered");
+        let (actor, endpoints): (Actor<_, Sha256, _, Bls<MinPk>, _, _>, _) = Actor::new(
+            context.child("resolver"),
+            Config {
+                scheme: committee.signers[0].clone(),
+                blocker: RecordingBlocker::default(),
+                strategy: Sequential,
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                mailbox_size: NonZeroUsize::new(8).unwrap(),
+            },
+        );
+        let voter_context = context.child("voter");
+        let (voter, _inbox) = VoterMailbox::<Ed25519PublicKey, Bls<MinPk>, Digest>::new(
+            &voter_context,
+            &context,
+            NonZeroUsize::new(8).unwrap(),
+        );
+        let task = actor.start(voter.into_endpoints().resolutions, local_network);
+
+        let chain = ChainId::new(1);
+        let lower = committee.da_certificate(header_at(&committee, chain, 4));
+        let retained = committee.da_certificate(header_at(&committee, chain, 5));
+        assert!(endpoints.retain_certificate(retained.clone()).accepted());
+        // A lower certificate never replaces a higher one.
+        assert!(endpoints.retain_certificate(lower).accepted());
+
+        let ask = |sender: &mut _, id: u64, after: u64| {
+            let mut request = BytesMut::new();
+            id.write(&mut request);
+            0u8.write(&mut request);
+            ResolverKey::Certificate {
+                chain,
+                after: Height::new(after),
+            }
+            .write(&mut request);
+            let _ = commonware_p2p::Sender::send(
+                sender,
+                Recipients::One(local.clone()),
+                request.freeze(),
+                false,
+            );
+        };
+        // Asked above its height, the peer answers with an error.
+        ask(&mut peer_sender, 1, 5);
+        let (_, response) = peer_receiver.recv().await.expect("error response");
+        let mut response = Copying(response.as_ref());
+        assert_eq!(u64::read(&mut response).unwrap(), 1);
+        assert_eq!(u8::read(&mut response).unwrap(), 2);
+        // Asked below it, the peer serves the retained certificate.
+        ask(&mut peer_sender, 2, 4);
+        let (_, response) = peer_receiver.recv().await.expect("certificate response");
+        let mut response = Copying(response.as_ref());
+        assert_eq!(u64::read(&mut response).unwrap(), 2);
+        assert_eq!(u8::read(&mut response).unwrap(), 1);
+        let value = Bytes::read_cfg(&mut response, &RangeCfg::from(..)).unwrap();
+        assert_eq!(
+            DaCertificate::<Bls<MinPk>, Digest>::decode_cfg(value, &committee.codec()).unwrap(),
+            retained
+        );
+
+        task.abort();
+        let _ = task.await;
+    });
 }

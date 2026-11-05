@@ -675,6 +675,125 @@ async fn finality_without_votes_at_producer<S: Fixture>(
     finalized
 }
 
+/// A receipt chain's producer that receives view certificates but none of its chain's DA traffic
+/// and no leader block keeps building as finality advances, while its peers certify and place its
+/// blocks without it. Messages before GST may be lost, and peers never re-send a placed block's
+/// certificate, so unless the producer recovers the certificates its duties fill and it stops
+/// producing for good.
+#[test_traced]
+fn a_receipt_producer_cut_off_from_its_certificates_keeps_producing() {
+    const PRODUCER: usize = RECEIPT_PRODUCER;
+    let executor = DeterministicRunner::timed(Duration::from_secs(600));
+    executor.start(|context| async move {
+        let mut chain_limits = vec![PathLimits::new(2, 1); 6];
+        chain_limits[PRODUCER] = PathLimits::new(0, 0);
+        let mut cluster = Cluster::<Mock<Binding>>::new(
+            &context,
+            ClusterOptions {
+                chain_limits: Some(chain_limits),
+                ..ClusterOptions::new(96, 6)
+            },
+        )
+        .await;
+        let others = (0..6).filter(|node| *node != PRODUCER).collect::<Vec<_>>();
+        let planes = [Plane::Data, Plane::Consensus, Plane::Resolver];
+        cluster.start_all().await;
+        for &node in &others {
+            for plane in planes {
+                cluster.block(plane, node, PRODUCER);
+            }
+        }
+        cluster.produce();
+
+        // The chain keeps finalizing far past its pipeline window while the producer is cut off.
+        let chain = [PRODUCER as u32];
+        cluster
+            .wait_finalized(&others, &chain, 12, Duration::from_secs(240))
+            .await;
+
+        // Once delivery recovers, every node keeps finalizing the chain.
+        for &node in &others {
+            for plane in planes {
+                cluster.unblock(plane, node, PRODUCER);
+            }
+        }
+        cluster
+            .wait_finalized(&cluster.all_nodes(), &chain, 20, Duration::from_secs(240))
+            .await;
+        cluster.observe_finality(&cluster.all_nodes()).await;
+    });
+}
+
+/// A node that lost a certificate before GST, and that peers no longer send, fetches it: the
+/// receipt chain's producer, cut off on every plane while its peers certify and place its block,
+/// then building nothing more, recovers the certificate of its placed tip once delivery recovers.
+/// No later proposal carries that certificate, since the chain no longer advances.
+#[test_traced]
+fn a_producer_recovers_the_certificate_of_its_placed_tip() {
+    const PRODUCER: usize = RECEIPT_PRODUCER;
+    let executor = DeterministicRunner::timed(Duration::from_secs(600));
+    executor.start(|context| async move {
+        let mut chain_limits = vec![PathLimits::new(2, 1); 6];
+        chain_limits[PRODUCER] = PathLimits::new(0, 0);
+        let mut cluster = Cluster::<Mock<Binding>>::new(
+            &context,
+            ClusterOptions {
+                chain_limits: Some(chain_limits),
+                ..ClusterOptions::new(97, 6)
+            },
+        )
+        .await;
+        let others = (0..6).filter(|node| *node != PRODUCER).collect::<Vec<_>>();
+        let planes = [Plane::Data, Plane::Consensus, Plane::Certificates, Plane::Resolver];
+        cluster.start_all().await;
+        cluster.produce();
+        let chain = [PRODUCER as u32];
+        cluster
+            .wait_finalized(&cluster.all_nodes(), &chain, 3, Duration::from_secs(120))
+            .await;
+
+        // Cut the producer off while its peers certify and place what it builds next.
+        for &node in &others {
+            for plane in planes {
+                cluster.block(plane, node, PRODUCER);
+            }
+        }
+        let certified = |inspection: &Inspection<Sha256Digest>| {
+            inspection.chain_progress()[PRODUCER].certified()
+        };
+        let behind = certified(&cluster.inspect(PRODUCER).await.expect("producer is live"));
+        assert!(
+            cluster
+                .wait_until(&others, Duration::from_secs(240), Duration::from_millis(100), |inspection| {
+                    certified(inspection) > behind
+                })
+                .await,
+            "peers certify the producer's next block without it"
+        );
+        cluster.app(PRODUCER).pause_building();
+        let mut placed = Height::new(u64::MAX);
+        for &node in &others {
+            let inspection = cluster.inspect(node).await.expect("peer is live");
+            placed = placed.min(certified(&inspection));
+        }
+
+        // Once delivery recovers, the producer holds the certificate its peers placed.
+        for &node in &others {
+            for plane in planes {
+                cluster.unblock(plane, node, PRODUCER);
+            }
+        }
+        assert!(
+            cluster
+                .wait_until(&[PRODUCER], Duration::from_secs(240), Duration::from_millis(100), |inspection| {
+                    certified(inspection) >= placed
+                })
+                .await,
+            "the producer recovers the certificate of its placed tip"
+        );
+    });
+}
+
 /// The pipeline window of chain 5 in [`receipt_chain_finality_without_votes_at_its_producer`]
 /// without receipt chains: how far it finalizes with no certificates at all.
 const UNCERTIFIED_WINDOW: u64 = 2;

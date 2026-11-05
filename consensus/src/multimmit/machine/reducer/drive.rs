@@ -253,6 +253,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         self.chain
             .drive::<H>(self.durable.state.generation, self.finality.finalized())?;
         capabilities.extend(self.chain.take_capabilities());
+        capabilities.extend(self.drive_certificate_resolution()?);
 
         if order == DaOrder::ChainFirst && self.advance_da_certificate(&mut capabilities)? {
             return Ok((WorkStatus::Requeue, capabilities));
@@ -869,6 +870,100 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         }
     }
 
+    /// Requests a DA certificate for every chain placed above the certificates this node holds,
+    /// and retires the requests no longer needed.
+    ///
+    /// Only chains whose placement implies a certificate qualify: they advance only through a
+    /// certificate that correct voters verified before voting, so a correct node holds one at or
+    /// above the placed tip. Messages before GST may be lost, and peers stop sending a placed
+    /// block's certificate, so without asking a node could stay behind for good: a producer could
+    /// not retire its block duties, and a validator could not DA-vote above its window. A chain
+    /// stays behind for one view before a request goes out, so the certificate the placing leader
+    /// block carries is not fetched again.
+    pub(super) fn drive_certificate_resolution(
+        &mut self,
+    ) -> Result<Capabilities<S, H::Digest>, StepError> {
+        let mut capabilities = Capabilities::new();
+        // Requests, held and carried certificates exist only for qualifying chains.
+        if !self.chain.implies_certificates() {
+            return Ok(capabilities);
+        }
+        // Admit certificates waiting for capacity and those carried by authenticated proofs.
+        for (chain, certificate) in self.resolution.take_held_certificates() {
+            capabilities.extend(self.observe_certificate_resolution(chain, certificate)?);
+        }
+        for (chain, certificate) in take(&mut self.resolution.carried) {
+            if self.chain.da.certified_anchor(chain).height() >= certificate.header().height() {
+                continue;
+            }
+            let artifact =
+                Artifact::DaCertificate(certificate).identify::<H>(&mut self.store.id_scratch);
+            capabilities.extend(
+                self.observe_artifacts([artifact].into_iter())?
+                    .into_capabilities(),
+            );
+        }
+
+        let view = self.durable.state.view;
+        let behind = self
+            .views
+            .anchor_tips(view)
+            .into_iter()
+            .flatten()
+            .filter(|tip| {
+                self.chain.placement_implies_certificate(tip.chain())
+                    && tip.height() > self.chain.da.certified_anchor(tip.chain()).height()
+            })
+            .map(|tip| tip.chain())
+            .collect::<Vec<_>>();
+        self.resolution
+            .lagging
+            .retain(|chain, _| behind.contains(chain));
+        let settled = self
+            .resolution
+            .certificate_chains()
+            .filter(|chain| !behind.contains(chain))
+            .collect::<Vec<_>>();
+        for chain in settled {
+            self.cancel_certificate_resolution(chain);
+        }
+        for chain in behind {
+            let since = *self.resolution.lagging.entry(chain).or_insert(view);
+            if since >= view {
+                continue;
+            }
+            let after = self
+                .durable
+                .state
+                .certified_height(chain)
+                .unwrap_or_default();
+            if let Some(job) = self.resolution.certificate_job(chain) {
+                if job.after() == after {
+                    continue;
+                }
+                // A certificate at or below the new durable height no longer helps.
+                self.cancel_certificate_resolution(chain);
+            }
+            if let Some(job) =
+                self.resolution
+                    .request_certificate(self.durable.state.generation, chain, after)?
+            {
+                self.resolution
+                    .capabilities
+                    .push(Capability::Resolver(ResolverCommand::ResolveCertificate(job)));
+            }
+        }
+        Ok(capabilities)
+    }
+
+    pub(super) fn cancel_certificate_resolution(&mut self, chain: ChainId) {
+        if let Some(job) = self.resolution.resolved_certificate(chain) {
+            self.resolution
+                .capabilities
+                .push(Capability::Resolver(ResolverCommand::CancelCertificate(job)));
+        }
+    }
+
     pub(super) fn cancel_resolution(&mut self, view: View) {
         if let Some(job) = self.resolution.resolved(view) {
             self.resolution
@@ -882,8 +977,16 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         artifact: ArtifactId<H::Digest>,
     ) -> Vec<ResolutionJob> {
         let failed = self.resolution.verification_failed(artifact);
-        if !failed.is_empty() {
+        // A rejected certificate drops its request; the next drive asks again while the chain
+        // is still behind.
+        let certificates = self.resolution.certificate_verification_failed(artifact);
+        if !failed.is_empty() || !certificates.is_empty() {
             self.wake_components();
+        }
+        for job in certificates {
+            self.resolution
+                .capabilities
+                .push(Capability::Resolver(ResolverCommand::RejectCertificate(job)));
         }
         for job in &failed {
             self.resolution

@@ -12,7 +12,7 @@ use crate::{
         algebra::ValidatedLqc,
         config::Role,
         machine::{
-            capability::{Capabilities, Capability, ChainCommand},
+            capability::{Capabilities, Capability, ChainCommand, ResolverCommand},
             durability::{Change, DurableEffect, EffectCompletion, EffectId, EffectResult},
             finality::PreparedLqc,
             input::{CryptoCompletion, ObservationStatus, Step, StepError, StepStatus},
@@ -20,13 +20,13 @@ use crate::{
                 BuildCompletion, BuildOutcome, CustodyCancellation, CustodyCompletion,
                 ProductionTimer,
             },
-            resolution::ResolutionCompletion,
+            resolution::{CertificateCompletion, ResolutionCompletion},
             scheduler::WorkKey,
             verification::{JobId, Observation, VerificationTicket},
             view::{NullificationRecoveryCompletion, ViewTimer, VqcAggregateCompletion},
         },
         scheme::Scheme,
-        types::{Activity, Artifact, ArtifactBatch, ArtifactId, BlockRef, DaCertificate},
+        types::{Activity, Artifact, ArtifactBatch, ArtifactId, BlockRef, ChainId, DaCertificate},
     },
     types::{Round, View},
 };
@@ -187,6 +187,78 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
             StepStatus::ResolutionCompleted { admission: status },
             step.into_capabilities(),
         ))
+    }
+
+    pub(super) fn complete_certificate_resolution(
+        &mut self,
+        completion: CertificateCompletion<S, H::Digest>,
+    ) -> Result<Step<S, H::Digest>, StepError> {
+        if !self.resolution.certificate_matches(&completion) {
+            return Ok(Step::stale());
+        }
+        let job = completion.job();
+        let header = completion.certificate().header();
+        if header.chain() != job.chain() || header.height() <= job.after() {
+            return Err(StepError::CompletionMismatch);
+        }
+        let capabilities =
+            self.observe_certificate_resolution(job.chain(), completion.into_certificate())?;
+        Ok(Step::new(StepStatus::Accepted, capabilities))
+    }
+
+    /// Admits a certificate fetched for `chain` like any observed certificate.
+    ///
+    /// The request stays open while the certificate is verified, and while local admission has
+    /// no room for it the certificate is held and offered again on the next drive rather than
+    /// fetched again. An invalid certificate rejects the request, which the next drive issues
+    /// anew if the chain is still behind.
+    pub(super) fn observe_certificate_resolution(
+        &mut self,
+        chain: ChainId,
+        certificate: DaCertificate<S, H::Digest>,
+    ) -> Result<Capabilities<S, H::Digest>, StepError> {
+        let artifact = Artifact::DaCertificate(certificate.clone())
+            .identify::<H>(&mut self.store.id_scratch);
+        let id = artifact.id;
+        let step = self.observe_artifacts([artifact].into_iter())?;
+        let status = match step.status() {
+            StepStatus::Observed(results) => match results.as_slice() {
+                [result] => Some(result.status()),
+                _ => return Err(StepError::CompletionMismatch),
+            },
+            _ => None,
+        };
+        match status {
+            Some(ObservationStatus::Scheduled) => {
+                self.resolution.begin_certificate_verification(chain, id);
+            }
+            Some(ObservationStatus::Duplicate)
+                if self
+                    .store
+                    .artifacts
+                    .get(&id)
+                    .is_some_and(|entry| !matches!(entry.state, ArtifactState::Ready)) =>
+            {
+                self.resolution.begin_certificate_verification(chain, id);
+            }
+            Some(ObservationStatus::Rejected(rejection)) if rejection.is_capacity() => {
+                self.resolution.hold_certificate(chain, certificate);
+            }
+            Some(ObservationStatus::Rejected(_)) => {
+                if let Some(job) = self.resolution.resolved_certificate(chain) {
+                    self.resolution
+                        .capabilities
+                        .push(Capability::Resolver(ResolverCommand::RejectCertificate(job)));
+                }
+                self.wake_components();
+            }
+            // Already verified, or settled by a certificate at or above it.
+            Some(ObservationStatus::Duplicate) | None => {
+                self.cancel_certificate_resolution(chain);
+                self.wake_components();
+            }
+        }
+        Ok(step.into_capabilities())
     }
 
     pub(super) fn fire_production_timer(

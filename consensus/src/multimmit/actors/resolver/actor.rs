@@ -6,8 +6,8 @@
 //! runs at once.
 
 use super::{
-    Config, Mailbox, Message, ResolveRequest, Serve, custody::Custody,
-    metrics::Metrics as ActorMetrics,
+    CertificateRequest, Config, Mailbox, Message, ResolveRequest, ResolverKey, Serve,
+    custody::Custody, metrics::Metrics as ActorMetrics,
 };
 use crate::{
     Epochable as _, Viewable as _,
@@ -16,11 +16,11 @@ use crate::{
             util::{self, Handler, WorkerPanicked, offload, some_or_pending},
             voter::Resolutions,
         },
-        machine::{ResolutionCompletion, ResolutionJob},
+        machine::{CertificateCompletion, CertificateJob, ResolutionCompletion, ResolutionJob},
         scheme::{Generic, Scheme},
-        types::{CodecConfig, ViewProof},
+        types::{ChainId, CodecConfig, DaCertificate, ViewProof},
     },
-    types::{Epoch, Round, View},
+    types::{Epoch, Height, Round, View},
 };
 use bytes::Bytes;
 use commonware_actor::{Feedback, mailbox};
@@ -38,7 +38,6 @@ use commonware_utils::{
     NonZeroDuration,
     channel::{fallible::OneshotExt as _, oneshot},
     futures::Pool,
-    sequence::U64,
 };
 use rand_core::Rng;
 use std::{
@@ -55,8 +54,31 @@ use tracing::{Span, debug, error, info_span};
 /// The issuing context of one outstanding resolution job.
 struct Origin {
     root: Span,
-    round: Round,
+    /// The round that issued a view request; DA-certificate requests carry none.
+    round: Option<Round>,
     started_at: SystemTime,
+}
+
+/// The machine job a fetch serves.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) enum Subscriber {
+    /// A view-proof request.
+    View(ResolutionJob),
+    /// A DA-certificate request.
+    Certificate(CertificateJob),
+}
+
+impl Subscriber {
+    /// Returns the key that fetches this job.
+    const fn key(self) -> ResolverKey {
+        match self {
+            Self::View(job) => ResolverKey::View(job.view()),
+            Self::Certificate(job) => ResolverKey::Certificate {
+                chain: job.chain(),
+                after: job.after(),
+            },
+        }
+    }
 }
 
 /// A blocker that never blocks and forwards only the blocked-peer subscription.
@@ -79,8 +101,8 @@ impl<B: Blocker> Blocker for NonBlocking<B> {
     }
 }
 
-/// A fetched view proof to validate or a peer request to serve one, keyed by view.
-type HandlerMessage = util::HandlerMessage<U64, ResolutionJob, bool>;
+/// A fetched value to validate or a peer request to serve one.
+type HandlerMessage = util::HandlerMessage<ResolverKey, Subscriber, bool>;
 
 /// The result of one proof encode or decode on the codec pool.
 pub(super) enum CodecCompletion<S: Scheme, D: Digest> {
@@ -88,6 +110,17 @@ pub(super) enum CodecCompletion<S: Scheme, D: Digest> {
     Decoded {
         proofs: Option<Vec<(ResolutionJob, ViewProof<S, D>)>>,
         response: oneshot::Sender<bool>,
+    },
+    /// A peer's DA certificate decoded for each subscribed job, or `None` if it is unusable.
+    DecodedCertificate {
+        certificates: Option<Vec<(CertificateJob, DaCertificate<S, D>)>>,
+        response: oneshot::Sender<bool>,
+    },
+    /// A retained DA certificate encoded to serve one peer request.
+    EncodedCertificate {
+        certificate: Arc<DaCertificate<S, D>>,
+        value: Bytes,
+        response: oneshot::Sender<Bytes>,
     },
     /// A retained proof encoded to serve one peer request.
     Encoded {
@@ -132,6 +165,33 @@ where
     (span, CodecCompletion::Decoded { proofs, response })
 }
 
+/// Decodes an untrusted DA-certificate delivery on `strategy`, counting a worker panic as an
+/// invalid response.
+async fn decode_certificate_delivery<St, S, D>(
+    strategy: St,
+    span: Span,
+    response: oneshot::Sender<bool>,
+    decode: impl FnOnce() -> Option<Vec<(CertificateJob, DaCertificate<S, D>)>> + Send + 'static,
+) -> CodecResult<S, D>
+where
+    St: Strategy,
+    S: Scheme,
+    D: Digest,
+{
+    let (span, certificates) = offload(strategy, 1, span, move |_| decode()).await;
+    let certificates = certificates.unwrap_or_else(|WorkerPanicked| {
+        span.in_scope(|| error!("resolver decode worker panicked"));
+        None
+    });
+    (
+        span,
+        CodecCompletion::DecodedCertificate {
+            certificates,
+            response,
+        },
+    )
+}
+
 /// Runs codec work over locally held proofs on `strategy`. A worker panic is a local defect and
 /// propagates.
 async fn encode_local<St, S, D>(
@@ -150,7 +210,7 @@ where
 
 /// A peer delivery whose p2p response waits until the machine settles every job it completed.
 struct Verdict {
-    jobs: BTreeSet<ResolutionJob>,
+    jobs: BTreeSet<Subscriber>,
     response: oneshot::Sender<bool>,
 }
 
@@ -187,6 +247,12 @@ impl<S: Scheme, D: Digest> Borrow<ViewProof<S, D>> for StoredProof<S, D> {
 /// In-memory view proofs this node serves to peers.
 pub(super) type State<S, D> = Custody<S, D, StoredProof<S, D>>;
 
+/// A durable DA certificate and its canonical encoding, cached once a peer requests it.
+pub(super) struct StoredCertificate<S: Scheme, D: Digest> {
+    certificate: Arc<DaCertificate<S, D>>,
+    canonical: Option<Bytes>,
+}
+
 impl<S: Scheme, D: Digest> State<S, D> {
     /// Returns an empty state that refuses exits at the genesis view.
     pub(super) fn new() -> Self {
@@ -216,9 +282,16 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 }
 
-/// Returns the view a resolver key requests.
-fn key_view(key: U64) -> View {
-    View::new(key.into())
+/// Returns `certificate` if it answers a request for `chain` above `after` in `epoch`.
+fn usable_certificate<S: Scheme, D: Digest>(
+    epoch: Epoch,
+    chain: ChainId,
+    after: Height,
+    certificate: DaCertificate<S, D>,
+) -> Option<DaCertificate<S, D>> {
+    let header = certificate.header();
+    (header.epoch() == epoch && header.chain() == chain && header.height() > after)
+        .then_some(certificate)
 }
 
 /// Returns `proof` if it can resolve `view`: an exit proof for exactly `view`, or an L-QC at or
@@ -351,6 +424,7 @@ where
             engine,
             voter,
             state: State::new(),
+            certificates: BTreeMap::new(),
             outstanding: BTreeMap::new(),
             pending_local: PendingLocal::new(),
             verdicts: Vec::new(),
@@ -379,11 +453,13 @@ where
     mailbox: mailbox::Receiver<Message<S, H::Digest>>,
     queries: mailbox::UnreliableReceiver<Serve<S, H::Digest>>,
     handler: mailbox::Receiver<HandlerMessage>,
-    fetcher: p2p::Mailbox<U64, P, ResolutionJob>,
+    fetcher: p2p::Mailbox<ResolverKey, P, Subscriber>,
     engine: Handle<()>,
     voter: Resolutions<S, H::Digest>,
     state: State<S, H::Digest>,
-    outstanding: BTreeMap<ResolutionJob, Origin>,
+    /// The durable DA certificate of each chain this node serves.
+    certificates: BTreeMap<ChainId, StoredCertificate<S, H::Digest>>,
+    outstanding: BTreeMap<Subscriber, Origin>,
     pending_local: PendingLocal<S, H::Digest>,
     verdicts: Vec<Verdict>,
     codecs: CodecResults<S, H::Digest>,
@@ -421,9 +497,12 @@ where
             },
             Some(message) = self.handler.recv() else break => {
                 match message {
-                    HandlerMessage::Produce { key, response } => {
-                        self.on_produce(key_view(key), response);
-                    }
+                    HandlerMessage::Produce { key, response } => match key {
+                        ResolverKey::View(view) => self.on_produce(view, response),
+                        ResolverKey::Certificate { chain, after } => {
+                            self.on_produce_certificate(chain, after, response);
+                        }
+                    },
                     HandlerMessage::Deliver {
                         delivery,
                         value,
@@ -468,10 +547,10 @@ where
             } => {
                 let mut jobs = BTreeSet::new();
                 for (job, proof) in proofs {
-                    let Some(origin) = self.outstanding.get(&job) else {
+                    let Some(origin) = self.outstanding.get(&Subscriber::View(job)) else {
                         continue;
                     };
-                    jobs.insert(job);
+                    jobs.insert(Subscriber::View(job));
                     self.complete(job, origin, proof);
                 }
                 if jobs.is_empty() {
@@ -479,6 +558,45 @@ where
                 } else {
                     self.verdicts.push(Verdict { jobs, response });
                 }
+            }
+            CodecCompletion::DecodedCertificate {
+                certificates: None,
+                response,
+            } => {
+                self.metrics.mismatched.inc();
+                response.send_lossy(false);
+            }
+            CodecCompletion::DecodedCertificate {
+                certificates: Some(certificates),
+                response,
+            } => {
+                let mut jobs = BTreeSet::new();
+                for (job, certificate) in certificates {
+                    let Some(origin) = self.outstanding.get(&Subscriber::Certificate(job)) else {
+                        continue;
+                    };
+                    jobs.insert(Subscriber::Certificate(job));
+                    self.complete_certificate(job, origin, certificate);
+                }
+                if jobs.is_empty() {
+                    response.send_lossy(true);
+                } else {
+                    self.verdicts.push(Verdict { jobs, response });
+                }
+            }
+            CodecCompletion::EncodedCertificate {
+                certificate,
+                value,
+                response,
+            } => {
+                let chain = certificate.header().chain();
+                if let Some(stored) = self.certificates.get_mut(&chain)
+                    && Arc::ptr_eq(&stored.certificate, &certificate)
+                {
+                    stored.canonical = Some(value.clone());
+                }
+                self.metrics.served.inc();
+                response.send_lossy(value);
             }
             CodecCompletion::Encoded {
                 proof,
@@ -490,7 +608,7 @@ where
                 response.send_lossy(value);
             }
             CodecCompletion::Materialized { job, proof } => {
-                if let Some(origin) = self.outstanding.get(&job) {
+                if let Some(origin) = self.outstanding.get(&Subscriber::View(job)) {
                     self.complete(job, origin, proof);
                 }
             }
@@ -501,13 +619,22 @@ where
     fn on_control(&mut self, message: Message<S, H::Digest>) {
         match message {
             Message::Resolve(request) => self.on_resolve(request),
-            Message::Cancel { job } => self.retire(job, Outcome::Cancelled),
+            Message::Cancel { job } => self.retire(Subscriber::View(job), Outcome::Cancelled),
             Message::Reject { job } => {
                 self.metrics.rejected.inc();
-                self.retire(job, Outcome::Rejected);
+                self.retire(Subscriber::View(job), Outcome::Rejected);
             }
             Message::Retain { proof } => self.state.retain(proof),
             Message::Prune { through } => self.state.prune(through),
+            Message::ResolveCertificate(request) => self.on_resolve_certificate(request),
+            Message::CancelCertificate { job } => {
+                self.retire(Subscriber::Certificate(job), Outcome::Cancelled);
+            }
+            Message::RejectCertificate { job } => {
+                self.metrics.rejected.inc();
+                self.retire(Subscriber::Certificate(job), Outcome::Rejected);
+            }
+            Message::RetainCertificate { certificate } => self.retain_certificate(certificate),
         }
     }
 
@@ -522,15 +649,15 @@ where
         );
         let _entered = process.enter();
         let job = request.job;
-        if self.outstanding.contains_key(&job) {
+        if self.outstanding.contains_key(&Subscriber::View(job)) {
             return;
         }
         self.metrics.requests.inc();
         self.outstanding.insert(
-            job,
+            Subscriber::View(job),
             Origin {
                 root: request.root,
-                round: request.round,
+                round: Some(request.round),
                 started_at: self.context.current(),
             },
         );
@@ -545,10 +672,94 @@ where
             job = job.issued().id().get().traced(),
         );
         let _ = self.fetcher.fetch(Fetch {
-            key: U64::new(job.view().get()),
-            subscriber: job,
+            key: ResolverKey::View(job.view()),
+            subscriber: Subscriber::View(job),
             span,
         });
+    }
+
+    /// Starts one machine-issued DA-certificate request.
+    ///
+    /// The request is always fetched: a node asks only for a certificate above every one it
+    /// holds, so its own retained certificate never answers it.
+    fn on_resolve_certificate(&mut self, request: CertificateRequest) {
+        let job = request.job;
+        let subscriber = Subscriber::Certificate(job);
+        if self.outstanding.contains_key(&subscriber) {
+            return;
+        }
+        self.metrics.requests.inc();
+        self.outstanding.insert(
+            subscriber,
+            Origin {
+                root: request.root,
+                round: None,
+                started_at: self.context.current(),
+            },
+        );
+        let span = info_span!(
+            parent: &request.span,
+            "multimmit.resolver.resolve_certificate.fetch",
+            chain = job.chain().get().traced(),
+            after = job.after().get().traced(),
+            job = job.issued().id().get().traced(),
+        );
+        let _ = self.fetcher.fetch(Fetch {
+            key: subscriber.key(),
+            subscriber,
+            span,
+        });
+    }
+
+    /// Serves one durable DA certificate, replacing a lower one of its chain.
+    fn retain_certificate(&mut self, certificate: DaCertificate<S, H::Digest>) {
+        let chain = certificate.header().chain();
+        let higher = self.certificates.get(&chain).is_none_or(|stored| {
+            stored.certificate.header().height() < certificate.header().height()
+        });
+        if higher {
+            self.certificates.insert(
+                chain,
+                StoredCertificate {
+                    certificate: Arc::new(certificate),
+                    canonical: None,
+                },
+            );
+        }
+    }
+
+    /// Serves one peer request for `chain`'s DA certificate above `after`.
+    fn on_produce_certificate(
+        &mut self,
+        chain: ChainId,
+        after: Height,
+        response: oneshot::Sender<Bytes>,
+    ) {
+        let Some(stored) = self
+            .certificates
+            .get(&chain)
+            .filter(|stored| stored.certificate.header().height() > after)
+        else {
+            return;
+        };
+        if let Some(value) = &stored.canonical {
+            self.metrics.served.inc();
+            response.send_lossy(value.clone());
+            return;
+        }
+        let span = info_span!(
+            "multimmit.resolver.serve_certificate.encode",
+            epoch = self.epoch.get().traced(),
+            chain = chain.get().traced(),
+        );
+        let certificate = Arc::clone(&stored.certificate);
+        let operation = move || CodecCompletion::EncodedCertificate {
+            value: certificate.encode(),
+            certificate,
+            response,
+        };
+        self.codecs
+            .push(encode_local(self.strategy.clone(), span, operation));
     }
 
     /// Serves one peer request for `view` from retained proofs.
@@ -576,14 +787,19 @@ where
             .push(encode_local(self.strategy.clone(), span, operation));
     }
 
-    /// Decodes one fetched value for every job subscribed to its view.
+    /// Decodes one fetched value for every job subscribed to its key.
     fn on_deliver(
         &mut self,
-        delivery: Delivery<U64, ResolutionJob>,
+        delivery: Delivery<ResolverKey, Subscriber>,
         value: Bytes,
         response: oneshot::Sender<bool>,
     ) {
-        let requested = key_view(delivery.key);
+        let requested = match delivery.key {
+            ResolverKey::View(view) => view,
+            ResolverKey::Certificate { chain, after } => {
+                return self.on_deliver_certificate(chain, after, delivery, value, response);
+            }
+        };
         let (_, cause) = delivery.subscribers.first();
         let deliver = info_span!(
             parent: cause,
@@ -599,11 +815,16 @@ where
             let proof = ViewProof::<S, H::Digest>::decode_cfg(value, &codec)
                 .ok()
                 .and_then(|proof| usable_for(requested, proof))?;
-            let proofs = repeat_n(proof, delivery.subscribers.len().get())
-                .zip(delivery.subscribers.iter())
-                .map(|(proof, (job, _))| (*job, proof))
-                .collect();
-            Some(proofs)
+            let jobs = delivery
+                .subscribers
+                .iter()
+                .filter_map(|(subscriber, _)| match subscriber {
+                    Subscriber::View(job) => Some(*job),
+                    Subscriber::Certificate(_) => None,
+                })
+                .collect::<Vec<_>>();
+            let proofs = repeat_n(proof, jobs.len()).zip(jobs).map(|(proof, job)| (job, proof));
+            Some(proofs.collect())
         };
         self.codecs.push(decode_delivery(
             self.strategy.clone(),
@@ -613,6 +834,75 @@ where
         ));
     }
 
+    /// Decodes one fetched DA certificate for every job subscribed to `chain` above `after`.
+    fn on_deliver_certificate(
+        &mut self,
+        chain: ChainId,
+        after: Height,
+        delivery: Delivery<ResolverKey, Subscriber>,
+        value: Bytes,
+        response: oneshot::Sender<bool>,
+    ) {
+        let (_, cause) = delivery.subscribers.first();
+        let deliver = info_span!(
+            parent: cause,
+            "multimmit.resolver.resolve_certificate.deliver",
+            epoch = self.epoch.get().traced(),
+            chain = chain.get().traced(),
+            after = after.get().traced(),
+        );
+        for (_, cause) in delivery.subscribers.iter().skip(1) {
+            deliver.follows_from(cause.id());
+        }
+        let (codec, epoch) = (self.codec, self.epoch);
+        let decode = move || {
+            let certificate = DaCertificate::<S, H::Digest>::decode_cfg(value, &codec)
+                .ok()
+                .and_then(|certificate| usable_certificate(epoch, chain, after, certificate))?;
+            let jobs = delivery
+                .subscribers
+                .iter()
+                .filter_map(|(subscriber, _)| match subscriber {
+                    Subscriber::Certificate(job) => Some(*job),
+                    Subscriber::View(_) => None,
+                })
+                .collect::<Vec<_>>();
+            let certificates = repeat_n(certificate, jobs.len())
+                .zip(jobs)
+                .map(|(certificate, job)| (job, certificate));
+            Some(certificates.collect())
+        };
+        self.codecs.push(decode_certificate_delivery(
+            self.strategy.clone(),
+            deliver,
+            response,
+            decode,
+        ));
+    }
+
+    /// Hands one fetched DA certificate to the voter.
+    fn complete_certificate(
+        &self,
+        job: CertificateJob,
+        origin: &Origin,
+        certificate: DaCertificate<S, H::Digest>,
+    ) {
+        self.metrics.resolved.inc();
+        self.metrics
+            .resolved_latency
+            .observe_between(origin.started_at, self.context.current());
+        let span = info_span!(
+            "multimmit.resolver.resolve_certificate.complete",
+            epoch = self.epoch.get().traced(),
+            chain = job.chain().get().traced(),
+        );
+        let _ = self.voter.certified(
+            origin.root.clone(),
+            span,
+            CertificateCompletion::new(job, certificate),
+        );
+    }
+
     /// Hands one resolved proof to the voter.
     fn complete(&self, job: ResolutionJob, origin: &Origin, proof: ViewProof<S, H::Digest>) {
         self.metrics.resolved.inc();
@@ -620,20 +910,25 @@ where
             .resolved_latency
             .observe_between(origin.started_at, self.context.current());
         let completion = ResolutionCompletion::new(job.issued(), job.view(), proof);
+        let round = origin
+            .round
+            .unwrap_or_else(|| Round::new(self.epoch, job.view()));
         let span = info_span!(
             "multimmit.resolver.resolve.complete",
-            epoch = origin.round.epoch().get().traced(),
-            view = origin.round.view().get().traced()
+            epoch = round.epoch().get().traced(),
+            view = round.view().get().traced()
         );
         let _ = self
             .voter
-            .resolved(origin.root.clone(), span, origin.round, completion);
+            .resolved(origin.root.clone(), span, round, completion);
     }
 
     /// Stops tracking one job the machine settled and answers the peer deliveries waiting on it.
-    fn retire(&mut self, job: ResolutionJob, outcome: Outcome) {
+    fn retire(&mut self, job: Subscriber, outcome: Outcome) {
         self.outstanding.remove(&job);
-        self.pending_local.remove(&job);
+        if let Subscriber::View(view_job) = job {
+            self.pending_local.remove(&view_job);
+        }
         settle(&mut self.verdicts, job, outcome);
         let _ = self.fetcher.retain(move |_, candidate| *candidate != job);
     }
@@ -643,7 +938,7 @@ where
 ///
 /// A rejection settles each delivery carrying `job` as invalid. A cancellation settles a delivery
 /// as valid once none of its jobs remain.
-fn settle(verdicts: &mut Vec<Verdict>, job: ResolutionJob, outcome: Outcome) {
+fn settle(verdicts: &mut Vec<Verdict>, job: Subscriber, outcome: Outcome) {
     let settled = verdicts.extract_if(.., |verdict| {
         verdict.jobs.remove(&job) && (outcome == Outcome::Rejected || verdict.jobs.is_empty())
     });
