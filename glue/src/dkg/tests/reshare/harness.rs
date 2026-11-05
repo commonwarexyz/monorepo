@@ -1384,10 +1384,12 @@ impl EngineDefinition for ReshareEngine {
                 partition_prefix: partition_prefix.clone(),
                 max_participants: MAX_PARTICIPANTS,
                 max_supported_mode: max_supported_mode(),
+                block_codec_config: (),
             },
             state_sync,
         )
         .await;
+        let probe_plan = state_sync.clone();
         let (reshare_actor, reshare_mailbox) = reshare::Actor::new(
             context.child("reshare"),
             reshare::Config {
@@ -1511,7 +1513,7 @@ impl EngineDefinition for ReshareEngine {
             buffer,
             resolver,
         );
-        probe_mailbox.attach(marshal.clone());
+        probe_mailbox.attach(marshal.clone(), probe_plan);
         // Record the synced height without blocking init: awaiting the floor
         // block here would stall the simulator's restart arm (and with it the
         // crash monitor) until the block is fetched.

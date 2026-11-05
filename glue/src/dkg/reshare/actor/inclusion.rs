@@ -11,6 +11,7 @@ use crate::dkg::{
     types::{EpochInfo, EpochOutcome, Payload},
 };
 use commonware_actor::mailbox::Sender as ActorSender;
+use commonware_codec::Codec;
 use commonware_consensus::{
     Block as _, Heightable as _,
     marshal::{ancestry::BoxedAncestry, core::Variant as MarshalVariant},
@@ -64,7 +65,7 @@ type LogView<V, P> = Arc<PendingLogs<V, P>>;
 /// A queued epoch-info request whose ancestry has not been read.
 struct ArtifactRequest<B, V, C>
 where
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
 {
@@ -77,7 +78,7 @@ where
 /// restart the scan.
 struct ArtifactScan<'a, B, V, C>
 where
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
 {
@@ -87,7 +88,7 @@ where
 
 impl<'a, B, V, C> Default for ArtifactScan<'a, B, V, C>
 where
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
 {
@@ -101,7 +102,7 @@ where
 
 impl<'a, B, V, C> ArtifactScan<'a, B, V, C>
 where
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
 {
@@ -140,7 +141,7 @@ where
 // move a future after it has been polled.
 impl<B, V, C> Unpin for ArtifactScan<'_, B, V, C>
 where
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
 {
@@ -148,7 +149,7 @@ where
 
 impl<B, V, C> Future for ArtifactScan<'_, B, V, C>
 where
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
 {
@@ -173,7 +174,7 @@ where
 /// a dealer-log map while the verifier is busy.
 pub(super) struct ArtifactRequests<B, V, C>
 where
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
 {
@@ -182,7 +183,7 @@ where
 
 impl<B, V, C> Default for ArtifactRequests<B, V, C>
 where
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
 {
@@ -195,7 +196,7 @@ where
 
 impl<B, V, C> ArtifactRequests<B, V, C>
 where
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
 {
@@ -362,7 +363,7 @@ impl<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> ArtifactCache<V, C, D
 /// Epoch-info request state for one inclusion window.
 struct ArtifactWork<B, V, C>
 where
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
 {
@@ -374,7 +375,7 @@ where
 
 impl<B, V, C> Default for ArtifactWork<B, V, C>
 where
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
 {
@@ -594,7 +595,7 @@ where
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + Clock + RuntimeStorage,
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
