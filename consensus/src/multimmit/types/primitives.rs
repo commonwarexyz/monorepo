@@ -96,12 +96,7 @@ pub(crate) fn ensure_canonical_chains(
 
 /// Returns the digest of `value`'s canonical encoding.
 pub(crate) fn canonical_digest<H: Hasher>(value: &impl Encode) -> H::Digest {
-    encoded_digest::<H>(value.encode().as_ref())
-}
-
-/// Returns the digest of a canonical encoding that is already serialized.
-pub(crate) fn encoded_digest<H: Hasher>(canonical: &[u8]) -> H::Digest {
-    H::hash(&[canonical])
+    H::hash(&[value.encode().as_ref()])
 }
 
 /// Identifies a coordinate within one chain proposal.
@@ -126,7 +121,9 @@ impl Position {
 
 impl_numeric_codec!(Position, u32);
 
-/// Identifies a canonical certificate.
+/// Identifies a canonical V-QC or L-QC: the identifier of the certificate as an [`Artifact`].
+///
+/// [`Artifact`]: super::Artifact
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct CertificateId<D: Digest>(D);
@@ -135,11 +132,6 @@ impl<D: Digest> CertificateId<D> {
     /// Creates an identifier from its canonical digest.
     pub const fn new(digest: D) -> Self {
         Self(digest)
-    }
-
-    /// Creates the identifier of the certificate whose canonical encoding is `canonical`.
-    pub fn from_canonical<H: Hasher<Digest = D>>(canonical: &[u8]) -> Self {
-        Self(encoded_digest::<H>(canonical))
     }
 
     /// Returns the canonical digest.

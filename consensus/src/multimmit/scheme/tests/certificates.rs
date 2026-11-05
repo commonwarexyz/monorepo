@@ -92,9 +92,12 @@ fn vqc_carries_designated_conflicting_and_abstaining_messages<S: Suite>() {
         .verifier
         .verify_vqc::<_, Sha256, _>(&mut test_rng(), &certificate, &Sequential)
         .unwrap();
+    // A certificate is identified by its artifact identifier.
     assert_eq!(
         id,
-        CertificateId::new(Sha256::hash(&[certificate.encode().as_ref()]))
+        crate::multimmit::types::Artifact::Vqc(certificate.clone())
+            .id::<Sha256>()
+            .certificate()
     );
     // A signer can verify certificates too.
     assert!(
@@ -389,7 +392,9 @@ fn lqc_uses_only_the_exact_vote_aggregate<S: Suite>() {
         .unwrap();
     assert_eq!(
         id,
-        CertificateId::new(Sha256::hash(&[certificate.encode().as_ref()]))
+        crate::multimmit::types::Artifact::Lqc(certificate.clone())
+            .id::<Sha256>()
+            .certificate()
     );
 
     let derived = certificate.derive_vqc(fixture.codec).unwrap();

@@ -3,7 +3,9 @@
 use crate::{
     multimmit::{
         scheme::Scheme,
-        types::{Artifact, ArtifactId, BlockRef, FinalityFact, FinalityId, TipRecord},
+        types::{
+            Artifact, ArtifactId, BlockRef, CertificateId, FinalityFact, FinalityId, Lqc, TipRecord,
+        },
     },
     types::{Epoch, Height, View},
 };
@@ -97,6 +99,39 @@ impl<D: Digest> Placement<D> {
     }
 }
 
+/// A verified L-QC, shared with the engine rather than copied.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LqcProof<S: Scheme, D: Digest> {
+    id: CertificateId<D>,
+    artifact: Arc<Artifact<S, D>>,
+}
+
+impl<S: Scheme, D: Digest> LqcProof<S, D> {
+    /// Wraps `artifact`, identified by `id`, or returns `None` when it is not an L-QC.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn new(id: CertificateId<D>, artifact: Arc<Artifact<S, D>>) -> Option<Self> {
+        matches!(artifact.as_ref(), Artifact::Lqc(_)).then_some(Self { id, artifact })
+    }
+
+    /// Returns the certificate's identifier.
+    pub const fn id(&self) -> CertificateId<D> {
+        self.id
+    }
+
+    /// Returns the certificate.
+    pub fn lqc(&self) -> &Lqc<S, D> {
+        let Artifact::Lqc(certificate) = self.artifact.as_ref() else {
+            unreachable!("constructed from an L-QC");
+        };
+        certificate
+    }
+
+    /// Returns the shared artifact holding the certificate.
+    pub const fn artifact(&self) -> &Arc<Artifact<S, D>> {
+        &self.artifact
+    }
+}
+
 /// A local proposal, contextually admitted artifact, consensus finality observation, or durable
 /// record.
 ///
@@ -147,6 +182,26 @@ pub enum Activity<S: Scheme, D: Digest> {
         /// The newly placed runs: one per chain each history opening advances, oldest opening
         /// first, then one per chain the final sweep advances, each group in chain order.
         placed: Vec<Placement<D>>,
+    },
+    /// The engine verified an L-QC: portable proof that its leader is final.
+    ///
+    /// Reported once for every L-QC the engine verifies, aggregated locally or received, in
+    /// the drain that verifies it. A restarted engine may report a certificate again.
+    Proven {
+        /// The certificate.
+        proof: LqcProof<S, D>,
+        /// The leader finality the certificate proves on its own.
+        fact: FinalityFact<D>,
+        /// Records of the finalized history chain, oldest first, through the record the proof's
+        /// leader commits to (`LeaderBlock::history`), that no earlier `Proven` reported.
+        ///
+        /// The engine reports a record once it has placed the order the record opens. Empty
+        /// when the engine does not hold the leader's record or reported it already. Records
+        /// need not connect to those reported before: an engine that restarted, or that dropped
+        /// records while no proof arrived for a long time, reports only the suffix it holds.
+        ///
+        /// [`LeaderBlock::history`]: crate::multimmit::types::LeaderBlock::history
+        records: Arc<[Arc<TipRecord<D>>]>,
     },
     /// An authenticated artifact entered the machine's contextually ready set.
     ProtocolAccepted {

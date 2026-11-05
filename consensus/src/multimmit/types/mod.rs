@@ -68,7 +68,7 @@ pub use tally::*;
 pub use vote::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use {
-    artifact::{ArtifactBatch, ArtifactKind, each_artifact},
+    artifact::{ArtifactBatch, ArtifactKind, artifact_digest, each_artifact},
     bounds::EncodedBounds,
 };
 

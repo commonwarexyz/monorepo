@@ -572,6 +572,11 @@ fn inbound_lqc_finalizes_without_parent_resolution() {
         .collect::<Vec<_>>();
     let certificate = Artifact::Lqc(lqc(&machine, proposed, &votes));
     let certificate_id = certificate.id::<Sha256>();
+    // A certificate is identified by its artifact identifier.
+    let Artifact::Lqc(inner) = &certificate else {
+        unreachable!()
+    };
+    assert_eq!(inner.id::<Sha256>(), certificate_id.certificate());
     let verification = observe(&mut machine, certificate);
     let completed = machine.verify(&verification, true, Until::CursorAdvance);
     machine.drain_persisting(completed);
@@ -580,9 +585,9 @@ fn inbound_lqc_finalizes_without_parent_resolution() {
     let fact = inspection
         .finality()
         .iter()
-        .find(|fact| fact.id() == FinalityId::Lqc(certificate_id))
+        .find(|fact| fact.id() == FinalityId::Lqc(certificate_id.certificate()))
         .expect("an authenticated L-QC must establish finality immediately");
-    assert_eq!(fact.id(), FinalityId::Lqc(certificate_id));
+    assert_eq!(fact.id(), FinalityId::Lqc(certificate_id.certificate()));
     assert_eq!(fact.votes(), 5);
     assert_eq!(inspection.pools()[0].votes(), 5);
     assert!(inspection.pools()[0].finalized());

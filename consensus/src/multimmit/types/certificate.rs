@@ -3,12 +3,12 @@
 use super::{
     Ballot, BlockRef, CertificateId, ConflictingVote, Error, LeaderBlock, Tally,
     TransactionBlockHeader,
+    artifact::{ArtifactKind, artifact_digest},
     bounds::{
         MAX_U64_VARINT_SIZE, VARINT_BOUNDARIES, checked_product, checked_sum, encoded_len,
         largest_index_width_sum, max_aggregate_size, max_da_certificate_size,
         max_nullification_size, read_aggregate, signers_size,
     },
-    canonical_digest,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use super::{DigestedLeader, VoteBody};
@@ -23,7 +23,9 @@ use crate::{
     types::{Epoch, Height, Round, View},
 };
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write,
+};
 use commonware_cryptography::{Digest, Hasher, certificate::Signers};
 
 /// A recovered data-availability threshold signature over one block header.
@@ -230,7 +232,7 @@ impl<S: Scheme, D: Digest> Vqc<S, D> {
 
     /// Returns the identifier used by leader blocks to reference this V-QC.
     pub fn id<H: Hasher<Digest = D>>(&self) -> CertificateId<D> {
-        CertificateId::new(canonical_digest::<H>(self))
+        CertificateId::new(artifact_digest::<H>(ArtifactKind::Vqc, &self.encode()))
     }
 
     pub(crate) fn validate(&self, config: CodecConfig) -> Result<(), Error> {
@@ -430,7 +432,7 @@ impl<S: Scheme, D: Digest> Lqc<S, D> {
 
     /// Returns the identifier of this L-QC.
     pub fn id<H: Hasher<Digest = D>>(&self) -> CertificateId<D> {
-        CertificateId::new(canonical_digest::<H>(self))
+        CertificateId::new(artifact_digest::<H>(ArtifactKind::Lqc, &self.encode()))
     }
 
     pub(crate) fn validate(&self, config: CodecConfig) -> Result<(), Error> {
