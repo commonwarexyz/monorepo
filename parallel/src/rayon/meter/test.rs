@@ -1,5 +1,5 @@
 use super::{Context, charge, measure};
-use crate::rayon::{ThreadPoolBuilder, Yield, join, spin, timed_spin};
+use crate::rayon::{Placement, ThreadPoolBuilder, Yield, join, spin, timed_spin};
 use commonware_utils::NZUsize;
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
@@ -133,6 +133,28 @@ fn installs_charge_the_worker_but_not_the_wait() {
     let (busy, wall) = timed(|| pool.install(|| spin(20 * MS)));
 
     // The worker's spin is charged, and the caller's wait adds nothing.
+    assert!(
+        busy >= 20 * MS && busy < wall + 10 * MS,
+        "busy time {busy:?} must cover the 20ms spin and stay under the wall {wall:?} plus 10ms"
+    );
+}
+
+/// An install placed on another group from a worker charges that group's 20ms spin but not the
+/// worker's wait, so busy time stays within the wall time, with slack for the hand-off.
+#[test]
+fn cross_group_installs_charge_the_worker_but_not_the_wait() {
+    // From a worker of group 0, install a 20ms spin on group 1.
+    let pool = ThreadPoolBuilder::new(NZUsize!(2))
+        .group_width(1)
+        .build()
+        .unwrap();
+    let (busy, wall) = timed(|| {
+        pool.install_in(Placement::Local(0), || {
+            pool.install_in(Placement::Local(1), || spin(20 * MS))
+        })
+    });
+
+    // The spin is charged, and the hand-off and wait add nothing.
     assert!(
         busy >= 20 * MS && busy < wall + 10 * MS,
         "busy time {busy:?} must cover the 20ms spin and stay under the wall {wall:?} plus 10ms"
@@ -279,46 +301,33 @@ fn blocked_threads_are_charged_for_the_wait() {
     );
 }
 
-/// A worker that yields on empty queues searches in no context, so a measured install that keeps
-/// yielding is charged only for its time between yields. A descheduled attempt is retried. The
-/// oracle assumes a clock read costs less than an idle search.
+/// A worker that yields on empty queues searches in no context. The searches dominate a measured
+/// install that keeps yielding, so it is charged for less than half of its wall time. A deschedule
+/// inside a charged interval can inflate one attempt, so a failed attempt is retried.
 #[test]
 fn idle_yields_charge_nothing() {
-    const ITERATIONS: usize = 20_000;
-    let pool = ThreadPoolBuilder::new(NZUsize!(8)).build().unwrap();
+    // Each idle search scans the other workers' deques, so a wide pool makes it dwarf the charged
+    // interval between yields.
+    const ITERATIONS: usize = 10_000;
+    let pool = ThreadPoolBuilder::new(NZUsize!(32)).build().unwrap();
+    let mut attempts = Vec::new();
     for _ in 0..10 {
-        // Yield on empty queues inside a measured install, timing every yield.
-        let start = Instant::now();
-        let (mut yields, busy) = measure(|| {
+        // Yield on empty queues inside a measured install.
+        let (busy, wall) = timed(|| {
             pool.install(|| {
-                let mut yields = Vec::with_capacity(ITERATIONS);
                 for _ in 0..ITERATIONS {
-                    let begun = Instant::now();
                     assert_eq!(pool.yield_now(), Some(Yield::Idle));
-                    yields.push(begun.elapsed());
                 }
-                yields
             })
         });
-        let wall = start.elapsed();
 
-        // An outlier yield or excess wall time means the thread was descheduled, so retry.
-        yields.sort_unstable();
-        let median = yields[ITERATIONS / 2].max(Duration::from_nanos(100));
-        let total: Duration = yields.iter().sum();
-        if yields[ITERATIONS - 1] > 50 * median || wall > total + total / 2 {
-            continue;
+        // A charged search would bring the busy time up to the wall time on every attempt.
+        if busy < wall / 2 {
+            return;
         }
-
-        // The yields are not charged, so the busy time leaves out most of their total; a charged
-        // search would bring it up to the wall time.
-        assert!(
-            busy + total / 2 < wall,
-            "busy time {busy:?} must exclude the {total:?} spent in idle searches, wall {wall:?}"
-        );
-        return;
+        attempts.push((busy, wall));
     }
-    panic!("some attempt must run without a deschedule in ten tries");
+    panic!("busy time must exclude the idle searches in one of ten attempts: {attempts:?}");
 }
 
 /// Contexts restore across an install, a join with a nested run, and a nested run that unwinds on

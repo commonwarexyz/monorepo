@@ -1957,7 +1957,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
                         // A worker awaits with its context suspended, so it charges its run the
                         // job's busy time on receipt. A thread outside the pool parks in its
-                        // context, and that charge covers the job.
+                        // context, so its run's charge for the park covers the part of the job
+                        // that overlaps it.
                         if pool.current_placement().is_some() {
                             rayon::charge(busy);
                         }
@@ -3934,14 +3935,42 @@ mod test {
     }
 
     /// A spawn awaited by a run on a worker is charged once, on receipt, and the worker's wait
-    /// for it is not charged.
+    /// for it is not charged. The job holds another worker and starts its work only once the run
+    /// awaits it, so the awaiting worker waits instead of running the job on its own stack.
     #[test]
     fn spawns_awaited_on_a_worker_are_charged_once() {
+        #[track_caller]
+        fn await_on_a_worker(
+            strategy: &Rayon,
+            future: impl core::future::Future<Output = ()> + Send,
+            start: std::sync::mpsc::Sender<()>,
+        ) -> &'static Location<'static> {
+            let future = Mutex::new(Some(future));
+            let body = || {
+                start.send(()).unwrap();
+                block_on_nested(future.lock().take().unwrap());
+            };
+            strategy.run(1, body, body);
+            Location::caller()
+        }
+
+        // Spawn from outside the pool a job that waits on a worker for the run's signal and then
+        // spins for 20ms.
         let strategy = parallel_strategy();
+        let (held, on_worker) = std::sync::mpsc::channel();
+        let (start, started) = std::sync::mpsc::channel();
+        let future = strategy.spawn(1, move |_| {
+            held.send(()).unwrap();
+            started.recv().unwrap();
+            spin(Duration::from_millis(20));
+        });
+        on_worker.recv().unwrap();
+
+        // Await the job inside a measured run on another worker.
         let caller = strategy
             .groups
             .pool()
-            .install(|| spawn_and_block(&strategy));
+            .install(|| await_on_a_worker(&strategy, future, start));
         let (wall, busy) = recorded(&strategy, caller, 1);
         assert!(
             busy >= Duration::from_millis(20) && busy < wall + Duration::from_millis(10),
