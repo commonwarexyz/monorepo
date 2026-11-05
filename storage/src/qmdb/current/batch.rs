@@ -2039,6 +2039,8 @@ mod tests {
     type TestDb<F, const N: usize> =
         fixed::Db<F, deterministic::Context, Digest, Digest, Sha256, OneCap, N, Sequential>;
 
+    type TestUpdate = update::Unordered<Digest, any::value::FixedEncoding<Digest>>;
+
     /// A mirror of bitmap chunks, by chunk index, and grafted nodes, by operations-tree position,
     /// seeded from the database and advanced only by applying deltas.
     struct Published<F: Graftable, const N: usize> {
@@ -2115,13 +2117,7 @@ mod tests {
 
     /// Check that a batch's operations, proof, and pinned nodes verify against its operations root.
     fn check_frontier<F: Graftable, const N: usize>(
-        batch: &MerkleizedBatch<
-            F,
-            Digest,
-            update::Unordered<Digest, any::value::FixedEncoding<Digest>>,
-            N,
-            Sequential,
-        >,
+        batch: &MerkleizedBatch<F, Digest, TestUpdate, N, Sequential>,
         db: &TestDb<F, N>,
     ) {
         let (start, operations) = batch.operations();
@@ -2134,6 +2130,21 @@ mod tests {
             &pins,
             &batch.ops_root(),
         ));
+    }
+
+    /// Write the hash of `round` to the key hashed from each index in `keys`.
+    fn write_keys<F: Graftable, const N: usize>(
+        mut batch: UnmerkleizedBatch<F, Sha256, TestUpdate, N, Sequential>,
+        keys: Range<u64>,
+        round: u64,
+    ) -> UnmerkleizedBatch<F, Sha256, TestUpdate, N, Sequential> {
+        for key in keys {
+            batch = batch.write(
+                Sha256::hash(&[&key.to_be_bytes()]),
+                Some(Sha256::hash(&[&round.to_be_bytes()])),
+            );
+        }
+        batch
     }
 
     /// Mirror the database from its deltas across three rounds of rewrites and a reopen, checking
@@ -2159,14 +2170,10 @@ mod tests {
         // well as setting new ones. Each batch's frontier verifies against its operations root.
         let count = (N * 16 + 5) as u64;
         for round in 0..3u64 {
-            let mut batch = db.new_batch();
-            for key in 0..count {
-                batch = batch.write(
-                    Sha256::hash(&[&key.to_be_bytes()]),
-                    Some(Sha256::hash(&[&round.to_be_bytes()])),
-                );
-            }
-            let batch = batch.merkleize(&db, None, &mut Hold).await.unwrap();
+            let batch = write_keys(db.new_batch(), 0..count, round)
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
             let delta = batch.delta();
             check_frontier(&batch, &db);
             db = db.apply_batch(batch).await.unwrap();
@@ -2234,22 +2241,14 @@ mod tests {
         .unwrap();
         let mut published = Published::from_db(&db);
         let count = (N * 16 + 5) as u64;
-        let mut batch = db.new_batch();
-        for key in 0..count {
-            batch = batch.write(
-                Sha256::hash(&[&key.to_be_bytes()]),
-                Some(Sha256::hash(&[&0u64.to_be_bytes()])),
-            );
-        }
-        let parent = batch.merkleize(&db, None, &mut Hold).await.unwrap();
-        let mut batch = parent.new_batch::<Sha256>();
-        for key in 0..count {
-            batch = batch.write(
-                Sha256::hash(&[&key.to_be_bytes()]),
-                Some(Sha256::hash(&[&1u64.to_be_bytes()])),
-            );
-        }
-        let child = batch.merkleize(&db, None, &mut Hold).await.unwrap();
+        let parent = write_keys(db.new_batch(), 0..count, 0)
+            .merkleize(&db, None, &mut Hold)
+            .await
+            .unwrap();
+        let child = write_keys(parent.new_batch::<Sha256>(), 0..count, 1)
+            .merkleize(&db, None, &mut Hold)
+            .await
+            .unwrap();
         let parent_delta = parent.delta();
         let child_delta = child.delta();
         let parent_positions: BTreeSet<_> = parent_delta
@@ -2314,14 +2313,10 @@ mod tests {
             // With the genesis commit and its own commit, the parent ends two operations short
             // of `graftable_at`, leaving chunk 0 complete but pending and a partial chunk after
             // it. Its delta keeps the mirror in step.
-            let mut batch = db.new_batch();
-            for key in 0..graftable_at - 4 {
-                batch = batch.write(
-                    Sha256::hash(&[&key.to_be_bytes()]),
-                    Some(Digest::from([0; 32])),
-                );
-            }
-            let parent = batch.merkleize(&db, None, &mut Hold).await.unwrap();
+            let parent = write_keys(db.new_batch(), 0..graftable_at - 4, 0)
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
             assert_eq!(*parent.bounds().tip.size, graftable_at - 2);
             assert!(parent.ops_root_witness().pending_chunk_digest.is_some());
             assert!(parent.ops_root_witness().partial_chunk.is_some());
@@ -2366,7 +2361,7 @@ mod tests {
     }
 
     /// A saved delta is unchanged after apply, prune, staleness, and dropped ancestors, and a
-    /// batch staged before pruning but merkleized after it records the new pruning boundary.
+    /// batch held unmerkleized across a prune records the new pruning boundary.
     #[test_traced]
     fn test_publication_survives_apply_prune_and_stale_ancestors() {
         deterministic::Runner::default().start(|ctx| async move {
@@ -2381,14 +2376,10 @@ mod tests {
             .await
             .unwrap();
             for round in 0..4u64 {
-                let mut batch = db.new_batch();
-                for key in 0..256u64 {
-                    batch = batch.write(
-                        Sha256::hash(&[&key.to_be_bytes()]),
-                        Some(Sha256::hash(&[&round.to_be_bytes()])),
-                    );
-                }
-                let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                let batch = write_keys(db.new_batch(), 0..256, round)
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap();
                 db = db.apply_batch(batch).await.unwrap();
             }
 
@@ -2399,14 +2390,10 @@ mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let mut child = parent.new_batch::<Sha256>();
-            for key in 0..16u64 {
-                child = child.write(
-                    Sha256::hash(&[&key.to_be_bytes()]),
-                    Some(Sha256::hash(&[&4u64.to_be_bytes()])),
-                );
-            }
-            let child = child.merkleize(&db, None, &mut Hold).await.unwrap();
+            let child = write_keys(parent.new_batch::<Sha256>(), 0..16, 4)
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
             let saved = child.delta();
             let saved_parent = parent.delta();
             let mut published = Published::from_db(&db);
@@ -2419,17 +2406,11 @@ mod tests {
 
             // Pruning to the sync boundary removes at least one chunk and leaves every saved delta
             // unchanged, including that of a batch at the database's own state, while a fresh batch
-            // at the pruned state records the new boundary. A copy of the child staged before the
-            // prune records the new boundary only once it is merkleized.
+            // at the pruned state records the new boundary. A copy of the child is written before
+            // the prune and held unmerkleized across it.
             let base = db.to_batch();
             let saved_base = base.delta();
-            let mut staged = parent.new_batch::<Sha256>();
-            for key in 0..16u64 {
-                staged = staged.write(
-                    Sha256::hash(&[&key.to_be_bytes()]),
-                    Some(Sha256::hash(&[&4u64.to_be_bytes()])),
-                );
-            }
+            let held = write_keys(parent.new_batch::<Sha256>(), 0..16, 4);
             let boundary = db.sync_boundary();
             db = db.prune(boundary).await.unwrap();
             assert!(db.bitmap().pruned_chunks() > 0);
@@ -2438,12 +2419,15 @@ mod tests {
             assert_eq!(base.delta(), saved_base);
             published.check(&db, &db.to_batch().delta());
 
-            // The staged copy writes the same keys as the child, so once merkleized after pruning
-            // it has the saved child's root and witness. It records the boundary at merkleize, not
-            // at staging, and the saved child's frontier still verifies.
-            let post_prune = staged.merkleize(&db, None, &mut Hold).await.unwrap();
+            // The held copy writes the same 16 keys as the child, so once merkleized after pruning
+            // it has the saved child's root, witness, chunks, and grafted nodes. It records the
+            // boundary at merkleize, not when it was written, and the saved child's frontier still
+            // verifies.
+            let post_prune = held.merkleize(&db, None, &mut Hold).await.unwrap();
             let post_delta = post_prune.delta();
             assert_eq!(post_prune.root(), child.root());
+            assert_eq!(post_delta.chunks, saved.chunks);
+            assert_eq!(post_delta.grafted_nodes, saved.grafted_nodes);
             assert_eq!(post_delta.pruned_chunks, db.bitmap().pruned_chunks() as u64);
             assert_eq!(post_prune.ops_root_witness(), child.ops_root_witness());
             check_frontier(&child, &db);
