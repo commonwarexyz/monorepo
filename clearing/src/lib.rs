@@ -1,0 +1,15 @@
+//! Settle actions at scale.
+//!
+//! # Status
+//!
+//! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability)
+//! for details.
+
+#![doc(
+    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
+)]
+
+commonware_macros::stability_scope!(ALPHA {
+    pub mod bajillion;
+});
