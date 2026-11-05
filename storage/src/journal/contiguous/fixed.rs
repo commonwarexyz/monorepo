@@ -1805,6 +1805,31 @@ pub struct Reader<'a, E: Context, A> {
 }
 
 impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
+    /// Split `positions` (strictly increasing and within `bounds`) into maximal runs stored in
+    /// one blob, yielding each run's index range in `positions`, its blob, and the position
+    /// stored at the blob's first byte.
+    fn blob_runs<'p>(
+        &self,
+        positions: &'p [u64],
+    ) -> impl Iterator<Item = Result<(Range<usize>, u64, u64), Error>> + 'p {
+        let items_per_blob = self.items_per_blob.get();
+        let pruning_boundary = self.bounds.start;
+        let mut start = 0;
+        core::iter::from_fn(move || {
+            let &first_pos = positions.get(start)?;
+            let blob = super::position_to_blob(first_pos, items_per_blob);
+            let end = start
+                + positions[start..]
+                    .partition_point(|&pos| super::position_to_blob(pos, items_per_blob) == blob);
+            let run = start..end;
+            start = end;
+            Some(
+                first_in_blob(pruning_boundary, blob, items_per_blob)
+                    .map(|first| (run, blob, first)),
+            )
+        })
+    }
+
     /// Split `positions` (strictly increasing) into runs of items stored in one immutable blob
     /// view (see [Blobs::immutable]), returning each run's index range in `positions`, the
     /// view, and the position stored at the blob's first byte. Positions outside `bounds` are
@@ -1814,24 +1839,15 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         &self,
         positions: &[u64],
     ) -> Vec<(Range<usize>, Sealed<E::Blob>, u64)> {
-        let items_per_blob = self.items_per_blob.get();
-        let start = positions.partition_point(|&pos| pos < self.bounds.start);
-        let end = positions.partition_point(|&pos| pos < self.bounds.end);
-        let mut runs = Vec::new();
-        let mut run_start = start;
-        while run_start < end {
-            let blob = super::position_to_blob(positions[run_start], items_per_blob);
-            let run_end = run_start
-                + positions[run_start..end]
-                    .partition_point(|&pos| super::position_to_blob(pos, items_per_blob) == blob);
-            if let Some(view) = self.blobs.immutable(blob)
-                && let Ok(first) = first_in_blob(self.bounds.start, blob, items_per_blob)
-            {
-                runs.push((run_start..run_end, view, first));
-            }
-            run_start = run_end;
-        }
-        runs
+        let valid = super::within(positions, &self.bounds);
+        let offset = valid.start;
+        self.blob_runs(&positions[valid])
+            .filter_map(|run| {
+                let (run, blob, first) = run.ok()?;
+                let view = self.blobs.immutable(blob)?;
+                Some((run.start + offset..run.end + offset, view, first))
+            })
+            .collect()
     }
 
     /// Where this journal records its prefetch reads.
@@ -1868,17 +1884,13 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         Ok(())
     }
 
-    /// Resolve a blob-sharing group of positions to its blob number and per-position byte
-    /// offsets within the blob.
-    fn locate_group(&self, group: &[u64]) -> Result<(u64, Vec<u64>), Error> {
-        let items_per_blob = self.items_per_blob.get();
-        let blob = super::position_to_blob(group[0], items_per_blob);
-        let first_position = first_in_blob(self.bounds.start, blob, items_per_blob)?;
-        let mut offsets = Vec::with_capacity(group.len());
-        for &pos in group {
-            offsets.push(Inner::<E, A>::items_to_bytes(pos - first_position)?);
+    /// The byte offsets, within their blob, of `run`'s items, given the blob's first position.
+    fn byte_offsets(run: &[u64], first: u64) -> Result<Vec<u64>, Error> {
+        let mut offsets = Vec::with_capacity(run.len());
+        for &pos in run {
+            offsets.push(Inner::<E, A>::items_to_bytes(pos - first)?);
         }
-        Ok((blob, offsets))
+        Ok(offsets)
     }
 
     /// Shared body of [`super::Contiguous::read_many`] and the variable journal's offsets
@@ -1896,10 +1908,8 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             self.validate_readable(pos)?;
         }
 
-        let items_per_blob = self.items_per_blob.get();
-
-        // Read all positions grouped by blob. Positions are sorted, so `chunk_by` splits them into
-        // maximal runs that share one blob. Each group goes through the blob's batched read,
+        // Read all positions grouped by blob. Positions are sorted, so they split into maximal
+        // runs that share one blob. Each group goes through the blob's batched read,
         // which serves page-cache and tip-buffer hits under a single lock acquisition and reads only
         // true misses from the blob (concurrently).
         let mut result: Vec<A> = Vec::with_capacity(positions.len());
@@ -1909,11 +1919,10 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         // all groups can read concurrently.
         let mut reads = Vec::new();
         let mut remaining_buf = buf.as_mut_slice();
-        for group in positions.chunk_by(|a, b| {
-            super::position_to_blob(*a, items_per_blob)
-                == super::position_to_blob(*b, items_per_blob)
-        }) {
-            let (blob_num, blob_offsets) = self.locate_group(group)?;
+        for run in self.blob_runs(positions) {
+            let (run, blob_num, first) = run?;
+            let group = &positions[run];
+            let blob_offsets = Self::byte_offsets(group, first)?;
             let blob = self
                 .blobs
                 .get(blob_num)
@@ -1990,16 +1999,15 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         // Sorted positions put pruned ones in a prefix and out-of-range ones in a suffix, so
         // validation trims the batch instead of poisoning a blob group that also holds valid
         // positions.
-        let start = positions.partition_point(|&pos| pos < self.bounds.start);
-        let end = positions.partition_point(|&pos| pos < self.bounds.end);
-        let valid = &positions[start..end];
+        let valid = super::within(positions, &self.bounds);
+        let start = valid.start;
+        let valid = &positions[valid];
         if valid.is_empty() {
             return (out, 0);
         }
 
         // Serve the probe from the per-thread scratch buffer. Stale bytes from a previous probe
         // are harmless: slots the cache cannot serve are reported as misses and never decoded.
-        let items_per_blob = self.items_per_blob.get();
         let mut scratch =
             Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
         let need = valid.len() * A::SIZE;
@@ -2008,14 +2016,13 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         }
         let buf = &mut scratch[..need];
         let mut hits = 0u64;
-        let mut group_base = start;
-        for group in valid.chunk_by(|a, b| {
-            super::position_to_blob(*a, items_per_blob)
-                == super::position_to_blob(*b, items_per_blob)
-        }) {
-            let base = group_base;
-            group_base += group.len();
-            let Ok((blob_num, blob_offsets)) = self.locate_group(group) else {
+        for run in self.blob_runs(valid) {
+            let Ok((run, blob_num, first)) = run else {
+                continue;
+            };
+            let base = start + run.start;
+            let group = &valid[run];
+            let Ok(blob_offsets) = Self::byte_offsets(group, first) else {
                 continue;
             };
             let Some(blob) = self.blobs.get(blob_num) else {

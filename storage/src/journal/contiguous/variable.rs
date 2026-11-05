@@ -570,8 +570,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         positions: &[u64],
     ) -> impl Future<Output = ()> + Send + 'static + use<E, V> {
         let items_per_blob = self.items_per_blob.get();
-        let start = positions.partition_point(|&pos| pos < self.bounds.start);
-        let end = positions.partition_point(|&pos| pos < self.bounds.end);
+        let Range { start, end } = super::within(positions, &self.bounds);
         let mut plan = PrefetchFrames {
             lookups: Vec::with_capacity(2 * (end - start)),
             frames: Vec::with_capacity(end - start),

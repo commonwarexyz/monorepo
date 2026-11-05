@@ -53,6 +53,13 @@ const fn position_to_blob(position: u64, items_per_blob: u64) -> u64 {
     position / items_per_blob
 }
 
+/// Return the index range of `positions` (strictly increasing) that lies within `bounds`.
+fn within(positions: &[u64], bounds: &Range<u64>) -> Range<usize> {
+    let start = positions.partition_point(|&pos| pos < bounds.start);
+    let end = positions.partition_point(|&pos| pos < bounds.end);
+    start..end
+}
+
 /// Return the first position stored in `blob`.
 fn blob_first_position(blob: u64, items_per_blob: u64) -> Result<u64, Error> {
     blob.checked_mul(items_per_blob)
