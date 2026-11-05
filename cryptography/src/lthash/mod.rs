@@ -17,9 +17,17 @@
 //!
 //! # Security
 //!
-//! [LtHash]'s state consists of 1024 16-bit unsigned integers (2048 bytes), as recommended in
-//! "Securing Update Propagation with Homomorphic Hashing". This provides (by their estimates) at
-//! least 200 bits of security.
+//! [LtHash]'s state consists of 1024 16-bit unsigned integers (2048 bytes) with arithmetic modulo
+//! 2^16. These are the "LtHash16" parameters recommended in "Securing Update Propagation with
+//! Homomorphic Hashing". "Two-Bit Lifting for Ternary SIS: Polynomial-Time Collision Attacks on
+//! LtHash" (<https://eprint.iacr.org/2026/2083>) exploits the power-of-two modulus to find two
+//! distinct sets with the same hash in time polynomial in the number of state elements.
+//!
+//! For these parameters, the attack is expected to make about 2^81 hash evaluations, perform at
+//! most 2^101 bit operations, and use roughly 2^88 bits of memory. The colliding sets it produces
+//! contain at least 2^72 elements combined. Collision resistance is therefore far below 128 bits
+//! and well below the 200 bits that the original analysis estimated against generalized birthday
+//! attacks. These costs are still beyond practical reach.
 //!
 //! # Warning
 //!
