@@ -1,11 +1,10 @@
 //! Offset-major slot streams and the final sweep one finalized leader fixes.
 
-use super::Error;
+use super::{Error, SweepFact};
 use crate::{
     multimmit::{
-        algebra::FinalTips,
         scheme::Scheme,
-        types::{BlockRef, ChainId, CodecConfig, Frontier, Lqc},
+        types::{BlockRef, CodecConfig, Frontier, Lqc},
     },
     types::Height,
 };
@@ -263,15 +262,13 @@ impl<D: Digest> FinalSweep<D> {
         H: Hasher<Digest = D>,
         S: Scheme,
     {
-        let tips = FinalTips::from_lqc::<H, S>(certificate, config)?;
-        let settled = (0..config.chains())
-            .map(|chain| {
-                let chain = u32::try_from(chain).map_err(|_| Error::Frontier)?;
-                tips.settled(ChainId::new(chain)).ok_or(Error::Frontier)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let proposed = certificate.leader().proposed_heights();
-        Self::new(base, tips.blocks().to_vec(), &proposed, settled)
+        let fact = SweepFact::from_lqc::<H, S>(certificate, config)?;
+        Self::new(
+            base,
+            fact.tips().to_vec(),
+            fact.proposed(),
+            fact.settled().to_vec(),
+        )
     }
 
     /// Returns the final tips the sweep moves toward.
@@ -431,7 +428,7 @@ mod tests {
         multimmit::{
             algebra::{FinalTips, PoolExtractor},
             mocks::{Bls, Committee},
-            types::{DigestedLeader, Extension, Position, VoteBody},
+            types::{ChainId, DigestedLeader, Extension, Position, VoteBody},
         },
         types::View,
     };
