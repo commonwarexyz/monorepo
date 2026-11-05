@@ -5,7 +5,7 @@ use crate::dkg::{
     fence::Gate,
     network::{Directory, Manager},
     orchestrator::{Mailbox, mailbox::Message},
-    state_sync::{self, Plan as StateSyncPlan},
+    state_sync::{self, Checkpoint, Plan as StateSyncPlan},
     types::{EpochInfo, Payload},
 };
 use commonware_actor::mailbox;
@@ -421,10 +421,10 @@ where
     }
 
     /// Resolves the startup epoch from state-sync material if the plan resolves
-    /// to any, and otherwise from the boundary block of marshal's recovered
-    /// epoch.
+    /// to any, then from the recovered epoch's checkpoint, and otherwise from the
+    /// epoch's boundary block.
     ///
-    /// Returns `None` if marshal cannot supply that boundary block.
+    /// Returns `None` if no source can supply the epoch.
     async fn resolve_start(
         &mut self,
         epocher: &FixedEpocher,
@@ -457,12 +457,55 @@ where
             });
         }
 
-        self.resolve_boundary(recovered_epoch.unwrap_or_else(Epoch::zero), epocher)
+        let epoch = recovered_epoch.unwrap_or_else(Epoch::zero);
+        if let Some(checkpoint) = self
+            .state_sync
+            .checkpoint(self.context.as_present().child("checkpoint"), epoch)
             .await
+        {
+            return Some(ResolvedStart {
+                epoch,
+                floor: Floor::Genesis(checkpoint.boundary),
+                info: checkpoint.info,
+            });
+        }
+
+        self.resolve_boundary(epoch, epocher).await
+    }
+
+    /// Records the checkpoint of `info`'s epoch, keeping every checkpoint from the epoch
+    /// recovered from marshal's processed height onward.
+    ///
+    /// Marshal reports a processed height only after syncing it, so no later restart
+    /// recovers an earlier epoch.
+    async fn record_checkpoint(
+        &mut self,
+        epocher: &FixedEpocher,
+        info: EpochInfo<
+            DV,
+            <P::Scheme as Verifier>::PublicKey,
+            <MV::ApplicationBlock as ReshareBlock>::Directory,
+        >,
+        boundary: MV::Commitment,
+    ) {
+        let retained_from = self
+            .marshal
+            .get_processed()
+            .await
+            .map_or_else(Epoch::zero, |processed| {
+                state_sync::recovered_epoch(processed, epocher)
+            });
+        self.state_sync
+            .record(
+                self.context.as_present().child("checkpoint"),
+                Checkpoint { info, boundary },
+                retained_from,
+            )
+            .await;
     }
 
     /// Resolves `epoch` from the finalized boundary block that carries its
-    /// [`EpochInfo`].
+    /// [`EpochInfo`] and records the epoch's checkpoint.
     ///
     /// Returns `None` if marshal cannot supply the block. Panics if the block
     /// carries no [`EpochInfo`] or one for another epoch.
@@ -499,6 +542,8 @@ where
             );
         }
 
+        self.record_checkpoint(epocher, info.clone(), commitment)
+            .await;
         Some(ResolvedStart {
             epoch,
             floor: Floor::Genesis(commitment),
@@ -581,12 +626,12 @@ where
     /// Handles a finalized block and returns whether the actor keeps running.
     ///
     /// Acknowledges any block below the active epoch's final block
-    /// immediately. For the final block, enters the next epoch and acknowledges
-    /// the block once the new engine has started. Returns `false` if marshal
-    /// cannot supply the block or the next epoch cannot be entered. Panics if
-    /// the block is above the active epoch's final block (marshal skipped the
-    /// final block) or if the final block does not carry the next epoch's
-    /// [`EpochInfo`].
+    /// immediately. For the final block, records the next epoch's checkpoint,
+    /// enters the next epoch, and acknowledges the block once the new engine
+    /// has started. Returns `false` if marshal cannot supply the block or the
+    /// next epoch cannot be entered. Panics if the block is above the active
+    /// epoch's final block (marshal skipped the final block) or if the final
+    /// block does not carry the next epoch's [`EpochInfo`].
     async fn handle_finalized<S>(
         &mut self,
         epocher: &FixedEpocher,
@@ -627,7 +672,14 @@ where
             debug!(%height, "boundary block unavailable, shutting down orchestrator");
             return false;
         };
-        let floor = Floor::Genesis(MV::commitment(&boundary));
+        let boundary = MV::commitment(&boundary);
+        let floor = Floor::Genesis(boundary);
+
+        // Record the next epoch's checkpoint before acknowledging the final block. Once
+        // marshal's processed height passes the block, a restart recovers the next epoch
+        // and marshal may have pruned the block that carries its info.
+        self.record_checkpoint(epocher, info.clone(), boundary)
+            .await;
 
         let next = self.enter_epoch(next_epoch, floor, &info, channels).await;
         let next = match next {

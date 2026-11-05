@@ -8,7 +8,9 @@ use crate::{
         },
         orchestrator, probe as dkg_probe,
         reshare::{self, Input as ReshareInput},
-        state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
+        state_sync::{
+            Config as StateSyncConfig, Plan as StateSyncPlan, StateSync, recovered_epoch,
+        },
         tests::{
             max_supported_mode,
             mocks::{FilteredReceiver, MemorySecretStore},
@@ -21,7 +23,7 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Finality, Input, Proposed,
+        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
@@ -726,6 +728,8 @@ pub(super) struct ReshareEngine {
     processed_hold: Arc<Mutex<Option<(ed25519::PublicKey, u64)>>>,
     epoch_cross_during_sync: bool,
     stale: Option<Height>,
+    pruned: Option<ed25519::PublicKey>,
+    pub(super) pruned_restarts: Arc<Mutex<Vec<(Epoch, bool)>>>,
     processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     marshals: Arc<Mutex<BTreeMap<ed25519::PublicKey, Marshal>>>,
     failures: Arc<HashSet<u64>>,
@@ -838,6 +842,8 @@ impl ReshareEngine {
             processed_hold: Arc::new(Mutex::new(None)),
             epoch_cross_during_sync: false,
             stale: None,
+            pruned: None,
+            pruned_restarts: Arc::new(Mutex::new(Vec::new())),
             processed: Arc::new(Mutex::new(BTreeMap::new())),
             marshals: Arc::new(Mutex::new(BTreeMap::new())),
             failures: Arc::new(HashSet::new()),
@@ -885,6 +891,16 @@ impl ReshareEngine {
     /// node's marshal.
     pub(super) const fn with_stale(mut self, height: Height) -> Self {
         self.stale = Some(height);
+        self
+    }
+
+    /// Prunes `participant`'s marshal after every block with stateful pruning and no
+    /// extra marshal retention.
+    ///
+    /// Each restart of `participant` appends its recovered epoch to `pruned_restarts`,
+    /// with whether marshal still held the boundary block that introduced that epoch.
+    pub(super) fn with_marshal_pruning(mut self, participant: ed25519::PublicKey) -> Self {
+        self.pruned = Some(participant);
         self
     }
 
@@ -1199,6 +1215,28 @@ impl EngineDefinition for ReshareEngine {
         self.marshals
             .lock()
             .insert(public_key.clone(), marshal.clone());
+        let pruned = self.pruned.as_ref() == Some(public_key);
+
+        // Report the epoch this restart recovers and whether marshal still holds the
+        // boundary block that introduced it.
+        if pruned && restarted {
+            let marshal = marshal.clone();
+            let pruned_restarts = self.pruned_restarts.clone();
+            context
+                .child("pruned_boundary_probe")
+                .spawn(move |_| async move {
+                    let processed = marshal
+                        .get_processed()
+                        .await
+                        .expect("restarted marshal must have processed a block");
+                    let epoch = recovered_epoch(processed, &FixedEpocher::new(EPOCH_LENGTH));
+                    let boundary = epoch
+                        .previous()
+                        .map_or(Height::zero(), |previous| final_height(previous.get()));
+                    let held = marshal.get_block(boundary).await.is_some();
+                    pruned_restarts.lock().push((epoch, held));
+                });
+        }
 
         let db_config = FixedConfig {
             merkle_config: MmrJournalConfig {
@@ -1328,7 +1366,11 @@ impl EngineDefinition for ReshareEngine {
                     apply_batch_size: NZU64!(64),
                     max_outstanding_requests: NZUsize!(8),
                 },
-                prune_config: None,
+                prune_config: pruned.then_some(PruneConfig {
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 0,
+                    retained_qmdb_blocks: 0,
+                }),
                 strategy: Sequential,
             },
         );

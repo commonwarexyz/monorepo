@@ -425,6 +425,63 @@ fn reshare_e2e_multiple_epochs_with_total_shutdown(#[case] network: Network) {
     .unwrap();
 }
 
+/// A player restarted after its marshal pruned the boundary block that introduced
+/// its epoch takes its role in that epoch from the epoch's checkpoint. Without the
+/// checkpoint, it would follow the epoch until its final block.
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_restart_after_boundary_pruned_participates(#[case] network: Network) {
+    let epoch = Epoch::new(1);
+    let engine = ReshareEngine::new(network);
+
+    // Participant one is a player in epochs zero and one, so it holds a share for
+    // epoch one. Its marshal archives prune in sections of ten heights, so by the
+    // epoch's midpoint the section holding the boundary block is gone.
+    let pruned = engine.participants[1].clone();
+    let engine = engine.with_marshal_pruning(pruned.clone());
+    let registrations = engine.registrations.clone();
+    let pruned_restarts = engine.pruned_restarts.clone();
+    let crash_heights = FixedEpocher::new(EPOCH_LENGTH)
+        .midpoint(epoch)
+        .expect("test epoch must have a midpoint")
+        .get()..=final_height(epoch.get()).get() - 1;
+    let result = PlanBuilder::new(engine)
+        .seed(0)
+        .exit_condition(ProcessedHeightAtLeast::new(
+            final_height(epoch.get() + 1).get(),
+        ))
+        .crash(Crash::ProcessedHeight {
+            participant: pruned.clone(),
+            heights: crash_heights,
+            downtime: Duration::from_millis(250),
+        })
+        .timeout(Duration::from_secs(120))
+        .run()
+        .unwrap()
+        .pop()
+        .unwrap();
+
+    // The node restarted once, in epoch one, after its boundary block was pruned.
+    assert_eq!(result.crashes, 1);
+    assert_eq!(*pruned_restarts.lock(), vec![(epoch, false)]);
+
+    // The node registers its epoch-one share once when the epoch begins and again
+    // when its restart takes its role. A follower would not register it again.
+    let registrations = registrations
+        .lock()
+        .get(&pruned)
+        .cloned()
+        .unwrap_or_default();
+    let signed = registrations
+        .iter()
+        .filter(|registration| registration.epoch == epoch && registration.signs())
+        .count();
+    assert_eq!(signed, 2, "{registrations:?}");
+}
+
 #[rstest]
 #[case::discovery(Network::Discovery)]
 #[case::lookup(Network::Lookup)]
