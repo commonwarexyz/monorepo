@@ -30,7 +30,12 @@
 //! sums and the negative sums of each component. [`product_sub`](Fp2::product_sub) adds the
 //! subtrahend's negative sums to the positive sums and its positive sums to the negative sums,
 //! and [`product_mul_by_nonresidue`](Fp2::product_mul_by_nonresidue) rearranges them the same way,
-//! so neither adds a bias. [`lift`](Fp2::lift) gives positive sums with the value's bounds.
+//! so neither adds a bias. [`accumulate_product`](Fp2::accumulate_product) and
+//! [`subtract_product`](Fp2::subtract_product) add a product of two elements to a sum, or
+//! subtract it, with the bounds of [`product`](Fp2::product) followed by
+//! [`accumulate`](Fp2::accumulate) or [`product_sub`](Fp2::product_sub); residues multiply-add
+//! into the sums without forming the product. [`lift`](Fp2::lift) gives positive sums with the
+//! value's bounds.
 //!
 //! [`reduce::<K>`](Fp2::reduce) applies [`Field::reduce_signed`] with the bias `K` to each
 //! component. A positional negative sum must be below `K`, and the component returns the positive
@@ -299,9 +304,9 @@ impl<F> Fp2<F> {
 
     /// Forms the product `self * rhs`.
     ///
-    /// The real component is `a0 b0` less `a1 b1`, and the imaginary component comes from
-    /// [`Field::cross`], which reuses both known products. Both factors' components must have limb
-    /// bound `1`.
+    /// This is [`Field::quadratic`]: the real component is `a0 b0` less `a1 b1`, and the imaginary
+    /// component comes from [`Field::cross`], which reuses both known products. Both factors'
+    /// components must have limb bound `1`.
     /// Runs through [`Field::kernel`], as its own kernel unless the representation inlines it.
     #[inline(always)]
     pub fn product<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
@@ -311,27 +316,35 @@ impl<F> Fp2<F> {
         F::kernel(
             simd,
             #[inline(always)]
-            move |simd: S| self.product_body(simd, rhs),
+            move |simd: S| {
+                let [c0, c1] = F::quadratic(simd, [self.c0, self.c1], [rhs.c0, rhs.c1]);
+                Fp2 { c0, c1 }
+            },
         )
     }
 
-    /// Body of [`Self::product`].
+    /// Returns `sum + a * b`, as [`Field::accumulate_quadratic`] does: the product of
+    /// [`Self::product`] accumulated into each component of `sum`.
     #[inline(always)]
-    fn product_body<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
+    pub fn accumulate_product<S: Simd>(simd: S, sum: Product<F, S>, a: Self, b: Self) -> Product<F, S>
     where
         F: Field<S>,
     {
-        let a = [self.c0, self.c1];
-        let b = [rhs.c0, rhs.c1];
-        let p0 = self.c0.product(simd, rhs.c0);
-        let p1 = self.c1.product(simd, rhs.c1);
-        Fp2 {
-            c0: Signed {
-                pos: p0,
-                neg: Some(p1),
-            },
-            c1: F::cross(simd, a, b, p0, p1),
-        }
+        let [c0, c1] =
+            F::accumulate_quadratic(simd, [sum.c0, sum.c1], [a.c0, a.c1], [b.c0, b.c1]);
+        Fp2 { c0, c1 }
+    }
+
+    /// Returns `sum - a * b`, as [`Field::subtract_quadratic`] does: the product of
+    /// [`Self::product`] subtracted from each component of `sum` without a bias.
+    #[inline(always)]
+    pub fn subtract_product<S: Simd>(simd: S, sum: Product<F, S>, a: Self, b: Self) -> Product<F, S>
+    where
+        F: Field<S>,
+    {
+        let [c0, c1] =
+            F::subtract_quadratic(simd, [sum.c0, sum.c1], [a.c0, a.c1], [b.c0, b.c1]);
+        Fp2 { c0, c1 }
     }
 
     /// Returns `self * rhs`, under the requirements of [`Self::product`] and [`Self::reduce`] with
@@ -347,9 +360,10 @@ impl<F> Fp2<F> {
     /// Forms the product `self * rhs` with four base field products.
     ///
     /// The real component is `a0 b0` less `a1 b1`, and the imaginary component is
-    /// `a0 b1 + a1 b0`. Unlike [`Self::product`], no product takes a sum of components, so large
-    /// factors keep smaller positional bounds at the cost of one more positional product; residues
-    /// form the same products either way. Every factor must be ready, as for [`Field::product`].
+    /// `a0 b1 + a1 b0`, accumulated as it forms. Unlike [`Self::product`], no product takes a sum
+    /// of components, so large factors keep smaller positional bounds at the cost of one more
+    /// positional product; residues form the same products either way. Every factor must be
+    /// ready, as for [`Field::product`].
     /// Runs through [`Field::kernel`], as its own kernel unless the representation inlines it.
     #[inline(always)]
     pub fn product_schoolbook<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
@@ -374,10 +388,11 @@ impl<F> Fp2<F> {
                 pos: self.c0.product(simd, rhs.c0),
                 neg: Some(self.c1.product(simd, rhs.c1)),
             },
-            c1: Signed::positive(F::accumulate(
+            c1: Signed::positive(F::accumulate_product(
                 simd,
                 self.c0.product(simd, rhs.c1),
-                self.c1.product(simd, rhs.c0),
+                self.c1,
+                rhs.c0,
             )),
         }
     }
@@ -457,8 +472,8 @@ impl<F> Fp2<F> {
         F: Field<S>,
     {
         Fp2 {
-            c0: add::<S, F>(simd, a.c0, b.c0),
-            c1: add::<S, F>(simd, a.c1, b.c1),
+            c0: a.c0.add::<S, F>(simd, b.c0),
+            c1: a.c1.add::<S, F>(simd, b.c1),
         }
     }
 
@@ -472,8 +487,8 @@ impl<F> Fp2<F> {
         F: Field<S>,
     {
         Fp2 {
-            c0: sub::<S, F>(simd, a.c0, b.c0),
-            c1: sub::<S, F>(simd, a.c1, b.c1),
+            c0: a.c0.sub::<S, F>(simd, b.c0),
+            c1: a.c1.sub::<S, F>(simd, b.c1),
         }
     }
 
@@ -487,8 +502,8 @@ impl<F> Fp2<F> {
         F: Field<S>,
     {
         Fp2 {
-            c0: sub::<S, F>(simd, product.c0, product.c1),
-            c1: add::<S, F>(simd, product.c0, product.c1),
+            c0: product.c0.sub::<S, F>(simd, product.c1),
+            c1: product.c0.add::<S, F>(simd, product.c1),
         }
     }
 
@@ -556,8 +571,8 @@ impl<F> Fp2<F> {
         F: Field<S>,
     {
         Fp2 {
-            c0: carry::<S, F>(simd, product.c0),
-            c1: carry::<S, F>(simd, product.c1),
+            c0: product.c0.carry::<S, F>(simd),
+            c1: product.c1.carry::<S, F>(simd),
         }
     }
 
@@ -652,67 +667,10 @@ impl<F> Fp2<F> {
     where
         F: Field<S>,
     {
-        let norm = F::accumulate(
-            simd,
-            self.c0.product(simd, self.c0),
-            self.c1.product(simd, self.c1),
-        );
+        let norm = F::accumulate_product(simd, self.c0.product(simd, self.c0), self.c1, self.c1);
         let inverse = F::reduce_tight(simd, norm).invert(simd);
         let conjugate = self.conjugate::<{ TIGHT + 1 }, S>(simd).carry(simd);
         Self::reduce_tight::<1, S>(simd, conjugate.product_base(simd, inverse))
-    }
-}
-
-/// Returns the sum of two optional products.
-#[cfg_attr(not(debug_assertions), inline(always))]
-fn join<S: Simd, F: Field<S>>(
-    simd: S,
-    a: Option<F::Product>,
-    b: Option<F::Product>,
-) -> Option<F::Product> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(F::accumulate(simd, a, b)),
-        (a, None) => a,
-        (None, b) => b,
-    }
-}
-
-/// Returns `a + b` for signed sums.
-#[cfg_attr(not(debug_assertions), inline(always))]
-fn add<S: Simd, F: Field<S>>(
-    simd: S,
-    a: Signed<F::Product>,
-    b: Signed<F::Product>,
-) -> Signed<F::Product> {
-    Signed {
-        pos: F::accumulate(simd, a.pos, b.pos),
-        neg: join::<S, F>(simd, a.neg, b.neg),
-    }
-}
-
-/// Returns `a - b` for signed sums, swapping the parts of `b`.
-#[cfg_attr(not(debug_assertions), inline(always))]
-fn sub<S: Simd, F: Field<S>>(
-    simd: S,
-    a: Signed<F::Product>,
-    b: Signed<F::Product>,
-) -> Signed<F::Product> {
-    let mut pos = a.pos;
-    if let Some(neg) = b.neg {
-        pos = F::accumulate(simd, pos, neg);
-    }
-    Signed {
-        pos,
-        neg: join::<S, F>(simd, a.neg, Some(b.pos)),
-    }
-}
-
-/// Carries both parts of a signed sum.
-#[cfg_attr(not(debug_assertions), inline(always))]
-fn carry<S: Simd, F: Field<S>>(simd: S, sum: Signed<F::Product>) -> Signed<F::Product> {
-    Signed {
-        pos: F::carry_product(simd, sum.pos),
-        neg: sum.neg.map(|neg| F::carry_product(simd, neg)),
     }
 }
 
@@ -858,6 +816,25 @@ mod tests {
             simd,
             Fp2::<F>::reduce::<BIAS, S>(simd, Fp2::<F>::product_sub(simd, ab, cd)),
             sub(rab, rcd),
+        );
+        // Products accumulate into sums as they form, and subtract from them.
+        assert_value(
+            simd,
+            Fp2::<F>::reduce::<BIAS, S>(simd, Fp2::<F>::accumulate_product(simd, ab, c, d)),
+            add(rab, rcd),
+        );
+        assert_value(
+            simd,
+            Fp2::<F>::reduce::<BIAS, S>(simd, Fp2::<F>::subtract_product(simd, ab, c, d)),
+            sub(rab, rcd),
+        );
+        let accumulated = Fp2::<F>::accumulate_product(simd, cd, a, b);
+        let accumulated = Fp2::<F>::subtract_product(simd, accumulated, c, d);
+        let accumulated = Fp2::<F>::accumulate_product(simd, accumulated, a, b);
+        assert_value(
+            simd,
+            Fp2::<F>::reduce::<BIAS, S>(simd, accumulated),
+            add(rab, rab),
         );
         // (ab - cd)(1 + i) - (ab + cd) - b^2, as formulas over extensions combine products.
         let difference = Fp2::<F>::product_sub(simd, ab, cd);
