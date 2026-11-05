@@ -86,7 +86,6 @@ impl CohortSet {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ClaimIndex<D: Digest> {
     by_claim: BTreeMap<Claim, BTreeMap<ArtifactId<D>, Observation>>,
-    cohorts: BTreeMap<Claim, CohortSet>,
     message_cohorts: BTreeMap<View, CohortSet>,
     nullify_cohorts: BTreeMap<View, CohortSet>,
 }
@@ -95,7 +94,6 @@ impl<D: Digest> Default for ClaimIndex<D> {
     fn default() -> Self {
         Self {
             by_claim: BTreeMap::new(),
-            cohorts: BTreeMap::new(),
             message_cohorts: BTreeMap::new(),
             nullify_cohorts: BTreeMap::new(),
         }
@@ -113,10 +111,6 @@ impl<D: Digest> ClaimIndex<D> {
         if let Some(previous) = previous {
             self.remove_cohort(claim, previous.cohort());
         }
-        self.cohorts
-            .entry(claim)
-            .or_default()
-            .insert(observation.cohort());
         if let Some(aggregate) = self.aggregate_mut(claim) {
             aggregate.insert(observation.cohort());
         }
@@ -136,9 +130,14 @@ impl<D: Digest> ClaimIndex<D> {
         self.remove_cohort(claim, observation.cohort());
     }
 
-    /// Returns the earliest cohort with a pending claim on `claim`.
+    /// Returns the earliest cohort with a pending claim on `claim`. A slot holds few claims, so
+    /// this reads them rather than keeping a derived index.
     pub(super) fn first_cohort(&self, claim: Claim) -> Option<u64> {
-        self.cohorts.get(&claim).and_then(CohortSet::first)
+        self.by_claim
+            .get(&claim)?
+            .values()
+            .map(|observation| observation.cohort())
+            .min()
     }
 
     /// Returns the earliest cohort with a pending view-message claim in `view`.
@@ -154,7 +153,6 @@ impl<D: Digest> ClaimIndex<D> {
     /// Drops every claim at or below `floor`.
     pub(super) fn retire_through(&mut self, floor: View) {
         retire_prefix(&mut self.by_claim, |claim| claim.view <= floor);
-        retire_prefix(&mut self.cohorts, |claim| claim.view <= floor);
         retire_prefix(&mut self.message_cohorts, |view| *view <= floor);
         retire_prefix(&mut self.nullify_cohorts, |view| *view <= floor);
     }
@@ -168,7 +166,6 @@ impl<D: Digest> ClaimIndex<D> {
     }
 
     fn remove_cohort(&mut self, claim: Claim, cohort: u64) {
-        remove_from(&mut self.cohorts, claim, cohort);
         match claim.kind {
             ClaimKind::ViewMessage(_) => remove_from(&mut self.message_cohorts, claim.view, cohort),
             ClaimKind::Nullify(_) => remove_from(&mut self.nullify_cohorts, claim.view, cohort),
@@ -226,6 +223,6 @@ mod tests {
         claims.retire_through(View::new(3));
         assert_eq!(claims.first_cohort(proposal), Some(3));
         claims.retire_through(view);
-        assert!(claims.by_claim.is_empty() && claims.cohorts.is_empty());
+        assert!(claims.by_claim.is_empty());
     }
 }
