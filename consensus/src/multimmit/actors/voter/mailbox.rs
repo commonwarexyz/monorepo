@@ -8,7 +8,10 @@
 use crate::{
     multimmit::{
         actors::util::reliable_policy,
-        machine::{IdentifiedArtifact, Inspection, ResolutionCompletion, VerificationCompletion},
+        machine::{
+            CertificateCompletion, IdentifiedArtifact, Inspection, ResolutionCompletion,
+            VerificationCompletion,
+        },
         scheme::Scheme,
         wire::Plane,
     },
@@ -36,6 +39,15 @@ pub(crate) enum Message<S: Scheme, D: Digest> {
         round: Round,
         /// The completion for the machine-issued request.
         completion: ResolutionCompletion<S, D>,
+    },
+    /// One completion for a machine-issued DA-certificate request.
+    Certificate {
+        /// The root span that owns terminal failures from this request.
+        root: Span,
+        /// The resolver's tracing span.
+        span: Span,
+        /// The completion for the machine-issued request.
+        completion: CertificateCompletion<S, D>,
     },
 }
 
@@ -152,6 +164,20 @@ impl<S: Scheme, D: Digest> Resolutions<S, D> {
             root,
             span,
             round,
+            completion,
+        })
+    }
+
+    /// Delivers one DA-certificate completion.
+    pub(crate) fn certified(
+        &self,
+        root: Span,
+        span: Span,
+        completion: CertificateCompletion<S, D>,
+    ) -> Feedback {
+        self.sender.enqueue(Message::Certificate {
+            root,
+            span,
             completion,
         })
     }
