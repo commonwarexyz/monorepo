@@ -48,6 +48,31 @@ fn placed(activities: &[TestActivity]) -> Vec<&TestActivity> {
         .collect()
 }
 
+/// Returns the identifier, fact and record commitments of every reported proof.
+fn proven(activities: &[TestActivity]) -> Vec<(CertificateId<Digest>, FinalityId<Digest>, Vec<Digest>)> {
+    activities
+        .iter()
+        .filter_map(|activity| match activity {
+            Activity::Proven {
+                proof,
+                fact,
+                records,
+            } => {
+                assert_eq!(proof.lqc().id::<Sha256>(), proof.id());
+                Some((
+                    proof.id(),
+                    fact.id(),
+                    records
+                        .iter()
+                        .map(|record| record.commitment::<Sha256>())
+                        .collect(),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn direct_finality_places_the_final_sweep_above_the_leaders_history() {
     let profile = Harness::observer().participants(6).profile();
@@ -99,6 +124,27 @@ fn direct_finality_places_the_final_sweep_above_the_leaders_history() {
     assert_eq!(*view, View::new(2));
     assert_eq!(*history, proposed.history());
     assert_eq!(placed, &vec![Placement::new(extension, Height::zero(), Height::new(1))]);
+
+    // A later certificate for the leader reports the record that direct finality placed, once.
+    let report = |machine: &mut TestMachine, signers: core::ops::Range<u32>| {
+        let votes = signers
+            .map(|signer| extending_vote(machine, &proposed, signer))
+            .collect::<Vec<_>>();
+        let certificate = Artifact::Lqc(lqc(machine, proposed.clone(), &votes));
+        let id = certificate.id::<Sha256>().certificate();
+        let pending = observe(machine, certificate);
+        let step = machine.verify(&pending, true, Until::CursorAdvance);
+        let reported = proven(step.activities());
+        machine.drain_persisting(step);
+        (id, reported)
+    };
+    let (id, reported) = report(&mut machine, 0..5);
+    assert_eq!(
+        reported,
+        vec![(id, FinalityId::Lqc(id), vec![proposed.history()])]
+    );
+    let (id, reported) = report(&mut machine, 1..6);
+    assert_eq!(reported, vec![(id, FinalityId::Lqc(id), Vec::new())]);
 }
 
 #[test]
@@ -129,13 +175,21 @@ fn certificate_finality_places_only_once_the_leaders_history_is_known() {
         let votes = (0..5)
             .map(|signer| extending_vote(&machine, &proposed, signer))
             .collect::<Vec<_>>();
+        let history = proposed.history();
         let certificate = Artifact::Lqc(lqc(&machine, proposed, &votes));
+        let id = certificate.id::<Sha256>().certificate();
         let certificate = observe(&mut machine, certificate);
         let step = machine.verify(&certificate, true, Until::CursorAdvance);
         assert!(
             step.activities()
                 .iter()
                 .any(|activity| matches!(activity, Activity::LeaderFinalized { .. }))
+        );
+        // The certificate is reported either way, with the leader's record only when known.
+        let records = if known_parent { vec![history] } else { Vec::new() };
+        assert_eq!(
+            proven(step.activities()),
+            vec![(id, FinalityId::Lqc(id), records)]
         );
         placed(step.activities()).len()
     };
@@ -154,6 +208,7 @@ fn an_lqc_verified_below_the_finality_floor_still_places() {
     let votes = (0..5)
         .map(|signer| extending_vote(&machine, &proposed, signer))
         .collect::<Vec<_>>();
+    let history = proposed.history();
     let certificate = Artifact::Lqc(lqc(&machine, proposed, &votes));
     let id = certificate.id::<Sha256>();
     let pending = observe(&mut machine, certificate);
@@ -191,7 +246,11 @@ fn an_lqc_verified_below_the_finality_floor_still_places() {
         panic!("the verified certificate must report placement once: {activities:?}");
     };
     assert_eq!(*view, View::new(2));
-    assert_eq!(*evidence, FinalityId::Lqc(id));
+    assert_eq!(*evidence, FinalityId::Lqc(id.certificate()));
+    assert_eq!(
+        proven(&activities),
+        vec![(id.certificate(), *evidence, vec![history])]
+    );
     assert_eq!(placed.len(), 1);
     assert_eq!(placed[0].tip().height(), Height::new(1));
     assert_eq!(placed[0].above(), Height::zero());

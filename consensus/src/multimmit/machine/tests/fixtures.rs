@@ -1028,7 +1028,8 @@ pub(super) fn record_protocol_acceptances(
         | Activity::HistoryAccepted { .. }
         | Activity::TransactionProposed { .. }
         | Activity::CertificateRecorded { .. }
-        | Activity::Placed { .. } => None,
+        | Activity::Placed { .. }
+        | Activity::Proven { .. } => None,
         Activity::LeaderFinalized { .. } | Activity::LeaderFinalityUpdated { .. } => None,
     }));
 }

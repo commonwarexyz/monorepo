@@ -10,6 +10,9 @@
 //! already placed, exactly as marshal reconciles them. An anchor may jump to a rival branch, so
 //! the run an opening adds is only known when every opening since the last placed one is: the
 //! state then names the run, and otherwise only advances its heights.
+//!
+//! The records whose order the state places are queued for the next verified L-QC to report
+//! (see [`Activity::Proven`]): marshal stores them as the links between portable proofs.
 
 use crate::{
     multimmit::{
@@ -20,7 +23,10 @@ use crate::{
     types::{Height, View},
 };
 use commonware_cryptography::Digest;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 
 /// Most views whose history records or waiting facts are retained.
 ///
@@ -40,6 +46,24 @@ const RETAINED_FACT_LEADERS: usize = 4;
 
 /// Most mutually undominated facts retained per leader while its history record is unknown.
 const RETAINED_FACTS: usize = 4;
+
+/// Most views a fact may wait for a missing intermediate history opening.
+///
+/// A later leader's finality can arrive before the record of a leader between it and the last
+/// placed one (that record waits on a parent V-QC this node has not observed yet). Its fact then
+/// waits, so the gap is named once the record arrives. Past this span the newest waiting fact is
+/// placed without naming the gap, so a record that never arrives cannot stall placement.
+const STALLED_VIEWS: usize = 8;
+
+/// Most placed history records queued for the next proof report.
+///
+/// Every finalized leader yields an L-QC, so the queue drains every view while finality is
+/// live. Past this bound the oldest records are dropped; marshal then fetches them from peers.
+/// At 64 chains a record is about 4 KiB.
+const RETAINED_UNPROVEN: usize = 1024;
+
+/// A history record and its commitment.
+type Committed<D> = (D, Arc<TipRecord<D>>);
 
 /// A retained history opening.
 #[derive(Clone, Debug)]
@@ -66,8 +90,13 @@ pub(crate) struct PlacementState<D: Digest> {
     openings: BTreeMap<D, Opening<D>>,
     /// Facts waiting for their leader's history record, by view and leader digest.
     waiting: BTreeMap<View, BTreeMap<D, Vec<FinalityFact<D>>>>,
+    /// Facts whose leader's record is known but does not connect to the ordered opening yet,
+    /// because an intermediate record is missing, by view.
+    stalled: BTreeMap<View, Vec<FinalityFact<D>>>,
     /// Newest view whose leader's finality placed the order.
     floor: Option<View>,
+    /// Placed records no proof report took yet, oldest first, by commitment.
+    unproven: VecDeque<Committed<D>>,
 }
 
 impl<D: Digest> PlacementState<D> {
@@ -79,7 +108,9 @@ impl<D: Digest> PlacementState<D> {
             leaders: BTreeMap::new(),
             openings: BTreeMap::new(),
             waiting: BTreeMap::new(),
+            stalled: BTreeMap::new(),
             floor: None,
+            unproven: VecDeque::new(),
         }
     }
 
@@ -115,16 +146,16 @@ impl<D: Digest> PlacementState<D> {
                 record: Arc::clone(record),
             });
         self.bound();
-        let Some(facts) = self
+        let facts = self
             .waiting
             .get_mut(&view)
             .and_then(|waiting| waiting.remove(&leader))
-        else {
-            return;
-        };
-        for fact in &facts {
-            self.apply(fact, placed);
+            .unwrap_or_default();
+        for fact in facts {
+            self.place(fact, placed);
         }
+        // The record may be the missing link of a stalled fact.
+        self.retry_stalled(placed);
     }
 
     /// Applies one leader-finality fact and reports the placement it advances.
@@ -138,7 +169,7 @@ impl<D: Digest> PlacementState<D> {
             return;
         }
         if self.commitment(view, fact.leader()).is_some() {
-            self.apply(fact, placed);
+            self.place(fact.clone(), placed);
             return;
         }
         let waiting = self.waiting.entry(view).or_default();
@@ -161,6 +192,66 @@ impl<D: Digest> PlacementState<D> {
         }
     }
 
+    /// Places `fact`, whose leader's record is known, or stalls it while an intermediate opening
+    /// is missing.
+    fn place<S: Scheme>(&mut self, fact: FinalityFact<D>, placed: &mut Vec<Activity<S, D>>) {
+        if self.apply(&fact, false, placed) {
+            // A stalled later fact may build on what this one placed.
+            self.retry_stalled(placed);
+            return;
+        }
+        let view = fact.round().view();
+        let facts = self.stalled.entry(view).or_default();
+        if facts.iter().any(|kept| dominates(kept, &fact)) {
+            return;
+        }
+        facts.retain(|kept| !dominates(&fact, kept));
+        if facts.len() >= RETAINED_FACTS {
+            facts.remove(0);
+        }
+        facts.push(fact);
+        // A missing record that never arrives must not stall placement: past the span, place the
+        // newest stalled facts without naming the gap.
+        let (Some(oldest), Some(newest)) = (
+            self.stalled.keys().next().copied(),
+            self.stalled.keys().next_back().copied(),
+        ) else {
+            return;
+        };
+        if newest.get().saturating_sub(oldest.get()) < STALLED_VIEWS as u64 {
+            return;
+        }
+        let newest = self
+            .stalled
+            .pop_last()
+            .map(|(_, facts)| facts)
+            .unwrap_or_default();
+        self.stalled.clear();
+        for fact in &newest {
+            self.apply(fact, true, placed);
+        }
+    }
+
+    /// Places every stalled fact whose openings now connect, oldest view first.
+    fn retry_stalled<S: Scheme>(&mut self, placed: &mut Vec<Activity<S, D>>) {
+        while let Some((view, facts)) = self.stalled.pop_first() {
+            if self.below_floor(view) {
+                continue;
+            }
+            let mut kept = Vec::new();
+            for fact in facts {
+                if !self.apply(&fact, false, placed) {
+                    kept.push(fact);
+                }
+            }
+            if !kept.is_empty() {
+                // Later views build on this one, so they cannot connect either.
+                self.stalled.insert(view, kept);
+                return;
+            }
+        }
+    }
+
     fn below_floor(&self, view: View) -> bool {
         self.floor.is_some_and(|floor| view < floor)
     }
@@ -172,35 +263,64 @@ impl<D: Digest> PlacementState<D> {
             .copied()
     }
 
-    /// Returns the openings after the ordered one up to `commitment`, newest first, or `None`
-    /// when one of them is not retained.
-    fn openings_since(&self, commitment: D) -> Option<Vec<Arc<TipRecord<D>>>> {
+    /// Returns the retained openings after the ordered one up to `commitment`, newest first,
+    /// with their commitments, and whether they reach the ordered one. Without a missing
+    /// opening, the walk stops at the first one not retained.
+    fn openings_since(&self, commitment: D) -> (Vec<Committed<D>>, bool) {
         let mut openings = Vec::new();
         let mut cursor = commitment;
         while cursor != self.ordered {
             // Every retained opening appears at most once on a parent chain.
             if openings.len() >= self.openings.len() {
-                return None;
+                return (openings, false);
             }
-            let opening = self.openings.get(&cursor)?;
-            openings.push(Arc::clone(&opening.record));
+            let Some(opening) = self.openings.get(&cursor) else {
+                return (openings, false);
+            };
+            openings.push((cursor, Arc::clone(&opening.record)));
             cursor = opening.record.parent();
         }
-        Some(openings)
+        (openings, true)
+    }
+
+    /// Takes the queued records through the one with commitment `history`, oldest first, or
+    /// none when `history` is not queued.
+    pub(crate) fn proven(&mut self, history: D) -> Arc<[Arc<TipRecord<D>>]> {
+        let Some(position) = self
+            .unproven
+            .iter()
+            .position(|(commitment, _)| *commitment == history)
+        else {
+            return Arc::new([]);
+        };
+        self.unproven
+            .drain(..=position)
+            .map(|(_, record)| record)
+            .collect()
     }
 
     /// Places the order `fact` fixes: its leader's history openings, then its final sweep.
-    fn apply<S: Scheme>(&mut self, fact: &FinalityFact<D>, placed: &mut Vec<Activity<S, D>>) {
+    ///
+    /// Returns false, changing nothing, when an opening between the ordered one and the fact's
+    /// is missing after the tracker has placed before, unless `skip` places the fact anyway
+    /// without naming the blocks of the missing openings. A tracker that never placed (a
+    /// restarted engine) skips at once: it never held the openings before its first fact.
+    fn apply<S: Scheme>(
+        &mut self,
+        fact: &FinalityFact<D>,
+        skip: bool,
+        placed: &mut Vec<Activity<S, D>>,
+    ) -> bool {
         let view = fact.round().view();
         let Some(commitment) = self.commitment(view, fact.leader()) else {
-            return;
+            return true;
         };
         let Some(record) = self
             .openings
             .get(&commitment)
             .map(|opening| Arc::clone(&opening.record))
         else {
-            return;
+            return true;
         };
         let Ok(swept) = FinalSweep::placed(
             record.tips(),
@@ -208,28 +328,33 @@ impl<D: Digest> PlacementState<D> {
             fact.proposed(),
             fact.settled(),
         ) else {
-            return;
+            return true;
         };
 
         let mut runs = Vec::new();
-        match self.openings_since(commitment) {
-            Some(openings) => {
-                for opening in openings.iter().rev() {
-                    for (tip, current) in opening.tips().iter().zip(&mut self.placed) {
-                        if tip.height() > *current {
-                            runs.push(Placement::new(*tip, *current, tip.height()));
-                            *current = tip.height();
-                        }
+        let (openings, connected) = self.openings_since(commitment);
+        if !connected && !skip && self.floor.is_some() {
+            return false;
+        }
+        if connected {
+            for (_, opening) in openings.iter().rev() {
+                for (tip, current) in opening.tips().iter().zip(&mut self.placed) {
+                    if tip.height() > *current {
+                        runs.push(Placement::new(*tip, *current, tip.height()));
+                        *current = tip.height();
                     }
                 }
             }
-            None => {
-                // Without every opening since the ordered one, an anchor jump among them could
-                // place blocks off the newest opening's path, so their runs stay unnamed.
-                for (tip, current) in record.tips().iter().zip(&mut self.placed) {
-                    *current = (*current).max(tip.height());
-                }
+        } else {
+            // Without every opening since the ordered one, an anchor jump among them could
+            // place blocks off the newest opening's path, so their runs stay unnamed.
+            for (tip, current) in record.tips().iter().zip(&mut self.placed) {
+                *current = (*current).max(tip.height());
             }
+        }
+        self.unproven.extend(openings.into_iter().rev());
+        if let Some(excess) = self.unproven.len().checked_sub(RETAINED_UNPROVEN) {
+            self.unproven.drain(..excess);
         }
         self.ordered = commitment;
         // Sweep slots above the emitted heights resolve on the final tips' own paths.
@@ -249,6 +374,7 @@ impl<D: Digest> PlacementState<D> {
             self.floor = Some(view);
             self.leaders = self.leaders.split_off(&view);
             self.waiting = self.waiting.split_off(&view);
+            self.stalled = self.stalled.split_off(&view);
             self.prune_openings();
         }
         if !runs.is_empty() {
@@ -259,6 +385,7 @@ impl<D: Digest> PlacementState<D> {
                 placed: runs,
             });
         }
+        true
     }
 
     /// Drops the oldest views beyond [`RETAINED_VIEWS`] and the openings only they committed.
@@ -806,5 +933,174 @@ mod tests {
         );
         let placed = finality(&mut placement, &fact(1, leader(1), &[1], &[1], &[true]));
         assert_eq!(runs(&placed), vec![(reference(0, 1), 0, 1)]);
+    }
+
+    /// Returns the commitments of the records proven through `history`.
+    fn proven(
+        placement: &mut PlacementState<Sha256Digest>,
+        history: Sha256Digest,
+    ) -> Vec<Sha256Digest> {
+        placement
+            .proven(history)
+            .iter()
+            .map(|record| commitment(record))
+            .collect()
+    }
+
+    #[test]
+    fn placed_records_are_proven_once_oldest_first() {
+        let mut placement = state(2);
+        let first = record(genesis(), frontier(&[1, 1]));
+        let second = record(commitment(&first), frontier(&[2, 1]));
+        history(&mut placement, 2, leader(2), &first);
+        history(&mut placement, 3, leader(3), &second);
+        // Nothing is queued before its order is placed.
+        assert!(proven(&mut placement, commitment(&first)).is_empty());
+        finality(
+            &mut placement,
+            &fact(3, leader(3), &[2, 1], &[2, 1], &[true, true]),
+        );
+
+        // An unknown history takes nothing.
+        assert!(proven(&mut placement, Sha256::hash(&[b"unknown"])).is_empty());
+        assert_eq!(placement.unproven.len(), 2);
+        // A proof of the older leader takes only its own record, then the newer proof the rest.
+        assert_eq!(
+            proven(&mut placement, commitment(&first)),
+            vec![commitment(&first)]
+        );
+        assert!(proven(&mut placement, commitment(&first)).is_empty());
+        assert_eq!(
+            proven(&mut placement, commitment(&second)),
+            vec![commitment(&second)]
+        );
+        assert!(placement.unproven.is_empty());
+    }
+
+    #[test]
+    fn a_disconnected_opening_queues_the_suffix_it_holds() {
+        let mut placement = state(2);
+        let unseen = record(genesis(), frontier(&[1, 1]));
+        let held = record(commitment(&unseen), frontier(&[2, 2]));
+        let next = record(commitment(&held), frontier(&[3, 2]));
+        history(&mut placement, 4, leader(4), &held);
+        history(&mut placement, 5, leader(5), &next);
+        finality(
+            &mut placement,
+            &fact(5, leader(5), &[3, 2], &[3, 2], &[true, true]),
+        );
+        assert_eq!(
+            proven(&mut placement, commitment(&next)),
+            vec![commitment(&held), commitment(&next)]
+        );
+    }
+
+    #[test]
+    fn a_late_intermediate_opening_is_placed_once_it_arrives() {
+        let mut placement = state(1);
+        let first = record(genesis(), frontier(&[1]));
+        history(&mut placement, 10, leader(10), &first);
+        finality(&mut placement, &fact(10, leader(10), &[2], &[2], &[true]));
+        assert_eq!(placement.heights(), heights(&[2]));
+
+        // Leader 11's record waits on a parent this node has not observed yet, so its finality
+        // waits too; leader 12 builds on it and is finalized first.
+        let second = record(commitment(&first), frontier(&[3]));
+        let third = record(commitment(&second), frontier(&[5]));
+        assert!(finality(&mut placement, &fact(11, leader(11), &[4], &[4], &[true])).is_empty());
+        history(&mut placement, 12, leader(12), &third);
+        let early = finality(&mut placement, &fact(12, leader(12), &[6], &[6], &[true]));
+        // Nothing is placed past the gap until it is known.
+        assert!(early.is_empty());
+        assert_eq!(placement.heights(), heights(&[2]));
+
+        let late = history(&mut placement, 11, leader(11), &second);
+        assert_eq!(
+            runs(&late),
+            vec![
+                (reference(0, 3), 2, 3),
+                (reference(0, 4), 3, 4),
+                (reference(0, 5), 4, 5),
+                (reference(0, 6), 5, 6),
+            ]
+        );
+        assert_eq!(
+            proven(&mut placement, commitment(&third)),
+            vec![commitment(&first), commitment(&second), commitment(&third)]
+        );
+    }
+
+    #[test]
+    fn a_late_intermediate_opening_without_finality_connects_the_stalled_fact() {
+        let mut placement = state(1);
+        let first = record(genesis(), frontier(&[1]));
+        history(&mut placement, 10, leader(10), &first);
+        finality(&mut placement, &fact(10, leader(10), &[1], &[1], &[true]));
+        // Leader 11 is never finalized here; leader 12, which builds on it, is.
+        let second = record(commitment(&first), frontier(&[3]));
+        let third = record(commitment(&second), frontier(&[4]));
+        history(&mut placement, 12, leader(12), &third);
+        assert!(finality(&mut placement, &fact(12, leader(12), &[4], &[4], &[true])).is_empty());
+        let late = history(&mut placement, 11, leader(11), &second);
+        assert_eq!(
+            runs(&late),
+            vec![(reference(0, 3), 1, 3), (reference(0, 4), 3, 4)]
+        );
+    }
+
+    #[test]
+    fn an_opening_that_never_arrives_stalls_placement_only_for_a_bounded_span() {
+        let mut placement = state(1);
+        let first = record(genesis(), frontier(&[1]));
+        history(&mut placement, 10, leader(10), &first);
+        finality(&mut placement, &fact(10, leader(10), &[1], &[1], &[true]));
+        // Leader 11's record never arrives.
+        let mut parent = commitment(&record(commitment(&first), frontier(&[2])));
+        let mut placed = Vec::new();
+        let mut view = 12;
+        while placed.is_empty() {
+            assert!(
+                view < 12 + STALLED_VIEWS as u64 + 2,
+                "placement stalled without bound"
+            );
+            let opening = record(parent, frontier(&[view]));
+            history(&mut placement, view, leader(view), &opening);
+            placed = finality(
+                &mut placement,
+                &fact(view, leader(view), &[view], &[view], &[true]),
+            );
+            parent = commitment(&opening);
+            view += 1;
+        }
+        // The gap is skipped; everything the held openings name after it is placed.
+        assert_eq!(placement.heights(), heights(&[view - 1]));
+        let resumed = record(parent, frontier(&[view]));
+        history(&mut placement, view, leader(view), &resumed);
+        let next = finality(
+            &mut placement,
+            &fact(view, leader(view), &[view], &[view], &[true]),
+        );
+        assert_eq!(runs(&next), vec![(reference(0, view), view - 1, view)]);
+    }
+
+    #[test]
+    fn unproven_records_are_bounded() {
+        let mut placement = state(1);
+        let mut parent = genesis();
+        let mut first = None;
+        for view in 1..=(RETAINED_UNPROVEN as u64 + 5) {
+            let opening = record(parent, frontier(&[view]));
+            history(&mut placement, view, leader(view), &opening);
+            finality(
+                &mut placement,
+                &fact(view, leader(view), &[view], &[view], &[true]),
+            );
+            parent = commitment(&opening);
+            first.get_or_insert(parent);
+        }
+        assert_eq!(placement.unproven.len(), RETAINED_UNPROVEN);
+        // The oldest records were dropped; the newest proof takes every retained one.
+        assert!(proven(&mut placement, first.unwrap()).is_empty());
+        assert_eq!(proven(&mut placement, parent).len(), RETAINED_UNPROVEN);
     }
 }

@@ -4,7 +4,7 @@ use super::lanes::{Group, LaneId};
 use crate::multimmit::{
     actors::util::offload,
     scheme::Scheme,
-    types::{Artifact, CertificateId, CodecConfig},
+    types::{Artifact, CodecConfig},
     wire::{CertificateMessage, ConsensusMessage, DataMessage, Envelope, EnvelopeConfig, Plane},
 };
 use commonware_codec::{Decode as _, EncodeSize as _, Write as _};
@@ -159,12 +159,12 @@ fn prepare_consensus<H: Hasher, S: Scheme, P>(
             let certificate = *parent;
             scratch.reserve(certificate.encode_size());
             certificate.write(&mut scratch);
-            if CertificateId::from_canonical::<H>(&scratch) != block.block().parent() {
+            let parent = Artifact::Vqc(certificate).identify_from_canonical_encoding::<H>(&scratch);
+            if parent.id.certificate() != block.block().parent() {
                 return IngressOutcome::Invalid {
                     reason: InvalidIngress::ProposalParent,
                 };
             }
-            let parent = Artifact::Vqc(certificate).identify_from_canonical_encoding::<H>(&scratch);
             let block = Artifact::LeaderBlock(*block).identify::<H>(&mut scratch);
             return IngressOutcome::Ready {
                 peer,

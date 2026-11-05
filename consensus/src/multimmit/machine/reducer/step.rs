@@ -27,7 +27,7 @@ use crate::{
             view::{HistoryRecord, LeaderHistory},
         },
         scheme::Scheme,
-        types::{Activity, Artifact, ArtifactId, ChainId, FinalityFact},
+        types::{Activity, Artifact, ArtifactId, ChainId, FinalityFact, LqcProof},
     },
     types::{Height, Participant, View},
 };
@@ -38,6 +38,9 @@ use std::{
     num::NonZeroUsize,
     sync::Arc,
 };
+
+/// A verified L-QC with the finality fact it proves.
+type Certified<S, D> = (FinalityFact<D>, LqcProof<S, D>);
 
 /// Reports one reconstructed leader history record.
 pub(super) fn history_accepted<S: Scheme, D: Digest>(
@@ -620,14 +623,14 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
                     activities.push(Activity::CommitmentsAccepted { commitments });
                     activities.push(Activity::LeaderFinalityUpdated { fact });
                 }
-                FinalityUpdate::Certified(fact) => certified.push(fact),
+                FinalityUpdate::Certified(fact, proof) => certified.push((fact, proof)),
             }
         }
         for (_, artifact_id, artifact) in accepted {
             self.push_acceptance(artifact_id, artifact, &mut activities);
         }
         activities.extend(histories.into_iter().map(history_accepted));
-        self.report_placement(&certified, &mut activities);
+        self.report_placement(certified, &mut activities);
         activities
     }
 
@@ -690,33 +693,46 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
     }
 
     /// Appends the placement that the reported history records and finality facts, and the
-    /// facts of `certified` L-QCs, advance.
+    /// facts of `certified` L-QCs, advance, then reports every certified L-QC with the records
+    /// its placement queued.
     pub(super) fn report_placement(
         &mut self,
-        certified: &[FinalityFact<H::Digest>],
+        certified: Vec<Certified<S, H::Digest>>,
         activities: &mut Vec<Activity<S, H::Digest>>,
     ) {
         let mut placed = Vec::new();
+        // Records first: a fact of this drain then finds every record the drain reconstructed.
         for activity in activities.iter() {
-            match activity {
-                Activity::HistoryAccepted {
-                    view,
-                    leader,
-                    commitment,
-                    record,
-                } => self
-                    .placement
-                    .history(*view, *leader, *commitment, record, &mut placed),
-                Activity::LeaderFinalized { fact } | Activity::LeaderFinalityUpdated { fact } => {
-                    self.placement.finality(fact, &mut placed);
-                }
-                _ => {}
+            if let Activity::HistoryAccepted {
+                view,
+                leader,
+                commitment,
+                record,
+            } = activity
+            {
+                self.placement
+                    .history(*view, *leader, *commitment, record, &mut placed);
             }
         }
-        for fact in certified {
+        for activity in activities.iter() {
+            if let Activity::LeaderFinalized { fact } | Activity::LeaderFinalityUpdated { fact } =
+                activity
+            {
+                self.placement.finality(fact, &mut placed);
+            }
+        }
+        for (fact, _) in &certified {
             self.placement.finality(fact, &mut placed);
         }
         activities.append(&mut placed);
+        for (fact, proof) in certified {
+            let records = self.placement.proven(proof.lqc().leader().history());
+            activities.push(Activity::Proven {
+                proof,
+                fact,
+                records,
+            });
+        }
     }
 
     /// Appends the activities reporting one accepted artifact: its selected commitments and the

@@ -5,8 +5,8 @@ use crate::multimmit::{
     machine::{Held, VqcKind},
     scheme::{CertificateVotes, Scheme},
     types::{
-        Artifact, ArtifactId, CertificateId, CodecConfig, DigestedLeader, LeaderBlock, Lqc,
-        SelectedCommitments, TipRecord, VoteBody, Vqc,
+        Artifact, ArtifactId, ArtifactKind, CertificateId, CodecConfig, DigestedLeader, LeaderBlock, Lqc,
+        SelectedCommitments, TipRecord, VoteBody, Vqc, artifact_digest,
     },
 };
 use bytes::Bytes;
@@ -330,7 +330,7 @@ where
     D: Digest,
 {
     let canonical = certificate.encode();
-    let id = CertificateId::from_canonical::<H>(&canonical);
+    let id = CertificateId::new(artifact_digest::<H>(ArtifactKind::Vqc, &canonical));
     (canonical, id)
 }
 

@@ -21,6 +21,14 @@ use std::sync::Arc;
 
 const ARTIFACT_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_ARTIFACT";
 
+/// Returns the digest identifying an artifact of `kind` whose canonical encoding is `encoded`.
+///
+/// Certificates are identified by the same digest (see [`CertificateId`]), so the engine hashes
+/// each certificate it receives once.
+pub(crate) fn artifact_digest<H: Hasher>(kind: ArtifactKind, encoded: &[u8]) -> H::Digest {
+    H::hash(&[ARTIFACT_NAMESPACE, &[kind as u8], encoded])
+}
+
 /// Evaluates `$e` with `$v` bound to the value inside whichever [`Artifact`] variant `$a` holds.
 macro_rules! each_artifact {
     ($a:expr, $v:ident => $e:expr) => {
@@ -166,12 +174,7 @@ impl<S: Scheme, D: Digest> Artifact<S, D> {
         kind: ArtifactKind,
         value: &T,
     ) -> ArtifactId<D> {
-        let kind = [kind as u8];
-        ArtifactId(H::hash(&[
-            ARTIFACT_NAMESPACE,
-            &kind,
-            value.encode().as_ref(),
-        ]))
+        ArtifactId(artifact_digest::<H>(kind, value.encode().as_ref()))
     }
 
     /// Computes a domain-separated identifier for the encoded artifact.
@@ -200,8 +203,7 @@ impl<S: Scheme, D: Digest> Artifact<S, D> {
         encoded: &[u8],
     ) -> ArtifactId<D> {
         debug_assert_eq!(encoded.len(), self.encoded_len());
-        let kind = [self.kind() as u8];
-        ArtifactId(H::hash(&[ARTIFACT_NAMESPACE, &kind, encoded]))
+        ArtifactId(artifact_digest::<H>(self.kind(), encoded))
     }
 
     /// Returns whether this artifact may authenticate a far-future view before ancestry is resolved.
@@ -282,5 +284,11 @@ impl<D: Digest> ArtifactId<D> {
     /// Returns the underlying digest.
     pub const fn get(self) -> D {
         self.0
+    }
+
+    /// Returns the identifier of the V-QC or L-QC this artifact identifier names.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const fn certificate(self) -> super::CertificateId<D> {
+        super::CertificateId::new(self.0)
     }
 }
