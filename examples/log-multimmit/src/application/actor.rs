@@ -387,7 +387,7 @@ mod tests {
         Automaton as _, Epochable as _, Relay as _, Reporter as _,
         multimmit::{
             Artifact,
-            marshal::{self, ArchiveConfig, LqcVerifier, OutputIndex, Start, Update},
+            marshal::{self, LqcVerifier, OutputIndex, Update},
             mocks::{
                 Committee,
                 cluster::{BOUNDED_QUOTA, link_all, start_network},
@@ -403,17 +403,13 @@ mod tests {
     use commonware_runtime::{
         Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_storage::translator::EightCap;
     use commonware_utils::{
-        Acknowledgement as _, NZDuration, NZU16, NZU64, NZUsize, acknowledgement::Exact, test_rng,
+        Acknowledgement as _, NZDuration, NZU16, NZUsize, acknowledgement::Exact, test_rng,
     };
-    use std::{convert::Infallible, num::NonZeroUsize, time::Duration};
+    use std::{convert::Infallible, time::Duration};
 
     /// Body bytes in every test block.
     const BODY_SIZE: usize = 32;
-
-    /// Resolver mailbox capacity, which also bounds backfill concurrency.
-    const RESOLVER_MAILBOX_SIZE: NonZeroUsize = NZUsize!(64);
 
     /// Participants in the test committee; participant 0 runs the actor and produces chain 0.
     const PARTICIPANTS: u32 = 6;
@@ -494,20 +490,14 @@ mod tests {
             );
             broadcast_engine.start(broadcast_network);
             let config = marshal::Config::new(
-                Start::Genesis(committee.config.genesis().clone()),
+                committee.config.genesis().clone(),
                 "log_multimmit_actor_test".into(),
+                CacheRef::new(NZU16!(1024), NZUsize!(8)),
                 committee.codec(),
                 Body::codec_config(BODY_SIZE),
-                ArchiveConfig::new(EightCap, CacheRef::new(NZU16!(1024), NZUsize!(8))),
-            )
-            .with_catalog_mailbox_size(NZUsize!(64))
-            .with_admission_cut_capacity(NZUsize!(64))
-            .with_pending_segment_items(NZU64!(64))
-            .with_resolver_mailbox_size(RESOLVER_MAILBOX_SIZE)
-            // Backfill must not exceed the resolver mailbox.
-            .with_backfill_concurrency(RESOLVER_MAILBOX_SIZE);
+            );
             let (mut service, bridge) =
-                marshal::open::<_, EightCap, Sha256, Suite, Body, ed25519::PublicKey>(
+                marshal::open::<_, Sha256, Suite, Body, ed25519::PublicKey>(
                     context.child("marshal"),
                     config,
                     buffer.clone(),

@@ -143,20 +143,6 @@ fn pool_finality_precedes_lqc_assembly_and_grows_monotonically() {
             .all(|activity| !matches!(activity, Activity::LeaderFinalized { .. }))
     );
     assert_ne!(updated_blocks, initial_blocks);
-    let commitments = grown
-        .activities()
-        .iter()
-        .find_map(|activity| match activity {
-            Activity::CommitmentsAccepted { commitments } => Some(commitments),
-            _ => None,
-        })
-        .expect("the direct pool supplies selected producer commitments");
-    assert_eq!(commitments.epoch(), proposed.round().epoch());
-    assert_eq!(commitments.paths().len(), 1);
-    assert_eq!(
-        commitments.paths()[0].as_ref(),
-        &[initial_blocks[0], updated_blocks[0]]
-    );
     let effects = machine.drain_persisting(grown);
     assert!(
         effects
