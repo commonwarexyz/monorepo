@@ -242,9 +242,11 @@ where
 /// The bitmap chunks and grafted nodes one batch wrote on top of its parent, with the canonical
 /// root and witness at the batch's tip.
 ///
-/// Writing a chain's deltas in order over the state the chain was built on reproduces each
-/// batch's unpruned chunks and grafted nodes. Chunks below [`Self::pruned_chunks`] are all zero,
-/// so each one's grafted leaf equals the operations-tree subtree root it covers.
+/// Writing a chain's deltas in order over the state the chain was built on reproduces each batch's
+/// unpruned chunks and grafted nodes. A delta covers only its own batch, so reproducing the state
+/// after [`super::db::Db::apply_batch`] applies a descendant directly also takes each unapplied
+/// ancestor's delta. Chunks below [`Self::pruned_chunks`] are all zero, so each one's grafted leaf
+/// equals the operations-tree subtree root it covers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Delta<F: Graftable, D: Digest, const N: usize> {
     /// Canonical current root at the batch's tip.
@@ -1167,10 +1169,10 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
 
     /// Return the operations this batch appends to the ops log and the location of the first.
     ///
-    /// Delegates to the wrapped ops-level batch. The bitmap state contributes to the
-    /// canonical root but appends no log operations. The operations and
-    /// [`Self::ops_pinned_nodes`] verify against [`Self::ops_root`], and
-    /// [`Self::ops_root_witness`] binds that root to the canonical [`Self::root`].
+    /// Delegates to the wrapped ops-level batch. The bitmap state contributes to the canonical
+    /// root but appends no log operations. Replaying the operations onto
+    /// [`Self::ops_pinned_nodes`] recomputes [`Self::ops_root`], and [`Self::ops_root_witness`]
+    /// binds that root to the canonical [`Self::root`].
     pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, U>>>) {
         self.inner.operations()
     }
@@ -1217,7 +1219,7 @@ where
     ///
     /// It has the staleness and retention requirements of
     /// [`any::batch::MerkleizedBatch::pinned_nodes`], so read it before the batch's changes are
-    /// flushed. With the batch's operations, the nodes verify against [`Self::ops_root`].
+    /// flushed. Replaying the batch's operations onto these nodes recomputes [`Self::ops_root`].
     pub fn ops_pinned_nodes<E, C, I, H>(
         &self,
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
@@ -2208,12 +2210,13 @@ mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Replaying deltas reproduces the database for both merkle families.
+    /// Replaying deltas reproduces MMR and MMB databases and a database with 64-byte chunks.
     #[test_traced]
     fn test_publication_replays_mmr_and_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             replay::<mmr::Family, 32>(ctx.child("mmr")).await;
             replay::<mmb::Family, 32>(ctx.child("mmb")).await;
+            replay::<mmr::Family, 64>(ctx.child("mmr64")).await;
         });
     }
 
@@ -2389,18 +2392,21 @@ mod tests {
                 db = db.apply_batch(batch).await.unwrap();
             }
 
-            // Save the deltas of an unapplied parent and child, and seed a mirror, before
-            // anything is pruned.
+            // Save the deltas of an unapplied parent and a child that rewrites the first 16 keys,
+            // and seed a mirror, before anything is pruned.
             let parent = db
                 .new_batch()
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let child = parent
-                .new_batch::<Sha256>()
-                .merkleize(&db, None, &mut Hold)
-                .await
-                .unwrap();
+            let mut child = parent.new_batch::<Sha256>();
+            for key in 0..16u64 {
+                child = child.write(
+                    Sha256::hash(&[&key.to_be_bytes()]),
+                    Some(Sha256::hash(&[&4u64.to_be_bytes()])),
+                );
+            }
+            let child = child.merkleize(&db, None, &mut Hold).await.unwrap();
             let saved = child.delta();
             let saved_parent = parent.delta();
             let mut published = Published::from_db(&db);
@@ -2411,13 +2417,19 @@ mod tests {
             published.apply(&saved_parent);
             published.check(&db, &saved_parent);
 
-            // Pruning to the sync boundary removes at least one chunk and leaves every saved
-            // delta unchanged, including that of a batch at the database's own state, while a
-            // fresh batch at the pruned state records the new boundary. A batch staged before the
-            // prune does not observe it until it is merkleized.
+            // Pruning to the sync boundary removes at least one chunk and leaves every saved delta
+            // unchanged, including that of a batch at the database's own state, while a fresh batch
+            // at the pruned state records the new boundary. A copy of the child staged before the
+            // prune records the new boundary only once it is merkleized.
             let base = db.to_batch();
             let saved_base = base.delta();
-            let staged = parent.new_batch::<Sha256>();
+            let mut staged = parent.new_batch::<Sha256>();
+            for key in 0..16u64 {
+                staged = staged.write(
+                    Sha256::hash(&[&key.to_be_bytes()]),
+                    Some(Sha256::hash(&[&4u64.to_be_bytes()])),
+                );
+            }
             let boundary = db.sync_boundary();
             db = db.prune(boundary).await.unwrap();
             assert!(db.bitmap().pruned_chunks() > 0);
@@ -2426,9 +2438,9 @@ mod tests {
             assert_eq!(base.delta(), saved_base);
             published.check(&db, &db.to_batch().delta());
 
-            // The empty child merkleized after pruning has the saved child's root and witness but
-            // records the boundary at merkleize, not at staging. The saved child's frontier still
-            // verifies.
+            // The staged copy writes the same keys as the child, so once merkleized after pruning
+            // it has the saved child's root and witness. It records the boundary at merkleize, not
+            // at staging, and the saved child's frontier still verifies.
             let post_prune = staged.merkleize(&db, None, &mut Hold).await.unwrap();
             let post_delta = post_prune.delta();
             assert_eq!(post_prune.root(), child.root());
