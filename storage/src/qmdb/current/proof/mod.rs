@@ -525,8 +525,8 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
         let merkle_root = match self.proof.reconstruct_root_inner(
             &grafting_verifier,
-            &elements,
             start_loc,
+            &elements,
             collected,
         ) {
             Ok(root) => root,
@@ -553,7 +553,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         start_loc: Location<F>,
         ops: &[O],
         chunks: &[[u8; N]],
-        root: &H::Digest,
+        root: &D,
     ) -> bool {
         self.verify_with_chunk_size::<H, O>(start_loc, ops, chunks, N, root)
     }
@@ -595,9 +595,32 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         chunks: &[[u8; N]],
         root: &D,
     ) -> Result<qmdb::verify::ExtractedDigests<F, H>, merkle::Error<F>> {
+        self.verify_and_extract_digests_with_chunk_size::<H, O>(start_loc, ops, chunks, N, root)
+    }
+
+    /// Verify the proof as [Self::verify_with_chunk_size] does and return the positioned digests
+    /// required to compute the peaks covering the proven range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [merkle::Error::RootMismatch] if the proof reconstructs a root other than `root`,
+    /// or [merkle::Error::InvalidProof] if the proof, its inputs, or `chunk_size` are malformed.
+    pub fn verify_and_extract_digests_with_chunk_size<H: Hasher<Digest = D>, O: Encode>(
+        &self,
+        start_loc: Location<F>,
+        ops: &[O],
+        chunks: &[impl AsRef<[u8]>],
+        chunk_size: usize,
+        root: &D,
+    ) -> Result<qmdb::verify::ExtractedDigests<F, H>, merkle::Error<F>> {
         let mut collected = Vec::new();
-        let reconstructed_root =
-            self.reconstruct_root::<H, O>(start_loc, ops, chunks, N, Some(&mut collected))?;
+        let reconstructed_root = self.reconstruct_root::<H, O>(
+            start_loc,
+            ops,
+            chunks,
+            chunk_size,
+            Some(&mut collected),
+        )?;
         if reconstructed_root != *root {
             debug!("verification failed, root mismatch");
             return Err(merkle::Error::RootMismatch);
@@ -1436,6 +1459,31 @@ mod tests {
             .verify_and_extract_digests::<Sha256, _, N>(start, &operations, &chunks, &root)
             .unwrap();
         assert!(!extracted.is_empty());
+
+        // Runtime-sized chunks extract the same digests, and a mismatched size is malformed.
+        let runtime_chunks = chunks.iter().map(|chunk| &chunk[..]).collect::<Vec<_>>();
+        assert_eq!(
+            proof
+                .verify_and_extract_digests_with_chunk_size::<Sha256, _>(
+                    start,
+                    &operations,
+                    &runtime_chunks,
+                    N,
+                    &root,
+                )
+                .unwrap(),
+            extracted
+        );
+        assert!(matches!(
+            proof.verify_and_extract_digests_with_chunk_size::<Sha256, _>(
+                start,
+                &operations,
+                &runtime_chunks,
+                N * 2,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
 
         // The extractor should return the authenticated digest for every proven leaf.
         for loc in *start..*end {

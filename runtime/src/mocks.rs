@@ -571,6 +571,11 @@ macro_rules! forward_context {
     };
 }
 
+#[cfg(any(test, feature = "test-utils"))]
+mod read_gate;
+#[cfg(any(test, feature = "test-utils"))]
+pub use read_gate::{ReadGate, ReadGateBlob, ReadGateContext};
+
 /// Snapshot of the options observed by a [RecordingContext] or [RecordingBlob].
 #[cfg(any(test, feature = "test-utils"))]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

@@ -86,7 +86,7 @@ pub(crate) mod test {
             mmr::{self, Location},
         },
         qmdb::{
-            SnapshotBuild as _,
+            ProofExt as _, SnapshotBuild as _,
             any::{
                 batch::Slot,
                 ordered::{
@@ -99,7 +99,6 @@ pub(crate) mod test {
                 test::{fixed_db_config, fixed_db_config_partitioned},
             },
             floor::{Bounded, Policy, Proportional},
-            verify_proof,
         },
         translator::{OneCap, OrderedTranslator, TwoCap},
     };
@@ -1036,7 +1035,7 @@ pub(crate) mod test {
             for i in start_loc.as_u64()..end_loc.as_u64() {
                 let loc = Location::from(i);
                 let (proof, log) = db.proof(loc, max_ops).await.unwrap();
-                assert!(verify_proof::<Sha256, _, _>(&proof, loc, &log, &root));
+                assert!(proof.verify::<Sha256, _>(loc, &log, &root));
             }
 
             db.destroy().await.unwrap();
@@ -1286,8 +1285,7 @@ pub(crate) mod test {
             assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(verify_proof::<Sha256, _, _>(
-                &historical_proof,
+            assert!(historical_proof.verify::<Sha256, _>(
                 Location::new(5),
                 &historical_ops,
                 &root_hash
@@ -1308,8 +1306,7 @@ pub(crate) mod test {
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            assert!(verify_proof::<Sha256, _, _>(
-                &historical_proof,
+            assert!(historical_proof.verify::<Sha256, _>(
                 Location::new(5),
                 &historical_ops,
                 &root_hash
@@ -1339,8 +1336,7 @@ pub(crate) mod test {
             // Verify a single-op proof at the full commit size.
             let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
             assert_eq!(proof_ops.len(), 1);
-            assert!(verify_proof::<Sha256, _, _>(
-                &proof,
+            assert!(proof.verify::<Sha256, _>(
                 Location::new(1),
                 &proof_ops,
                 &root
@@ -1414,12 +1410,7 @@ pub(crate) mod test {
                 assert_eq!(proof.digests, historical_proof.digests);
 
                 // Verify proof against reference root
-                assert!(verify_proof::<Sha256, _, _>(
-                    &historical_proof,
-                    start_loc,
-                    &historical_ops,
-                    &root
-                ));
+                assert!(historical_proof.verify::<Sha256, _>(start_loc, &historical_ops, &root));
             }
 
             db.destroy().await.unwrap();

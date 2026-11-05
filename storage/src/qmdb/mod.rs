@@ -120,10 +120,7 @@ pub mod verify;
 
 pub use snapshot::SnapshotBuild;
 pub(super) use snapshot::build_snapshot_from_log;
-pub use verify::{
-    create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
-    verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
-};
+pub use verify::ProofExt;
 
 /// Reject a bound that cannot retain the bootstrap commit.
 pub(crate) fn validate_initialization_bound<F: Family>(

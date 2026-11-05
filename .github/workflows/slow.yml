@@ -141,7 +141,7 @@ jobs:
           - fuzz_dir: simd/fuzz
           # Apple Silicon has SHA-2 and SHA-3 without SVE.
           - fuzz_dir: simd/fuzz
-            os: macos-15
+            os: macos-latest
             simd-backend: neon
             cpu-features: "neon sha2 sha3"
           - fuzz_dir: stream/fuzz
@@ -245,8 +245,8 @@ jobs:
         tool: just@1.43.0,cargo-nextest@0.9.133
     - name: Run miri tests
       run: |
-        just miri -p commonware-runtime -p commonware-utils -p commonware-p2p --partition hash:${{matrix.partition}}/12
-        just miri-lenient -p commonware-parallel --partition hash:${{matrix.partition}}/12
+        just miri -p commonware-runtime -p commonware-utils -p commonware-p2p --partition slice:${{matrix.partition}}/12
+        just miri-lenient -p commonware-parallel --partition slice:${{matrix.partition}}/12
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"
@@ -273,9 +273,9 @@ jobs:
       matrix:
         include:
           - name: x86_64
-            os: ubuntu-latest
+            os: ubuntu-latest-16
           - name: arm64
-            os: ubuntu-24.04-arm
+            os: ubuntu-26.04-arm
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -322,7 +322,7 @@ jobs:
           - name: x86_64
             os: ubuntu-latest
           - name: arm64
-            os: ubuntu-24.04-arm
+            os: ubuntu-26.04-arm
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -341,7 +341,7 @@ jobs:
       run: >-
         cargo-nextest nextest run --archive-file "$RUNNER_TEMP/conformance.tar.zst"
         --workspace-remap "$GITHUB_WORKSPACE" --profile conformance
-        --partition hash:${{ matrix.partition }}/8
+        --partition slice:${{ matrix.partition }}/8
     - name: Check fixtures are unchanged
       run: git diff --exit-code
 

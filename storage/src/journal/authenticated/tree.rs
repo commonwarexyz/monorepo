@@ -964,7 +964,7 @@ mod tests {
             let proof = batch
                 .range_proof(tree.mem(), &hasher, range.clone(), 0)
                 .unwrap();
-            assert!(proof.verify_range_inclusion(&hasher, &leaves, range.start, &root));
+            assert!(proof.verify_range_inclusion(&hasher, range.start, &leaves, &root));
         }
 
         // Compare reconstructed nodes with a tree that retains every node.

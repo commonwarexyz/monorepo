@@ -1333,13 +1333,13 @@ mod tests {
         let root = mmr.root(&hasher, 0).unwrap();
         assert!(empty_proof.verify_range_inclusion(
             &hasher,
-            &[] as &[Digest],
             Location::<F>::new(0),
+            &[] as &[Digest],
             &root
         ));
         assert!(empty_proof.verify_multi_inclusion(
             &hasher,
-            &[] as &[(Digest, Location<F>)],
+            &[] as &[(Location<F>, Digest)],
             &root
         ));
 
@@ -1350,13 +1350,13 @@ mod tests {
         let root = mmr.root(&hasher, 0).unwrap();
         assert!(!empty_proof.verify_range_inclusion(
             &hasher,
-            &[] as &[Digest],
             Location::<F>::new(0),
+            &[] as &[Digest],
             &root
         ));
         assert!(!empty_proof.verify_multi_inclusion(
             &hasher,
-            &[] as &[(Digest, Location<F>)],
+            &[] as &[(Location<F>, Digest)],
             &root
         ));
 
@@ -1695,8 +1695,8 @@ mod tests {
         let root = mmr.root(&hasher, 0).unwrap();
         assert!(proof.verify_element_inclusion(
             &hasher,
-            &leaves[TEST_ELEMENT],
             test_element_loc,
+            &leaves[TEST_ELEMENT],
             &root
         ));
 
@@ -1713,8 +1713,8 @@ mod tests {
         let proof = mmr.range_proof(&hasher, range.clone(), 0).await.unwrap();
         assert!(proof.verify_range_inclusion(
             &hasher,
-            &leaves[range.to_usize_range()],
             test_element_loc,
+            &leaves[range.to_usize_range()],
             &root
         ));
 
@@ -1858,7 +1858,7 @@ mod tests {
         const TEST_ELEMENT: usize = 42;
         let loc: Location<F> = Location::new(TEST_ELEMENT as u64);
         let proof = mmr.proof(&hasher, loc, 0).await.unwrap();
-        assert!(proof.verify_element_inclusion(&hasher, &leaves[TEST_ELEMENT], loc, &root));
+        assert!(proof.verify_element_inclusion(&hasher, loc, &leaves[TEST_ELEMENT], &root));
 
         // Sync after flush succeeds (and must fsync the journal even though there is nothing
         // left to flush).
@@ -2389,8 +2389,8 @@ mod tests {
         let root = mmr.root(&hasher, 0).unwrap();
         assert!(historical_proof.verify_range_inclusion(
             &hasher,
-            &elements[2..6],
             Location::<F>::new(2),
+            &elements[2..6],
             &root
         ));
         let regular_proof = mmr
@@ -2502,8 +2502,8 @@ mod tests {
         // Verify proof works despite pruning
         assert!(historical_proof.verify_range_inclusion(
             &hasher,
-            &elements[35..39],
             Location::<F>::new(35),
+            &elements[35..39],
             &historical_root
         ));
 
@@ -2590,8 +2590,8 @@ mod tests {
 
         assert!(proof.verify_range_inclusion(
             &hasher,
-            &elements[range.to_usize_range()],
             range.start,
+            &elements[range.to_usize_range()],
             &expected_root, // Compare to historical (reference) root
         ));
 
@@ -2637,8 +2637,8 @@ mod tests {
         let root = mmr.root(&hasher, 0).unwrap();
         assert!(single_proof.verify_range_inclusion(
             &hasher,
-            &[element],
             Location::<F>::new(0),
+            &[element],
             &root
         ));
 

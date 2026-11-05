@@ -30,7 +30,7 @@ mod tests {
         journal::contiguous::Contiguous as _,
         merkle::{Family, Location, mmb, mmr},
         qmdb::{
-            Error,
+            Error, ProofExt as _,
             keyless::tests::{self, keyless_tests},
             sync,
         },
@@ -387,8 +387,7 @@ mod tests {
         let root = batch.root();
         let original_proof = batch.proof(&db).unwrap();
         let original_pins = batch.pinned_nodes(&db).unwrap();
-        assert!(crate::qmdb::verify_proof_and_pinned_nodes::<Sha256, _, _>(
-            &original_proof,
+        assert!(original_proof.verify_with_pinned_nodes::<Sha256, _>(
             start,
             &ops,
             &original_pins,
@@ -1041,12 +1040,7 @@ mod tests {
                     assert_eq!(db.get(Location::new(1)).await.unwrap(), Some(U64::new(22)));
                 }
                 let (proof, operations) = db.proof(Location::new(0), NZU64!(size)).await.unwrap();
-                assert!(crate::qmdb::verify_proof::<Sha256, _, _>(
-                    &proof,
-                    Location::new(0),
-                    &operations,
-                    &root,
-                ));
+                assert!(proof.verify::<Sha256, _>(Location::new(0), &operations, &root));
             });
         }
     }

@@ -759,7 +759,7 @@ pub(super) mod tests {
     use super::*;
     use crate::{
         merkle::{Family, Location},
-        qmdb::{verify_proof, verify_proof_and_pinned_nodes},
+        qmdb::ProofExt as _,
         translator::TwoCap,
     };
     use commonware_codec::EncodeShared;
@@ -1451,12 +1451,7 @@ pub(super) mod tests {
 
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
         let root = db.root();
-        assert!(verify_proof::<Sha256, _, _>(
-            &proof,
-            Location::new(0),
-            &ops,
-            &root
-        ));
+        assert!(proof.verify::<Sha256, _>(Location::new(0), &ops, &root));
 
         db.destroy().await.unwrap();
     }
@@ -1669,10 +1664,8 @@ pub(super) mod tests {
             let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
             assert_eq!(log_ops, *ops);
             assert_eq!(log_proof, proof);
-            assert!(verify_proof::<Sha256, _, _>(&proof, start, &ops, &root));
-            assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
-                &proof, start, &ops, &pins, &root
-            ));
+            assert!(proof.verify::<Sha256, _>(start, &ops, &root));
+            assert!(proof.verify_with_pinned_nodes::<Sha256, _>(start, &ops, &pins, &root));
         }
 
         // Flushing the applied batch prunes the store to its peaks. The late batch's base is
@@ -1709,8 +1702,7 @@ pub(super) mod tests {
         let flushed_root = flushed.root();
         let flushed_proof = flushed.proof(&db).unwrap();
         let flushed_pins = flushed.pinned_nodes(&db).unwrap();
-        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
-            &flushed_proof,
+        assert!(flushed_proof.verify_with_pinned_nodes::<Sha256, _>(
             flushed_start,
             &flushed_ops,
             &flushed_pins,
@@ -1816,12 +1808,7 @@ pub(super) mod tests {
         let max_ops = NZU64!(5);
         for i in 0..*db.bounds().end {
             let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
-            assert!(verify_proof::<Sha256, _, _>(
-                &proof,
-                Location::new(i),
-                &log,
-                &root
-            ));
+            assert!(proof.verify::<Sha256, _>(Location::new(i), &log, &root));
         }
 
         db.destroy().await.unwrap();
@@ -2632,12 +2619,7 @@ pub(super) mod tests {
         // Verify proof over the full range.
         let root = db.root();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(10000)).await.unwrap();
-        assert!(verify_proof::<Sha256, _, _>(
-            &proof,
-            Location::new(0),
-            &ops,
-            &root
-        ));
+        assert!(proof.verify::<Sha256, _>(Location::new(0), &ops, &root));
 
         // Expected: 1 initial commit + BATCHES * (KEYS_PER_BATCH + 1 commit).
         let expected = 1 + BATCHES * (KEYS_PER_BATCH + 1);
@@ -2780,12 +2762,7 @@ pub(super) mod tests {
         // Verify proof over the full range.
         let root = db.root();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
-        assert!(verify_proof::<Sha256, _, _>(
-            &proof,
-            Location::new(0),
-            &ops,
-            &root
-        ));
+        assert!(proof.verify::<Sha256, _>(Location::new(0), &ops, &root));
 
         // Expected: 1 initial commit + N sets + 1 commit.
         assert_eq!(db.bounds().end, 1 + N + 1);

@@ -9,8 +9,8 @@ use commonware_storage::{
     journal::{authenticated::Config as MerkleConfig, contiguous::variable::Config as VConfig},
     merkle::{Family as MerkleFamily, Location, mmb, mmr},
     qmdb::{
+        ProofExt as _,
         immutable::{Config, variable::Db as Immutable},
-        verify_proof,
     },
     translator::TwoCap,
 };
@@ -225,8 +225,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             last_commit_loc = Some(db.bounds().end - 1);
                             if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
                                 let root = db.root();
-                                let _ =
-                                    verify_proof::<Sha256, _, _>(&proof, safe_start, &ops, &root);
+                                let _ = proof.verify::<Sha256, _>(safe_start, &ops, &root);
                             }
                             db
                         } else {

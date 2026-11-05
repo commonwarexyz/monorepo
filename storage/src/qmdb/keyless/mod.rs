@@ -564,7 +564,7 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::qmdb::{verify_proof, verify_proof_and_pinned_nodes};
+    use crate::qmdb::ProofExt as _;
     use commonware_cryptography::Sha256;
     use commonware_parallel::Strategy;
     use commonware_runtime::{Supervisor as _, deterministic};
@@ -1179,12 +1179,7 @@ pub(crate) mod tests {
         assert_eq!(pending.root(), child.root());
         let db = db.apply_batch(child).await.unwrap();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
-        assert!(verify_proof::<Sha256, _, _>(
-            &proof,
-            Location::new(0),
-            &ops,
-            &db.root()
-        ));
+        assert!(proof.verify::<Sha256, _>(Location::new(0), &ops, &db.root()));
         db.destroy().await.unwrap();
     }
 
@@ -1344,10 +1339,8 @@ pub(crate) mod tests {
             let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
             assert_eq!(log_ops, *ops);
             assert_eq!(log_proof, proof);
-            assert!(verify_proof::<H, _, _>(&proof, start, &ops, &root));
-            assert!(verify_proof_and_pinned_nodes::<H, _, _>(
-                &proof, start, &ops, &pins, &root
-            ));
+            assert!(proof.verify::<H, _>(start, &ops, &root));
+            assert!(proof.verify_with_pinned_nodes::<H, _>(start, &ops, &pins, &root));
         }
 
         // Flushing the applied batch prunes the store to its peaks. The late batch's base is
@@ -1384,8 +1377,7 @@ pub(crate) mod tests {
         let flushed_root = flushed.root();
         let flushed_proof = flushed.proof(&db).unwrap();
         let flushed_pins = flushed.pinned_nodes(&db).unwrap();
-        assert!(verify_proof_and_pinned_nodes::<H, _, _>(
-            &flushed_proof,
+        assert!(flushed_proof.verify_with_pinned_nodes::<H, _>(
             flushed_start,
             &flushed_ops,
             &flushed_pins,
@@ -1597,21 +1589,11 @@ pub(crate) mod tests {
         let root = db.root();
 
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
-        assert!(verify_proof::<Sha256, _, _>(
-            &proof,
-            Location::new(0),
-            &ops,
-            &root,
-        ));
+        assert!(proof.verify::<Sha256, _>(Location::new(0), &ops, &root));
         assert_eq!(ops.len() as u64, 1 + ELEMENTS + 1);
 
         let (proof, ops) = db.proof(Location::new(10), NZU64!(5)).await.unwrap();
-        assert!(verify_proof::<Sha256, _, _>(
-            &proof,
-            Location::new(10),
-            &ops,
-            &root,
-        ));
+        assert!(proof.verify::<Sha256, _>(Location::new(10), &ops, &root));
         assert_eq!(ops.len(), 5);
 
         db.destroy().await.unwrap();
@@ -2294,26 +2276,16 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             assert!(
-                verify_proof::<Sha256, _, _>(&proof, Location::new(start_loc), &ops, &root,),
+                proof.verify::<Sha256, _>(Location::new(start_loc), &ops, &root),
                 "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops",
             );
             let expected_ops = std::cmp::min(max_ops, *db.bounds().end - start_loc);
             assert_eq!(ops.len() as u64, expected_ops);
 
             let wrong_root = Sha256::hash(&[&[0xFF; 32]]);
-            assert!(!verify_proof::<Sha256, _, _>(
-                &proof,
-                Location::new(start_loc),
-                &ops,
-                &wrong_root,
-            ));
+            assert!(!proof.verify::<Sha256, _>(Location::new(start_loc), &ops, &wrong_root));
             if start_loc > 0 {
-                assert!(!verify_proof::<Sha256, _, _>(
-                    &proof,
-                    Location::new(start_loc - 1),
-                    &ops,
-                    &root,
-                ));
+                assert!(!proof.verify::<Sha256, _>(Location::new(start_loc - 1), &ops, &root));
             }
         }
 
@@ -2373,7 +2345,7 @@ pub(crate) mod tests {
                 continue;
             }
             let (proof, ops) = db.proof(start_loc, NZU64!(max_ops)).await.unwrap();
-            assert!(verify_proof::<Sha256, _, _>(&proof, start_loc, &ops, &root,));
+            assert!(proof.verify::<Sha256, _>(start_loc, &ops, &root));
         }
 
         let aggressive_prune: Location<F> = Location::new(150);
@@ -2381,21 +2353,14 @@ pub(crate) mod tests {
 
         let new_oldest = db.bounds().start;
         let (proof, ops) = db.proof(new_oldest, NZU64!(20)).await.unwrap();
-        assert!(verify_proof::<Sha256, _, _>(
-            &proof, new_oldest, &ops, &root,
-        ));
+        assert!(proof.verify::<Sha256, _>(new_oldest, &ops, &root));
 
         let almost_all = db.bounds().end - 5;
         let db = db.prune(almost_all).await.unwrap();
         let final_oldest = db.bounds().start;
         if final_oldest < db.bounds().end {
             let (final_proof, final_ops) = db.proof(final_oldest, NZU64!(10)).await.unwrap();
-            assert!(verify_proof::<Sha256, _, _>(
-                &final_proof,
-                final_oldest,
-                &final_ops,
-                &root,
-            ));
+            assert!(final_proof.verify::<Sha256, _>(final_oldest, &final_ops, &root));
         }
 
         db.destroy().await.unwrap();
@@ -2688,12 +2653,7 @@ pub(crate) mod tests {
 
         let root = db.root();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
-        assert!(verify_proof::<Sha256, _, _>(
-            &proof,
-            Location::new(0),
-            &ops,
-            &root,
-        ));
+        assert!(proof.verify::<Sha256, _>(Location::new(0), &ops, &root));
         assert_eq!(db.bounds().end, 1 + BATCHES * (APPENDS_PER_BATCH + 1));
 
         db.destroy().await.unwrap();
@@ -2815,12 +2775,7 @@ pub(crate) mod tests {
 
         let root = db.root();
         let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
-        assert!(verify_proof::<Sha256, _, _>(
-            &proof,
-            Location::new(0),
-            &ops,
-            &root,
-        ));
+        assert!(proof.verify::<Sha256, _>(Location::new(0), &ops, &root));
         assert_eq!(db.bounds().end, 1 + N + 1);
 
         db.destroy().await.unwrap();

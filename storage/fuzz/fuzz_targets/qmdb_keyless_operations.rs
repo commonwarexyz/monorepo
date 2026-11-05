@@ -10,9 +10,8 @@ use commonware_storage::{
     journal::{authenticated::Config as MerkleConfig, contiguous::variable::Config as VConfig},
     merkle::{Family, Location, mmb, mmr},
     qmdb::{
-        Error,
+        Error, ProofExt as _,
         keyless::variable::{Config, Db as Keyless},
-        verify_proof,
     },
 };
 use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -439,8 +438,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     let root = db.root();
                     if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
-                                verify_proof::<Sha256, _, _>(
-                                    &proof,
+                                proof.verify::<Sha256, _>(
                                     start_loc,
                                     &ops,
                                     &root),
@@ -478,8 +476,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                         .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
                             .await {
                             assert!(
-                                verify_proof::<Sha256, _, _>(
-                                    &proof,
+                                proof.verify::<Sha256, _>(
                                     start_loc,
                                     &ops,
                                     &root),

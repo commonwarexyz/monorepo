@@ -11,10 +11,6 @@ fn bench_verify_multi_family<F: Family>(c: &mut Criterion, family: &str) {
         let (mem, root, samples) = multi_samples::<F>(n);
         let locations: Vec<_> = samples.iter().map(|(loc, _)| *loc).collect();
         let proof = block_on(verification::multi_proof(&mem, 0, &locations)).unwrap();
-        let elements: Vec<_> = samples
-            .into_iter()
-            .map(|(loc, element)| (element, loc))
-            .collect();
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         c.bench_function(
             &format!(
@@ -25,7 +21,7 @@ fn bench_verify_multi_family<F: Family>(c: &mut Criterion, family: &str) {
                 b.iter(|| {
                     assert!(black_box(&proof).verify_multi_inclusion(
                         &hasher,
-                        black_box(&elements),
+                        black_box(&samples),
                         &root
                     ))
                 })
