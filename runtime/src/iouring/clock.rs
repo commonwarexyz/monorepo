@@ -1,4 +1,4 @@
-//! Monotonic nanosecond time for sleep deadlines.
+//! Monotonic nanosecond time for sleep and request deadlines.
 //!
 //! A time is a `u64` count of nanoseconds since one [`Instant`] origin, plus
 //! one. The origin is taken on first use and shared by every worker and
@@ -22,8 +22,9 @@ use std::{
 /// still reaches it.
 pub const MAX: u64 = (i64::MAX as u64) & !1023;
 
-/// The process's origin, taken on first use.
-fn origin() -> Instant {
+/// The process's origin, taken on first use: the instant of time one. A hot
+/// path can keep a copy and convert with [`nanos_from`] instead.
+pub fn origin() -> Instant {
     /// The origin shared by every worker and runtime in the process.
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
     *ORIGIN.get_or_init(Instant::now)
@@ -33,7 +34,14 @@ fn origin() -> Instant {
 /// convert to the origin's time, one.
 #[inline]
 pub fn nanos(instant: Instant) -> u64 {
-    let since = instant.saturating_duration_since(origin());
+    nanos_from(origin(), instant)
+}
+
+/// The time of `instant`, as [`nanos`] computes it, given a copy of
+/// [`origin`].
+#[inline]
+pub fn nanos_from(origin: Instant, instant: Instant) -> u64 {
+    let since = instant.saturating_duration_since(origin);
     since
         .as_secs()
         .saturating_mul(1_000_000_000)
