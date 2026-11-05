@@ -163,6 +163,11 @@ impl<D: Digest> Cut<D> {
         &self.ordered
     }
 
+    /// Returns the tips of the newest incorporated record, shared.
+    pub(crate) fn shared_ordered(&self) -> Arc<[BlockRef<D>]> {
+        Arc::clone(&self.ordered)
+    }
+
     /// Returns the emitted height of every chain.
     pub(crate) fn emitted(&self) -> &[Height] {
         &self.emitted
@@ -293,6 +298,11 @@ impl<D: Digest> Expansion<D> {
     /// yielded position completed.
     pub(crate) const fn cut(&self) -> &Cut<D> {
         &self.cut
+    }
+
+    /// Returns the number of queued steps not started yet.
+    pub(crate) fn pending_steps(&self) -> usize {
+        self.steps.len()
     }
 
     /// Queues the opening of `record`, whose commitment is `commitment`.

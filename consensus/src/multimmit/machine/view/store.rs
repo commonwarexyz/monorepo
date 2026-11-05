@@ -18,8 +18,8 @@ use crate::{
         },
         scheme::Scheme,
         types::{
-            Artifact, ArtifactId, CertificateId, DigestedLeader, LeaderBlock, NoVote,
-            SelectedCommitments, TipRecord, Vote, VoteBody,
+            Artifact, ArtifactId, CertificateId, DigestedLeader, LeaderBlock, NoVote, TipRecord,
+            Vote, VoteBody,
         },
     },
     types::{Attributable, Height, Participant, View},
@@ -67,7 +67,7 @@ pub(super) enum ParentProof<S: Scheme, D: Digest> {
     Vqc(Held<VqcKind, S, D>),
 }
 
-/// A certified block later proposals may build on, with the tips and commitments it fixes.
+/// A certified block later proposals may build on, with the tips it fixes.
 #[derive(Clone, Debug)]
 pub(super) struct ParentRecord<S: Scheme, D: Digest> {
     pub(super) id: CertificateId<D>,
@@ -76,7 +76,6 @@ pub(super) struct ParentRecord<S: Scheme, D: Digest> {
     pub(super) canonical: Bytes,
     pub(super) proof: ParentProof<S, D>,
     pub(super) tips: Arc<Tips<D>>,
-    pub(super) commitments: SelectedCommitments<D>,
     /// Each chain's proposed tip height in the view this record's V-QC certified.
     pub(super) proposed: Vec<Height>,
     /// The commitment of [`Self::tip_record`], which a child leader block names as its history.
@@ -422,7 +421,6 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
             id,
             canonical,
             tips,
-            commitments,
             child_history,
         } = validated.into_parts();
         let record = ParentRecord {
@@ -433,7 +431,6 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
             proof: ParentProof::Vqc(held.clone()),
             proposed: certificate.leader().proposed_heights(),
             tips,
-            commitments,
             child_history,
             messages: certificate.tally().signers().count()
                 + certificate.novoters().count()
