@@ -13,7 +13,7 @@ use crate::{
             artifact::Held,
             capability::{Capabilities, Capability, CryptoJob},
             job::{Admit, Generation, Issued, SequenceId},
-            util::Drive,
+            util::{Drive, same_encoding},
             verification::Observation,
         },
         scheme::{CertificateVotes, Error as SchemeError, Scheme},
@@ -428,7 +428,7 @@ where
     S: Scheme,
     D: Digest,
 {
-    if certificate.leader() != leader || certificate.validate(config).is_err() {
+    if !same_encoding(certificate.leader(), leader) || certificate.validate(config).is_err() {
         return false;
     }
     enum MessageBody<D: Digest> {
@@ -899,6 +899,8 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
                         .vqc
                         .assembled
                         .insert(candidate.transcript.target, candidate.transcript.messages);
+                    // An assembled transcript is a forwarding input.
+                    self.forward_scans.remove(&candidate.transcript.view);
                     rescan = materialized;
                 } else {
                     let job = VqcAggregateJob {
@@ -1022,9 +1024,11 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
         set_member(&mut self.ready_certificate_views, view, ready);
 
         // Only live views have a first-forwarding duty. Certificates resolved for retired
-        // views supply finality evidence and proposal parents.
+        // views supply finality evidence and proposal parents. The scan that decides whether a
+        // local assembly holds a candidate back runs when forwarding is tried.
+        self.forward_scans.remove(&view);
         let live = view > self.retired_transitions;
-        let candidates = live.then(|| self.forward_candidates(view));
+        let candidates = live.then(|| self.unblocked_candidates(view));
         let vqc = candidates
             .as_ref()
             .is_some_and(|candidates| candidates.vqc.is_some());
