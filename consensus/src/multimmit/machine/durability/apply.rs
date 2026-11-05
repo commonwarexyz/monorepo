@@ -171,6 +171,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         sign: &SignEffect<S, H::Digest>,
         ids: Vec<ArtifactId<H::Digest>>,
     ) -> Result<(), ReplayError> {
+        ensure!(self.sign_fits(sign), Obligation);
         let requests = sign.requests();
         if let [SignRequest::LeaderBlock(request)] = requests {
             ensure!(
