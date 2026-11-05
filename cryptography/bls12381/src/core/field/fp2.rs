@@ -512,6 +512,25 @@ impl<F> Fp2<F> {
         }
     }
 
+    /// Returns `sum + value`, lifting each component of the value into the positive sum of the
+    /// matching component, as [`Field::accumulate_lift`] does.
+    #[inline(always)]
+    pub fn accumulate_lift<S: Simd>(simd: S, sum: Product<F, S>, value: Self) -> Product<F, S>
+    where
+        F: Field<S>,
+    {
+        Fp2 {
+            c0: Signed {
+                pos: F::accumulate_lift(simd, sum.c0.pos, value.c0),
+                neg: sum.c0.neg,
+            },
+            c1: Signed {
+                pos: F::accumulate_lift(simd, sum.c1.pos, value.c1),
+                neg: sum.c1.neg,
+            },
+        }
+    }
+
     /// Reduces both components of a product, as for [`Field::reduce_signed`] with the bias `K`.
     /// Runs through [`Field::kernel`], as its own kernel unless the representation inlines it.
     #[inline(always)]

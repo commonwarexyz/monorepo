@@ -417,6 +417,16 @@ pub trait Field<S: Simd>: Copy {
     /// lifting does not canonicalize the input.
     fn lift(self, simd: S) -> Self::Product;
 
+    /// Returns `sum + value`, lifting the value as [`Self::lift`] does and accumulating it as
+    /// [`Self::accumulate`] does.
+    ///
+    /// The default lifts the value and accumulates it; representations with wide products
+    /// multiply-add into the sum's accumulators, as for [`Self::accumulate_product`].
+    #[inline(always)]
+    fn accumulate_lift(simd: S, sum: Self::Product, value: Self) -> Self::Product {
+        Self::accumulate(simd, sum, value.lift(simd))
+    }
+
     /// Reduces a sum of at most [`Self::PRODUCTS`] products and prepares its limbs for reuse.
     ///
     /// The input must satisfy the integer and machine-accumulator limits for reduction. The
