@@ -1617,7 +1617,10 @@ mod harnesses {
     use super::SyncTestHarness;
     use crate::{
         merkle::{self, mmb, mmr},
-        qmdb::floor::Proportional,
+        qmdb::any::{
+            ordered::fixed::Config as OrderedFixedConfig,
+            unordered::fixed::Config as UnorderedFixedConfig,
+        },
         translator::TwoCap,
     };
     use commonware_cryptography::sha256::Digest;
@@ -1739,9 +1742,7 @@ mod harnesses {
         >;
         type Metadata = Digest;
 
-        fn config(
-            suffix: &str,
-        ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
+        fn config(suffix: &str) -> OrderedFixedConfig<TwoCap, commonware_parallel::Sequential> {
             crate::qmdb::any::test::fixed_db_config(suffix)
         }
 
@@ -1786,14 +1787,12 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch
-                .merkleize(&db, None::<Digest>, &mut Proportional)
-                .await
-                .unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, metadata, &mut Proportional)
+                .with_metadata(metadata)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -1869,14 +1868,12 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch
-                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
-                .await
-                .unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, metadata, &mut Proportional)
+                .with_metadata(metadata)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -1904,9 +1901,7 @@ mod harnesses {
         >;
         type Metadata = Digest;
 
-        fn config(
-            suffix: &str,
-        ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
+        fn config(suffix: &str) -> UnorderedFixedConfig<TwoCap, commonware_parallel::Sequential> {
             crate::qmdb::any::test::fixed_db_config(suffix)
         }
 
@@ -1951,14 +1946,12 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch
-                .merkleize(&db, None::<Digest>, &mut Proportional)
-                .await
-                .unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, metadata, &mut Proportional)
+                .with_metadata(metadata)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -2033,14 +2026,12 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch
-                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
-                .await
-                .unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, metadata, &mut Proportional)
+                .with_metadata(metadata)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();

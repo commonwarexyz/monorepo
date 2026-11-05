@@ -73,17 +73,17 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
     let root = Digest::from(input.root);
     let range = Location::<F>::new(input.range.start)..Location::<F>::new(input.range.end);
 
-    let Ok(proof_store) = ProofStore::new(&hasher, &proof, &input.elements, start_loc, &root)
+    let Ok(proof_store) = ProofStore::new(&hasher, &proof, start_loc, &input.elements, &root)
     else {
         return;
     };
 
     if let Ok(proof) = proof_store.range_proof(&hasher, range) {
-        let _ = proof.verify_range_inclusion(&hasher, &input.elements, start_loc, &root);
+        let _ = proof.verify_range_inclusion(&hasher, start_loc, &input.elements, &root);
         let _ = proof.verify_range_inclusion_and_extract_digests(
             &hasher,
-            &input.elements,
             start_loc,
+            &input.elements,
             &root,
         );
     }
@@ -127,15 +127,15 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
             &hasher,
             &sorted
                 .iter()
-                .map(|loc| (loc.encode(), *loc))
+                .map(|loc| (*loc, loc.encode()))
                 .collect::<Vec<_>>(),
             &root,
         );
 
         let _ = proof.verify_range_inclusion_and_extract_digests(
             &hasher,
-            &input.elements,
             start_loc,
+            &input.elements,
             &root,
         );
     }

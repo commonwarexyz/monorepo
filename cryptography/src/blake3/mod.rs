@@ -7,8 +7,8 @@
 //! # Example
 //! ```rust
 //! use commonware_cryptography::{Hasher, blake3::Blake3};
-//! use commonware_parallel::Rayon;
-//! use std::num::NonZeroUsize;
+//! use commonware_parallel::{Rayon, rayon::ThreadPoolBuilder};
+//! use commonware_utils::NZUsize;
 //!
 //! // Hash data in a single shot
 //! let digest = Blake3::hash(&[b"hello,", b"world!"]);
@@ -22,7 +22,7 @@
 //! println!("digest: {:?}", digest);
 //!
 //! // Hash a long message across a thread pool
-//! let strategy = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
+//! let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(4))).unwrap();
 //! let message = vec![7u8; 1 << 20];
 //! assert_eq!(
 //!     Blake3::hash_across(&[&message], &strategy),
@@ -466,7 +466,7 @@ mod tests {
     fn test_hash_splits_long_messages() {
         // One worker, planned as four, counts the jobs it runs while looping. Splitting a message
         // from outside the pool hands it one job, whose nested forks stay on the worker.
-        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(1).build().unwrap());
+        let pool = Arc::new(ThreadPoolBuilder::new(NZUsize!(1)).build().unwrap());
         let strategy =
             Explorer::parallel(&Rayon::with_pool(pool.clone()).with_parallelism(NZUsize!(4)));
         let data = random(2 * MIN_SPLIT_LEN, 0);

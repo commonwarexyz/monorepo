@@ -17,7 +17,6 @@ use commonware_storage::{
             traits::{BatchableDb, DbAny, MerkleizedBatch},
         },
         current,
-        floor::Proportional,
     },
     translator::TwoCap,
 };
@@ -651,7 +650,7 @@ macro_rules! impl_test_db {
                 let (reads, staged) = self.new_batch().stage(keys, self).await.unwrap();
                 let slots = settle(reads)?;
                 Ok(staged
-                    .merkleize(slots, Vec::new(), None, self, &mut Proportional)
+                    .merkleize(slots, Vec::new(), self)
                     .await
                     .unwrap())
             }
@@ -741,10 +740,10 @@ type CurrentOrdered = current::ordered::fixed::Db<
     Sequential,
 >;
 
-fn any_config(suffix: &str) -> any::FixedConfig<TwoCap, Sequential> {
+fn any_config(suffix: &str) -> any::Config<TwoCap, FixedJournalConfig, Sequential> {
     let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
-    any::FixedConfig {
-        merkle_config: MerkleConfig {
+    any::Config {
+        merkle: MerkleConfig {
             journal_partition: format!("transfers-journal-{suffix}"),
             metadata_partition: format!("transfers-metadata-{suffix}"),
             items_per_blob: NZU64!(11),
@@ -753,7 +752,7 @@ fn any_config(suffix: &str) -> any::FixedConfig<TwoCap, Sequential> {
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: FixedJournalConfig {
+        log: FixedJournalConfig {
             partition: format!("transfers-log-{suffix}"),
             items_per_blob: NZU64!(7),
             page_cache,
@@ -767,11 +766,11 @@ fn any_config(suffix: &str) -> any::FixedConfig<TwoCap, Sequential> {
     }
 }
 
-fn current_config(suffix: &str) -> current::FixedConfig<TwoCap, Sequential> {
+fn current_config(suffix: &str) -> current::Config<TwoCap, FixedJournalConfig, Sequential> {
     let any = any_config(suffix);
-    current::FixedConfig {
-        merkle_config: any.merkle_config,
-        journal_config: any.journal_config,
+    current::Config {
+        merkle: any.merkle,
+        log: any.log,
         grafted_metadata_partition: format!("transfers-grafted-{suffix}"),
         translator: TwoCap,
         init_cache: any.init_cache,
@@ -780,16 +779,16 @@ fn current_config(suffix: &str) -> current::FixedConfig<TwoCap, Sequential> {
     }
 }
 
-fn variable_config(suffix: &str) -> any::VariableConfig<TwoCap, ((), ()), Sequential> {
+fn variable_config(suffix: &str) -> any::unordered::variable::Config<TwoCap, ((), ()), Sequential> {
     let any = any_config(suffix);
-    any::VariableConfig {
-        merkle_config: any.merkle_config,
-        journal_config: VariableJournalConfig {
+    any::unordered::variable::Config {
+        merkle: any.merkle,
+        log: VariableJournalConfig {
             partition: format!("transfers-log-{suffix}"),
             items_per_section: NZU64!(7),
             compression: None,
             codec_config: ((), ()),
-            page_cache: any.journal_config.page_cache,
+            page_cache: any.log.page_cache,
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
         },
@@ -1358,7 +1357,7 @@ fn selection_reads_later_rounds_through_expand() {
             ]
         );
         let merkleized = staged
-            .merkleize(slots, Vec::new(), None, &proposer, &mut Proportional)
+            .merkleize(slots, Vec::new(), &proposer)
             .await
             .unwrap();
         let proposed = merkleized.root();

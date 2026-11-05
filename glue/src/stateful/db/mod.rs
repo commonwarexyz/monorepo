@@ -80,9 +80,10 @@
 //! # Failures
 //!
 //! Database failures are fatal. [`DatabaseSet`] implementations panic when a database fails to
-//! open, apply, finalize, or prune, and [`Barrier::durable`] panics when a deferred sync fails. A
-//! mutation that is cancelled also loses its database until restart (see [`Shared`]). A database
-//! that fails state sync is reported through the error returned by [`StateSyncSet::sync`].
+//! open, apply, finalize, or prune, and [`Barrier::durable`] panics when a deferred sync fails.
+//! Cancelling a mutation can leave some databases usable, but the set and all its handles must
+//! still be discarded and recovered on restart (see [`DatabaseSet`]). A database that fails state
+//! sync is reported through the error returned by [`StateSyncSet::sync`].
 
 use commonware_actor::mailbox::{self, Policy};
 use commonware_consensus::{
@@ -494,6 +495,10 @@ impl Barrier {
 /// # Mutation Safety
 ///
 /// Calls to [`Self::apply`], [`Self::finalize`], and [`Self::prune`] must not overlap.
+/// Cancelling a pending call may leave some members completed, others untouched, and others
+/// [lost](Shared). Discard the entire set and all handles to its members, including clones and
+/// readers, and recover on restart, even if every member remains accessible.
+///
 /// Implementations panic if a database mutation fails (see
 /// [Failures](crate::stateful::db#failures)).
 pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
@@ -561,6 +566,8 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     ///
     /// Returns once every database exposes its batch as an independently recoverable checkpoint.
     /// Durability starts separately with [`Self::finalize`].
+    ///
+    /// See [Mutation Safety](DatabaseSet#mutation-safety) for cancellation requirements.
     fn apply(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send;
 
     /// Starts persisting every checkpoint applied before this call.
@@ -568,12 +575,16 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// The returned [`Barrier`] resolves once that state is durable in every database. Batches
     /// applied while it is pending are not covered and need a later finalization. The barrier
     /// must be awaited before finalizing again.
+    ///
+    /// See [Mutation Safety](DatabaseSet#mutation-safety) for cancellation requirements.
     fn finalize(&self) -> impl Future<Output = Barrier> + Send;
 
     /// Prunes each database to its target in `targets`.
     ///
     /// The state represented by `targets` must already be durable, and no barrier may be pending.
     /// Pruning effects must be durable before this returns.
+    ///
+    /// See [Mutation Safety](DatabaseSet#mutation-safety) for cancellation requirements.
     fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
     /// Returns the targets of the latest applied checkpoints (which need not be durable yet).
@@ -1982,7 +1993,9 @@ mod tests {
         Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate, dispatch_queued_tips,
         drain_generation_updates, mailbox,
     };
-    use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
+    use crate::stateful::tests::mocks::{
+        FlushControl, TestDb as ObservedDb, TestMerkleized, TestUnmerkleized, anchor as mock_anchor,
+    };
     use commonware_cryptography::sha256;
     use commonware_macros::select;
     use commonware_runtime::{
@@ -2173,10 +2186,12 @@ mod tests {
             }
         }
 
-        fn any_fixed_config(suffix: &str) -> storage_any::FixedConfig<TwoCap, Sequential> {
+        fn any_fixed_config(
+            suffix: &str,
+        ) -> storage_any::Config<TwoCap, FixedJournalConfig, Sequential> {
             storage_any::Config {
-                merkle_config: merkle_config(suffix),
-                journal_config: fixed_journal_config(suffix),
+                merkle: merkle_config(suffix),
+                log: fixed_journal_config(suffix),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
@@ -2186,10 +2201,10 @@ mod tests {
 
         fn any_variable_config(
             suffix: &str,
-        ) -> storage_any::VariableConfig<TwoCap, ((), ()), Sequential> {
+        ) -> storage_any::Config<TwoCap, VariableJournalConfig<((), ())>, Sequential> {
             storage_any::Config {
-                merkle_config: merkle_config(suffix),
-                journal_config: variable_journal_config(suffix, ((), ())),
+                merkle: merkle_config(suffix),
+                log: variable_journal_config(suffix, ((), ())),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
@@ -2197,10 +2212,12 @@ mod tests {
             }
         }
 
-        fn current_fixed_config(suffix: &str) -> storage_current::FixedConfig<TwoCap, Sequential> {
+        fn current_fixed_config(
+            suffix: &str,
+        ) -> storage_current::Config<TwoCap, FixedJournalConfig, Sequential> {
             storage_current::Config {
-                merkle_config: merkle_config(suffix),
-                journal_config: fixed_journal_config(suffix),
+                merkle: merkle_config(suffix),
+                log: fixed_journal_config(suffix),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
@@ -2211,10 +2228,10 @@ mod tests {
 
         fn current_variable_config(
             suffix: &str,
-        ) -> storage_current::VariableConfig<TwoCap, ((), ()), Sequential> {
+        ) -> storage_current::Config<TwoCap, VariableJournalConfig<((), ())>, Sequential> {
             storage_current::Config {
-                merkle_config: merkle_config(suffix),
-                journal_config: variable_journal_config(suffix, ((), ())),
+                merkle: merkle_config(suffix),
+                log: variable_journal_config(suffix, ((), ())),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
@@ -2227,7 +2244,7 @@ mod tests {
             suffix: &str,
         ) -> storage_immutable::fixed::Config<TwoCap, Sequential> {
             storage_immutable::Config {
-                merkle_config: merkle_config(suffix),
+                merkle: merkle_config(suffix),
                 log: fixed_journal_config(suffix),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
@@ -2238,7 +2255,7 @@ mod tests {
             suffix: &str,
         ) -> storage_immutable::variable::Config<TwoCap, ((), ()), Sequential> {
             storage_immutable::Config {
-                merkle_config: merkle_config(suffix),
+                merkle: merkle_config(suffix),
                 log: variable_journal_config(suffix, ((), ())),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
@@ -3804,6 +3821,39 @@ mod tests {
 
             drop(reader1);
             apply.await;
+        });
+    }
+
+    #[test]
+    fn tuple_apply_cancellation_leaves_completed_and_untouched_members() {
+        deterministic::Runner::default().start(|_context| async move {
+            type DbSet = (Shared<ObservedDb>, Shared<ObservedDb>);
+
+            let first = FlushControl::default();
+            let second = FlushControl::default();
+            let databases = (
+                Shared::new("test", ObservedDb::gated(first.clone())),
+                Shared::new("test", ObservedDb::gated(second.clone())),
+            );
+            let readers = <DbSet as DatabaseSet<deterministic::Context>>::readers(&databases);
+            let reader2 = readers.1.read().await;
+
+            // The first member finishes while the second waits for `reader2` to be released.
+            let mut apply = Box::pin(<DbSet as DatabaseSet<deterministic::Context>>::apply(
+                &databases,
+                (TestMerkleized, TestMerkleized),
+            ));
+            assert!(apply.as_mut().now_or_never().is_none());
+
+            // Cancel the apply, then release the reader it was waiting behind.
+            drop(apply);
+            drop(reader2);
+
+            // Neither member was lost, yet only the first applied its batch.
+            assert!(readers.0.read().now_or_never().is_some());
+            assert!(readers.1.read().now_or_never().is_some());
+            assert_eq!(first.applied.load(Ordering::Relaxed), 1);
+            assert_eq!(second.applied.load(Ordering::Relaxed), 0);
         });
     }
 

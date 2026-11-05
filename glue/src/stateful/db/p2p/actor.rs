@@ -378,11 +378,7 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
         mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
-        qmdb::{
-            any::{FixedConfig, unordered::fixed},
-            floor::Proportional,
-            sync,
-        },
+        qmdb::{any::unordered::fixed, sync},
         translator::TwoCap,
     };
     use commonware_utils::{
@@ -575,10 +571,10 @@ mod tests {
         }
     }
 
-    fn db_config(suffix: &str) -> FixedConfig<TwoCap, Sequential> {
+    fn db_config(suffix: &str) -> fixed::Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
-        FixedConfig {
-            merkle_config: MmrJournalConfig {
+        fixed::Config {
+            merkle: MmrJournalConfig {
                 journal_partition: format!("{suffix}-mmr-journal"),
                 metadata_partition: format!("{suffix}-mmr-metadata"),
                 items_per_blob: NZU64!(11),
@@ -587,7 +583,7 @@ mod tests {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FixedLogConfig {
+            log: FixedLogConfig {
                 partition: format!("{suffix}-log-journal"),
                 items_per_blob: NZU64!(7),
                 page_cache,
@@ -618,7 +614,7 @@ mod tests {
         let batch = db
             .new_batch()
             .write(key, Some(value))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .expect("batch should merkleize");
         let db = db.apply_batch(batch).await.expect("batch should apply");
@@ -1685,10 +1681,7 @@ mod tests {
                 let value = Sha256::hash(&[b"value", &index.to_be_bytes()]);
                 batch = batch.write(key, Some(value));
             }
-            let batch = batch
-                .merkleize(&database, None, &mut Proportional)
-                .await
-                .unwrap();
+            let batch = batch.merkleize(&database).await.unwrap();
             let database = database.apply_batch(batch).await.unwrap();
             let bounds = database.bounds();
             let target = sync::Target::new(database.root(), bounds.clone().try_into().unwrap());

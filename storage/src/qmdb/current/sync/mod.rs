@@ -9,7 +9,7 @@
 //! the module documentation). The sync engine operates on the **ops root**, not the canonical root:
 //! it downloads operations and verifies each batch against the ops root using ops-tree range proofs
 //! (identical to `any` sync). Callers that verify current ops proofs directly should use
-//! [crate::qmdb::verify_proof]. [crate::qmdb::current::proof::OpsRootWitness] can be used by
+//! [crate::qmdb::ProofExt::verify]. [crate::qmdb::current::proof::OpsRootWitness] can be used by
 //! callers that need to authenticate the synced ops root against a trusted canonical root; the sync
 //! engine does not perform this check itself.
 //!
@@ -62,7 +62,7 @@ impl<T: Translator, J: Clone, S: Strategy, B> Config for super::Config<T, J, S, 
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
-        self.journal_config.clone()
+        self.log.clone()
     }
 }
 
@@ -241,10 +241,10 @@ where
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, qmdb::Error<F>> {
-        let strategy = config.merkle_config.strategy.clone();
+        let strategy = config.merkle.strategy.clone();
         build_db::<F, _, U, _, H, _, N, _>(
             context,
-            config.merkle_config,
+            config.merkle,
             log,
             config.translator,
             pinned_nodes,
@@ -282,7 +282,7 @@ where
 
         qmdb::sync::local_pinned_nodes::<F, _, H, S>(
             context,
-            config.merkle_config.clone(),
+            config.merkle.clone(),
             target,
             inactivity_floor,
         )

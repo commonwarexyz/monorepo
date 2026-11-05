@@ -10,9 +10,8 @@ use commonware_storage::{
     qmdb::{
         any::{ordered::Update, traits::DbAny as _, value::FixedEncoding as FixedEncodingGeneric},
         current::{
-            FixedConfig as Config,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
-            ordered::fixed::Db as CurrentDb,
+            ordered::fixed::{Config, Db as CurrentDb},
         },
     },
     translator::OneCap,
@@ -123,7 +122,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 fn test_config(name: &str) -> Config<OneCap, Sequential> {
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(2));
     Config {
-        merkle_config: MerkleConfig {
+        merkle: MerkleConfig {
             journal_partition: format!("{name}-merkle"),
             metadata_partition: format!("{name}-meta"),
             items_per_blob: NZU64!(17),
@@ -132,7 +131,7 @@ fn test_config(name: &str) -> Config<OneCap, Sequential> {
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: FConfig {
+        log: FConfig {
             partition: format!("{name}-log"),
             items_per_blob: NZU64!(13),
             write_buffer: NZUsize!(1024),
@@ -202,7 +201,7 @@ async fn merkleize<F: Graftable>(
     model: &mut BTreeMap<Key, Value>,
 ) -> (Arc<Merkleized<F>>, Recorder<Key, Value>) {
     let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
-    let merkleized = batch.merkleize(db, None, &mut policy).await.unwrap();
+    let merkleized = batch.merkleize_with(db, &mut policy).await.unwrap();
     let bounds = merkleized.bounds();
     policy.check(
         model,
@@ -222,7 +221,7 @@ async fn rebuild<F: Graftable>(
     original: &Recorder<Key, Value>,
 ) -> Arc<Merkleized<F>> {
     let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
-    let merkleized = batch.merkleize(db, None, &mut policy).await.unwrap();
+    let merkleized = batch.merkleize_with(db, &mut policy).await.unwrap();
     policy.assert_same_walk(original);
     merkleized
 }

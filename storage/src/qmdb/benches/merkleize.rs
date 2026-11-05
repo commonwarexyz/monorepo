@@ -26,8 +26,13 @@ use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{self, full},
     qmdb::{
-        any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
-        floor::Proportional,
+        any::{
+            traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
+            unordered::{fixed::Config as AnyFixedConfig, variable::Config as AnyVariableConfig},
+        },
+        current::unordered::{
+            fixed::Config as CurrentFixedConfig, variable::Config as CurrentVariableConfig,
+        },
     },
     translator::EightCap,
 };
@@ -325,10 +330,10 @@ fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
 pub(crate) fn any_fix_cfg_with_cache(
     ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::any::FixedConfig<EightCap, Rayon> {
-    commonware_storage::qmdb::any::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+) -> AnyFixedConfig<EightCap, Rayon> {
+    AnyFixedConfig {
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: fix_log_cfg(pc),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
@@ -339,10 +344,10 @@ pub(crate) fn any_fix_cfg_with_cache(
 fn any_var_cfg_with_cache(
     ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ()), Rayon> {
-    commonware_storage::qmdb::any::VariableConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: var_log_cfg(pc),
+) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
+    AnyVariableConfig {
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: var_log_cfg(pc),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
@@ -353,10 +358,10 @@ fn any_var_cfg_with_cache(
 pub(crate) fn cur_fix_cfg_with_cache(
     ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
-    commonware_storage::qmdb::current::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+) -> CurrentFixedConfig<EightCap, Rayon> {
+    CurrentFixedConfig {
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
@@ -368,10 +373,10 @@ pub(crate) fn cur_fix_cfg_with_cache(
 fn cur_var_cfg_with_cache(
     ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ()), Rayon> {
-    commonware_storage::qmdb::current::VariableConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: var_log_cfg(pc),
+) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
+    CurrentVariableConfig {
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: var_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
@@ -397,7 +402,7 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
 
     for _ in 0..churn_batches {
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         db = db.apply_batch(merkleized).await.unwrap();
     }
     let db = db.commit().await.unwrap();
@@ -407,7 +412,7 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
     for _ in 0..iters {
         let start = Instant::now();
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         black_box(merkleized.root());
         total += start.elapsed();
     }
@@ -514,7 +519,7 @@ where
             self.options.num_keys,
             &mut self.rng,
         );
-        self.parent = Some(batch.merkleize(db, None, &mut Proportional).await.unwrap());
+        self.parent = Some(batch.merkleize(db).await.unwrap());
     }
 
     async fn iter(&mut self) -> Self::Output {
@@ -540,7 +545,7 @@ where
                 &mut self.rng,
             )
         };
-        let merkleized = batch.merkleize(db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(db).await.unwrap();
         merkleized.root()
     }
 

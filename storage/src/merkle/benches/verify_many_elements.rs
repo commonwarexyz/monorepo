@@ -33,8 +33,8 @@ fn bench_verify_many_elements_family<F: Family>(c: &mut Criterion, family: &str)
                             for (range, elements, proof) in proofs {
                                 assert!(proof.verify_range_inclusion(
                                     &hasher,
-                                    &elements,
                                     range.start,
+                                    &elements,
                                     &root
                                 ));
                             }

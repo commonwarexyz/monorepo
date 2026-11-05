@@ -58,10 +58,7 @@ use commonware_storage::{
     Context as Ctx,
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full, mmb},
-    qmdb::{
-        any::{FixedConfig, batch::Slot},
-        floor::Proportional,
-    },
+    qmdb::any::{batch::Slot, unordered::fixed::Config as AnyConfig},
     translator::EightCap,
 };
 use commonware_utils::{NZU64, NZUsize, TestRng, futures::try_join_all};
@@ -298,11 +295,11 @@ fn disk_delta(label: &str, before: DiskStats, after: DiskStats, elapsed_ms: f64)
     )
 }
 
-fn config<E: Strategizer>(ctx: &E, args: &Args) -> FixedConfig<EightCap, Rayon> {
+fn config<E: Strategizer>(ctx: &E, args: &Args) -> AnyConfig<EightCap, Rayon> {
     let page_size = args.logical.unwrap_or(paged::page_size(args.page));
     let page_cache = CacheRef::new(page_size, NZUsize!(args.cache));
-    FixedConfig {
-        merkle_config: full::Config {
+    AnyConfig {
+        merkle: full::Config {
             journal_partition: "cold-merkle".into(),
             metadata_partition: "cold-merkle-meta".into(),
             items_per_blob: NZU64!(args.blob),
@@ -311,7 +308,7 @@ fn config<E: Strategizer>(ctx: &E, args: &Args) -> FixedConfig<EightCap, Rayon> 
             strategy: ctx.strategy(NZUsize!(args.threads)),
             page_cache: page_cache.clone(),
         },
-        journal_config: FConfig {
+        log: FConfig {
             partition: "cold-log".into(),
             items_per_blob: NZU64!(args.blob),
             page_cache,
@@ -342,7 +339,7 @@ async fn seed<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E> {
         for k in i..end {
             batch = batch.write(key(k), Some(Sha256::hash(&[&rng.next_u32().to_be_bytes()])));
         }
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         db = db.apply_batch(merkleized).await.unwrap();
         db = db.commit().await.unwrap();
         i = end;
@@ -427,10 +424,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                         Slot::Put(Sha256::hash(&[&v.to_be_bytes()]))
                     })
                     .collect();
-                let merkleized = staged
-                    .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
-                    .await
-                    .unwrap();
+                let merkleized = staged.merkleize(slots, Vec::new(), &db).await.unwrap();
                 let t_merk = start.elapsed();
                 db = db.apply_batch(merkleized).await.unwrap();
                 db = db.commit().await.unwrap();
@@ -472,10 +466,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                     })
                     .collect();
                 let t0 = Instant::now();
-                let merkleized = staged
-                    .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
-                    .await
-                    .unwrap();
+                let merkleized = staged.merkleize(slots, Vec::new(), &db).await.unwrap();
                 let t_merk = t0.elapsed();
                 db = db.apply_batch(merkleized).await.unwrap();
                 db = db.commit().await.unwrap();

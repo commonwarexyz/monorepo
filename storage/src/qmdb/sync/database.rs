@@ -23,7 +23,7 @@ impl<T: Translator, J: Clone, S: Strategy, B> Config for crate::qmdb::any::Confi
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
-        self.journal_config.clone()
+        self.log.clone()
     }
 }
 

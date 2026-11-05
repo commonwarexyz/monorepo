@@ -15,11 +15,12 @@ use commonware_storage::{
         self,
         any::{ordered::fixed::Update, value::FixedEncoding},
         current::{
-            FixedConfig,
-            ordered::{fixed::Db, proof::ExclusionProof},
+            ordered::{
+                fixed::{Config, Db},
+                proof::ExclusionProof,
+            },
             proof::constant::OperationProof,
         },
-        floor::Proportional,
     },
     translator::OneCap,
 };
@@ -60,10 +61,10 @@ impl LifecycleArgs {
     }
 }
 
-fn config() -> FixedConfig<OneCap, Sequential> {
+fn config() -> Config<OneCap, Sequential> {
     let page_cache = CacheRef::new(NZU16!(4096), NZUsize!(8));
-    FixedConfig {
-        merkle_config: MerkleConfig {
+    Config {
+        merkle: MerkleConfig {
             journal_partition: "lifecycle-merkle-journal".into(),
             metadata_partition: "lifecycle-merkle-metadata".into(),
             items_per_blob: NZU64!(11),
@@ -72,7 +73,7 @@ fn config() -> FixedConfig<OneCap, Sequential> {
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: JournalConfig {
+        log: JournalConfig {
             partition: "lifecycle-operations".into(),
             items_per_blob: NZU64!(7),
             page_cache,
@@ -169,7 +170,7 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
             .write(key(2), Some(initial.clone()))
             .write(key(4), Some(FixedBytes::new(leaf(seed, 1))))
             .write(key(6), Some(FixedBytes::new(leaf(seed, 2))))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await?;
         let db = db.apply_batch(batch).await?.commit().await?;
         let before = membership(&db, initial).await?;
@@ -183,7 +184,7 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
                 .new_batch()
                 .write(key(2), Some(FixedBytes::new(leaf(seed, round + 3))))
                 .write(key(4), None)
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await?;
             db = db.apply_batch(batch).await?;
         }
@@ -207,11 +208,8 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
             .new_batch()
             .write(key(2), None)
             .write(key(6), None)
-            .merkleize(
-                &db,
-                Some(FixedBytes::new(leaf(seed, OVERWRITES + 3))),
-                &mut Proportional,
-            )
+            .with_metadata(Some(FixedBytes::new(leaf(seed, OVERWRITES + 3))))
+            .merkleize(&db)
             .await?;
         let db = db.apply_batch(batch).await?.commit().await?;
         assert!(db.is_empty());
