@@ -20,10 +20,16 @@
 //! so subtractions add a bias only in the final reductions. Their negative sums stay below
 //! `512p` in the positional representations.
 //!
+//! Representations with [`Field::SCHOOLBOOK`] multiply instead over the coefficients of
+//! `1, w, ..., w^5`, where `w^2 = v` and `w^6 = 1 + i`: each output coefficient is the sum of the
+//! products of the pairs of coefficients whose degrees add to its own, or to its own plus six,
+//! the latter with one factor first multiplied by `1 + i`. Every product accumulates into its
+//! output as it forms, so no sum is ever combined with another.
+//!
 //! Lines multiply with the same contract for their coefficients, but within [`LINE_BOUND`].
 
 use super::{
-    arithmetic::{Field, TIGHT},
+    arithmetic::{Field, TIGHT, unroll},
     fp::{BYTES as FP_BYTES, WORDS},
     fp2::{BYTES as FP2_BYTES, Fp2},
     fp6::{self, BYTES as FP6_BYTES, Fp6},
@@ -37,13 +43,6 @@ pub const BYTES: usize = 2 * FP6_BYTES;
 pub const BOUND: u64 = TIGHT;
 
 /// Largest integer bound of a component of a line coefficient, in units of `p`.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Documents the line contract, which the tests check."
-    )
-)]
 pub const LINE_BOUND: u64 = 64;
 
 /// The encoding of one.
@@ -255,7 +254,7 @@ impl<F> Fp12<F> {
     }
 
     /// Returns `self * rhs`, with Karatsuba's three products over `Fp6`, eighteen extension
-    /// products in all.
+    /// products in all, or every product of two coefficients for [`Field::SCHOOLBOOK`].
     ///
     /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
@@ -267,6 +266,9 @@ impl<F> Fp12<F> {
             #[inline(always)]
             move |simd: S| {
                 let (a, b) = (self, rhs);
+                if F::SCHOOLBOOK {
+                    return Self::mul_schoolbook(simd, a, b);
+                }
                 let t0 = a.c0.product(simd, &b.c0);
                 let t1 = a.c1.product(simd, &b.c1);
                 let a01 = a.c0.add(simd, a.c1).carry(simd);
@@ -276,8 +278,40 @@ impl<F> Fp12<F> {
         )
     }
 
+    /// Returns `a * b` with the thirty-six products of pairs of coefficients, each accumulated
+    /// into its output as it forms.
+    #[inline(always)]
+    fn mul_schoolbook<S: Simd>(simd: S, a: &Self, b: &Self) -> Self
+    where
+        F: Field<S>,
+    {
+        let a = coefficients(a);
+        let b = coefficients(b);
+        let twisted = twist::<{ BOUND + 1 }, S, F>(simd, &b);
+        from_coefficients(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
+            simd,
+            #[cfg_attr(not(debug_assertions), inline(always))]
+            |k| {
+                let k = DEGREE[k];
+                let acc = |sum, x: Fp2<F>, y| Fp2::<F>::accumulate_product(simd, sum, x, y);
+                // Coefficient k sums a_j b_(k - j), where b_(k - j) for j above k is the twisted
+                // coefficient of w^(k + 6 - j).
+                let mut sum = a[0].product(simd, b[k]);
+                unroll::<5>(
+                    #[inline(always)]
+                    |j| {
+                        let j = j + 1;
+                        let factor = if j <= k { b[k - j] } else { twisted[k + 5 - j] };
+                        sum = acc(sum, a[j], factor);
+                    },
+                );
+                sum
+            },
+        ))
+    }
+
     /// Returns `self * self`: `c0^2 + v c1^2 + ((c0 + c1)^2 - c0^2 - c1^2) w`, with three
-    /// squarings over `Fp6`.
+    /// squarings over `Fp6`, or every product of two coefficients for [`Field::SCHOOLBOOK`].
     ///
     /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
@@ -288,6 +322,9 @@ impl<F> Fp12<F> {
         simd.execute(
             #[inline(always)]
             move |simd: S| {
+                if F::SCHOOLBOOK {
+                    return Self::square_schoolbook(simd, self);
+                }
                 let t0 = self.c0.square_product(simd);
                 let t1 = self.c1.square_product(simd);
                 let sum = self.c0.add(simd, self.c1).carry(simd);
@@ -296,11 +333,46 @@ impl<F> Fp12<F> {
         )
     }
 
+    /// Returns `a * a` with the six squares of coefficients and the fifteen products of pairs,
+    /// each taken once with one factor doubled, accumulated into their outputs as they form.
+    #[inline(always)]
+    fn square_schoolbook<S: Simd>(simd: S, a: &Self) -> Self
+    where
+        F: Field<S>,
+    {
+        const K: u64 = BOUND + 1;
+        let a = coefficients(a);
+        let t = twist::<K, S, F>(simd, &a);
+        let mut d = [a[0]; 5];
+        unroll::<5>(
+            #[inline(always)]
+            |j| d[j] = a[j].double(simd).carry(simd),
+        );
+        from_coefficients(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
+            simd,
+            #[cfg_attr(not(debug_assertions), inline(always))]
+            |k| {
+                let acc = |sum, x: Fp2<F>, y| Fp2::<F>::accumulate_product(simd, sum, x, y);
+                let square = |x: Fp2<F>| x.square_product::<K, S>(simd);
+                // Coefficient k sums a_j a_l over pairs whose degrees add to k, or to k + 6 with
+                // the twisted coefficient t[l - 1] of w^(l + 6) in place of a_l.
+                match DEGREE[k] {
+                    0 => acc(acc(acc(square(a[0]), d[1], t[4]), d[2], t[3]), t[2], a[3]),
+                    1 => acc(acc(d[0].product(simd, a[1]), d[2], t[4]), d[3], t[3]),
+                    2 => acc(acc(acc(square(a[1]), d[0], a[2]), d[3], t[4]), t[3], a[4]),
+                    3 => acc(acc(d[0].product(simd, a[3]), d[1], a[2]), d[4], t[4]),
+                    4 => acc(acc(acc(square(a[2]), d[0], a[4]), d[1], a[3]), t[4], a[5]),
+                    _ => acc(acc(d[0].product(simd, a[5]), d[1], a[4]), d[2], a[3]),
+                }
+            },
+        ))
+    }
+
     /// Returns the product of `self` and the line `l0 + l2 w^2 + l3 w^3`, given `[l0, l2, l3]`.
     ///
     /// As an element, the line is `(l0 + l2 v) + l3 v w`, so Karatsuba's products over `Fp6` are
-    /// sparse: thirteen extension products in all. Every line component must have limb bound `1`
-    /// and integer bound at most [`LINE_BOUND`].
+    /// sparse: thirteen extension products in all, or eighteen for [`Field::SCHOOLBOOK`]. Every
+    /// line component must have limb bound `1` and integer bound at most [`LINE_BOUND`].
     /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn mul_by_line<S: Simd>(&self, simd: S, line: &[Fp2<F>; 3]) -> Self
@@ -311,6 +383,9 @@ impl<F> Fp12<F> {
             #[inline(always)]
             move |simd: S| {
                 let [l0, l2, l3] = *line;
+                if F::SCHOOLBOOK {
+                    return Self::mul_by_line_schoolbook(simd, self, [l0, l2, l3]);
+                }
                 let t0 = self.c0.product_by_01(simd, l0, l2);
                 let t1 = self.c1.product_by_1(simd, l3);
                 let sum = self.c0.add(simd, self.c1).carry(simd);
@@ -318,6 +393,36 @@ impl<F> Fp12<F> {
                 combine::<S, F>(simd, t0, t1, sum.product_by_01(simd, l0, l23))
             },
         )
+    }
+
+    /// Returns `a` times the line `l0 + l2 w^2 + l3 w^3` with the eighteen products of a
+    /// coefficient and a line coefficient, each accumulated into its output as it forms.
+    #[inline(always)]
+    fn mul_by_line_schoolbook<S: Simd>(simd: S, a: &Self, [l0, l2, l3]: [Fp2<F>; 3]) -> Self
+    where
+        F: Field<S>,
+    {
+        const K: u64 = LINE_BOUND + 1;
+        let a = coefficients(a);
+        let t2 = l2.mul_by_nonresidue::<K, S>(simd).carry(simd);
+        let t3 = l3.mul_by_nonresidue::<K, S>(simd).carry(simd);
+        from_coefficients(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
+            simd,
+            #[cfg_attr(not(debug_assertions), inline(always))]
+            |k| {
+                let acc = |sum, x: Fp2<F>, y| Fp2::<F>::accumulate_product(simd, sum, x, y);
+                // Coefficient k sums a_k l0, a_(k - 2) l2, and a_(k - 3) l3, with the twisted
+                // line coefficients against a_(k + 4) and a_(k + 3) where the degree wraps.
+                match DEGREE[k] {
+                    0 => acc(acc(a[0].product(simd, l0), a[4], t2), a[3], t3),
+                    1 => acc(acc(a[1].product(simd, l0), a[5], t2), a[4], t3),
+                    2 => acc(acc(a[2].product(simd, l0), a[0], l2), a[5], t3),
+                    3 => acc(acc(a[3].product(simd, l0), a[1], l2), a[0], l3),
+                    4 => acc(acc(a[4].product(simd, l0), a[2], l2), a[1], l3),
+                    _ => acc(acc(a[5].product(simd, l0), a[3], l2), a[2], l3),
+                }
+            },
+        ))
     }
 
     /// Returns `self^2` for `self` in the cyclotomic subgroup, where `self^(p^6 + 1) = 1`.
@@ -534,6 +639,28 @@ fn from_coefficients<T>([c00, c01, c02, c10, c11, c12]: [Fp2<T>; 6]) -> Fp12<T> 
             c2: c12,
         },
     }
+}
+
+/// Returns the coefficients of `1, w, ..., w^5`, where `w^2 = v`.
+#[inline(always)]
+const fn coefficients<T: Copy>(a: &Fp12<T>) -> [Fp2<T>; 6] {
+    [a.c0.c0, a.c1.c0, a.c0.c1, a.c1.c1, a.c0.c2, a.c1.c2]
+}
+
+/// The degree in `w` of each coefficient in the order of [`from_coefficients`].
+const DEGREE: [usize; 6] = [0, 2, 4, 1, 3, 5];
+
+/// Returns the coefficients of `w^7, ..., w^11` of an element with the given coefficients of
+/// `1, w, ..., w^5`: those of `w, ..., w^5` times `w^6 = 1 + i`, carried, with the bias `K`
+/// covering their imaginary components.
+#[inline(always)]
+fn twist<const K: u64, S: Simd, F: Field<S>>(simd: S, a: &[Fp2<F>; 6]) -> [Fp2<F>; 5] {
+    let mut twisted = [a[1]; 5];
+    unroll::<5>(
+        #[inline(always)]
+        |l| twisted[l] = a[l + 1].mul_by_nonresidue::<K, S>(simd).carry(simd),
+    );
+    twisted
 }
 
 /// Returns the parts of `(x + y s)^2` in `Fp4`, `x^2 + (1 + i) y^2` and `2 x y`, as carried

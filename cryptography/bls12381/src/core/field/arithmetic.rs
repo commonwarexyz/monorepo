@@ -122,6 +122,11 @@
 //! product and add or subtract it as [`Signed::add`] and [`Signed::sub`] do, and [`Rns`]
 //! multiply-adds each of the four products into the sum it belongs to.
 //!
+//! Where accumulating a product costs nothing beyond its multiplications, formulas over the
+//! higher extensions multiply every pair of coefficients and accumulate each product into the sum
+//! it belongs to, rather than forming Karatsuba's fewer products of sums and combining them with
+//! many more additions. [`Field::SCHOOLBOOK`] selects those formulas.
+//!
 //! Generic formulas must account for all of these bounds, including between calls. For repeated
 //! point operations, a coordinate contract can bound the inputs and show that the outputs satisfy
 //! the same contract. This does not require canonical coordinates between operations.
@@ -264,6 +269,14 @@ pub trait Field<S: Simd>: Copy {
     /// result in one call only when this covers all their components, and otherwise reduce each
     /// coefficient in its own kernel.
     const INTERLEAVE: usize = 1;
+
+    /// Whether formulas over the higher extensions form the product of every pair of
+    /// coefficients and accumulate each as it forms, through [`Self::accumulate_quadratic`],
+    /// rather than Karatsuba's fewer products of sums combined with more additions.
+    ///
+    /// Set where [`Self::accumulate_product`] costs no more than [`Self::product`], so that
+    /// every product lands in the sum it belongs to and the additions disappear.
+    const SCHOOLBOOK: bool = false;
 
     /// Loads up to [`Self::LANES`] big-endian integers, filling the remaining lanes with `fill`.
     ///
