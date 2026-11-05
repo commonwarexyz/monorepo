@@ -353,15 +353,10 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// can skip [Self::expect], and the exclusive access it requires, for such a key.
     #[commonware_macros::stability(ALPHA)]
     pub fn is_referenced(&self, key: &K) -> bool {
-        let Some(slot) = self.find_slot(key) else {
-            return false;
-        };
-        let state = &self.slots[slot].state;
-        match self.topology[slot].location() {
-            Location::Main => state.is_referenced(),
-            Location::Small => state.earned_promotion(),
-            Location::Free => unreachable!("resident slot cannot be free"),
-        }
+        // A reference bit is never set inside the correlation window, so for a Small resident it
+        // already means the resident earned promotion.
+        self.find_slot(key)
+            .is_some_and(|slot| self.slots[slot].state.is_referenced())
     }
 
     /// Removes `key`, returning whether it was present.
