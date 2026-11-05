@@ -32,10 +32,7 @@ use commonware_cryptography::{
 use commonware_utils::{Faults, N5f1, TestRng};
 use proptest::{collection::vec as prop_vec, prelude::*};
 use rand::seq::SliceRandom;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 type Digest = sha256::Digest;
 
@@ -183,57 +180,6 @@ fn attributed(
     votes: &[(Participant, VoteBody<Digest>)],
 ) -> impl Iterator<Item = (Participant, &VoteBody<Digest>)> {
     votes.iter().map(|(signer, vote)| (*signer, vote))
-}
-
-#[test]
-fn selected_commitments_follow_only_known_selected_edges() {
-    let epoch = Epoch::new(7);
-    let chain = ChainId::new(0);
-    let block = |height, label| BlockRef::new(chain, Height::new(height), digest(label));
-    let parent = block(8, b"parent");
-    let anchor = block(9, b"anchor");
-    let selected = block(10, b"selected");
-    let fork = block(10, b"fork");
-    let unknown = BlockRef::new(ChainId::new(1), Height::new(20), digest(b"unknown"));
-    let mut ancestry = PathIndex::default();
-    ancestry.insert(&[parent, anchor, selected]).unwrap();
-    ancestry.insert(&[anchor, fork]).unwrap();
-
-    let commitments = ancestry.selected(epoch, [anchor, selected, unknown]);
-    assert_eq!(commitments.epoch(), epoch);
-    assert_eq!(commitments.paths().len(), 1);
-    assert_eq!(commitments.paths()[0].as_ref(), &[parent, anchor, selected]);
-    let shared = commitments.clone();
-    assert!(Arc::ptr_eq(&shared.paths()[0], &commitments.paths()[0]));
-
-    let child = block(11, b"child");
-    ancestry.insert_parent(child, selected).unwrap();
-    assert_eq!(commitments.paths()[0].as_ref(), &[parent, anchor, selected]);
-    assert_eq!(
-        ancestry.selected(epoch, [child]).paths()[0].as_ref(),
-        &[parent, anchor, selected, child]
-    );
-}
-
-#[test]
-fn selected_commitments_certificate_anchor_opens_only_its_parent_edge() {
-    let fixture = cross_certificate_leader(6, 0, false);
-    let proposals = ProposalPaths::new::<Sha256, Bls<MinSig>>(&fixture.leader).unwrap();
-    let mut ancestry = PathIndex::default();
-    proposals.index(&mut ancestry).unwrap();
-    let commitments = ancestry.selected(
-        fixture.leader.round().epoch(),
-        fixture
-            .leader
-            .proposals()
-            .iter()
-            .map(|proposal| proposal.anchor().block_ref::<Sha256>()),
-    );
-    assert_eq!(commitments.paths().len(), 1);
-    assert_eq!(
-        commitments.paths()[0].as_ref(),
-        &fixture.certificate_history[1..]
-    );
 }
 
 #[test]

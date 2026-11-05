@@ -5,17 +5,14 @@ use crate::{
     multimmit::{
         scheme::Scheme,
         types::{
-            Anchor, BlockRef, ChainId, DigestedLeader, LeaderBlock, Position, SelectedCommitments,
+            Anchor, BlockRef, ChainId, DigestedLeader, LeaderBlock, Position,
             TransactionBlockHeader, VoteBody,
         },
     },
-    types::{Epoch, Height},
+    types::Height,
 };
 use commonware_cryptography::{Digest, Hasher};
-use std::{
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, btree_map::Entry};
 
 #[cfg(test)]
 std::thread_local! {
@@ -42,30 +39,6 @@ impl<D: Digest> Default for PathIndex<D> {
 }
 
 impl<D: Digest> PathIndex<D> {
-    /// Selects known contiguous suffixes, including only edges present in this index.
-    pub(crate) fn selected(
-        &self,
-        epoch: Epoch,
-        tips: impl IntoIterator<Item = BlockRef<D>>,
-    ) -> SelectedCommitments<D> {
-        let mut tips = tips.into_iter().collect::<BTreeSet<_>>();
-        let mut paths = Vec::new();
-        while let Some(tip) = tips.pop_last() {
-            let mut path = vec![tip];
-            let mut child = tip;
-            while let Some(parent) = self.parents.get(&child) {
-                path.push(*parent);
-                tips.remove(parent);
-                child = *parent;
-            }
-            if path.len() > 1 {
-                path.reverse();
-                paths.push(Arc::from(path));
-            }
-        }
-        SelectedCommitments::new(epoch, paths)
-    }
-
     /// Adds one authenticated parent edge to the index.
     pub(crate) fn insert_parent(
         &mut self,

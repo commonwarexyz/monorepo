@@ -1,13 +1,13 @@
 //! Marshal custody intake: producer blocks staged through the public mailbox until each is
 //! durable.
 //!
-//! Every staged block travels the router and the catalog's admission path (batching, pending
-//! writes, and durability cuts) on the deterministic runtime's in-memory storage, so the
-//! measurement is host time spent in marshal rather than disk latency.
+//! Every staged block travels marshal's custody path (appends to the custody stream and its
+//! durability cuts) on the deterministic runtime's in-memory storage, so the measurement is host
+//! time spent in marshal rather than disk latency.
 //!
 //! The timer stops only after the downstream work settles: once every custody token resolves,
-//! a short simulated sleep lets the deterministic executor run every task left ready (the
-//! router's admitted-block notices and backfill's bookkeeping) before the clock advances. Without
+//! a short simulated sleep lets the deterministic executor run every task left ready before the
+//! clock advances. Without
 //! it, whether that work lands inside the measured interval depends on the seed-shuffled order of
 //! the executor's ready queue.
 
@@ -20,7 +20,7 @@ use commonware_codec::{
 use commonware_consensus::{
     Reporter,
     multimmit::{
-        marshal::{ArchiveConfig, Config, LqcVerifier, Start, Update, open},
+        marshal::{Config, LqcVerifier, Update, open},
         mocks::{
             Bls, Committee,
             cluster::{BOUNDED_QUOTA, start_network},
@@ -39,10 +39,8 @@ use commonware_runtime::{
     buffer::paged::CacheRef,
     deterministic::{Config as RuntimeConfig, Runner as DeterministicRunner},
 };
-use commonware_storage::translator::TwoCap;
 use commonware_utils::{
-    Acknowledgement as _, NZDuration, NZU16, NZU64, NZUsize, Participant, Widen,
-    futures::try_join_all,
+    Acknowledgement as _, NZDuration, NZU16, NZUsize, Participant, Widen, futures::try_join_all,
 };
 use criterion::{Criterion, Throughput, criterion_group};
 use std::{
@@ -60,7 +58,9 @@ const RESOLVER_CHANNEL: u64 = 0;
 const BROADCAST_CHANNEL: u64 = 1;
 const RUNTIME_SEED: u64 = 0x5eed_c0de;
 /// Admission cuts the deterministic schedule needs to make every staged block durable.
-const ADMISSION_CUTS: u64 = 1;
+/// Most custody cuts the staged blocks may take: they arrive together, so appends coalesce while
+/// each cut is in flight.
+const MAX_CUSTODY_CUTS: u64 = 16;
 
 type Block = TransactionBlock<Sha256, Body>;
 
@@ -192,22 +192,17 @@ fn stage_blocks() -> Duration {
             },
         );
         let broadcast = broadcast_engine.start(broadcast_network);
-        let archive = ArchiveConfig::new(TwoCap, CacheRef::new(NZU16!(1024), NZUsize!(64)));
         let config = Config::new(
-            Start::Genesis(committee.config.genesis().clone()),
+            committee.config.genesis().clone(),
             "multimmit_marshal_bench".into(),
+            CacheRef::new(NZU16!(1024), NZUsize!(64)),
             committee.codec(),
             (),
-            archive,
-        )
-        .with_pending_segment_items(NZU64!(4096));
-        let (service, bridge) = open::<_, TwoCap, Sha256, Bls<MinPk>, Body, _>(
-            context.child("marshal"),
-            config,
-            buffer,
-        )
-        .await
-        .unwrap();
+        );
+        let (service, bridge) =
+            open::<_, Sha256, Bls<MinPk>, Body, _>(context.child("marshal"), config, buffer)
+                .await
+                .unwrap();
         let (resolver_engine, resolver) = p2p::Engine::new(
             context.child("resolver"),
             p2p::Config {
@@ -241,13 +236,12 @@ fn stage_blocks() -> Duration {
         context.sleep(Duration::from_millis(1)).await;
         let elapsed = started.elapsed();
         let metrics = context.encode();
-        let items = counter_total(&metrics, "admission_cut_scheduled_items_total");
-        let cuts = counter_total(&metrics, "admission_cut_triggers_total");
-        // Storage is in memory, so the timing shows intake CPU only; the cut count shows batching.
-        assert_eq!(items, Widen::<u64>::widen(BLOCKS));
-        assert_eq!(
-            cuts, ADMISSION_CUTS,
-            "admission cuts lost batching: {items} items in {cuts} cuts"
+        let cuts = counter_total(&metrics, "custody_cuts_total");
+        // Storage is in memory, so the timing shows intake CPU only; the cut count shows that
+        // staged blocks share durability cuts.
+        assert!(
+            cuts > 0 && cuts <= MAX_CUSTODY_CUTS,
+            "custody cuts lost batching: {BLOCKS} blocks in {cuts} cuts"
         );
 
         marshal.abort();

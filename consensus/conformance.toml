@@ -26,53 +26,25 @@ n_cases = 128
 hash = "379995b4bc3bef16f53780540cec9a04a3969dbcb4634a0516cd5c98203010ac"
 n_cases = 128
 
-["commonware_consensus::multimmit::marshal::actors::delivery::cursor::tests::conformance::StateConformance"]
-hash = "d1210e352c35f072b9d53d8446f8ce83e1dc3622819e42d0445542ed7a7a931a"
+["commonware_consensus::multimmit::marshal::store::blocks::tests::conformance::RowConformance"]
+hash = "1186d3b0184572bf345487410ef413047bf5aea35f2f2dbc2c9dc7c91038b4fd"
+n_cases = 256
+
+["commonware_consensus::multimmit::marshal::store::log::tests::conformance::ManifestConformance"]
+hash = "a126c35158f9379c40c1eb31b6b5fb3d3cd7dfcf7dd0df6f1f1604158ef2dc67"
+n_cases = 256
+
+["commonware_consensus::multimmit::marshal::store::meta::tests::conformance::StateConformance"]
+hash = "9cae7f7f648ee2e0592529f1a2297da4dbbfd8537fd8a6939e4526caecc3e1db"
 n_cases = 128
 
-["commonware_consensus::multimmit::marshal::actors::promoter::store::tests::conformance::PromotionStateConformance"]
-hash = "dc72ed94ba4c4f38baddb4e6a5f8c6a5c3a4566165d83f02bc7c52f7104a5d5f"
+["commonware_consensus::multimmit::marshal::store::proofs::tests::conformance::PartConformance"]
+hash = "c6c8fcc4bb73afd450ad7206211619c53f0d2b4199b83c2c0875311820642905"
 n_cases = 128
 
-["commonware_consensus::multimmit::marshal::storage::archive::tests::conformance::CodecConformance<Entry<Key,u64>>"]
-hash = "1fcc771b10923421ee538474db328982a37da5e8b8f4962ac136d53d33cdc871"
-n_cases = 128
-
-["commonware_consensus::multimmit::marshal::storage::blocks::tests::conformance::CodecConformance<BlockMeta<Sha256Digest>>"]
-hash = "8bbc1367244d6db9fa1640ef9af2b5c88ec335fa032abf81c5979579a991c84c"
-n_cases = 128
-
-["commonware_consensus::multimmit::marshal::storage::blocks::tests::conformance::CodecConformance<FinalBlockMeta<Sha256Digest>>"]
-hash = "83824539b439ef40b32cdcf909fa59e21ce608200ebdb985de8635755ae454b6"
-n_cases = 128
-
-["commonware_consensus::multimmit::marshal::storage::catalog_state::tests::conformance::CheckpointConformance"]
-hash = "b600a22410929bfaec7de5bb0618cc962a485976a9615343587778dc4542a5b1"
-n_cases = 128
-
-["commonware_consensus::multimmit::marshal::storage::catalog_state::tests::conformance::CommitCleanupCatalogStateConformance"]
-hash = "c4de4ae9ec12d40e8c338d99aec58770a92c4541769b892f3cb2399bad8d2506"
-n_cases = 128
-
-["commonware_consensus::multimmit::marshal::storage::catalog_state::tests::conformance::InstallCatalogStateConformance"]
-hash = "d8e9ec654afc23476f06ee9b165a0fa1236ca81607590c2c9a6eeb696516ae8d"
-n_cases = 128
-
-["commonware_consensus::multimmit::marshal::storage::catalog_state::tests::conformance::ReadyCatalogStateConformance"]
-hash = "885e2642e73441809cd043889688a1ad7fdc28007974df87f1014acdfb740ee1"
-n_cases = 128
-
-["commonware_consensus::multimmit::marshal::storage::floors::tests::conformance::FloorRecordConformance"]
-hash = "1cba8df1fbf604965efd5b5ab03fada8aef6c3d88e81221950a9192418dbfc9b"
-n_cases = 128
-
-["commonware_consensus::multimmit::marshal::storage::pending::manifest::tests::conformance::PendingStateConformance"]
-hash = "113615d36ef707a3fb17592c39b349a4f3d3cb33706a6eee84185ce646ce1acc"
-n_cases = 128
-
-["commonware_consensus::multimmit::marshal::storage::pending::record::tests::conformance::CodecConformance<PendingRecord<Sha256Digest>>"]
-hash = "193311b31518bf978fdef02998aa7c825949043826137aba5db4b4f2c98c44a3"
-n_cases = 128
+["commonware_consensus::multimmit::marshal::store::proofs::tests::conformance::RowConformance"]
+hash = "bf31c49504c827da07b08c6727ac746ccda8200ac39d41242ad795df3f0b2a6b"
+n_cases = 256
 
 ["commonware_consensus::multimmit::marshal::types::tests::conformance::CodecConformance<OutputIndex>"]
 hash = "0a64af25ec3432d415e1dc79a96c6e1eb1859a9babb22a843a805c819401f59d"
@@ -82,8 +54,16 @@ n_cases = 1024
 hash = "91ac9c1183e914f4d76b20646cccfea12e1fa8a5776028d1f53b36c1648221ca"
 n_cases = 128
 
-["commonware_consensus::multimmit::marshal::wire::tests::conformance::CodecConformance<BackfillKey<D>>"]
-hash = "ebe2e1334ace938c7fbd24c462f3373b8f6adfa7242504cb9e8a1d070422977e"
+["commonware_consensus::multimmit::marshal::wire::tests::conformance::CodecConformance<Key<D>>"]
+hash = "0197611b1b76003a5b6db0ac85b79e99cfbe0552174bc0e3296e0e2f3b00c5c9"
+n_cases = 128
+
+["commonware_consensus::multimmit::marshal::wire::tests::conformance::ProofConformance"]
+hash = "e96660afda70ba9337d297c8799d290045574fa06abc7323f0e458e4bcb26d4c"
+n_cases = 128
+
+["commonware_consensus::multimmit::marshal::wire::tests::conformance::RecordsConformance"]
+hash = "c821ef1907ab671fcad93fb707bd62f0f951a92b3d4d5ad4f84faadecfc383f8"
 n_cases = 128
 
 ["commonware_consensus::multimmit::storage::journal::tests::conformance::JournalRecordMinPkConformance"]
