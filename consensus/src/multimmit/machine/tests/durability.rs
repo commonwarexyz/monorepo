@@ -2625,3 +2625,78 @@ fn oversized_signing_completion_never_reaches_the_journal() {
     assert_eq!(machine.inspect().local_artifacts(), 0);
     assert!(machine.inspect().ready_artifacts().is_empty());
 }
+
+#[test]
+fn own_message_duties_from_the_retired_view_through_the_current_one_fit_their_family() {
+    // A floor retires the messages below it but not those of its own view, so with a retention
+    // of one view the duties of views 1, 2 and 3 are all outstanding once view 3 is entered.
+    let profile = Harness::builder(Role::Observer)
+        .participants(6)
+        .retention(ViewDelta::new(1))
+        .profile();
+    let mut machine = Machine::<Sha256, Bls<MinPk>>::new(profile);
+    machine.durable.state.view = View::new(3);
+    machine.durable.state.retired_view = View::new(1);
+    let duties = (1..=3)
+        .flat_map(|view| {
+            std::iter::repeat_n(
+                Discharge::new(
+                    0,
+                    DischargeKind::ViewRetired {
+                        view: View::new(view),
+                    },
+                ),
+                4,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(machine.discharges_fit(&duties));
+    let mut over = duties;
+    over.push(over[0]);
+    assert!(!machine.discharges_fit(&over));
+}
+
+#[test]
+fn signing_reservations_count_toward_the_duties_their_publications_will_carry() {
+    let mut machine = active_machine(Role::Observer);
+    let bound = machine.obligation_family_bounds().da;
+    let tip = machine.profile().protocol().genesis().tips()[0];
+    let epoch = machine.profile().protocol().epoch();
+    let header = |height: u64| {
+        TransactionBlockHeader::new(
+            epoch,
+            tip.chain(),
+            Height::new(height),
+            tip.digest(),
+            digest(&height.to_be_bytes()),
+        )
+        .unwrap()
+    };
+    let blocks = |heights: std::ops::RangeInclusive<u64>| {
+        SignEffect::new(
+            heights
+                .map(|height| SignRequest::TransactionBlock(header(height)))
+                .collect::<Vec<_>>()
+                .into(),
+        )
+    };
+    let bound = bound as u64;
+    assert!(machine.sign_fits(&blocks(1..=bound)));
+    assert!(!machine.sign_fits(&blocks(1..=bound + 1)));
+
+    // Reserved signatures hold their publications' duties: one more block no longer fits, so
+    // the work waits instead of failing the transition that would publish it.
+    machine
+        .durable
+        .state
+        .signing_reservations
+        .insert(EffectId::from_cursor(Cursor::new(1)), blocks(1..=bound));
+    assert!(!machine.sign_fits(&blocks(bound + 1..=bound + 1)));
+    assert!(!machine.discharges_fit(&[Discharge::new(
+        0,
+        DischargeKind::BlockCertifiedAtLeast {
+            chain: tip.chain(),
+            height: Height::new(bound + 1),
+        },
+    )]));
+}

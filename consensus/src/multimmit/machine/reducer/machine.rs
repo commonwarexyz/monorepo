@@ -519,6 +519,11 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
             machine.views.observe_forwarded::<H>(artifact);
         }
         machine.retire_view_history()?;
+        // Replay rejects a transition that leaves a publication family over its bound, so a
+        // checkpoint over the bound under this profile is rejected alike.
+        if !machine.discharges_fit(&[]) {
+            return Err(ReplayError::Transition(TransitionReason::Obligation));
+        }
         machine.lifecycle = Lifecycle::Recovering;
         Ok(machine)
     }
