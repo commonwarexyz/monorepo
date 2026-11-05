@@ -35,7 +35,7 @@ use futures::future;
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque, btree_map},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
@@ -513,20 +513,15 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
     }
 
-    /// The peer sets `peer` tracks: its own if it has a manager from [`ingress::Control`],
-    /// otherwise the network-wide ones while they list `peer`.
-    fn tracked_by(&self, peer: &P) -> Option<&Tracker<P>> {
-        self.own_trackers.get(peer).or_else(|| {
-            self.network_tracker
-                .contains(peer)
-                .then_some(&self.network_tracker)
-        })
+    /// The peer sets `peer` follows: its own if it has a manager from [`ingress::Control`],
+    /// otherwise the network-wide ones.
+    fn tracked_by(&self, peer: &P) -> &Tracker<P> {
+        self.own_trackers.get(peer).unwrap_or(&self.network_tracker)
     }
 
     /// Returns whether `peer` tracks `other`.
     fn tracks(&self, peer: &P, other: &P) -> bool {
-        self.tracked_by(peer)
-            .is_some_and(|tracker| tracker.contains(other))
+        self.tracked_by(peer).contains(other)
     }
 
     /// Returns whether `origin` and `recipient` each track the other, as an authenticated network
@@ -609,12 +604,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
             }
             ingress::Message::OwnPeerSets { owner } => {
-                if let btree_map::Entry::Vacant(entry) = self.own_trackers.entry(owner) {
-                    entry.insert(Tracker::new());
-                    self.broadcast_peer_list();
-                }
-            }
-            ingress::Message::ResetPeerSets { owner } => {
                 self.own_trackers.insert(owner, Tracker::new());
                 self.broadcast_peer_list();
             }
@@ -809,9 +798,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Broadcast updated peer list to all connected peer subscribers.
     ///
-    /// This runs when tracked membership changes ([`ingress::Message::Track`],
-    /// [`ingress::Message::OwnPeerSets`] or [`ingress::Message::ResetPeerSets`]), not when peers
-    /// are first discovered via register, links, or bandwidth limits.
+    /// This runs when tracked membership changes ([`ingress::Message::Track`] or
+    /// [`ingress::Message::OwnPeerSets`]), not when peers are first discovered via register,
+    /// links, or bandwidth limits.
     ///
     /// Subscribers whose receivers have been dropped are removed to prevent
     /// memory leaks.
@@ -825,10 +814,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Peers used when expanding [`Recipients::All`] for a sender.
     fn connected_peers_for(&self, sender: &P) -> Vec<P> {
-        let Some(tracker) = self.tracked_by(sender) else {
-            return Vec::new();
-        };
-        tracker
+        self.tracked_by(sender)
             .peers()
             .filter(|peer| *peer != sender && self.tracks(peer, sender))
             .cloned()

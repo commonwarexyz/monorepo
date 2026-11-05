@@ -13,10 +13,11 @@
 //! # Peer Sets
 //!
 //! Two peers exchange messages only while each tracks the other, as on an authenticated network.
-//! By default a peer follows the network-wide peer sets, tracked through [Oracle::manager] or
-//! [Oracle::socket_manager]. It tracks the peers they list, or no one if they do not list it. A
-//! peer with its own manager, from [Control::manager] or [Control::socket_manager], follows only
-//! the sets tracked through it. Use this when peers advance through peer sets at different times.
+//! A peer tracks the peers listed in the peer sets it follows. By default it follows the
+//! network-wide sets, tracked through [Oracle::manager] or [Oracle::socket_manager]. Each call to
+//! [Control::manager] or [Control::socket_manager] gives the peer new, empty sets of its own
+//! instead, as starting a node does. Use this when peers advance through peer sets at different
+//! times.
 //!
 //! # Bandwidth Simulation
 //!
@@ -2966,6 +2967,10 @@ mod tests {
                 };
                 oracle.add_link(from, to, link).await.unwrap();
             }
+
+            // pk3 has its own sets but never tracks one, so it reaches no one
+            oracle.control(pk3.clone()).manager();
+
             // Network-wide peer sets connect peers without their own
             let mut global = oracle.manager();
             global.track(0, Set::try_from([pk1.clone(), pk2.clone()]).unwrap());
@@ -3042,16 +3047,19 @@ mod tests {
             manager1.track(1, Set::try_from([pk2.clone()]).unwrap());
             let mut global = oracle.manager();
 
-            // pk2 is not in a network-wide set, so it tracks no one
-            global.track(0, Set::try_from([pk1.clone()]).unwrap());
+            // The network-wide set does not list pk1, so pk2 does not track it
+            let pk3 = PrivateKey::from_seed(3).public_key();
+            global.track(0, Set::try_from([pk3]).unwrap());
             assert!(global.peer_set(0).await.is_some());
+            assert!(all_recipients(&mut sender1).is_empty());
             assert!(all_recipients(&mut sender2).is_empty());
             assert!(!delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
             assert!(!delivered(&context, &mut sender2, &mut receiver1, &pk1).await);
 
-            // Once a network-wide set lists both, they connect in both directions
-            global.track(1, Set::try_from([pk1.clone(), pk2.clone()]).unwrap());
+            // Once it lists pk1, they connect in both directions, though it does not list pk2
+            global.track(1, Set::try_from([pk1.clone()]).unwrap());
             assert!(global.peer_set(1).await.is_some());
+            assert_eq!(all_recipients(&mut sender1), vec![pk2.clone()]);
             assert_eq!(all_recipients(&mut sender2), vec![pk1.clone()]);
             assert!(delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
             assert!(delivered(&context, &mut sender2, &mut receiver1, &pk1).await);
@@ -3120,7 +3128,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reset_peer_sets_starts_empty() {
+    fn test_manager_starts_peer_sets_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
@@ -3158,15 +3166,15 @@ mod tests {
             assert_eq!(updates.recv().await.unwrap().index, 2);
             assert!(delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
 
-            // A reset forgets the old sets and ends their subscriptions
-            control1.reset_peer_sets();
-            assert!(manager1.peer_set(2).await.is_none());
+            // A new manager forgets the old sets and ends their subscriptions
+            let mut restarted = control1.manager();
+            assert!(restarted.peer_set(2).await.is_none());
             assert!(updates.recv().await.is_none());
             assert!(!delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
 
             // An id older than the forgotten sets is accepted
-            manager1.track(1, Set::try_from([pk2.clone()]).unwrap());
-            assert!(manager1.peer_set(1).await.is_some());
+            restarted.track(1, Set::try_from([pk2.clone()]).unwrap());
+            assert!(restarted.peer_set(1).await.is_some());
             assert!(delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
         });
     }

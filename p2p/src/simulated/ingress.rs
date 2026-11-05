@@ -35,10 +35,8 @@ pub enum Message<P: PublicKey, E: Clock> {
         id: u64,
         peers: TrackedPeers<P>,
     },
-    /// Switch `owner` to the peer sets tracked through its own managers.
+    /// Give `owner` new, empty peer sets of its own.
     OwnPeerSets { owner: P },
-    /// Replace `owner`'s own peer sets with empty ones.
-    ResetPeerSets { owner: P },
     PeerSet {
         owner: Option<P>,
         id: u64,
@@ -107,10 +105,6 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
             Self::OwnPeerSets { owner } => {
                 f.debug_struct("OwnPeerSets").field("owner", owner).finish()
             }
-            Self::ResetPeerSets { owner } => f
-                .debug_struct("ResetPeerSets")
-                .field("owner", owner)
-                .finish(),
             Self::PeerSet { owner, id, .. } => f
                 .debug_struct("PeerSet")
                 .field("owner", owner)
@@ -517,14 +511,13 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
 
     /// Create a [Manager] that tracks peer sets for this peer alone.
     ///
-    /// The first call switches this peer to its own peer sets, as a node on an authenticated
-    /// network has, and the peer never returns to the network-wide sets. Its sets start empty, so
-    /// it reaches no one until it tracks one. Later calls, from any [Control] for this peer,
-    /// return handles to the same sets. Use [Self::reset_peer_sets] when the peer restarts.
+    /// Each call gives this peer new, empty peer sets of its own, as starting a node on an
+    /// authenticated network does, and the peer stops following the network-wide sets. It reaches
+    /// no one until it tracks a set. To share one node's sets, clone the returned manager.
     ///
     /// Useful for mocking [crate::authenticated::discovery].
     pub fn manager(&self) -> Manager<P, E> {
-        self.own_peer_sets();
+        self.new_peer_sets();
         Manager {
             oracle: Oracle::new(self.sender.clone()),
             owner: Some(self.me.clone()),
@@ -537,29 +530,15 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
     ///
     /// Useful for mocking [crate::authenticated::lookup].
     pub fn socket_manager(&self) -> SocketManager<P, E> {
-        self.own_peer_sets();
+        self.new_peer_sets();
         SocketManager {
             oracle: Oracle::new(self.sender.clone()),
             owner: Some(self.me.clone()),
         }
     }
 
-    /// Clear the peer sets this peer tracks through its own managers, as a node does when it
-    /// restarts.
-    ///
-    /// The peer then follows its own sets, now empty, so it reaches no one until it tracks one
-    /// again. Existing managers keep working, but their subscriptions end.
-    pub fn reset_peer_sets(&self) {
-        let _ = enqueue(
-            &self.sender,
-            Message::ResetPeerSets {
-                owner: self.me.clone(),
-            },
-        );
-    }
-
-    /// Switch this peer to the peer sets tracked through its own managers.
-    fn own_peer_sets(&self) {
+    /// Give this peer new, empty peer sets of its own.
+    fn new_peer_sets(&self) {
         let _ = enqueue(
             &self.sender,
             Message::OwnPeerSets {
