@@ -520,12 +520,12 @@ impl<B: RBlob> PrefetchFrames<B> {
     fn range(&self, offsets: &[Option<u64>], idx: usize, blob_size: u64) -> Option<(u64, u64)> {
         let start = offsets[idx]?;
         let next = self.lookups[idx] + 1;
+        // Unless the frame ends its blob or the journal, its successor follows it in `lookups`.
         let end = if next.is_multiple_of(self.items_per_blob) || next == self.size {
             blob_size
-        } else if self.lookups.get(idx + 1) == Some(&next) {
-            offsets[idx + 1]?
         } else {
-            return None;
+            debug_assert_eq!(self.lookups[idx + 1], next);
+            offsets[idx + 1]?
         };
         Some((start, end.checked_sub(start)?))
     }
