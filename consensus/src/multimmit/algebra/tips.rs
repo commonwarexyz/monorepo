@@ -6,15 +6,12 @@ use super::{
 };
 #[cfg(any(test, feature = "mocks"))]
 use crate::multimmit::types::Vqc;
-use crate::{
-    multimmit::{
-        scheme::Scheme,
-        types::{
-            BlockRef, ChainId, CodecConfig, DigestedLeader, FinalityFact, FinalityId, LeaderBlock,
-            Lqc, Position, SelectedCommitments, VoteBody,
-        },
+use crate::multimmit::{
+    scheme::Scheme,
+    types::{
+        BlockRef, ChainId, CodecConfig, DigestedLeader, FinalityFact, FinalityId, LeaderBlock, Lqc,
+        Position, VoteBody,
     },
-    types::Epoch,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::Participant;
@@ -42,12 +39,6 @@ pub(crate) struct PoolExtractor<D: Digest> {
 }
 
 impl<D: Digest> PoolExtractor<D> {
-    /// Selects the known contiguous block paths ending at each final tip, using only edges this
-    /// pool authenticated.
-    pub(crate) fn selected(&self, epoch: Epoch, tips: &FinalTips<D>) -> SelectedCommitments<D> {
-        self.ancestry.selected(epoch, tips.blocks().iter().copied())
-    }
-
     /// Creates an empty pool for one leader block.
     pub(crate) fn new<H, S>(leader: &LeaderBlock<S, D>, config: CodecConfig) -> Result<Self, Error>
     where

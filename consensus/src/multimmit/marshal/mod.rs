@@ -1,77 +1,58 @@
 //! Durable block custody and ordered delivery for Multimmit.
 //!
-//! Multimmit consensus agrees on transaction-block header digests and leaves block bodies to
-//! marshal. Marshal keeps the complete blocks, reconstructs the order that finalized leader
-//! proofs authenticate, and reports each block to the application in that order until the
-//! application acknowledges it.
+//! Multimmit consensus agrees on block references and leaves block bodies to marshal. Marshal
+//! keeps the complete blocks, reconstructs the canonical order from portable proofs, and reports
+//! each block to the application in that order until the application acknowledges it.
 //!
 //! # Lifecycle
 //!
-//! 1. [`open`](fn@open) opens storage and returns the [`Service`] and the [`BackfillBridge`].
-//! 2. The caller attaches the bridge to its network resolver.
+//! 1. [`open`](fn@open) opens the stores and returns the [`Service`] and the [`Bridge`].
+//! 2. The caller attaches the bridge to its network resolver, as consumer and producer.
 //! 3. [`Service::start`] returns the [`Mailbox`] and the [`ServiceHandle`].
-//! 4. Consensus reports activity to the [`Mailbox`]; producers stage their blocks with
-//!    [`Mailbox::stage_block`]. An engine whose application also reads activity reports to both
-//!    through [`Reporters::from((marshal, application))`](crate::Reporters), and
-//!    [`Service::relay`] gives it a [`Relay`] that broadcasts staged blocks.
-//! 5. The application receives one [`Update`] per block in [`OutputIndex`] order and
-//!    acknowledges each once it has durably applied it. Indices are canonical: an output's index
-//!    is the sum of the producer-chain heights once it commits, so it is the same on every node.
-//! 6. [`ServiceHandle::abort`] stops marshal; [`ServiceHandle::join`] returns its first
-//!    failure.
+//! 4. Consensus reports its activity to the [`Mailbox`] (it is a [`Reporter`](crate::Reporter));
+//!    producers stage their blocks with [`Mailbox::stage_block`], and [`Service::relay`] gives the
+//!    engine a [`Relay`] that broadcasts them.
+//! 5. The application receives one [`Update`] per block in [`OutputIndex`] order and acknowledges
+//!    each once it has durably applied it. An output's index is the sum of the producer-chain
+//!    heights once it is emitted, so it is the same on every node.
+//! 6. [`ServiceHandle::abort`] stops marshal; [`ServiceHandle::join`] returns its failure.
 //!
-//! # Actors
+//! # What authorizes delivery
 //!
-//! ```text
-//!   consensus --hints--> router --> synchronizer --commits--> catalog --> delivery --> app
-//!   producers --stage--> router -----------------------------> catalog --> promoter
-//!                                         resolver <--> backfill --> catalog
-//! ```
+//! Consensus reports every L-QC it verifies with the finality it proves and the tip-history
+//! records placed since its last report. Marshal stores them, connects the records into the
+//! finalized history, and derives the order from durable proofs only: the openings of the records
+//! from the delivered cut to the strongest durable L-QC's leader history, then that L-QC's final
+//! sweep. A block is delivered only when its proof, the parent-linked path from its authenticated
+//! tip down to it, and its body are all durable. Placement reports only hint at fetches, and a
+//! direct finality result never authorizes delivery.
 //!
-//! - Router: runs staging, block subscriptions, floor installation and consensus hints for the
-//!   public mailbox.
-//! - Synchronizer: verifies leader proofs, reconstructs the finalized order, and commits it. It
-//!   owns the scratch journals of its ancestry walks.
-//! - Backfill: fetches missing L-QCs, histories and blocks from peers, and serves peers.
-//! - Catalog: owns pending custody, finalized rows and the checkpoint.
-//! - Delivery: owns the acknowledgement cursor and reports committed outputs to the application.
-//! - Promoter: with immutable block retention, owns the immutable body archive and copies
-//!   committed bodies into it.
+//! # Structure
 //!
-//! The catalog and delivery, and the catalog and the promoter, each need the other's mailbox, so
-//! those mailboxes are created before the actors.
+//! One task owns all state and makes every transition synchronously; storage, reads, certificate
+//! verification and serving run as jobs on other tasks. Three stores hold everything durable:
+//! blocks (a custody stream and a bulk stream over one index), proofs (L-QCs, records and cut
+//! entries), and one progress record. A peer request never runs on the owner, and a custody cut
+//! never waits behind fetched bytes.
 //!
-//! # Durability
+//! # State sync and pruning
 //!
-//! - Custody: a staged block is recoverable after a crash once its [`Custody`] resolves.
-//! - Checkpoint cut: a commit makes its finalized rows durable before it publishes the checkpoint
-//!   that names them, so after a crash an output is either absent or recoverable with its body.
-//! - Acknowledgement cursor: only delivery's durable cursor suppresses redelivery after a crash.
-//!   Contiguous acknowledgements share one cursor sync.
+//! - [`Mailbox::floor_at`] serves the newest floor at or below an output index: an L-QC, its
+//!   leader's history record, and the exact last block of every chain once its order is emitted.
+//! - [`Mailbox::install_floor`] verifies a newer floor and resumes delivery after it.
+//! - [`Mailbox::prune`] drops what the newest floor at or below an index makes obsolete, keeping
+//!   that floor servable and every block the engine may still verify.
 //!
-//! A storage failure stops the actor that owns the store, the supervisor then stops every actor,
-//! and [`ServiceHandle::join`] returns the failure. No actor keeps using a store after a failed
-//! mutation.
-//!
-//! # State sync
-//!
-//! - [`Start::Floor`] seeds a fresh namespace from a caller-authenticated [`Floor`].
-//! - [`Mailbox::install_floor`] verifies and installs a newer floor while marshal runs, and
-//!   resets delivery to it.
-//! - [`Mailbox::floor_at`] serves the newest retained floor at or below an output index, which
-//!   another node can install to resume at the same indices.
-//! - [`Mailbox::prune`] drops what the newest floor at or below an output index makes obsolete,
-//!   keeping that floor servable.
+//! A storage failure stops marshal; no store is used after a failed mutation.
 
-mod actors;
-mod bodies;
 mod config;
+mod input;
+mod ledger;
 mod mailbox;
-mod open;
-mod protocol;
+mod metrics;
 mod relay;
 mod service;
-mod storage;
+mod store;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -79,16 +60,19 @@ mod verifier;
 mod wire;
 
 pub use crate::multimmit::actors::util::Completion;
-pub use actors::backfill::{BackfillBridge, BackfillSubscriber};
-pub use config::{
-    ArchiveConfig, ArchiveMode, Capacities, Config, ConfigError, Limits, Retention, Start,
-};
+pub use config::{Config, ConfigError, Limits};
+pub use input::Bridge;
 pub use mailbox::Mailbox;
-pub use open::OpenError;
 pub use relay::Relay;
-pub use service::{Service, ServiceHandle, open};
+pub use service::{OpenError, Service, ServiceHandle, open};
 pub use types::{
-    Custody, Error, Failure, Families, Floor, LqcVerifier, MarshalProgress, OutputIndex, Update,
+    Custody, Error, Failure, Floor, LqcVerifier, MarshalProgress, OutputIndex, Update,
 };
 pub use verifier::{InvalidLqc, SchemeVerifier};
-pub use wire::BackfillKey;
+pub use wire::Key;
+
+/// Decodes `input` as every marshal request and response a peer may send.
+#[cfg(feature = "mocks")]
+pub(crate) fn fuzz_wire(input: &[u8]) {
+    wire::fuzz::exercise(input);
+}

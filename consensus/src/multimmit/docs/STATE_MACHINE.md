@@ -170,73 +170,80 @@ running.join().await?;
 
 The `log-multimmit` example is the compiling consensus reference. `Inspection` is a diagnostic API,
 not an application delivery stream. A deployment may attach marshal directly as its `Reporter`
-without changing consensus durability or progress. Marshal reclaims pending producer bodies only
-as far as the engine's `Activity::CertificateRecorded` reports allow, so the engine's activity
-must reach marshal for pending custody to be reclaimed.
+without changing consensus durability or progress. Marshal reclaims producer bodies only as far
+as the engine's `Activity::CertificateRecorded` reports allow, so the engine's activity must reach
+marshal for blocks to be reclaimed.
 
 ### Marshal service lifecycle
 
-Marshal implements the Section 6 two-pass ordering variant. Consensus emits authenticated L-QCs,
-accepted producer headers, available history openings, and the DA certificates it has durably
-recorded through one best-effort `Activity` stream; marshal validates each identity, persists useful hints, and resolves missing openings or
-blocks by authenticated digest. Dense delivery and application acknowledgement never enter
-consensus storage. `marshal/mod.rs` lists the actors; each owns its own store:
+Marshal implements the Section 6 two-pass ordering variant from portable proofs. Consensus reports
+each L-QC it verifies (`Activity::Proven`) with the finality the certificate proves on its own and
+the history records whose order its placement fixed since the previous report, placement runs as
+fetch hints (`Activity::Placed`), and every DA certificate once its record is durable
+(`Activity::CertificateRecorded`). Dense delivery and application acknowledgement never enter
+consensus storage.
 
-- `Catalog` owns finalized archives, temporary multi-archives, shared producer-block custody, dense
-  output rows, and the compact checkpoint. Producer bodies and their compact metadata use one
-  global append coordinate across every chain, while chain-local indexes retain ancestry and
-  pruning semantics. Mutations and required archive syncs complete before the checkpoint's
-  high-water exposes them.
-- `Backfill` owns bounded fetches by key, checks Catalog custody before contacting a peer, and
-  serves only Catalog-admitted L-QCs, tip-history openings, and complete producer blocks through
-  `commonware-resolver`. Producer wire keys contain only chain and header digest to avoid redundant
-  bytes; request completion still compares the complete `BlockRef`, including height.
-- `Synchronizer` walks recursive history commitments and producer ancestry through disk-backed
-  scratch journals, applies the deterministic offset-major sweeps in two passes (proposed blocks,
-  then extensions), and asks Catalog to commit bounded batches of adjacent history openings and
-  dense rows. Producer ancestry is serial within each chain and concurrent across chains up to
-  `backfill_concurrency`, so a stalled chain does not block another chain. Once block references
-  are known, missing bodies share one global pool at the same bound. Fetch completion order cannot
-  affect output order because each result retains its canonical output position. Each new block
-  is read off its target tip's own path, so an anchor may jump to another branch, and only blocks
-  emitted past the ordered tip must lie on that path. A run of openings shares one walk and one
-  custody window only while their tips share one path; otherwise each record is opened and
-  recorded in turn. The ancestry scheduler also verifies state-sync frontiers. Synchronizer owns
-  no finalized archive handle.
-- `Delivery` owns the acknowledgement cursor. It fills a configurable window with consecutive
-  committed `OutputIndex` entries and reports each complete transaction block with an `Exact`
-  acknowledgement. It retires only the ready FIFO prefix and syncs that prefix to its cursor once.
-  A crash before that sync may repeat the unpersisted window and cannot skip it.
-- `Promoter`, with immutable block retention, owns the immutable body archive and copies committed
-  bodies into it.
-- `Router` validates request identity, joins accepted headers with complete blocks from buffered
-  ingress, and owns bounded command, job, ready, and missing-block sets. Under pressure, a later
-  unique header retires the oldest missing-block subscription before admission. Malformed hints are
-  request-local.
+One owner task holds every store and machine and makes each transition synchronously; storage,
+reads, peer certificate verification and serving run as jobs on other tasks and return as events.
+Three stores hold everything durable:
 
-The service supervisor owns child lifecycles only. A storage or required-child failure stops every
-actor.
+- Blocks: a custody stream (staged, subscribed and broadcast blocks) and a bulk stream (fetched
+  blocks), each its own segmented log with its own durability cuts, over one index keyed by exact
+  `BlockRef`. Index rows carry the fixed-width header, so the index and every identity walk are
+  rebuilt from rows without reading bodies. A custody cut never waits behind fetched bytes.
+- Proofs: L-QCs, history records and cut entries, immutable and content-addressed. Records
+  connect to the base (genesis history or the last floor's record) through parent links and get
+  local ordinals.
+- Meta: one record with the acknowledged cut, the floor, the ordinal base and every chain's block
+  retention floor.
 
-The public `Mailbox` implements best-effort `Reporter<Activity>`. It also supports durable block
-submission, eager buffered complete-block broadcast, local get, network fetch, local subscription,
-authenticated floor installation, floor lookup and pruning by output index, and compact progress
-inspection. A subscription waits for local admission and does not start network work; a fetch does.
+The order is derived only from durable proofs: the openings of the connected records from the
+acknowledged cut to the target L-QC's leader history, then that L-QC's final sweep. The target is a
+durable L-QC whose leader history is the connected record with the highest ordinal, the strongest
+sweep above that record winning and the newest view breaking ties. A later or stronger L-QC
+abandons the sweep in progress; the openings that follow skip the heights it already emitted. The
+order is fed lazily: at most four openings wait ahead of the one being expanded, and records are
+read from storage a few ordinals ahead, so a distant target costs bounded work and memory per
+turn. An L-QC ends at or after the cut its history opens, so the order opens no record past one
+whose L-QCs' ends are not all known yet (their facts are read or derived first); delivery thus
+never passes an end before its cut entry can be written. After a restart the order starts at the
+acknowledged cut, not at the cut its record opens, so an L-QC there whose sweep does not pass that
+cut is closed at it only when every chain stands at the sweep's height or the record's tip. Positions are symbolic (a record, its tips and the emitted heights), and each is
+resolved to an exact block by walking parent links down from its authenticated tip, never by
+height alone. A position is dispatched only when its proof, the path from its tip down to it, and
+its body are durable, and the acknowledgement window has room. Acknowledgements drain in order and
+each drained group is written to Meta, one write at a time; a crash may repeat outputs after the
+durable acknowledgement and cannot skip any.
 
-Finalized L-QCs, history openings, and dense producer blocks use independently configurable prunable
-or immutable archives. Unfinalized same-view and same-position candidates use prunable
-`MultiArchive`; successful commits and floor installation advance their prune frontier internally.
-Application pruning is explicit through `Mailbox::prune(below)`, which drops what the newest floor
-at or below `below` (and the acknowledgement cursor) makes obsolete and keeps that floor servable.
-Immutable final archives retain old values and treat pruning as a no-op.
+An L-QC whose history does not connect starts a record walk: records are fetched backward from its
+history, each authenticated by the record after it, until they meet the stored chain. When
+consensus stays quiet, marshal asks peers for a proof after its delivered history. Missing bodies
+are looked up in the broadcast buffer and then fetched as exact parent-linked ranges. Requests are
+deduplicated by key and by range head; those over the fetch budget wait in a FIFO, and a request
+still unanswered after five seconds is asserted to the resolver again (demand is level triggered).
 
-`Start::Genesis` opens or resumes the namespace at protocol genesis. `Start::Floor` seeds only an
-empty namespace and trusts the caller to authenticate the application snapshot, signature, and
-generation that justify the supplied floor. Runtime state sync uses `install_floor`, which verifies
-the L-QC, its opening, non-regressing ordering frontiers, and internal sweep consistency before
-durably installing a new generation. Delivery resumes strictly after the application-owned emitted
-frontier, at the index that frontier's heights sum to. `floor_at` serves the newest retained floor at
-or below an output index: each floor-establishing L-QC is recorded with the frontier its final
-sweep ends at, so another node can install that floor and resume at the same indices.
+The owner's select is biased toward local inputs, so each iteration also gives peer responses and
+peer requests a turn of at most eight each before driving the machines once. A peer request for
+data the node holds but cannot read yet (a segment still opening, rows not yet cut) is parked, up to
+the serving bound, and retried as storage progresses instead of dropped.
+
+The public `Mailbox` implements best-effort `Reporter<Activity>` on a lane that never blocks
+consensus: placement runs and older proofs are dropped under pressure, and records never are (past
+their byte bound marshal stops instead). It also supports durable block staging, local get,
+network fetch, local subscription (satisfied by custody or the broadcast buffer, never by a peer
+fetch), certificate lookup and fetch, floor lookup and installation, pruning, and progress.
+
+A floor is an L-QC, its leader's history record, and the exact last block of every chain once the
+order it proves is emitted. Marshal writes a cut entry whenever delivery reaches such an end, so
+`floor_at` serves the newest durable one at or below an index. `install_floor` verifies the
+certificate, checks that the boundary is where the certificate's own sweep ends and that each
+boundary block is the ancestor of its authenticated tip, fences dispatch, rechecks freshness
+against the durable acknowledgement, stores the floor's parts, and writes Meta before resuming at
+the floor. `prune(below)` moves the base and retention to the newest floor at or below `below` and
+the acknowledgement, keeping every block the engine may still verify; Meta is durable before
+anything is deleted.
+
+A storage failure stops marshal; no store is used after a failed mutation.
 
 ### Startup and recovery
 
@@ -545,10 +552,10 @@ Randomized election therefore needs a new machine-visible seed, not a different 
    the same prefix but may never retract or choose an incompatible tip.
 6. L-QC aggregation and admission freeze the vote transcript. A late valid covering L-QC may advance
    floors but may not change prior sticky choices.
-7. Every admitted L-QC and locally reconstructable history opening may be reported as idempotent,
-   best-effort activity. Reporter feedback never gates consensus. Marshal persists useful hints and
-   resolves an unavailable opening by the digest authenticated in the L-QC; later L-QCs, startup
-   reconciliation, and marshal backfill repair missed activity.
+7. Every verified L-QC is reported as idempotent, best-effort activity with the finality it proves
+   and the history records placed since the last report. Reporter feedback never gates consensus.
+   Marshal stores records as they arrive and walks an unavailable record back from peers by the
+   commitment the L-QC authenticates.
 8. Consensus does not materialize, store, or acknowledge the specification's dense `Emit` stream.
    Marshal owns recursive history storage and all later ordering and delivery state.
 
@@ -697,34 +704,24 @@ acknowledgement, and retention pass.
   authenticated conflicting claims. Relay identity, timing, omission, application validity, and
   unresolved work cannot supply or replace either half of the proof.
 
-Marshal checks a separate invariant set after every durable commit and recovery:
+Marshal keeps a separate invariant set:
 
-- **M-INV-01:** Every archived object matches its key: L-QC ID, recursive history commitment, or
-  full canonical producer-header `BlockRef`. A body commitment is never a producer-block identity.
-- **M-INV-02:** The selected finalized L-QC, history index, ordered frontier, emitted frontier,
-  committed output, and acknowledged output are one canonical checkpoint. Every frontier is chain
-  ordered and monotone within its generation.
-- **M-INV-03:** Dense outputs are contiguous by `OutputIndex` above the floor index; each index
-  names one complete transaction block. Every output advances one chain by one height, so the
-  committed index is the sum of the emitted frontier's heights and is the same on every node,
-  whichever floor it started from. History is processed oldest first. Each sweep visits every
-  chain's proposed region before any chain's extension region, preserving offset-major order
-  within each pass.
-- **M-INV-04:** Evidence, openings, blocks, and output rows are durable before checkpoint exposure. An
-  ordinary checkpoint carries its remaining temporary-cleanup obligation, which startup completes
-  before serving reads. Delivery advances only through a contiguous FIFO prefix whose `Exact`
-  acknowledgements all resolve, and syncs that prefix to its own cursor.
-- **M-INV-05:** A runtime floor first persists one bounded intent containing the verified L-QC,
-  opening, target checkpoint, and cleanup floors. Catalog completes that intent before serving reads,
-  keeps it durable while both finalized archives sync and temporary data is pruned, then publishes
-  the target checkpoint by replacing the intent with one ready state. Output indices are canonical
-  across installations, so a delayed prune request cannot affect a newer floor.
-- **M-INV-06:** Backfill fetches recheck Catalog before peer work. Deliveries are bounded,
-  generation-scoped, matched to their request key, decoded under protocol limits, and independently
-  verified before Catalog admission. Buffered broadcast is only an eager complete-block cache.
-- **M-INV-07:** Every actor mailbox, router job, backfill request/subscriber set, block waiter, dense
-  commit batch, and in-memory delivery window has a configured finite ceiling. Unbounded history and
-  ancestry walks spill to prunable scratch archives.
+- **M-INV-01:** Every stored part matches its key: an L-QC its certificate identifier, a record its
+  commitment, a block its exact `BlockRef`. A body commitment is never a block identity.
+- **M-INV-02:** A position is dispatched only when its proof (the records from the acknowledged cut
+  and the target L-QC), the parent-linked path from its tip down to it, and its body are durable.
+  Placement and direct finality results never authorize dispatch.
+- **M-INV-03:** Output indices are canonical: an output's index is the sum of the emitted heights
+  after it, the same on every node and from any floor.
+- **M-INV-04:** Meta's acknowledged cut advances only over a contiguous prefix of acknowledged
+  outputs. Meta naming a new base or retention is durable before anything it makes obsolete is
+  deleted.
+- **M-INV-05:** A floor install changes no state until the certificate, the boundary's placement,
+  and every boundary block's identity verify, and rechecks freshness against the durable
+  acknowledgement after fencing dispatch.
+- **M-INV-06:** Peer responses are decoded under protocol bounds and authenticated against their
+  keys before anything is stored; peer L-QCs are verified before use.
+- **M-INV-07:** Every queue, window, cache and in-flight budget has a configured finite bound.
 
 ## Steady-state resource proof
 
@@ -802,14 +799,16 @@ derives every remaining ceiling before startup.
   state and cannot backpressure consensus.
 - Dependency availability is retired by provider and consumer reachability for every artifact kind,
   including leader dependencies. Parent retirement preserves dependencies of retained leaders;
-  marshal resolves an unavailable opening directly by its authenticated commitment.
+  marshal walks an unavailable record back from peers by its authenticated commitment.
 - Recovery enforces encoded checkpoint and journal byte ceilings before allocation or decode; invalid
   durable input fails startup without constructing actors.
-- Marshal bounds its mailboxes, jobs, subscriptions, commit batches, and scratch, and its disk use
-  follows the finality-driven prune frontier; the marshal storage module documentation
-  (`marshal/storage/mod.rs`) gives the proof.
+- Marshal bounds its order window, hot bodies, fetch reservations, served requests, and feed lane;
+  `Limits::within_memory` sizes the byte budgets from one memory bound, after the fixed parts
+  (delivered blocks awaiting acknowledgement, responses being served, journal buffers); a budget
+  raised to its one-block floor takes the difference from the others, and the hot cache pins (and
+  delivery reads ahead) no more bodies than maximum-size blocks fit its budget; its indexes grow with retained blocks and records, which application pruning bounds.
 
-Therefore consensus memory and marshal's active actor/scratch working set plateau across arbitrarily
+Therefore consensus memory and marshal's working set plateau across arbitrarily
 many views and finalized blocks, provided configured external network/application/storage capabilities
 continue making the progress required by the protocol. A stalled async dependency consumes its
 pre-reserved bounded actor slot; it cannot create new active work.
