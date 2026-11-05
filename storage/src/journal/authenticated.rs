@@ -48,7 +48,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, ReadOptions, Spawner};
-use commonware_utils::NZU64;
+use commonware_utils::{NZU64, channel::mpsc};
 use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -881,19 +881,27 @@ where
     {
         let journal = Arc::new(Self::persist(self.journal, self.selected_end).await?);
 
-        // A reader sharing this task would starve the replay until it finished.
+        // A reader sharing this task would starve the replay until it finished. The replay's
+        // subtree tasks each hold a clone of `done` until they drop the journal, so `done_rx`
+        // closing means none of them holds it.
+        let (done, mut done_rx) = mpsc::channel::<()>(1);
         let replay = {
             let (journal, merkle, hasher) = (journal.clone(), self.merkle, self.hasher.clone());
             self.context
                 .dedicated()
-                .spawn(move |_| async move {
-                    let merkle = Journal::<F, E, C, H, S>::align(
-                        merkle,
-                        &journal,
-                        &hasher,
-                        APPLY_BATCH_SIZE,
-                    )
-                    .await;
+                .spawn(move |context| async move {
+                    let end = Location::new(journal.bounds().end);
+                    let merkle = merkle
+                        .replay_subtrees(
+                            context,
+                            &journal,
+                            &hasher,
+                            end,
+                            SUBTREE_HEIGHT,
+                            APPLY_BATCH_SIZE,
+                            done,
+                        )
+                        .await;
                     drop(journal);
                     merkle
                 })
@@ -902,13 +910,21 @@ where
         let value = match read(journal.clone()).await {
             Ok(value) => value,
             Err(error) => {
-                // Release the replay's clone of the journal before returning.
+                // Release every replay clone of the journal, its subtree tasks' included, before
+                // returning.
                 replay.abort().await;
+                while done_rx.recv().await.is_some() {}
                 return Err(error);
             }
         };
         let merkle = replay.join().await.map_err(JournalError::from);
-        let merkle = merkle.map_err(Error::from)??;
+        let merkle = match merkle.map_err(Error::from).and_then(|merkle| merkle) {
+            Ok(merkle) => merkle,
+            Err(error) => {
+                while done_rx.recv().await.is_some() {}
+                return Err(error.into());
+            }
+        };
         let journal = Arc::into_inner(journal).expect("read must drop every journal clone");
         Ok((
             Self::assemble(journal, merkle, self.frontier, self.hasher).await?,
@@ -950,6 +966,10 @@ where
 
 /// The number of items to apply to the Merkle structure in a single batch.
 const APPLY_BATCH_SIZE: NonZeroU64 = NZU64!(1 << 16);
+
+/// The height of the aligned subtrees whose leaves [Recovery::finish_with] reads and hashes on
+/// tasks of their own.
+const SUBTREE_HEIGHT: u32 = 17;
 
 impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where

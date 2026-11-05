@@ -23,10 +23,11 @@ use crate::{
     },
     merkle::{self, Family, Location, Position, Readable, batch, hasher::Hasher, mem::Mem},
 };
-use commonware_codec::{Encode, EncodeShared};
+use commonware_codec::{Encode, EncodeShared, Write as _};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::{ReadOptions, telemetry::metrics::GaugeExt as _};
+use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner, telemetry::metrics::GaugeExt as _};
+use commonware_utils::channel::mpsc;
 use futures::{Stream, StreamExt as _, TryStreamExt as _, pin_mut, stream};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -40,6 +41,9 @@ const REPLAY_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 /// Regions filled concurrently by one request.
 const CONCURRENT_FILLS: usize = 8;
+
+/// Subtrees a replay reads and hashes concurrently.
+const CONCURRENT_SUBTREES: usize = 8;
 
 /// Born nodes of one resident height at or past the boundary, in ordinal order.
 struct Level<D> {
@@ -93,6 +97,18 @@ impl<D: Copy> Resident<D> {
         end: Position<F>,
         node: impl Fn(Position<F>) -> Option<D>,
     ) -> Result<(), merkle::Error<F>> {
+        self.extend_with(end, |height, ordinal| {
+            let pos = F::subtree_root_position(Location::new(ordinal << height), height);
+            node(pos).ok_or(merkle::Error::MissingNode(pos))
+        })
+    }
+
+    /// Like [Self::extend], but `node` returns each digest by its height and ordinal.
+    fn extend_with<F: Family>(
+        &mut self,
+        end: Position<F>,
+        mut node: impl FnMut(u32, u64) -> Result<D, merkle::Error<F>>,
+    ) -> Result<(), merkle::Error<F>> {
         let born = born(end);
         for (index, (level, &to)) in self
             .levels
@@ -102,10 +118,7 @@ impl<D: Copy> Resident<D> {
         {
             let height = self.height + index as u32;
             for ordinal in level.end()..to {
-                let pos = F::subtree_root_position(Location::new(ordinal << height), height);
-                level
-                    .nodes
-                    .push_back(node(pos).ok_or(merkle::Error::MissingNode(pos))?);
+                level.nodes.push_back(node(height, ordinal)?);
             }
         }
         Ok(())
@@ -210,6 +223,58 @@ impl<F: Family> Encoded<F> {
             |h, (pos, range)| h.leaf_digest(*pos, &self.bytes[range.clone()]),
         )
     }
+}
+
+/// The slot of the `index`th node of height `h` in a subtree of height `height`, whose nodes are
+/// laid out like a [Region]: leaves first, then each height in turn up to the subtree root.
+const fn subtree_slot(height: u32, h: u32, index: u64) -> usize {
+    let width = 2u64 << height;
+    (width - (width >> h) + index) as usize
+}
+
+/// Every node of one aligned subtree, as [Tree::hash_subtree] returns them.
+struct Subtree<'a, D> {
+    /// The subtree's first leaf.
+    start: u64,
+    height: u32,
+    nodes: &'a [D],
+}
+
+impl<D: Digest> Subtree<'_, D> {
+    /// The node of height `h` whose leftmost leaf is `leaf`, born by the end of the subtree. A
+    /// born node outside the subtree is hashed from its children, which were born with it or
+    /// were peaks before the subtree, pinned in `mem`. `computed` holds the nodes hashed so far.
+    fn node<F: Family>(
+        &self,
+        mem: &Mem<F, D>,
+        hasher: &impl Hasher<F, Digest = D>,
+        computed: &mut BTreeMap<Position<F>, D>,
+        leaf: u64,
+        h: u32,
+    ) -> Result<D, merkle::Error<F>> {
+        if h <= self.height && leaf >= self.start && leaf - self.start < 1 << self.height {
+            return Ok(self.nodes[subtree_slot(self.height, h, (leaf - self.start) >> h)]);
+        }
+        let pos = F::subtree_root_position(Location::new(leaf), h);
+        if let Some(digest) = computed.get(&pos).copied().or_else(|| mem.get_node(pos)) {
+            return Ok(digest);
+        }
+        if h == 0 {
+            return Err(merkle::Error::MissingNode(pos));
+        }
+        let left = self.node(mem, hasher, computed, leaf, h - 1)?;
+        let right = self.node(mem, hasher, computed, leaf + (1 << (h - 1)), h - 1)?;
+        let digest = hasher.node_digest(pos, &left, &right);
+        computed.insert(pos, digest);
+        Ok(digest)
+    }
+}
+
+/// A subtree task's clone of the journal, and a clone of the replay's done sender that it drops
+/// only after the journal. Fields drop in declaration order.
+struct SubtreeHold<C> {
+    journal: Arc<C>,
+    _done: mpsc::Sender<()>,
 }
 
 /// The Merkle digests of an authenticated journal. Only `mem` is shared with batches.
@@ -354,6 +419,196 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             })
             .await;
         self = self.apply_batch(&batch)?;
+        self.flush();
+        Ok(self)
+    }
+
+    /// Like [Self::replay], but each aligned subtree of `2^height` leaves is read and hashed whole
+    /// on a task of its own spawned from `context`, with [CONCURRENT_SUBTREES] at once. Appending a
+    /// subtree in order hashes only the nodes above its root. Leaves before the first whole subtree
+    /// and after the last are replayed as [Self::replay] does.
+    ///
+    /// Each subtree task holds a clone of `done` until it drops its clone of `journal`, so once
+    /// every clone of `done` is dropped, no task still holds the journal, even after the replay
+    /// is aborted or fails.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn replay_subtrees<E, C, H>(
+        mut self,
+        context: E,
+        journal: &Arc<C>,
+        hasher: &H,
+        end: Location<F>,
+        height: u32,
+        batch_size: NonZeroU64,
+        done: mpsc::Sender<()>,
+    ) -> Result<Self, super::Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: EncodeShared> + 'static,
+        H: Hasher<F, Digest = D> + 'static,
+    {
+        if !end.is_valid()
+            || end < self.leaves()
+            || *end > journal.bounds().end
+            || *self.leaves() < journal.bounds().start
+        {
+            return Err(merkle::Error::RangeOutOfBounds(end).into());
+        }
+        let width = 1u64 << height;
+        let first = (*self.leaves()).next_multiple_of(width);
+        let last = *end / width * width;
+        if first >= last {
+            return self.replay(&**journal, hasher, end, batch_size).await;
+        }
+        self = self
+            .replay(&**journal, hasher, Location::new(first), batch_size)
+            .await?;
+
+        let buffer = self.replay_buffer;
+        let mut starts =
+            (first..last).step_by(usize::try_from(width).expect("subtree width fits usize"));
+        let mut spawn_next = |pending: &mut VecDeque<AbortOnDrop<_>>| {
+            let Some(start) = starts.next() else {
+                return;
+            };
+            let hold = SubtreeHold {
+                journal: journal.clone(),
+                _done: done.clone(),
+            };
+            let hasher = hasher.clone();
+            let task = context
+                .child("subtree")
+                .dedicated()
+                .spawn(move |_| async move {
+                    Self::hash_subtree(&*hold.journal, &hasher, start, height, buffer).await
+                });
+            pending.push_back(task.abort_on_drop());
+        };
+
+        // Hash subtrees ahead of appending them, and append them in order.
+        let mut pending = VecDeque::with_capacity(CONCURRENT_SUBTREES);
+        for _ in 0..CONCURRENT_SUBTREES {
+            spawn_next(&mut pending);
+        }
+        while let Some(task) = pending.pop_front() {
+            let appended = match task.join().await {
+                Ok(Ok(nodes)) => {
+                    spawn_next(&mut pending);
+                    self.append_subtree(hasher, height, &nodes)
+                        .map_err(super::Error::from)
+                }
+                Ok(Err(error)) => Err(error),
+                Err(error) => Err(JournalError::from(error).into()),
+            };
+            match appended {
+                Ok(tree) => self = tree,
+                Err(error) => {
+                    // Join the rest, so none outlives the replay holding the journal.
+                    for task in pending {
+                        task.abort().await;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        self.replay(&**journal, hasher, end, batch_size).await
+    }
+
+    /// Read the `2^height` operations from `start`, the first leaf of an aligned subtree, and
+    /// hash every node of the subtree, laid out as [subtree_slot] describes.
+    async fn hash_subtree<C, H>(
+        journal: &C,
+        hasher: &H,
+        start: u64,
+        height: u32,
+        buffer: NonZeroUsize,
+    ) -> Result<Vec<D>, super::Error<F>>
+    where
+        C: Contiguous<Item: EncodeShared>,
+        H: Hasher<F, Digest = D>,
+    {
+        let width = 1u64 << height;
+        let mut nodes = Vec::with_capacity((2usize << height) - 1);
+        let stream = journal
+            .replay(start..start + width, buffer, ReadOptions::default())
+            .await?;
+        pin_mut!(stream);
+        let mut encoded = Vec::new();
+        let mut loc = Location::<F>::new(start);
+        while let Some(batch) = stream.next().await {
+            for item in batch?.items {
+                encoded.clear();
+                item.write(&mut encoded);
+                nodes.push(hasher.leaf_digest(F::location_to_position(loc), &encoded));
+                loc += 1;
+            }
+        }
+        if nodes.len() as u64 != width {
+            return Err(merkle::Error::DataCorrupted("replay ended before its range").into());
+        }
+
+        // Hash each height's nodes from the one below, two at a time.
+        for h in 1..=height {
+            let below = subtree_slot(height, h - 1, 0);
+            let count = width >> h;
+            let pos = |i: u64| F::subtree_root_position(Location::new(start + (i << h)), h);
+            let child = |nodes: &[D], i: u64| {
+                let slot = below + 2 * i as usize;
+                (nodes[slot], nodes[slot + 1])
+            };
+            let mut i = 0;
+            while i + 1 < count {
+                let ((l0, r0), (l1, r1)) = (child(&nodes, i), child(&nodes, i + 1));
+                let (a, b) = hasher.node_digest_pair([(pos(i), &l0, &r0), (pos(i + 1), &l1, &r1)]);
+                nodes.push(a);
+                nodes.push(b);
+                i += 2;
+            }
+            if i < count {
+                let (left, right) = child(&nodes, i);
+                nodes.push(hasher.node_digest(pos(i), &left, &right));
+            }
+        }
+        Ok(nodes)
+    }
+
+    /// Append the aligned subtree of `2^height` leaves at the current size, whose every node
+    /// `nodes` holds as [Self::hash_subtree] returns them. Only the nodes the tree keeps are read:
+    /// resident nodes and peaks born by the subtree's end, hashing the ones above its root.
+    fn append_subtree<H>(
+        mut self,
+        hasher: &H,
+        height: u32,
+        nodes: &[D],
+    ) -> Result<Self, merkle::Error<F>>
+    where
+        H: Hasher<F, Digest = D>,
+    {
+        let start = *self.leaves();
+        let width = 1u64 << height;
+        debug_assert_eq!(start % width, 0, "subtree is not aligned");
+        let initial = self.size();
+        let leaves = Location::new(start + width);
+        let subtree = Subtree {
+            start,
+            height,
+            nodes,
+        };
+        let mut computed = BTreeMap::new();
+        let Self { mem, resident, .. } = &mut self;
+        resident.extend_with(F::location_to_position(leaves), |h, ordinal| {
+            subtree.node(mem, hasher, &mut computed, ordinal << h, h)
+        })?;
+        let peaks = F::nodes_to_pin(leaves)
+            .filter(|&pos| pos >= initial)
+            .map(|pos| {
+                let h = F::pos_to_height(pos);
+                let leaf = *F::leftmost_leaf(pos, h);
+                Ok((pos, subtree.node(mem, hasher, &mut computed, leaf, h)?))
+            })
+            .collect::<Result<Vec<_>, merkle::Error<F>>>()?;
+        Arc::make_mut(mem).skip_to(leaves, peaks)?;
+        self.metrics.replayed_leaves.inc_by(width);
         self.flush();
         Ok(self)
     }
@@ -650,7 +905,9 @@ mod tests {
     };
     use commonware_cryptography::{Sha256, sha256::Digest as D};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{ReadOptions, Runner as _, deterministic, reschedule};
+    use commonware_runtime::{
+        ReadOptions, Runner as _, Supervisor as _, deterministic, reschedule,
+    };
     use commonware_utils::NZU64;
     use std::{
         ops::Range,
@@ -874,6 +1131,94 @@ mod tests {
     #[test]
     fn matches_oracle_mmb() {
         deterministic::Runner::default().start(matches_oracle::<mmb::Family>);
+    }
+
+    /// Replaying in aligned subtrees builds the same tree as replaying in batches: subtrees of
+    /// several heights, opened at boundaries on and off subtree edges, replayed to ends before, on,
+    /// and past them. Every node at or past the boundary matches an oracle.
+    async fn subtrees_match_batches<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
+        let total = 200;
+        let expected = oracle::<F>(&Operations::new(total), &hasher);
+        for subtree in [1, 2, 4] {
+            for resident in [0, 2, 5] {
+                for boundary in [0, 1, 5, 16, 17, 45] {
+                    for end in [boundary, boundary + 1, 16, 31, 64, 100, 129, total] {
+                        if end < boundary {
+                            continue;
+                        }
+                        let case = format!(
+                            "subtree {subtree}, resident {resident}, boundary {boundary}, end {end}"
+                        );
+                        let pins: Vec<_> = F::nodes_to_pin(Location::new(boundary))
+                            .map(|p| expected.get_node(p).unwrap())
+                            .collect();
+                        let ops = Arc::new(Operations::range(boundary..total));
+                        let open = || {
+                            Tree::new(
+                                Location::new(boundary),
+                                pins.clone(),
+                                &config(resident),
+                                Metrics::new(&context),
+                            )
+                            .unwrap()
+                        };
+                        let batched = open()
+                            .replay(&*ops, &hasher, Location::new(end), NZU64!(7))
+                            .await
+                            .unwrap();
+                        let (done, _done_rx) = mpsc::channel(1);
+                        let subtrees = open()
+                            .replay_subtrees(
+                                context.child("replay"),
+                                &ops,
+                                &hasher,
+                                Location::new(end),
+                                subtree,
+                                NZU64!(7),
+                                done,
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(subtrees.size(), batched.size(), "{case}");
+                        assert_eq!(
+                            subtrees.root(&hasher, 0).unwrap(),
+                            batched.root(&hasher, 0).unwrap(),
+                            "{case}"
+                        );
+                        assert_eq!(
+                            subtrees.mem().pinned_nodes(),
+                            batched.mem().pinned_nodes(),
+                            "{case}"
+                        );
+                        assert_eq!(subtrees.resident.len(), batched.resident.len(), "{case}");
+                        let first = *F::location_to_position(Location::new(boundary));
+                        let positions: Vec<_> =
+                            (first..*subtrees.size()).map(Position::new).collect();
+                        let got = subtrees
+                            .get_nodes(&*ops, &hasher, &positions)
+                            .await
+                            .unwrap();
+                        for (&pos, node) in positions.iter().zip(got) {
+                            assert_eq!(
+                                Some(node),
+                                expected.get_node(pos),
+                                "{case}, position {pos}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn subtrees_match_batches_mmr() {
+        deterministic::Runner::default().start(subtrees_match_batches::<mmr::Family>);
+    }
+    #[test]
+    fn subtrees_match_batches_mmb() {
+        deterministic::Runner::default().start(subtrees_match_batches::<mmb::Family>);
     }
 
     /// Appending up to the largest supported size matches an oracle, and rebuilding the regions
