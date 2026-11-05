@@ -26,9 +26,11 @@
 //!
 //! - If it is below the active epoch's final block, acknowledge it.
 //! - If it is above the active epoch's final block, panic.
-//! - Otherwise, read the next epoch's [`EpochInfo`] from it, record that epoch's
-//!   checkpoint in the [`state_sync::Plan`], enter the next epoch from the block's
-//!   commitment, stop the previous engine, and only then acknowledge the block.
+//! - Otherwise, read the next epoch's [`EpochInfo`] from it and record the
+//!   block as that epoch's checkpoint in the [`state_sync::Plan`], with
+//!   marshal's finalization of it when marshal has one. Then enter the next
+//!   epoch from the block's commitment, stop the previous engine, and only then
+//!   acknowledge the block.
 //!
 //! ```text
 //! state-sync artifact, checkpoint, or finalized boundary: EpochInfo(N)
@@ -64,9 +66,14 @@
 //! the final block of the previous epoch. Without state-sync material, the
 //! orchestrator recovers the epoch containing marshal's next unprocessed height
 //! and takes that epoch's [`EpochInfo`] and Simplex root from its
-//! [checkpoint](crate::dkg#marshal-retention). For an epoch without a checkpoint,
-//! such as epoch zero on a new node, it reads them from the boundary block in
-//! marshal's finalized block archive and records the checkpoint.
+//! [checkpoint](crate::dkg#marshal-retention).
+//!
+//! For an epoch without a checkpoint, such as epoch zero on a new node, it
+//! reads them from the boundary block in marshal's finalized block archive. It
+//! then records that block as the epoch's checkpoint, with marshal's
+//! finalization of it when marshal has one. The [probe](crate::dkg::probe)
+//! serves the epoch to joining nodes from a checkpoint that holds the
+//! finalization.
 //!
 //! # Catching Up
 //!
@@ -100,13 +107,17 @@
 //!
 //! The actor exits cleanly if the gate closes, peer activation fails, marshal
 //! cannot supply a boundary block, its mailbox or a consensus muxer closes, the
-//! active Simplex engine stops without error, or the runtime stops. It panics if
-//! a boundary block does not carry the [`EpochInfo`] of the epoch it introduces,
-//! if a finalized block is above the active epoch's final block, if the
-//! [`Provider`] has no scheme for an entered epoch, if the [`SimplexConfig`] is
-//! invalid, if an epoch's Simplex engine fails, if the [`state_sync::Plan`]
-//! cannot access storage, or if a boundary block's [`EpochInfo`] exceeds the
-//! plan's codec limits.
+//! active Simplex engine stops without error, or the runtime stops.
+//!
+//! The actor panics if:
+//!
+//! - a boundary block does not carry the [`EpochInfo`] of the epoch it
+//!   introduces, or does not decode under the plan's block codec configuration
+//! - a finalized block is above the active epoch's final block
+//! - the [`Provider`] has no scheme for an entered epoch
+//! - the [`SimplexConfig`] is invalid
+//! - an epoch's Simplex engine fails
+//! - the [`state_sync::Plan`] cannot access storage
 //!
 //! # Configuration
 //!
@@ -209,7 +220,7 @@ mod tests {
         success_rate: probability!(1.0),
     };
     type TestStateSync = StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
-    type TestPlan = StateSyncPlan<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
+    type TestPlan = StateSyncPlan<mocks::TestScheme, mocks::TestMarshalVariant>;
 
     /// Roles that the cluster's epoch infos assign and faults that its nodes exhibit.
     #[derive(Clone, Default)]
@@ -719,6 +730,7 @@ mod tests {
                 partition_prefix: node_partition_prefix(index),
                 max_participants: NZU32!(16),
                 max_supported_mode: max_supported_mode(),
+                block_codec_config: (),
             },
             state_sync,
         )
@@ -1427,6 +1439,7 @@ mod tests {
                     partition_prefix: partition_prefix.clone(),
                     max_participants: NZU32!(16),
                     max_supported_mode: max_supported_mode(),
+                    block_codec_config: (),
                 },
                 Some(StateSync {
                     info: info.clone(),
@@ -1553,6 +1566,50 @@ mod tests {
         });
     }
 
+    /// At a live boundary the orchestrator checkpoints the boundary block with the
+    /// finalization marshal holds for it, so the probe can serve the epoch. The genesis
+    /// checkpoint recorded at startup has no finalization.
+    #[test]
+    fn live_boundary_checkpoint_carries_finalization() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut cluster = Cluster::start_with_fixture(&mut context, &fixture, true).await;
+            wait_for_proposal(&context, &cluster.nodes[0..1], Epoch::new(1)).await;
+            cluster.nodes[0].stop().await;
+
+            let plan = node_plan(context.child("state_sync_plan"), 0, None).await;
+            let boundary = &cluster.boundary;
+            let checkpoint = plan
+                .checkpoint(Epoch::new(1))
+                .await
+                .expect("checkpoint 1 must be recorded at the boundary");
+            let round = boundary.context().round;
+            let parent_view = boundary.context().parent.0;
+            let finalization = make_finalization(
+                Proposal::new(round, parent_view, boundary.digest()),
+                &fixture.schemes,
+            );
+            assert_eq!(checkpoint.finalization(), Some(&finalization));
+            assert_eq!(checkpoint.commitment(), boundary.digest());
+            assert_eq!(checkpoint.block().inner(), boundary);
+            assert_eq!(checkpoint.info().epoch, Epoch::new(1));
+
+            let genesis = make_genesis_block(
+                fixture.participants[0].clone(),
+                fixture.participants.iter().cloned(),
+                fixture.participants.iter().cloned(),
+            );
+            let checkpoint = plan
+                .checkpoint(Epoch::zero())
+                .await
+                .expect("checkpoint 0 must be recorded at startup");
+            assert!(checkpoint.finalization().is_none());
+            assert_eq!(checkpoint.commitment(), genesis.digest());
+            assert_eq!(checkpoint.info().epoch, Epoch::zero());
+        });
+    }
+
     #[test]
     fn recovered_node_starts_from_processed_epoch() {
         let runner = deterministic::Runner::default();
@@ -1581,6 +1638,56 @@ mod tests {
             let proposal = wait_for_proposal(&context, &cluster.nodes[0..1], Epoch::new(1)).await;
 
             assert_eq!(proposal.round.epoch(), Epoch::new(1));
+        });
+    }
+
+    /// A restart whose plan has no checkpoint for the recovered epoch, such as a plan in a
+    /// new partition, starts the epoch from its boundary block in marshal and checkpoints
+    /// that block with marshal's finalization.
+    #[test]
+    fn restart_from_boundary_block_records_checkpoint() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut cluster = Cluster::start_with_fixture(&mut context, &fixture, true).await;
+            let boundary = cluster.boundary.clone();
+            wait_for_processed(&context, &cluster.nodes[0].marshal, boundary.height()).await;
+            cluster.nodes[0].stop().await;
+
+            let restart = context
+                .child("node")
+                .with_attribute("index", 0)
+                .with_attribute("restart", 1);
+            let plan = TestPlan::init(
+                restart.child("state_sync_plan"),
+                StateSyncConfig {
+                    partition_prefix: "orchestrator-node-0-unrecorded".into(),
+                    max_participants: NZU32!(16),
+                    max_supported_mode: max_supported_mode(),
+                    block_codec_config: (),
+                },
+                None,
+            )
+            .await;
+            assert!(plan.checkpoint(Epoch::new(1)).await.is_none());
+            cluster
+                .recover(restart, &fixture, 0, plan.clone(), Epoch::new(1))
+                .await;
+            wait_for_proposal(&context, &cluster.nodes[0..1], Epoch::new(1)).await;
+
+            let checkpoint = plan
+                .checkpoint(Epoch::new(1))
+                .await
+                .expect("restart must checkpoint the boundary block it starts from");
+            let round = boundary.context().round;
+            let parent_view = boundary.context().parent.0;
+            let finalization = make_finalization(
+                Proposal::new(round, parent_view, boundary.digest()),
+                &fixture.schemes,
+            );
+            assert_eq!(checkpoint.commitment(), boundary.digest());
+            assert_eq!(checkpoint.finalization(), Some(&finalization));
+            assert_eq!(checkpoint.info().epoch, Epoch::new(1));
         });
     }
 
@@ -1652,10 +1759,8 @@ mod tests {
             let plan = node_plan(restart.child("state_sync_plan"), 0, None).await;
             plan.record(
                 restart.child("crash_cut"),
-                Checkpoint {
-                    info,
-                    boundary: last.digest(),
-                },
+                Epoch::new(2),
+                Checkpoint::new(Digested::precomputed(last.clone(), last.digest()), None),
                 Epoch::new(1),
             )
             .await;
@@ -1753,9 +1858,7 @@ mod tests {
 
             let plan = node_plan(context.child("state_sync_plan"), 0, None).await;
             assert!(
-                plan.checkpoint(context.child("verify"), Epoch::new(2))
-                    .await
-                    .is_some(),
+                plan.checkpoint(Epoch::new(2)).await.is_some(),
                 "checkpoint 2 must be durable once the final block of epoch 1 is acknowledged"
             );
         });
@@ -1837,9 +1940,7 @@ mod tests {
             let plan = node_plan(restart.child("state_sync_plan"), 0, None).await;
             for epoch in 1..=3 {
                 assert!(
-                    plan.checkpoint(restart.child("verify"), Epoch::new(epoch))
-                        .await
-                        .is_some(),
+                    plan.checkpoint(Epoch::new(epoch)).await.is_some(),
                     "checkpoint {epoch} must survive"
                 );
             }

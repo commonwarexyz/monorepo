@@ -187,13 +187,13 @@
 //! the next boundary.
 //!
 //! ```text
-//!   epoch f:  |---------- dealing ----------|------- inclusion: dealer logs on-chain -------|
-//!           first                        midpoint                                         final
-//!                     ^                           ^
-//!                     floor here: every dealer log is delivered,
-//!                     so the actor participates
-//!                                                 floor here: logs before it were skipped,
-//!                                                 so the actor follows
+//!   epoch f:  |-------- dealing --------|--- dealer log inclusion ---|
+//!           first                   midpoint                       final
+//!                   ^                       ^
+//!                   floor here: every dealer log is delivered,
+//!                   so the actor participates
+//!                                           floor here: logs before it
+//!                                           were skipped, so the actor follows
 //! ```
 //!
 //! State-sync startup registers the certified current-epoch consensus scheme
@@ -223,14 +223,14 @@
 //!
 //! # Persistence and Recovery
 //!
-//! Public protocol messages (dealer public messages, player acknowledgements,
-//! and finalized dealer logs) are journaled under [`Config::partition_prefix`].
+//! Public protocol messages (dealer public messages, player acknowledgements, and
+//! finalized dealer logs) are journaled under [`Config::partition_prefix`].
 //! Secret material is held only in the [`SecretStore`](crate::dkg::SecretStore).
 //! The current epoch's [`EpochInfo`](crate::dkg::types::EpochInfo) is not
-//! journaled. After a restart, the actor reads it from state-sync material in
-//! the [`state_sync::Plan`](crate::dkg::state_sync::Plan), then from the epoch's
-//! checkpoint there, and otherwise from the finalized boundary block. If none is
-//! available locally, the actor follows that epoch.
+//! journaled. After a restart, the actor reads it from the first available of
+//! state-sync material in the [`state_sync::Plan`](crate::dkg::state_sync::Plan),
+//! the boundary block in the epoch's checkpoint there, and that block in marshal.
+//! If none is available locally, the actor follows that epoch.
 //! [Marshal Retention](crate::dkg#marshal-retention) describes when each source
 //! applies.
 //!

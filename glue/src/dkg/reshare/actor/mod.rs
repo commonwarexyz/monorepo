@@ -29,6 +29,7 @@ use crate::dkg::{
     types::EpochInfo,
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiver};
+use commonware_codec::Codec;
 use commonware_consensus::{
     Block as _, Heightable as _,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
@@ -139,13 +140,8 @@ where
     /// Marshal mailbox used to read finalized blocks.
     pub marshal: MarshalMailbox<S, MV>,
 
-    /// State-sync recovery plan shared with the orchestrator.
-    pub state_sync: StateSyncPlan<
-        S,
-        MV::Commitment,
-        R::Variant,
-        <MV::ApplicationBlock as ReshareBlock>::Directory,
-    >,
+    /// State-sync recovery plan shared with the orchestrator and the probe.
+    pub state_sync: StateSyncPlan<S, MV>,
 
     /// Fence marked after each epoch's scheme is registered.
     pub fence: Fence,
@@ -192,7 +188,7 @@ where
 pub struct Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A = Exact>
 where
     E: Spawner + CryptoRng + Metrics + Clock + Storage,
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -215,7 +211,7 @@ where
     strategy: T,
     registrar: R,
     marshal: MarshalMailbox<S, MV>,
-    state_sync: StateSyncPlan<S, MV::Commitment, V, B::Directory>,
+    state_sync: StateSyncPlan<S, MV>,
     fence: Fence,
     namespace: &'static [u8],
     sharing_mode: SharingMode,
@@ -234,7 +230,7 @@ where
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + Clock + Storage,
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -371,13 +367,10 @@ where
         } else {
             let checkpoint = self
                 .state_sync
-                .checkpoint(
-                    self.context.as_present().child("checkpoint"),
-                    recovered_epoch.unwrap_or_else(Epoch::zero),
-                )
+                .checkpoint(recovered_epoch.unwrap_or_else(Epoch::zero))
                 .await;
             let start = checkpoint.map(|checkpoint| RecoveredStart {
-                info: checkpoint.info,
+                info: checkpoint.info(),
                 floor: None,
             });
             (start, None)

@@ -1,27 +1,36 @@
-//! Durable startup material for DKG actors.
+//! Durable state-sync material and epoch checkpoints for DKG restart and probe serving.
 //!
-//! Restart derives the active epoch from marshal's processed height, but marshal may have
-//! pruned the finalized boundary block that introduced it or, after application state sync,
-//! never stored it. [`Plan`] keeps that epoch's public material in two partitions under one
-//! prefix and is shared by the reshare and orchestrator actors.
-//! [Marshal Retention](crate::dkg#marshal-retention) describes how restart uses them:
+//! Restart derives the active epoch from marshal's processed height, but marshal may have pruned
+//! the boundary block that introduced it or, after application state sync, never stored it. The DKG
+//! actors therefore store what they need while they process each block, and [`Plan`] keeps it
+//! outside marshal in two partitions under one prefix. Restart and the [`probe`](crate::dkg::probe)
+//! read them as [Marshal Retention](crate::dkg#marshal-retention) describes.
 //!
-//! - [`StateSync`] material is persisted by [`Plan::init`] and deleted by a later startup
-//!   once marshal's recovered epoch is past the synced epoch. The reshare actor records the
-//!   height of the material's floor block with it, so a later startup in the synced epoch
-//!   can skip reading the block once marshal has processed it.
-//! - A [`Checkpoint`] is recorded for each epoch the orchestrator enters from its boundary
-//!   block. At an epoch's final block, the next epoch's checkpoint is recorded before the
-//!   block is acknowledged.
+//! - The state-sync partition holds the [`StateSync`] material given to [`Plan::init`] and the
+//!   height of its floor block. The reshare actor records that height when a startup first receives
+//!   the floor block from marshal. A later startup deletes the record once marshal's recovered
+//!   epoch is past the synced epoch.
+//! - The checkpoint partition holds a [`Checkpoint`] for each epoch the orchestrator enters from
+//!   its boundary block. The orchestrator records it when it reads the block from marshal at
+//!   startup, and at each live boundary before it acknowledges the final block. Recording a
+//!   checkpoint drops those of epochs before the one recovered from marshal's processed height.
+//!
+//! A plan loads the retained checkpoints when it opens, and its clones share that copy in memory,
+//! so reading a checkpoint does not touch storage. Recording one syncs the partition before it
+//! updates the copy in memory.
 
-use crate::dkg::{network::Directory, types::EpochInfo};
+use crate::dkg::{
+    ReshareBlock,
+    network::Directory,
+    types::{EpochInfo, Payload},
+};
 use bytes::BufMut;
 use commonware_codec::{
     Buf, Decode as _, Encode as _, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
     Epochable as _,
-    marshal::core::Processed,
+    marshal::core::{Processed, Variant as MarshalVariant},
     simplex::{scheme::Scheme, types::Finalization},
     types::{Epoch, Epocher, FixedEpocher, Height},
 };
@@ -30,6 +39,7 @@ use commonware_cryptography::bls12381::dkg::feldman_desmedt::Output;
 use commonware_cryptography::{
     Digest,
     bls12381::primitives::{sharing::ModeVersion, variant::Variant},
+    certificate::Verifier,
 };
 use commonware_storage::{
     Context,
@@ -40,7 +50,7 @@ use commonware_utils::{
     sequence::{FixedBytes, U64, Unit},
     sync::AsyncMutex,
 };
-use std::{fmt, num::NonZeroU32, sync::Arc};
+use std::{collections::BTreeMap, fmt, num::NonZeroU32, sync::Arc};
 
 const STATE_SYNC_KEY: FixedBytes<1> = fixed_bytes!("00");
 const STATE_SYNC_SUFFIX: &str = "_dkg_state_sync";
@@ -49,11 +59,10 @@ type EpochInfoCodecConfig = (NonZeroU32, ModeVersion);
 
 /// Storage settings for a DKG state-sync recovery plan.
 ///
-/// The limits bound every [`EpochInfo`] the plan persists, including the info of each
-/// boundary block the orchestrator checkpoints. They must admit every epoch info the
-/// application's block codec accepts, or recording that block's checkpoint panics.
+/// The participant and mode limits bound every [`EpochInfo`] in persisted state-sync material, and
+/// the block codec configuration bounds the boundary block of each checkpoint.
 #[derive(Clone, Debug)]
-pub struct Config {
+pub struct Config<B> {
     /// Stable node-wide partition prefix.
     pub partition_prefix: String,
 
@@ -62,6 +71,9 @@ pub struct Config {
 
     /// Maximum sharing mode version accepted in persisted epoch information.
     pub max_supported_mode: ModeVersion,
+
+    /// Marshal's codec configuration for the application's blocks.
+    pub block_codec_config: B,
 }
 
 /// Public material needed to start DKG actors in a state-synced epoch.
@@ -203,134 +215,205 @@ where
     }
 }
 
-/// Public information of an epoch and the commitment of the boundary block it starts from.
-///
-/// Restart resumes an epoch from its checkpoint without reading the boundary block, so marshal
-/// can prune that block. [Marshal Retention](crate::dkg#marshal-retention) describes when
-/// restart still reads it.
-pub struct Checkpoint<S, D, V, Dir = Unit>
-where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
-{
-    /// Public information for the epoch.
-    pub info: EpochInfo<V, S::PublicKey, Dir>,
+/// BLS variant carried by a marshal variant's application block.
+pub(crate) type BlsVariant<MV> =
+    <<MV as MarshalVariant>::ApplicationBlock as ReshareBlock>::Variant;
 
-    /// Commitment of the boundary block that carried the info: genesis for epoch zero, or
-    /// the final block of the previous epoch. The epoch's Simplex engine starts from it.
-    pub boundary: D,
+/// Directory carried by a marshal variant's application block.
+type Dir<MV> = <<MV as MarshalVariant>::ApplicationBlock as ReshareBlock>::Directory;
+
+/// Codec configuration of a marshal variant's application block.
+type BlockCfg<MV> = <<MV as MarshalVariant>::ApplicationBlock as Read>::Cfg;
+
+/// State-sync material for a marshal variant.
+type Material<S, MV> = StateSync<S, <MV as MarshalVariant>::Commitment, BlsVariant<MV>, Dir<MV>>;
+
+/// The stored state-sync record for a marshal variant.
+type Stored<S, MV> = Record<S, <MV as MarshalVariant>::Commitment, BlsVariant<MV>, Dir<MV>>;
+
+/// Epoch info for a marshal variant.
+type Info<S, MV> = EpochInfo<BlsVariant<MV>, <S as Verifier>::PublicKey, Dir<MV>>;
+
+/// The boundary block an epoch starts from, with marshal's finalization of it when marshal has one.
+///
+/// The orchestrator copies the block from marshal when it enters the epoch, so restart and the
+/// [`probe`](crate::dkg::probe) read the epoch from here after marshal prunes the block. The block
+/// carries the epoch's [`EpochInfo`], and its commitment is the root the epoch's Simplex engine
+/// starts from.
+///
+/// Marshal may hold a boundary block without its finalization when it repaired the block by walking
+/// back from a later finalized block, and genesis has none. A checkpoint without a finalization
+/// still restarts its epoch, but the probe does not serve that epoch.
+pub struct Checkpoint<S, MV>
+where
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
+{
+    block: MV::StoredBlock,
+    commitment: MV::Commitment,
+    finalization: Option<Finalization<S, MV::Commitment>>,
 }
 
-impl<S, D, V, Dir> Clone for Checkpoint<S, D, V, Dir>
+impl<S, MV> Checkpoint<S, MV>
 where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
-    fn clone(&self) -> Self {
+    /// Creates a checkpoint of the boundary `block` with marshal's `finalization` of it, if any.
+    pub(crate) fn new(
+        block: MV::Block,
+        finalization: Option<Finalization<S, MV::Commitment>>,
+    ) -> Self {
+        let commitment = MV::commitment(&block);
         Self {
-            info: self.info.clone(),
-            boundary: self.boundary,
+            block: block.into(),
+            commitment,
+            finalization,
+        }
+    }
+
+    /// Returns the commitment of the boundary block.
+    pub(crate) const fn commitment(&self) -> MV::Commitment {
+        self.commitment
+    }
+
+    /// Returns the finalization of the boundary block, if the checkpoint holds one.
+    pub(crate) const fn finalization(&self) -> Option<&Finalization<S, MV::Commitment>> {
+        self.finalization.as_ref()
+    }
+
+    /// Returns the boundary block.
+    pub(crate) fn block(&self) -> MV::Block {
+        MV::restore(self.block.clone(), MV::commitment_to_inner(self.commitment))
+    }
+
+    /// Returns the epoch info carried by the boundary block.
+    ///
+    /// The checkpoint keeps no separate copy, so this reads the info from the block's payload.
+    /// Panics if the block carries no epoch info. [`Plan::record`] rejects such a checkpoint.
+    pub(crate) fn info(&self) -> Info<S, MV> {
+        let block = MV::into_shared(self.block());
+        match block.inner().payload() {
+            Some(Payload::EpochInfo(info)) => info,
+            _ => panic!("checkpoint block must carry epoch info"),
         }
     }
 }
 
-impl<S, D, V, Dir> fmt::Debug for Checkpoint<S, D, V, Dir>
+impl<S, MV> Clone for Checkpoint<S, MV>
 where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            block: self.block.clone(),
+            commitment: self.commitment,
+            finalization: self.finalization.clone(),
+        }
+    }
+}
+
+impl<S, MV> fmt::Debug for Checkpoint<S, MV>
+where
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Checkpoint")
-            .field("info", &self.info)
-            .field("boundary", &self.boundary)
-            .finish()
+            .field("commitment", &self.commitment)
+            .field("finalization", &self.finalization)
+            .finish_non_exhaustive()
     }
 }
 
-impl<S, D, V, Dir> PartialEq for Checkpoint<S, D, V, Dir>
+impl<S, MV> PartialEq for Checkpoint<S, MV>
 where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
+    MV::StoredBlock: PartialEq,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.info == other.info && self.boundary == other.boundary
+        self.block == other.block
+            && self.commitment == other.commitment
+            && self.finalization == other.finalization
     }
 }
 
-impl<S, D, V, Dir> Eq for Checkpoint<S, D, V, Dir>
+impl<S, MV> Eq for Checkpoint<S, MV>
 where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
+    MV::StoredBlock: Eq,
 {
 }
 
-impl<S, D, V, Dir> Write for Checkpoint<S, D, V, Dir>
+impl<S, MV> Write for Checkpoint<S, MV>
 where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
     fn write(&self, writer: &mut impl BufMut) {
-        self.info.write(writer);
-        self.boundary.write(writer);
+        self.block.write(writer);
+        self.commitment.write(writer);
+        self.finalization.write(writer);
     }
 }
 
-impl<S, D, V, Dir> EncodeSize for Checkpoint<S, D, V, Dir>
+impl<S, MV> EncodeSize for Checkpoint<S, MV>
 where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
     fn encode_size(&self) -> usize {
-        self.info.encode_size() + self.boundary.encode_size()
+        self.block.encode_size() + self.commitment.encode_size() + self.finalization.encode_size()
     }
 }
 
-impl<S, D, V, Dir> Read for Checkpoint<S, D, V, Dir>
+impl<S, MV> Read for Checkpoint<S, MV>
 where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
-    type Cfg = EpochInfoCodecConfig;
+    type Cfg = (BlockCfg<MV>, <S::Certificate as Read>::Cfg);
 
-    fn read_cfg(reader: &mut impl Buf, epoch_info: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(
+        reader: &mut impl Buf,
+        (block, certificate): &Self::Cfg,
+    ) -> Result<Self, CodecError> {
         Ok(Self {
-            info: EpochInfo::read_cfg(reader, epoch_info)?,
-            boundary: D::read(reader)?,
+            block: MV::StoredBlock::read_cfg(reader, block)?,
+            commitment: MV::Commitment::read(reader)?,
+            finalization: Option::<Finalization<S, MV::Commitment>>::read_cfg(reader, certificate)?,
         })
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<S, D, V, Dir> arbitrary::Arbitrary<'_> for Checkpoint<S, D, V, Dir>
+impl<S, MV> arbitrary::Arbitrary<'_> for Checkpoint<S, MV>
 where
-    S: Scheme<D>,
-    D: Digest + for<'a> arbitrary::Arbitrary<'a>,
-    V: Variant,
-    Dir: Directory<S::PublicKey> + for<'a> arbitrary::Arbitrary<'a>,
-    S::PublicKey: for<'a> arbitrary::Arbitrary<'a>,
-    Output<V, S::PublicKey>: for<'a> arbitrary::Arbitrary<'a>,
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
+    MV::StoredBlock: for<'a> arbitrary::Arbitrary<'a>,
+    MV::Commitment: for<'a> arbitrary::Arbitrary<'a>,
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            info: u.arbitrary()?,
-            boundary: u.arbitrary()?,
+            block: u.arbitrary()?,
+            commitment: u.arbitrary()?,
+            finalization: u.arbitrary()?,
         })
     }
 }
@@ -475,50 +558,60 @@ where
 
 /// Partition prefix and codec limits shared by the plan's records.
 #[derive(Clone)]
-struct Storage {
+struct Storage<C> {
     partition_prefix: String,
     codec_config: EpochInfoCodecConfig,
+    block_codec_config: C,
 }
 
-enum PlanState<S, D, V, Dir>
+enum MaterialState<S, MV>
 where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
-    Pending(Option<Record<S, D, V, Dir>>),
-    Resolved(Option<Record<S, D, V, Dir>>),
+    Pending(Option<Stored<S, MV>>),
+    Resolved(Option<Stored<S, MV>>),
+}
+
+/// The plan's records, with every retained checkpoint mirrored from storage so reads do not
+/// reopen the partition.
+struct PlanState<S, MV>
+where
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
+{
+    material: MaterialState<S, MV>,
+    checkpoints: BTreeMap<Epoch, Checkpoint<S, MV>>,
 }
 
 /// Shared startup recovery plan for DKG actors.
 ///
-/// Initialize one plan after obtaining optional application state-sync material
-/// and before starting either DKG actor, and give each actor a clone. Clones share
-/// the resolution decision, so both actors observe the same material, and they
-/// serialize their storage access. Separately initialized plans do not, so
-/// initialize only one plan per partition prefix.
+/// Initialize one plan after obtaining optional application state-sync material and before starting
+/// either DKG actor. Give a clone to the reshare actor, the orchestrator, and the probe through
+/// [`Mailbox::attach`](crate::dkg::probe::Mailbox::attach). Clones share the material decision and
+/// the checkpoints, and they serialize their storage access. Separately initialized plans do not,
+/// so initialize only one plan per partition prefix.
 ///
-/// A [`Plan::disabled`] plan stores nothing, so every restart reads its epoch's
-/// boundary block from marshal. Use it for deployments that never restart into a
-/// later epoch, such as a one-shot DKG.
-pub struct Plan<S, D, V, Dir = Unit>
+/// A [`Plan::disabled`] plan stores nothing, so every restart reads its epoch's boundary block from
+/// marshal and the probe serves no epoch. Use it for deployments that never restart into a later
+/// epoch, such as a one-shot DKG.
+pub struct Plan<S, MV>
 where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
-    state: Arc<AsyncMutex<PlanState<S, D, V, Dir>>>,
-    storage: Option<Storage>,
+    state: Arc<AsyncMutex<PlanState<S, MV>>>,
+    storage: Option<Storage<BlockCfg<MV>>>,
 }
 
-impl<S, D, V, Dir> Clone for Plan<S, D, V, Dir>
+impl<S, MV> Clone for Plan<S, MV>
 where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
     fn clone(&self) -> Self {
         Self {
@@ -528,31 +621,29 @@ where
     }
 }
 
-impl<S, D, V, Dir> fmt::Debug for Plan<S, D, V, Dir>
+impl<S, MV> fmt::Debug for Plan<S, MV>
 where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("Plan").finish_non_exhaustive()
     }
 }
 
-impl<S, D, V, Dir> Plan<S, D, V, Dir>
+impl<S, MV> Plan<S, MV>
 where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
-    /// Initializes and durably records a DKG state-sync recovery candidate.
+    /// Opens the plan's partitions, durably stores any provided state-sync material, and loads the
+    /// retained checkpoints into memory.
     ///
-    /// Provided material replaces any existing material and the floor height
-    /// recorded for it, and is durable when this method returns. Without provided
-    /// material, the existing material (if any) is loaded. The returned plan may be
-    /// passed to the actors immediately.
+    /// Provided material replaces any existing material and the floor height recorded for it.
+    /// Without provided material, the plan loads the existing material, if any. The returned plan
+    /// may be passed to the actors immediately.
     ///
     /// # Panics
     ///
@@ -561,8 +652,8 @@ where
     /// provided material violates the configured codec limits.
     pub async fn init<E: Context>(
         context: E,
-        config: Config,
-        provided: Option<StateSync<S, D, V, Dir>>,
+        config: Config<BlockCfg<MV>>,
+        provided: Option<Material<S, MV>>,
     ) -> Self {
         let codec_config = (config.max_participants, config.max_supported_mode);
         if let Some(provided) = &provided {
@@ -571,8 +662,10 @@ where
         let storage = Storage {
             partition_prefix: config.partition_prefix,
             codec_config,
+            block_codec_config: config.block_codec_config,
         };
-        let mut store = open_state_sync::<E, S, D, V, Dir>(context, &storage).await;
+        let checkpoints_context = context.child("checkpoints");
+        let mut store = open_state_sync::<E, S, MV>(context, &storage).await;
         if let Some(provided) = provided {
             store.put(
                 STATE_SYNC_KEY,
@@ -592,8 +685,21 @@ where
         }
         drop(store);
 
+        let store = open_checkpoints::<E, S, MV>(checkpoints_context, &storage).await;
+        let checkpoints = store
+            .keys()
+            .map(|key| {
+                let checkpoint = store.get(key).expect("key must have a value").clone();
+                (Epoch::new(u64::from(key)), checkpoint)
+            })
+            .collect();
+        drop(store);
+
         Self {
-            state: Arc::new(AsyncMutex::new(PlanState::Pending(candidate))),
+            state: Arc::new(AsyncMutex::new(PlanState {
+                material: MaterialState::Pending(candidate),
+                checkpoints,
+            })),
             storage: Some(storage),
         }
     }
@@ -602,7 +708,10 @@ where
     /// records no checkpoints.
     pub fn disabled() -> Self {
         Self {
-            state: Arc::new(AsyncMutex::new(PlanState::Resolved(None))),
+            state: Arc::new(AsyncMutex::new(PlanState {
+                material: MaterialState::Resolved(None),
+                checkpoints: BTreeMap::new(),
+            })),
             storage: None,
         }
     }
@@ -617,22 +726,22 @@ where
         &self,
         context: E,
         recovered_epoch: Option<Epoch>,
-    ) -> Option<StateSync<S, D, V, Dir>> {
+    ) -> Option<Material<S, MV>> {
         let mut state = self.state.lock().await;
-        let candidate = match &*state {
-            PlanState::Resolved(resolved) => {
+        let candidate = match &state.material {
+            MaterialState::Resolved(resolved) => {
                 return resolved.as_ref().map(|record| record.material.clone());
             }
-            PlanState::Pending(candidate) => candidate.clone(),
+            MaterialState::Pending(candidate) => candidate.clone(),
         };
 
         let Some(candidate) = candidate else {
-            *state = PlanState::Resolved(None);
+            state.material = MaterialState::Resolved(None);
             return None;
         };
         if recovered_epoch.is_none_or(|epoch| epoch <= candidate.material.floor.epoch()) {
             let material = candidate.material.clone();
-            *state = PlanState::Resolved(Some(candidate));
+            state.material = MaterialState::Resolved(Some(candidate));
             return Some(material);
         }
 
@@ -640,21 +749,21 @@ where
             .storage
             .as_ref()
             .expect("pending plan must have storage");
-        let mut store = open_state_sync::<E, S, D, V, Dir>(context, storage).await;
+        let mut store = open_state_sync::<E, S, MV>(context, storage).await;
         store.remove(&STATE_SYNC_KEY);
         store
             .sync()
             .await
             .expect("failed to delete stale DKG state sync metadata");
-        *state = PlanState::Resolved(None);
+        state.material = MaterialState::Resolved(None);
         None
     }
 
     /// Returns the floor block height recorded with the material [`Self::resolve`]
     /// kept, if any.
     pub(crate) async fn floor_height(&self) -> Option<Height> {
-        match &*self.state.lock().await {
-            PlanState::Resolved(Some(record)) => record.floor_height,
+        match &self.state.lock().await.material {
+            MaterialState::Resolved(Some(record)) => record.floor_height,
             _ => None,
         }
     }
@@ -665,7 +774,7 @@ where
     /// Does nothing unless [`Self::resolve`] has kept material. Panics if storage fails.
     pub(crate) async fn record_floor_height<E: Context>(&self, context: E, height: Height) {
         let mut state = self.state.lock().await;
-        let PlanState::Resolved(Some(record)) = &mut *state else {
+        let MaterialState::Resolved(Some(record)) = &mut state.material else {
             return;
         };
         record.floor_height = Some(height);
@@ -673,7 +782,7 @@ where
             .storage
             .as_ref()
             .expect("kept material must have storage");
-        let mut store = open_state_sync::<E, S, D, V, Dir>(context, storage).await;
+        let mut store = open_state_sync::<E, S, MV>(context, storage).await;
         store.put(STATE_SYNC_KEY, record.clone());
         store
             .sync()
@@ -681,64 +790,68 @@ where
             .expect("DKG state sync floor height must persist");
     }
 
-    /// Returns the checkpoint recorded for `epoch`, if any.
-    ///
-    /// Panics if storage fails to load.
-    pub(crate) async fn checkpoint<E: Context>(
-        &self,
-        context: E,
-        epoch: Epoch,
-    ) -> Option<Checkpoint<S, D, V, Dir>> {
-        let storage = self.storage.as_ref()?;
-
-        // Every access to the checkpoint partition holds the shared state lock. Opening the
-        // partition truncates a copy that fails validation, and the runtime allows one open
-        // handle per blob.
-        let _serialized = self.state.lock().await;
-        let store = open_checkpoints::<E, S, D, V, Dir>(context, storage).await;
-        store.get(&U64::new(epoch.get())).cloned()
+    /// Returns the checkpoint recorded for `epoch`, if any, from memory.
+    pub(crate) async fn checkpoint(&self, epoch: Epoch) -> Option<Checkpoint<S, MV>> {
+        self.state.lock().await.checkpoints.get(&epoch).cloned()
     }
 
-    /// Durably records `checkpoint` and drops every other checkpoint for an epoch before
-    /// `retained_from`.
+    /// Durably records `checkpoint` for `epoch` and drops every other checkpoint for an epoch
+    /// before `retained_from`, in storage and then in memory.
     ///
-    /// `retained_from` must not be later than the epoch any later restart recovers from
-    /// marshal's processed height. A disabled plan records nothing. Panics if storage fails
-    /// or if `checkpoint` exceeds the plan's codec limits, since every later load of a stored
-    /// record that exceeds them would panic.
+    /// `retained_from` must not be later than the epoch any later restart recovers from marshal's
+    /// processed height. A disabled plan records nothing.
+    ///
+    /// Panics if storage fails or if the checkpoint's block does not carry the info of `epoch`.
+    /// Also panics if the checkpoint does not decode under the plan's block codec configuration,
+    /// since every later load of it would fail.
     pub(crate) async fn record<E: Context>(
         &self,
         context: E,
-        checkpoint: Checkpoint<S, D, V, Dir>,
+        epoch: Epoch,
+        checkpoint: Checkpoint<S, MV>,
         retained_from: Epoch,
     ) {
         let Some(storage) = &self.storage else {
             return;
         };
-        Checkpoint::<S, D, V, Dir>::decode_cfg(checkpoint.encode(), &storage.codec_config)
-            .expect("checkpoint must satisfy codec config");
-        let epoch = checkpoint.info.epoch;
-        let _serialized = self.state.lock().await;
-        let mut store = open_checkpoints::<E, S, D, V, Dir>(context, storage).await;
+        assert!(
+            checkpoint.info().epoch == epoch,
+            "checkpoint block must carry the info of its epoch"
+        );
+        Checkpoint::<S, MV>::decode_cfg(
+            checkpoint.encode(),
+            &(
+                storage.block_codec_config.clone(),
+                S::certificate_codec_config_unbounded(),
+            ),
+        )
+        .expect("checkpoint must satisfy codec config");
+
+        // Opening a metadata store repairs a copy that fails validation, so the lock keeps clones
+        // from opening the partition while another clone writes it.
+        let mut state = self.state.lock().await;
+        let mut store = open_checkpoints::<E, S, MV>(context, storage).await;
         store.retain(|key, _| Epoch::new(u64::from(key)) >= retained_from);
-        store.put(U64::new(epoch.get()), checkpoint);
+        store.put(U64::new(epoch.get()), checkpoint.clone());
         store
             .sync()
             .await
             .expect("failed to persist DKG checkpoint metadata");
+
+        state.checkpoints.retain(|kept, _| *kept >= retained_from);
+        state.checkpoints.insert(epoch, checkpoint);
     }
 }
 
-async fn open_state_sync<E, S, D, V, Dir>(
+async fn open_state_sync<E, S, MV>(
     context: E,
-    storage: &Storage,
-) -> Metadata<E, FixedBytes<1>, Record<S, D, V, Dir>>
+    storage: &Storage<BlockCfg<MV>>,
+) -> Metadata<E, FixedBytes<1>, Stored<S, MV>>
 where
     E: Context,
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
     Metadata::init(
         context,
@@ -754,22 +867,24 @@ where
     .expect("failed to load DKG state sync metadata")
 }
 
-async fn open_checkpoints<E, S, D, V, Dir>(
+async fn open_checkpoints<E, S, MV>(
     context: E,
-    storage: &Storage,
-) -> Metadata<E, U64, Checkpoint<S, D, V, Dir>>
+    storage: &Storage<BlockCfg<MV>>,
+) -> Metadata<E, U64, Checkpoint<S, MV>>
 where
     E: Context,
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
+    S: Scheme<MV::Commitment>,
+    MV: MarshalVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
     Metadata::init(
         context,
         metadata::Config {
             partition: format!("{}{CHECKPOINT_SUFFIX}", storage.partition_prefix),
-            codec_config: storage.codec_config,
+            codec_config: (
+                storage.block_codec_config.clone(),
+                S::certificate_codec_config_unbounded(),
+            ),
         },
     )
     .await
@@ -810,12 +925,17 @@ where
 mod tests {
     use super::*;
     use crate::dkg::{network::Addresses, tests::mocks, types::EpochOutcome};
+
+    /// Marshal variant whose blocks carry addressed directories.
+    type AddressedVariant = commonware_consensus::marshal::standard::Standard<
+        mocks::MockBlock<mocks::TestDigest, mocks::TestContext, Addresses<mocks::TestPublicKey>>,
+    >;
     use commonware_consensus::{
         simplex::types::{Finalize, Proposal},
         types::{Round, View},
     };
     use commonware_cryptography::{
-        Hasher as _, Sha256, Signer as _,
+        Digested, Digestible as _, Hasher as _, Sha256, Signer as _,
         bls12381::{dkg::feldman_desmedt::deal, primitives::sharing::Mode},
         ed25519,
     };
@@ -827,6 +947,21 @@ mod tests {
 
     type TestStateSync = StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
 
+    /// A quorum finalization of `payload` in the first view of `epoch`.
+    fn finalization(
+        schemes: &[mocks::TestScheme],
+        epoch: Epoch,
+        payload: mocks::TestDigest,
+    ) -> Finalization<mocks::TestScheme, mocks::TestDigest> {
+        let proposal = Proposal::new(Round::new(epoch, View::new(1)), View::zero(), payload);
+        let finalizes = schemes
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("scheme must sign"))
+            .collect::<Vec<_>>();
+        Finalization::from_finalizes(&schemes[0], non_empty![@finalizes.iter()], &Sequential)
+            .expect("test finalizes must form a quorum")
+    }
+
     fn state_sync(context: &mut deterministic::Context, epoch: Epoch) -> TestStateSync {
         let fixture = mocks::scheme_fixture_n(context, 4);
         let participants = Set::from_iter_dedup(fixture.participants);
@@ -836,22 +971,11 @@ mod tests {
             participants.clone(),
         )
         .expect("test DKG output");
-        let proposal = Proposal::new(
-            Round::new(epoch, View::new(1)),
-            View::zero(),
+        let floor = finalization(
+            &fixture.schemes,
+            epoch,
             Sha256::hash(&[b"state sync floor"]),
         );
-        let finalizes = fixture
-            .schemes
-            .iter()
-            .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("test finalize"))
-            .collect::<Vec<_>>();
-        let floor = Finalization::from_finalizes(
-            &fixture.schemes[0],
-            non_empty![@finalizes.iter()],
-            &Sequential,
-        )
-        .expect("test finalization quorum");
         TestStateSync {
             info: EpochInfo {
                 outcome: EpochOutcome::Success,
@@ -865,13 +989,14 @@ mod tests {
         }
     }
 
-    type TestPlan = Plan<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
+    type TestPlan = Plan<mocks::TestScheme, mocks::TestMarshalVariant>;
 
-    fn config(partition: &str) -> Config {
+    fn config(partition: &str) -> Config<()> {
         Config {
             partition_prefix: partition.into(),
             max_participants: NZU32!(16),
             max_supported_mode: crate::dkg::tests::max_supported_mode(),
+            block_codec_config: (),
         }
     }
 
@@ -887,13 +1012,42 @@ mod tests {
         assert_eq!(actual.as_ref(), Some(expected));
     }
 
-    type TestCheckpoint = Checkpoint<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
+    type TestCheckpoint = Checkpoint<mocks::TestScheme, mocks::TestMarshalVariant>;
 
+    /// A block at the height of `epoch`'s boundary carrying `info`.
+    fn boundary_block(
+        epoch: Epoch,
+        info: EpochInfo<mocks::TestBlsVariant, mocks::TestPublicKey>,
+    ) -> mocks::TestBlock {
+        let leader = info
+            .players
+            .iter()
+            .next()
+            .expect("test epoch must have players")
+            .clone();
+        let parent = Sha256::hash(&[&epoch.get().to_be_bytes()]);
+        let height = Height::new(epoch.get() * 10);
+        mocks::TestBlock::new::<Sha256>(
+            mocks::TestContext {
+                round: Round::new(epoch, View::new(1)),
+                leader,
+                parent: (View::zero(), parent),
+            },
+            parent,
+            height,
+            height.get(),
+        )
+        .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestPublicKey>(
+            NZU32!(16),
+            Payload::EpochInfo(info),
+        )
+    }
+
+    /// A checkpoint of a boundary block carrying `epoch`'s info, without a finalization.
     fn checkpoint(context: &mut deterministic::Context, epoch: Epoch) -> TestCheckpoint {
-        TestCheckpoint {
-            info: state_sync(context, epoch).info,
-            boundary: Sha256::hash(&[&epoch.get().to_be_bytes()]),
-        }
+        let block = boundary_block(epoch, state_sync(context, epoch).info);
+        let digest = block.digest();
+        Checkpoint::new(Digested::precomputed(block, digest), None)
     }
 
     /// Checkpoints survive reopening the plan, and each record keeps only the checkpoints
@@ -905,10 +1059,13 @@ mod tests {
             let second = checkpoint(&mut context, Epoch::new(4));
             let third = checkpoint(&mut context, Epoch::new(5));
             let recorder = plan(context.child("recorder"), "checkpoints", None).await;
-            for (checkpoint, retained_from) in [(&first, 3), (&second, 3), (&third, 4)] {
+            for (epoch, checkpoint, retained_from) in
+                [(3, &first, 3), (4, &second, 3), (5, &third, 4)]
+            {
                 recorder
                     .record(
                         context.child("record"),
+                        Epoch::new(epoch),
                         checkpoint.clone(),
                         Epoch::new(retained_from),
                     )
@@ -918,7 +1075,7 @@ mod tests {
 
             // The last record dropped epoch three and kept every later epoch.
             let reopened = plan(context.child("reopened"), "checkpoints", None).await;
-            let read = |epoch| reopened.checkpoint(context.child("read"), Epoch::new(epoch));
+            let read = |epoch| reopened.checkpoint(Epoch::new(epoch));
             assert_eq!(read(5).await.as_ref(), Some(&third));
             assert_eq!(read(4).await.as_ref(), Some(&second));
             assert!(read(3).await.is_none());
@@ -933,8 +1090,13 @@ mod tests {
             let material = state_sync(&mut context, Epoch::new(2));
             let recorded = checkpoint(&mut context, Epoch::new(2));
             let plan = plan(context.child("plan"), "independent", Some(material.clone())).await;
-            plan.record(context.child("record"), recorded.clone(), Epoch::new(2))
-                .await;
+            plan.record(
+                context.child("record"),
+                Epoch::new(2),
+                recorded.clone(),
+                Epoch::new(2),
+            )
+            .await;
 
             assert!(
                 plan.resolve(context.child("resolve"), Some(Epoch::new(3)))
@@ -942,11 +1104,80 @@ mod tests {
                     .is_none()
             );
             assert_eq!(
-                plan.checkpoint(context.child("read"), Epoch::new(2))
-                    .await
-                    .as_ref(),
+                plan.checkpoint(Epoch::new(2)).await.as_ref(),
                 Some(&recorded)
             );
+        });
+    }
+
+    /// A reopened plan restores the recorded boundary block with its commitment, its
+    /// finalization, and the epoch info the block carries.
+    #[test]
+    fn checkpoint_restores_recorded_block() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let info = state_sync(&mut context, Epoch::new(3)).info;
+            let block = boundary_block(Epoch::new(3), info.clone());
+            let digest = block.digest();
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let boundary_finalization = finalization(&fixture.schemes, Epoch::new(2), digest);
+            let recorder = plan(context.child("recorder"), "restore", None).await;
+            recorder
+                .record(
+                    context.child("record"),
+                    Epoch::new(3),
+                    Checkpoint::new(
+                        Digested::precomputed(block.clone(), digest),
+                        Some(boundary_finalization.clone()),
+                    ),
+                    Epoch::new(3),
+                )
+                .await;
+            drop(recorder);
+
+            let reopened = plan(context.child("reopened"), "restore", None).await;
+            let restored = reopened
+                .checkpoint(Epoch::new(3))
+                .await
+                .expect("checkpoint must survive reopening");
+            let restored_block = restored.block();
+            assert_eq!(restored_block.inner(), &block);
+            assert_eq!(restored_block.digest(), digest);
+            assert_eq!(restored.commitment(), digest);
+            assert_eq!(restored.finalization(), Some(&boundary_finalization));
+            assert_eq!(restored.info(), info);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "checkpoint block must carry the info of its epoch")]
+    fn record_rejects_checkpoint_for_another_epoch() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let recorded = checkpoint(&mut context, Epoch::new(3));
+            let plan = plan(context.child("plan"), "another-epoch", None).await;
+            plan.record(
+                context.child("record"),
+                Epoch::new(4),
+                recorded,
+                Epoch::new(4),
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "checkpoint block must carry epoch info")]
+    fn record_rejects_checkpoint_without_epoch_info() {
+        deterministic::Runner::default().start(|context| async move {
+            let block = mocks::genesis_block(ed25519::PrivateKey::from_seed(0).public_key());
+            let digest = block.digest();
+            let plan = plan(context.child("plan"), "no-info", None).await;
+            plan.record(
+                context.child("record"),
+                Epoch::zero(),
+                Checkpoint::new(Digested::precomputed(block, digest), None),
+                Epoch::zero(),
+            )
+            .await;
         });
     }
 
@@ -956,13 +1187,14 @@ mod tests {
         deterministic::Runner::default().start(|mut context| async move {
             let recorded = checkpoint(&mut context, Epoch::new(1));
             let plan = TestPlan::disabled();
-            plan.record(context.child("record"), recorded, Epoch::new(1))
-                .await;
-            assert!(
-                plan.checkpoint(context.child("read"), Epoch::new(1))
-                    .await
-                    .is_none()
-            );
+            plan.record(
+                context.child("record"),
+                Epoch::new(1),
+                recorded,
+                Epoch::new(1),
+            )
+            .await;
+            assert!(plan.checkpoint(Epoch::new(1)).await.is_none());
         });
     }
 
@@ -1144,7 +1376,12 @@ mod tests {
             let recorded = checkpoint(&mut context, Epoch::new(3));
             let recorder = plan(context.child("recorder"), "kept", None).await;
             recorder
-                .record(context.child("record"), recorded.clone(), Epoch::new(3))
+                .record(
+                    context.child("record"),
+                    Epoch::new(3),
+                    recorded.clone(),
+                    Epoch::new(3),
+                )
                 .await;
             drop(recorder);
 
@@ -1159,10 +1396,7 @@ mod tests {
                     .is_none()
             );
             assert_eq!(
-                provided
-                    .checkpoint(context.child("read"), Epoch::new(3))
-                    .await
-                    .as_ref(),
+                provided.checkpoint(Epoch::new(3)).await.as_ref(),
                 Some(&recorded)
             );
         });
@@ -1237,12 +1471,7 @@ mod tests {
                 floor,
             };
 
-            let _ = Plan::<
-                mocks::TestScheme,
-                mocks::TestDigest,
-                mocks::TestBlsVariant,
-                Addresses<mocks::TestPublicKey>,
-            >::init(
+            let _ = Plan::<mocks::TestScheme, AddressedVariant>::init(
                 context.child("init"),
                 config("invalid-directory"),
                 Some(invalid),
@@ -1271,7 +1500,7 @@ mod conformance {
         CodecConformance<StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant, Addresses<mocks::TestPublicKey>>> => 8192,
         CodecConformance<Record<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>> => 8192,
         CodecConformance<Record<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant, Addresses<mocks::TestPublicKey>>> => 8192,
-        CodecConformance<Checkpoint<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>> => 8192,
-        CodecConformance<Checkpoint<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant, Addresses<mocks::TestPublicKey>>> => 8192,
+        CodecConformance<Checkpoint<mocks::TestScheme, mocks::TestMarshalVariant>> => 8192,
+        CodecConformance<Checkpoint<mocks::TestScheme, commonware_consensus::marshal::standard::Standard<mocks::MockBlock<mocks::TestDigest, mocks::TestContext, Addresses<mocks::TestPublicKey>>>>> => 8192,
     }
 }

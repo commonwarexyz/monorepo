@@ -9,7 +9,7 @@ use crate::dkg::{
     },
     types::Message,
 };
-use commonware_codec::{Decode, Encode};
+use commonware_codec::{Codec, Decode, Encode};
 use commonware_consensus::{
     Heightable as _,
     marshal::core::Variant as MarshalVariant,
@@ -37,7 +37,7 @@ use tracing::{Instrument as _, debug, info, info_span, warn};
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + Clock + Storage,
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
