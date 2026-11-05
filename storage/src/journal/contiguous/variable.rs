@@ -624,7 +624,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                             .iter()
                             .map(|&pos| ((pos - first).saturating_mul(item_size), item_size))
                             .collect();
-                        offset_metrics.record(blob.warm(&ranges).await);
+                        let warm = blob.warm(&ranges).await;
+                        let warmed = warm.is_ok();
+                        offset_metrics.record(warm);
 
                         // Only offsets the view holds entirely can be read from it.
                         let written = first.saturating_add(blob.size() / item_size);
@@ -637,12 +639,16 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                             .collect();
                         let mut buf = vec![0u8; items.len() * offset_size.get()];
                         let result = blob.read_many_into(&mut buf, &items, offset_size).await;
-                        (missing, buf, result)
+                        (missing, buf, result, warmed)
                     });
-                for (missing, buf, result) in join_all(reads).await {
-                    // The reads are served from the pages just warmed, so only a failure counts.
+                for (missing, buf, result, warmed) in join_all(reads).await {
+                    // The reads are served from the pages just warmed, so only a failure counts,
+                    // and only after a successful warm, since a failed warm already counted the
+                    // pages that the read then fails on.
                     if let Err(err) = result {
-                        offset_metrics.record(Err(err));
+                        if warmed {
+                            offset_metrics.record(Err(err));
+                        }
                         continue;
                     }
                     for (idx, item) in missing.into_iter().zip(buf.chunks(offset_size.get())) {
@@ -3063,6 +3069,48 @@ mod tests {
             write_buffer: NZUsize!(1),
             replay_buffer: NZUsize!(256),
         }
+    }
+
+    #[test_traced]
+    fn test_variable_prefetch_counts_each_failed_offsets_blob_once() {
+        deterministic::Runner::default().start(|context| async move {
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(256));
+            let cfg = Config {
+                partition: "prefetch-failures".into(),
+                items_per_section: NZU64!(100),
+                compression: None,
+                codec_config: ((..=4096).into(), ()),
+                page_cache: cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, Vec<u8>>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for i in 0..250u32 {
+                (journal, _) = journal.append(&vec![i as u8; 20]).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // With every blob read failing, a prefetch of frames in two sealed blobs fails once
+            // for each offsets blob it reads, and warms no frame.
+            cache.clear();
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                read_rate: Some(probability!(1.0)),
+                ..Default::default()
+            };
+            journal.prefetch(&[1, 150]).await;
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let failures: u64 = context
+                .encode()
+                .lines()
+                .filter(|l| l.contains("prefetch_failures") && !l.starts_with('#'))
+                .map(|l| l.split_whitespace().last().unwrap().parse::<u64>().unwrap())
+                .sum();
+            assert_eq!(failures, 2);
+
+            journal.destroy().await.unwrap();
+        });
     }
 
     #[test_traced]
