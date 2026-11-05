@@ -51,6 +51,8 @@ pub(super) struct Metrics<E: Clock> {
     pub items_read: Counter,
     /// Syncs begun via `start_sync`, excluding those issued by `commit` and `sync`.
     pub start_sync_calls: Counter,
+    /// Flush calls (buffered appends pushed to storage without durability).
+    pub flush_calls: Counter,
     /// Durable commit calls that do not fully sync all indexes.
     pub commit_calls: Counter,
     /// Duration of commit calls that do not fully sync all indexes.
@@ -115,6 +117,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
                 "Number of items returned by point reads, batch reads, and sync probes",
             ),
             start_sync_calls: context.counter("start_sync_calls", "Number of start_sync calls"),
+            flush_calls: context.counter("flush_calls", "Number of flush calls"),
             commit_calls: context.counter("commit_calls", "Number of commit calls"),
             commit_duration: Timed::register(
                 &context,
