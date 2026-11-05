@@ -273,7 +273,7 @@ jobs:
       matrix:
         include:
           - name: x86_64
-            os: ubuntu-latest
+            os: ubuntu-latest-16
           - name: arm64
             os: ubuntu-26.04-arm
     steps:
