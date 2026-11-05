@@ -104,6 +104,18 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         if !effect.authorized::<H>(&self.profile) {
             return Err(StepError::UnauthorizedEffect);
         }
+        // Publication duties are bounded per family. A signing reservation counts the duties its
+        // publication will carry, so a full family holds the work back here instead of failing
+        // the transition that would queue the publication.
+        let family_fits = match effect {
+            DurableEffect::Sign(sign) => self.sign_fits(sign),
+            DurableEffect::Publish(publication) => self
+                .discharges(publication)
+                .is_none_or(|discharges| self.discharges_fit(&discharges)),
+        };
+        if !family_fits {
+            return Err(StepError::OutboxFull);
+        }
         let artifact_capacity = self.effect_artifact_capacity(effect);
         let reservations = effect.reservations();
         if self.store.artifacts.len() + self.local_artifact_reservations() + reservations
