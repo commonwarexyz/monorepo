@@ -12,7 +12,7 @@ pub type Operation<F, V> = BaseOperation<F, VariableEncoding<V>>;
 
 /// A keyless authenticated database for variable-length data.
 pub type Db<F, E, V, H, S> =
-    super::Keyless<F, E, VariableEncoding<V>, variable::Journal<E, Operation<F, V>>, H, S>;
+    super::Db<F, E, VariableEncoding<V>, variable::Journal<E, Operation<F, V>>, H, S>;
 
 /// A compact keyless authenticated db for variable-length data.
 pub type CompactDb<F, E, V, H, S> = super::CompactDb<F, E, VariableEncoding<V>, H, S>;

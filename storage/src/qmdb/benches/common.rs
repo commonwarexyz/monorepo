@@ -32,7 +32,6 @@ use commonware_storage::{
             ordered::{fixed::Db as OCFixed, variable::Db as OCVariable},
             unordered::{fixed::Db as UCFixed, variable::Db as UCVariable},
         },
-        floor::Proportional,
         immutable::fixed::{Config as ImmutableFixedConfig, Db as IFixed},
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
         store::db::{Config as StoreConfig, Db as Store},
@@ -745,10 +744,7 @@ pub async fn gen_store_random_kv(
         let key = Sha256::hash(&[&i.to_be_bytes()]);
         changes.push((key, Some(make_value(&mut rng))));
     }
-    db = db
-        .apply_batch(changes.into_iter().collect(), &mut Proportional)
-        .await
-        .unwrap();
+    db = db.apply_batch(changes.into_iter().collect()).await.unwrap();
     db = db.commit().await.unwrap();
 
     // Perform `num_operations` random updates/deletes, committing periodically.
@@ -762,19 +758,13 @@ pub async fn gen_store_random_kv(
         changes.push((rand_key, Some(make_value(&mut rng))));
         if rng.next_u32().is_multiple_of(commit_frequency) {
             db = db
-                .apply_batch(
-                    std::mem::take(&mut changes).into_iter().collect(),
-                    &mut Proportional,
-                )
+                .apply_batch(std::mem::take(&mut changes).into_iter().collect())
                 .await
                 .unwrap();
             db = db.commit().await.unwrap();
         }
     }
-    let db = db
-        .apply_batch(changes.into_iter().collect(), &mut Proportional)
-        .await
-        .unwrap();
+    let db = db.apply_batch(changes.into_iter().collect()).await.unwrap();
     db.commit().await.unwrap()
 }
 

@@ -23,7 +23,7 @@ use commonware_storage::{
         Error,
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         immutable::{
-            Immutable, Operation,
+            Db, Operation,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
             fixed, initial_root, variable,
         },
@@ -40,7 +40,7 @@ use commonware_utils::{
 use std::{ops::Deref, sync::Arc};
 
 /// Shared handle to an immutable database.
-type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Shared<Immutable<F, E, K, V, C, H, T, S>>;
+type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Shared<Db<F, E, K, V, C, H, T, S>>;
 
 /// A speculative batch of new keyed values over a shared immutable database.
 pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>

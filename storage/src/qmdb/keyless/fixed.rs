@@ -12,7 +12,7 @@ pub type Operation<F, V> = BaseOperation<F, FixedEncoding<V>>;
 
 /// A keyless authenticated database for fixed-size data.
 pub type Db<F, E, V, H, S> =
-    super::Keyless<F, E, FixedEncoding<V>, fixed::Journal<E, Operation<F, V>>, H, S>;
+    super::Db<F, E, FixedEncoding<V>, fixed::Journal<E, Operation<F, V>>, H, S>;
 
 /// A compact keyless authenticated db for fixed-size data.
 pub type CompactDb<F, E, V, H, S> = super::CompactDb<F, E, FixedEncoding<V>, H, S>;

@@ -851,7 +851,7 @@ pub(crate) mod harnesses {
         variable::CompactDb<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
     type FixedDb<F> = fixed::Db<F, deterministic::Context, U64, Sha256, Sequential>;
     type CompactFixedDb<F> = fixed::CompactDb<F, deterministic::Context, U64, Sha256, Sequential>;
-    type FullDb<F, V, C> = keyless::Keyless<F, deterministic::Context, V, C, Sha256, Sequential>;
+    type FullDb<F, V, C> = keyless::Db<F, deterministic::Context, V, C, Sha256, Sequential>;
     type CompactDb<F, V> = keyless::CompactDb<F, deterministic::Context, V, Sha256, Sequential>;
 
     fn fixed_config(suffix: &str) -> fixed::Config<Sequential> {

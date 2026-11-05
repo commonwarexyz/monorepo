@@ -1,7 +1,7 @@
 //! A keyless authenticated db that discards historical operations, retaining only a witness
 //! for each applied batch.
 //!
-//! Mirrors the API of [`crate::qmdb::keyless::Keyless`] (`new_batch -> merkleize ->
+//! Mirrors the API of [`crate::qmdb::keyless::Db`] (`new_batch -> merkleize ->
 //! apply_batch -> commit / sync / start_sync`, pipelined batch chains, `StaleBatch` validation)
 //! but is backed by the peak-only [`crate::merkle::compact`]. Because history is discarded,
 //! the db has no `get` / `proof` / `bounds` methods. A merkleized batch can prove only its own
@@ -19,7 +19,7 @@
 //! # Inactivity floor
 //!
 //! Commits carry an inactivity floor for wire-format compatibility with
-//! [`crate::qmdb::keyless::Keyless`]: the root is computed over the encoded operation
+//! [`crate::qmdb::keyless::Db`]: the root is computed over the encoded operation
 //! sequence, and that sequence must include the same floor to produce the same root as the
 //! full variant. The floor has no effect on pruning or snapshot rebuilding here; all
 //! historical in-memory state is discarded whenever a batch is applied.
@@ -286,7 +286,7 @@ where
     /// Resolve appends into operations, merkleize, and return the batch.
     ///
     /// The commit records the batch's inactivity floor (see [`Self::with_inactivity_floor`]) for
-    /// wire-format parity with [`crate::qmdb::keyless::Keyless`].
+    /// wire-format parity with [`crate::qmdb::keyless::Db`].
     ///
     /// # Errors
     ///
@@ -605,7 +605,7 @@ where
         Ok(self)
     }
 
-    /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness
+    /// Drop witnesses for commits with fewer than `prune_loc` operations. Some witness
     /// below the boundary may survive.
     ///
     /// Bounded initialization and compact sync can only use witnesses that survive. The current
@@ -615,8 +615,8 @@ where
     ///
     /// Fails if a compact-sync import has not yet been applied to the witness journal.
     #[tracing::instrument(name = "qmdb.keyless.compact.db.prune", level = "info", skip_all)]
-    pub async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
-        self.witness = self.witness.prune(pruning_boundary).await?;
+    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>> {
+        self.witness = self.witness.prune(prune_loc).await?;
         Ok(self)
     }
 
