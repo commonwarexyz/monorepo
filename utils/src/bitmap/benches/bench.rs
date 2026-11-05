@@ -12,13 +12,13 @@ mod roaring_union;
 mod roaring_write;
 mod write;
 
-/// Whether `just test-benches` requested the smallest inputs.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
+/// Whether to run benchmarks with their smallest inputs.
 fn smoke() -> bool {
     std::env::var_os("COMMONWARE_BENCH_SMOKE").is_some()
 }
-
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(
     count_ones::benches,

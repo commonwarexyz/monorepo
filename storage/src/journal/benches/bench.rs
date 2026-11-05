@@ -29,6 +29,11 @@ mod variable_replay;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
+/// Whether to run benchmarks with their smallest inputs.
+fn smoke() -> bool {
+    std::env::var_os("COMMONWARE_BENCH_SMOKE").is_some()
+}
+
 criterion_main!(
     append_sync::benches,
     fixed_append::benches,
@@ -121,9 +126,4 @@ async fn get_variable_journal<const ITEM_SIZE: usize>(
     VariableJournal::init(context, journal_config)
         .await
         .unwrap()
-}
-
-/// Whether `just test-benches` requested the smallest inputs.
-fn smoke() -> bool {
-    std::env::var_os("COMMONWARE_BENCH_SMOKE").is_some()
 }
