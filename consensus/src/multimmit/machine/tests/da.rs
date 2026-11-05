@@ -582,7 +582,8 @@ fn typed_obligation_family_bounds_match_their_retained_state() {
     let bounds = machine.obligation_family_bounds();
     let participants = machine.profile().codec().participants();
     let depth = machine.profile().codec().pipeline_depth();
-    let retained_views = usize::try_from(machine.profile().view_retention().get() + 1).unwrap();
+    // The floor's own view keeps its duties too.
+    let retained_views = usize::try_from(machine.profile().view_retention().get() + 2).unwrap();
 
     assert_eq!(bounds.own_messages, retained_views * 4);
     assert_eq!(bounds.da, participants * depth * 3);

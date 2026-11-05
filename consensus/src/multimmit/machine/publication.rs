@@ -3,7 +3,7 @@
 use super::{
     durability::{
         Discharge, DischargeKind, DurableEffect, EffectId, OutboxEntry, Publication, ReplayError,
-        TransitionReason,
+        SignEffect, SignRequest, TransitionReason,
     },
     reducer::machine::Machine,
 };
@@ -51,7 +51,10 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
     /// Own messages are counted from the durable retired view, so the retained window is the
     /// larger of this profile's view retention and the views the durable state still holds below
     /// the current one. The two agree in steady state; the durable window is larger after a
-    /// restart with a smaller view retention, until the next exit compacts it.
+    /// restart with a smaller view retention, until the next exit compacts it. A floor retires
+    /// the messages of the views below it but not of its own view (an L-QC that sets the floor
+    /// is still published), so the duties span the retired view through the current one: one
+    /// view more than the window.
     pub(crate) fn obligation_family_bounds(&self) -> ObligationCounts {
         let da = self
             .profile
@@ -73,27 +76,87 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         let retained_views =
             usize::try_from(self.profile.view_retention().get().max(durable_window))
                 .ok()
-                .and_then(|retention| retention.checked_add(1))
+                .and_then(|retention| retention.checked_add(2))
                 .unwrap_or(usize::MAX);
         let own_messages = retained_views.saturating_mul(OWN_MESSAGES_PER_VIEW);
         ObligationCounts { da, own_messages }
     }
 
     /// Returns whether queuing `discharges` keeps every family within its bound.
-    fn discharges_fit(&self, discharges: &[Discharge]) -> bool {
+    ///
+    /// Outstanding duties count the queued publications and the signing reservations whose
+    /// signed items will become publications, so a reservation that fits leaves room for its
+    /// publication: a reservation leaves the count when its signing completes, before its
+    /// publication enters it.
+    pub(super) fn discharges_fit(&self, discharges: &[Discharge]) -> bool {
+        self.family_fits(discharges.iter().map(|discharge| discharge.until()))
+    }
+
+    /// Returns whether reserving `sign` keeps every family within its bound once its items are
+    /// signed and published.
+    pub(super) fn sign_fits(&self, sign: &SignEffect<S, H::Digest>) -> bool {
+        self.family_fits(
+            sign.requests()
+                .iter()
+                .filter_map(|request| self.request_discharge(request)),
+        )
+    }
+
+    /// Returns the duty an item signed for `request` will carry, or `None` when it already
+    /// holds. It is the duty [`Self::discharge_kind`] derives from the signed item.
+    fn request_discharge(&self, request: &SignRequest<S, H::Digest>) -> Option<DischargeKind> {
+        let certified = |chain| {
+            self.durable
+                .state
+                .certified_height(chain)
+                .unwrap_or_default()
+        };
+        match request {
+            SignRequest::TransactionBlock(header) => {
+                let (chain, height) = (header.chain(), header.height());
+                (certified(chain) < height)
+                    .then_some(DischargeKind::BlockCertifiedAtLeast { chain, height })
+            }
+            SignRequest::DaVote(block) => {
+                let (chain, height) = (block.header().chain(), block.header().height());
+                (certified(chain) < height)
+                    .then_some(DischargeKind::VoteCertifiedAtLeast { chain, height })
+            }
+            SignRequest::LeaderBlock(proposal) => {
+                self.own_message_discharge(proposal.block().view())
+            }
+            SignRequest::Vote(body) => self.own_message_discharge(body.view()),
+            SignRequest::NoVote { round } | SignRequest::Nullify { round } => {
+                self.own_message_discharge(round.view())
+            }
+        }
+    }
+
+    /// Returns whether the outstanding duties plus `added` fit every family bound.
+    fn family_fits(&self, added: impl Iterator<Item = DischargeKind>) -> bool {
         let mut counts = ObligationCounts::default();
         // A batch can outlive its certified items. Family limits count outstanding duties;
         // the artifact cache independently bounds every payload retained by the whole batch.
-        for discharge in self
+        let queued = self
             .durable
             .state
             .outbox
             .values()
             .flat_map(OutboxEntry::discharges)
-            .chain(discharges)
-            .filter(|discharge| !self.discharge_satisfied(discharge.until(), Successor::Current))
+            .map(|discharge| discharge.until());
+        let reserved = self
+            .durable
+            .state
+            .signing_reservations
+            .values()
+            .flat_map(|sign| sign.requests())
+            .filter_map(|request| self.request_discharge(request));
+        for until in queued
+            .chain(reserved)
+            .chain(added)
+            .filter(|until| !self.discharge_satisfied(*until, Successor::Current))
         {
-            match discharge.until() {
+            match until {
                 DischargeKind::BlockCertifiedAtLeast { .. }
                 | DischargeKind::VoteCertifiedAtLeast { .. }
                 | DischargeKind::CertificateSupersededAbove { .. } => {
