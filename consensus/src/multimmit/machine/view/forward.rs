@@ -57,6 +57,7 @@ pub(crate) struct Exit<S: Scheme, D: Digest> {
 }
 
 /// The earliest unforwarded V-QC and nullification of one view, with their observations.
+#[derive(Clone)]
 pub(super) struct ForwardCandidates<S: Scheme, D: Digest> {
     pub(super) vqc: Option<(Observation, Arc<Artifact<S, D>>)>,
     pub(super) nullification: Option<(Observation, Arc<Artifact<S, D>>)>,
@@ -90,20 +91,33 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
     }
 
     /// Returns the next certificate to forward: the earliest unforwarded V-QC or nullification of
-    /// the lowest forwardable view, by cohort.
-    pub(crate) fn next_forward(&self) -> Option<Arc<Artifact<S, D>>> {
-        let vqc_view = self.forwardable_vqcs.first().copied();
-        let nullification_view = self.forwardable_nullifications.first().copied();
-        let ForwardCandidates { vqc, nullification } = match (vqc_view, nullification_view) {
-            (Some(vqc), Some(nullification)) if vqc == nullification => {
-                self.forward_candidates(vqc)
-            }
-            _ => ForwardCandidates {
-                vqc: vqc_view.and_then(|view| self.forward_candidates(view).vqc),
-                nullification: nullification_view
-                    .and_then(|view| self.forward_candidates(view).nullification),
-            },
-        };
+    /// the lowest view that can forward one, by cohort.
+    ///
+    /// A view's certificate scan runs here, once per change of the view, and only for views up
+    /// to the first that can forward each kind.
+    pub(crate) fn next_forward(&mut self) -> Option<Arc<Artifact<S, D>>> {
+        let vqc_views = self.forwardable_vqcs.iter().copied().collect::<Vec<_>>();
+        let vqc = vqc_views
+            .into_iter()
+            .find_map(|view| self.scanned_candidates(view).vqc.clone());
+        let nullification_views = self
+            .forwardable_nullifications
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let nullification = nullification_views
+            .into_iter()
+            .find_map(|view| self.scanned_candidates(view).nullification.clone());
+        debug_assert!(self.forward_scans.iter().all(|(view, scanned)| {
+            let fresh = self.forward_candidates(*view);
+            fresh.vqc.map(|(observation, _)| observation)
+                == scanned.vqc.as_ref().map(|(observation, _)| *observation)
+                && fresh.nullification.map(|(observation, _)| observation)
+                    == scanned
+                        .nullification
+                        .as_ref()
+                        .map(|(observation, _)| *observation)
+        }));
         // `min_by_key` keeps the first minimum, so a V-QC wins a cohort tie.
         [vqc, nullification]
             .into_iter()
@@ -112,8 +126,18 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
             .map(|(_, artifact)| artifact)
     }
 
-    /// Returns the forwarding candidates of `view`.
-    pub(super) fn forward_candidates(&self, view: View) -> ForwardCandidates<S, D> {
+    /// Returns the forwarding candidates of `view`, scanning it if it changed since its last scan.
+    fn scanned_candidates(&mut self, view: View) -> &ForwardCandidates<S, D> {
+        if !self.forward_scans.contains_key(&view) {
+            let candidates = self.forward_candidates(view);
+            self.forward_scans.insert(view, candidates);
+        }
+        &self.forward_scans[&view]
+    }
+
+    /// Returns the forwarding candidates of `view` that no earlier unresolved exit holds back,
+    /// without the certificate scan that decides whether a local assembly holds them back.
+    pub(super) fn unblocked_candidates(&self, view: View) -> ForwardCandidates<S, D> {
         let mut vqc = (!self.vqc_forwarded(view))
             .then(|| {
                 let (_, record) = self.entry(view)?.vqc.records.first()?;
@@ -143,10 +167,20 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
             self.unresolved_exit(view, wait_for_vqc, true)
                 .is_none_or(|unresolved| unresolved > ExitKey::nullification(observation.cohort()))
         });
+        ForwardCandidates { vqc, nullification }
+    }
+
+    /// Returns the forwarding candidates of `view`.
+    pub(super) fn forward_candidates(&self, view: View) -> ForwardCandidates<S, D> {
+        let ForwardCandidates {
+            mut vqc,
+            mut nullification,
+        } = self.unblocked_candidates(view);
         if vqc.is_none() && nullification.is_none() {
             return ForwardCandidates { vqc, nullification };
         }
-
+        let wait_for_vqc = !self.vqc_forwarded(view);
+        let wait_for_nullification = !self.nullification_forwarded(view);
         let scan = self.complete_certificate_scan(view);
         vqc = vqc.filter(|(observation, _)| {
             !self.local_exit_blocks(
