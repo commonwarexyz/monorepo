@@ -121,11 +121,7 @@
 use crate::{
     Context,
     index::{Factory as IndexFactory, Ordered as OrderedIndex},
-    journal::{
-        authenticated,
-        authenticated::Config as MerkleConfig,
-        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    },
+    journal::{authenticated, authenticated::Config as MerkleConfig},
     merkle::{Family, Location},
     qmdb::{
         Error as QmdbError,
@@ -182,10 +178,10 @@ pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 #[derive(Clone)]
 pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle_config: MerkleConfig<S>,
+    pub merkle: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
-    pub journal_config: J,
+    pub log: J,
 
     /// The translator used by the compressed index. Ordered databases require an
     /// [OrderedTranslator](crate::translator::OrderedTranslator).
@@ -205,12 +201,6 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// between spawned decode and insert tasks while the init task merely forwards batches.
     pub init_concurrency: B,
 }
-
-/// Configuration for an `Any` authenticated db with fixed-size values.
-pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
-
-/// Configuration for an `Any` authenticated db with variable-sized values.
-pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
 impl<F, E, K, V, C, I, H, S> db::Db<F, E, C, I, H, UnorderedUpdate<K, V>, BITMAP_CHUNK_BYTES, S>
 where
@@ -290,8 +280,8 @@ where
     // been checked against the same retained prefix.
     let pending = crate::qmdb::prepare_initialization::<F, E, J, H, S>(
         context.child("log"),
-        cfg.merkle_config,
-        cfg.journal_config,
+        cfg.merkle,
+        cfg.log,
         max_size,
     )
     .await?;
@@ -379,7 +369,7 @@ pub(crate) mod test {
         merkle::Location as GenericLocation,
         qmdb::{
             ProofExt as _,
-            any::{FixedConfig, MerkleConfig, VariableConfig, db::Db},
+            any::{Config, MerkleConfig, db::Db},
             chain::Bounds,
         },
         translator::OneCap,
@@ -411,7 +401,7 @@ pub(crate) mod test {
 
     pub(crate) fn fixed_db_config<T: Translator + Default>(
         suffix: &str,
-    ) -> FixedConfig<T, Sequential> {
+    ) -> Config<T, FConfig, Sequential> {
         fixed_db_config_with_strategy(suffix, Sequential)
     }
 
@@ -421,7 +411,7 @@ pub(crate) mod test {
     >(
         suffix: &str,
         strategy: S,
-    ) -> FixedConfig<T, S> {
+    ) -> Config<T, FConfig, S> {
         fixed_db_config_full(suffix, strategy, ())
     }
 
@@ -435,16 +425,16 @@ pub(crate) mod test {
         suffix: &str,
         strategy: S,
         init_concurrency: B,
-    ) -> FixedConfig<T, S, B> {
+    ) -> Config<T, FConfig, S, B> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        FixedConfig {
-            merkle_config: MerkleConfig {
+        Config {
+            merkle: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy,
                 cache: crate::journal::authenticated::low_resident_height(),
             },
-            journal_config: FConfig {
+            log: FConfig {
                 partition: format!("log-journal-{suffix}"),
                 items_per_blob: NZU64!(7),
                 page_cache,
@@ -461,20 +451,20 @@ pub(crate) mod test {
     /// Like [fixed_db_config], typed for a partitioned index at the serial concurrency.
     pub(crate) fn fixed_db_config_partitioned<T: Translator + Default>(
         suffix: &str,
-    ) -> FixedConfig<T, Sequential, NonZeroUsize> {
+    ) -> Config<T, FConfig, Sequential, NonZeroUsize> {
         fixed_db_config_full(suffix, Sequential, NZUsize!(1))
     }
 
     /// Like [variable_db_config], typed for a partitioned index at the serial concurrency.
     pub(crate) fn variable_db_config_partitioned<T: Translator + Default>(
         suffix: &str,
-    ) -> VariableConfig<T, ((), ()), Sequential, NonZeroUsize> {
+    ) -> Config<T, VConfig<((), ())>, Sequential, NonZeroUsize> {
         variable_db_config_full(suffix, NZUsize!(1))
     }
 
     pub(crate) fn variable_db_config<T: Translator + Default>(
         suffix: &str,
-    ) -> VariableConfig<T, ((), ()), Sequential> {
+    ) -> Config<T, VConfig<((), ())>, Sequential> {
         variable_db_config_full(suffix, ())
     }
 
@@ -483,16 +473,16 @@ pub(crate) mod test {
     pub(crate) fn variable_db_config_full<T: Translator + Default, B>(
         suffix: &str,
         init_concurrency: B,
-    ) -> VariableConfig<T, ((), ()), Sequential, B> {
+    ) -> Config<T, VConfig<((), ())>, Sequential, B> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        VariableConfig {
-            merkle_config: MerkleConfig {
+        Config {
+            merkle: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 cache: crate::journal::authenticated::low_resident_height(),
             },
-            journal_config: VConfig {
+            log: VConfig {
                 partition: format!("log-journal-{suffix}"),
                 items_per_section: NZU64!(7),
                 compression: None,
@@ -7070,7 +7060,7 @@ pub(crate) mod test {
         deterministic::Runner::default().start(|context| async move {
             let ctx = context.child("db");
             let mut cfg = variable_db_config::<OneCap>("coarse-prune");
-            cfg.journal_config.items_per_section = NZU64!(2048);
+            cfg.log.items_per_section = NZU64!(2048);
             let db = UnorderedVariable::init(ctx.child("storage"), cfg.clone(), None)
                 .await
                 .unwrap();
@@ -7121,7 +7111,7 @@ pub(crate) mod test {
                     let suffix = format!("any-live-child-{child_after_prune}-{prune}");
                     let ctx = context.child("db").with_attribute("case", &suffix);
                     let mut cfg = variable_db_config::<OneCap>(&suffix);
-                    cfg.journal_config.items_per_section = NZU64!(2048);
+                    cfg.log.items_per_section = NZU64!(2048);
                     let db = UnorderedVariable::init(ctx.child("storage"), cfg, None)
                         .await
                         .unwrap();

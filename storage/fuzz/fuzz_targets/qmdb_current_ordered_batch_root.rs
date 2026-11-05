@@ -10,9 +10,8 @@ use commonware_storage::{
     qmdb::{
         any::{ordered::Update, traits::DbAny as _, value::FixedEncoding as FixedEncodingGeneric},
         current::{
-            FixedConfig as Config,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
-            ordered::fixed::Db as CurrentDb,
+            ordered::fixed::{Config, Db as CurrentDb},
         },
     },
     translator::OneCap,
@@ -123,13 +122,13 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 fn test_config(name: &str) -> Config<OneCap, Sequential> {
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(2));
     Config {
-        merkle_config: MerkleConfig {
+        merkle: MerkleConfig {
             metadata_partition: format!("{name}-meta"),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             cache: Default::default(),
         },
-        journal_config: FConfig {
+        log: FConfig {
             partition: format!("{name}-log"),
             items_per_blob: NZU64!(13),
             write_buffer: NZUsize!(1024),

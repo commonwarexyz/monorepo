@@ -46,8 +46,15 @@ use commonware_storage::{
     },
     merkle::mmb,
     qmdb::{
-        any::{FixedConfig, batch::Slot},
-        current::FixedConfig as CurrentFixedConfig,
+        any::{
+            batch::Slot,
+            ordered::fixed::Config as AnyOrderedConfig,
+            unordered::{fixed::Config as AnyConfig, variable::Config as AnyVarConfig},
+        },
+        current::{
+            ordered::fixed::Config as CurrentOrderedConfig,
+            unordered::fixed::Config as CurrentConfig,
+        },
         floor::Bounded,
     },
     translator::EightCap,
@@ -442,9 +449,9 @@ fn main() {
         };
         match db_kind.as_str() {
             "current::unordered::fixed::mmb" => {
-                let cfg = CurrentFixedConfig {
-                    merkle_config,
-                    journal_config,
+                let cfg = CurrentConfig {
+                    merkle: merkle_config,
+                    log: journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
@@ -460,9 +467,9 @@ fn main() {
                 )
             }
             "current::ordered::fixed::mmb" => {
-                let cfg = CurrentFixedConfig {
-                    merkle_config,
-                    journal_config,
+                let cfg = CurrentOrderedConfig {
+                    merkle: merkle_config,
+                    log: journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
@@ -480,9 +487,9 @@ fn main() {
                 )
             }
             "any::ordered::fixed::mmb" => {
-                let cfg = FixedConfig {
-                    merkle_config,
-                    journal_config,
+                let cfg = AnyOrderedConfig {
+                    merkle: merkle_config,
+                    log: journal_config,
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
@@ -494,9 +501,9 @@ fn main() {
                 run_pipeline!(db, args, "any::ordered::fixed::mmb", AnyOrderedMerkleized)
             }
             "any::unordered::variable::mmb" => {
-                let cfg = commonware_storage::qmdb::any::VariableConfig {
-                    merkle_config,
-                    journal_config: VConfig {
+                let cfg = AnyVarConfig {
+                    merkle: merkle_config,
+                    log: VConfig {
                         partition: "constantinople-var-log".into(),
                         items_per_section: ITEMS_PER_BLOB,
                         compression: None,
@@ -514,9 +521,9 @@ fn main() {
                 run_pipeline!(db, args, "any::unordered::variable::mmb", AnyVarMerkleized)
             }
             _ => {
-                let cfg = FixedConfig {
-                    merkle_config,
-                    journal_config,
+                let cfg = AnyConfig {
+                    merkle: merkle_config,
+                    log: journal_config,
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),

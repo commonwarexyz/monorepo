@@ -9,7 +9,7 @@ use commonware_storage::{
     merkle::{Family as MerkleFamily, Location, mmb, mmr},
     qmdb::{
         ProofExt as _,
-        any::{VariableConfig as Config, unordered::variable::Db},
+        any::unordered::variable::{Config, Db},
     },
     translator::TwoCap,
 };
@@ -137,13 +137,13 @@ type CodecConfig = ((), (commonware_codec::RangeCfg<usize>, ()));
 fn test_config(test_name: &str) -> Config<TwoCap, CodecConfig, Sequential> {
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(1));
     Config {
-        merkle_config: MerkleConfig {
+        merkle: MerkleConfig {
             metadata_partition: format!("{test_name}-meta"),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             cache: commonware_storage_fuzz::low_resident_height(),
         },
-        journal_config: VConfig {
+        log: VConfig {
             partition: format!("{test_name}-log"),
             items_per_section: NZU64!(3),
             write_buffer: NZUsize!(1024),

@@ -9,7 +9,7 @@ use commonware_storage::{
     merkle::{Graftable, Location, mmb, mmr},
     qmdb::{
         any::{traits::DbAny as _, value::FixedEncoding},
-        current::{FixedConfig as Config, unordered::fixed::Db as CurrentDb},
+        current::unordered::fixed::{Config, Db as CurrentDb},
     },
     translator::TwoCap,
 };
@@ -145,13 +145,13 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
     runner.start(|context| async move {
         let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
         let cfg = Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 metadata_partition: format!("fuzz-current-{suffix}-merkle-metadata"),
                 replay_buffer: NZUsize!(WRITE_BUFFER_SIZE),
                 strategy: Sequential,
                 cache: commonware_storage_fuzz::low_resident_height(),
             },
-            journal_config: FConfig {
+            log: FConfig {
                 partition: format!("fuzz-current-{suffix}-log-journal"),
                 items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(WRITE_BUFFER_SIZE),

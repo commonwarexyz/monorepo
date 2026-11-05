@@ -121,7 +121,7 @@ where
     ) -> Result<Self, qmdb::Error<F>> {
         build_db::<F, _, U, _, H, _, N, _>(
             context,
-            config.merkle_config,
+            config.merkle,
             log,
             config.translator,
             pinned_nodes,
@@ -153,7 +153,7 @@ where
 
         qmdb::sync::local_pinned_nodes::<F, _, H, S>(
             context,
-            config.merkle_config.clone(),
+            config.merkle.clone(),
             target,
             journal,
         )

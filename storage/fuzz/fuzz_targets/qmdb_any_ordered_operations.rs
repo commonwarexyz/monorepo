@@ -14,9 +14,8 @@ use commonware_storage::{
     qmdb::{
         ProofExt as _,
         any::{
-            FixedConfig as Config,
             db::Db as AnyDb,
-            ordered::{Operation, Update},
+            ordered::{Operation, Update, fixed::Config},
             traits::DbAny as _,
             value::FixedEncoding,
         },
@@ -160,13 +159,13 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
         async move {
             let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
             let cfg = Config::<EightCap, Sequential> {
-                merkle_config: MerkleConfig {
+                merkle: MerkleConfig {
                     metadata_partition: format!("test-qmdb-mmr-metadata-{suffix}"),
                     replay_buffer: NZUsize!(1024),
                     strategy: Sequential,
                     cache: commonware_storage_fuzz::low_resident_height(),
                 },
-                journal_config: FConfig {
+                log: FConfig {
                     partition: format!("test-qmdb-log-journal-{suffix}"),
                     items_per_blob: NZU64!(500000),
                     write_buffer: NZUsize!(1024),

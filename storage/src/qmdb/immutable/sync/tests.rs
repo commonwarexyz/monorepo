@@ -159,7 +159,7 @@ pub(crate) mod harnesses {
 
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
@@ -423,7 +423,7 @@ pub(crate) mod harnesses {
     ) -> immutable::variable::Config<TwoCap, CodecConfig, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
@@ -446,7 +446,7 @@ pub(crate) mod harnesses {
     fn fixed_config(suffix: &str) -> immutable::fixed::Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,

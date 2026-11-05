@@ -24,7 +24,6 @@ use commonware_storage::{
     qmdb::{
         Error,
         any::{
-            FixedConfig, VariableConfig,
             batch::{MerkleizedBatch, Slot, Staged, UnmerkleizedBatch},
             db::Db,
             initial_root,
@@ -478,7 +477,7 @@ where
         S,
     >;
     type Error = Error<F>;
-    type Config = FixedConfig<T, S>;
+    type Config = unordered::fixed::Config<T, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
     async fn init(
@@ -577,7 +576,7 @@ where
         S,
     >;
     type Error = Error<F>;
-    type Config = VariableConfig<
+    type Config = unordered::variable::Config<
         T,
         <Operation<F, unordered::Update<K, VariableEncoding<V>>> as CodecRead>::Cfg,
         S,
@@ -763,16 +762,16 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn fixed_config(suffix: &str) -> FixedConfig<TwoCap, Sequential> {
+    fn fixed_config(suffix: &str) -> fixed::Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        FixedConfig {
-            merkle_config: MerkleConfig {
+        fixed::Config {
+            merkle: MerkleConfig {
                 metadata_partition: format!("stateful-any-metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 cache: Default::default(),
             },
-            journal_config: FixedJournalConfig {
+            log: FixedJournalConfig {
                 partition: format!("stateful-any-log-{suffix}"),
                 items_per_blob: NZU64!(7),
                 page_cache,

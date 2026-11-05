@@ -59,7 +59,7 @@ use commonware_storage::{
     },
     mmr::{self, Location},
     qmdb::{
-        any::{FixedConfig, unordered::fixed},
+        any::unordered::fixed,
         immutable,
         sync::{CompactTarget, Target},
     },
@@ -91,17 +91,17 @@ pub(super) fn qmdb_config(
     prefix: &str,
     page_cache: CacheRef,
 ) -> (
-    FixedConfig<TwoCap, Sequential>,
+    fixed::Config<TwoCap, Sequential>,
     immutable::fixed::CompactConfig<Sequential>,
 ) {
-    let db_a = FixedConfig {
-        merkle_config: MerkleConfig {
+    let db_a = fixed::Config {
+        merkle: MerkleConfig {
             metadata_partition: format!("{prefix}-qmdb-a-mmr-metadata"),
             replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,
             cache: Default::default(),
         },
-        journal_config: FixedLogConfig {
+        log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-a-log-journal"),
             items_per_blob: NZU64!(7),
             page_cache: page_cache.clone(),

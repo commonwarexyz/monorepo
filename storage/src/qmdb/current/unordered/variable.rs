@@ -8,9 +8,12 @@
 
 use crate::{
     index::unordered::Index,
-    journal::contiguous::variable::Journal,
+    journal::contiguous::variable::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::any::{unordered::variable::Operation, value::VariableEncoding},
+    qmdb::{
+        any::{unordered::variable::Operation, value::VariableEncoding},
+        current,
+    },
 };
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
@@ -25,11 +28,15 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     S,
 >;
 
+/// Configuration for a [Db].
+pub type Config<T, C, S> = current::Config<T, JournalConfig<C>, S>;
+
 pub mod partitioned {
     //! A variant of [super] that uses a partitioned index for the snapshot.
 
     use super::*;
     use crate::index::partitioned::unordered::Index;
+    use core::num::NonZeroUsize;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -49,6 +56,9 @@ pub mod partitioned {
             N,
             S,
         >;
+
+    /// Configuration for a [Db].
+    pub type Config<T, C, S> = current::Config<T, JournalConfig<C>, S, NonZeroUsize>;
 }
 
 #[cfg(test)]
@@ -119,16 +129,16 @@ mod test {
         executor.start(|context| async move {
             // Configure the operation codec for variable-length keys.
             let base = variable_config::<TwoCap>("vec-keys");
-            let cfg = crate::qmdb::current::VariableConfig {
-                merkle_config: base.merkle_config.clone(),
-                journal_config: crate::journal::contiguous::variable::Config {
-                    partition: base.journal_config.partition.clone(),
-                    items_per_section: base.journal_config.items_per_section,
+            let cfg = Config {
+                merkle: base.merkle.clone(),
+                log: crate::journal::contiguous::variable::Config {
+                    partition: base.log.partition.clone(),
+                    items_per_section: base.log.items_per_section,
                     compression: None,
                     codec_config: (((0..).into(), ()), ()),
-                    page_cache: base.journal_config.page_cache.clone(),
-                    write_buffer: base.journal_config.write_buffer,
-                    replay_buffer: base.journal_config.replay_buffer,
+                    page_cache: base.log.page_cache.clone(),
+                    write_buffer: base.log.write_buffer,
+                    replay_buffer: base.log.replay_buffer,
                 },
                 grafted_metadata_partition: base.grafted_metadata_partition.clone(),
                 translator: TwoCap,

@@ -2272,7 +2272,7 @@ mod graft_height_tests {
         // Open a database whose ops tree caches nodes at or above `resident_height`. At height 8
         // the resident cache excludes the height-7 graft roots.
         let mut cfg = fixed_config::<TwoCap>("graft-height");
-        cfg.merkle_config.cache.resident_height = resident_height;
+        cfg.merkle.cache.resident_height = resident_height;
         let db = TestDb::<F>::init(context.child("initial"), cfg.clone(), None)
             .await
             .unwrap();

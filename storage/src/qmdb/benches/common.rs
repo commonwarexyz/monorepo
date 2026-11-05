@@ -16,7 +16,7 @@ use commonware_storage::{
     merkle::{self, Family},
     qmdb::{
         any::{
-            FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
+            Config as AnyConfig,
             ordered::{
                 fixed::{
                     Db as OFixed,
@@ -31,7 +31,7 @@ use commonware_storage::{
             },
         },
         current::{
-            FixedConfig as CurrentFixedConfig, VariableConfig as CurrentVariableConfig,
+            Config as CurrentConfig,
             ordered::{fixed::Db as OCFixed, variable::Db as OCVariable},
             unordered::{fixed::Db as UCFixed, variable::Db as UCVariable},
         },
@@ -155,7 +155,7 @@ fn var_log_cfg<C>(
     }
 }
 
-pub fn any_fix_cfg(ctx: &impl Strategizer) -> AnyFixedConfig<EightCap, Rayon> {
+pub fn any_fix_cfg(ctx: &impl Strategizer) -> AnyConfig<EightCap, FConfig, Rayon> {
     any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE)
 }
 
@@ -163,7 +163,7 @@ pub fn any_fix_cfg_with(
     ctx: &impl Strategizer,
     items_per_blob: NonZeroU64,
     page_cache_size: NonZeroUsize,
-) -> AnyFixedConfig<EightCap, Rayon> {
+) -> AnyConfig<EightCap, FConfig, Rayon> {
     any_fix_cfg_full(ctx, items_per_blob, page_cache_size, ())
 }
 
@@ -173,11 +173,11 @@ pub fn any_fix_cfg_full<B>(
     items_per_blob: NonZeroU64,
     page_cache_size: NonZeroUsize,
     init_concurrency: B,
-) -> AnyFixedConfig<EightCap, Rayon, B> {
+) -> AnyConfig<EightCap, FConfig, Rayon, B> {
     let page_cache = CacheRef::new(PAGE_SIZE, page_cache_size);
-    AnyFixedConfig {
-        merkle_config: merkle_cfg(PARTITION_FIX, ctx),
-        journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
+    AnyConfig {
+        merkle: merkle_cfg(PARTITION_FIX, ctx),
+        log: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
@@ -191,25 +191,25 @@ pub fn imm_fix_cfg_with(
 ) -> ImmutableFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     ImmutableFixedConfig {
-        merkle_config: merkle_cfg(PARTITION_IMM, ctx),
+        merkle: merkle_cfg(PARTITION_IMM, ctx),
         log: fix_log_cfg(PARTITION_IMM, page_cache, items_per_blob),
         translator: EightCap,
         init_buffer: NZUsize!(1 << 21),
     }
 }
 
-pub fn cur_fix_cfg(ctx: &impl Strategizer) -> CurrentFixedConfig<EightCap, Rayon> {
+pub fn cur_fix_cfg(ctx: &impl Strategizer) -> CurrentConfig<EightCap, FConfig, Rayon> {
     cur_fix_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn cur_fix_cfg_with(
     ctx: &impl Strategizer,
     items_per_blob: NonZeroU64,
-) -> CurrentFixedConfig<EightCap, Rayon> {
+) -> CurrentConfig<EightCap, FConfig, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-    CurrentFixedConfig {
-        merkle_config: merkle_cfg(PARTITION_FIX, ctx),
-        journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
+    CurrentConfig {
+        merkle: merkle_cfg(PARTITION_FIX, ctx),
+        log: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
@@ -218,18 +218,18 @@ pub fn cur_fix_cfg_with(
     }
 }
 
-pub fn any_var_digest_cfg(ctx: &impl Strategizer) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
+pub fn any_var_digest_cfg(ctx: &impl Strategizer) -> AnyConfig<EightCap, VConfig<((), ())>, Rayon> {
     any_var_digest_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn any_var_digest_cfg_with(
     ctx: &impl Strategizer,
     items_per_blob: NonZeroU64,
-) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
+) -> AnyConfig<EightCap, VConfig<((), ())>, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-    AnyVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx),
-        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
+    AnyConfig {
+        merkle: merkle_cfg(PARTITION_VAR, ctx),
+        log: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
@@ -239,18 +239,18 @@ pub fn any_var_digest_cfg_with(
 
 pub fn cur_var_digest_cfg(
     ctx: &impl Strategizer,
-) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
+) -> CurrentConfig<EightCap, VConfig<((), ())>, Rayon> {
     cur_var_digest_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn cur_var_digest_cfg_with(
     ctx: &impl Strategizer,
     items_per_blob: NonZeroU64,
-) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
+) -> CurrentConfig<EightCap, VConfig<((), ())>, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-    CurrentVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx),
-        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
+    CurrentConfig {
+        merkle: merkle_cfg(PARTITION_VAR, ctx),
+        log: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
@@ -262,18 +262,18 @@ pub fn cur_var_digest_cfg_with(
 /// Codec config for variable-length `Vec<u8>` values.
 type VarVecCfg = ((), (commonware_codec::RangeCfg<usize>, ()));
 
-pub fn any_var_vec_cfg(ctx: &impl Strategizer) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
+pub fn any_var_vec_cfg(ctx: &impl Strategizer) -> AnyConfig<EightCap, VConfig<VarVecCfg>, Rayon> {
     any_var_vec_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn any_var_vec_cfg_with(
     ctx: &impl Strategizer,
     items_per_blob: NonZeroU64,
-) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
+) -> AnyConfig<EightCap, VConfig<VarVecCfg>, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-    AnyVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx),
-        journal_config: var_log_cfg(
+    AnyConfig {
+        merkle: merkle_cfg(PARTITION_VAR, ctx),
+        log: var_log_cfg(
             PARTITION_VAR,
             page_cache,
             ((), ((0..=10000).into(), ())),
@@ -288,18 +288,18 @@ pub fn any_var_vec_cfg_with(
 
 pub fn cur_var_vec_cfg(
     ctx: &impl Strategizer,
-) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
+) -> CurrentConfig<EightCap, VConfig<VarVecCfg>, Rayon> {
     cur_var_vec_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn cur_var_vec_cfg_with(
     ctx: &impl Strategizer,
     items_per_blob: NonZeroU64,
-) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
+) -> CurrentConfig<EightCap, VConfig<VarVecCfg>, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-    CurrentVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx),
-        journal_config: var_log_cfg(
+    CurrentConfig {
+        merkle: merkle_cfg(PARTITION_VAR, ctx),
+        log: var_log_cfg(
             PARTITION_VAR,
             page_cache,
             ((), ((0..=10000).into(), ())),

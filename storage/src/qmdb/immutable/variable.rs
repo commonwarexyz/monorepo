@@ -54,7 +54,7 @@ mod tests {
     fn config(suffix: &str) -> Config<TwoCap, ((), ()), Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         super::BaseConfig {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,

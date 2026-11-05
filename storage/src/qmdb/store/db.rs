@@ -118,7 +118,7 @@ pub struct Config<T: Translator, C> {
     /// Configuration for the variable-size operations log journal.
     pub log: JournalConfig<C>,
 
-    /// The [Translator] used by the [Index].
+    /// The translator used by the compressed index.
     pub translator: T,
 
     /// Maximum number of entries in the `(location -> key)` cache used during init to resolve

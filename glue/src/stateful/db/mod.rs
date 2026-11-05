@@ -2186,10 +2186,12 @@ mod tests {
             }
         }
 
-        fn any_fixed_config(suffix: &str) -> storage_any::FixedConfig<TwoCap, Sequential> {
+        fn any_fixed_config(
+            suffix: &str,
+        ) -> storage_any::Config<TwoCap, FixedJournalConfig, Sequential> {
             storage_any::Config {
-                merkle_config: merkle_config(suffix),
-                journal_config: fixed_journal_config(suffix),
+                merkle: merkle_config(suffix),
+                log: fixed_journal_config(suffix),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
@@ -2199,10 +2201,10 @@ mod tests {
 
         fn any_variable_config(
             suffix: &str,
-        ) -> storage_any::VariableConfig<TwoCap, ((), ()), Sequential> {
+        ) -> storage_any::Config<TwoCap, VariableJournalConfig<((), ())>, Sequential> {
             storage_any::Config {
-                merkle_config: merkle_config(suffix),
-                journal_config: variable_journal_config(suffix, ((), ())),
+                merkle: merkle_config(suffix),
+                log: variable_journal_config(suffix, ((), ())),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
@@ -2210,10 +2212,12 @@ mod tests {
             }
         }
 
-        fn current_fixed_config(suffix: &str) -> storage_current::FixedConfig<TwoCap, Sequential> {
+        fn current_fixed_config(
+            suffix: &str,
+        ) -> storage_current::Config<TwoCap, FixedJournalConfig, Sequential> {
             storage_current::Config {
-                merkle_config: merkle_config(suffix),
-                journal_config: fixed_journal_config(suffix),
+                merkle: merkle_config(suffix),
+                log: fixed_journal_config(suffix),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
@@ -2224,10 +2228,10 @@ mod tests {
 
         fn current_variable_config(
             suffix: &str,
-        ) -> storage_current::VariableConfig<TwoCap, ((), ()), Sequential> {
+        ) -> storage_current::Config<TwoCap, VariableJournalConfig<((), ())>, Sequential> {
             storage_current::Config {
-                merkle_config: merkle_config(suffix),
-                journal_config: variable_journal_config(suffix, ((), ())),
+                merkle: merkle_config(suffix),
+                log: variable_journal_config(suffix, ((), ())),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
@@ -2240,7 +2244,7 @@ mod tests {
             suffix: &str,
         ) -> storage_immutable::fixed::Config<TwoCap, Sequential> {
             storage_immutable::Config {
-                merkle_config: merkle_config(suffix),
+                merkle: merkle_config(suffix),
                 log: fixed_journal_config(suffix),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
@@ -2251,7 +2255,7 @@ mod tests {
             suffix: &str,
         ) -> storage_immutable::variable::Config<TwoCap, ((), ()), Sequential> {
             storage_immutable::Config {
-                merkle_config: merkle_config(suffix),
+                merkle: merkle_config(suffix),
                 log: variable_journal_config(suffix, ((), ())),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),

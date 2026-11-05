@@ -61,7 +61,7 @@ where
 
         let journal = authenticated::Journal::<_, _, _, _, S>::from_components(
             context.child("merkle"),
-            &db_config.merkle_config,
+            &db_config.merkle,
             log,
             hasher,
             range.start(),
@@ -121,13 +121,8 @@ where
             return Ok(None);
         }
 
-        sync::local_pinned_nodes::<F, _, H, S>(
-            context,
-            config.merkle_config.clone(),
-            target,
-            journal,
-        )
-        .await
+        sync::local_pinned_nodes::<F, _, H, S>(context, config.merkle.clone(), target, journal)
+            .await
     }
 
     fn root(&self) -> Self::Digest {

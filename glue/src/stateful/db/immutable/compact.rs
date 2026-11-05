@@ -456,7 +456,7 @@ mod tests {
     fn full_fixed_config(suffix: &str) -> fixed::Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
         fixed::Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 metadata_partition: format!("stateful-immutable-full-metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,

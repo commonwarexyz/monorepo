@@ -380,10 +380,7 @@ mod tests {
             authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedLogConfig,
         },
         mmr::{self, Location, Proof},
-        qmdb::{
-            any::{FixedConfig, unordered::fixed},
-            sync,
-        },
+        qmdb::{any::unordered::fixed, sync},
         translator::TwoCap,
     };
     use commonware_utils::{
@@ -576,16 +573,16 @@ mod tests {
         }
     }
 
-    fn db_config(suffix: &str) -> FixedConfig<TwoCap, Sequential> {
+    fn db_config(suffix: &str) -> fixed::Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
-        FixedConfig {
-            merkle_config: MerkleConfig {
+        fixed::Config {
+            merkle: MerkleConfig {
                 metadata_partition: format!("{suffix}-mmr-metadata"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 cache: Default::default(),
             },
-            journal_config: FixedLogConfig {
+            log: FixedLogConfig {
                 partition: format!("{suffix}-log-journal"),
                 items_per_blob: NZU64!(7),
                 page_cache,

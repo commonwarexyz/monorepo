@@ -18,7 +18,10 @@ use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deter
 use commonware_storage::{
     journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FConfig},
     merkle::mmb,
-    qmdb::current::{BitmapPrunedBits, FixedConfig as Config, unordered::fixed::Db as CurrentDb},
+    qmdb::current::{
+        BitmapPrunedBits,
+        unordered::fixed::{Config, Db as CurrentDb},
+    },
     translator::TwoCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
@@ -147,13 +150,13 @@ const WRITE_BUFFER_SIZE: usize = 1024;
 
 fn test_config(name: &str, page_cache: CacheRef) -> Config<TwoCap, Sequential> {
     Config {
-        merkle_config: MerkleConfig {
+        merkle: MerkleConfig {
             metadata_partition: format!("fuzz-current-mmb-pruning-{name}-merkle-metadata"),
             replay_buffer: NZUsize!(WRITE_BUFFER_SIZE),
             strategy: Sequential,
             cache: Default::default(),
         },
-        journal_config: FConfig {
+        log: FConfig {
             partition: format!("fuzz-current-mmb-pruning-{name}-log-journal"),
             items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
             write_buffer: NZUsize!(WRITE_BUFFER_SIZE),

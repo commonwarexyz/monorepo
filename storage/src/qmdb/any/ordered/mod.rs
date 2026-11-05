@@ -1417,17 +1417,17 @@ mod test {
                 Sequential,
             >;
             let config = current::tests::variable_config_partitioned::<OneCap>("neighbors");
-            let config = current::VariableConfig {
-                journal_config: crate::journal::contiguous::variable::Config {
+            let config = current::ordered::variable::partitioned::Config {
+                log: crate::journal::contiguous::variable::Config {
                     codec_config: (((..=3).into(), ()), ((..=4096).into(), ())),
-                    partition: config.journal_config.partition,
-                    items_per_section: config.journal_config.items_per_section,
-                    compression: config.journal_config.compression,
-                    page_cache: config.journal_config.page_cache,
-                    write_buffer: config.journal_config.write_buffer,
-                    replay_buffer: config.journal_config.replay_buffer,
+                    partition: config.log.partition,
+                    items_per_section: config.log.items_per_section,
+                    compression: config.log.compression,
+                    page_cache: config.log.page_cache,
+                    write_buffer: config.log.write_buffer,
+                    replay_buffer: config.log.replay_buffer,
                 },
-                merkle_config: config.merkle_config,
+                merkle: config.merkle,
                 grafted_metadata_partition: config.grafted_metadata_partition,
                 translator: config.translator,
                 init_cache: config.init_cache,
@@ -1693,7 +1693,7 @@ mod test {
                 Sequential,
             >;
             let config = any::test::fixed_db_config::<OneCap>("scan-errors");
-            let cache = config.journal_config.page_cache.clone();
+            let cache = config.log.page_cache.clone();
             let db = TestDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -1787,17 +1787,17 @@ mod test {
                 Sequential,
             >;
             let base = any::test::variable_db_config::<OneCap>("scan-variable-keys");
-            let config = any::VariableConfig {
-                journal_config: crate::journal::contiguous::variable::Config {
+            let config = any::ordered::variable::Config {
+                log: crate::journal::contiguous::variable::Config {
                     codec_config: (((0..=32).into(), ()), ()),
-                    partition: base.journal_config.partition,
-                    items_per_section: base.journal_config.items_per_section,
-                    compression: base.journal_config.compression,
-                    page_cache: base.journal_config.page_cache,
-                    write_buffer: base.journal_config.write_buffer,
-                    replay_buffer: base.journal_config.replay_buffer,
+                    partition: base.log.partition,
+                    items_per_section: base.log.items_per_section,
+                    compression: base.log.compression,
+                    page_cache: base.log.page_cache,
+                    write_buffer: base.log.write_buffer,
+                    replay_buffer: base.log.replay_buffer,
                 },
-                merkle_config: base.merkle_config,
+                merkle: base.merkle,
                 translator: base.translator,
                 init_cache: base.init_cache,
                 init_buffer: base.init_buffer,

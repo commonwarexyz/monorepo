@@ -60,7 +60,7 @@ mod tests {
     fn config(suffix: &str) -> Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
@@ -253,7 +253,7 @@ mod tests {
         let journal =
             crate::journal::authenticated::Journal::<F, _, _, Sha256, _>::from_components(
                 context.child("import"),
-                &cfg.merkle_config,
+                &cfg.merkle,
                 journal,
                 hasher,
                 start,

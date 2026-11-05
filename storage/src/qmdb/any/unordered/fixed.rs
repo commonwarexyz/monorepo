@@ -2,9 +2,9 @@
 
 use crate::{
     index::unordered::Index,
-    journal::contiguous::fixed::Journal,
+    journal::contiguous::fixed::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::any::{unordered, value::FixedEncoding},
+    qmdb::any::{self, unordered, value::FixedEncoding},
 };
 
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
@@ -23,16 +23,21 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
+/// Configuration for a [Db].
+pub type Config<T, S> = any::Config<T, JournalConfig, S>;
+
 /// Partitioned index variants that divide the key space into `2^(P*8)` partitions.
 ///
 /// See [partitioned::Db] for the generic type, or use the convenience aliases:
 /// - [partitioned::p256::Db] for 256 partitions (P=1)
 /// - [partitioned::p64k::Db] for 65,536 partitions (P=2)
 pub mod partitioned {
+    use super::{JournalConfig, any};
     pub use super::{Operation, Update};
     use crate::{
         index::partitioned::unordered::Index, journal::contiguous::fixed::Journal, merkle::Location,
     };
+    use core::num::NonZeroUsize;
 
     /// A key-value QMDB with a partitioned snapshot index.
     ///
@@ -54,16 +59,21 @@ pub mod partitioned {
         S,
     >;
 
+    /// Configuration for a [Db].
+    pub type Config<T, S> = any::Config<T, JournalConfig, S, NonZeroUsize>;
+
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Fixed-value DB with 256 partitions.
         pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 1, S>;
+        pub use super::Config;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
         /// Fixed-value DB with 65,536 partitions.
         pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 2, S>;
+        pub use super::Config;
     }
 }
 
@@ -185,8 +195,8 @@ pub(crate) mod test {
         items_per_blob: std::num::NonZeroU64,
     ) -> impl Future<Output = Result<DelayedTest, crate::qmdb::Error<mmr::Family>>> {
         let mut cfg = fixed_db_config::<TwoCap>(suffix);
-        cfg.journal_config.items_per_blob = items_per_blob;
-        cfg.journal_config.page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
+        cfg.log.items_per_blob = items_per_blob;
+        cfg.log.page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
         DelayedTest::init(
             DelayedSyncContext {
                 inner: context,
@@ -729,7 +739,7 @@ pub(crate) mod test {
                 let cfg = fixed_db_config::<OneCap>(if cached { "cached" } else { "uncached" });
                 let mut log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
                     context.child("log"),
-                    cfg.journal_config,
+                    cfg.log,
                 )
                 .await
                 .unwrap();
@@ -990,7 +1000,7 @@ pub(crate) mod test {
             let cfg = fixed_db_config_partitioned::<OneCap>("unordered_parallel_replay_fail");
             let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
                 context.child("log"),
-                cfg.journal_config,
+                cfg.log,
             )
             .await
             .unwrap();
@@ -1108,7 +1118,7 @@ pub(crate) mod test {
             let cfg = fixed_db_config_partitioned::<OneCap>("unordered_parallel_worker_fail");
             let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
                 context.child("log"),
-                cfg.journal_config,
+                cfg.log,
             )
             .await
             .unwrap();
@@ -1150,7 +1160,7 @@ pub(crate) mod test {
                     context
                         .child("log")
                         .with_attribute("concurrency", concurrency),
-                    cfg.journal_config,
+                    cfg.log,
                 )
                 .await
                 .unwrap();

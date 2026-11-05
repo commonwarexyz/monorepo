@@ -41,10 +41,7 @@ use commonware_storage::{
     journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedLogConfig},
     metadata::{self, Metadata},
     mmr::{self, Location},
-    qmdb::{
-        any::{FixedConfig, unordered::fixed},
-        sync::Target,
-    },
+    qmdb::{any::unordered::fixed, sync::Target},
     translator::TwoCap,
 };
 use commonware_utils::{
@@ -566,15 +563,15 @@ impl<E: StorageContext> dkg::SecretStore for Secrets<E> {
 }
 
 /// Application QMDB config with partitions derived from `prefix`.
-pub fn db_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequential> {
-    FixedConfig {
-        merkle_config: MerkleConfig {
+pub fn db_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<TwoCap, Sequential> {
+    fixed::Config {
+        merkle: MerkleConfig {
             metadata_partition: format!("{prefix}-qmdb-mmr-metadata"),
             replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,
             cache: Default::default(),
         },
-        journal_config: FixedLogConfig {
+        log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-log-journal"),
             items_per_blob: NZU64!(7),
             page_cache,

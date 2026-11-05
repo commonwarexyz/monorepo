@@ -6,9 +6,9 @@
 
 use crate::{
     index::unordered::Index,
-    journal::contiguous::variable::Journal,
+    journal::contiguous::variable::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::any::{unordered, value::VariableEncoding},
+    qmdb::any::{self, unordered, value::VariableEncoding},
 };
 
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
@@ -27,17 +27,22 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
+/// Configuration for a [Db].
+pub type Config<T, C, S> = any::Config<T, JournalConfig<C>, S>;
+
 /// Partitioned index variants that divide the key space into `2^(P*8)` partitions.
 ///
 /// See [partitioned::Db] for the generic type, or use the convenience aliases:
 /// - [partitioned::p256::Db] for 256 partitions (P=1)
 /// - [partitioned::p64k::Db] for 65,536 partitions (P=2)
 pub mod partitioned {
+    use super::{JournalConfig, any};
     pub use super::{Operation, Update};
     use crate::{
         index::partitioned::unordered::Index, journal::contiguous::variable::Journal,
         merkle::Location,
     };
+    use core::num::NonZeroUsize;
 
     /// A key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -59,16 +64,21 @@ pub mod partitioned {
         S,
     >;
 
+    /// Configuration for a [Db].
+    pub type Config<T, C, S> = any::Config<T, JournalConfig<C>, S, NonZeroUsize>;
+
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Variable-value DB with 256 partitions.
         pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 1, S>;
+        pub use super::Config;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
         /// Variable-value DB with 65,536 partitions.
         pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 2, S>;
+        pub use super::Config;
     }
 }
 
@@ -80,7 +90,7 @@ pub(crate) mod test {
         mmr,
         qmdb::{
             Error,
-            any::{VariableConfig, batch::Slot},
+            any::batch::Slot,
             bitmap::{Candidates, FnCandidates},
             floor::{Bounded, Proportional},
         },
@@ -107,14 +117,14 @@ pub(crate) mod test {
 
     pub(crate) fn create_test_config(seed: u64) -> VarConfig {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        VariableConfig {
-            merkle_config: crate::journal::authenticated::Config {
+        Config {
+            merkle: crate::journal::authenticated::Config {
                 metadata_partition: format!("metadata-{seed}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 cache: Default::default(),
             },
-            journal_config: crate::journal::contiguous::variable::Config {
+            log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{seed}"),
                 items_per_section: NZU64!(7),
                 write_buffer: NZUsize!(1024),
@@ -131,7 +141,7 @@ pub(crate) mod test {
     }
 
     pub(crate) type VarConfig =
-        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential>;
+        Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential>;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     pub(crate) type AnyTest =

@@ -8,7 +8,7 @@ use commonware_storage::{
     journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FConfig},
     merkle::{Family as MerkleFamily, mmb, mmr},
     qmdb::{
-        any::{FixedConfig as Config, unordered::fixed::Db},
+        any::unordered::fixed::{Config, Db},
         sync,
     },
     translator::TwoCap,
@@ -91,13 +91,13 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 fn test_config(test_name: &str) -> Config<TwoCap, Sequential> {
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(1));
     Config {
-        merkle_config: MerkleConfig {
+        merkle: MerkleConfig {
             metadata_partition: format!("{test_name}-meta"),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             cache: commonware_storage_fuzz::low_resident_height(),
         },
-        journal_config: FConfig {
+        log: FConfig {
             partition: format!("{test_name}-log"),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(1024),
