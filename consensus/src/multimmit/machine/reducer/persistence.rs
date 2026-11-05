@@ -738,11 +738,13 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         id: EffectId,
         effect: &DurableEffect<S, H::Digest>,
     ) -> Result<(), ReplayError> {
+        // Every retained effect's identifiers are cached when it is retained (and on restore), so
+        // a missing entry is a ledger inconsistency, not something to recompute around.
         let ids = self
             .durable
             .effect_ids
             .remove(&id)
-            .unwrap_or_else(|| Self::effect_artifact_ids(effect));
+            .ok_or(ReplayError::Transition(TransitionReason::References))?;
         for artifact in ids {
             self.release_durable_artifact(artifact)?;
         }
