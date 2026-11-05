@@ -99,7 +99,7 @@ fn generate_value(seed: u64, size: usize) -> Vec<u8> {
 fn db_config(suffix: &str) -> Config<TwoCap, VConfig<((), (RangeCfg<usize>, ()))>, Sequential> {
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
-        merkle_config: MerkleConfig {
+        merkle: MerkleConfig {
             journal_partition: format!("journal-{suffix}"),
             metadata_partition: format!("metadata-{suffix}"),
             items_per_blob: NZU64!(ITEMS_PER_BLOB),

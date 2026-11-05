@@ -158,7 +158,7 @@ pub(crate) mod harnesses {
 
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -425,7 +425,7 @@ pub(crate) mod harnesses {
     ) -> immutable::variable::Config<TwoCap, CodecConfig, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -451,7 +451,7 @@ pub(crate) mod harnesses {
     fn fixed_config(suffix: &str) -> immutable::fixed::Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),

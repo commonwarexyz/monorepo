@@ -710,7 +710,7 @@ pub(crate) mod test {
             let cfg = fixed_db_config_partitioned::<OneCap>("parallel_replay_fail");
             let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
                 context.child("log"),
-                cfg.journal_config,
+                cfg.log,
             )
             .await
             .unwrap();
@@ -755,7 +755,7 @@ pub(crate) mod test {
                     context
                         .child("log")
                         .with_attribute("concurrency", concurrency),
-                    cfg.journal_config,
+                    cfg.log,
                 )
                 .await
                 .unwrap();
@@ -812,7 +812,7 @@ pub(crate) mod test {
                             .child("log")
                             .with_attribute("label", label)
                             .with_attribute("concurrency", concurrency),
-                        cfg.journal_config,
+                        cfg.log,
                     )
                     .await
                     .unwrap();

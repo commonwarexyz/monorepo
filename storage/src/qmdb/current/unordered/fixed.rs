@@ -584,7 +584,7 @@ pub mod test {
             )
             .unwrap();
             FixedConfig {
-                merkle_config: MerkleConfig {
+                merkle: MerkleConfig {
                     journal_partition: "rebranch-merkle-journal".into(),
                     metadata_partition: "rebranch-merkle-metadata".into(),
                     items_per_blob: NZU64!(100_000),
@@ -593,7 +593,7 @@ pub mod test {
                     strategy: Sequential,
                     page_cache: CacheRef::new(NZU16!(1024), NZUsize!(64)),
                 },
-                journal_config: JournalConfig {
+                log: JournalConfig {
                     partition: "rebranch-ops-journal".into(),
                     items_per_blob: NZU64!(100_000),
                     page_cache: CacheRef::new(page_size, NZUsize!(64)),

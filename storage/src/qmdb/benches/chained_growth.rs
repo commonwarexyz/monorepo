@@ -81,8 +81,8 @@ fn cur_fix_cfg(
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
     let pc = pc();
     commonware_storage::qmdb::current::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,

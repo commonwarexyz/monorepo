@@ -123,7 +123,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 fn test_config(name: &str) -> Config<OneCap, Sequential> {
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(2));
     Config {
-        merkle_config: MerkleConfig {
+        merkle: MerkleConfig {
             journal_partition: format!("{name}-merkle"),
             metadata_partition: format!("{name}-meta"),
             items_per_blob: NZU64!(17),
@@ -132,7 +132,7 @@ fn test_config(name: &str) -> Config<OneCap, Sequential> {
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: FConfig {
+        log: FConfig {
             partition: format!("{name}-log"),
             items_per_blob: NZU64!(13),
             write_buffer: NZUsize!(1024),

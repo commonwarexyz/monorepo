@@ -443,8 +443,8 @@ fn main() {
         match db_kind.as_str() {
             "current::unordered::fixed::mmb" => {
                 let cfg = CurrentFixedConfig {
-                    merkle_config,
-                    journal_config,
+                    merkle: merkle_config,
+                    log: journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
@@ -461,8 +461,8 @@ fn main() {
             }
             "current::ordered::fixed::mmb" => {
                 let cfg = CurrentFixedConfig {
-                    merkle_config,
-                    journal_config,
+                    merkle: merkle_config,
+                    log: journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
@@ -481,8 +481,8 @@ fn main() {
             }
             "any::ordered::fixed::mmb" => {
                 let cfg = FixedConfig {
-                    merkle_config,
-                    journal_config,
+                    merkle: merkle_config,
+                    log: journal_config,
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
@@ -495,8 +495,8 @@ fn main() {
             }
             "any::unordered::variable::mmb" => {
                 let cfg = commonware_storage::qmdb::any::VariableConfig {
-                    merkle_config,
-                    journal_config: VConfig {
+                    merkle: merkle_config,
+                    log: VConfig {
                         partition: "constantinople-var-log".into(),
                         items_per_section: ITEMS_PER_BLOB,
                         compression: None,
@@ -515,8 +515,8 @@ fn main() {
             }
             _ => {
                 let cfg = FixedConfig {
-                    merkle_config,
-                    journal_config,
+                    merkle: merkle_config,
+                    log: journal_config,
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),

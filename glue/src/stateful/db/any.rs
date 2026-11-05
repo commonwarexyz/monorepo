@@ -764,7 +764,7 @@ mod tests {
     fn fixed_config(suffix: &str) -> FixedConfig<TwoCap, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("stateful-any-journal-{suffix}"),
                 metadata_partition: format!("stateful-any-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -773,7 +773,7 @@ mod tests {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FixedJournalConfig {
+            log: FixedJournalConfig {
                 partition: format!("stateful-any-log-{suffix}"),
                 items_per_blob: NZU64!(7),
                 page_cache,

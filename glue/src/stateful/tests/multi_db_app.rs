@@ -92,7 +92,7 @@ pub(super) fn qmdb_config(
     immutable::fixed::CompactConfig<Sequential>,
 ) {
     let db_a = FixedConfig {
-        merkle_config: MmrJournalConfig {
+        merkle: MmrJournalConfig {
             journal_partition: format!("{prefix}-qmdb-a-mmr-journal"),
             metadata_partition: format!("{prefix}-qmdb-a-mmr-metadata"),
             items_per_blob: NZU64!(11),
@@ -101,7 +101,7 @@ pub(super) fn qmdb_config(
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: FixedLogConfig {
+        log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-a-log-journal"),
             items_per_blob: NZU64!(7),
             page_cache: page_cache.clone(),

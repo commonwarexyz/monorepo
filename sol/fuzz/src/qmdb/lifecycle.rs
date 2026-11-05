@@ -62,7 +62,7 @@ impl LifecycleArgs {
 fn config() -> FixedConfig<OneCap, Sequential> {
     let page_cache = CacheRef::new(NZU16!(4096), NZUsize!(8));
     FixedConfig {
-        merkle_config: MerkleConfig {
+        merkle: MerkleConfig {
             journal_partition: "lifecycle-merkle-journal".into(),
             metadata_partition: "lifecycle-merkle-metadata".into(),
             items_per_blob: NZU64!(11),
@@ -71,7 +71,7 @@ fn config() -> FixedConfig<OneCap, Sequential> {
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: JournalConfig {
+        log: JournalConfig {
             partition: "lifecycle-operations".into(),
             items_per_blob: NZU64!(7),
             page_cache,

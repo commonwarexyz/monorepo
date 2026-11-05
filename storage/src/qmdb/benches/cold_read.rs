@@ -299,7 +299,7 @@ fn config<E: Strategizer>(ctx: &E, args: &Args) -> FixedConfig<EightCap, Rayon> 
     let page_size = args.logical.unwrap_or(paged::page_size(args.page));
     let page_cache = CacheRef::new(page_size, NZUsize!(args.cache));
     FixedConfig {
-        merkle_config: full::Config {
+        merkle: full::Config {
             journal_partition: "cold-merkle".into(),
             metadata_partition: "cold-merkle-meta".into(),
             items_per_blob: NZU64!(args.blob),
@@ -308,7 +308,7 @@ fn config<E: Strategizer>(ctx: &E, args: &Args) -> FixedConfig<EightCap, Rayon> 
             strategy: ctx.strategy(NZUsize!(args.threads)),
             page_cache: page_cache.clone(),
         },
-        journal_config: FConfig {
+        log: FConfig {
             partition: "cold-log".into(),
             items_per_blob: NZU64!(args.blob),
             page_cache,

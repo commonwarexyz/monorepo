@@ -73,7 +73,7 @@ pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
 /// Builds the QMDB configuration used by single-database tests.
 pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequential> {
     FixedConfig {
-        merkle_config: MmrJournalConfig {
+        merkle: MmrJournalConfig {
             journal_partition: format!("{prefix}-qmdb-mmr-journal"),
             metadata_partition: format!("{prefix}-qmdb-mmr-metadata"),
             items_per_blob: NZU64!(11),
@@ -82,7 +82,7 @@ pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<Two
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: FixedLogConfig {
+        log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-log-journal"),
             items_per_blob: NZU64!(7),
             page_cache,

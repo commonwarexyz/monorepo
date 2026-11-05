@@ -182,7 +182,7 @@ where
 #[derive(Clone)]
 pub struct Config<T: Translator, J, S: Strategy> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle_config: MerkleConfig<S>,
+    pub merkle: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
     pub log: J,
@@ -281,7 +281,7 @@ where
         // floor must remain in the retained operation prefix.
         let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
             context.child("journal"),
-            cfg.merkle_config,
+            cfg.merkle,
             cfg.log,
             max_size,
             true,

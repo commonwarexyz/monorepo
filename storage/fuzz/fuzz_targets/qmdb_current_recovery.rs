@@ -110,7 +110,7 @@ fn make_config(suffix: &str, params: ConfigParams) -> VariableConfig<TwoCap, (()
     } = params;
     let page_cache = CacheRef::new(page_size, page_cache_size);
     VariableConfig {
-        merkle_config: MerkleConfig {
+        merkle: MerkleConfig {
             journal_partition: format!("crash-merkle-journal-{suffix}"),
             metadata_partition: format!("crash-merkle-metadata-{suffix}"),
             items_per_blob: NZU64!(merkle_items_per_blob),
@@ -119,7 +119,7 @@ fn make_config(suffix: &str, params: ConfigParams) -> VariableConfig<TwoCap, (()
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: VConfig {
+        log: VConfig {
             partition: format!("crash-log-{suffix}"),
             items_per_section: NZU64!(log_items_per_blob),
             write_buffer,

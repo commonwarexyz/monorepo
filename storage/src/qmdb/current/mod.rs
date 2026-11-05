@@ -373,10 +373,10 @@ use self::db::Metrics;
 #[derive(Clone)]
 pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub merkle_config: MerkleConfig<S>,
+    pub merkle: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
-    pub journal_config: J,
+    pub log: J,
 
     /// The name of the storage partition used for grafted tree metadata.
     pub grafted_metadata_partition: String,
@@ -403,8 +403,8 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
 impl<T: Translator, J, S: Strategy, B> From<Config<T, J, S, B>> for AnyConfig<T, J, S, B> {
     fn from(cfg: Config<T, J, S, B>) -> Self {
         Self {
-            merkle_config: cfg.merkle_config,
-            journal_config: cfg.journal_config,
+            merkle: cfg.merkle,
+            log: cfg.log,
             translator: cfg.translator,
             init_cache: cfg.init_cache,
             init_buffer: cfg.init_buffer,
@@ -518,7 +518,7 @@ where
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
-    let strategy = config.merkle_config.strategy.clone();
+    let strategy = config.merkle.strategy.clone();
     let metadata_partition = config.grafted_metadata_partition.clone();
 
     // Load bitmap metadata (pruned_chunks + pinned nodes for the grafted tree).
@@ -885,7 +885,7 @@ pub mod tests {
     ) -> FixedConfig<T, Sequential, B> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
@@ -894,7 +894,7 @@ pub mod tests {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FConfig {
+            log: FConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
                 items_per_blob: NZU64!(7),
                 page_cache,
@@ -924,7 +924,7 @@ pub mod tests {
     ) -> VariableConfig<T, ((), ()), Sequential, B> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
@@ -933,7 +933,7 @@ pub mod tests {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: VConfig {
+            log: VConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
                 items_per_section: NZU64!(7),
                 compression: None,
@@ -2091,7 +2091,7 @@ pub mod tests {
         executor.start(|context| async move {
             let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = VariableConfig {
-                merkle_config: MerkleConfig {
+                merkle: MerkleConfig {
                     journal_partition: "forged-exclusion-journal".to_string(),
                     metadata_partition: "forged-exclusion-metadata".to_string(),
                     items_per_blob: NZU64!(11),
@@ -2100,7 +2100,7 @@ pub mod tests {
                     strategy: Sequential,
                     page_cache: page_cache.clone(),
                 },
-                journal_config: VConfig {
+                log: VConfig {
                     partition: "forged-exclusion-log".to_string(),
                     items_per_section: NZU64!(7),
                     compression: None,

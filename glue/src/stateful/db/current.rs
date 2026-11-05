@@ -1202,7 +1202,7 @@ mod tests {
     fn fixed_config(suffix: &str) -> FixedConfig<TwoCap, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -1211,7 +1211,7 @@ mod tests {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FixedJournalConfig {
+            log: FixedJournalConfig {
                 partition: format!("stateful-current-log-{suffix}"),
                 items_per_blob: NZU64!(7),
                 page_cache,
@@ -1229,7 +1229,7 @@ mod tests {
     fn variable_config(suffix: &str) -> VariableConfig<TwoCap, ((), ()), Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -1238,7 +1238,7 @@ mod tests {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: VariableJournalConfig {
+            log: VariableJournalConfig {
                 partition: format!("stateful-current-log-{suffix}"),
                 items_per_section: NZU64!(7),
                 compression: None,
@@ -1683,11 +1683,10 @@ mod tests {
             let size = <FixedOp as FixedSize>::SIZE;
             let page_size = NonZeroU16::new(size as u16).unwrap();
             let mut config = fixed_config("bounded-init-crash");
-            config.journal_config.page_cache = CacheRef::new(page_size, PAGE_CACHE_SIZE);
-            config.journal_config.write_buffer =
-                NonZeroUsize::new(CAPACITY as usize * size).unwrap();
-            config.journal_config.items_per_blob = NZU64!(1000);
-            config.merkle_config.items_per_blob = NZU64!(1000);
+            config.log.page_cache = CacheRef::new(page_size, PAGE_CACHE_SIZE);
+            config.log.write_buffer = NonZeroUsize::new(CAPACITY as usize * size).unwrap();
+            config.log.items_per_blob = NZU64!(1000);
+            config.merkle.items_per_blob = NZU64!(1000);
             config
         }
 

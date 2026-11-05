@@ -324,8 +324,8 @@ pub(crate) fn any_fix_cfg_with_cache(
     pc: CacheRef,
 ) -> commonware_storage::qmdb::any::FixedConfig<EightCap, Rayon> {
     commonware_storage::qmdb::any::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: fix_log_cfg(pc),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
@@ -338,8 +338,8 @@ fn any_var_cfg_with_cache(
     pc: CacheRef,
 ) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ()), Rayon> {
     commonware_storage::qmdb::any::VariableConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: var_log_cfg(pc),
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: var_log_cfg(pc),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
@@ -352,8 +352,8 @@ pub(crate) fn cur_fix_cfg_with_cache(
     pc: CacheRef,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
     commonware_storage::qmdb::current::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
@@ -367,8 +367,8 @@ fn cur_var_cfg_with_cache(
     pc: CacheRef,
 ) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ()), Rayon> {
     commonware_storage::qmdb::current::VariableConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: var_log_cfg(pc),
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: var_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
