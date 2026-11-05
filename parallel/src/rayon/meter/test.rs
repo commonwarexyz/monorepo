@@ -15,13 +15,6 @@ fn measured(op: impl FnOnce(&TestClock)) -> Duration {
     measure_with(Clock::Virtual(clock.clone()), || op(&clock)).1
 }
 
-/// Measures `op` on the system clock and returns the run's busy time and its wall time.
-fn timed(op: impl FnOnce()) -> (Duration, Duration) {
-    let start = Instant::now();
-    let ((), busy) = measure(op);
-    (busy, start.elapsed())
-}
-
 /// Blocks until at least `count` workers of `pool` sleep. A sleeping worker waits with its context
 /// suspended, so virtual time that passes afterwards is not charged to it.
 fn wait_until_asleep(pool: &ThreadPool, count: usize) {
@@ -262,9 +255,9 @@ fn blocked_threads_are_charged_for_the_wait() {
     assert_eq!(busy, 20 * MS);
 }
 
-/// A worker that yields on empty queues searches in no context. The searches dominate a measured
-/// install that keeps yielding, so it is charged for less than half of its wall time. A deschedule
-/// inside a charged interval can inflate one attempt, so a failed attempt is retried.
+/// A worker that yields on empty queues searches in no context. The searches dominate a loop of
+/// yields, so the worker is charged for less than half of the loop's wall time. A deschedule inside
+/// a charged interval can inflate one attempt, so a failed attempt is retried.
 #[test]
 fn idle_yields_charge_nothing() {
     // Each idle search scans the other workers' deques, so a wide pool makes it dwarf the charged
@@ -273,12 +266,14 @@ fn idle_yields_charge_nothing() {
     let pool = ThreadPoolBuilder::new(NZUsize!(32)).build().unwrap();
     let mut attempts = Vec::new();
     for _ in 0..10 {
-        // Yield on empty queues inside a measured install.
-        let (busy, wall) = timed(|| {
+        // Yield on empty queues inside a measured install, timing the loop on the worker.
+        let (wall, busy) = measure(|| {
             pool.install(|| {
+                let start = Instant::now();
                 for _ in 0..ITERATIONS {
                     assert_eq!(pool.yield_now(), Some(Yield::Idle));
                 }
+                start.elapsed()
             })
         });
 
