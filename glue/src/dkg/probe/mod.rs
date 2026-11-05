@@ -120,11 +120,12 @@
 //! marshal. A boundary finalization or block request for epoch `e` reads the plan's checkpoint for
 //! `e`. The orchestrator records that checkpoint when it enters `e` from its boundary block.
 //!
-//! The actor answers a boundary request only when that checkpoint holds the boundary finalization,
-//! so it answers nothing for an epoch the node entered by state sync or whose boundary block
-//! marshal held without its finalization. It also answers nothing for epoch zero, and nothing to a
-//! latest-finalization request while marshal has no finalization.
-//! [Marshal Retention](crate::dkg#marshal-retention) describes which peers can serve an epoch.
+//! The actor answers a boundary request only when that checkpoint holds the boundary finalization.
+//! The genesis checkpoint of epoch zero has none, a node that entered an epoch by state sync has no
+//! checkpoint for it, and marshal may hold a boundary block without its finalization, so the actor
+//! serves none of those epochs. It also answers nothing to a latest-finalization request while
+//! marshal has no finalization. [Marshal Retention](crate::dkg#marshal-retention) describes which
+//! peers can serve an epoch.
 //!
 //! # Message Sizes
 //!
@@ -1750,10 +1751,9 @@ mod tests {
     }
 
     /// The source answers no boundary request for an epoch whose checkpoint lacks a
-    /// finalization, even when its marshal stores the boundary, and none for epoch zero,
-    /// even when its plan holds a finalized checkpoint for it.
+    /// finalization, even when its marshal stores the boundary.
     #[test]
-    fn serving_ignores_unfinalized_checkpoint_and_epoch_zero() {
+    fn serving_ignores_unfinalized_checkpoint() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let fixture = mocks::scheme_fixture_n(&mut context, 4);
@@ -1763,26 +1763,9 @@ mod tests {
                 &fixture.schemes,
                 false,
             );
-            let genesis = mocks::genesis_block(fixture.participants[0].clone())
-                .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestPublicKey>(
-                NZU32!(16),
-                Payload::EpochInfo(genesis_info(&fixture.participants)),
-            );
-            let genesis_finalization = finalization(
-                Proposal::new(
-                    Round::new(Epoch::zero(), View::new(1)),
-                    View::zero(),
-                    genesis.digest(),
-                ),
-                &fixture.schemes,
-            );
-            let genesis = Checkpoint::new(
-                Digested::precomputed(genesis.clone(), genesis.digest()),
-                Some(genesis_finalization),
-            );
             let source = Source {
                 marshal: vec![Epoch::new(1)],
-                checkpoints: vec![(Epoch::zero(), genesis), (Epoch::new(1), unfinalized)],
+                checkpoints: vec![(Epoch::new(1), unfinalized)],
             };
             let mut harness =
                 Harness::start_source(&mut context, fixture, source, Epoch::zero(), None).await;
@@ -1790,10 +1773,8 @@ mod tests {
             // The source handles requests in order and the link delivers its responses in
             // order, so the first response answers the latest request only if the source
             // ignored every request before it.
-            for epoch in [Epoch::new(1), Epoch::zero()] {
-                harness.request_from_source(wire::Message::BoundaryRequest(epoch));
-                harness.request_from_source(wire::Message::BlockRequest(epoch));
-            }
+            harness.request_from_source(wire::Message::BoundaryRequest(Epoch::new(1)));
+            harness.request_from_source(wire::Message::BlockRequest(Epoch::new(1)));
             harness.request_from_source(wire::Message::LatestRequest);
             let (_peer, message) = harness
                 .client_boundary_receiver

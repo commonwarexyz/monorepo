@@ -210,11 +210,11 @@
 //! follow the epoch.
 //!
 //! Startup from state-sync material records the floor block's height with the
-//! material once marshal yields that block. A restart in the synced epoch takes
-//! the height from the plan, so it makes the same choice to participate or
-//! follow even once marshal has pruned the floor block.
-//! [Marshal Retention](crate::dkg#marshal-retention) describes when a restart
-//! still reads the floor block.
+//! material once marshal yields that block. A later restart in the synced epoch
+//! that is not given the material again takes the height from the plan, so it
+//! makes the same choice to participate or follow even once marshal has pruned
+//! the floor block. [Marshal Retention](crate::dkg#marshal-retention) describes
+//! when a restart still reads the floor block.
 //!
 //! A `player` that missed private dealings may need public reveals to reconstruct
 //! its share, but a revealed share is no longer private. Announcing a node as a

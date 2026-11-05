@@ -34,7 +34,7 @@ use commonware_consensus::{
     Block as _, Heightable as _,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
-    types::{Epoch, EpochPhase, FixedEpocher, Height},
+    types::{EpochPhase, FixedEpocher, Height},
 };
 use commonware_cryptography::{
     BatchVerifier, Digested, Digestible as _, PublicKey, Signer,
@@ -72,7 +72,7 @@ mod setup;
 #[cfg(test)]
 mod utils;
 use inclusion::ArtifactRequests;
-use setup::{PreparedEpoch, RecoveredStart, Setup, startup};
+use setup::{PreparedEpoch, Setup, StateSyncStart, startup};
 
 /// Configuration for the one-shot DKG mode used by [`bootstrap`](crate::dkg::bootstrap).
 pub(crate) struct DkgConfig<V, P, D>
@@ -188,7 +188,7 @@ where
 pub struct Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A = Exact>
 where
     E: Spawner + CryptoRng + Metrics + Clock + Storage,
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -351,29 +351,18 @@ where
 
         // With state-sync material, resolve the floor's height and, when startup needs
         // it, the floor block. Setup uses the height to decide whether the epoch's
-        // dealer-log window is complete. Otherwise the recovered epoch's checkpoint, if
-        // any, supplies its info with no floor, since marshal redelivers every block
-        // after its processed height and the journal holds the dealer logs from blocks
-        // already processed.
-        let (mut recovered, floor) = if let Some(state_sync) = state_sync {
+        // dealer-log window is complete.
+        let (mut state_sync, floor) = if let Some(state_sync) = state_sync {
             let (height, block) = self
                 .resolve_floor(&mut store, &anchor, &state_sync.info, state_sync.floor)
                 .await;
-            let start = RecoveredStart {
+            let start = StateSyncStart {
                 info: state_sync.info,
-                floor: Some(height),
+                floor: height,
             };
             (Some(start), block)
         } else {
-            let checkpoint = self
-                .state_sync
-                .checkpoint(recovered_epoch.unwrap_or_else(Epoch::zero))
-                .await;
-            let start = checkpoint.map(|checkpoint| RecoveredStart {
-                info: checkpoint.info(),
-                floor: None,
-            });
-            (start, None)
+            (None, None)
         };
 
         self.tip = startup(anchor, floor);
@@ -384,7 +373,7 @@ where
         }
 
         loop {
-            let Setup::Participate(prepared) = self.setup(&mut store, recovered.take()).await
+            let Setup::Participate(prepared) = self.setup(&mut store, state_sync.take()).await
             else {
                 if self.follow(&mut store).await.is_break() {
                     return;

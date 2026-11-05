@@ -16,7 +16,7 @@ use commonware_consensus::{
         self, Floor, ForwardPolicy, Plan, SkipPolicy,
         elector::Config as Elector,
         scheme,
-        types::{Activity, Context},
+        types::{Activity, Context, Finalization},
     },
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
@@ -454,8 +454,21 @@ where
         self.resolve_boundary(epoch, epocher).await
     }
 
-    /// Records `boundary` as the checkpoint of `epoch`, with marshal's finalization of it when
-    /// marshal has one.
+    /// Reads the boundary block at `height` with marshal's finalization of it, if any.
+    ///
+    /// Returns `None` if marshal cannot supply the block. Marshal answers no request once it
+    /// closes, so reading the finalization first makes a returned block show that marshal was
+    /// still running when it reported no finalization.
+    async fn read_boundary(
+        &mut self,
+        height: Height,
+    ) -> Option<(MV::Block, Option<Finalization<P::Scheme, MV::Commitment>>)> {
+        let finalization = self.marshal.get_finalization(height).await;
+        let block = self.marshal.get_block(height).await?;
+        Some((block, finalization))
+    }
+
+    /// Records `boundary` and marshal's `finalization` of it, if any, as the checkpoint of `epoch`.
     ///
     /// Checkpoints of epochs before the one recovered from marshal's processed height are dropped.
     /// Marshal reports a processed height only after syncing it, so no later restart recovers an
@@ -465,8 +478,8 @@ where
         epocher: &FixedEpocher,
         epoch: Epoch,
         boundary: MV::Block,
+        finalization: Option<Finalization<P::Scheme, MV::Commitment>>,
     ) {
-        let finalization = self.marshal.get_finalization(boundary.height()).await;
         let retained_from = self
             .marshal
             .get_processed()
@@ -506,7 +519,7 @@ where
             .previous()
             .and_then(|epoch| epocher.last(epoch))
             .unwrap_or_else(Height::zero);
-        let Some(boundary) = self.marshal.get_block(height).await else {
+        let Some((boundary, finalization)) = self.read_boundary(height).await else {
             error!(%epoch, %height, "boundary block unavailable, shutting down orchestrator");
             return None;
         };
@@ -522,7 +535,8 @@ where
             );
         }
 
-        self.record_checkpoint(epocher, epoch, boundary).await;
+        self.record_checkpoint(epocher, epoch, boundary, finalization)
+            .await;
         Some(ResolvedStart {
             epoch,
             floor: Floor::Genesis(commitment),
@@ -647,7 +661,7 @@ where
             );
         }
 
-        let Some(boundary) = self.marshal.get_block(height).await else {
+        let Some((boundary, finalization)) = self.read_boundary(height).await else {
             debug!(%height, "boundary block unavailable, shutting down orchestrator");
             return false;
         };
@@ -656,7 +670,8 @@ where
         // Record the next epoch's checkpoint before acknowledging the final block. Once
         // marshal's processed height passes the block, a restart recovers the next epoch
         // and marshal may have pruned the block that carries its info.
-        self.record_checkpoint(epocher, next_epoch, boundary).await;
+        self.record_checkpoint(epocher, next_epoch, boundary, finalization)
+            .await;
 
         let next = self.enter_epoch(next_epoch, floor, &info, channels).await;
         let next = match next {

@@ -427,7 +427,7 @@ fn reshare_e2e_multiple_epochs_with_total_shutdown(#[case] network: Network) {
 
 /// A player restarted after its marshal pruned the boundary block that introduced
 /// its epoch takes its role in that epoch from the epoch's checkpoint. Without the
-/// checkpoint, it would follow the epoch until its final block.
+/// checkpoint, the node could not restart in that epoch.
 #[rstest]
 #[case::discovery(Network::Discovery)]
 #[case::lookup(Network::Lookup)]
