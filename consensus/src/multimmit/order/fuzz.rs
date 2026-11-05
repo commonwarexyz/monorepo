@@ -1,6 +1,6 @@
 //! Differential ordering histories with partial iteration and acknowledged-frontier replay.
 
-use super::{FinalSweep, HistoryState, Reconciliation, Slot, SlotStream};
+use super::{Cut, Expansion, FinalSweep, HistoryState, Reconciliation, Slot, SlotStream, SweepFact};
 use crate::{
     multimmit::{
         fuzz::ByteSchedule,
@@ -9,6 +9,7 @@ use crate::{
     types::Height,
 };
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
+use std::sync::Arc;
 
 /// A slot coordinate: chain index and height.
 pub(super) type Coordinate = (usize, u64);
@@ -134,7 +135,15 @@ pub(crate) fn exercise(input: &[u8]) {
     let mut state = HistoryState::new(history, frontier(&base), frontier(&base)).unwrap();
     let mut delivered = Vec::new();
     let mut expected_delivery = Vec::new();
+    let mut order_cut = Cut::new(
+        history,
+        frontier(&base).into(),
+        base.iter().map(|height| Height::new(*height)).collect(),
+    )
+    .unwrap();
+    let mut expanded = Vec::new();
     for _ in 0..2 + next() % 10 {
+        let round_start = expected_delivery.len();
         let target = base
             .iter()
             .map(|height| height + (next() % 10) as u64)
@@ -246,6 +255,41 @@ pub(crate) fn exercise(input: &[u8]) {
             &mut delivered,
         );
         state.finish_opening::<Sha256>(commitment, &record).unwrap();
+
+        // The symbolic expansion yields the same dense sequence, also when resumed from the cut
+        // it reached part way through.
+        let fact = Arc::new(
+            SweepFact::new(frontier(&target), proposed_heights.clone(), settled.clone()).unwrap(),
+        );
+        let record = Arc::new(record);
+        let end = order_cut.sweep(&fact).unwrap().open(commitment, &record).unwrap();
+        let round = expected_delivery.len() - round_start;
+        let stop = next() % (round + 1);
+        let mut expansion = Expansion::new(order_cut.clone());
+        expansion.sweep(Arc::clone(&fact));
+        expansion.open(commitment, Arc::clone(&record));
+        for _ in 0..stop {
+            let position = expansion.next_position().unwrap().unwrap();
+            assert_eq!(position.index, expansion.cut().index());
+            expanded.push((position.chain().get() as usize, position.height.get()));
+        }
+        let mut resumed = Expansion::new(expansion.cut().clone());
+        // A cut part way through a round still names the previous record; re-queueing the
+        // sweep is harmless because the cut already covers whatever of it was emitted.
+        if expansion.cut().history() != commitment {
+            resumed.sweep(fact);
+            resumed.open(commitment, record);
+        }
+        while let Some(position) = resumed.next_position().unwrap() {
+            assert_eq!(position.index, resumed.cut().index());
+            expanded.push((position.chain().get() as usize, position.height.get()));
+        }
+        assert!(resumed.is_idle());
+        order_cut = resumed.cut().clone();
+        assert_eq!(order_cut, end);
+        assert_eq!(order_cut.history(), commitment);
+        assert_eq!(order_cut.index(), target.iter().sum::<u64>());
+        assert_eq!(expanded, expected_delivery);
         assert_eq!(state.ordered(), frontier(&target));
         assert_eq!(acknowledged, target);
         assert_eq!(delivered, expected_delivery);
