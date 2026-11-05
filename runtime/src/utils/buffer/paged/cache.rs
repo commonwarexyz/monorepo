@@ -178,7 +178,7 @@ struct Batch {
     blob_id: u64,
     /// The page numbers, strictly increasing. A page's index in this list identifies it.
     pages: Box<[u64]>,
-    /// How each valid page is cached as it arrives.
+    /// How each page is cached as it arrives.
     insert: Insert,
     state: Mutex<BatchState>,
 }
