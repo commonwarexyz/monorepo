@@ -203,8 +203,8 @@ where
         Self::destroy(self).await
     }
 
-    fn inactivity_floor_loc(&self) -> Location<F> {
-        Self::inactivity_floor_loc(self)
+    fn inactivity_floor(&self) -> Location<F> {
+        Self::inactivity_floor(self)
     }
 
     fn sync_boundary(&self) -> Location<F> {

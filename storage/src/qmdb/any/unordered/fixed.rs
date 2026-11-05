@@ -399,7 +399,7 @@ pub(crate) mod test {
             assert!(pending.starts() > starts_before);
 
             // A non-trivial prune: the floor advanced past the seed commit.
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             assert!(*floor > 0);
             let db = {
                 let mut prune = std::pin::pin!(db.prune(floor));

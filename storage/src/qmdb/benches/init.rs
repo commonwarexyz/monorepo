@@ -216,7 +216,7 @@ fn bench_store_init(c: &mut Criterion) {
                                     make_var_value,
                                 )
                                 .await;
-                                let floor = db.inactivity_floor_loc();
+                                let floor = db.inactivity_floor();
                                 let db = db.prune(floor).await.unwrap();
                                 db.sync().await.unwrap();
                             },

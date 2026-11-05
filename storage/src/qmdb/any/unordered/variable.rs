@@ -591,7 +591,7 @@ pub(crate) mod test {
             let db = db.commit().await.unwrap();
 
             let root = db.root();
-            let inactivity_floor = db.inactivity_floor_loc();
+            let inactivity_floor = db.inactivity_floor();
             let db = db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             let db = db.prune(inactivity_floor).await.unwrap();
             let bounds = db.bounds();
@@ -603,7 +603,7 @@ pub(crate) mod test {
             let db = open_db(context.child("open").with_attribute("index", 5)).await;
             assert_eq!(root, db.root());
             assert_eq!(db.bounds(), bounds);
-            assert_eq!(db.inactivity_floor_loc(), inactivity_floor);
+            assert_eq!(db.inactivity_floor(), inactivity_floor);
             assert_eq!(db.snapshot.items(), snapshot_items);
 
             db.destroy().await.unwrap();
@@ -632,7 +632,7 @@ pub(crate) mod test {
             let db = db.apply_batch(merkleized).await.unwrap();
 
             // inactivity_floor should be at some location < op_count
-            let inactivity_floor = db.inactivity_floor_loc();
+            let inactivity_floor = db.inactivity_floor();
             let beyond_floor = inactivity_floor + 1;
 
             // Try to prune beyond the inactivity floor

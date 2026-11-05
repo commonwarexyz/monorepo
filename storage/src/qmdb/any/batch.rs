@@ -302,7 +302,7 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> Base<F, D, U, S> {
         }
     }
 
-    fn inactivity_floor_loc(&self) -> Location<F> {
+    fn inactivity_floor(&self) -> Location<F> {
         match self {
             Self::Db {
                 inactivity_floor_loc,
@@ -2059,7 +2059,7 @@ where
             ancestors,
             base_state: self.base.base_state(),
             db_state,
-            base_inactivity_floor_loc: self.base.inactivity_floor_loc(),
+            base_inactivity_floor_loc: self.base.inactivity_floor(),
             base_active_keys: self.base.active_keys(),
         };
         (self.mutations, self.metadata, m)
@@ -3771,7 +3771,7 @@ pub(crate) mod tests {
         for (_, key, ..) in &policy.evicted {
             assert!(db.get(key).await.unwrap().is_none());
         }
-        assert_eq!(db.inactivity_floor_loc() + 1, range.end);
+        assert_eq!(db.inactivity_floor() + 1, range.end);
         db.destroy().await.unwrap();
     }
 
@@ -3844,13 +3844,13 @@ pub(crate) mod tests {
                 db = db.apply_batch(batch).await.unwrap();
             }
             assert_eq!(db.active_keys, 2);
-            assert_eq!((*db.inactivity_floor_loc(), *db.size()), (0, 388));
+            assert_eq!((*db.inactivity_floor(), *db.size()), (0, 388));
             let last = db.size();
             let inactive = [last - 1];
 
             // An ordinary round selects both active updates and passes the last commit.
             let prepared = db.new_batch().prepare(&db).unwrap();
-            let mut scan = db.inactivity_floor_loc();
+            let mut scan = db.inactivity_floor();
             let mut source = db.bitmap.as_ref();
             let round = prepared
                 .merkleizer
@@ -4167,7 +4167,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let db = db.apply_batch(seed).await.unwrap();
-            assert_eq!(*db.inactivity_floor_loc(), 2);
+            assert_eq!(*db.inactivity_floor(), 2);
 
             // An unapplied parent, if any, rewrites keys with a held floor.
             let parent = if rewritten.is_empty() {
@@ -4537,7 +4537,7 @@ pub(crate) mod tests {
                                     }
                                 };
                                 let fresh = check(fresh).await;
-                                let (root, floor) = (fresh.root(), fresh.inactivity_floor_loc());
+                                let (root, floor) = (fresh.root(), fresh.inactivity_floor());
                                 drop(fresh.sync().await.unwrap());
                                 let config = $config(&partition);
                                 let reopened =
@@ -4546,7 +4546,7 @@ pub(crate) mod tests {
                                         .unwrap();
                                 assert_eq!(reopened.root(), root, "{label}: root after reopen");
                                 assert_eq!(
-                                    reopened.inactivity_floor_loc(),
+                                    reopened.inactivity_floor(),
                                     floor,
                                     "{label}: floor after reopen"
                                 );
@@ -6021,7 +6021,7 @@ pub(crate) mod tests {
                     .unwrap();
                 db = db.apply_batch(batch).await.unwrap();
             }
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             assert!(*floor > 0, "the test needs prunable history");
 
             // A batch built before the prune, plus the reference values it must

@@ -621,7 +621,7 @@ mod tests {
             let database = <FixedDb as ManagedDb<_>>::apply(database, next)
                 .await
                 .unwrap();
-            assert_eq!(database.inactivity_floor_loc(), mmr::Location::new(1));
+            assert_eq!(database.inactivity_floor(), mmr::Location::new(1));
             slot.put(database);
         });
     }

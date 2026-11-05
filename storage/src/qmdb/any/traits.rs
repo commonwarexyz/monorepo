@@ -153,7 +153,7 @@ pub trait DbAny<F: Family>:
         Self: Sized;
 
     /// The location before which all operations are known to be inactive.
-    fn inactivity_floor_loc(&self) -> Location<F>;
+    fn inactivity_floor(&self) -> Location<F>;
 
     /// The maximum location that [`Self::prune`] accepts and the most recent location from which
     /// this database can be safely synced.

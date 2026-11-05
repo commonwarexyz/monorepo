@@ -13,7 +13,6 @@ use commonware_storage::{
         ProofExt as _,
         any::{
             db::Db as AnyDb,
-            traits::DbAny as _,
             unordered::{Operation, Update, fixed::Config},
             value::FixedEncoding,
         },
@@ -71,7 +70,7 @@ async fn commit_pending<F: MerkleFamily>(
     committed_state: &mut HashMap<RawKey, Option<RawValue>>,
     pending_expected: &mut HashMap<RawKey, Option<RawValue>>,
 ) -> GenericDb<F> {
-    let inherited = db.inactivity_floor_loc();
+    let inherited = db.inactivity_floor();
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
@@ -91,7 +90,7 @@ async fn commit_pending<F: MerkleFamily>(
             .iter()
             .filter_map(|(key, value)| Some((*key, (*value)?))),
         inherited,
-        db.inactivity_floor_loc(),
+        db.inactivity_floor(),
         db.bounds().end - 1,
     );
     for (key, value) in committed_state.iter_mut() {

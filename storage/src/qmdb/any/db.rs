@@ -134,8 +134,7 @@ where
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
-    #[cfg(any(test, feature = "test-traits"))]
-    pub(crate) const fn inactivity_floor_loc(&self) -> Location<F> {
+    pub const fn inactivity_floor(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
 

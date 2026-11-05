@@ -134,7 +134,7 @@ where
         target_db = H::apply_ops(target_db, H::create_ops(50), None).await;
 
         // Start at the inactivity floor so the lower bound can rise twice under the same end.
-        let initial_lower_bound = H::inactivity_floor_loc(&target_db);
+        let initial_lower_bound = H::inactivity_floor(&target_db);
         assert!(
             *initial_lower_bound > 1,
             "test setup requires lower bound that can advance twice"
@@ -658,7 +658,7 @@ where
         let bounds = H::bounds(&db);
         let sync_upper_bound = bounds.end;
         let target_db_op_count = bounds.end;
-        let target_db_inactivity_floor_loc = H::inactivity_floor_loc(&db);
+        let target_db_inactivity_floor_loc = H::inactivity_floor(&db);
 
         let pinned_nodes = db.pinned_nodes_at(sync_lower_bound).await;
         let (_, journal) = db.into_log_components();
@@ -677,7 +677,7 @@ where
         // Verify database state
         assert_eq!(H::bounds(&sync_db).end, target_db_op_count);
         assert_eq!(
-            H::inactivity_floor_loc(&sync_db),
+            H::inactivity_floor(&sync_db),
             target_db_inactivity_floor_loc
         );
         assert_eq!(H::sync_boundary(&sync_db), sync_lower_bound);
@@ -725,7 +725,7 @@ where
         // Capture target db state for comparison
         let bounds = H::bounds(&target_db);
         let target_db_op_count = bounds.end;
-        let target_db_inactivity_floor_loc = H::inactivity_floor_loc(&target_db);
+        let target_db_inactivity_floor_loc = H::inactivity_floor(&target_db);
         let sync_lower_bound = H::sync_boundary(&target_db);
         let sync_upper_bound = bounds.end;
         let target_hash = H::canonical_root(&target_db);
@@ -750,7 +750,7 @@ where
         // Verify database state
         assert_eq!(H::bounds(&sync_db).end, target_db_op_count);
         assert_eq!(
-            H::inactivity_floor_loc(&sync_db),
+            H::inactivity_floor(&sync_db),
             target_db_inactivity_floor_loc
         );
         assert_eq!(H::sync_boundary(&sync_db), sync_lower_bound);
@@ -789,7 +789,7 @@ where
         let pinned_nodes = source_db.pinned_nodes_at(lower_bound).await;
         let target_hash = H::canonical_root(&source_db);
         let target_op_count = H::bounds(&source_db).end;
-        let target_inactivity_floor = H::inactivity_floor_loc(&source_db);
+        let target_inactivity_floor = H::inactivity_floor(&source_db);
 
         let (mmr, journal) = source_db.into_log_components();
 
@@ -809,7 +809,7 @@ where
 
         // Verify database state
         assert_eq!(H::bounds(&db).end, target_op_count);
-        assert_eq!(H::inactivity_floor_loc(&db), target_inactivity_floor);
+        assert_eq!(H::inactivity_floor(&db), target_inactivity_floor);
         assert_eq!(H::sync_boundary(&db), lower_bound);
 
         // Verify the root digest matches the target
@@ -855,7 +855,7 @@ where
 
         // Verify database state
         assert_eq!(H::bounds(&synced_db).end, Location::new(1));
-        assert_eq!(H::inactivity_floor_loc(&synced_db), Location::new(0));
+        assert_eq!(H::inactivity_floor(&synced_db), Location::new(0));
         assert_eq!(H::canonical_root(&synced_db), target_hash);
 
         // Test that we can perform operations on the synced database
@@ -1093,7 +1093,7 @@ where
             let boundary = H::sync_boundary(&target_db);
             target_db = H::prune(target_db, boundary).await;
 
-            if H::inactivity_floor_loc(&target_db) > Location::new(0) {
+            if H::inactivity_floor(&target_db) > Location::new(0) {
                 break;
             }
 
@@ -1106,7 +1106,7 @@ where
         let old_target = Target {
             root: H::db_root(&target_db),
             range: non_empty_range!(
-                H::inactivity_floor_loc(&target_db),
+                H::inactivity_floor(&target_db),
                 H::bounds(&target_db).end
             ),
         };
@@ -1115,7 +1115,7 @@ where
         let new_target = Target {
             root: H::db_root(&target_db),
             range: non_empty_range!(
-                H::inactivity_floor_loc(&target_db),
+                H::inactivity_floor(&target_db),
                 H::bounds(&target_db).end
             ),
         };
@@ -1496,7 +1496,7 @@ pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
             assert!(round <= 64, "inactivity floor never passed a peak");
             db = H::apply_ops(db, H::create_ops(100), None).await;
             let end = H::bounds(&db).end;
-            let floor = H::inactivity_floor_loc(&db);
+            let floor = H::inactivity_floor(&db);
             if <H::Family as merkle::Family>::inactive_peaks(end, floor)
                 > <H::Family as merkle::Family>::inactive_peaks(end, start)
             {
@@ -1560,8 +1560,8 @@ macro_rules! db_any_harness_methods {
             db.sync_boundary()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> $crate::merkle::Location<Self::Family> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> $crate::merkle::Location<Self::Family> {
+            db.inactivity_floor()
         }
 
         fn db_root(db: &Self::Db) -> commonware_cryptography::sha256::Digest {

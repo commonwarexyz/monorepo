@@ -1040,7 +1040,7 @@ pub(crate) mod test {
             let merkleized = db.new_batch().merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
-            assert!(start_loc < db.inactivity_floor_loc());
+            assert!(start_loc < db.inactivity_floor());
 
             for i in start_loc.as_u64()..end_loc.as_u64() {
                 let loc = Location::from(i);
@@ -1077,13 +1077,13 @@ pub(crate) mod test {
             let db = db.prune(boundary).await.unwrap();
             let root = db.root();
             let op_count = db.bounds().end;
-            let inactivity_floor_loc = db.inactivity_floor_loc();
+            let inactivity_floor_loc = db.inactivity_floor();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             drop(db);
             let mut db = open_db(context.child("second")).await;
             assert_eq!(db.bounds().end, op_count);
-            assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
+            assert_eq!(db.inactivity_floor(), inactivity_floor_loc);
             assert_eq!(db.root(), root);
 
             fn write_unapplied_batch(db: &mut AnyTest) {
@@ -1103,7 +1103,7 @@ pub(crate) mod test {
             drop(db);
             let mut db = open_db(context.child("third")).await;
             assert_eq!(db.bounds().end, op_count);
-            assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
+            assert_eq!(db.inactivity_floor(), inactivity_floor_loc);
             assert_eq!(db.root(), root);
 
             // Repeat, drop without cleanup again.
@@ -1140,7 +1140,7 @@ pub(crate) mod test {
             drop(db);
             let db = open_db(context.child("sixth")).await;
             assert!(db.bounds().end > op_count);
-            assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
+            assert_ne!(db.inactivity_floor(), inactivity_floor_loc);
             assert_ne!(db.root(), root);
 
             db.destroy().await.unwrap();
