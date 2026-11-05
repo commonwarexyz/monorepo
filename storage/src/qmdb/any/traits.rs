@@ -124,10 +124,10 @@ pub trait DbAny<F: Family>:
         &self,
     ) -> impl Future<Output = Result<Option<<Self as DbAny<F>>::Value>, Error<F>>> + Send;
 
-    /// Prune historical operations prior to `loc`.
+    /// Prune historical operations prior to `prune_loc`.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `loc`.
-    fn prune(self, loc: Location<F>) -> impl Future<Output = Result<Self, Error<F>>> + Send;
+    /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
+    fn prune(self, prune_loc: Location<F>) -> impl Future<Output = Result<Self, Error<F>>> + Send;
 
     /// Begin durably persisting the database.
     ///

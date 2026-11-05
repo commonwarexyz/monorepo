@@ -2,7 +2,7 @@
 //!
 //! For variable-size values, use [super::variable] instead.
 
-use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
+use super::{Config as BaseConfig, operation::Operation as BaseOperation};
 use crate::{
     journal::contiguous::fixed::{self, Config as JournalConfig},
     qmdb::any::value::FixedEncoding,
@@ -13,7 +13,7 @@ pub type Operation<F, K, V> = BaseOperation<F, K, FixedEncoding<V>>;
 
 /// Type alias for the fixed-size immutable database.
 pub type Db<F, E, K, V, H, T, S> =
-    Immutable<F, E, K, FixedEncoding<V>, fixed::Journal<E, Operation<F, K, V>>, H, T, S>;
+    super::Db<F, E, K, FixedEncoding<V>, fixed::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the fixed-size compact immutable db.
 pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, FixedEncoding<V>, H, S>;
@@ -111,7 +111,7 @@ mod tests {
                 .unwrap();
             db = db.apply_batch(batch).await.unwrap();
         }
-        let old_end = db.size();
+        let old_end = db.bounds().end;
         assert_eq!(*old_end, 6);
 
         // A later commit at 6 raises the floor to 6 and defines the latest state.
@@ -123,7 +123,7 @@ mod tests {
             .unwrap();
         db = db.apply_batch(batch).await.unwrap();
         let latest_root = db.root();
-        let latest_end = db.size();
+        let latest_end = db.bounds().end;
 
         // The frontier becomes durable before the first obsolete blob is removed. Failing every
         // removal leaves the frontier at boundary 5 while the blob holding operations 0 to 4
@@ -147,7 +147,7 @@ mod tests {
         let db = Db::<F, _, Digest, Digest, Sha256, _, _>::init(context.child("latest"), cfg, None)
             .await
             .unwrap();
-        assert_eq!(db.size(), latest_end);
+        assert_eq!(db.bounds().end, latest_end);
         assert_eq!(db.root(), latest_root);
         assert_eq!(db.get(&key).await.unwrap(), None);
         db.destroy().await.unwrap();
@@ -202,7 +202,7 @@ mod tests {
             .await
             .unwrap();
         db = db.apply_batch(batch).await.unwrap();
-        let old_end = db.size();
+        let old_end = db.bounds().end;
 
         // The latest commit at 7 keeps floor 5 for the sync case, so syncing to it must replay
         // from operation 5. The bounded case raises the floor to 6, which leaves only the commit
@@ -215,7 +215,7 @@ mod tests {
             .unwrap();
         let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
         let latest_root = db.root();
-        let latest_end = db.size();
+        let latest_end = db.bounds().end;
 
         // Take the durable operations and the pins at location 6 out of the database. Location 6
         // falls inside the blob covering 5 to 9, so starting there retains operation 5 as padding.
@@ -283,7 +283,7 @@ mod tests {
         let db = Db::<F, _, Digest, Digest, Sha256, _, _>::init(context.child("latest"), cfg, None)
             .await
             .unwrap();
-        assert_eq!(db.size(), latest_end);
+        assert_eq!(db.bounds().end, latest_end);
         assert_eq!(db.root(), latest_root);
         db.destroy().await.unwrap();
     }
@@ -550,7 +550,7 @@ mod tests {
             let db = apply.await.unwrap();
             handle.await.unwrap();
             assert_eq!(db.root(), root);
-            assert_eq!(db.size(), Location::new(36));
+            assert_eq!(db.bounds().end, Location::new(36));
             let db = db.sync().await.unwrap();
             drop(db);
 

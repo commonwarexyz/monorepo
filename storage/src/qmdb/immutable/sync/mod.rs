@@ -17,7 +17,7 @@ use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 use std::num::NonZeroU64;
 
-impl<F, E, K, V, C, H, T, S> sync::Database for immutable::Immutable<F, E, K, V, C, H, T, S>
+impl<F, E, K, V, C, H, T, S> sync::Database for immutable::Db<F, E, K, V, C, H, T, S>
 where
     F: Family,
     E: Context,
@@ -37,7 +37,7 @@ where
     type Digest = H::Digest;
     type Context = E;
 
-    /// Returns an [Immutable](immutable::Immutable) initialized from data collected in the sync process.
+    /// Returns a [Db](immutable::Db) initialized from data collected in the sync process.
     ///
     /// # Behavior
     ///
@@ -46,7 +46,7 @@ where
     ///
     /// # Returns
     ///
-    /// A [super::Immutable] db populated with the state from the given range.
+    /// A [super::Db] populated with the state from the given range.
     /// Its inactivity floor comes from the final commit, while the Merkle pruning boundary is
     /// the range start.
     async fn from_sync_result(

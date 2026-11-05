@@ -1,6 +1,6 @@
 //! Batch mutation API for Keyless QMDBs.
 
-use super::{Keyless, operation::Operation};
+use super::{Db, operation::Operation};
 use crate::{
     Context,
     journal::{authenticated, contiguous::Mutable},
@@ -78,7 +78,7 @@ where
 ///
 /// `loc` must be at or above the chain's recorded database boundary. Nonempty ancestor chunks
 /// align with the newest end of the journal batch's ancestor chunks, and detached clones can hold
-/// older chunks beyond those. A batch from [`Keyless::to_batch`] has no chunk, but its tip is its
+/// older chunks beyond those. A batch from [`Db::to_batch`] has no chunk, but its tip is its
 /// recorded boundary, so no location in range selects it.
 fn read_chain_op<F: Family, D: Digest, V: ValueEncoding, S: Strategy>(
     batch: &MerkleizedBatch<F, D, V, S>,
@@ -128,7 +128,7 @@ where
 /// Whether the journal still retains such a location depends on local pruning, so every database
 /// at the same commitment rejects it alike. The journal retains every location at or above the
 /// floor, unless the database was recovered or synced with its floor below its retained start
-/// (see [`Keyless::init`]).
+/// (see [`Db::init`]).
 fn check_floor<F: Family>(loc: Location<F>, floor: Location<F>) -> Result<(), Error<F>> {
     if loc < floor {
         return Err(Error::BelowInactivityFloor(loc));
@@ -144,10 +144,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     /// Create a batch from the DB (no parent chain).
-    pub(super) fn new<E, C>(
-        keyless: &Keyless<F, E, V, C, H, S>,
-        base: Commitment<F, H::Digest>,
-    ) -> Self
+    pub(super) fn new<E, C>(keyless: &Db<F, E, V, C, H, S>, base: Commitment<F, H::Digest>) -> Self
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
@@ -196,7 +193,7 @@ where
 
     /// The inactivity floor this batch builds on: its parent's, or `db`'s for a batch with no
     /// parent.
-    fn floor<E, C>(&self, db: &Keyless<F, E, V, C, H, S>) -> Location<F>
+    fn floor<E, C>(&self, db: &Db<F, E, V, C, H, S>) -> Location<F>
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
@@ -212,8 +209,8 @@ where
     #[allow(clippy::type_complexity)]
     fn compatible<'a, E, C>(
         &self,
-        db: &'a Keyless<F, E, V, C, H, S>,
-    ) -> Result<Compatible<'a, Keyless<F, E, V, C, H, S>>, Error<F>>
+        db: &'a Db<F, E, V, C, H, S>,
+    ) -> Result<Compatible<'a, Db<F, E, V, C, H, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
@@ -243,11 +240,11 @@ where
     /// Returns [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) for a location
     /// between the floor and the database's retained start that neither this batch nor its chain
     /// holds. Only a database recovered or synced with its floor below its retained start has such
-    /// locations (see [`Keyless::init`]).
+    /// locations (see [`Db::init`]).
     pub async fn get<E, C>(
         &self,
         loc: Location<F>,
-        db: &Keyless<F, E, V, C, H, S>,
+        db: &Db<F, E, V, C, H, S>,
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
@@ -292,7 +289,7 @@ where
     pub async fn get_many<E, C>(
         &self,
         locs: &[Location<F>],
-        db: &Keyless<F, E, V, C, H, S>,
+        db: &Db<F, E, V, C, H, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
@@ -356,7 +353,7 @@ where
     #[tracing::instrument(name = "qmdb.keyless.batch.merkleize", level = "info", skip_all)]
     pub async fn merkleize<E, C>(
         mut self,
-        db: &Keyless<F, E, V, C, H, S>,
+        db: &Db<F, E, V, C, H, S>,
     ) -> MerkleizeResult<F, H::Digest, V, S>
     where
         E: Context,
@@ -464,8 +461,8 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned, and
     /// [`crate::merkle::Error::Empty`] if the batch has no operations (such as a batch from
-    /// [`Keyless::to_batch`]).
-    pub fn proof<E, C, H>(&self, db: &Keyless<F, E, V, C, H, S>) -> Result<Proof<F, D>, Error<F>>
+    /// [`Db::to_batch`]).
+    pub fn proof<E, C, H>(&self, db: &Db<F, E, V, C, H, S>) -> Result<Proof<F, D>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
@@ -492,7 +489,7 @@ where
     ///
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, and
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
-    pub fn pinned_nodes<E, C, H>(&self, db: &Keyless<F, E, V, C, H, S>) -> Result<Vec<D>, Error<F>>
+    pub fn pinned_nodes<E, C, H>(&self, db: &Db<F, E, V, C, H, S>) -> Result<Vec<D>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
@@ -515,16 +512,16 @@ where
     /// Returns [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) for a location
     /// between the floor and the database's retained start that neither this batch nor its chain
     /// holds. Only a database recovered or synced with its floor below its retained start has such
-    /// locations (see [`Keyless::init`]).
-    pub async fn get<E, H, C>(
+    /// locations (see [`Db::init`]).
+    pub async fn get<E, C, H>(
         &self,
         loc: Location<F>,
-        db: &Keyless<F, E, V, C, H, S>,
+        db: &Db<F, E, V, C, H, S>,
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        H: Hasher<Digest = D>,
         C: Mutable<Item = Operation<F, V>>,
+        H: Hasher<Digest = D>,
     {
         let db = self.bounds.compatible(db, db.commitment())?;
         let size = self.size();
@@ -555,15 +552,15 @@ where
     /// for an empty input. Otherwise returns [`Error::LocationOutOfOrder`] if the locations are
     /// not strictly increasing, [`Error::LocationOutOfBounds`] if any location is at or past
     /// [`Self::size`], or the error [`Self::get`] returns for a requested location.
-    pub async fn get_many<E, H, C>(
+    pub async fn get_many<E, C, H>(
         &self,
         locs: &[Location<F>],
-        db: &Keyless<F, E, V, C, H, S>,
+        db: &Db<F, E, V, C, H, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
-        H: Hasher<Digest = D>,
         C: Mutable<Item = Operation<F, V>>,
+        H: Hasher<Digest = D>,
     {
         let db = self.bounds.compatible(db, db.commitment())?;
         if locs.is_empty() {
