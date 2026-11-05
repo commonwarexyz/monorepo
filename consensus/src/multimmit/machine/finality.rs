@@ -1223,9 +1223,6 @@ pub(crate) enum FinalityError {
     /// An aggregation completion does not match the job it names.
     #[error("finality completion does not match its job")]
     CompletionMismatch,
-    /// Two distinct leader blocks share one pool key.
-    #[error("two leader blocks share one finality pool key")]
-    LeaderCollision,
     /// Finality indexes disagree, or a validated input failed to re-derive.
     #[error("finality state invariant violated")]
     Invariant,
@@ -2192,9 +2189,8 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
         }
 
         if let Some(pool) = self.direct_pool_mut(key) {
-            if pool.leader != leader {
-                return Err(FinalityError::LeaderCollision);
-            }
+            // The pool key binds the leader's digest, which commits to its whole encoding.
+            debug_assert!(super::util::same_encoding(&pool.leader, &leader));
             pool.leader_observation = pool.leader_observation.min(observation);
             pool.sources.insert(source);
             self.release_pool_claim(key, source);

@@ -12,6 +12,7 @@ use crate::{
             capability::{Capabilities, Capability},
             input::{ObservationResult, ObservationStatus, Rejection, Step, StepError, StepStatus},
             job::Issued,
+            util::same_encoding,
             verification::{JobId, Observation, VerificationItem, VerificationTicket, VerifyJob},
         },
         scheme::Scheme,
@@ -239,7 +240,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
                         .chain
                         .da
                         .held_certificate(certificate.block_ref::<H>())
-                        .filter(|held| *held == certificate)
+                        .filter(|held| same_encoding(*held, certificate))
                         .map(|held| Arc::new(Artifact::DaCertificate(held.clone()))),
                     Anchor::Tip(_) => None,
                 })
