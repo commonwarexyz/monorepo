@@ -610,17 +610,14 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
                 .is_some_and(|entry| matches!(entry.state, ArtifactState::Ready))
         });
         accepted.sort_unstable_by_key(|(observation, id, _)| (*observation, *id));
-        let mut activities =
-            Vec::with_capacity(accepted.len() + 2 * updates.len() + histories.len());
+        let mut activities = Vec::with_capacity(accepted.len() + updates.len() + histories.len());
         let mut certified = Vec::new();
         for update in updates {
             match update {
-                FinalityUpdate::Finalized(fact, commitments) => {
-                    activities.push(Activity::CommitmentsAccepted { commitments });
-                    activities.push(Activity::LeaderFinalized { fact });
+                FinalityUpdate::Finalized(fact) => {
+                    activities.push(Activity::LeaderFinalized { fact })
                 }
-                FinalityUpdate::Advanced(fact, commitments) => {
-                    activities.push(Activity::CommitmentsAccepted { commitments });
+                FinalityUpdate::Advanced(fact) => {
                     activities.push(Activity::LeaderFinalityUpdated { fact });
                 }
                 FinalityUpdate::Certified(fact, proof) => certified.push((fact, proof)),
@@ -735,23 +732,13 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         }
     }
 
-    /// Appends the activities reporting one accepted artifact: its selected commitments and the
-    /// acceptance itself.
+    /// Appends the activity reporting one accepted artifact.
     pub(super) fn push_acceptance(
         &self,
         artifact_id: ArtifactId<H::Digest>,
         artifact: Arc<Artifact<S, H::Digest>>,
         activities: &mut Vec<Activity<S, H::Digest>>,
     ) {
-        if let Some(commitments) = self
-            .views
-            .selected_commitments(&artifact)
-            .or_else(|| self.finality.selected_commitments(&artifact))
-        {
-            activities.push(Activity::CommitmentsAccepted {
-                commitments: commitments.clone(),
-            });
-        }
         activities.push(Activity::ProtocolAccepted {
             artifact_id,
             artifact,

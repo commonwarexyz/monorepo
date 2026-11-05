@@ -11,12 +11,8 @@ pub(crate) enum Error {
     Regression,
     #[error("ordering frontiers conflict at one height")]
     Conflict,
-    #[error("ordering stream has a chain-local gap")]
-    Gap,
     #[error("tip-history opening does not extend the active history")]
     History,
-    #[error("resolved block does not match its requested coordinate")]
-    Coordinate,
     #[error(transparent)]
     Algebra(#[from] algebra::Error),
 }

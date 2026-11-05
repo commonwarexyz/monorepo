@@ -430,8 +430,7 @@ mod tests {
             "pipeline_depth: 32",
             "extension_bound: 16",
             "production_interval_ms: 0",
-            "marshal_live_cache_bytes: 536870912",
-            "marshal_materialized_cache_bytes: 536870912",
+            "marshal_memory_bytes: 1073741824",
             "storage_dir: /home/ubuntu/data",
             "trace_sampling: 0.25",
         ] {
@@ -442,12 +441,11 @@ mod tests {
         }
         assert!(!raw.contains("benchmark"));
         assert!(!raw.contains("offered_bytes_per_second"));
-        assert!(!raw.contains("marshal_delivery_bytes"));
 
         // Optional tuning keys fall back to the command-line defaults.
         let minimal = "key: 1\nport: 3000\nparticipants: [0, 1]\nproducers: [0]\n\
             bootstrappers: [0]\nworker_threads: 4\ncompute_threads: 2\nbody_size: 1024\n\
-            marshal_live_cache_bytes: 1\nmarshal_materialized_cache_bytes: 1\n\
+            marshal_memory_bytes: 1\n\
             storage_dir: /tmp\ntrace_sampling: 0.5\n";
         let minimal: NodeConfig = serde_yaml::from_str(minimal).unwrap();
         assert_eq!(minimal.tuning.pipeline_depth, PIPELINE_DEPTH);
@@ -481,22 +479,6 @@ mod tests {
     #[should_panic(expected = "producer 6 is not a participant")]
     fn producers_must_be_validators() {
         parse(&["deploy", "--producers", "6"]).validate();
-    }
-
-    #[test]
-    fn delivery_budget_is_optional_and_nonzero() {
-        assert_eq!(parse(&["deploy"]).tuning.marshal_delivery_bytes, None);
-        assert_eq!(
-            parse(&["deploy", "--marshal-delivery-bytes", "134217728"])
-                .tuning
-                .marshal_delivery_bytes,
-            NonZeroUsize::new(128 * 1024 * 1024),
-        );
-        assert!(
-            <Deploy as Args>::augment_args(Command::new("deploy"))
-                .try_get_matches_from(["deploy", "--marshal-delivery-bytes", "0"])
-                .is_err()
-        );
     }
 
     #[test]

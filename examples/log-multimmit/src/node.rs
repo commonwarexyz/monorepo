@@ -88,9 +88,10 @@ const MIN_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Returns the network message bound for blocks of `max_block_size`.
 fn max_message_size(max_block_size: usize) -> u32 {
     u32::try_from(
-        Limits::sized_resolver_max_value_bytes(
+        Limits::for_block_bytes(
             NonZeroUsize::new(max_block_size).expect("encoded blocks are non-empty"),
         )
+        .max_response_bytes
         .get()
         .checked_add(MESSAGE_ENVELOPE_BYTES)
         .expect("resolver response and transport envelope must fit in memory")
@@ -313,7 +314,7 @@ mod tests {
         assert_eq!(max_message_size(Body::max_block_size(1_024)), 1_048_576);
         assert_eq!(
             max_message_size(Body::max_block_size(1024 * 1024)),
-            16_779_825
+            16_779_888
         );
     }
 }

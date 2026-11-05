@@ -56,11 +56,8 @@ const COMPUTE_THREADS: NonZeroUsize = NZUsize!(2);
 /// Default Tokio worker threads for local runs.
 const LOCAL_WORKER_THREADS: NonZeroUsize = NZUsize!(2);
 
-/// Default bytes marshal reserves for live producer blocks awaiting ordered delivery.
-const MARSHAL_LIVE_CACHE_BYTES: NonZeroUsize = NZUsize!(512 * 1024 * 1024);
-
-/// Default bytes marshal reserves for reused historical producer-block reads.
-const MARSHAL_MATERIALIZED_CACHE_BYTES: NonZeroUsize = NZUsize!(512 * 1024 * 1024);
+/// Default memory marshal sizes its budgets within.
+const MARSHAL_MEMORY_BYTES: NonZeroUsize = NZUsize!(1024 * 1024 * 1024);
 
 /// Fraction of traces a local run with `--trace-endpoint` exports.
 const LOCAL_TRACE_SAMPLING: Probability = probability!(1, 1);
@@ -240,18 +237,11 @@ pub struct NodeTuning {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offered_bytes_per_second: Option<NonZeroU64>,
 
-    /// Bytes reserved for live producer blocks awaiting ordered delivery.
-    #[arg(long, default_value_t = MARSHAL_LIVE_CACHE_BYTES)]
-    pub marshal_live_cache_bytes: NonZeroUsize,
-
-    /// Bytes reserved for reused historical producer-block reads.
-    #[arg(long, default_value_t = MARSHAL_MATERIALIZED_CACHE_BYTES)]
-    pub marshal_materialized_cache_bytes: NonZeroUsize,
-
-    /// Target encoded bytes per cold application-delivery read.
-    #[arg(long)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub marshal_delivery_bytes: Option<NonZeroUsize>,
+    /// Memory marshal sizes its budgets within: bodies held ahead of delivery, fetches in
+    /// flight, staged blocks and the record backlog share what delivery, serving and journal
+    /// buffers leave.
+    #[arg(long, default_value_t = MARSHAL_MEMORY_BYTES)]
+    pub marshal_memory_bytes: NonZeroUsize,
 }
 
 impl NodeTuning {
@@ -691,18 +681,6 @@ mod tests {
         );
         assert_eq!(explicit.tuning.production_interval(), Duration::ZERO);
         assert!(parse(["--offered-bytes-per-second", "0"]).is_err());
-    }
-
-    #[test]
-    fn local_delivery_budget_is_optional_and_nonzero() {
-        let default = parse([]).unwrap();
-        assert_eq!(default.tuning.marshal_delivery_bytes, None);
-        let explicit = parse(["--marshal-delivery-bytes", "134217728"]).unwrap();
-        assert_eq!(
-            explicit.tuning.marshal_delivery_bytes,
-            Some(NZUsize!(128 * 1024 * 1024))
-        );
-        assert!(parse(["--marshal-delivery-bytes", "0"]).is_err());
     }
 
     #[test]

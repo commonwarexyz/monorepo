@@ -163,6 +163,11 @@ impl<D: Digest> Cut<D> {
         &self.ordered
     }
 
+    /// Returns the tips of the newest incorporated record, shared.
+    pub(crate) fn shared_ordered(&self) -> Arc<[BlockRef<D>]> {
+        Arc::clone(&self.ordered)
+    }
+
     /// Returns the emitted height of every chain.
     pub(crate) fn emitted(&self) -> &[Height] {
         &self.emitted
@@ -295,6 +300,11 @@ impl<D: Digest> Expansion<D> {
         &self.cut
     }
 
+    /// Returns the number of queued steps not started yet.
+    pub(crate) fn pending_steps(&self) -> usize {
+        self.steps.len()
+    }
+
     /// Queues the opening of `record`, whose commitment is `commitment`.
     pub(crate) fn open(&mut self, commitment: D, record: Arc<TipRecord<D>>) {
         self.steps.push_back(Step::Open(commitment, record));
@@ -391,7 +401,6 @@ impl<D: Digest> Expansion<D> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{super::fuzz::frontier, *};
@@ -423,7 +432,10 @@ mod tests {
         let mut yielded = Vec::new();
         while let Some(position) = expansion.next_position().unwrap() {
             assert_eq!(position.index, expansion.cut().index());
-            assert!(position.height <= position.tip.height(), "slot above its tip");
+            assert!(
+                position.height <= position.tip.height(),
+                "slot above its tip"
+            );
             yielded.push((position.chain().get(), position.height.get()));
         }
         assert!(expansion.is_idle());
@@ -551,4 +563,3 @@ mod tests {
         assert_eq!(expansion.cut().history(), genesis());
     }
 }
-

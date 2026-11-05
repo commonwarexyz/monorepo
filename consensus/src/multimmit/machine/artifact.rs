@@ -55,8 +55,7 @@ impl<S: Scheme, D: Digest> Artifact<S, D> {
         encoded: &[u8],
     ) -> IdentifiedArtifact<S, D> {
         let id = self.id_from_canonical_encoding::<H>(encoded);
-        let provisions =
-            self.provisions_with_vqc_id::<H>(|_| id.certificate());
+        let provisions = self.provisions_with_vqc_id::<H>(|_| id.certificate());
         IdentifiedArtifact {
             id,
             artifact: self,

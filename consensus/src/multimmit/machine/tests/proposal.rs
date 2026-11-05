@@ -1145,7 +1145,7 @@ fn proposal_accepts_exact_tip_history_and_rejects_an_incorrect_commitment() {
                 Activity::HistoryAccepted {
                     commitment, record, ..
                 } => Some((*commitment, record.commitment::<Sha256>())),
-                Activity::CommitmentsAccepted { .. } | Activity::ProtocolAccepted { .. } => None,
+                Activity::ProtocolAccepted { .. } => None,
                 Activity::TransactionProposed { .. }
                 | Activity::LeaderFinalized { .. }
                 | Activity::LeaderFinalityUpdated { .. }

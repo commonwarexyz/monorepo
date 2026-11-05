@@ -358,11 +358,7 @@ impl<D: Digest> PlacementState<D> {
         }
         self.ordered = commitment;
         // Sweep slots above the emitted heights resolve on the final tips' own paths.
-        for ((height, current), tip) in swept
-            .into_iter()
-            .zip(&mut self.placed)
-            .zip(fact.blocks())
-        {
+        for ((height, current), tip) in swept.into_iter().zip(&mut self.placed).zip(fact.blocks()) {
             if height > *current {
                 runs.push(Placement::new(*tip, *current, height));
                 *current = height;
@@ -848,7 +844,12 @@ mod tests {
         // for leaders whose records never arrive.
         for view in 1..=(RETAINED_VIEWS as u64 + 10) {
             let parent = Sha256::hash(&[b"parent", &view.to_be_bytes()]);
-            history(&mut placement, view, leader(view), &record(parent, frontier(&[0])));
+            history(
+                &mut placement,
+                view,
+                leader(view),
+                &record(parent, frontier(&[0])),
+            );
             let unrecorded = Sha256::hash(&[b"unrecorded", &view.to_be_bytes()]);
             finality(&mut placement, &fact(view, unrecorded, &[1], &[1], &[true]));
         }
@@ -864,7 +865,12 @@ mod tests {
         for marker in 0..100u64 {
             let equivocation = Sha256::hash(&[b"equivocation", &marker.to_be_bytes()]);
             let parent = Sha256::hash(&[b"parent", &marker.to_be_bytes()]);
-            history(&mut placement, 1, equivocation, &record(parent, frontier(&[0])));
+            history(
+                &mut placement,
+                1,
+                equivocation,
+                &record(parent, frontier(&[0])),
+            );
             finality(&mut placement, &fact(2, equivocation, &[1], &[1], &[true]));
         }
         // Mutually undominated facts of one leader: each settles a different chain.
@@ -883,7 +889,10 @@ mod tests {
         }
         assert_eq!(placement.leaders[&View::new(1)].len(), RETAINED_RECORDS);
         assert_eq!(placement.openings.len(), RETAINED_RECORDS);
-        assert_eq!(placement.waiting[&View::new(2)].len(), RETAINED_FACT_LEADERS);
+        assert_eq!(
+            placement.waiting[&View::new(2)].len(),
+            RETAINED_FACT_LEADERS
+        );
         assert_eq!(two.waiting[&View::new(3)][&leader(3)].len(), RETAINED_FACTS);
         assert_eq!(placement.heights(), heights(&[0]));
     }
@@ -923,7 +932,12 @@ mod tests {
         for marker in 0..8u64 {
             let equivocation = Sha256::hash(&[b"equivocation", &marker.to_be_bytes()]);
             let parent = Sha256::hash(&[b"parent", &marker.to_be_bytes()]);
-            history(&mut placement, 1, equivocation, &record(parent, frontier(&[0])));
+            history(
+                &mut placement,
+                1,
+                equivocation,
+                &record(parent, frontier(&[0])),
+            );
         }
         history(
             &mut placement,

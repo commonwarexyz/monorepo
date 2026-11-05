@@ -1,14 +1,11 @@
 //! Offset-major slot streams and the final sweep one finalized leader fixes.
 
-use super::{Error, SweepFact};
+use super::Error;
 use crate::{
-    multimmit::{
-        scheme::Scheme,
-        types::{BlockRef, CodecConfig, Frontier, Lqc},
-    },
+    multimmit::types::{BlockRef, Frontier},
     types::Height,
 };
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::Digest;
 
 /// One ancestor required by an ordering stream.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -18,12 +15,6 @@ pub(crate) struct Slot<D: Digest> {
 }
 
 impl<D: Digest> Slot<D> {
-    /// Creates a slot at `height` beneath `tip`.
-    #[cfg(test)]
-    pub(super) const fn new(tip: BlockRef<D>, height: Height) -> Self {
-        Self { tip, height }
-    }
-
     /// Returns the target tip whose ancestor fills this slot.
     pub(crate) const fn tip(self) -> BlockRef<D> {
         self.tip
@@ -39,7 +30,8 @@ impl<D: Digest> Slot<D> {
 ///
 /// Pass A holds the heights from the base up to the proposed tip, clamped to the target; pass B
 /// the heights above the proposed tip. The proposal pins pass A's blocks, so an L-QC finalizes
-/// them with fewer votes than the extensions of pass B need ([`FinalTips::from_lqc`] applies the
+/// them with fewer votes than the extensions of pass B need
+/// ([`FinalTips::from_lqc`](crate::multimmit::algebra::FinalTips::from_lqc) applies the
 /// thresholds). Sweeping pass A first keeps an extension that only some voters saw from deferring
 /// other chains' pinned blocks.
 struct Passes {
@@ -88,6 +80,7 @@ impl Passes {
     }
 
     /// Returns the slot count of both passes together.
+    #[cfg(any(test, feature = "mocks"))]
     fn total(&self) -> Result<u64, Error> {
         self.positional
             .maxima
@@ -166,22 +159,9 @@ impl<D: Digest> SlotStream<D> {
         })
     }
 
-    /// Returns how many slots [`Self::new`] yields for the same inputs, without copying the target.
-    pub(crate) fn count(
-        base: &[BlockRef<D>],
-        target: &[BlockRef<D>],
-        proposed: &[Height],
-    ) -> Result<u64, Error> {
-        Passes::new(base, target, proposed)?.total()
-    }
-
-    /// Returns the tips the traversal moves toward.
-    pub(crate) fn target(&self) -> &[BlockRef<D>] {
-        &self.target
-    }
-
     /// Returns each chain's maximum remaining slot height in O(chains) time. Chains with no
     /// remaining slots have no maximum.
+    #[cfg(any(test, feature = "mocks"))]
     pub(crate) fn maxima(&self) -> Vec<Option<Height>> {
         self.passes.maxima()
     }
@@ -204,8 +184,10 @@ impl<D: Digest> Iterator for SlotStream<D> {
 pub(crate) struct FinalSweep<D: Digest> {
     stream: SlotStream<D>,
     /// Whether a halt deferred slots below the final tips to a later view.
+    #[cfg(any(test, feature = "mocks"))]
     halted: bool,
     /// Slots the sweep will emit.
+    #[cfg(any(test, feature = "mocks"))]
     planned: u64,
 }
 
@@ -220,12 +202,16 @@ impl<D: Digest> FinalSweep<D> {
         if settled.len() != target.len() {
             return Err(Error::Frontier);
         }
+        #[cfg(any(test, feature = "mocks"))]
         let total = passes.total()?;
         passes.halt(proposed, &settled);
+        #[cfg(any(test, feature = "mocks"))]
         let planned = passes.total()?;
         Ok(Self {
             stream: SlotStream { target, passes },
+            #[cfg(any(test, feature = "mocks"))]
             halted: planned < total,
+            #[cfg(any(test, feature = "mocks"))]
             planned,
         })
     }
@@ -253,35 +239,14 @@ impl<D: Digest> FinalSweep<D> {
             .collect())
     }
 
-    pub(super) fn from_lqc<H, S>(
-        base: &[BlockRef<D>],
-        certificate: &Lqc<S, D>,
-        config: CodecConfig,
-    ) -> Result<Self, Error>
-    where
-        H: Hasher<Digest = D>,
-        S: Scheme,
-    {
-        let fact = SweepFact::from_lqc::<H, S>(certificate, config)?;
-        Self::new(
-            base,
-            fact.tips().to_vec(),
-            fact.proposed(),
-            fact.settled().to_vec(),
-        )
-    }
-
-    /// Returns the final tips the sweep moves toward.
-    pub(super) fn target(&self) -> &[BlockRef<D>] {
-        self.stream.target()
-    }
-
     /// Returns whether a halt deferred slots below the final tips to a later view.
+    #[cfg(any(test, feature = "mocks"))]
     pub(crate) const fn halted(&self) -> bool {
         self.halted
     }
 
     /// Returns how many slots this sweep emits in total.
+    #[cfg(any(test, feature = "mocks"))]
     pub(crate) const fn planned(&self) -> u64 {
         self.planned
     }
@@ -419,7 +384,7 @@ fn validate_monotone<D: Digest>(base: &[BlockRef<D>], target: &[BlockRef<D>]) ->
 mod tests {
     use super::{
         super::{
-            HistoryState,
+            SweepFact,
             fuzz::{Coordinate, coordinate, frontier, remaining_maxima},
         },
         *,
@@ -433,7 +398,7 @@ mod tests {
         types::View,
     };
     use commonware_cryptography::{
-        Sha256, bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest,
+        Hasher as _, Sha256, bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
     use commonware_utils::{Participant, test_rng};
@@ -754,18 +719,14 @@ mod tests {
         ] {
             let base = frontier(&base);
             let target = frontier(&target);
-            let stream = FinalSweep::new(&base, target, &heights(&proposed), settled.clone())
-                .unwrap()
-                .into_stream();
+            let stream =
+                FinalSweep::new(&base, target.clone(), &heights(&proposed), settled.clone())
+                    .unwrap()
+                    .into_stream();
             let expected = coordinates(
-                FinalSweep::new(
-                    &base,
-                    stream.target().to_vec(),
-                    &heights(&proposed),
-                    settled,
-                )
-                .unwrap()
-                .into_stream(),
+                FinalSweep::new(&base, target, &heights(&proposed), settled)
+                    .unwrap()
+                    .into_stream(),
             );
             assert_remaining_maxima(stream, base.len(), &expected);
         }
@@ -796,24 +757,23 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let genesis = committee.config.genesis().tips().to_vec();
-        let state = HistoryState::new(
-            Sha256::hash(&[b"history"]),
-            genesis.clone(),
-            genesis.clone(),
-        )
-        .unwrap();
         let lqc = committee
             .verifier
             .assemble_lqc::<_, Sha256, _>(&mut test_rng(), leader.clone(), &votes[..5], &Sequential)
             .unwrap();
         let certified = FinalTips::from_lqc::<Sha256, Bls<MinPk>>(&lqc, codec).unwrap();
         assert_eq!(certified.settled(ChainId::new(0)), Some(false));
+        let fact = SweepFact::from_lqc::<Sha256, Bls<MinPk>>(&lqc, codec).unwrap();
         assert!(
             coordinates(
-                state
-                    .final_sweep::<Sha256, Bls<MinPk>>(&lqc, codec, &genesis)
-                    .unwrap()
-                    .into_stream()
+                FinalSweep::new(
+                    &genesis,
+                    fact.tips().to_vec(),
+                    fact.proposed(),
+                    fact.settled().to_vec(),
+                )
+                .unwrap()
+                .into_stream()
             )
             .is_empty()
         );
@@ -851,19 +811,20 @@ mod tests {
         let committee = Committee::<Bls<MinPk>>::builder(17, 6).build();
         let lqc = committee.lqc(View::new(1));
         let genesis = committee.config.genesis().tips().to_vec();
-        let state = HistoryState::new(
-            Sha256::hash(&[b"history"]),
-            genesis.clone(),
-            genesis.clone(),
+        let fact = SweepFact::from_lqc::<Sha256, Bls<MinPk>>(&lqc, committee.codec()).unwrap();
+        assert_eq!(fact.tips().len(), committee.codec().chains());
+        let sweep = FinalSweep::new(
+            &genesis,
+            fact.tips().to_vec(),
+            fact.proposed(),
+            fact.settled().to_vec(),
         )
         .unwrap();
-        let sweep = state
-            .final_sweep::<Sha256, Bls<MinPk>>(&lqc, committee.codec(), &genesis)
-            .unwrap();
-
+        let placed =
+            FinalSweep::placed(&genesis, fact.tips(), fact.proposed(), fact.settled()).unwrap();
         assert_eq!(
-            sweep.into_stream().target().len(),
-            committee.codec().chains()
+            sweep.planned(),
+            placed.iter().map(|height| height.get()).sum::<u64>()
         );
     }
 

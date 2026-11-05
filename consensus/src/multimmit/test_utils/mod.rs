@@ -55,6 +55,12 @@ pub fn fuzz_marshal(input: &[u8]) {
     super::order::fuzz::exercise(input);
 }
 
+/// Decodes every marshal request and response a peer may send, checking canonical re-encoding
+/// and the linkage of authenticated responses.
+pub fn fuzz_marshal_wire(input: &[u8]) {
+    super::marshal::fuzz_wire(input);
+}
+
 /// Runs one bounded adversarial Twins schedule followed by a fair recovery suffix.
 pub fn fuzz_twins(input: &[u8]) {
     super::twins::randomized::exercise(input);

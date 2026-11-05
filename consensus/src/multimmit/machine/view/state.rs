@@ -30,10 +30,7 @@ use crate::{
             vote_body::VoteBuilds,
         },
         scheme::Scheme,
-        types::{
-            Artifact, ArtifactId, CertificateId, CodecConfig, SelectedCommitments, TipRecord,
-            genesis_history,
-        },
+        types::{Artifact, ArtifactId, CertificateId, CodecConfig, TipRecord, genesis_history},
     },
     types::{Epoch, Participant, Round, View},
 };
@@ -252,7 +249,6 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
                 .map(|record| record.commitment::<H>()),
             proposed,
             tips: Arc::new(tips),
-            commitments: SelectedCommitments::new(genesis.epoch(), Vec::new()),
             messages: 0,
         };
         let me = match profile.role() {
@@ -288,32 +284,6 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
             certificate_ids: IdSequence::new(),
             capabilities: Vec::new(),
             history: HistoryReports::default(),
-        }
-    }
-
-    /// Returns selected paths owned by this V-QC or the leader's retained parent.
-    pub(crate) fn selected_commitments(
-        &self,
-        artifact: &Arc<Artifact<S, D>>,
-    ) -> Option<&SelectedCommitments<D>> {
-        match artifact.as_ref() {
-            Artifact::Vqc(certificate) => self
-                .parents_by_view
-                .get(&certificate.view())?
-                .iter()
-                .filter_map(|id| self.parents.get(id))
-                .find(|parent| {
-                    matches!(
-                        &parent.proof,
-                        ParentProof::Vqc(retained) if Arc::ptr_eq(retained.arc(), artifact)
-                    )
-                })
-                .map(|parent| &parent.commitments),
-            Artifact::LeaderBlock(block) => self
-                .parents
-                .get(&block.block().parent())
-                .map(|parent| &parent.commitments),
-            _ => None,
         }
     }
 

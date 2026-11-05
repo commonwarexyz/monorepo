@@ -53,7 +53,7 @@ use crate::{
         scheme::{CertificateVotes, Error as SchemeError, Scheme},
         types::{
             Artifact, ArtifactId, CodecConfig, DigestedLeader, FinalityFact, FinalityId,
-            LeaderBlock, Lqc, LqcProof, PoolSummary, SelectedCommitments, Vote, VoteBody, Vqc,
+            LeaderBlock, Lqc, LqcProof, PoolSummary, Vote, VoteBody, Vqc,
         },
     },
     types::{Attributable, Height, Participant, Round, View},
@@ -227,11 +227,11 @@ where
         .map(|leader| pool_key::<H, S, D>(leader, cached))
 }
 
-/// A leader's local finality fact: a change to its direct pool's fact, with the producer
-/// commitments its tips select, or a verified L-QC with the fact it proves.
+/// A leader's local finality fact: a change to its direct pool's fact, or a verified L-QC with
+/// the fact it proves.
 pub(super) enum FinalityUpdate<S: Scheme, D: Digest> {
-    Finalized(FinalityFact<D>, SelectedCommitments<D>),
-    Advanced(FinalityFact<D>, SelectedCommitments<D>),
+    Finalized(FinalityFact<D>),
+    Advanced(FinalityFact<D>),
     Certified(FinalityFact<D>, LqcProof<S, D>),
 }
 
@@ -239,7 +239,7 @@ impl<S: Scheme, D: Digest> FinalityUpdate<S, D> {
     /// Returns the finality fact of the update.
     const fn fact(&self) -> &FinalityFact<D> {
         match self {
-            Self::Finalized(fact, _) | Self::Advanced(fact, _) | Self::Certified(fact, _) => fact,
+            Self::Finalized(fact) | Self::Advanced(fact) | Self::Certified(fact, _) => fact,
         }
     }
 }
@@ -1066,11 +1066,11 @@ impl<S: Scheme, D: Digest> DirectPool<S, D> {
         let PoolPhase::Finalized { tips, .. } = &self.phase else {
             unreachable!("the pool finalized above");
         };
-        let commitments = self.extractor.selected(self.leader.round().epoch(), tips);
+        let _ = tips;
         Ok(Some(if first {
-            FinalityUpdate::Finalized(fact, commitments)
+            FinalityUpdate::Finalized(fact)
         } else {
-            FinalityUpdate::Advanced(fact, commitments)
+            FinalityUpdate::Advanced(fact)
         }))
     }
 
@@ -1306,15 +1306,6 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
             .and_then(|proof| Arc::ptr_eq(&proof.artifact, artifact).then_some(&proof.derived))
     }
 
-    /// Returns the selected paths of the retained proof `artifact`.
-    pub(crate) fn selected_commitments(
-        &self,
-        artifact: &Arc<Artifact<S, D>>,
-    ) -> Option<&SelectedCommitments<D>> {
-        self.finality_anchor(artifact)
-            .map(|derived| derived.validated.commitments())
-    }
-
     /// Drops the retained proof once the signing floor reaches its view.
     pub(crate) fn retire_proofs_through(&mut self, floor: View) {
         if self.proof.as_ref().is_some_and(|proof| proof.view <= floor) {
@@ -1468,7 +1459,12 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
         {
             let leader = DigestedLeader::with_digest(block, *leader);
             return tips
-                .fact(FinalityId::Lqc(id.certificate()), leader, votes.len(), self.config)
+                .fact(
+                    FinalityId::Lqc(id.certificate()),
+                    leader,
+                    votes.len(),
+                    self.config,
+                )
                 .ok();
         }
         let digest = block.digest::<H>();
@@ -1480,8 +1476,13 @@ impl<S: Scheme, D: Digest> FinalityState<S, D> {
         )
         .ok()?;
         let leader = DigestedLeader::with_digest(block, digest);
-        tips.fact(FinalityId::Lqc(id.certificate()), leader, expanded.len(), self.config)
-            .ok()
+        tips.fact(
+            FinalityId::Lqc(id.certificate()),
+            leader,
+            expanded.len(),
+            self.config,
+        )
+        .ok()
     }
 
     fn resolve_finality_claim<H: Hasher<Digest = D>>(

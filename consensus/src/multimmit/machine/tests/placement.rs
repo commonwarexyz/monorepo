@@ -49,7 +49,9 @@ fn placed(activities: &[TestActivity]) -> Vec<&TestActivity> {
 }
 
 /// Returns the identifier, fact and record commitments of every reported proof.
-fn proven(activities: &[TestActivity]) -> Vec<(CertificateId<Digest>, FinalityId<Digest>, Vec<Digest>)> {
+fn proven(
+    activities: &[TestActivity],
+) -> Vec<(CertificateId<Digest>, FinalityId<Digest>, Vec<Digest>)> {
     activities
         .iter()
         .filter_map(|activity| match activity {
@@ -112,18 +114,23 @@ fn direct_finality_places_the_final_sweep_above_the_leaders_history() {
     assert_eq!(extension.height(), Height::new(1));
 
     // Placement is reported once, for the only chain the sweep moves.
-    let [Activity::Placed {
-        view,
-        evidence: _,
-        history,
-        placed,
-    }] = placed(&reports)[..]
+    let [
+        Activity::Placed {
+            view,
+            evidence: _,
+            history,
+            placed,
+        },
+    ] = placed(&reports)[..]
     else {
         panic!("finality must report placement once: {reports:?}");
     };
     assert_eq!(*view, View::new(2));
     assert_eq!(*history, proposed.history());
-    assert_eq!(placed, &vec![Placement::new(extension, Height::zero(), Height::new(1))]);
+    assert_eq!(
+        placed,
+        &vec![Placement::new(extension, Height::zero(), Height::new(1))]
+    );
 
     // A later certificate for the leader reports the record that direct finality placed, once.
     let report = |machine: &mut TestMachine, signers: core::ops::Range<u32>| {
@@ -154,10 +161,8 @@ fn certificate_finality_places_only_once_the_leaders_history_is_known() {
         let (mut machine, _) = start_profile(profile);
         let mut proposed = leader(&machine, 2);
         if known_parent {
-            let proposal = Artifact::LeaderBlock(SignedLeaderBlock::new(
-                proposed.clone(),
-                attestation(0),
-            ));
+            let proposal =
+                Artifact::LeaderBlock(SignedLeaderBlock::new(proposed.clone(), attestation(0)));
             let proposal = observe(&mut machine, proposal);
             let step = machine.verify(&proposal, true, Until::CursorAdvance);
             machine.drain_persisting(step);
@@ -186,7 +191,11 @@ fn certificate_finality_places_only_once_the_leaders_history_is_known() {
                 .any(|activity| matches!(activity, Activity::LeaderFinalized { .. }))
         );
         // The certificate is reported either way, with the leader's record only when known.
-        let records = if known_parent { vec![history] } else { Vec::new() };
+        let records = if known_parent {
+            vec![history]
+        } else {
+            Vec::new()
+        };
         assert_eq!(
             proven(step.activities()),
             vec![(id, FinalityId::Lqc(id), records)]
@@ -236,12 +245,14 @@ fn an_lqc_verified_below_the_finality_floor_still_places() {
             .iter()
             .all(|activity| !matches!(activity, Activity::LeaderFinalized { .. }))
     );
-    let [Activity::Placed {
-        view,
-        evidence,
-        placed,
-        ..
-    }] = placed(&activities)[..]
+    let [
+        Activity::Placed {
+            view,
+            evidence,
+            placed,
+            ..
+        },
+    ] = placed(&activities)[..]
     else {
         panic!("the verified certificate must report placement once: {activities:?}");
     };

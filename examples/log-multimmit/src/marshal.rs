@@ -2,7 +2,7 @@
 
 use crate::{
     application::{Block, Body, Marshal, Relay},
-    committee::{Committee, Suite},
+    committee::Committee,
     config::NodeTuning,
     node::PARTITION_PREFIX,
 };
@@ -10,12 +10,11 @@ use commonware_broadcast::buffered;
 use commonware_consensus::{
     Reporter,
     multimmit::marshal::{
-        ArchiveConfig, ArchiveMode, Config, Retention, SchemeVerifier, ServiceHandle, Start,
-        Update, open as open_marshal,
+        Config, Limits, SchemeVerifier, ServiceHandle, Update, open as open_marshal,
     },
     types::Participant,
 };
-use commonware_cryptography::ed25519;
+use commonware_cryptography::{Sha256, ed25519};
 use commonware_p2p::{Receiver, Sender, authenticated::discovery};
 use commonware_parallel::Rayon;
 use commonware_resolver::p2p as resolver;
@@ -24,21 +23,20 @@ use commonware_runtime::{
     buffer::paged::{self, CacheRef},
     tokio,
 };
-use commonware_storage::translator::EightCap;
 use commonware_utils::{NZDuration, NZUsize};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     time::Duration,
 };
 
-/// Application acknowledgements retained while a durable cursor publication is pending.
+/// Delivered outputs awaiting the application's acknowledgement at once.
 const DELIVERY_ACK_WINDOW: NonZeroUsize = NZUsize!(2_048);
 
-/// Logical page size of marshal's archive page cache.
-const ARCHIVE_PAGE_SIZE: NonZeroU16 = paged::page_size(16_384);
+/// Logical page size of marshal's index page cache.
+const INDEX_PAGE_SIZE: NonZeroU16 = paged::page_size(16_384);
 
-/// Pages held by marshal's archive page cache.
-const ARCHIVE_CACHE_PAGES: NonZeroUsize = NZUsize!(256);
+/// Pages held by marshal's index page cache.
+const INDEX_CACHE_PAGES: NonZeroUsize = NZUsize!(256);
 
 /// Messages buffered by the body broadcast and body backfill mailboxes.
 const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1_024);
@@ -56,30 +54,29 @@ const RESOLVER_RETRY: Duration = Duration::from_millis(100);
 ///
 /// Every size bound follows from the largest encoded block, so the configuration scales with
 /// `--body-size` without separate knobs.
-fn config(committee: &Committee, tuning: &NodeTuning) -> Config<EightCap, Suite, Body> {
-    let archive = ArchiveConfig::new(
-        EightCap,
-        CacheRef::new(ARCHIVE_PAGE_SIZE, ARCHIVE_CACHE_PAGES),
-    );
-    let config = Config::new(
-        Start::Genesis(committee.config.genesis().clone()),
+fn config(
+    committee: &Committee,
+    tuning: &NodeTuning,
+) -> Config<
+    <Sha256 as commonware_cryptography::Hasher>::Digest,
+    <Body as commonware_codec::Read>::Cfg,
+> {
+    let limits = Limits {
+        max_pending_acks: DELIVERY_ACK_WINDOW,
+        ..Limits::for_block_bytes(
+            NonZeroUsize::new(Body::max_block_size(tuning.body_size))
+                .expect("encoded blocks are non-empty"),
+        )
+    }
+    .within_memory(tuning.marshal_memory_bytes);
+    Config::new(
+        committee.config.genesis().clone(),
         PARTITION_PREFIX.into(),
+        CacheRef::new(INDEX_PAGE_SIZE, INDEX_CACHE_PAGES),
         committee.codec(),
         Body::codec_config(tuning.body_size),
-        archive,
     )
-    .with_max_block_bytes(
-        NonZeroUsize::new(Body::max_block_size(tuning.body_size))
-            .expect("encoded blocks are non-empty"),
-    )
-    .with_max_hot_block_bytes(tuning.marshal_live_cache_bytes)
-    .with_max_materialized_block_bytes(tuning.marshal_materialized_cache_bytes)
-    .with_max_pending_acks(DELIVERY_ACK_WINDOW)
-    .with_retention(Retention::uniform(ArchiveMode::Prunable));
-    match tuning.marshal_delivery_bytes {
-        Some(bytes) => config.with_max_delivery_bytes(bytes),
-        None => config,
-    }
+    .with_limits(limits)
 }
 
 /// Handles of marshal and the transport services it runs on.
@@ -200,16 +197,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_consensus::multimmit::marshal::Limits;
 
     #[test]
     fn resolver_responses_page_large_blocks() {
         let max_block_size = Body::max_block_size(512 * 1024);
         assert_eq!(max_block_size, 524_387);
         assert_eq!(
-            Limits::sized_resolver_max_value_bytes(NonZeroUsize::new(max_block_size).unwrap())
+            Limits::for_block_bytes(NonZeroUsize::new(max_block_size).unwrap())
+                .max_response_bytes
                 .get(),
-            8_390_193
+            8_390_256
         );
     }
 }

@@ -5,8 +5,8 @@ use crate::multimmit::{
     machine::{Held, VqcKind},
     scheme::{CertificateVotes, Scheme},
     types::{
-        Artifact, ArtifactId, ArtifactKind, CertificateId, CodecConfig, DigestedLeader, LeaderBlock, Lqc,
-        SelectedCommitments, TipRecord, VoteBody, Vqc, artifact_digest,
+        Artifact, ArtifactId, ArtifactKind, CertificateId, CodecConfig, DigestedLeader,
+        LeaderBlock, Lqc, TipRecord, VoteBody, Vqc, artifact_digest,
     },
 };
 use bytes::Bytes;
@@ -55,7 +55,6 @@ pub(crate) struct ValidatedVqc<D: Digest> {
     leader: D,
     canonical: Bytes,
     tips: Arc<Tips<D>>,
-    commitments: SelectedCommitments<D>,
     child_history: Option<D>,
     votes: Vec<VerifiedVote<D>>,
 }
@@ -75,13 +74,8 @@ impl<D: Digest> ValidatedVqc<D> {
             id: self.id,
             canonical: self.canonical,
             tips: self.tips,
-            commitments: self.commitments,
             child_history: self.child_history,
         }
-    }
-
-    pub(crate) const fn commitments(&self) -> &SelectedCommitments<D> {
-        &self.commitments
     }
 
     /// Takes the attested votes: transcript signers first, then conflicting votes.
@@ -95,7 +89,6 @@ impl<D: Digest> ValidatedVqc<D> {
             .canonical
             .len()
             .checked_add(self.tips.owned_bytes()?)?
-            .checked_add(self.commitments.owned_bytes()?)?
             .checked_add(size_of::<Tips<D>>() + 2 * size_of::<usize>())?
             .checked_add(size_of_val(self.votes.as_slice()))?;
         for vote in &self.votes {
@@ -120,8 +113,6 @@ pub(crate) struct ValidatedVqcParts<D: Digest> {
     pub(crate) canonical: Bytes,
     /// The safe tips the certificate's designated votes select.
     pub(crate) tips: Arc<Tips<D>>,
-    /// The contiguous block paths ending at `tips` that the designated votes authenticate.
-    pub(crate) commitments: SelectedCommitments<D>,
     /// The history commitment a leader block extending this certificate names, or `None` when the
     /// safe tips and proposed heights do not form a tip record.
     pub(crate) child_history: Option<D>,
@@ -269,7 +260,7 @@ where
         .map_err(|_| Error::Vote)
 }
 
-/// Derives a V-QC's identity, tips, and selected commitments from its designated votes.
+/// Derives a V-QC's identity and tips from its designated votes.
 fn derive_validated<H, S, D>(
     certificate: &Vqc<S, D>,
     config: CodecConfig,
@@ -282,23 +273,18 @@ where
     D: Digest,
 {
     let (canonical, id) = canonical_identity::<H, S, D>(certificate);
-    let (tips, ancestry) = VqcExtraction::from_votes::<H, S>(
+    let (tips, _) = VqcExtraction::from_votes::<H, S>(
         DigestedLeader::with_digest(certificate.leader(), leader),
         designated.iter().map(|(signer, body)| (*signer, body)),
         config,
     )?
     .into_parts();
-    let commitments = ancestry.selected(
-        certificate.leader().round().epoch(),
-        tips.blocks().iter().copied(),
-    );
     Ok(ValidatedVqc {
         id,
         leader,
         canonical,
         child_history: child_history::<H, S, D>(certificate.leader(), &tips),
         tips: Arc::new(tips),
-        commitments,
         votes: Vec::new(),
     })
 }
@@ -362,12 +348,7 @@ where
         .into_iter()
         .map(|(signer, body)| VerifiedVote::new::<H>(signer, body))
         .collect();
-    let ancestry = prepared.ancestry()?;
     let safe_tips = Tips::from_prepared(&prepared, config)?;
-    let commitments = ancestry.selected(
-        leader.round().epoch(),
-        safe_tips.blocks().iter().chain(tips.blocks()).copied(),
-    );
     let vqc = certificate.derive_vqc(config).map_err(|_| Error::Vote)?;
     let (canonical, id) = canonical_identity::<H, S, D>(&vqc);
     let derived = DerivedVqc::new::<H>(
@@ -378,7 +359,6 @@ where
             canonical,
             child_history: child_history::<H, S, D>(leader, &safe_tips),
             tips: Arc::new(safe_tips),
-            commitments,
             votes: Vec::new(),
         },
     )?;

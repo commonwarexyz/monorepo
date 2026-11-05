@@ -3,12 +3,12 @@
 use super::{
     Ballot, BlockRef, CertificateId, ConflictingVote, Error, LeaderBlock, Tally,
     TransactionBlockHeader,
+    artifact::{ArtifactKind, artifact_digest},
     bounds::{
         MAX_U64_VARINT_SIZE, VARINT_BOUNDARIES, checked_product, checked_sum, encoded_len,
         largest_index_width_sum, max_aggregate_size, max_da_certificate_size,
         max_nullification_size, read_aggregate, signers_size,
     },
-    artifact::{ArtifactKind, artifact_digest},
 };
 #[cfg(not(target_arch = "wasm32"))]
 use super::{DigestedLeader, VoteBody};

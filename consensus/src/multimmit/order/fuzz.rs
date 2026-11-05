@@ -1,6 +1,7 @@
-//! Differential ordering histories with partial iteration and acknowledged-frontier replay.
+//! Differential ordering: slot streams and symbolic expansion, resumed from random cuts, against
+//! an explicitly sorted order.
 
-use super::{Cut, Expansion, FinalSweep, HistoryState, Reconciliation, Slot, SlotStream, SweepFact};
+use super::{Cut, Expansion, FinalSweep, Slot, SlotStream, SweepFact};
 use crate::{
     multimmit::{
         fuzz::ByteSchedule,
@@ -87,53 +88,32 @@ fn explicit_order(
         .collect()
 }
 
-fn consume(
-    mut stream: SlotStream<Digest>,
-    expected: &[Coordinate],
-    count: usize,
-    state: &mut HistoryState<Digest>,
-    acknowledged: &mut [u64],
-    delivered: &mut Vec<Coordinate>,
-) {
-    for position in 0..=count {
+/// Checks that `stream` yields exactly `expected`, with exact remaining maxima at every step.
+fn check_stream(mut stream: SlotStream<Digest>, expected: &[Coordinate], chains: usize) {
+    for position in 0..=expected.len() {
         assert_eq!(
             stream.maxima(),
-            remaining_maxima(&expected[position..], acknowledged.len())
+            remaining_maxima(&expected[position..], chains)
         );
-        if position == count {
+        if position == expected.len() {
             break;
         }
-        let slot = stream.next().unwrap();
-        let (chain, height) = coordinate(slot);
-        assert_eq!((chain, height), expected[position]);
-        let action = state.reconcile(slot, reference(chain, height)).unwrap();
-        if height <= acknowledged[chain] {
-            assert_eq!(action, Reconciliation::Duplicate);
-        } else {
-            assert_eq!(height, acknowledged[chain] + 1);
-            assert_eq!(action, Reconciliation::Emit);
-            acknowledged[chain] = height;
-            delivered.push((chain, height));
-        }
-        assert_eq!(state.emitted(), frontier(acknowledged));
+        assert_eq!(coordinate(stream.next().unwrap()), expected[position]);
     }
-    if count == expected.len() {
-        assert!(stream.next().is_none());
-        assert!(stream.next().is_none());
-        assert_eq!(stream.maxima(), vec![None; acknowledged.len()]);
-    }
+    assert!(stream.next().is_none());
+    assert!(stream.next().is_none());
+    assert_eq!(stream.maxima(), vec![None; chains]);
 }
 
-/// Checks sweep ordering, history reconciliation, and dense output sequence across replay cuts.
+/// Checks slot streams and the symbolic expansion, resumed from a random cut in every round,
+/// against the explicit order.
 pub(crate) fn exercise(input: &[u8]) {
     let mut schedule = ByteSchedule::cycling(input);
     let mut next = || schedule.index();
     let chains = 2 + next() % 7;
     let mut base = (0..chains).map(|_| next() as u64).collect::<Vec<_>>();
-    let mut acknowledged = base.clone();
+    let mut emitted = base.clone();
     let mut history = Sha256::hash(&[b"initial history"]);
-    let mut state = HistoryState::new(history, frontier(&base), frontier(&base)).unwrap();
-    let mut delivered = Vec::new();
     let mut expected_delivery = Vec::new();
     let mut order_cut = Cut::new(
         history,
@@ -159,110 +139,46 @@ pub(crate) fn exercise(input: &[u8]) {
             .collect::<Vec<_>>();
         let sweep_order = explicit_order(&base, &target, &proposed, Some(&settled));
         let horizontal_order = explicit_order(&base, &target, &proposed, None);
-        let make_sweep = || {
-            FinalSweep::new(
-                &frontier(&base),
-                frontier(&target),
-                &proposed_heights,
-                settled.clone(),
-            )
-            .unwrap()
-        };
-        let sweep = make_sweep();
+        let sweep = FinalSweep::new(
+            &frontier(&base),
+            frontier(&target),
+            &proposed_heights,
+            settled.clone(),
+        )
+        .unwrap();
         assert_eq!(sweep.planned(), sweep_order.len() as u64);
         // The halt flag reports deferred target blocks; a hole after every real slot defers none.
         assert_eq!(sweep.halted(), sweep_order.len() < horizontal_order.len());
-        let mut oracle_frontier = acknowledged.clone();
+        check_stream(sweep.into_stream(), &sweep_order, chains);
+        check_stream(
+            SlotStream::new(&frontier(&base), &frontier(&target), &proposed_heights).unwrap(),
+            &horizontal_order,
+            chains,
+        );
+        // The order of the round: the sweep, then the opening of the next record, each slot
+        // emitted once at the next height of its chain.
         for &(chain, height) in sweep_order.iter().chain(&horizontal_order) {
-            if height > oracle_frontier[chain] {
-                assert_eq!(height, oracle_frontier[chain] + 1);
-                oracle_frontier[chain] = height;
+            if height > emitted[chain] {
+                assert_eq!(height, emitted[chain] + 1);
+                emitted[chain] = height;
                 expected_delivery.push((chain, height));
             }
         }
-        let cut = next() % (sweep_order.len() + 1);
-        consume(
-            sweep.into_stream(),
-            &sweep_order,
-            cut,
-            &mut state,
-            &mut acknowledged,
-            &mut delivered,
-        );
-        state = HistoryState::new(
-            state.history(),
-            state.ordered().to_vec(),
-            state.emitted().to_vec(),
-        )
-        .unwrap();
-        consume(
-            make_sweep().into_stream(),
-            &sweep_order,
-            sweep_order.len(),
-            &mut state,
-            &mut acknowledged,
-            &mut delivered,
-        );
+        assert_eq!(emitted, target);
 
         let record = TipRecord::new(history, frontier(&target), proposed_heights.clone()).unwrap();
         let commitment = record.commitment::<Sha256>();
-        let common = target
-            .iter()
-            .zip(&acknowledged)
-            .map(|(target, ack)| (*target).min(*ack))
-            .collect::<Vec<_>>();
-        state
-            .validate_opening::<Sha256>(commitment, &record, &frontier(&common))
-            .unwrap();
-        // A contradictory resolved common ancestor must never authorize duplicate suppression.
-        // With nothing emitted past the ordered tip it is an anchor jump, which suppresses none.
-        let mut wrong_common = frontier(&common);
-        wrong_common[0] = BlockRef::new(
-            wrong_common[0].chain(),
-            wrong_common[0].height(),
-            Sha256::hash(&[b"fork"]),
-        );
-        let jump = acknowledged[0] == base[0] && target[0] > acknowledged[0];
-        assert_eq!(
-            state
-                .validate_opening::<Sha256>(commitment, &record, &wrong_common)
-                .is_ok(),
-            jump
-        );
-        let make_horizontal =
-            || SlotStream::new(&frontier(&base), &frontier(&target), &proposed_heights).unwrap();
-        let cut = next() % (horizontal_order.len() + 1);
-        consume(
-            make_horizontal(),
-            &horizontal_order,
-            cut,
-            &mut state,
-            &mut acknowledged,
-            &mut delivered,
-        );
-        state = HistoryState::new(
-            state.history(),
-            state.ordered().to_vec(),
-            state.emitted().to_vec(),
-        )
-        .unwrap();
-        consume(
-            make_horizontal(),
-            &horizontal_order,
-            horizontal_order.len(),
-            &mut state,
-            &mut acknowledged,
-            &mut delivered,
-        );
-        state.finish_opening::<Sha256>(commitment, &record).unwrap();
-
         // The symbolic expansion yields the same dense sequence, also when resumed from the cut
         // it reached part way through.
         let fact = Arc::new(
             SweepFact::new(frontier(&target), proposed_heights.clone(), settled.clone()).unwrap(),
         );
         let record = Arc::new(record);
-        let end = order_cut.sweep(&fact).unwrap().open(commitment, &record).unwrap();
+        let end = order_cut
+            .sweep(&fact)
+            .unwrap()
+            .open(commitment, &record)
+            .unwrap();
         let round = expected_delivery.len() - round_start;
         let stop = next() % (round + 1);
         let mut expansion = Expansion::new(order_cut.clone());
@@ -290,9 +206,6 @@ pub(crate) fn exercise(input: &[u8]) {
         assert_eq!(order_cut.history(), commitment);
         assert_eq!(order_cut.index(), target.iter().sum::<u64>());
         assert_eq!(expanded, expected_delivery);
-        assert_eq!(state.ordered(), frontier(&target));
-        assert_eq!(acknowledged, target);
-        assert_eq!(delivered, expected_delivery);
         history = commitment;
         base = target;
     }
@@ -306,7 +219,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
         #[test]
-        fn ragged_history_replay_matches_explicit_order(input in proptest::collection::vec(any::<u8>(), 0..1024)) {
+        fn expansion_matches_explicit_order_across_resumed_cuts(input in proptest::collection::vec(any::<u8>(), 0..1024)) {
             exercise(&input);
         }
     }

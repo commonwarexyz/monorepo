@@ -23,8 +23,9 @@ const ARTIFACT_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_ARTIFACT";
 
 /// Returns the digest identifying an artifact of `kind` whose canonical encoding is `encoded`.
 ///
-/// Certificates are identified by the same digest (see [`CertificateId`]), so the engine hashes
-/// each certificate it receives once.
+/// Certificates are identified by the same digest (see
+/// [`CertificateId`](super::CertificateId)), so the engine hashes each certificate it receives
+/// once.
 pub(crate) fn artifact_digest<H: Hasher>(kind: ArtifactKind, encoded: &[u8]) -> H::Digest {
     H::hash(&[ARTIFACT_NAMESPACE, &[kind as u8], encoded])
 }
