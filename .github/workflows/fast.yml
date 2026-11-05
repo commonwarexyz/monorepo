@@ -185,7 +185,7 @@ jobs:
       run: >-
         cargo-nextest nextest run --archive-file "$RUNNER_TEMP/tests.tar.zst"
         --workspace-remap "$GITHUB_WORKSPACE" --profile ${{ matrix.shard.profile }}
-        --partition hash:${{ matrix.shard.partition }}/${{ matrix.shard.partitions }} --verbose
+        --partition slice:${{ matrix.shard.partition }}/${{ matrix.shard.partitions }} --verbose
 
   Tests-Subset:
     name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\"${{ matrix.rustflags && format(', rustflags: \"{0}\"', matrix.rustflags) || '' }}, cpu: \"${{ matrix.sde && format('native, else sde -{0}', matrix.sde) || matrix.qemu && format('native, else qemu -cpu {0}', matrix.qemu) || 'native' }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) || '' }}\")"
