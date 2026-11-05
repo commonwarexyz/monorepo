@@ -29,7 +29,8 @@ impl Default for CacheConfig {
 /// Configuration for an authenticated journal.
 #[derive(Clone)]
 pub struct Config<S: Strategy> {
-    /// Metadata partition holding the frontier. It must stay the same for the life of the journal.
+    /// Metadata partition holding the frontier. It must stay the same for the life of the journal
+    /// and must not be shared with any other store.
     pub metadata_partition: String,
     /// Memory policy for Merkle digests.
     pub cache: CacheConfig,
