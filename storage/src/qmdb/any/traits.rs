@@ -106,6 +106,19 @@ pub trait DbAny<F: Family>:
         keys: &'a [&'a Self::Key],
     ) -> impl Future<Output = Result<Vec<Option<Self::Value>>, Error<F>>> + Send + use<'a, F, Self>;
 
+    /// Return a future that reads the storage holding the applied state of `keys` into the page
+    /// cache. The future does not borrow the database.
+    ///
+    /// Prefetching is best effort and candidate-based. Keys absent from the index are skipped.
+    /// An absent key whose translated key collides with an indexed key's may cause reads of
+    /// unrelated operations. Failures are logged.
+    fn prefetch(&self, keys: &[&Self::Key]) -> impl Future<Output = ()> + Send + 'static;
+
+    /// Return a future that reads the first `candidates` active operations at or above the
+    /// inactivity floor into the page cache, so a later batch can raise the floor without storage
+    /// I/O. The future does not borrow the database. Failures are logged.
+    fn prefetch_floor(&self, candidates: usize) -> impl Future<Output = ()> + Send + 'static;
+
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;
 

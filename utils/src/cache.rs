@@ -288,6 +288,77 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         (slot, &mut self.slots[slot].value)
     }
 
+    /// Like [Self::get_or_insert_mut], for a key the caller expects to request soon but has not
+    /// requested yet.
+    ///
+    /// The entry is placed in Main without recording use, where Main's eviction sweep reaches it
+    /// last. A missing key is admitted there, displacing only a Main resident not referenced since
+    /// the sweep last passed it, and a resident one is moved there (see [Self::expect]). A request
+    /// before the sweep arrives gives the entry the usual second chance, and an unrequested entry
+    /// is evicted when the sweep reaches it.
+    ///
+    /// Expected entries never use Small, which stays available to demand misses. A set of them
+    /// therefore survives until requested only while it fits in Main alongside Main's other
+    /// admissions, regardless of the cache's total capacity. Unlike demand misses, which churn
+    /// only Small, expected admissions give up that scan resistance: each displaces a Main
+    /// resident when Main is full.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn get_or_insert_mut_expected<F: FnOnce() -> V>(
+        &mut self,
+        key: K,
+        make: F,
+    ) -> (usize, &mut V) {
+        // The entry sits immediately before the CLOCK hand, unreferenced. The hand moves one
+        // resident per Main eviction (caused by an expected entry, a Ghost hit, or a Small entry
+        // promoted on eviction) and one per referenced resident it passes. Small admissions that
+        // evict from Small do not move it. Main has no correlation window, so a request before
+        // the hand arrives sets the reference bit. In a full cache with Main capacity `M`
+        // (`capacity - max(capacity / 10, 1)`), a run of `W` expected entries admitted together
+        // therefore survives until requested as long as `W + A + R < M`, where `A` counts later
+        // Main admissions and `R` the referenced residents the hand passes, both from the first
+        // entry of the run onward.
+        let hash = self.hasher.hash_one(&key);
+        let slot = match self.find_slot_hashed(&key, hash) {
+            Some(slot) => {
+                self.expect_resident(slot);
+                slot
+            }
+            None => self.insert_as(key, hash, None, make, Some(Admission::Main)),
+        };
+        (slot, &mut self.slots[slot].value)
+    }
+
+    /// Marks a resident `key` as expected to be requested soon, returning whether it is resident.
+    ///
+    /// The entry moves to where [Self::get_or_insert_mut_expected] admits a new key, immediately
+    /// before the Main CLOCK hand, without recording use. A Main resident keeps its reference bit.
+    /// A Small resident moves to Main, evicting an unreferenced Main resident if Main is full, so
+    /// its survival does not depend on Small's probation. An expected set thus shares one survival
+    /// bound whether its keys were resident or not.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn expect(&mut self, key: &K) -> bool {
+        let Some(slot) = self.find_slot(key) else {
+            return false;
+        };
+        self.expect_resident(slot);
+        true
+    }
+
+    /// Returns whether a resident `key` has recorded use that already gives it the survival bound
+    /// of an entry [Self::get_or_insert_mut_expected] admits, without recording use.
+    ///
+    /// A referenced Main resident is passed over once by Main's eviction sweep, so it outlasts a
+    /// full sweep from now, as a newly expected entry does. A Small resident that earned promotion
+    /// leaves Small only by moving to Main ahead of the sweep. A caller that needs only that bound
+    /// can skip [Self::expect], and the exclusive access it requires, for such a key.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn is_referenced(&self, key: &K) -> bool {
+        // A reference bit is never set inside the correlation window, so for a Small resident it
+        // already means the resident earned promotion.
+        self.find_slot(key)
+            .is_some_and(|slot| self.slots[slot].state.is_referenced())
+    }
+
     /// Removes `key`, returning whether it was present.
     ///
     /// The slot and its allocation are retained for reuse, so the value is not
@@ -379,19 +450,29 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// Installs an absent key, replacing a supplied value or reusing storage.
     /// `make` supplies a value only when a reusable value is unavailable.
     fn insert<F: FnOnce() -> V>(&mut self, key: K, hash: u64, value: Option<V>, make: F) -> Slot {
+        self.insert_as(key, hash, value, make, None)
+    }
+
+    /// Like [Self::insert], admitting to `forced` when set instead of the policy's choice.
+    /// Admission to a full partition evicts from it, and admission to a partition with unused
+    /// capacity requires unused cache capacity.
+    fn insert_as<F: FnOnce() -> V>(
+        &mut self,
+        key: K,
+        hash: u64,
+        value: Option<V>,
+        make: F,
+        forced: Option<Admission>,
+    ) -> Slot {
         let ghost_hit = self.ghost.discard(&key, hash);
         let has_vacancy = !self.free.is_empty() || self.slots.len() < self.capacity;
-        let admission = self.admission(ghost_hit, has_vacancy);
+        let admission = forced.unwrap_or_else(|| self.admission(ghost_hit, has_vacancy));
         let plan = self.plan(admission, has_vacancy);
 
         // Remove the resident index while its canonical victim key is still
         // installed. The same hash accompanies a Small key into Ghost.
         let (slot, historical_hash) = if let Some(victim) = plan.victim() {
-            let victim_hash = self.hasher.hash_one(&self.slots[victim].key);
-            self.index
-                .find_entry(victim_hash, |&slot| slot == victim)
-                .expect("a live victim must be indexed")
-                .remove();
+            let victim_hash = self.unindex(victim);
             let location = self.unlink_resident(victim);
             (victim, (location == Location::Small).then_some(victim_hash))
         } else {
@@ -488,6 +569,39 @@ impl<K: Hash + Eq, V> Cache<K, V> {
                 InsertionPlan::Vacant
             }
         }
+    }
+
+    /// Moves the resident at `slot` immediately before the Main hand (see [Self::expect]).
+    #[commonware_macros::stability(ALPHA)]
+    fn expect_resident(&mut self, slot: Slot) {
+        match self.topology[slot].location() {
+            Location::Main => self.main.unlink(&mut self.topology, slot),
+            Location::Small => {
+                self.small.unlink(&mut self.topology, slot);
+                self.slots[slot].state.reset();
+                if self.main.len == self.main.capacity {
+                    let victim = self.main.select(&self.slots, &self.topology);
+                    self.unindex(victim);
+                    self.main.unlink(&mut self.topology, victim);
+                    self.slots[victim].live = false;
+                    self.free.push(victim);
+                }
+            }
+            Location::Free => unreachable!("resident slot cannot be free"),
+        }
+        self.main.push(&mut self.topology, slot);
+    }
+
+    /// Removes the resident at `slot` from the index, returning its key's hash. The slot keeps
+    /// its key and queue links.
+    #[inline]
+    fn unindex(&mut self, slot: Slot) -> u64 {
+        let hash = self.hasher.hash_one(&self.slots[slot].key);
+        self.index
+            .find_entry(hash, |&indexed| indexed == slot)
+            .expect("a resident slot must be indexed")
+            .remove();
+        hash
     }
 
     /// Detaches a resident and returns its previous partition.
@@ -706,6 +820,13 @@ impl SlotState {
         if *current & (CORRELATED | REFERENCED) == 0 {
             *current |= REFERENCED;
         }
+    }
+
+    /// Returns whether the reference bit is set.
+    #[commonware_macros::stability(ALPHA)]
+    #[inline]
+    fn is_referenced(&self) -> bool {
+        self.0.load(Ordering::Relaxed) & REFERENCED != 0
     }
 
     /// Returns whether a Small resident has earned promotion.
@@ -1151,6 +1272,117 @@ mod tests {
         cache.check_invariants();
     }
 
+    /// Fill a 100-entry cache's Small (10) and Main (90), then reference a hot set (keys 10 to
+    /// 39) in Main.
+    fn fill_with_hot_main(cache: &mut Cache<u64, u64>) {
+        for key in 0..100 {
+            cache.put(key, key);
+        }
+        for key in 10..40 {
+            assert!(cache.get(&key).is_some());
+        }
+    }
+
+    #[test]
+    fn test_expected_entries_survive_until_requested() {
+        // Expected entries beyond Small's capacity all survive until requested, and they
+        // displace no referenced resident.
+        let mut cache = Cache::new(NZUsize!(100));
+        fill_with_hot_main(&mut cache);
+        for key in 1000..1040 {
+            let (_, value) = cache.get_or_insert_mut_expected(key, || 0);
+            *value = key;
+        }
+        cache.check_invariants();
+        for key in 1000..1040 {
+            assert_eq!(cache.get(&key).copied(), Some(key));
+        }
+        for key in 10..40 {
+            assert!(cache.contains(&key));
+        }
+
+        // Admitted through Small instead, most are evicted before their request.
+        let mut cache = Cache::new(NZUsize!(100));
+        fill_with_hot_main(&mut cache);
+        for key in 1000..1040 {
+            cache.get_or_insert_mut(key, || 0);
+        }
+        assert!((1000..1040).filter(|key| cache.contains(key)).count() <= 10);
+    }
+
+    #[test]
+    fn test_is_referenced_reports_recorded_use() {
+        // Warm-up places keys 0 to 9 in Small, whose newest half (5 to 9) is correlated, and the
+        // rest in Main, where keys 10 to 39 are referenced.
+        let mut cache = Cache::new(NZUsize!(100));
+        fill_with_hot_main(&mut cache);
+        assert!(cache.is_referenced(&15));
+        assert!(!cache.is_referenced(&50));
+        assert!(!cache.is_referenced(&5000));
+
+        // A Small resident counts once a hit outside the correlation window earns its promotion.
+        assert!(!cache.is_referenced(&2));
+        assert!(cache.get(&2).is_some());
+        assert!(cache.is_referenced(&2));
+        assert!(cache.get(&8).is_some());
+        assert!(!cache.is_referenced(&8));
+
+        // The query records no use.
+        assert!(!cache.is_referenced(&50));
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn test_expect_keeps_residents_until_requested() {
+        // The unreferenced Main resident the hand evicts next, and the oldest Small resident.
+        // Expecting the Small resident moves it to Main, evicting the next Main victim, so the
+        // Main resident is expected first.
+        let doomed = |cache: &Cache<u64, u64>| {
+            let mut slot = cache.main.hand.unwrap();
+            while cache.slots[slot].state.is_referenced() {
+                slot = cache.topology[slot].next;
+            }
+            [
+                cache.slots[slot].key,
+                cache.slots[cache.small.tail.unwrap()].key,
+            ]
+        };
+        // Expected admissions sweep Main and demand misses churn Small.
+        let churn = |cache: &mut Cache<u64, u64>| {
+            for key in 1000..1040 {
+                cache.get_or_insert_mut_expected(key, || key);
+            }
+            for key in 2000..2020 {
+                cache.put(key, key);
+            }
+        };
+
+        let mut cache = Cache::new(NZUsize!(100));
+        fill_with_hot_main(&mut cache);
+        let keys = doomed(&cache);
+        for key in keys {
+            assert!(cache.expect(&key));
+        }
+        assert!(!cache.expect(&5000));
+        churn(&mut cache);
+        cache.check_invariants();
+        for key in keys {
+            assert_eq!(cache.get(&key).copied(), Some(key));
+        }
+        for key in 1000..1040 {
+            assert!(cache.contains(&key));
+        }
+
+        // Without the expectation, both are evicted.
+        let mut cache = Cache::new(NZUsize!(100));
+        fill_with_hot_main(&mut cache);
+        let keys = doomed(&cache);
+        churn(&mut cache);
+        for key in keys {
+            assert!(!cache.contains(&key));
+        }
+    }
+
     #[test]
     fn test_put_replaces_existing() {
         let mut cache = Cache::new(NZUsize!(2));
@@ -1515,6 +1747,9 @@ mod tests {
         GetOrInsert(u8, u16),
         GetOrInsertMut(u8, u16),
         GetMut(u8, u16),
+        Expect(u8),
+        GetOrInsertMutExpected(u8, u16),
+        IsReferenced(u8),
         Remove(u8),
         Retain(u8),
         Clear,
@@ -1528,6 +1763,9 @@ mod tests {
             8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsert(k, v)),
             8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsertMut(k, v)),
             8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetMut(k, v)),
+            8 => (0..keys).prop_map(Op::Expect),
+            8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsertMutExpected(k, v)),
+            8 => (0..keys).prop_map(Op::IsReferenced),
             8 => (0..keys).prop_map(Op::Remove),
             8 => (0..keys).prop_map(Op::Retain),
             1 => Just(Op::Clear),
@@ -1572,6 +1810,28 @@ mod tests {
                         *stored = value;
                         model.insert(key, value);
                     }
+                }
+                Op::Expect(key) => {
+                    // Moving a resident never changes its value or the cache's size.
+                    let (present, len) = (cache.contains(&key), cache.len());
+                    let value = cache.peek(&key).copied();
+                    prop_assert_eq!(cache.expect(&key), present);
+                    prop_assert!(cache.len() <= len);
+                    prop_assert_eq!(cache.peek(&key).copied(), value);
+                }
+                Op::GetOrInsertMutExpected(key, value) => {
+                    *cache.get_or_insert_mut_expected(key, || value).1 = value;
+                    model.insert(key, value);
+                    prop_assert_eq!(cache.peek(&key).copied(), Some(value));
+                }
+                Op::IsReferenced(key) => {
+                    // The query records no use, and a referenced key is resident.
+                    let state =
+                        |cache: &Cache<u8, u16>| cache.find_slot(&key).map(|slot| cache.bits(slot));
+                    let before = state(&cache);
+                    let referenced = cache.is_referenced(&key);
+                    prop_assert!(!referenced || before.is_some());
+                    prop_assert_eq!(state(&cache), before);
                 }
                 Op::Remove(key) => {
                     let present = cache.contains(&key);

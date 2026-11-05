@@ -323,6 +323,25 @@ where
         self.any.get_many(keys).await
     }
 
+    /// Return a future that reads the storage holding the applied operations of `keys` into
+    /// the page cache. Merkleizing a change to the keys reads no Merkle node from storage. See
+    /// [any::db::Db::prefetch].
+    pub fn prefetch(
+        &self,
+        keys: &[&U::Key],
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S> {
+        self.any.prefetch(keys)
+    }
+
+    /// Return a future that reads the first `candidates` active operations at or above the
+    /// inactivity floor into the page cache. See [any::db::Db::prefetch_floor].
+    pub fn prefetch_floor(
+        &self,
+        candidates: usize,
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S> {
+        self.any.prefetch_floor(candidates)
+    }
+
     /// Return the retained operation range `[start, end)`.
     ///
     /// Proof generation also requires the necessary Merkle nodes to be retained. Proofs against

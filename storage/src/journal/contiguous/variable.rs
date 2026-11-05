@@ -34,13 +34,19 @@ use crate::{
     },
 };
 use bytes::{Bytes, BytesMut};
+#[commonware_macros::stability(ALPHA)]
+use commonware_codec::DecodeExt;
 use commonware_codec::{Codec, CodecShared, Copying, varint::MAX_U32_VARINT_SIZE};
 use commonware_macros::boxed;
+#[commonware_macros::stability(ALPHA)]
+use commonware_runtime::buffer::paged::Sealed;
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay},
 };
 use commonware_utils::{MAX_ALLOCATION_BYTES, futures::try_join_all};
+#[commonware_macros::stability(ALPHA)]
+use futures::future::join_all;
 use futures::{FutureExt as _, Stream, future::try_join};
 #[cfg(test)]
 use std::future::pending;
@@ -490,7 +496,173 @@ pub struct Reader<'a, E: Context, V: Codec> {
     metrics: Arc<Metrics<E>>,
 }
 
+/// The frames a prefetch warms: every frame position interleaved with its same-blob successor,
+/// and the immutable views of the data blobs holding them.
+#[commonware_macros::stability(ALPHA)]
+struct PrefetchFrames<B: RBlob> {
+    /// Frame positions and their same-blob successors, strictly increasing.
+    lookups: Vec<u64>,
+    /// Each frame's index in `lookups`.
+    frames: Vec<usize>,
+    /// The data blobs holding frames, ascending, with their immutable views.
+    blobs: Vec<(u64, Sealed<B>)>,
+    items_per_blob: u64,
+    /// The journal's size. The frame before it ends at the end of its blob.
+    size: u64,
+    /// Where the frame reads are recorded.
+    metrics: super::metrics::PrefetchMetrics,
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<B: RBlob> PrefetchFrames<B> {
+    /// The byte range of the frame at `idx` in `lookups`, in a blob of `blob_size` bytes, once
+    /// `offsets` resolves both of its ends.
+    fn range(&self, offsets: &[Option<u64>], idx: usize, blob_size: u64) -> Option<(u64, u64)> {
+        let start = offsets[idx]?;
+        let next = self.lookups[idx] + 1;
+        // Unless the frame ends its blob or the journal, its successor follows it in `lookups`.
+        let end = if next.is_multiple_of(self.items_per_blob) || next == self.size {
+            blob_size
+        } else {
+            debug_assert_eq!(self.lookups[idx + 1], next);
+            offsets[idx + 1]?
+        };
+        Some((start, end.checked_sub(start)?))
+    }
+
+    /// Collect the frames not yet `warmed` whose ranges `offsets` resolves, marking them warmed.
+    fn warm(&self, offsets: &[Option<u64>], warmed: &mut [bool]) -> super::blobs::Warm<B> {
+        let mut warm = super::blobs::Warm::new(self.metrics.clone());
+        let (mut frames, mut warmed) = (self.frames.as_slice(), warmed);
+        for (blob, view) in &self.blobs {
+            let count = frames.partition_point(|&idx| {
+                position_to_blob(self.lookups[idx], self.items_per_blob) == *blob
+            });
+            let (group, rest) = frames.split_at(count);
+            let (flags, rest_flags) = std::mem::take(&mut warmed).split_at_mut(count);
+            (frames, warmed) = (rest, rest_flags);
+            let blob_size = view.size();
+            let ranges = group.iter().zip(flags).filter_map(|(&idx, warmed)| {
+                if *warmed {
+                    return None;
+                }
+                let range = self.range(offsets, idx, blob_size)?;
+                *warmed = true;
+                Some(range)
+            });
+            warm.push(view.clone(), ranges);
+        }
+        warm
+    }
+}
+
 impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
+    /// See [Contiguous::prefetch].
+    ///
+    /// Reads each frame's offset and its same-blob successor's offset from the offsets journal
+    /// (through the page cache), then the pages covering the frames. Frames whose offsets are
+    /// cached are warmed while the other offsets are read. Offset pages are warmed like frame
+    /// pages, so both get the same best-effort residency (see [Sealed::warm]). A blob's last frame
+    /// ends at the end of its blob. Bytes still in the tail's write buffer are skipped.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn prefetch(
+        &self,
+        positions: &[u64],
+    ) -> impl Future<Output = ()> + Send + 'static + use<E, V> {
+        let items_per_blob = self.items_per_blob.get();
+        let start = positions.partition_point(|&pos| pos < self.bounds.start);
+        let end = positions.partition_point(|&pos| pos < self.bounds.end);
+        let mut plan = PrefetchFrames {
+            lookups: Vec::with_capacity(2 * (end - start)),
+            frames: Vec::with_capacity(end - start),
+            blobs: Vec::new(),
+            items_per_blob,
+            size: self.bounds.end,
+            metrics: self.metrics.prefetch.clone(),
+        };
+        for &position in &positions[start..end] {
+            let blob = position_to_blob(position, items_per_blob);
+            if plan.blobs.last().map(|&(last, _)| last) != Some(blob) {
+                let Some(view) = self.data.immutable(blob) else {
+                    continue;
+                };
+                plan.blobs.push((blob, view));
+            }
+            if plan.lookups.last() != Some(&position) {
+                plan.lookups.push(position);
+            }
+            plan.frames.push(plan.lookups.len() - 1);
+            let next = position + 1;
+            if !next.is_multiple_of(items_per_blob) && next < self.bounds.end {
+                plan.lookups.push(next);
+            }
+        }
+
+        // Resolve the offsets the cache or write buffer holds now. The offsets journal's
+        // immutable views supply the rest below.
+        let (mut offsets, _) = self.offsets.probe_uncounted(&plan.lookups);
+        let offset_runs = self.offsets.immutable_runs(&plan.lookups);
+        let offset_metrics = self.offsets.prefetch_metrics();
+
+        async move {
+            // Warm the frames whose offsets are resolved while reading the others.
+            let mut warmed = vec![false; plan.frames.len()];
+            let early = plan.warm(&offsets, &mut warmed).run();
+
+            // Warm the pages of every offset in an immutable view, resolved or not, then read the
+            // missing offsets from the warmed pages, one batched read per offsets blob, and warm
+            // the frames they resolve.
+            let late = async {
+                let offset_size = fixed::Inner::<E, u64>::CHUNK_SIZE;
+                let item_size = offset_size.get() as u64;
+                let (lookups, resolved, offset_metrics) =
+                    (&plan.lookups, &offsets, &offset_metrics);
+                let reads = offset_runs
+                    .into_iter()
+                    .map(|(run, blob, first)| async move {
+                        let ranges: Vec<(u64, u64)> = lookups[run.clone()]
+                            .iter()
+                            .map(|&pos| ((pos - first).saturating_mul(item_size), item_size))
+                            .collect();
+                        let warm = blob.warm(&ranges).await;
+                        let warm_failed = warm.is_err();
+                        offset_metrics.record(warm);
+
+                        // Only offsets the view holds entirely can be read from it.
+                        let written = first.saturating_add(blob.size() / item_size);
+                        let missing: Vec<usize> = run
+                            .filter(|&idx| resolved[idx].is_none() && lookups[idx] < written)
+                            .collect();
+                        let items: Vec<u64> = missing
+                            .iter()
+                            .map(|&idx| (lookups[idx] - first) * item_size)
+                            .collect();
+                        let mut buf = vec![0u8; items.len() * offset_size.get()];
+
+                        // The read is served from the pages just warmed, so only its failure
+                        // counts, and only after a successful warm, which would otherwise have
+                        // counted the pages the read then fails on.
+                        match blob.read_many_into(&mut buf, &items, offset_size).await {
+                            Ok(_) => Some((missing, buf)),
+                            Err(err) => {
+                                if !warm_failed {
+                                    offset_metrics.record(Err(err));
+                                }
+                                None
+                            }
+                        }
+                    });
+                for (missing, buf) in join_all(reads).await.into_iter().flatten() {
+                    for (idx, item) in missing.into_iter().zip(buf.chunks(offset_size.get())) {
+                        offsets[idx] = <u64 as DecodeExt<()>>::decode(Copying(item)).ok();
+                    }
+                }
+                plan.warm(&offsets, &mut warmed).run().await;
+            };
+            futures::join!(early, late);
+        }
+    }
+
     /// Validate a position to be read: must lie within `bounds`.
     const fn validate_readable(&self, position: u64) -> Result<(), Error> {
         if position >= self.bounds.end {
@@ -1010,8 +1182,16 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
     }
 }
 
-impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
+impl<'a, E: Context, V: CodecShared> super::Contiguous for Reader<'a, E, V> {
     type Item = V;
+
+    #[commonware_macros::stability(ALPHA)]
+    fn prefetch(
+        &self,
+        positions: &[u64],
+    ) -> impl Future<Output = ()> + Send + 'static + use<'a, E, V> {
+        Reader::prefetch(self, positions)
+    }
 
     fn bounds(&self) -> Range<u64> {
         self.bounds.clone()
@@ -2576,6 +2756,11 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         self.0.reader().try_read_many_sync(positions)
     }
 
+    #[commonware_macros::stability(ALPHA)]
+    fn prefetch(&self, positions: &[u64]) -> impl Future<Output = ()> + Send + 'static + use<E, V> {
+        self.0.reader().prefetch(positions)
+    }
+
     async fn replay(
         &self,
         range: Range<u64>,
@@ -2886,6 +3071,159 @@ mod tests {
             write_buffer: NZUsize!(1),
             replay_buffer: NZUsize!(256),
         }
+    }
+
+    #[test_traced]
+    fn test_variable_prefetch_counts_each_failed_offsets_blob_once() {
+        deterministic::Runner::default().start(|context| async move {
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(256));
+            let cfg = Config {
+                partition: "prefetch-failures".into(),
+                items_per_section: NZU64!(100),
+                compression: None,
+                codec_config: ((..=4096).into(), ()),
+                page_cache: cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, Vec<u8>>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for i in 0..250u32 {
+                (journal, _) = journal.append(&vec![i as u8; 20]).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // With every blob read failing, a prefetch of frames in two sealed blobs fails once
+            // for each offsets blob it reads, and warms no frame.
+            cache.clear();
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                read_rate: Some(probability!(1.0)),
+                ..Default::default()
+            };
+            journal.prefetch(&[1, 150]).await;
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let failures: u64 = context
+                .encode()
+                .lines()
+                .filter(|l| l.contains("prefetch_failures") && !l.starts_with('#'))
+                .map(|l| l.split_whitespace().last().unwrap().parse::<u64>().unwrap())
+                .sum();
+            assert_eq!(failures, 2);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_prefetch_warms_sealed_frames() {
+        deterministic::Runner::default().start(|context| async move {
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(256));
+            let cfg = Config {
+                partition: "prefetch".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: ((..=4096).into(), ()),
+                page_cache: cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+
+            // Frames of varying length span page boundaries in two sealed blobs and the tail.
+            let items: Vec<Vec<u8>> = (0..25u8).map(|i| vec![i; 40 + 37 * i as usize]).collect();
+            let mut journal = Journal::<_, Vec<u8>>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for item in &items {
+                (journal, _) = journal.append(item).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Prefetching serves later reads from the cache, in sealed blobs (including each
+            // blob's last frame) and in the tail's written pages. Bytes still buffered are served
+            // from memory.
+            let positions = [0, 3, 9, 10, 19, 21, 24];
+            cache.clear();
+            let cold = journal.try_read_many_sync(&positions);
+            assert!(cold[..6].iter().all(Option::is_none));
+            journal.prefetch(&positions).await;
+            let served = journal.try_read_many_sync(&positions);
+            for (&pos, item) in positions.iter().zip(&served) {
+                assert_eq!(item.as_ref(), Some(&items[pos as usize]), "pos={pos}");
+            }
+
+            // Prefetch reads are counted, by the data journal and its offsets journal, and a
+            // prefetch of cached frames reads nothing.
+            let prefetched = || {
+                context
+                    .encode()
+                    .lines()
+                    .filter(|l| l.contains("prefetched_pages") && !l.starts_with('#'))
+                    .map(|l| l.split_whitespace().last().unwrap().parse::<u64>().unwrap())
+                    .sum::<u64>()
+            };
+            let read = prefetched();
+            assert!(read > 0);
+            journal.prefetch(&positions).await;
+            assert_eq!(prefetched(), read);
+
+            // A prefetch outlives a prune that removes the blob it reads.
+            cache.clear();
+            let pending = journal.prefetch(&[1, 2]);
+            let (journal, pruned) = journal.prune(10).await.unwrap();
+            assert!(pruned);
+            pending.await;
+            assert_eq!(journal.read(12).await.unwrap(), items[12]);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_prefetch_survives_full_cache() {
+        deterministic::Runner::default().start(|context| async move {
+            // A 50-page cache admits demand-read pages through a 5-page probation queue.
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(50));
+            let cfg = Config {
+                partition: "prefetch-full".into(),
+                items_per_section: NZU64!(1000),
+                compression: None,
+                codec_config: ((..=64).into(), ()),
+                page_cache: cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let items: Vec<Vec<u8>> = (0..800u64).map(|i| vec![i as u8; 10]).collect();
+            let mut journal = Journal::<_, Vec<u8>>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for item in &items {
+                (journal, _) = journal.append(item).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Fill the cache with other pages.
+            let filler: Vec<u64> = (0..400).collect();
+            journal.read_many(&filler).await.unwrap();
+
+            // Prefetched frames whose offsets span 12 offset pages, more than the probation queue
+            // holds, and whose offset and frame pages together fit in the cache, are all served
+            // from the cache.
+            let positions: Vec<u64> = (0..12).map(|i| 500 + 13 * i).collect();
+            assert!(
+                journal
+                    .try_read_many_sync(&positions)
+                    .iter()
+                    .all(Option::is_none)
+            );
+            journal.prefetch(&positions).await;
+            let served = journal.try_read_many_sync(&positions);
+            for (&pos, item) in positions.iter().zip(&served) {
+                assert_eq!(item.as_ref(), Some(&items[pos as usize]), "pos={pos}");
+            }
+
+            journal.destroy().await.unwrap();
+        });
     }
 
     #[test]
