@@ -1,5 +1,8 @@
 //! The frontier, the one record an authenticated journal persists besides its operations. It holds
 //! the pruning boundary and the digests pinned there. A journal without one was never pruned.
+//!
+//! The frontier's partition holds nothing else. A record of another kind there fails to decode,
+//! and the journal neither opens nor syncs until that partition is deleted.
 
 use crate::{
     Context,

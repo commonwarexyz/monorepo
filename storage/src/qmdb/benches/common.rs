@@ -648,9 +648,9 @@ where
     // N commits, bounding on-disk growth and the operations an `init` replays.
     let mut commits = 0u32;
 
-    // Seed the db with `num_elements` entries. `seed_batch` caps how many seeds accumulate before a
-    // merkleize+apply (bounding the batch); `None` seeds in a single batch. Each apply is followed by
-    // a `commit`.
+    // Seed the db with `num_elements` entries. `seed_batch` caps how many seeds accumulate before
+    // a merkleize+apply (bounding the batch); `None` seeds in a single batch. Each apply is
+    // followed by a `commit`.
     {
         let mut batch = db.new_batch();
         let mut pending = 0u64;

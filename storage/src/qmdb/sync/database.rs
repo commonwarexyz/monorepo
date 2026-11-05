@@ -470,9 +470,10 @@ mod tests {
         });
     }
 
-    /// A sync whose root check fails records nothing, so the database reopens at its previous
-    /// state. Here the source's pins and the kept local operations rebuild a root matching
-    /// neither.
+    /// A sync whose root check fails writes no frontier and prunes nothing. Here the local journal
+    /// already reaches the target end, so nothing is fetched and the database reopens at its
+    /// previous state, while the source's pins and the kept local operations rebuild a root
+    /// matching neither.
     #[test]
     fn sync_with_mismatched_root_leaves_the_database_as_it_was() {
         deterministic::Runner::default().start(|context| async move {
