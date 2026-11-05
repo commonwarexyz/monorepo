@@ -237,7 +237,7 @@ impl<F> Fp6<F> {
                 Fp2::<F>::product_mul_by_nonresidue(simd, self.c2.product(simd, y1)),
             ),
             c1,
-            c2: Fp2::<F>::accumulate(simd, self.c2.product(simd, y0), v1),
+            c2: Fp2::<F>::accumulate_product(simd, v1, self.c2, y0),
         }
     }
 
@@ -360,16 +360,13 @@ impl<F> Fp6<F> {
                     c0.square_product::<K, S>(simd),
                     Fp2::<F>::product_mul_by_nonresidue(simd, c1.product(simd, c2)),
                 );
-                let a1 = Fp2::<F>::product_sub(
+                let a1 = Fp2::<F>::subtract_product(
                     simd,
                     Fp2::<F>::product_mul_by_nonresidue(simd, c2.square_product::<K, S>(simd)),
-                    c0.product(simd, c1),
+                    c0,
+                    c1,
                 );
-                let a2 = Fp2::<F>::product_sub(
-                    simd,
-                    c1.square_product::<K, S>(simd),
-                    c0.product(simd, c2),
-                );
+                let a2 = Fp2::<F>::subtract_product(simd, c1.square_product::<K, S>(simd), c0, c2);
                 let products = [a0, a1, a2];
                 let [a0, a1, a2] = Fp2::<F>::reduce_each_tight::<3, 6, BIAS, S>(
                     simd,
@@ -382,7 +379,7 @@ impl<F> Fp6<F> {
                     c0.product(simd, a0),
                     Fp2::<F>::product_mul_by_nonresidue(
                         simd,
-                        Fp2::<F>::accumulate(simd, c2.product(simd, a1), c1.product(simd, a2)),
+                        Fp2::<F>::accumulate_product(simd, c2.product(simd, a1), c1, a2),
                     ),
                 );
                 let inverse = Fp2::<F>::reduce_tight::<BIAS, S>(simd, d).invert(simd);

@@ -282,8 +282,8 @@ impl<F> Point<F> {
         let xx3_b3xz =
             Fp2::<F>::product_mul_by_nonresidue(simd, xz12.product_schoolbook(simd, xx3));
         let x = Fp2::<F>::product_sub(simd, xy.product(simd, difference), yz_b3xz);
-        let y = Fp2::<F>::accumulate(simd, xx3_b3xz, difference.product(simd, sum));
-        let z = Fp2::<F>::accumulate(simd, sum.product(simd, yz), xx3.product(simd, xy));
+        let y = Fp2::<F>::accumulate_product(simd, xx3_b3xz, difference, sum);
+        let z = Fp2::<F>::accumulate_product(simd, sum.product(simd, yz), xx3, xy);
         Self {
             x: Fp2::<F>::reduce::<14, S>(simd, x),
             y: Fp2::<F>::reduce::<16, S>(simd, y),
@@ -335,11 +335,7 @@ impl<F> Point<F> {
         let difference = yy.sub::<130, S>(simd, b9zz).carry(simd);
         let sum = yy.add(simd, b3zz).carry(simd);
         let xy2 = xy.double(simd).carry(simd);
-        let y = Fp2::<F>::accumulate(
-            simd,
-            difference.product(simd, sum),
-            b3zz.product(simd, yy8),
-        );
+        let y = Fp2::<F>::accumulate_product(simd, difference.product(simd, sum), b3zz, yy8);
         Doubling {
             point: Self {
                 x: Fp2::<F>::reduce::<6, S>(simd, difference.product(simd, xy2)),

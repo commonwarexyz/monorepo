@@ -107,6 +107,21 @@
 //! [`Rns`] overrides it with two products and an accumulation, giving a positive wide integer
 //! bound `A0 * B1 + A1 * B0` with two terms and no negative sum.
 //!
+//! # Accumulating products
+//!
+//! [`Field::accumulate_product`] returns a sum plus one more product. The default forms the
+//! product and accumulates it; wide products multiply-add into the sum's accumulators, which costs
+//! nothing beyond the products. Formulas accumulate a product this way whenever they do not reuse
+//! it, and the bounds are those of [`Field::product`] followed by [`Field::accumulate`].
+//!
+//! [`Field::quadratic`] forms the product of two elements `a[0] + a[1] i` and `b[0] + b[1] i` of
+//! the quadratic extension with `i^2 = -1`, as a [`Signed`] sum per component: the real component
+//! is `a[0] b[0]` less `a[1] b[1]`, and the imaginary component is `a[0] b[1] + a[1] b[0]`, which
+//! [`Field::cross`] forms. [`Field::accumulate_quadratic`] and [`Field::subtract_quadratic`]
+//! add such a product to, or subtract it from, a pair of signed sums; the defaults form the
+//! product and add or subtract it as [`Signed::add`] and [`Signed::sub`] do, and [`Rns`]
+//! multiply-adds each of the four products into the sum it belongs to.
+//!
 //! Generic formulas must account for all of these bounds, including between calls. For repeated
 //! point operations, a coordinate contract can bound the inputs and show that the outputs satisfy
 //! the same contract. This does not require canonical coordinates between operations.
@@ -170,6 +185,52 @@ impl<P> Signed<P> {
     #[inline(always)]
     pub const fn positive(pos: P) -> Self {
         Self { pos, neg: None }
+    }
+
+    /// Returns `self + rhs`, adding the positive sums and the negative sums.
+    #[inline(always)]
+    pub fn add<S: Simd, F: Field<S, Product = P>>(self, simd: S, rhs: Self) -> Self {
+        Self {
+            pos: F::accumulate(simd, self.pos, rhs.pos),
+            neg: join::<S, F>(simd, self.neg, rhs.neg),
+        }
+    }
+
+    /// Returns `self - rhs`, adding the negative sum of `rhs` to the positive sum and its positive
+    /// sum to the negative sum, so no bias is needed.
+    #[inline(always)]
+    pub fn sub<S: Simd, F: Field<S, Product = P>>(self, simd: S, rhs: Self) -> Self {
+        let mut pos = self.pos;
+        if let Some(neg) = rhs.neg {
+            pos = F::accumulate(simd, pos, neg);
+        }
+        Self {
+            pos,
+            neg: join::<S, F>(simd, self.neg, Some(rhs.pos)),
+        }
+    }
+
+    /// Carries both sums, as for [`Field::carry_product`].
+    #[inline(always)]
+    pub fn carry<S: Simd, F: Field<S, Product = P>>(self, simd: S) -> Self {
+        Self {
+            pos: F::carry_product(simd, self.pos),
+            neg: self.neg.map(|neg| F::carry_product(simd, neg)),
+        }
+    }
+}
+
+/// Returns the sum of two optional sums of products.
+#[inline(always)]
+fn join<S: Simd, F: Field<S>>(
+    simd: S,
+    a: Option<F::Product>,
+    b: Option<F::Product>,
+) -> Option<F::Product> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(F::accumulate(simd, a, b)),
+        (a, None) => a,
+        (None, b) => b,
     }
 }
 
@@ -318,6 +379,17 @@ pub trait Field<S: Simd>: Copy {
     /// the product count alone does not establish this.
     fn accumulate(simd: S, a: Self::Product, b: Self::Product) -> Self::Product;
 
+    /// Returns `sum + a * b`, under the requirements of [`Self::product`] for the factors and of
+    /// [`Self::accumulate`] for the sum.
+    ///
+    /// The default forms the product and accumulates it. Representations with wide products
+    /// multiply-add into the sum's accumulators instead, which costs nothing beyond the products,
+    /// so formulas accumulate a product this way whenever they do not reuse it.
+    #[inline(always)]
+    fn accumulate_product(simd: S, sum: Self::Product, a: Self, b: Self) -> Self::Product {
+        Self::accumulate(simd, sum, a.product(simd, b))
+    }
+
     /// Returns `a - b` plus `K * p` for eager products, or a representation-specific fixed
     /// multiple of `p^2` for wide products.
     ///
@@ -386,6 +458,64 @@ pub trait Field<S: Simd>: Copy {
             pos: a.product(simd, b),
             neg: Some(Self::accumulate(simd, p0, p1)),
         }
+    }
+
+    /// Returns the product of `a[0] + a[1] i` and `b[0] + b[1] i`, where `i^2 = -1`, as the
+    /// signed sums of its real and imaginary components.
+    ///
+    /// The real component is `a[0] b[0]` less `a[1] b[1]`, and the imaginary component is
+    /// [`Self::cross`] of the factors given those two products, under its requirements.
+    #[inline(always)]
+    fn quadratic(simd: S, a: [Self; 2], b: [Self; 2]) -> [Signed<Self::Product>; 2] {
+        let p0 = a[0].product(simd, b[0]);
+        let p1 = a[1].product(simd, b[1]);
+        [
+            Signed {
+                pos: p0,
+                neg: Some(p1),
+            },
+            Self::cross(simd, a, b, p0, p1),
+        ]
+    }
+
+    /// Returns `sum` plus the product of `a[0] + a[1] i` and `b[0] + b[1] i`, component by
+    /// component, under the requirements of [`Self::quadratic`] and of [`Self::accumulate`] for
+    /// each sum.
+    ///
+    /// The default forms the product and adds it as [`Signed::add`] does. Representations with
+    /// wide products multiply-add each product into the sum it belongs to.
+    #[inline(always)]
+    fn accumulate_quadratic(
+        simd: S,
+        sum: [Signed<Self::Product>; 2],
+        a: [Self; 2],
+        b: [Self; 2],
+    ) -> [Signed<Self::Product>; 2] {
+        let [c0, c1] = Self::quadratic(simd, a, b);
+        [
+            sum[0].add::<S, Self>(simd, c0),
+            sum[1].add::<S, Self>(simd, c1),
+        ]
+    }
+
+    /// Returns `sum` less the product of `a[0] + a[1] i` and `b[0] + b[1] i`, component by
+    /// component, under the requirements of [`Self::quadratic`] and of [`Self::accumulate`] for
+    /// each sum.
+    ///
+    /// The default forms the product and subtracts it as [`Signed::sub`] does, without a bias.
+    /// Representations with wide products multiply-add each product into the sum it belongs to.
+    #[inline(always)]
+    fn subtract_quadratic(
+        simd: S,
+        sum: [Signed<Self::Product>; 2],
+        a: [Self; 2],
+        b: [Self; 2],
+    ) -> [Signed<Self::Product>; 2] {
+        let [c0, c1] = Self::quadratic(simd, a, b);
+        [
+            sum[0].sub::<S, Self>(simd, c0),
+            sum[1].sub::<S, Self>(simd, c1),
+        ]
     }
 
     /// Reduces a signed sum, subtracting its negative sum once with the bias `K`.
@@ -589,6 +719,29 @@ mod tests {
             F::reduce_signed::<64>(simd, F::cross(simd, [a, c], [b, d], ab, cd)),
             reference::add(reference::mul(ra, rd), reference::mul(rc, rb)),
         );
+        assert_value(
+            F::reduce(simd, F::accumulate_product(simd, ab, c, d)),
+            reference::add(reference::mul(ra, rb), reference::mul(rc, rd)),
+        );
+        // (a + c i)(b + d i) = ab - cd + (ad + cb) i, accumulated into itself and subtracted
+        // from the double.
+        let real = reference::sub(reference::mul(ra, rb), reference::mul(rc, rd));
+        let imaginary = reference::add(reference::mul(ra, rd), reference::mul(rc, rb));
+        let quadratic = F::quadratic(simd, [a, c], [b, d]);
+        assert_value(F::reduce_signed::<64>(simd, quadratic[0]), real);
+        assert_value(F::reduce_signed::<64>(simd, quadratic[1]), imaginary);
+        let doubled = F::accumulate_quadratic(simd, quadratic, [a, c], [b, d]);
+        assert_value(
+            F::reduce_signed::<64>(simd, doubled[0]),
+            reference::add(real, real),
+        );
+        assert_value(
+            F::reduce_signed::<64>(simd, doubled[1]),
+            reference::add(imaginary, imaginary),
+        );
+        let single = F::subtract_quadratic(simd, doubled, [a, c], [b, d]);
+        assert_value(F::reduce_signed::<64>(simd, single[0]), real);
+        assert_value(F::reduce_signed::<64>(simd, single[1]), imaginary);
         let mut sum = ab;
         let mut expected = reference::mul(ra, rb);
         for _ in 1..F::PRODUCTS {
