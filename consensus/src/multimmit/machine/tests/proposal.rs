@@ -1150,7 +1150,8 @@ fn proposal_accepts_exact_tip_history_and_rejects_an_incorrect_commitment() {
                 | Activity::LeaderFinalized { .. }
                 | Activity::LeaderFinalityUpdated { .. }
                 | Activity::CertificateRecorded { .. }
-                | Activity::Placed { .. } => None,
+                | Activity::Placed { .. }
+                | Activity::Proven { .. } => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(
