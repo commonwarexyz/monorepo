@@ -189,6 +189,7 @@ fn current_fixed_config(suffix: &str) -> current::Config<OneCap, FConfig, Sequen
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
+        init_graft_readers: NZUsize!(1),
     }
 }
 
@@ -202,6 +203,7 @@ fn current_variable_config(suffix: &str) -> current::Config<OneCap, VConfig<((),
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
+        init_graft_readers: NZUsize!(1),
     }
 }
 

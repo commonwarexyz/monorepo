@@ -367,6 +367,7 @@ pub(crate) fn cur_fix_cfg_with_cache(
         init_cache: crate::common::INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
+        init_graft_readers: THREADS,
     }
 }
 
@@ -382,6 +383,7 @@ fn cur_var_cfg_with_cache(
         init_cache: crate::common::INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
+        init_graft_readers: THREADS,
     }
 }
 
