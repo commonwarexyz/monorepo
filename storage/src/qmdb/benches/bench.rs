@@ -20,3 +20,8 @@ criterion_main!(
     init::benches,
     merkleize::benches
 );
+
+/// Whether `just test-benches` requested the smallest inputs.
+fn smoke() -> bool {
+    std::env::var_os("COMMONWARE_BENCH_SMOKE").is_some()
+}

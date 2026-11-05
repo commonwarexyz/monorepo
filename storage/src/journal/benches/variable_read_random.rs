@@ -23,6 +23,14 @@ const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10_000);
 /// Number of items to write to the journal we will be reading from.
 const ITEMS_TO_WRITE: u64 = 5_000_000;
 
+fn items_to_write() -> u64 {
+    if crate::smoke() {
+        10_000
+    } else {
+        ITEMS_TO_WRITE
+    }
+}
+
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;
 
@@ -35,7 +43,7 @@ async fn bench_run_serial(
     let (journal, reader) = journal.snapshot().await.unwrap();
     let mut rng = test_rng();
     for _ in 0..items_to_read {
-        let pos = rng.random_range(0..ITEMS_TO_WRITE);
+        let pos = rng.random_range(0..items_to_write());
         black_box(reader.read(pos).await.expect("failed to read data"));
     }
     journal
@@ -50,7 +58,7 @@ async fn bench_run_concurrent(
     let mut rng = test_rng();
     let mut futures = Vec::with_capacity(items_to_read);
     for _ in 0..items_to_read {
-        let pos = rng.random_range(0..ITEMS_TO_WRITE);
+        let pos = rng.random_range(0..items_to_write());
         futures.push(reader.read(pos));
     }
     try_join_all(futures).await.expect("failed to read data");
@@ -65,7 +73,7 @@ async fn bench_run_read_many(
     let (journal, reader) = journal.snapshot().await.unwrap();
     let mut rng = test_rng();
     let mut positions: Vec<u64> = (0..items_to_read)
-        .map(|_| rng.random_range(0..ITEMS_TO_WRITE))
+        .map(|_| rng.random_range(0..items_to_write()))
         .collect();
     positions.sort_unstable();
     positions.dedup();
@@ -83,7 +91,12 @@ fn bench_variable_read_random(c: &mut Criterion) {
     let mut initialized = false;
     let runner = tokio::Runner::new(cfg.clone());
     for mode in ["serial", "concurrent", "read_many"] {
-        for items_to_read in [100, 1_000, 10_000, 100_000] {
+        let reads: &[usize] = if crate::smoke() {
+            &[100]
+        } else {
+            &[100, 1_000, 10_000, 100_000]
+        };
+        for &items_to_read in reads {
             c.bench_function(
                 &format!(
                     "{}/mode={} items={} size={}",
@@ -97,7 +110,7 @@ fn bench_variable_read_random(c: &mut Criterion) {
                     if !initialized {
                         Runner::new(cfg.clone()).start(|ctx| async move {
                             let j = get_variable_journal(ctx, PARTITION, ITEMS_PER_SECTION).await;
-                            append_fixed_random_data::<_, ITEM_SIZE>(j, ITEMS_TO_WRITE).await;
+                            append_fixed_random_data::<_, ITEM_SIZE>(j, items_to_write()).await;
                         });
                         initialized = true;
                     }

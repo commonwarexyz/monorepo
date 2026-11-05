@@ -17,7 +17,7 @@ fn bench_restart(c: &mut Criterion) {
     let cfg = Config::default();
     for variant in [Variant::Prunable, Variant::Immutable] {
         for compression in [None, Some(3)] {
-            for items in ITEMS {
+            for &items in if crate::smoke() { &[1_000][..] } else { &ITEMS } {
                 let mut initialized = false;
                 let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(

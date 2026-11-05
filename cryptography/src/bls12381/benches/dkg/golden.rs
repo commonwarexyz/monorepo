@@ -25,8 +25,14 @@ cfg_if::cfg_if! {
 
 /// Cached eVRF setup, sized for the largest configuration we benchmark.
 /// Building it is expensive, so we share one across all benches.
-static SETUP: LazyLock<Setup> =
-    LazyLock::new(|| Setup::new(NonZeroU32::new(MAX_RECEIVERS).unwrap()));
+static SETUP: LazyLock<Setup> = LazyLock::new(|| {
+    let max = if crate::smoke() { 5 } else { MAX_RECEIVERS };
+    Setup::new(NonZeroU32::new(max).unwrap())
+});
+
+fn receivers() -> &'static [u32] {
+    if crate::smoke() { &[5] } else { RECEIVERS }
+}
 
 /// A Golden DKG scenario with one dealer and `n` receivers.
 struct Bench {
@@ -55,7 +61,7 @@ impl Bench {
 /// Time for a dealer to produce a [`SignedDealerLog`] addressed to `n` receivers.
 fn bench_deal(c: &mut Criterion) {
     let mut rng = test_rng();
-    for &n in RECEIVERS {
+    for &n in receivers() {
         let bench = Bench::new(&mut rng, n);
         c.bench_function(&format!("{}::deal/n={}", module_path!(), n), |b| {
             b.iter_batched(
@@ -78,7 +84,7 @@ fn bench_deal(c: &mut Criterion) {
 /// linear check via `golden::observe`.
 fn bench_verify(c: &mut Criterion) {
     let mut rng = test_rng();
-    for &n in RECEIVERS {
+    for &n in receivers() {
         let bench = Bench::new(&mut rng, n);
         let signed = bench.deal(&mut rng);
         c.bench_function(&format!("{}::verify/n={}", module_path!(), n), |b| {
@@ -102,7 +108,7 @@ fn bench_verify(c: &mut Criterion) {
 /// `coding/src/benches/bench_size.rs`.
 fn bench_dealing_size(_c: &mut Criterion) {
     let mut rng = test_rng();
-    for &n in RECEIVERS {
+    for &n in receivers() {
         let bench = Bench::new(&mut rng, n);
         let signed = bench.deal(&mut rng);
         println!(

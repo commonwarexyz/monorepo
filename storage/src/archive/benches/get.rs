@@ -23,11 +23,15 @@ const READS: [usize; 1] = [1_000];
 #[cfg(full_bench)]
 const READS: [usize; 3] = [1_000, 10_000, 50_000];
 
+fn items() -> u64 {
+    if crate::smoke() { 1_000 } else { ITEMS }
+}
+
 fn select_keys(keys: &[Key], reads: usize) -> Vec<Key> {
     let mut rng = TestRng::new(42);
     let mut selected_keys = Vec::with_capacity(reads);
     for _ in 0..reads {
-        selected_keys.push(keys[rng.random_range(0..ITEMS as usize)].clone());
+        selected_keys.push(keys[rng.random_range(0..keys.len())].clone());
     }
     selected_keys
 }
@@ -36,7 +40,7 @@ fn select_indices(reads: usize) -> Vec<u64> {
     let mut rng = TestRng::new(42);
     let mut selected_indices = Vec::with_capacity(reads);
     for _ in 0..reads {
-        selected_indices.push(rng.random_range(0..ITEMS));
+        selected_indices.push(rng.random_range(0..items()));
     }
     selected_indices
 }
@@ -75,7 +79,7 @@ fn bench_get(c: &mut Criterion) {
             let runner = tokio::Runner::new(cfg.clone());
             for mode in ["serial", "concurrent"] {
                 for pattern in ["key", "index"] {
-                    for reads in READS {
+                    for &reads in if crate::smoke() { &[100][..] } else { &READS } {
                         c.bench_function(
                             &format!(
                                 "{}/variant={} mode={} pattern={} comp={} reads={}",
@@ -94,7 +98,7 @@ fn bench_get(c: &mut Criterion) {
                                     keys = commonware_runtime::tokio::Runner::new(cfg.clone())
                                         .start(|ctx| async move {
                                             let a = Archive::init(ctx, variant, compression).await;
-                                            let (_, keys) = append_random(a, ITEMS).await;
+                                            let (_, keys) = append_random(a, items()).await;
                                             keys
                                         });
                                     initialized = true;

@@ -37,6 +37,14 @@ cfg_if::cfg_if! {
     }
 }
 
+fn cases() -> &'static [(u64, u64)] {
+    if crate::smoke() {
+        &[(1_000, 10_000)]
+    } else {
+        &CASES
+    }
+}
+
 /// Populate, prune, and sync a database (used in setup phase).
 #[boxed]
 async fn populate_and_sync<F: Family, C: DbAny<Family = F, Key = Digest>>(
@@ -71,7 +79,7 @@ define_fixed_variants! {
 
 fn bench_fixed_value_init(c: &mut Criterion) {
     let cfg = Config::default();
-    for (elements, operations) in CASES {
+    for &(elements, operations) in cases() {
         for &variant in FIXED_VARIANTS {
             // Populated lazily on the first sample of the first matched cache size, then reused by
             // every cache size for this variant (all read the same on-disk database).
@@ -136,7 +144,7 @@ define_vec_variants! {
 
 fn bench_var_value_init(c: &mut Criterion) {
     let cfg = Config::default();
-    for (elements, operations) in CASES {
+    for &(elements, operations) in cases() {
         for &variant in VEC_VARIANTS {
             // Populated lazily on the first sample of the first matched cache size, then reused by
             // every cache size for this variant (all read the same on-disk database).
@@ -190,7 +198,7 @@ fn bench_var_value_init(c: &mut Criterion) {
 /// Benchmark reopening a populated unauthenticated store at each init cache size.
 fn bench_store_init(c: &mut Criterion) {
     let cfg = Config::default();
-    for (elements, operations) in CASES {
+    for &(elements, operations) in cases() {
         // Populated lazily on the first sample of the first matched cache size, then reused by
         // every cache size (all read the same on-disk database).
         let mut initialized = false;

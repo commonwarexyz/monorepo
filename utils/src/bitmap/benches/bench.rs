@@ -12,6 +12,11 @@ mod roaring_union;
 mod roaring_write;
 mod write;
 
+/// Whether `just test-benches` requested the smallest inputs.
+fn smoke() -> bool {
+    std::env::var_os("COMMONWARE_BENCH_SMOKE").is_some()
+}
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
