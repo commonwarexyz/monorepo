@@ -465,11 +465,12 @@ impl<S: Scheme, D: Digest> ChainState<S, D> {
         &self,
         limit: usize,
         run_limit: usize,
-    ) -> Vec<Arc<SignedTransactionBlock<S, D>>> {
+        credit: &[usize],
+    ) -> (Vec<Arc<SignedTransactionBlock<S, D>>>, bool) {
         if self.me.is_none() {
-            return Vec::new();
+            return (Vec::new(), false);
         }
-        self.da.ready_votes(limit, run_limit)
+        self.da.ready_votes(limit, run_limit, credit)
     }
 
     /// Returns the chain of the first offered eligible vote `select` accepts, for a validator.
