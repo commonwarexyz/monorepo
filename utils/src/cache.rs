@@ -1747,6 +1747,9 @@ mod tests {
         GetOrInsert(u8, u16),
         GetOrInsertMut(u8, u16),
         GetMut(u8, u16),
+        Expect(u8),
+        GetOrInsertMutExpected(u8, u16),
+        IsReferenced(u8),
         Remove(u8),
         Retain(u8),
         Clear,
@@ -1760,6 +1763,9 @@ mod tests {
             8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsert(k, v)),
             8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsertMut(k, v)),
             8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetMut(k, v)),
+            8 => (0..keys).prop_map(Op::Expect),
+            8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsertMutExpected(k, v)),
+            8 => (0..keys).prop_map(Op::IsReferenced),
             8 => (0..keys).prop_map(Op::Remove),
             8 => (0..keys).prop_map(Op::Retain),
             1 => Just(Op::Clear),
@@ -1804,6 +1810,28 @@ mod tests {
                         *stored = value;
                         model.insert(key, value);
                     }
+                }
+                Op::Expect(key) => {
+                    // Moving a resident never changes its value or the cache's size.
+                    let (present, len) = (cache.contains(&key), cache.len());
+                    let value = cache.peek(&key).copied();
+                    prop_assert_eq!(cache.expect(&key), present);
+                    prop_assert!(cache.len() <= len);
+                    prop_assert_eq!(cache.peek(&key).copied(), value);
+                }
+                Op::GetOrInsertMutExpected(key, value) => {
+                    *cache.get_or_insert_mut_expected(key, || value).1 = value;
+                    model.insert(key, value);
+                    prop_assert_eq!(cache.peek(&key).copied(), Some(value));
+                }
+                Op::IsReferenced(key) => {
+                    // The query records no use, and a referenced key is resident.
+                    let state =
+                        |cache: &Cache<u8, u16>| cache.find_slot(&key).map(|slot| cache.bits(slot));
+                    let before = state(&cache);
+                    let referenced = cache.is_referenced(&key);
+                    prop_assert!(!referenced || before.is_some());
+                    prop_assert_eq!(state(&cache), before);
                 }
                 Op::Remove(key) => {
                     let present = cache.contains(&key);
