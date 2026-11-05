@@ -2,6 +2,7 @@ use crate::{
     dkg::{
         ReshareBlock,
         probe::{ActorArtifact, mailbox::Message, wire},
+        state_sync::Plan,
     },
     stateful::probe::sample,
 };
@@ -10,7 +11,7 @@ use commonware_codec::Encode as _;
 use commonware_consensus::{
     marshal::core::{Mailbox as MarshalMailbox, Variant},
     simplex::{scheme::Scheme, types::Finalization},
-    types::{Epoch, Epocher, FixedEpocher},
+    types::Epoch,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
@@ -20,8 +21,9 @@ use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use tracing::debug;
 
-/// Serving phase of the probe actor: answers requests from the attached marshal
-/// and sends no discovery requests.
+/// Serving phase of the probe actor. It answers latest-finalization requests from the
+/// attached marshal and boundary requests from the attached plan, and sends no
+/// discovery requests.
 pub(super) struct Service<E, S, V, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
@@ -33,8 +35,8 @@ where
     pub(super) context: ContextCell<E>,
     pub(super) mailbox: ActorReceiver<Message<S, V>>,
     pub(super) marshal: MarshalMailbox<S, V>,
+    pub(super) plan: Plan<S, V>,
     pub(super) blocker: B,
-    pub(super) epocher: FixedEpocher,
     pub(super) artifact: Option<ActorArtifact<S, V>>,
 }
 
@@ -131,16 +133,28 @@ where
         }
     }
 
+    /// Returns the finalization of the boundary block that introduces `epoch`, if this node
+    /// checkpointed the epoch with one. Returns `None` for epoch zero, since genesis has no
+    /// finalization.
     async fn produce_finalization(
         &mut self,
         epoch: Epoch,
     ) -> Option<Finalization<S, V::Commitment>> {
-        let height = self.epocher.last(epoch.previous()?)?;
-        self.marshal.get_finalization(height).await
+        epoch.previous()?;
+        self.plan
+            .checkpoint(epoch)
+            .await
+            .and_then(|checkpoint| checkpoint.finalization().cloned())
     }
 
+    /// Returns the boundary block that introduces `epoch` under the same conditions as
+    /// [`Self::produce_finalization`].
     async fn produce_block(&mut self, epoch: Epoch) -> Option<V::Block> {
-        let height = self.epocher.last(epoch.previous()?)?;
-        self.marshal.get_block(height).await
+        epoch.previous()?;
+        self.plan
+            .checkpoint(epoch)
+            .await
+            .filter(|checkpoint| checkpoint.finalization().is_some())
+            .map(|checkpoint| checkpoint.block())
     }
 }
