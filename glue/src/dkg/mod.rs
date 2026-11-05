@@ -102,14 +102,15 @@
 //!
 //! # Marshal Retention
 //!
-//! Each epoch starts from a boundary block that carries its [`types::EpochInfo`]: genesis for
-//! epoch zero, or the previous epoch's final block. Unless they start from state-sync material,
-//! restarted DKG actors resume the epoch containing the height after marshal's processed height
-//! `P`, or epoch zero if marshal has processed nothing. Both actors need that epoch's info, and the
-//! orchestrator also needs the boundary block's commitment to start the epoch's Simplex engine.
+//! Each epoch starts from a boundary block that carries its [`types::EpochInfo`]: genesis for epoch
+//! zero, or the previous epoch's final block. Restarted DKG actors recover the epoch `e` containing
+//! the height after marshal's processed height `P`, or epoch zero if marshal has processed nothing.
+//! State-sync material overrides this and starts them in its floor's epoch. Both actors need the
+//! epoch's info, and the orchestrator starts the epoch's Simplex engine from the boundary block's
+//! commitment, or from the floor finalization in a state-synced epoch.
 //!
-//! The [`state_sync::Plan`] keeps this material durable outside marshal in a _checkpoint_ for each
-//! epoch the orchestrator enters from its boundary block. At each boundary, the orchestrator
+//! The [`state_sync::Plan`] keeps this material durable outside marshal in a _checkpoint_ for
+//! each epoch the orchestrator enters from its boundary block. At each boundary, the orchestrator
 //! records the next epoch's checkpoint before it acknowledges the final block, so `P` cannot pass
 //! a boundary whose epoch is not durable. With `F` the final block of epoch `e`:
 //!
@@ -121,71 +122,91 @@
 //!
 //!  orchestrator, on delivery of F:
 //!
-//!         +--------------------+     +-------------+     +---------------+
+//!        +--------------------+     +-------------+     +---------------+
 //!   ----->| record and sync    |---->| enter e + 1 |---->| acknowledge F |----> P = F once every
-//!         | checkpoint e + 1   |     | stop e      |     |               |      reporter acked
-//!         +--------------------+     +-------------+     +---------------+
-//!      ^                          ^                                         ^
+//!        | checkpoint e + 1   |     | stop e      |     |               |      reporter acked
+//!        +--------------------+     +-------------+     +---------------+
+//!     ^                          ^                                         ^
 //!   crash 1                    crash 2                                   crash 3
 //!
 //!   crash | checkpoints | P                        | restart loads
 //!   ------+-------------+--------------------------+------------------------------------
-//!     1   | e           | below F                  | checkpoint e, then F is redelivered
-//!     2   | e, e + 1    | below F                  | checkpoint e, then F is redelivered
-//!     3   | e, e + 1    | below F (ack unrecorded) | checkpoint e, then F is redelivered
-//!         |             | F                        | checkpoint e + 1
+//!    1   | e           | below F                  | checkpoint e, then F is redelivered
+//!    2   | e, e + 1    | below F                  | checkpoint e, then F is redelivered
+//!    3   | e, e + 1    | below F (ack unrecorded) | checkpoint e, then F is redelivered
+//!        |             | F                        | checkpoint e + 1
 //! ```
 //!
 //! Marshal delivers up to its pending acknowledgement window ahead of `P`, so while another
 //! reporter lags the orchestrator can cross several boundaries before `P` does. Recording a
 //! checkpoint therefore keeps every checkpoint from the epoch recovered from `P` onward and drops
 //! older ones, so every epoch a later restart can recover keeps its checkpoint. Restart takes the
-//! active epoch from the first source that has it:
+//! active epoch from the first source that applies: the material while `e` is at or before `f`
+//! (it is deleted otherwise), then checkpoint `e`, then the boundary block, which the orchestrator
+//! then records as checkpoint `e`. With none, the orchestrator exits and the reshare actor
+//! follows `e`. With `L` blocks per epoch, the sources sit here:
 //!
 //! ```text
-//!   P  -->  active epoch e (contains height P + 1, or zero if marshal has processed nothing)
-//!                  |
-//!                  v
-//!   +------------------------------------+  found   +-------------------------------------+
-//!   | 1. plan's state-sync material,     |--------->| start in the floor's epoch from the |
-//!   |    if e is at or before its floor  |          | synced floor and its epoch info     |
-//!   |    epoch                           |          +-------------------------------------+
-//!   +------------------------------------+
-//!                  | none
-//!                  v
-//!   +------------------------------------+  found   +-------------------------------------+
-//!   | 2. plan's checkpoint for e         |--------->| start e from the checkpoint's info  |
-//!   |                                    |          | and boundary commitment             |
-//!   +------------------------------------+          +-------------------------------------+
-//!                  | none
-//!                  v
-//!   +------------------------------------+  found   +-------------------------------------+
-//!   | 3. e's boundary block in marshal   |--------->| start e from the block, and the     |
-//!   |    (genesis for epoch zero)        |          | orchestrator records checkpoint e   |
-//!   +------------------------------------+          +-------------------------------------+
-//!                  | none
-//!                  v
-//!   the orchestrator exits, and the reshare actor follows epoch e
+//!   plan partitions, outside marshal
+//!   +----------------------------+--------------------------+
+//!   | 1. state-sync material     | 2. checkpoint e          |
+//!   |    EpochInfo(f), floor,    |    EpochInfo(e), and the |
+//!   |    floor height h          |    boundary commitment   |
+//!   +----------------------------+--------------------------+
+//!
+//!   marshal's archive, pruned below its retention
+//!   xxxxxx|xxxxxxxxx| e*L | e*L + 1 | ... |   P   | P + 1 | ...
+//!   pruned          |<-------- epoch e -------->
+//!              ^
+//!              3. boundary block at e*L - 1 (genesis when e is zero), shown pruned:
+//!                 EpochInfo(e) and the block's commitment
 //! ```
 //!
 //! A new node starts epoch zero from genesis through step 3, and a restart reaches step 3 for any
-//! epoch without a checkpoint. Initialize the plan with [`state_sync::Plan::init`] on every node,
-//! with or without state-sync material. A [`state_sync::Plan::disabled`] plan records no
-//! checkpoints, so each restart reads the boundary block from marshal.
+//! epoch without kept material or a checkpoint. Initialize the plan with
+//! [`state_sync::Plan::init`] on every node, with or without state-sync material. A
+//! [`state_sync::Plan::disabled`] plan records no checkpoints, so each restart reads the boundary
+//! block from marshal.
 //!
-//! After state sync, the plan's state-sync material stands in for the synced epoch's checkpoint
-//! until marshal recovers beyond that epoch. Each restart in that epoch waits for the synced floor
-//! block, so the block must stay in marshal until then. The floor lies in the epoch of `P + 1` or
-//! a later one, so stateful pruning keeps it with
-//! `retained_marshal_blocks >= blocks_per_epoch - 1`. A live marshal floor must not be installed
-//! above it.
+//! Material passed to [`state_sync::Plan::init`] replaces any stored material and the floor height
+//! recorded for it, and leaves checkpoints in place. Startup deletes material whose floor lies in
+//! an epoch before the recovered one, and the recovered epoch starts from step 2.
 //!
-//! Once the active epoch has a checkpoint, restart does not read its boundary block, so marshal
-//! retention does not limit restart. Retention, set by [`PruneConfig::retained_marshal_blocks`]
-//! with stateful pruning, still bounds what a node can serve. Serving [`probe`] requests requires
-//! the boundary finalization and block for every epoch served. As
-//! [Reconfiguration](#reconfiguration) describes, a lagging peer catches up only from blocks its
-//! peers still hold.
+//! In a state-synced epoch `f` with its floor block at height `h`, both actors start `f` from the
+//! material until marshal's recovered epoch passes `f`. The reshare actor also needs `h`. Until `h`
+//! is recorded, each startup waits for the floor block from marshal and then records `h` with the
+//! material. A later restart takes `h` from the plan. Once marshal has processed the floor block,
+//! that restart resumes from marshal's processed position without reading the block, so marshal may
+//! prune it. The orchestrator starts Simplex from the material's floor on every startup in `f`:
+//!
+//! ```text
+//!         never delivered     floor block h             delivered from h onward
+//!   --------------------------|-------|-------|-----|-------|-------|------>
+//!                             |   h   | h + 1 | ... | P - 1 |   P   |
+//!                             ^
+//!   first startup             | marshal fetches h, the reshare actor waits for it and
+//!                             | records h with the material
+//!   restart, P >= h           |xxxxxxx| h may be pruned: resume at P with h from the plan
+//!   restart, P = h - 1        |   h   | the floor was just installed, so h is marshal's
+//!                             |       | anchor and is read locally
+//! ```
+//!
+//! Every startup in `f` uses `h` to decide whether the reshare actor participates in the epoch's
+//! ceremony or follows it, as [State Sync](reshare#state-sync) describes.
+//!
+//! A restart from a checkpoint never reads the boundary block. A startup reads the floor block only
+//! before marshal has processed it, and until then marshal is either fetching that block for its
+//! floor or stores it as the anchor of its processed position. Marshal retention therefore does not
+//! limit restart.
+//!
+//! Marshal skips a configured floor that its persisted round floor already covers, without fetching
+//! the floor block. A node must therefore not be given material whose floor its marshal has passed,
+//! since its reshare actor would wait forever for a floor block that marshal has pruned.
+//!
+//! Retention, set by [`PruneConfig::retained_marshal_blocks`] with stateful pruning, bounds what a
+//! node can serve. Serving [`probe`] requests requires the boundary finalization and block for
+//! every epoch served. As [Reconfiguration](#reconfiguration) describes, a lagging peer catches up
+//! only from blocks its peers still hold.
 //!
 //! The reshare actor treats every block marshal has processed as applied, and its journal stores
 //! dealer logs but not the last block it applied, so a node's marshal, application, and reshare

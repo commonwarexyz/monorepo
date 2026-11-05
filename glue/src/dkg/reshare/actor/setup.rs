@@ -11,12 +11,12 @@ use crate::dkg::{
     types::{EpochInfo, EpochOutcome, Participants, Payload, SchemeInfo},
 };
 use commonware_consensus::{
-    Block,
+    Block, Heightable as _,
     marshal::{
         Identifier,
-        core::{Processed, Variant as MarshalVariant},
+        core::{CommitmentFallback, Processed, Variant as MarshalVariant},
     },
-    simplex::scheme::Scheme as SimplexScheme,
+    simplex::{scheme::Scheme as SimplexScheme, types::Finalization},
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
 use commonware_cryptography::{
@@ -348,6 +348,46 @@ where
             share,
         );
         register_and_mark(&self.registrar, &self.fence, info.epoch, scheme_info).await;
+    }
+
+    /// Returns the height of the state-sync `floor` block, and the block itself when
+    /// startup needs it.
+    ///
+    /// When the plan has recorded the height and marshal has processed it, the actor
+    /// resumes from marshal's anchor without the floor block, so marshal may prune it.
+    /// Otherwise this registers the epoch of `info`, so the orchestrator can enter it
+    /// without waiting for the floor block. It then waits for the block from marshal and
+    /// records its height if the plan has none.
+    pub(super) async fn resolve_floor(
+        &mut self,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
+        anchor: &Option<(Processed, MV::Block)>,
+        info: &EpochInfo<V, C::PublicKey, B::Directory>,
+        floor: Finalization<S, MV::Commitment>,
+    ) -> (Height, Option<MV::Block>) {
+        let known = self.state_sync.floor_height().await;
+        if let Some(height) = known
+            && anchor
+                .as_ref()
+                .is_some_and(|(processed, _)| processed.height() >= height)
+        {
+            return (height, None);
+        }
+
+        let share = self.recovered_share(store, info).await;
+        self.register_epoch(info, share).await;
+        let block = self
+            .marshal
+            .subscribe_by_commitment(floor.proposal.payload, CommitmentFallback::Wait)
+            .await
+            .expect("marshal must yield state sync floor block");
+        let height = block.height();
+        if known.is_none() {
+            self.state_sync
+                .record_floor_height(self.context.as_present().child("state_sync"), height)
+                .await;
+        }
+        (height, Some(block))
     }
 
     pub(super) fn prepare_epoch(
