@@ -2,14 +2,11 @@
 
 use super::{DigestOf, Fatal, VoterTypes, live::Live};
 use crate::multimmit::{
-    actors::{
-        util::reliable_policy,
-        voter::{
-            chain_plane,
-            config::chain_validation_parallelism,
-            da_recovery::{self, DaUpdate, RecoveryPermits},
-            telemetry::metrics::Metrics,
-        },
+    actors::voter::{
+        chain_plane,
+        config::chain_validation_parallelism,
+        da_recovery::{self, DaUpdate, RecoveryPermits},
+        telemetry::metrics::Metrics,
     },
     config::{Profile, Role},
     machine::{
@@ -22,7 +19,7 @@ use commonware_actor::mailbox;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_p2p::Sender;
 use commonware_runtime::Supervisor as _;
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};
 
 /// A result from one of the chain tasks, which share one queue to the voter.
 pub(crate) enum ChainUpdate<S: Scheme, D: Digest> {
@@ -32,9 +29,24 @@ pub(crate) enum ChainUpdate<S: Scheme, D: Digest> {
     DaVoteReady(DaVotesOffer<S, D>),
 }
 
-// Results beyond the queue's capacity are retained without bound, in arrival order, so no task
-// blocks on the voter.
-reliable_policy!(impl<S: Scheme, D: Digest> for ChainUpdate<S, D>);
+/// Results beyond the queue's capacity are retained in arrival order, so no task blocks on the
+/// voter, but a chain's DA-vote offer replaces any offer of the same chain still retained: the
+/// machine keeps only a chain's latest offer and re-checks its generation, so a superseded offer
+/// carries nothing. Retained work is therefore at most one offer per chain plus the recovery
+/// certificates, which the recovery windows bound.
+impl<S: Scheme, D: Digest> mailbox::Policy for ChainUpdate<S, D> {
+    type Overflow = VecDeque<Self>;
+
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
+        if let Self::DaVoteReady(offer) = &message {
+            let chain = offer.chain;
+            overflow.retain(|retained| {
+                !matches!(retained, Self::DaVoteReady(previous) if previous.chain == chain)
+            });
+        }
+        overflow.push_back(message);
+    }
+}
 
 impl<S: Scheme, D: Digest> From<DaUpdate<S, D>> for ChainUpdate<S, D> {
     fn from(update: DaUpdate<S, D>) -> Self {
@@ -331,5 +343,41 @@ where
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        multimmit::{machine::Generation, mocks::Bls},
+        types::Height,
+    };
+    use commonware_actor::mailbox::Policy as _;
+    use commonware_cryptography::{bls12381::primitives::variant::MinPk, sha256::Digest as D};
+
+    fn offer(chain: u32, through: u64) -> ChainUpdate<Bls<MinPk>, D> {
+        ChainUpdate::DaVoteReady(DaVotesOffer {
+            generation: Generation::new(1),
+            chain: ChainId::new(chain),
+            candidates: Vec::new(),
+            ready_through: Height::new(through),
+        })
+    }
+
+    #[test]
+    fn retained_offers_keep_only_the_latest_of_each_chain() {
+        let mut overflow = VecDeque::new();
+        for (chain, through) in [(0, 1), (1, 1), (0, 2), (0, 3), (1, 2)] {
+            ChainUpdate::handle(&mut overflow, offer(chain, through));
+        }
+        let retained = overflow
+            .iter()
+            .map(|update| match update {
+                ChainUpdate::DaVoteReady(offer) => (offer.chain.get(), offer.ready_through.get()),
+                ChainUpdate::Recovered(_) => unreachable!("only offers were retained"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(retained, vec![(0, 3), (1, 2)]);
     }
 }
