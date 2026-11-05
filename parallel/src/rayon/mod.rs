@@ -122,17 +122,10 @@ pub(crate) use sleep::THREADS_MAX;
 /// Busy-waits for `duration`, so a job holds its thread without sleeping.
 #[cfg(test)]
 pub(crate) fn spin(duration: std::time::Duration) {
-    timed_spin(duration);
-}
-
-/// Busy-waits until at least `duration` has elapsed and returns the elapsed wall time.
-#[cfg(test)]
-pub(crate) fn timed_spin(duration: std::time::Duration) -> std::time::Duration {
     let start = std::time::Instant::now();
     while start.elapsed() < duration {
         std::hint::spin_loop();
     }
-    start.elapsed()
 }
 
 /// Returns the number of workers eligible to run the calling worker's current job.
