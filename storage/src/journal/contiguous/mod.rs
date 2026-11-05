@@ -246,7 +246,7 @@ pub trait Contiguous: Send + Sync {
     /// are skipped, and failures are logged.
     ///
     /// One prefetch warms at most half as many pages as the page cache's Main section holds,
-    /// starting from the lowest positions. The rest are skipped and a warning is logged.
+    /// mostly starting from the lowest positions. The rest are skipped and a warning is logged.
     #[commonware_macros::stability(ALPHA)]
     fn prefetch(&self, positions: &[u64]) -> impl Future<Output = ()> + Send + 'static + use<Self>;
 
