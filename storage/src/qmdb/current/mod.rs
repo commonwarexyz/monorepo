@@ -329,10 +329,7 @@
 use crate::{
     Context,
     index::{Factory as IndexFactory, Ordered as OrderedIndex},
-    journal::{
-        authenticated,
-        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    },
+    journal::authenticated,
     merkle::{self, Location, full::Config as MerkleConfig},
     qmdb::{
         any::{
@@ -412,12 +409,6 @@ impl<T: Translator, J, S: Strategy, B> From<Config<T, J, S, B>> for AnyConfig<T,
         }
     }
 }
-
-/// Configuration for a `Current` authenticated db with fixed-size values.
-pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
-
-/// Configuration for a `Current` authenticated db with variable-sized values.
-pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
 impl<F, E, K, V, C, I, H, const N: usize, S> db::Db<F, E, C, I, H, UnorderedUpdate<K, V>, N, S>
 where
@@ -587,12 +578,12 @@ pub mod tests {
 
     pub use super::BitmapPrunedBits;
     use super::{
-        Codec, FConfig, FixedConfig, MerkleConfig, Operation, Strategy, Update, VConfig,
-        VariableConfig, batch, db, grafting, ordered, unordered,
+        Codec, Config, MerkleConfig, Operation, Strategy, Update, batch, db, grafting, ordered,
+        unordered,
     };
     use crate::{
         index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
-        journal::contiguous::Mutable,
+        journal::contiguous::{Mutable, fixed::Config as FConfig, variable::Config as VConfig},
         merkle::{self, mmb, mmr, storage::Storage as _},
         qmdb::{
             ProofExt as _,
@@ -873,7 +864,7 @@ pub mod tests {
     /// Shared config factory for fixed-value Current QMDB tests.
     pub(crate) fn fixed_config<T: Translator + Default>(
         partition_prefix: &str,
-    ) -> FixedConfig<T, Sequential> {
+    ) -> Config<T, FConfig, Sequential> {
         fixed_config_full(partition_prefix, ())
     }
 
@@ -882,9 +873,9 @@ pub mod tests {
     pub(crate) fn fixed_config_full<T: Translator + Default, B>(
         partition_prefix: &str,
         init_concurrency: B,
-    ) -> FixedConfig<T, Sequential, B> {
+    ) -> Config<T, FConfig, Sequential, B> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        FixedConfig {
+        Config {
             merkle: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
@@ -912,7 +903,7 @@ pub mod tests {
     /// Shared config factory for variable-value Current QMDB tests with unit codec config.
     pub(crate) fn variable_config<T: Translator + Default>(
         partition_prefix: &str,
-    ) -> VariableConfig<T, ((), ()), Sequential> {
+    ) -> Config<T, VConfig<((), ())>, Sequential> {
         variable_config_full(partition_prefix, ())
     }
 
@@ -921,9 +912,9 @@ pub mod tests {
     pub(crate) fn variable_config_full<T: Translator + Default, B>(
         partition_prefix: &str,
         init_concurrency: B,
-    ) -> VariableConfig<T, ((), ()), Sequential, B> {
+    ) -> Config<T, VConfig<((), ())>, Sequential, B> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        VariableConfig {
+        Config {
             merkle: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
@@ -953,14 +944,14 @@ pub mod tests {
     /// Like [fixed_config], typed for a partitioned index at the serial concurrency.
     pub(crate) fn fixed_config_partitioned<T: Translator + Default>(
         partition_prefix: &str,
-    ) -> FixedConfig<T, Sequential, NonZeroUsize> {
+    ) -> Config<T, FConfig, Sequential, NonZeroUsize> {
         fixed_config_full(partition_prefix, NZUsize!(1))
     }
 
     /// Like [variable_config], typed for a partitioned index at the serial concurrency.
     pub(crate) fn variable_config_partitioned<T: Translator + Default>(
         partition_prefix: &str,
-    ) -> VariableConfig<T, ((), ()), Sequential, NonZeroUsize> {
+    ) -> Config<T, VConfig<((), ())>, Sequential, NonZeroUsize> {
         variable_config_full(partition_prefix, NZUsize!(1))
     }
 
@@ -2090,7 +2081,7 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-            let cfg = VariableConfig {
+            let cfg = Config {
                 merkle: MerkleConfig {
                     journal_partition: "forged-exclusion-journal".to_string(),
                     metadata_partition: "forged-exclusion-metadata".to_string(),

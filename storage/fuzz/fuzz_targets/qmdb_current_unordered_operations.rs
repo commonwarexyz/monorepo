@@ -9,7 +9,7 @@ use commonware_storage::{
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
         any::{traits::DbAny as _, value::FixedEncoding},
-        current::{FixedConfig as Config, unordered::fixed::Db as CurrentDb},
+        current::unordered::fixed::{Config, Db as CurrentDb},
     },
     translator::TwoCap,
 };

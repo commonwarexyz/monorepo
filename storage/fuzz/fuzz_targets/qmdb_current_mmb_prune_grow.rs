@@ -18,7 +18,10 @@ use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deter
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full::Config as MerkleConfig, mmb},
-    qmdb::current::{BitmapPrunedBits, FixedConfig as Config, unordered::fixed::Db as CurrentDb},
+    qmdb::current::{
+        BitmapPrunedBits,
+        unordered::fixed::{Config, Db as CurrentDb},
+    },
     translator::TwoCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};

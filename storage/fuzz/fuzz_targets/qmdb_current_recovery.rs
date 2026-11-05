@@ -19,7 +19,7 @@ use commonware_storage::{
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
         any::value::VariableEncoding,
-        current::{VariableConfig, unordered::variable::Db as Current},
+        current::unordered::variable::{Config, Db as Current},
     },
     translator::TwoCap,
 };
@@ -99,7 +99,7 @@ struct ConfigParams {
     replay_buffer: NonZeroUsize,
 }
 
-fn make_config(suffix: &str, params: ConfigParams) -> VariableConfig<TwoCap, ((), ()), Sequential> {
+fn make_config(suffix: &str, params: ConfigParams) -> Config<TwoCap, ((), ()), Sequential> {
     let ConfigParams {
         page_size,
         page_cache_size,
@@ -109,7 +109,7 @@ fn make_config(suffix: &str, params: ConfigParams) -> VariableConfig<TwoCap, (()
         replay_buffer,
     } = params;
     let page_cache = CacheRef::new(page_size, page_cache_size);
-    VariableConfig {
+    Config {
         merkle: MerkleConfig {
             journal_partition: format!("crash-merkle-journal-{suffix}"),
             metadata_partition: format!("crash-merkle-metadata-{suffix}"),

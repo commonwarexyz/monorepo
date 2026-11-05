@@ -10,9 +10,12 @@
 
 use crate::{
     index::ordered::Index,
-    journal::contiguous::fixed::Journal,
+    journal::contiguous::fixed::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::any::{ordered::fixed::Operation, value::FixedEncoding},
+    qmdb::{
+        any::{ordered::fixed::Operation, value::FixedEncoding},
+        current,
+    },
 };
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
@@ -27,11 +30,15 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     S,
 >;
 
+/// Configuration for a [Db].
+pub type Config<T, S> = current::Config<T, JournalConfig, S>;
+
 pub mod partitioned {
     //! A variant of [super] that uses a partitioned index for the snapshot.
 
     use super::*;
     use crate::index::partitioned::ordered::Index;
+    use core::num::NonZeroUsize;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -51,6 +58,9 @@ pub mod partitioned {
             N,
             S,
         >;
+
+    /// Configuration for a [Db].
+    pub type Config<T, S> = current::Config<T, JournalConfig, S, NonZeroUsize>;
 }
 
 #[cfg(test)]

@@ -12,10 +12,9 @@ use commonware_storage::{
     qmdb::{
         ProofExt as _,
         any::{
-            FixedConfig as Config,
             db::Db as AnyDb,
             traits::DbAny as _,
-            unordered::{Operation, Update},
+            unordered::{Operation, Update, fixed::Config},
             value::FixedEncoding,
         },
     },

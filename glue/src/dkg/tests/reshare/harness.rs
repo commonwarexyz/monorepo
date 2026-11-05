@@ -79,10 +79,7 @@ use commonware_storage::{
     archive::prunable,
     journal::contiguous::fixed::Config as FixedLogConfig,
     mmr::{self, Location, full::Config as MmrJournalConfig},
-    qmdb::{
-        any::{FixedConfig, unordered::fixed},
-        sync::Target,
-    },
+    qmdb::{any::unordered::fixed, sync::Target},
     translator::TwoCap,
 };
 use commonware_utils::{
@@ -1200,7 +1197,7 @@ impl EngineDefinition for ReshareEngine {
             .lock()
             .insert(public_key.clone(), marshal.clone());
 
-        let db_config = FixedConfig {
+        let db_config = fixed::Config {
             merkle: MmrJournalConfig {
                 journal_partition: format!("{partition_prefix}-qmdb-mmr-journal"),
                 metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),

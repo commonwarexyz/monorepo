@@ -25,7 +25,15 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{self, full},
-    qmdb::any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
+    qmdb::{
+        any::{
+            traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
+            unordered::{fixed::Config as AnyFixedConfig, variable::Config as AnyVariableConfig},
+        },
+        current::unordered::{
+            fixed::Config as CurrentFixedConfig, variable::Config as CurrentVariableConfig,
+        },
+    },
     translator::EightCap,
 };
 use commonware_utils::{NZU64, NZUsize, TestRng};
@@ -322,8 +330,8 @@ fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
 pub(crate) fn any_fix_cfg_with_cache(
     ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::any::FixedConfig<EightCap, Rayon> {
-    commonware_storage::qmdb::any::FixedConfig {
+) -> AnyFixedConfig<EightCap, Rayon> {
+    AnyFixedConfig {
         merkle: merkle_cfg(ctx, pc.clone()),
         log: fix_log_cfg(pc),
         translator: EightCap,
@@ -336,8 +344,8 @@ pub(crate) fn any_fix_cfg_with_cache(
 fn any_var_cfg_with_cache(
     ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ()), Rayon> {
-    commonware_storage::qmdb::any::VariableConfig {
+) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
+    AnyVariableConfig {
         merkle: merkle_cfg(ctx, pc.clone()),
         log: var_log_cfg(pc),
         translator: EightCap,
@@ -350,8 +358,8 @@ fn any_var_cfg_with_cache(
 pub(crate) fn cur_fix_cfg_with_cache(
     ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
-    commonware_storage::qmdb::current::FixedConfig {
+) -> CurrentFixedConfig<EightCap, Rayon> {
+    CurrentFixedConfig {
         merkle: merkle_cfg(ctx, pc.clone()),
         log: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
@@ -365,8 +373,8 @@ pub(crate) fn cur_fix_cfg_with_cache(
 fn cur_var_cfg_with_cache(
     ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ()), Rayon> {
-    commonware_storage::qmdb::current::VariableConfig {
+) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
+    CurrentVariableConfig {
         merkle: merkle_cfg(ctx, pc.clone()),
         log: var_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),

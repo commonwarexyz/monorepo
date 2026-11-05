@@ -56,7 +56,7 @@ use commonware_storage::{
     journal::contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
     mmr::{self, Location, full::Config as MmrJournalConfig},
     qmdb::{
-        any::{FixedConfig, unordered::fixed},
+        any::unordered::fixed,
         immutable,
         sync::{CompactTarget, Target},
     },
@@ -88,10 +88,10 @@ pub(super) fn qmdb_config(
     prefix: &str,
     page_cache: CacheRef,
 ) -> (
-    FixedConfig<TwoCap, Sequential>,
+    fixed::Config<TwoCap, Sequential>,
     immutable::fixed::CompactConfig<Sequential>,
 ) {
-    let db_a = FixedConfig {
+    let db_a = fixed::Config {
         merkle: MmrJournalConfig {
             journal_partition: format!("{prefix}-qmdb-a-mmr-journal"),
             metadata_partition: format!("{prefix}-qmdb-a-mmr-metadata"),

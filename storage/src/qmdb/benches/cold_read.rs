@@ -58,7 +58,7 @@ use commonware_storage::{
     Context as Ctx,
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full, mmb},
-    qmdb::any::{FixedConfig, batch::Slot},
+    qmdb::any::{batch::Slot, unordered::fixed::Config as AnyConfig},
     translator::EightCap,
 };
 use commonware_utils::{NZU64, NZUsize, TestRng, futures::try_join_all};
@@ -295,10 +295,10 @@ fn disk_delta(label: &str, before: DiskStats, after: DiskStats, elapsed_ms: f64)
     )
 }
 
-fn config<E: Strategizer>(ctx: &E, args: &Args) -> FixedConfig<EightCap, Rayon> {
+fn config<E: Strategizer>(ctx: &E, args: &Args) -> AnyConfig<EightCap, Rayon> {
     let page_size = args.logical.unwrap_or(paged::page_size(args.page));
     let page_cache = CacheRef::new(page_size, NZUsize!(args.cache));
-    FixedConfig {
+    AnyConfig {
         merkle: full::Config {
             journal_partition: "cold-merkle".into(),
             metadata_partition: "cold-merkle-meta".into(),

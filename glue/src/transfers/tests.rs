@@ -740,9 +740,9 @@ type CurrentOrdered = current::ordered::fixed::Db<
     Sequential,
 >;
 
-fn any_config(suffix: &str) -> any::FixedConfig<TwoCap, Sequential> {
+fn any_config(suffix: &str) -> any::Config<TwoCap, FixedJournalConfig, Sequential> {
     let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
-    any::FixedConfig {
+    any::Config {
         merkle: MerkleConfig {
             journal_partition: format!("transfers-journal-{suffix}"),
             metadata_partition: format!("transfers-metadata-{suffix}"),
@@ -766,9 +766,9 @@ fn any_config(suffix: &str) -> any::FixedConfig<TwoCap, Sequential> {
     }
 }
 
-fn current_config(suffix: &str) -> current::FixedConfig<TwoCap, Sequential> {
+fn current_config(suffix: &str) -> current::Config<TwoCap, FixedJournalConfig, Sequential> {
     let any = any_config(suffix);
-    current::FixedConfig {
+    current::Config {
         merkle: any.merkle,
         log: any.log,
         grafted_metadata_partition: format!("transfers-grafted-{suffix}"),
@@ -779,9 +779,9 @@ fn current_config(suffix: &str) -> current::FixedConfig<TwoCap, Sequential> {
     }
 }
 
-fn variable_config(suffix: &str) -> any::VariableConfig<TwoCap, ((), ()), Sequential> {
+fn variable_config(suffix: &str) -> any::unordered::variable::Config<TwoCap, ((), ()), Sequential> {
     let any = any_config(suffix);
-    any::VariableConfig {
+    any::unordered::variable::Config {
         merkle: any.merkle,
         log: VariableJournalConfig {
             partition: format!("transfers-log-{suffix}"),

@@ -1617,6 +1617,10 @@ mod harnesses {
     use super::SyncTestHarness;
     use crate::{
         merkle::{self, mmb, mmr},
+        qmdb::any::{
+            ordered::fixed::Config as OrderedFixedConfig,
+            unordered::fixed::Config as UnorderedFixedConfig,
+        },
         translator::TwoCap,
     };
     use commonware_cryptography::sha256::Digest;
@@ -1738,9 +1742,7 @@ mod harnesses {
         >;
         type Metadata = Digest;
 
-        fn config(
-            suffix: &str,
-        ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
+        fn config(suffix: &str) -> OrderedFixedConfig<TwoCap, commonware_parallel::Sequential> {
             crate::qmdb::any::test::fixed_db_config(suffix)
         }
 
@@ -1899,9 +1901,7 @@ mod harnesses {
         >;
         type Metadata = Digest;
 
-        fn config(
-            suffix: &str,
-        ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
+        fn config(suffix: &str) -> UnorderedFixedConfig<TwoCap, commonware_parallel::Sequential> {
             crate::qmdb::any::test::fixed_db_config(suffix)
         }
 

@@ -1189,6 +1189,7 @@ mod tests {
 
     type Qmdb<E> =
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
+    type QmdbConfig = any::unordered::fixed::Config<TwoCap, Sequential>;
     type DbSet<E> = Shared<Qmdb<E>>;
     type TestMerkleized =
         <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Merkleized;
@@ -1715,7 +1716,7 @@ mod tests {
         context_cell: ContextCell<deterministic::Context>,
         processor: Processor<deterministic::Context, ExecutionApp, Sequential>,
         provider: MapProvider,
-        db_config: any::FixedConfig<TwoCap, Sequential>,
+        db_config: QmdbConfig,
     }
 
     impl Harness {
@@ -1740,7 +1741,7 @@ mod tests {
         async fn with_app(
             context: deterministic::Context,
             provider: MapProvider,
-            config: any::FixedConfig<TwoCap, Sequential>,
+            config: QmdbConfig,
             app: ExecutionApp,
         ) -> Self {
             let databases = <DbSet<deterministic::Context> as DatabaseSet<
@@ -1884,9 +1885,9 @@ mod tests {
         format!("processor_harness_{id}")
     }
 
-    fn qmdb_config(prefix: &str) -> any::FixedConfig<TwoCap, Sequential> {
+    fn qmdb_config(prefix: &str) -> QmdbConfig {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        any::FixedConfig {
+        QmdbConfig {
             merkle: MmrJournalConfig {
                 journal_partition: format!("{prefix}_mmr_journal"),
                 metadata_partition: format!("{prefix}_mmr_metadata"),

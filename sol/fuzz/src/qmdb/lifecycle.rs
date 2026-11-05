@@ -15,8 +15,10 @@ use commonware_storage::{
         self,
         any::{ordered::fixed::Update, value::FixedEncoding},
         current::{
-            FixedConfig,
-            ordered::{fixed::Db, proof::ExclusionProof},
+            ordered::{
+                fixed::{Config, Db},
+                proof::ExclusionProof,
+            },
             proof::constant::OperationProof,
         },
     },
@@ -59,9 +61,9 @@ impl LifecycleArgs {
     }
 }
 
-fn config() -> FixedConfig<OneCap, Sequential> {
+fn config() -> Config<OneCap, Sequential> {
     let page_cache = CacheRef::new(NZU16!(4096), NZUsize!(8));
-    FixedConfig {
+    Config {
         merkle: MerkleConfig {
             journal_partition: "lifecycle-merkle-journal".into(),
             metadata_partition: "lifecycle-merkle-metadata".into(),

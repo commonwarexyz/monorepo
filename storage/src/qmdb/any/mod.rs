@@ -121,10 +121,7 @@
 use crate::{
     Context,
     index::{Factory as IndexFactory, Ordered as OrderedIndex},
-    journal::{
-        authenticated,
-        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    },
+    journal::authenticated,
     merkle::{Family, Location, full::Config as MerkleConfig},
     qmdb::{
         Error as QmdbError,
@@ -204,12 +201,6 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// between spawned decode and insert tasks while the init task merely forwards batches.
     pub init_concurrency: B,
 }
-
-/// Configuration for an `Any` authenticated db with fixed-size values.
-pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
-
-/// Configuration for an `Any` authenticated db with variable-sized values.
-pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
 impl<F, E, K, V, C, I, H, S> db::Db<F, E, C, I, H, UnorderedUpdate<K, V>, BITMAP_CHUNK_BYTES, S>
 where
@@ -353,7 +344,7 @@ pub(crate) mod test {
         merkle::Location as GenericLocation,
         qmdb::{
             ProofExt as _,
-            any::{FixedConfig, MerkleConfig, VariableConfig, db::Db},
+            any::{Config, MerkleConfig, db::Db},
             chain::Bounds,
         },
         translator::OneCap,
@@ -385,7 +376,7 @@ pub(crate) mod test {
 
     pub(crate) fn fixed_db_config<T: Translator + Default>(
         suffix: &str,
-    ) -> FixedConfig<T, Sequential> {
+    ) -> Config<T, FConfig, Sequential> {
         fixed_db_config_with_strategy(suffix, Sequential)
     }
 
@@ -395,7 +386,7 @@ pub(crate) mod test {
     >(
         suffix: &str,
         strategy: S,
-    ) -> FixedConfig<T, S> {
+    ) -> Config<T, FConfig, S> {
         fixed_db_config_full(suffix, strategy, ())
     }
 
@@ -409,9 +400,9 @@ pub(crate) mod test {
         suffix: &str,
         strategy: S,
         init_concurrency: B,
-    ) -> FixedConfig<T, S, B> {
+    ) -> Config<T, FConfig, S, B> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        FixedConfig {
+        Config {
             merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
@@ -438,20 +429,20 @@ pub(crate) mod test {
     /// Like [fixed_db_config], typed for a partitioned index at the serial concurrency.
     pub(crate) fn fixed_db_config_partitioned<T: Translator + Default>(
         suffix: &str,
-    ) -> FixedConfig<T, Sequential, NonZeroUsize> {
+    ) -> Config<T, FConfig, Sequential, NonZeroUsize> {
         fixed_db_config_full(suffix, Sequential, NZUsize!(1))
     }
 
     /// Like [variable_db_config], typed for a partitioned index at the serial concurrency.
     pub(crate) fn variable_db_config_partitioned<T: Translator + Default>(
         suffix: &str,
-    ) -> VariableConfig<T, ((), ()), Sequential, NonZeroUsize> {
+    ) -> Config<T, VConfig<((), ())>, Sequential, NonZeroUsize> {
         variable_db_config_full(suffix, NZUsize!(1))
     }
 
     pub(crate) fn variable_db_config<T: Translator + Default>(
         suffix: &str,
-    ) -> VariableConfig<T, ((), ()), Sequential> {
+    ) -> Config<T, VConfig<((), ())>, Sequential> {
         variable_db_config_full(suffix, ())
     }
 
@@ -460,9 +451,9 @@ pub(crate) mod test {
     pub(crate) fn variable_db_config_full<T: Translator + Default, B>(
         suffix: &str,
         init_concurrency: B,
-    ) -> VariableConfig<T, ((), ()), Sequential, B> {
+    ) -> Config<T, VConfig<((), ())>, Sequential, B> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        VariableConfig {
+        Config {
             merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
