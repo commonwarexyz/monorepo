@@ -112,7 +112,7 @@
 //! The actor panics if:
 //!
 //! - a boundary block does not carry the [`EpochInfo`] of the epoch it
-//!   introduces, or does not decode under the plan's block codec configuration
+//!   introduces
 //! - a finalized block is above the active epoch's final block
 //! - the [`Provider`] has no scheme for an entered epoch
 //! - the [`SimplexConfig`] is invalid
@@ -484,14 +484,16 @@ mod tests {
     /// Forwards marshal's updates to the orchestrator and observes when it acknowledges one
     /// chosen height.
     ///
-    /// The orchestrator receives that height's block with a private acknowledgement whose
-    /// waiter [`Self::acknowledged`] awaits. Marshal's own acknowledgement is held, so its
-    /// processed height stays below the block.
+    /// The orchestrator receives that height's block with a private acknowledgement that
+    /// [`Self::observe`] creates before the block is delivered, so [`Self::acknowledged`]
+    /// returns as soon as the orchestrator acknowledges the block. Marshal's own
+    /// acknowledgement is held, so its processed height stays below the block.
     #[derive(Clone)]
     struct AckObserver {
         orchestrator: super::Mailbox<mocks::TestBlock, Exact>,
         observed: Arc<Mutex<Option<Height>>>,
         held: Arc<Mutex<Option<Exact>>>,
+        private: Arc<Mutex<Option<Exact>>>,
         waiter: Arc<Mutex<Option<ExactWaiter>>>,
     }
 
@@ -501,22 +503,21 @@ mod tests {
                 orchestrator,
                 observed: Arc::new(Mutex::new(None)),
                 held: Arc::new(Mutex::new(None)),
+                private: Arc::new(Mutex::new(None)),
                 waiter: Arc::new(Mutex::new(None)),
             }
         }
 
         fn observe(&self, height: Height) {
+            let (private, waiter) = Exact::handle();
             *self.observed.lock() = Some(height);
+            *self.private.lock() = Some(private);
+            *self.waiter.lock() = Some(waiter);
         }
 
         /// Waits until the orchestrator acknowledges the observed height.
-        async fn acknowledged(&self, context: &deterministic::Context) {
-            let waiter = loop {
-                if let Some(waiter) = self.waiter.lock().take() {
-                    break waiter;
-                }
-                context.sleep(Duration::from_millis(10)).await;
-            };
+        async fn acknowledged(&self) {
+            let waiter = self.waiter.lock().take().expect("observer must be armed");
             waiter
                 .await
                 .expect("orchestrator must acknowledge the observed block");
@@ -533,9 +534,8 @@ mod tests {
             if *self.observed.lock() != Some(block.height()) {
                 return self.orchestrator.report(marshal::Update::Block(block, ack));
             }
-            let (private, waiter) = Exact::handle();
+            let private = self.private.lock().take().expect("observer must be armed");
             *self.held.lock() = Some(ack);
-            *self.waiter.lock() = Some(waiter);
             self.orchestrator
                 .report(marshal::Update::Block(block, private))
         }
@@ -1691,6 +1691,69 @@ mod tests {
         });
     }
 
+    /// A node stopped at any point while it checkpoints its startup epoch from marshal
+    /// keeps either no checkpoint or one with the finalization marshal holds. The latest
+    /// stop in the sweep must land after the checkpoint is recorded, so the sweep covers
+    /// the window between marshal's finalization and block replies.
+    #[test]
+    fn stop_during_startup_checkpoint_keeps_marshal_finalization() {
+        const SWEEP: usize = 16;
+        for yields in 0..SWEEP {
+            let runner = deterministic::Runner::default();
+            runner.start(|mut context| async move {
+                let fixture = mocks::scheme_fixture_n(&mut context, 4);
+                let mut cluster = Cluster::start_with_fixture(&mut context, &fixture, true).await;
+                let boundary = cluster.boundary.clone();
+                wait_for_processed(&context, &cluster.nodes[0].marshal, boundary.height()).await;
+                cluster.nodes[0].stop().await;
+
+                let restart = context
+                    .child("node")
+                    .with_attribute("index", 0)
+                    .with_attribute("restart", 1);
+                let plan = TestPlan::init(
+                    restart.child("state_sync_plan"),
+                    StateSyncConfig {
+                        partition_prefix: "orchestrator-node-0-unrecorded".into(),
+                        max_participants: NZU32!(16),
+                        max_supported_mode: max_supported_mode(),
+                        block_codec_config: (),
+                    },
+                    None,
+                )
+                .await;
+                cluster
+                    .recover(restart, &fixture, 0, plan.clone(), Epoch::new(1))
+                    .await;
+                let stopper = context.child("stopper");
+                context.child("stop").spawn(move |_| async move {
+                    for _ in 0..yields {
+                        commonware_runtime::reschedule().await;
+                    }
+                    let _ = stopper.stop(0, None).await;
+                });
+                let _ = context.stopped().await;
+
+                // The orchestrator keeps running until it observes the stop, so let it finish
+                // any checkpoint it was recording.
+                context.sleep(Duration::from_secs(1)).await;
+                let checkpoint = plan.checkpoint(Epoch::new(1)).await;
+                assert!(
+                    checkpoint
+                        .as_ref()
+                        .is_none_or(|checkpoint| checkpoint.finalization().is_some()),
+                    "stop after {yields} yields must not leave the checkpoint without its finalization"
+                );
+                if yields == SWEEP - 1 {
+                    assert!(
+                        checkpoint.is_some(),
+                        "the latest stop must land after the checkpoint is recorded"
+                    );
+                }
+            });
+        }
+    }
+
     /// A node restarts after marshal pruned the boundary block that introduced its
     /// epoch, so only the checkpoint recorded at that boundary can supply the epoch.
     #[test]
@@ -1853,7 +1916,7 @@ mod tests {
             let node = &mut cluster.nodes[0];
             node.acks.observe(last_one.height());
             finalize(&mut node.marshal, &last_one, &fixture.schemes).await;
-            node.acks.acknowledged(&context).await;
+            node.acks.acknowledged().await;
             node.stop().await;
 
             let plan = node_plan(context.child("state_sync_plan"), 0, None).await;

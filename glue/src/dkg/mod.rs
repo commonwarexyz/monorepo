@@ -191,9 +191,9 @@
 //! The reshare actor also needs the height `h` of the floor block to decide whether it participates
 //! in `f`'s ceremony or follows it, as [State Sync](reshare#state-sync) describes. A startup that
 //! lacks `h` or finds the floor block unprocessed waits for the block from marshal and records its
-//! height with the material if the plan has none. Once marshal has processed the floor block, a
-//! restart takes `h` from the plan and resumes from marshal's processed position without reading
-//! the block, so marshal may prune it:
+//! height with the material if the plan has none. Once the plan has `h` and marshal has processed
+//! the floor block, a restart takes `h` from the plan and resumes from marshal's processed position
+//! without reading the block, so marshal may prune it:
 //!
 //! ```text
 //!         never delivered     floor block h             delivered from h onward
@@ -207,14 +207,19 @@
 //!                             |       | anchor and is read locally
 //! ```
 //!
-//! A restart from a checkpoint never reads the boundary block. A startup reads the floor block only
-//! before marshal has processed it, and until then marshal is either fetching that block for its
-//! floor or stores it as the anchor of its processed position. Marshal retention therefore does not
-//! limit restart.
+//! A restart from a checkpoint never reads the boundary block. A restart with `h` in the plan reads
+//! the floor block only before marshal has processed it, and until then marshal is either fetching
+//! that block for its floor or stores it as the anchor of its processed position.
 //!
-//! Marshal skips a configured floor that its persisted round floor already covers, without fetching
-//! the floor block. A node must therefore not be given material whose floor its marshal has passed,
-//! since its reshare actor may wait forever for a floor block that marshal has already pruned.
+//! Material passed to [`state_sync::Plan::init`] has no `h`, so the next startup reads its floor
+//! block even if marshal has already processed it. Marshal skips a configured floor that its
+//! persisted round floor already covers and does not fetch the floor block. A node must therefore
+//! only be given material whose floor block its marshal still stores or will fetch, or its reshare
+//! actor may wait forever for a block that marshal has already pruned.
+//!
+//! [`Stateful`](crate::stateful::Stateful) does not prune marshal before [`crate::stateful`] state
+//! sync completes, so an application that passes material only until then meets this rule. Under
+//! this rule, marshal retention does not limit restart.
 //!
 //! The [`probe`] answers latest-finalization requests from marshal. It answers a request for epoch
 //! `e`'s boundary finalization or block from the node's checkpoint for `e`, and only when that

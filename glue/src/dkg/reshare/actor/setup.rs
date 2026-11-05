@@ -10,7 +10,6 @@ use crate::dkg::{
     },
     types::{EpochInfo, EpochOutcome, Participants, Payload, SchemeInfo},
 };
-use commonware_codec::Codec;
 use commonware_consensus::{
     Block, Heightable as _,
     marshal::{
@@ -69,17 +68,15 @@ where
     Participate(Box<PreparedEpoch<V, C>>),
 }
 
-/// Epoch info recovered from the plan at startup, with the height of the
-/// certified floor when it comes from state-sync material and no floor when it
-/// comes from a checkpoint.
-pub(super) struct RecoveredStart<V, P, D>
+/// State-sync epoch metadata paired with the block height of its certified floor.
+pub(super) struct StateSyncStart<V, P, D>
 where
     V: BlsVariant,
     P: PublicKey,
     D: Directory<P>,
 {
     pub(super) info: EpochInfo<V, P, D>,
-    pub(super) floor: Option<Height>,
+    pub(super) floor: Height,
 }
 
 /// Returns whether a state-sync floor lies after its epoch's midpoint, so the
@@ -148,6 +145,19 @@ async fn register_and_mark<R: Registrar>(
     fence.mark(epoch);
 }
 
+/// Returns whether a startup can resume from marshal's processed position without
+/// reading the state-sync floor block at `height`.
+///
+/// Marshal may deliver a subscribed block before it stores the block durably, so a
+/// crash can leave the floor's height recorded in the plan while marshal restarts
+/// with no processed position or one below the floor. Marshal is then fetching the
+/// floor block or holds it as its anchor, and the startup must wait for it.
+pub(super) fn floor_processed<B>(processed: &Option<(Processed, B)>, height: Height) -> bool {
+    processed
+        .as_ref()
+        .is_some_and(|(processed, _)| processed.height() >= height)
+}
+
 /// Returns the later of marshal's processed position and the parent of the
 /// state-sync floor (`None` when neither exists).
 ///
@@ -201,7 +211,7 @@ where
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + Clock + Storage,
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -218,7 +228,7 @@ where
     pub(super) async fn setup(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
-        recovered: Option<RecoveredStart<V, C::PublicKey, B::Directory>>,
+        state_sync: Option<StateSyncStart<V, C::PublicKey, B::Directory>>,
     ) -> Setup<V, C> {
         self.metrics.set_phase(Phase::Setup);
 
@@ -230,16 +240,16 @@ where
         let epoch = bounds.epoch();
         self.metrics.set_epoch(epoch.get());
 
-        // Prefer the epoch committed earlier in this run, then the material
-        // recovered from the plan, then the finalized boundary block.
+        // Prefer the epoch committed earlier in this run, then state-sync
+        // material, then the finalized boundary block.
         let current = store
             .current()
             .filter(|current| current.epoch == epoch)
             .cloned();
         let already_committed = current.is_some();
-        let state_sync_floor = recovered.as_ref().and_then(|start| start.floor);
+        let state_sync_floor = state_sync.as_ref().map(|start| start.floor);
         let follow = state_sync_skips_inclusion_prefix(&self.epocher, state_sync_floor);
-        let info = match current.or_else(|| recovered.map(|start| start.info)) {
+        let info = match current.or_else(|| state_sync.map(|start| start.info)) {
             Some(info) => info,
             None => {
                 let Some(info) = self.boundary_epoch_info(epoch).await else {
@@ -313,13 +323,17 @@ where
     }
 
     /// Returns the [`EpochInfo`] carried by the finalized boundary block that
-    /// introduced `epoch` (`None` if marshal does not have the block).
+    /// introduced `epoch`, read from the epoch's checkpoint in the plan and
+    /// otherwise from marshal (`None` if neither holds the block).
     ///
     /// Panics if the block carries no [`EpochInfo`].
     async fn boundary_epoch_info(
         &mut self,
         epoch: Epoch,
     ) -> Option<EpochInfo<V, C::PublicKey, B::Directory>> {
+        if let Some(checkpoint) = self.state_sync.checkpoint(epoch).await {
+            return Some(checkpoint.info());
+        }
         let height = epoch
             .previous()
             .and_then(|e| self.epocher.last(e))
@@ -368,9 +382,7 @@ where
     ) -> (Height, Option<MV::Block>) {
         let known = self.state_sync.floor_height().await;
         if let Some(height) = known
-            && anchor
-                .as_ref()
-                .is_some_and(|(processed, _)| processed.height() >= height)
+            && floor_processed(anchor, height)
         {
             return (height, None);
         }
@@ -446,7 +458,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        dealer_for_phase, recovered_share, register_and_mark, startup,
+        dealer_for_phase, floor_processed, recovered_share, register_and_mark, startup,
         state_sync_skips_inclusion_prefix,
     };
     use crate::dkg::{
@@ -516,6 +528,31 @@ mod tests {
         assert_eq!(tip(stored(1), Some(3)), covered(2));
         assert_eq!(tip(absent(2), Some(3)), covered(2));
         assert_eq!(tip(stored(4), Some(3)), covered(4));
+    }
+
+    /// A recorded floor height lets a restart skip the floor block only once marshal
+    /// has processed the floor. With no processed position, or one below the floor,
+    /// the restart must wait for the block.
+    #[test]
+    fn recorded_floor_resumes_only_once_processed() {
+        let floor = Height::new(3);
+        let anchor = |processed| Some((processed, ()));
+
+        assert!(!floor_processed::<()>(&None, floor));
+        assert!(!floor_processed(
+            &anchor(Processed::Absent(Height::new(2))),
+            floor
+        ));
+        assert!(!floor_processed(
+            &anchor(Processed::Block(Height::new(2))),
+            floor
+        ));
+        assert!(floor_processed(&anchor(Processed::Absent(floor)), floor));
+        assert!(floor_processed(&anchor(Processed::Block(floor)), floor));
+        assert!(floor_processed(
+            &anchor(Processed::Block(Height::new(5))),
+            floor
+        ));
     }
 
     #[test]

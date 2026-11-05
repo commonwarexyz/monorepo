@@ -134,13 +134,11 @@ where
     }
 
     /// Returns the finalization of the boundary block that introduces `epoch`, if this node
-    /// checkpointed the epoch with one. Returns `None` for epoch zero, since genesis has no
-    /// finalization.
+    /// checkpointed the epoch with one.
     async fn produce_finalization(
         &mut self,
         epoch: Epoch,
     ) -> Option<Finalization<S, V::Commitment>> {
-        epoch.previous()?;
         self.plan
             .checkpoint(epoch)
             .await
@@ -150,7 +148,6 @@ where
     /// Returns the boundary block that introduces `epoch` under the same conditions as
     /// [`Self::produce_finalization`].
     async fn produce_block(&mut self, epoch: Epoch) -> Option<V::Block> {
-        epoch.previous()?;
         self.plan
             .checkpoint(epoch)
             .await

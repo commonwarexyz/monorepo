@@ -10,10 +10,10 @@
 //!   height of its floor block. The reshare actor records that height when a startup first receives
 //!   the floor block from marshal. A later startup deletes the record once marshal's recovered
 //!   epoch is past the synced epoch.
-//! - The checkpoint partition holds a [`Checkpoint`] for each epoch the orchestrator enters from
-//!   its boundary block. The orchestrator records it when it reads the block from marshal at
-//!   startup, and at each live boundary before it acknowledges the final block. Recording a
-//!   checkpoint drops those of epochs before the one recovered from marshal's processed height.
+//! - The checkpoint partition holds a checkpoint for each epoch the orchestrator enters from its
+//!   boundary block. The orchestrator records it when it reads the block from marshal at startup,
+//!   and at each live boundary before it acknowledges the final block. Recording a checkpoint drops
+//!   those of epochs before the one recovered from marshal's processed height.
 //!
 //! A plan loads the retained checkpoints when it opens, and its clones share that copy in memory,
 //! so reading a checkpoint does not touch storage. Recording one syncs the partition before it
@@ -244,7 +244,7 @@ type Info<S, MV> = EpochInfo<BlsVariant<MV>, <S as Verifier>::PublicKey, Dir<MV>
 /// Marshal may hold a boundary block without its finalization when it repaired the block by walking
 /// back from a later finalized block, and genesis has none. A checkpoint without a finalization
 /// still restarts its epoch, but the probe does not serve that epoch.
-pub struct Checkpoint<S, MV>
+pub(crate) struct Checkpoint<S, MV>
 where
     S: Scheme<MV::Commitment>,
     MV: MarshalVariant,
@@ -292,7 +292,7 @@ where
     /// Returns the epoch info carried by the boundary block.
     ///
     /// The checkpoint keeps no separate copy, so this reads the info from the block's payload.
-    /// Panics if the block carries no epoch info. [`Plan::record`] rejects such a checkpoint.
+    /// Panics if the block carries no epoch info.
     pub(crate) fn info(&self) -> Info<S, MV> {
         let block = MV::into_shared(self.block());
         match block.inner().payload() {
@@ -344,15 +344,6 @@ where
             && self.commitment == other.commitment
             && self.finalization == other.finalization
     }
-}
-
-impl<S, MV> Eq for Checkpoint<S, MV>
-where
-    S: Scheme<MV::Commitment>,
-    MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
-    MV::StoredBlock: Eq,
-{
 }
 
 impl<S, MV> Write for Checkpoint<S, MV>
@@ -456,43 +447,6 @@ where
             floor_height: self.floor_height,
         }
     }
-}
-
-impl<S, D, V, Dir> fmt::Debug for Record<S, D, V, Dir>
-where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
-{
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Record")
-            .field("material", &self.material)
-            .field("floor_height", &self.floor_height)
-            .finish()
-    }
-}
-
-impl<S, D, V, Dir> PartialEq for Record<S, D, V, Dir>
-where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.material == other.material && self.floor_height == other.floor_height
-    }
-}
-
-impl<S, D, V, Dir> Eq for Record<S, D, V, Dir>
-where
-    S: Scheme<D>,
-    D: Digest,
-    V: Variant,
-    Dir: Directory<S::PublicKey>,
-{
 }
 
 impl<S, D, V, Dir> Write for Record<S, D, V, Dir>
@@ -801,9 +755,7 @@ where
     /// `retained_from` must not be later than the epoch any later restart recovers from marshal's
     /// processed height. A disabled plan records nothing.
     ///
-    /// Panics if storage fails or if the checkpoint's block does not carry the info of `epoch`.
-    /// Also panics if the checkpoint does not decode under the plan's block codec configuration,
-    /// since every later load of it would fail.
+    /// Panics if storage fails.
     pub(crate) async fn record<E: Context>(
         &self,
         context: E,
@@ -814,18 +766,6 @@ where
         let Some(storage) = &self.storage else {
             return;
         };
-        assert!(
-            checkpoint.info().epoch == epoch,
-            "checkpoint block must carry the info of its epoch"
-        );
-        Checkpoint::<S, MV>::decode_cfg(
-            checkpoint.encode(),
-            &(
-                storage.block_codec_config.clone(),
-                S::certificate_codec_config_unbounded(),
-            ),
-        )
-        .expect("checkpoint must satisfy codec config");
 
         // Opening a metadata store repairs a copy that fails validation, so the lock keeps clones
         // from opening the partition while another clone writes it.
@@ -1145,39 +1085,6 @@ mod tests {
             assert_eq!(restored.commitment(), digest);
             assert_eq!(restored.finalization(), Some(&boundary_finalization));
             assert_eq!(restored.info(), info);
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "checkpoint block must carry the info of its epoch")]
-    fn record_rejects_checkpoint_for_another_epoch() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let recorded = checkpoint(&mut context, Epoch::new(3));
-            let plan = plan(context.child("plan"), "another-epoch", None).await;
-            plan.record(
-                context.child("record"),
-                Epoch::new(4),
-                recorded,
-                Epoch::new(4),
-            )
-            .await;
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "checkpoint block must carry epoch info")]
-    fn record_rejects_checkpoint_without_epoch_info() {
-        deterministic::Runner::default().start(|context| async move {
-            let block = mocks::genesis_block(ed25519::PrivateKey::from_seed(0).public_key());
-            let digest = block.digest();
-            let plan = plan(context.child("plan"), "no-info", None).await;
-            plan.record(
-                context.child("record"),
-                Epoch::zero(),
-                Checkpoint::new(Digested::precomputed(block, digest), None),
-                Epoch::zero(),
-            )
-            .await;
         });
     }
 
@@ -1501,6 +1408,5 @@ mod conformance {
         CodecConformance<Record<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>> => 8192,
         CodecConformance<Record<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant, Addresses<mocks::TestPublicKey>>> => 8192,
         CodecConformance<Checkpoint<mocks::TestScheme, mocks::TestMarshalVariant>> => 8192,
-        CodecConformance<Checkpoint<mocks::TestScheme, commonware_consensus::marshal::standard::Standard<mocks::MockBlock<mocks::TestDigest, mocks::TestContext, Addresses<mocks::TestPublicKey>>>>> => 8192,
     }
 }
