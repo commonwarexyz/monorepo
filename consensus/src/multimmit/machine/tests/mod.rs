@@ -3,6 +3,7 @@
 
 mod admission;
 mod capacity;
+mod certificate_resolution;
 mod chain_limits;
 mod config;
 mod cost;

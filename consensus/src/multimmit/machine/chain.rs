@@ -92,6 +92,9 @@ pub(crate) struct ChainState<S: Scheme, D: Digest> {
     unplaced: Vec<Option<Height>>,
     /// Whether any chain is certified-only, so [`Self::unplaced_certificates`] has work to do.
     forwards: bool,
+    /// Whether any chain's placement implies a certificate (`d = 0` and `e = 0`), so that
+    /// certificates may need to be recovered from peers.
+    implies_certificates: bool,
     /// The receipt chains (see [`Parameters::receipt_chain`]), by chain.
     ///
     /// [`Parameters::receipt_chain`]: crate::multimmit::config::Parameters::receipt_chain
@@ -142,12 +145,31 @@ impl<S: Scheme, D: Digest> ChainState<S, D> {
                 .chain_limits()
                 .iter()
                 .any(PathLimits::certified_only),
+            implies_certificates: profile
+                .protocol()
+                .chain_limits()
+                .iter()
+                .any(|limits| limits.certified_only() && limits.extension_bound() == 0),
             receipts,
             da: DaState::new(genesis),
             producer,
             signing: ReservationBook::new(profile.resources().max_outbox_effects()),
             capabilities: Vec::new(),
         }
+    }
+
+    /// Returns whether any chain's placement implies a DA certificate; see
+    /// [`Self::placement_implies_certificate`].
+    pub(crate) const fn implies_certificates(&self) -> bool {
+        self.implies_certificates
+    }
+
+    /// Returns whether placing `chain` above a height implies a DA certificate at or above it: the
+    /// chain proposes no uncertified blocks (`d = 0`) and votes extend it by none (`e = 0`).
+    pub(crate) fn placement_implies_certificate(&self, chain: ChainId) -> bool {
+        self.limits
+            .get(chain)
+            .is_some_and(|limits| limits.certified_only() && limits.extension_bound() == 0)
     }
 
     /// Returns whether this node recovers `chain`'s DA certificates from its votes: a validator

@@ -7,7 +7,7 @@ use crate::{
             durability::{DurableJob, EffectId, PersistDirective, SendRequest},
             finality::LqcAggregateJob,
             producer::{BuildJob, CustodyCancellation, CustodyJob, ProductionTimer},
-            resolution::ResolutionJob,
+            resolution::{CertificateJob, ResolutionJob},
             verification::{Observation, VerifyJob},
             view::{NullificationRecoveryJob, ViewTimer, VqcAggregateJob},
         },
@@ -139,6 +139,12 @@ pub(crate) enum ResolverCommand {
     Cancel(ResolutionJob),
     /// Reject cryptographically invalid content returned by one queried resolver peer.
     Reject(ResolutionJob),
+    /// Fetch a DA certificate on one chain above a height.
+    ResolveCertificate(CertificateJob),
+    /// Stop one DA-certificate job whose owner no longer needs it.
+    CancelCertificate(CertificateJob),
+    /// Reject an invalid DA certificate returned by one queried resolver peer.
+    RejectCertificate(CertificateJob),
     /// Retire view evidence below the core's current retention frontier.
     Prune(View),
 }

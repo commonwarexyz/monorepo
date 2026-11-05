@@ -18,6 +18,10 @@ n_cases = 65536
 hash = "51b04637257c54cecdc4e5ded4568efccafbc08f20be3fe0951369cab43ba2b6"
 n_cases = 65536
 
+["commonware_consensus::multimmit::actors::resolver::key::tests::conformance::CodecConformance<ResolverKey>"]
+hash = "2e84959f207d57a03662b98f28a684bc9c0813f57652f2511309d127cc507c70"
+n_cases = 128
+
 ["commonware_consensus::multimmit::machine::durability::codec::tests::SnapshotMinPkConformance"]
 hash = "5bfab249377d3b8080a521f446406245cac9bc78d615e73c759b3fc877d8d384"
 n_cases = 128

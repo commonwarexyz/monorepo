@@ -47,8 +47,8 @@ use crate::{
         },
         scheme::Scheme,
         types::{
-            Artifact, ArtifactId, BlockRef, ChainId, Context, FinalityFact, PoolSummary, ViewProof,
-            genesis_history,
+            Artifact, ArtifactId, BlockRef, ChainId, Context, DaCertificate, FinalityFact,
+            PoolSummary, ViewProof, genesis_history,
         },
     },
     types::{Epoch, Height, Participant, Round, View},
@@ -774,6 +774,20 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
             self.durable.state.retired_view,
             self.durable.state.resolver_proofs(),
         )
+    }
+
+    /// Returns the durable DA certificate of every chain's certified tip, which the resolver
+    /// serves to peers that missed it.
+    pub(crate) fn resolver_certificates(&self) -> Vec<DaCertificate<S, H::Digest>> {
+        self.durable
+            .state
+            .local
+            .values()
+            .filter_map(|artifact| match artifact.as_ref() {
+                Artifact::DaCertificate(certificate) => Some(certificate.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Returns the number of nullifications retained above the proposal anchor.

@@ -387,7 +387,11 @@ impl NodeBuilder {
                         ResolverControl::Cancel { .. }
                         | ResolverControl::Reject { .. }
                         | ResolverControl::Retain { .. }
-                        | ResolverControl::Prune { .. } => {}
+                        | ResolverControl::Prune { .. }
+                        | ResolverControl::ResolveCertificate(_)
+                        | ResolverControl::CancelCertificate { .. }
+                        | ResolverControl::RejectCertificate { .. }
+                        | ResolverControl::RetainCertificate { .. } => {}
                     }
                 }
             });

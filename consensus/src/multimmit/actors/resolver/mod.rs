@@ -34,6 +34,7 @@
 mod actor;
 mod config;
 mod custody;
+mod key;
 mod mailbox;
 mod metrics;
 #[cfg(test)]
@@ -41,6 +42,7 @@ mod tests;
 
 pub(crate) use actor::Actor;
 pub(crate) use config::Config;
+pub(crate) use key::ResolverKey;
 #[cfg(any(test, feature = "mocks"))]
 pub(crate) use mailbox::Server;
-pub(crate) use mailbox::{Mailbox, Message, ResolveRequest, Serve};
+pub(crate) use mailbox::{CertificateRequest, Mailbox, Message, ResolveRequest, Serve};

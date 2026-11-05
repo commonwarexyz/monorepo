@@ -2,7 +2,11 @@
 
 use super::custody::{Change, Custody};
 use crate::{
-    multimmit::{machine::ResolutionJob, scheme::Scheme, types::ViewProof},
+    multimmit::{
+        machine::{CertificateJob, ResolutionJob},
+        scheme::Scheme,
+        types::{ChainId, DaCertificate, ViewProof},
+    },
     types::{Round, View},
 };
 use commonware_actor::{
@@ -11,7 +15,10 @@ use commonware_actor::{
 };
 use commonware_cryptography::Digest;
 use commonware_utils::channel::oneshot;
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 use tracing::Span;
 
 /// One machine-issued resolver request.
@@ -24,6 +31,16 @@ pub(crate) struct ResolveRequest {
     pub(crate) round: Round,
     /// The machine-issued job.
     pub(crate) job: ResolutionJob,
+}
+
+/// One machine-issued DA-certificate request.
+pub(crate) struct CertificateRequest {
+    /// The root span that owns terminal failures from this request.
+    pub(crate) root: Span,
+    /// The issuing tracing span.
+    pub(crate) span: Span,
+    /// The machine-issued job.
+    pub(crate) job: CertificateJob,
 }
 
 /// Reliable local control accepted by the resolver.
@@ -40,6 +57,14 @@ pub(crate) enum Message<S: Scheme, D: Digest> {
     Retain { proof: ViewProof<S, D> },
     /// Retire view evidence no longer retained by the machine.
     Prune { through: View },
+    /// Resolve one machine-issued DA-certificate request.
+    ResolveCertificate(CertificateRequest),
+    /// Retract one machine-owned DA-certificate request; see [`Message::Cancel`].
+    CancelCertificate { job: CertificateJob },
+    /// Reject a DA certificate returned by the queried peer.
+    RejectCertificate { job: CertificateJob },
+    /// Serve one durable DA certificate to peers, replacing any lower one of its chain.
+    RetainCertificate { certificate: DaCertificate<S, D> },
 }
 
 /// Coalesced Retain/Prune messages queued between two job messages.
@@ -85,6 +110,11 @@ pub(crate) struct ControlOverflow<S: Scheme, D: Digest> {
     pub(super) chunks: VecDeque<OverflowChunk<S, D>>,
     /// Retain/Prune messages queued after the last job message.
     tail: Option<RetentionDelta<S, D>>,
+    /// The highest queued DA certificate to retain per chain.
+    ///
+    /// A certificate request is never served from local retention, so certificates need no
+    /// ordering against job messages, and a higher one replaces a lower one of its chain.
+    certificates: BTreeMap<ChainId, DaCertificate<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> ControlOverflow<S, D> {
@@ -99,13 +129,14 @@ impl<S: Scheme, D: Digest> Default for ControlOverflow<S, D> {
         Self {
             chunks: VecDeque::new(),
             tail: None,
+            certificates: BTreeMap::new(),
         }
     }
 }
 
 impl<S: Scheme, D: Digest> Overflow<Message<S, D>> for ControlOverflow<S, D> {
     fn is_empty(&self) -> bool {
-        self.chunks.is_empty() && self.tail.is_none()
+        self.chunks.is_empty() && self.tail.is_none() && self.certificates.is_empty()
     }
 
     fn drain<F>(&mut self, mut push: F)
@@ -132,6 +163,15 @@ impl<S: Scheme, D: Digest> Overflow<Message<S, D>> for ControlOverflow<S, D> {
             && !delta.forward(&mut push)
         {
             self.tail = Some(delta);
+            return;
+        }
+        while let Some((chain, certificate)) = self.certificates.pop_first() {
+            if let Some(Message::RetainCertificate { certificate }) =
+                push(Message::RetainCertificate { certificate })
+            {
+                self.certificates.insert(chain, certificate);
+                return;
+            }
         }
     }
 }
@@ -141,7 +181,12 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         match message {
-            Self::Resolve(_) | Self::Cancel { .. } | Self::Reject { .. } => {
+            Self::Resolve(_)
+            | Self::Cancel { .. }
+            | Self::Reject { .. }
+            | Self::ResolveCertificate(_)
+            | Self::CancelCertificate { .. }
+            | Self::RejectCertificate { .. } => {
                 if let Some(delta) = overflow.tail.take() {
                     overflow.chunks.push_back(OverflowChunk::Retention(delta));
                 }
@@ -149,6 +194,16 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
             }
             Self::Retain { proof } => overflow.back_delta().retain(proof),
             Self::Prune { through } => overflow.back_delta().prune(through),
+            Self::RetainCertificate { certificate } => {
+                let chain = certificate.header().chain();
+                let higher = overflow
+                    .certificates
+                    .get(&chain)
+                    .is_none_or(|held| held.header().height() < certificate.header().height());
+                if higher {
+                    overflow.certificates.insert(chain, certificate);
+                }
+            }
         }
     }
 }
@@ -217,6 +272,27 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Retires the retained exits at or below `through`.
     pub(crate) fn prune(&self, through: View) -> Feedback {
         self.control.enqueue(Message::Prune { through })
+    }
+
+    /// Resolves one machine-issued DA-certificate request.
+    pub(crate) fn resolve_certificate(&self, request: CertificateRequest) -> Feedback {
+        self.control.enqueue(Message::ResolveCertificate(request))
+    }
+
+    /// Retracts one machine-owned DA-certificate request.
+    pub(crate) fn cancel_certificate(&self, job: CertificateJob) -> Feedback {
+        self.control.enqueue(Message::CancelCertificate { job })
+    }
+
+    /// Rejects the DA certificate a peer returned for one request.
+    pub(crate) fn reject_certificate(&self, job: CertificateJob) -> Feedback {
+        self.control.enqueue(Message::RejectCertificate { job })
+    }
+
+    /// Serves one durable DA certificate to peers.
+    pub(crate) fn retain_certificate(&self, certificate: DaCertificate<S, D>) -> Feedback {
+        self.control
+            .enqueue(Message::RetainCertificate { certificate })
     }
 
     /// Returns a handle that only serves retained proofs.

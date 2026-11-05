@@ -17,7 +17,10 @@ Protocol terms follow the specification.
 
 - **n, f:** committee size and fault bound, with `f = floor((n - 1) / 5)`, so `n >= 5f + 1`.
 - **GST:** global stabilization time, after which every message between correct participants
-  arrives within `delta`.
+  arrives within `delta`. A message sent before GST may be lost, not only delayed (the
+  specification delivers it by GST plus `delta`), so whatever a peer stops re-sending must be
+  pullable: view proofs and DA certificates through the consensus resolver, and blocks, records
+  and L-QCs through marshal's.
 - **delta:** the specification's bound on message delay after GST. The view timeout must cover
   `2 * delta` plus local admission and verification time.
 - **Producer chain:** one committee member's chain of transaction blocks. A transaction block is a
@@ -649,7 +652,7 @@ Only these operations cross an async boundary:
 | sign/recover/aggregate | generation, job, subject/transcript | subject and canonical transcript |
 | journal sync | ordered cursor range and durable prefix | releases and retirements |
 | checkpoint/prune | immutable `Snapshot` | durable state and cut cursor |
-| resolver | generation, requested view, proof kind | dependency demand and proof admission |
+| resolver | generation, requested view or chain and height, proof kind | dependency demand, proof and DA-certificate admission |
 | timers | generation, view/production position | timeout/pacing transition |
 | publication | stable effect identity and durable obligation | bytes, audience, and semantic retirement |
 
@@ -762,6 +765,13 @@ derives every remaining ceiling before startup.
   bounded per chain, three per slot of its pipeline window. A chain whose certificates are late
   holds back signing for that chain only: a DA-vote batch takes each chain's run up to the
   duties its family still admits.
+- A node asks the resolver for a DA certificate of a chain whose placement implies one (`d = 0`
+  and `e = 0`) when the current proposal anchor places the chain above every certificate it holds,
+  and the chain stays behind for a full view. Correct voters verified the anchoring certificate,
+  and every node keeps its newest durable certificate per chain, so a correct peer can answer.
+  At most one request per chain is outstanding; a fetched certificate is admitted and verified
+  like any observed one. Certificates carried by an observed or recovered V-QC's or L-QC's leader
+  block are admitted the same way, so a node that missed the leader block still installs them.
 - Verification, application, signing, recovery, and aggregation jobs each consume a class-specific
   permit plus reserved completion capacity before becoming mandatory. Remote application work has
   `min(d, max_verification_batch)` slots per producer and that width times the producer count
@@ -777,6 +787,9 @@ derives every remaining ceiling before startup.
 - Public inspection and proof-serving queries use bounded admission or backpressure. They cannot enter
   a reliable mailbox's unbounded overflow, and a caller that does not drain replies retains no state
   inside the engine.
+- The resolver serves each chain's newest durable DA certificate, retained once its advance is
+  acknowledged and seeded from durable state at start; queued certificate retentions collapse to
+  the highest per chain.
 - Resolver job controls stay in FIFO order. Adjacent `Retain` and `Prune` updates collapse to their
   final custody projection without crossing any other control, so a slow resolver does not retain
   every historical copy of a monotone retention frontier. Core emits live prune frontiers directly
