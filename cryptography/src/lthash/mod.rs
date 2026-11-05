@@ -27,8 +27,9 @@
 //! most 2^101 bit operations, and use roughly 2^88 bits of memory. Collision resistance is
 //! therefore far below 128 bits and well below the 200 bits that the original analysis estimated
 //! against generalized birthday attacks. The attack's colliding sets contain at least 2^72 elements
-//! combined, and the paper estimates every other known attack at over 2^180 operations, so usage
-//! remains safe when the adversary cannot control 2^72 elements across the hashed sets.
+//! combined, and the adversary must select elements for both sides. The paper estimates every other
+//! known attack at over 2^180 operations, so usage remains safe as long as an adversary cannot get
+//! 2^72 elements of its choosing into the sets being compared.
 //!
 //! # Warning
 //!
