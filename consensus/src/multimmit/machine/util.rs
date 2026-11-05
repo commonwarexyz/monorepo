@@ -1,7 +1,17 @@
 //! Collection helpers shared by the machine's partitions.
 
 use super::verification::Observation;
+use commonware_codec::Encode;
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Returns whether `a` and `b` have the same encoding.
+///
+/// Artifacts hold received signatures and points lazily: comparing them as values decodes every
+/// point (a subgroup check each), while their encodings carry the received bytes unchanged. Codec
+/// encodings are canonical, so equal encodings are equal values.
+pub(crate) fn same_encoding<T: Encode>(a: &T, b: &T) -> bool {
+    a.encode_size() == b.encode_size() && a.encode() == b.encode()
+}
 
 /// One bounded prefix of resumable work: the items it processed, whether the work finished, and
 /// what the prefix produced.
