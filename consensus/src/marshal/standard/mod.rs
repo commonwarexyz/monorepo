@@ -382,7 +382,7 @@ mod tests {
                 context.child("validator"),
                 "standard-provider-parent-commitment",
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(buffer),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -1238,7 +1238,7 @@ mod tests {
             for block in [&one, &two, &three] {
                 buffer.insert(block.clone());
             }
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let (mut mailbox, _buffer, _resolver, _handle) = start_standard_actor(
                 context.child("validator"),
                 "late-finalization-repaired",
@@ -1329,7 +1329,7 @@ mod tests {
             let buffer = RecordingBuffer::default();
             buffer.insert(one.clone());
             buffer.insert(two.clone());
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let (mut mailbox, _buffer, _resolver, _handle) = start_standard_actor(
                 context.child("validator"),
                 "finalization-below-floor",
@@ -1432,8 +1432,10 @@ mod tests {
                 Cutoff::Round(Round::new(Epoch::zero(), View::new(10)))
             );
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let _handle =
-                actor.start_unbuffered(Application::<B>::manual_ack(), (resolver_rx, resolver));
+            let _handle = actor.start_unbuffered(
+                Application::<B, S, D>::manual_ack(),
+                (resolver_rx, resolver),
+            );
 
             // Finalization 20 is kept, and pruning to height 20 removes finalization 10.
             StandardHarness::report_finalization(&mut mailbox, finalize(20)).await;
@@ -1528,7 +1530,7 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let _handle =
                 actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
             assert_eq!(application.acknowledged().await, Height::zero());
@@ -2137,7 +2139,7 @@ mod tests {
                 context.child("first"),
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Floor(floor_finalization.clone()),
             )
@@ -2159,7 +2161,7 @@ mod tests {
                 context.child("restarted"),
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Floor(floor_finalization),
             )
@@ -4179,7 +4181,7 @@ mod tests {
                     context.child("validator"),
                     &format!("missing-candidate-{kind:?}"),
                     ConstantProvider::new(schemes[0].clone()),
-                    Application::<B>::manual_ack(),
+                    Application::<B, S, D>::manual_ack(),
                     Some(RecordingBuffer::default()),
                     Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 )
@@ -4255,7 +4257,7 @@ mod tests {
                     context.child("validator"),
                     &format!("missing-certify-candidate-{kind:?}"),
                     ConstantProvider::new(schemes[0].clone()),
-                    Application::<B>::manual_ack(),
+                    Application::<B, S, D>::manual_ack(),
                     Some(RecordingBuffer::default()),
                     Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 )
@@ -4337,7 +4339,7 @@ mod tests {
             context.child("validator"),
             &partition_prefix,
             ConstantProvider::new(schemes[0].clone()),
-            Application::<B>::manual_ack(),
+            Application::<B, S, D>::manual_ack(),
             Some(RecordingBuffer::default()),
             Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
         )
@@ -4530,7 +4532,7 @@ mod tests {
                 context.child("validator"),
                 "deferred-certify-canceled-verify",
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -4611,7 +4613,7 @@ mod tests {
                     context.child("validator"),
                     &format!("height-lie-{kind:?}"),
                     ConstantProvider::new(schemes[0].clone()),
-                    Application::<B>::manual_ack(),
+                    Application::<B, S, D>::manual_ack(),
                     Some(RecordingBuffer::default()),
                     Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 )
@@ -5827,7 +5829,7 @@ mod tests {
             .await;
             let me = participants[0].clone();
 
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let setup = StandardHarness::setup_validator_with(
                 context.child("validator").with_attribute("index", 0),
                 &mut oracle,
@@ -5884,7 +5886,7 @@ mod tests {
             .await;
             let me = participants[0].clone();
 
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let setup = StandardHarness::setup_validator_with(
                 context.child("validator").with_attribute("index", 0),
                 &mut oracle,
@@ -5938,7 +5940,7 @@ mod tests {
             .await;
             let me = participants[0].clone();
 
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let setup = StandardHarness::setup_validator_with(
                 context.child("validator").with_attribute("index", 0),
                 &mut oracle,
@@ -5999,7 +6001,7 @@ mod tests {
             .await;
             let me = participants[0].clone();
 
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let setup = StandardHarness::setup_validator_with(
                 context.child("validator").with_attribute("index", 0),
                 &mut oracle,
@@ -6471,11 +6473,11 @@ mod tests {
     }
 
     impl Reporter for HoldingBlockReporter {
-        type Activity = Update<B>;
+        type Activity = Update<B, S, D>;
 
         fn report(&mut self, activity: Self::Activity) -> Feedback {
             match activity {
-                Update::Block(block, ack) => {
+                Update::Block(block, _, ack) => {
                     if block.height() < self.min_signal_height {
                         ack.acknowledge();
                         return Feedback::Ok;
@@ -6493,11 +6495,11 @@ mod tests {
 
     #[derive(Clone)]
     struct ApplicationReporter {
-        updates: mpsc::UnboundedSender<Update<B>>,
+        updates: mpsc::UnboundedSender<Update<B, S, D>>,
     }
 
     impl Reporter for ApplicationReporter {
-        type Activity = Update<B>;
+        type Activity = Update<B, S, D>;
 
         fn report(&mut self, activity: Self::Activity) -> Feedback {
             if self.updates.send(activity).is_ok() {
@@ -6522,7 +6524,7 @@ mod tests {
         commonware_runtime::Handle<()>,
     )
     where
-        R: Reporter<Activity = Update<B>>,
+        R: Reporter<Activity = Update<B, S, D>>,
         P: Provider<Scope = Epoch, Scheme = S>,
         Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey>,
     {
@@ -6629,12 +6631,12 @@ mod tests {
 
             // Model an application that handles genesis normally, then owns the first
             // non-genesis acknowledgement while its work remains in flight.
-            let (updates, mut application_mailbox) = mpsc::unbounded_channel::<Update<B>>();
+            let (updates, mut application_mailbox) = mpsc::unbounded_channel::<Update<B, S, D>>();
             let (delivered, delivery) = oneshot::channel();
             let application_handle = context.child("application").spawn(move |_| async move {
                 let mut delivered = Some(delivered);
                 while let Some(update) = application_mailbox.recv().await {
-                    let Update::Block(block, acknowledgement) = update else {
+                    let Update::Block(block, _, acknowledgement) = update else {
                         continue;
                     };
                     if block.height() == Height::zero() {
@@ -6698,7 +6700,7 @@ mod tests {
         deterministic::Runner::from(checkpoint).start(move |context| async move {
             // The canceled acknowledgement must leave the processed floor behind the block so the
             // recovered application receives the same finalized block again.
-            let restart_application = Application::<B>::manual_ack();
+            let restart_application = Application::<B, S, D>::manual_ack();
             let (_mailbox, _buffer, _resolver, _marshal_handle) = start_standard_actor(
                 context.child("validator").with_attribute("restart", 0),
                 PARTITION_PREFIX,
@@ -6741,7 +6743,7 @@ mod tests {
                 context.child("validator"),
                 "standard-no-buffer",
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 None::<RecordingBuffer>,
                 Start::Genesis(genesis.clone()),
             )
@@ -6826,7 +6828,7 @@ mod tests {
                 context.child("validator"),
                 "set-floor-invalid",
                 ConstantProvider::new(wrong_schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -7160,7 +7162,7 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "floor-jump-ignores-stale-ack",
@@ -7259,7 +7261,7 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let buffer = RecordingBuffer::default();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
@@ -7351,7 +7353,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "set-floor-repairs-gap-after-anchor",
@@ -7853,7 +7855,7 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "pending-floor-drops-in-flight-ack",
@@ -7956,7 +7958,7 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
@@ -8025,7 +8027,7 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
@@ -8148,7 +8150,7 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let (mut mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "floor-stored-predecessor",
@@ -8210,7 +8212,7 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "same-height-floor-keeps-pending-ack",
@@ -8291,7 +8293,7 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "stale-floor-anchor-round-floor",
@@ -8388,7 +8390,7 @@ mod tests {
                 context.child("validator"),
                 "standard-floor-parent-digest-commitment",
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -8468,7 +8470,7 @@ mod tests {
                 context.child("validator"),
                 "notarized-delivery-wakes-subscriber",
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -8548,7 +8550,7 @@ mod tests {
                 context.child("validator"),
                 "notarized-delivery-wrong-round",
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -8596,7 +8598,7 @@ mod tests {
                 context.child("validator"),
                 "notarized-delivery-stale-certificate-only",
                 VerifierProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -8642,7 +8644,7 @@ mod tests {
             let proposal = Proposal::new(round, View::zero(), block.digest());
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
             let verifier = schemes[0].clone();
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
 
             let (mailbox, _buffer, resolver, actor_handle) = start_standard_actor(
                 context.child("validator"),
@@ -8695,7 +8697,7 @@ mod tests {
                 context.child("recovered"),
                 PARTITION_PREFIX,
                 VerifierProvider::new(verifier),
-                Application::<B>::default(),
+                Application::<B, S, D>::default(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -8735,7 +8737,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "finalized-delivery-different-bytes",
@@ -8852,7 +8854,7 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let actor_handle =
                 actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
             assert_eq!(application.acknowledged().await, Height::zero());
@@ -8949,7 +8951,7 @@ mod tests {
                 context.child("validator"),
                 "finalized-delivery-epoch-mismatch",
                 VerifierProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -8993,7 +8995,7 @@ mod tests {
             let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
             let proposal = Proposal::new(round, View::zero(), block.digest());
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
 
             // The scope survives exactly the admission lookup, so it is gone by
             // the time the batched verification runs.
@@ -9067,7 +9069,7 @@ mod tests {
                 context.child("validator"),
                 "notarized-delivery-scope-retires",
                 provider.clone(),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -9138,7 +9140,7 @@ mod tests {
                 context.child("validator"),
                 "finalized-delivery-foreign-certificate-scope-retires",
                 provider.clone(),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -9212,7 +9214,7 @@ mod tests {
                 &second,
                 QUORUM,
             );
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
 
             // Epoch 0 retires right after its admission lookup while epoch 1
             // stays live. Both deliveries land in one batch, so each epoch group
@@ -9294,7 +9296,7 @@ mod tests {
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let proposal = Proposal::new(round, View::zero(), block.digest());
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let (mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "fetch-notarized-processed-round",
@@ -9376,7 +9378,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "finalization-processed-round-fetch",
@@ -9448,7 +9450,7 @@ mod tests {
                 context.child("validator"),
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(ready(original_genesis.clone())),
             )
@@ -9468,7 +9470,7 @@ mod tests {
                 context.child("validator_restart"),
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(ready(replacement_genesis.clone())),
             )
@@ -9495,7 +9497,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let (mailbox, _buffer, resolver, actor_handle) = start_standard_actor(
                 context.child("validator").with_attribute("index", 0),
                 &partition_prefix,
@@ -9535,7 +9537,7 @@ mod tests {
                     .with_attribute("index", 0),
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -9611,7 +9613,7 @@ mod tests {
                 context.child("validator"),
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -9735,7 +9737,7 @@ mod tests {
                     .with_attribute("index", 0),
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -9784,7 +9786,7 @@ mod tests {
                 context.child("validator"),
                 "set-floor-round-prune",
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -9897,7 +9899,7 @@ mod tests {
 
             // A configured floor for the pruned height 2 block is above the
             // recovered round floor, so marshal fetches it as a pending anchor.
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let buffer = RecordingBuffer::default();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
@@ -10091,7 +10093,7 @@ mod tests {
             )
             .await;
             actor.start(
-                Application::<B>::default(),
+                Application::<B, S, D>::default(),
                 buffer,
                 (
                     handler::Receiver::new(resolver_rx),
@@ -10208,7 +10210,7 @@ mod tests {
                     .with_attribute("index", 0),
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -10530,7 +10532,7 @@ mod tests {
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let _actor_handle = actor.start_unbuffered(
-                Application::<CountedBlock>::default(),
+                Application::<CountedBlock, S, D>::default(),
                 (resolver_rx, resolver),
             );
 
@@ -10640,7 +10642,7 @@ mod tests {
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let _actor_handle = actor.start_unbuffered(
-                Application::<CountedBlock>::default(),
+                Application::<CountedBlock, S, D>::default(),
                 (resolver_rx, resolver.clone()),
             );
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -10718,7 +10720,7 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::default();
+            let application = Application::<B, S, D>::default();
             let _actor_handle =
                 actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
 
@@ -10841,7 +10843,7 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::default();
+            let application = Application::<B, S, D>::default();
             let _actor_handle =
                 actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
 
@@ -11044,7 +11046,7 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::default();
+            let application = Application::<B, S, D>::default();
             let _actor_handle =
                 actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
             wait_until(
@@ -11157,7 +11159,7 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::default();
+            let application = Application::<B, S, D>::default();
             let buffer = RecordingBuffer::default();
             let _actor_handle =
                 actor.start(application.clone(), buffer.clone(), (resolver_rx, resolver));
@@ -11245,7 +11247,7 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let buffer = RecordingBuffer::default();
             let _actor_handle =
                 actor.start(application.clone(), buffer.clone(), (resolver_rx, resolver));
@@ -11343,7 +11345,7 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let buffer = RecordingBuffer::default();
             let _actor_handle =
                 actor.start(application.clone(), buffer.clone(), (resolver_rx, resolver));
@@ -11467,7 +11469,7 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let buffer = RecordingBuffer::default();
             let _actor_handle =
                 actor.start(application.clone(), buffer.clone(), (resolver_rx, resolver));
@@ -11567,7 +11569,7 @@ mod tests {
             .await;
 
             let validator = participants[0].clone();
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let setup = StandardHarness::setup_validator_with(
                 context.child("validator").with_attribute("index", 0),
                 &mut oracle,
@@ -11676,7 +11678,7 @@ mod tests {
                 context.child("validator").with_attribute("index", 0),
                 &format!("forward-unknown-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -11719,7 +11721,7 @@ mod tests {
                 context.child("validator").with_attribute("index", 0),
                 &format!("proposed-cache-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -11817,7 +11819,7 @@ mod tests {
                 context.child("validator").with_attribute("index", 0),
                 &format!("relay-claim-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -11885,7 +11887,7 @@ mod tests {
                 context.child("validator").with_attribute("index", 0),
                 &format!("relay-restage-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -11955,7 +11957,7 @@ mod tests {
                 context.child("validator").with_attribute("index", 0),
                 &format!("relay-hit-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -12017,7 +12019,7 @@ mod tests {
                 context.child("validator").with_attribute("index", 0),
                 &format!("relay-prepare-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -12101,7 +12103,7 @@ mod tests {
                     context.child("validator").with_attribute("index", 1),
                     "boundary-restage",
                     ConstantProvider::new(schemes[1].clone()),
-                    Application::<B>::manual_ack(),
+                    Application::<B, S, D>::manual_ack(),
                     Some(RecordingBuffer::default()),
                     Start::Genesis(genesis.clone()),
                 )
@@ -12263,7 +12265,7 @@ mod tests {
                 context.child("validator").with_attribute("index", 0),
                 &format!("proposed-conflict-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -12309,7 +12311,7 @@ mod tests {
                 context.child("validator").with_attribute("index", 0),
                 &format!("forward-cached-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -12354,7 +12356,7 @@ mod tests {
                 context.child("validator").with_attribute("index", 0),
                 &format!("hint-below-floor-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -12413,7 +12415,7 @@ mod tests {
                 context.child("validator").with_attribute("index", 0),
                 &format!("hint-already-final-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -12454,7 +12456,7 @@ mod tests {
                 context.child("validator").with_attribute("index", 0),
                 &format!("hint-targets-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -12504,7 +12506,7 @@ mod tests {
                 context.child("validator").with_attribute("index", 0),
                 &format!("prune-above-floor-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
+                Application::<B, S, D>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
@@ -12629,7 +12631,7 @@ mod tests {
                 1024 * 1024,
             )
             .await;
-            let reporter = Application::<B>::default();
+            let reporter = Application::<B, S, D>::default();
             let setup = StandardHarness::setup_validator_with(
                 context.child("marshal"),
                 &mut oracle,
@@ -13034,7 +13036,7 @@ mod tests {
             for block in &blocks[9..] {
                 buffer.insert(block.clone());
             }
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver));
             assert_eq!(application.acknowledged().await, Height::new(10));
 
@@ -13073,7 +13075,7 @@ mod tests {
             .await;
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("restarted_resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
             assert_eq!(application.acknowledged().await, Height::new(21));
         });
@@ -13104,7 +13106,7 @@ mod tests {
         /// Holds the actor's resolver channel, so a test can deliver responses through it.
         resolver: RecordingResolver,
         /// Holds block 21, dispatched and not yet acknowledged.
-        application: Application<B>,
+        application: Application<B, S, D>,
         /// Schemes of the validators that certify the chain.
         schemes: Vec<S>,
         /// Blocks 1 through 30, chained from genesis.
@@ -13276,7 +13278,7 @@ mod tests {
         for block in &blocks[9..] {
             buffer.insert(block.clone());
         }
-        let application = Application::<B>::manual_ack();
+        let application = Application::<B, S, D>::manual_ack();
         let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver.clone()));
 
         // Process block 10, then repair the gap below block 30 and process through height 20.
@@ -13326,7 +13328,7 @@ mod tests {
         );
         let (resolver_rx, resolver) =
             RecordingResolver::holding(context.child("restarted_resolver"));
-        let application = Application::<B>::manual_ack();
+        let application = Application::<B, S, D>::manual_ack();
         let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
         assert_eq!(application.acknowledged().await, next);
     }
@@ -13365,7 +13367,7 @@ mod tests {
             .await;
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("reproposal_resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
             mailbox.prune(Height::new(20));
             assert!(mailbox.get_block(Height::new(10)).await.is_none());
@@ -13535,7 +13537,7 @@ mod tests {
                     .covers(Round::new(Epoch::zero(), View::new(10)))
             );
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let handle =
                 actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
             mailbox.prune(Height::new(20));
@@ -13639,7 +13641,7 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let handle =
                 actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
             assert_eq!(mailbox.get_processed().await, None);
@@ -13701,7 +13703,7 @@ mod tests {
             assert!(restored.cutoff().covers(reproposal.round()));
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("restarted_resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
             assert_eq!(application.acknowledged().await, Height::new(10));
         });
@@ -13737,7 +13739,7 @@ mod tests {
             .await;
             assert!(restored.cutoff().covers(reproposal.round()));
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let handle =
                 actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
             mailbox.prune(Height::new(20));
@@ -13807,7 +13809,7 @@ mod tests {
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let buffer = RecordingBuffer::default();
             buffer.insert(boundary.block.clone());
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let _handle = actor.start(application.clone(), buffer, (resolver_rx, resolver));
             wait_until(&context, Duration::from_secs(5), "floor dispatch", || {
                 application.pending_ack_heights() == [Height::new(10)]
@@ -14008,7 +14010,7 @@ mod tests {
 
             // The floor is above the restored round floor, so it verifies and fetches its block.
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let _handle = actor.start_unbuffered(application, (resolver_rx, resolver.clone()));
             assert_eq!(
                 mailbox.get_processed().await,
@@ -14060,7 +14062,7 @@ mod tests {
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let buffer = RecordingBuffer::default();
             buffer.insert(boundary.block.clone());
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver));
             wait_until(&context, Duration::from_secs(5), "floor dispatch", || {
                 application.pending_ack_heights() == [Height::new(10)]
@@ -14095,7 +14097,7 @@ mod tests {
             assert!(restored.cutoff().covers(reproposal.round()));
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("restarted_resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
             assert_eq!(application.acknowledged().await, Height::new(10));
         });
@@ -14128,7 +14130,7 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let handle = actor.start_unbuffered(application, (resolver_rx, resolver));
 
             // Counts the finalization indices pruned from the epoch-zero cache.
@@ -14210,7 +14212,7 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let handle = actor.start_unbuffered(application, (resolver_rx, resolver));
 
             // Counts the finalization indices pruned from the epoch-one cache.
@@ -14277,7 +14279,7 @@ mod tests {
         )
         .await;
         let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-        let application = Application::<B>::manual_ack();
+        let application = Application::<B, S, D>::manual_ack();
         let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
         assert_eq!(application.acknowledged().await, Height::zero());
 
@@ -14467,7 +14469,7 @@ mod tests {
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let buffer = RecordingBuffer::default();
             buffer.insert(boundary.block.clone());
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver.clone()));
             wait_until(&context, Duration::from_secs(5), "floor dispatch", || {
                 application.pending_ack_heights() == [Height::new(10)]
@@ -14524,7 +14526,7 @@ mod tests {
             );
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("restarted_resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
             assert_eq!(
                 mailbox.get_processed().await,
@@ -14566,7 +14568,7 @@ mod tests {
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let buffer = RecordingBuffer::default();
             buffer.insert(boundary.block.clone());
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver));
             wait_until(&context, Duration::from_secs(5), "floor dispatch", || {
                 application.pending_ack_heights() == [Height::new(10)]
@@ -14598,7 +14600,7 @@ mod tests {
             assert!(restored.cutoff().covers(reproposal.round()));
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("reproposal_resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
             wait_until(&context, Duration::from_secs(5), "floor redispatch", || {
                 application.pending_ack_heights() == [Height::new(10)]
@@ -14625,7 +14627,7 @@ mod tests {
             .await;
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("restarted_resolver"));
-            let application = Application::<B>::manual_ack();
+            let application = Application::<B, S, D>::manual_ack();
             let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
             assert_eq!(application.acknowledged().await, Height::new(10));
         });

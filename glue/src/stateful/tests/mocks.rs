@@ -5,15 +5,15 @@ use crate::stateful::{
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Handoff, Heightable,
-    marshal::{ancestry::Ancestry, standard::Standard},
-    simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
+    marshal::{Finality as MarshalFinality, Update, ancestry::Ancestry, standard::Standard},
+    simplex::{mocks::scheme as scheme_mocks, scheme::Scheme, types::Context as SimplexContext},
     types::{Epoch, Height, View},
 };
 use commonware_cryptography::{
     Digest as _, Digested, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
 use commonware_runtime::{BufMut, Error as RuntimeError, Handle};
-use commonware_utils::{channel::oneshot, sync::Mutex};
+use commonware_utils::{acknowledgement::Exact, channel::oneshot, sync::Mutex};
 use futures::task::AtomicWaker;
 use std::{
     convert::Infallible,
@@ -456,6 +456,22 @@ pub(crate) fn test_databases() -> TestDatabases {
 pub(crate) fn digested<B: Digestible>(block: B) -> Digested<B> {
     let digest = block.digest();
     Digested::precomputed(block, digest)
+}
+
+/// Creates a block update with the block digest as its commitment and no finalization.
+pub(crate) fn block_update<B, S>(
+    block: Digested<B>,
+    acknowledgement: Exact,
+) -> Update<B, S, B::Digest>
+where
+    B: ConsensusBlock,
+    S: Scheme<B::Digest>,
+{
+    let finality = MarshalFinality {
+        commitment: block.digest(),
+        finalization: None,
+    };
+    Update::Block(block, finality, acknowledgement)
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

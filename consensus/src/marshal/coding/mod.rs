@@ -562,7 +562,7 @@ mod tests {
         .await;
         let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
         let actor_handle = actor.start(
-            Application::<CodingB>::default(),
+            Application::<CodingB, S, TestCommitment>::default(),
             buffer,
             (resolver_rx, resolver.clone()),
         );
@@ -1296,7 +1296,7 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<CodingB>::manual_ack();
+            let application = Application::<CodingB, S, TestCommitment>::manual_ack();
             let _actor_handle = actor.start(
                 application.clone(),
                 RecordingCodingBuffer::default(),
@@ -4028,7 +4028,7 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<CodingB>::manual_ack();
+            let application = Application::<CodingB, S, TestCommitment>::manual_ack();
             let _actor_handle = actor.start(
                 application.clone(),
                 RecordingCodingBuffer::default(),

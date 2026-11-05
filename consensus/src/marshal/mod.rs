@@ -186,6 +186,7 @@
 
 use crate::{
     Block,
+    simplex::{scheme::Scheme, types::Finalization},
     types::{Height, Round},
 };
 use commonware_cryptography::{Digest, Digested};
@@ -249,6 +250,19 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
     }
 }
 
+/// What consensus finalized for a delivered block.
+///
+/// Marshal can repair a block by walking back from a later finalized block without ever holding
+/// the block's own finalization. An application that needs the certificate must handle a block
+/// delivered without one.
+#[derive(Clone, Debug)]
+pub struct Finality<S: Scheme<D>, D: Digest> {
+    /// The payload consensus finalized for the block.
+    pub commitment: D,
+    /// The finalization certifying `commitment`, if marshal stored one with the block.
+    pub finalization: Option<Finalization<S, D>>,
+}
+
 /// An update reported to the application, either a new finalized tip or a finalized block.
 ///
 /// Finalized tips are reported as soon as known, whether or not we hold all blocks up to that height.
@@ -256,14 +270,15 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 /// Installing a floor can skip ahead. A restart or a floor installation can redeliver already
 /// reported blocks with fresh acknowledgements.
 #[derive(Clone, Debug)]
-pub enum Update<B: Block, A: Acknowledgement = Exact> {
+pub enum Update<B: Block, S: Scheme<D>, D: Digest, A: Acknowledgement = Exact> {
     /// A new finalized tip and the finalization round.
     ///
     /// This update can be reported before the finalized block and finalization archives complete
     /// a durable sync. Applications must not use this update as a storage durability signal.
     /// [`Update::Block`] provides that guarantee.
     Tip(Round, Height, B::Digest),
-    /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
+    /// A new finalized block, its [`Finality`], and an [Acknowledgement] for the application to
+    /// signal once processed.
     ///
     /// Marshal waits to mark a block as delivered until the application explicitly acknowledges the
     /// update. Dropping an [Acknowledgement] while marshal still waits for it stops marshal.
@@ -274,5 +289,5 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// Marshal only emits a block after durably persisting it, so applications that keep state
     /// derived from a block can read the same block after a restart. See [core::Processed] for
     /// the block that backs the processed height.
-    Block(Digested<B>, A),
+    Block(Digested<B>, Finality<S, D>, A),
 }

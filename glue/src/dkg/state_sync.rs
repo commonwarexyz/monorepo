@@ -11,9 +11,10 @@
 //!   the floor block from marshal. A later startup deletes the record once marshal's recovered
 //!   epoch is past the synced epoch.
 //! - The checkpoint partition holds a checkpoint for each epoch the orchestrator enters from its
-//!   boundary block. The orchestrator records it when it reads the block from marshal at startup,
-//!   and at each live boundary before it acknowledges the final block. Recording a checkpoint drops
-//!   those of epochs before the one recovered from marshal's processed height.
+//!   boundary block. The orchestrator records the block marshal delivers at each live boundary
+//!   before it acknowledges the final block. At startup, it records the boundary block it reads
+//!   from marshal for an epoch without a checkpoint. Recording a checkpoint drops those of epochs
+//!   before the one recovered from marshal's processed height.
 //!
 //! A plan loads the retained checkpoints when it opens, and its clones share that copy in memory,
 //! so reading a checkpoint does not touch storage. Recording one syncs the partition before it
@@ -236,10 +237,10 @@ type Info<S, MV> = EpochInfo<BlsVariant<MV>, <S as Verifier>::PublicKey, Dir<MV>
 
 /// The boundary block an epoch starts from, with marshal's finalization of it when marshal has one.
 ///
-/// The orchestrator copies the block from marshal when it enters the epoch, so restart and the
-/// [`probe`](crate::dkg::probe) read the epoch from here after marshal prunes the block. The block
-/// carries the epoch's [`EpochInfo`], and its commitment is the root the epoch's Simplex engine
-/// starts from.
+/// The orchestrator records the block and any finalization of it when it enters the epoch, so
+/// restart and the [`probe`](crate::dkg::probe) read the epoch from here after marshal prunes the
+/// block. The block carries the epoch's [`EpochInfo`], and its commitment is the root the epoch's
+/// Simplex engine starts from.
 ///
 /// Marshal may hold a boundary block without its finalization when it repaired the block by walking
 /// back from a later finalized block, and genesis has none. A checkpoint without a finalization

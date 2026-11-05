@@ -2,7 +2,7 @@ use super::{
     App, Block, NoopQmdbResolver, SingleDatabaseSet, build_chain,
     common::{EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config},
     fixtures,
-    mocks::digested,
+    mocks::{TestScheme, digested},
     qmdb_config,
 };
 use crate::stateful::{
@@ -21,7 +21,7 @@ use commonware_consensus::{
     simplex::{mocks::scheme as scheme_mocks, types::Activity},
     types::{FixedEpocher, Height, ViewDelta},
 };
-use commonware_cryptography::{Digestible as _, certificate::ConstantProvider};
+use commonware_cryptography::{Digestible as _, certificate::ConstantProvider, sha256::Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::archive::prunable;
@@ -33,16 +33,16 @@ use std::time::Duration;
 struct HoldBlock<R> {
     inner: R,
     height: Height,
-    held: ring::Sender<marshal::Update<Block>>,
+    held: ring::Sender<marshal::Update<Block, TestScheme, Digest>>,
 }
 
-impl<R: Reporter<Activity = marshal::Update<Block>>> Reporter for HoldBlock<R> {
-    type Activity = marshal::Update<Block>;
+impl<R: Reporter<Activity = marshal::Update<Block, TestScheme, Digest>>> Reporter for HoldBlock<R> {
+    type Activity = marshal::Update<Block, TestScheme, Digest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         if matches!(
             &activity,
-            marshal::Update::Block(block, _) if block.inner().height == self.height
+            marshal::Update::Block(block, _, _) if block.inner().height == self.height
         ) {
             assert!(
                 self.held.send_lossy(activity),
@@ -199,7 +199,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                 let report = floor_reports.recv().await.expect("floor report missing");
                 assert!(matches!(
                     &report,
-                    marshal::Update::Block(block, _) if block.inner().height == floor_height
+                    marshal::Update::Block(block, _, _) if block.inner().height == floor_height
                 ));
                 assert_eq!(
                     marshal.get_processed().await,

@@ -380,10 +380,10 @@ impl ParticipantsProvider for Participants {
 pub struct LogReporter;
 
 impl Reporter for LogReporter {
-    type Activity = Update<Block>;
+    type Activity = Update<Block, Scheme, sha256::Digest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        if let Update::Block(block, ack) = activity {
+        if let Update::Block(block, _, ack) = activity {
             info!(
                 epoch = block.context().epoch().get(),
                 height = block.height().get(),

@@ -301,12 +301,11 @@ mod tests {
         db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
         tests::{
             fixtures,
-            mocks::{TestApp, TestBlock, TestDb, digested},
+            mocks::{TestApp, TestBlock, TestDb, block_update, digested},
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Handoff, Reporter as _,
-        marshal::{Update, ancestry},
+        Application as _, CertifiableBlock as _, Handoff, Reporter as _, marshal::ancestry,
         simplex::mocks::scheme as scheme_mocks,
     };
     use commonware_cryptography::{Digestible as _, sha256::Digest as Sha256Digest};
@@ -617,7 +616,7 @@ mod tests {
 
             // Queue a finalization behind the verifications, then cancel every caller.
             let (acknowledgement, mut acknowledgement_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(finalized), acknowledgement));
+            let _ = mailbox.report(block_update(digested(finalized), acknowledgement));
 
             drop(first);
             drop(second);

@@ -509,7 +509,8 @@ mod tests {
             fixtures,
             mocks::{
                 FlushControl, TestApp, TestBlock, TestDatabases, TestDb, TestMerkleized,
-                TestScheme, TestUnmerkleized, TestVariant, anchor, digested, test_databases,
+                TestScheme, TestUnmerkleized, TestVariant, anchor, block_update, digested,
+                test_databases,
             },
         },
     };
@@ -518,7 +519,6 @@ mod tests {
         Application as _, Automaton as _, Block as _, CertifiableAutomaton as _,
         CertifiableBlock as _, Handoff, Heightable as _, Reporter as _, Reporters,
         marshal::{
-            Update,
             ancestry::{self, Ancestry, BoxedAncestry},
             core::{Mailbox as MarshalMailbox, Processed},
             standard::Deferred,
@@ -1889,7 +1889,7 @@ mod tests {
             assert!(poll!(&mut acquiring).is_pending());
             let (acknowledgement, waiter) = Exact::handle();
             let mut waiter = Box::pin(waiter);
-            let _ = mailbox.report(Update::Block(digested(block.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block.clone()), acknowledgement));
             parked
                 .await
                 .expect("finalization must pause the acquisition");
@@ -1958,7 +1958,7 @@ mod tests {
             );
             assert!(poll!(&mut acquiring).is_pending());
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(block.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block.clone()), acknowledgement));
             paused
                 .await
                 .expect("finalization must pause the acquisition");
@@ -2033,7 +2033,7 @@ mod tests {
             ));
             assert!(poll!(&mut acquiring).is_pending());
             let (acknowledgement, mut waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(competing), acknowledgement));
+            let _ = mailbox.report(block_update(digested(competing), acknowledgement));
             parked
                 .await
                 .expect("finalization must pause the acquisition");
@@ -2255,9 +2255,9 @@ mod tests {
             // Hold the first finalized hook while the child completes and another finalization
             // waits.
             let (acknowledgement, first_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(first), acknowledgement));
+            let _ = mailbox.report(block_update(digested(first), acknowledgement));
             let (acknowledgement, winner_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
+            let _ = mailbox.report(block_update(digested(winner), acknowledgement));
             finalized_started
                 .await
                 .expect("first finalized hook must start");
@@ -2348,7 +2348,7 @@ mod tests {
             );
             assert!(poll!(&mut acquiring).is_pending());
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(parent.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(parent.clone()), acknowledgement));
             parked
                 .await
                 .expect("finalization must pause the acquisition");
@@ -2484,7 +2484,7 @@ mod tests {
 
             // Finalize the canonical block and make it durable.
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(canonical), acknowledgement));
+            let _ = mailbox.report(block_update(digested(canonical), acknowledgement));
             control
                 .next_flush()
                 .await
@@ -2818,7 +2818,7 @@ mod tests {
             // The finalization queues behind the held build. A later verification starts
             // acquiring its blocks once the actor has received both.
             let (acknowledgement, mut waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
+            let _ = mailbox.report(block_update(digested(winner), acknowledgement));
             let (acquiring_ancestry, acquired) = AcquiredAncestry::new();
             let mut acquiring_verifier = mailbox.clone();
             let mut acquiring = Box::pin(acquiring_verifier.verify(
@@ -3016,7 +3016,7 @@ mod tests {
                 .expect("parent processing must remain active");
             proposal_started.await.expect("handoff build should start");
             let (acknowledgement, mut waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(outgoing.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(outgoing.clone()), acknowledgement));
 
             // The parent verifies and certifies from its processed state while the build is held.
             let optimistic = deferred.verify(parent.context(), parent.digest()).await;
@@ -3110,12 +3110,12 @@ mod tests {
 
             // Finalizations and subscriptions queue behind the proposal, then a verification.
             let (acknowledgement, first_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(first), acknowledgement));
+            let _ = mailbox.report(block_update(digested(first), acknowledgement));
             let first_subscriber = mailbox.clone();
             let mut first_databases = Box::pin(first_subscriber.subscribe_databases());
             assert!(poll!(&mut first_databases).is_pending());
             let (acknowledgement, mut second_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(second), acknowledgement));
+            let _ = mailbox.report(block_update(digested(second), acknowledgement));
             let second_subscriber = mailbox.clone();
             let mut second_databases = Box::pin(second_subscriber.subscribe_databases());
             assert!(poll!(&mut second_databases).is_pending());
@@ -3239,7 +3239,7 @@ mod tests {
             assert!(poll!(&mut proposal).is_pending());
             proposal_started.await.expect("proposal should start");
             let (acknowledgement, mut waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(winner.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(winner.clone()), acknowledgement));
 
             // Verifications queued after the finalization start during the proposal. The winner's
             // verification holds the winner's processing, the child's verification waits on it,
@@ -3358,7 +3358,7 @@ mod tests {
                 .expect("losing child verification should start");
 
             let (acknowledgement, mut waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
+            let _ = mailbox.report(block_update(digested(winner), acknowledgement));
 
             // The build queues the finalization. A verification of the applied genesis sent after
             // the report answers once the loop has received both.
@@ -3437,7 +3437,7 @@ mod tests {
                 .expect("child verification should start");
 
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(parent), acknowledgement));
+            let _ = mailbox.report(block_update(digested(parent), acknowledgement));
             waiter.await.expect("finalized parent must be acknowledged");
             child_release
                 .send(())
@@ -3500,7 +3500,7 @@ mod tests {
             assert!(poll!(&mut acquiring).is_pending());
 
             let (acknowledgement, mut waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
+            let _ = mailbox.report(block_update(digested(winner), acknowledgement));
 
             // Once finalization pauses the acquisition, it waits for the losing child's processing,
             // which keeps running.
@@ -3595,7 +3595,7 @@ mod tests {
             assert!(poll!(&mut acquiring).is_pending());
 
             let (acknowledgement, mut waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
+            let _ = mailbox.report(block_update(digested(winner), acknowledgement));
 
             // Once finalization pauses the acquisition, it waits for the losing grandchild's
             // processing. That processing keeps running.
@@ -3675,7 +3675,7 @@ mod tests {
                 .expect("child verification should start");
 
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(finalized.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(finalized.clone()), acknowledgement));
             waiter
                 .await
                 .expect("redelivered anchor should be acknowledged");
@@ -3743,7 +3743,7 @@ mod tests {
             let actor = context.child("loop").spawn(move |_| processing.run());
 
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(genesis.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(genesis.clone()), acknowledgement));
             waiter.await.expect("genesis should be acknowledged");
 
             assert_eq!(process_calls.at(genesis.height()), 0);
@@ -3881,7 +3881,7 @@ mod tests {
             // Once finalization pauses the acquisition, it waits for the shared parent execution to
             // finish and then reuses it.
             let (acknowledgement, mut waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(parent.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(parent.clone()), acknowledgement));
             parked
                 .await
                 .expect("finalization must pause the acquisition");
@@ -4009,7 +4009,7 @@ mod tests {
             // Once the first finalization pauses the acquisition, it waits for the shared execution
             // to finish and reuses it, then the descendant advances.
             let (acknowledgement, mut first_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(first.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(first.clone()), acknowledgement));
             parked
                 .await
                 .expect("finalization must pause the acquisition");
@@ -4028,7 +4028,7 @@ mod tests {
             // The second finalization keeps the descendant's processing running, and the request
             // then completes.
             let (acknowledgement, second_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(second.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(second.clone()), acknowledgement));
             second_waiter
                 .await
                 .expect("second finalized block must be acknowledged");
@@ -4116,11 +4116,11 @@ mod tests {
             let actor = context.child("loop").spawn(move |_| processing.run());
 
             let (acknowledgement, waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(block1), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block1), acknowledgement));
             let target_flush = control.next_flush().await;
 
             let (acknowledgement, waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(block2.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block2.clone()), acknowledgement));
 
             // A verification of the child or a build on the parent replays the parent.
             let blocks = match request {
@@ -4241,9 +4241,9 @@ mod tests {
             let actor = context.child("loop").spawn(move |_| processing.run());
 
             let (acknowledgement, waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(block1), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block1), acknowledgement));
             let (acknowledgement, waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(block2.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block2.clone()), acknowledgement));
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), losing.context()),
@@ -4272,7 +4272,7 @@ mod tests {
             prune_started.await.expect("prune should start");
 
             let (acknowledgement, winner_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(winner.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(winner.clone()), acknowledgement));
             let proposal_context = TestBlock::child(&winner, 5).context();
             let mut proposer = mailbox.clone();
             let mut proposal = Box::pin(proposer.propose(
@@ -4348,9 +4348,9 @@ mod tests {
             // Apply blocks 1 and 2 without releasing any flush: the loop must
             // stay live (both blocks applied) while no acknowledgement fires.
             let (acknowledgement, mut waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(block1), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block1), acknowledgement));
             let (acknowledgement, mut waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(block2.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block2.clone()), acknowledgement));
 
             // Queue a verification before pruning starts, then hold it in the
             // application until the prune is waiting on durability.
@@ -4450,7 +4450,7 @@ mod tests {
             let actor = context.child("loop").spawn(move |_| processing.run());
 
             let (acknowledgement, mut waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(block1), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block1), acknowledgement));
             finalized_started
                 .await
                 .expect("finalized handoff should start");
@@ -4465,7 +4465,7 @@ mod tests {
                 .expect("finalized handoff should remain active");
 
             let (acknowledgement, mut waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(block2), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block2), acknowledgement));
             control.applied_at_least(2).await;
             assert_eq!(capture_calls.load(Ordering::SeqCst), 2);
             assert_eq!(
@@ -4509,10 +4509,10 @@ mod tests {
             // Apply block 1 with its flush held, then report it again.
             let first = TestBlock::child(&TestBlock::new(0, 0), 1);
             let (ack, _waiter) = Exact::handle();
-            mailbox.report(Update::Block(digested(first.clone()), ack));
+            mailbox.report(block_update(digested(first.clone()), ack));
             drop(mailbox.subscribe_databases().await);
             let (ack, mut duplicate) = Exact::handle();
-            mailbox.report(Update::Block(digested(first.clone()), ack));
+            mailbox.report(block_update(digested(first.clone()), ack));
 
             // The subscription is a FIFO fence after both reports have been handled.
             drop(mailbox.subscribe_databases().await);
@@ -4827,7 +4827,7 @@ mod tests {
             const BLOCKS: u64 = 3;
 
             let (acknowledgement, mut waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(
+            let _ = mailbox.report(block_update(
                 digested(TestBlock::new(1, 1)),
                 acknowledgement,
             ));
@@ -4838,7 +4838,7 @@ mod tests {
             for height in 2..=BLOCKS {
                 let block = TestBlock::child(&parent, height as u8);
                 let (acknowledgement, waiter) = Exact::handle();
-                let _ = mailbox.report(Update::Block(digested(block.clone()), acknowledgement));
+                let _ = mailbox.report(block_update(digested(block.clone()), acknowledgement));
                 waiters.push(waiter);
                 parent = block;
             }
@@ -4892,11 +4892,11 @@ mod tests {
             let block1 = TestBlock::child(&genesis, 1);
             let block2 = TestBlock::child(&block1, 2);
             let (acknowledgement, waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(block1.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block1.clone()), acknowledgement));
             let release1 = control.next_flush().await;
 
             let (acknowledgement, mut waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(block2.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block2.clone()), acknowledgement));
             control.applied_at_least(2).await;
 
             let block3 = TestBlock::child(&block2, 3);
@@ -4960,14 +4960,14 @@ mod tests {
 
             // Marshal permits one pending acknowledgement, so block 1 must be durable first.
             let (acknowledgement, waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(block1), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block1), acknowledgement));
             control.next_flush().await.send(Ok(())).unwrap();
             waiter1.await.expect("block 1 must be durable");
 
             // Finalizing block 2 schedules a prune while a verification of a candidate on block 2
             // executes under the gate.
             let (acknowledgement, waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(block2.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block2.clone()), acknowledgement));
             let mut verifier = mailbox.clone();
             let mut verification = Box::pin(verifier.verify(
                 (context.child("verify"), candidate.context()),
@@ -5111,7 +5111,7 @@ mod tests {
             // The winner finalizes while its sibling is still executing. Finalization waits for
             // that execution before applying anything.
             let (acknowledgement, mut receipt) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(winner.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(winner.clone()), acknowledgement));
             assert!(poll!(&mut processing).is_pending());
             assert!(poll!(&mut receipt).is_pending());
             assert_eq!(observations.process_calls.at(winner.height()), 2);
@@ -5193,11 +5193,11 @@ mod tests {
             let block1 = TestBlock::child(&genesis, 1);
             let block2 = TestBlock::child(&block1, 2);
             let (acknowledgement, waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(block1.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block1.clone()), acknowledgement));
             let release1 = control.next_flush().await;
 
             let (acknowledgement, waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(block2.clone()), acknowledgement));
+            let _ = mailbox.report(block_update(digested(block2.clone()), acknowledgement));
             control.applied_at_least(2).await;
 
             let block3 = TestBlock::child(&block2, 3);
@@ -5249,12 +5249,12 @@ mod tests {
             .await;
 
             let (acknowledgement, waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(
+            let _ = mailbox.report(block_update(
                 digested(TestBlock::new(1, 1)),
                 acknowledgement,
             ));
             let (acknowledgement, waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(
+            let _ = mailbox.report(block_update(
                 digested(TestBlock::child(&TestBlock::new(1, 1), 2)),
                 acknowledgement,
             ));
@@ -5290,7 +5290,7 @@ mod tests {
             // Park the loop idle with block 1's flush pending. The flush starting means the loop
             // has already reached its next blocking point.
             let (acknowledgement, mut waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(
+            let _ = mailbox.report(block_update(
                 digested(TestBlock::new(1, 1)),
                 acknowledgement,
             ));
@@ -5302,7 +5302,7 @@ mod tests {
             // without displacing the new message.
             let _ = release1.send(Ok(()));
             let (acknowledgement, waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(
+            let _ = mailbox.report(block_update(
                 digested(TestBlock::child(&TestBlock::new(1, 1), 2)),
                 acknowledgement,
             ));
@@ -5328,14 +5328,14 @@ mod tests {
                 spawn_processing(&context, "gated-ready-abort", None).await;
 
             let (acknowledgement, waiter1) = Exact::handle();
-            let _ = mailbox.report(Update::Block(
+            let _ = mailbox.report(block_update(
                 digested(TestBlock::new(1, 1)),
                 acknowledgement,
             ));
             let release1 = control.next_flush().await;
 
             let (acknowledgement, waiter2) = Exact::handle();
-            let _ = mailbox.report(Update::Block(
+            let _ = mailbox.report(block_update(
                 digested(TestBlock::child(&TestBlock::new(1, 1), 2)),
                 acknowledgement,
             ));
@@ -5386,8 +5386,8 @@ mod tests {
             let mut second_receipt = Box::pin(second_receipt);
 
             // Queue both reports and close ingress before yielding to the actor.
-            let _ = mailbox.report(Update::Block(digested(first), first_ack));
-            let _ = mailbox.report(Update::Block(digested(second), second_ack));
+            let _ = mailbox.report(block_update(digested(first), first_ack));
+            let _ = mailbox.report(block_update(digested(second), second_ack));
             drop(mailbox);
 
             // Both blocks apply, and the scheduled prune waits for the barrier that covers block 1.
@@ -5451,7 +5451,7 @@ mod tests {
                 spawn_processing(&context, "gated-shutdown", None).await;
 
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(
+            let _ = mailbox.report(block_update(
                 digested(TestBlock::new(1, 1)),
                 acknowledgement,
             ));
@@ -5477,7 +5477,7 @@ mod tests {
                 spawn_processing(&context, "gated-failure", None).await;
 
             let (acknowledgement, _waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(
+            let _ = mailbox.report(block_update(
                 digested(TestBlock::new(1, 1)),
                 acknowledgement,
             ));
@@ -5550,7 +5550,7 @@ mod tests {
 
             // Finalization pauses the acquisition, completes, and then restarts it.
             let (acknowledgement, receipt) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(parent), acknowledgement));
+            let _ = mailbox.report(block_update(digested(parent), acknowledgement));
             control.next_flush().await.send(Ok(())).unwrap();
             receipt.await.expect("available finalization must complete");
             assert!(poll!(&mut verification).is_pending());
@@ -5585,7 +5585,7 @@ mod tests {
 
             // Observe the redelivery before checking that acquisition was left running.
             let (ack, waiter) = Exact::handle();
-            mailbox.report(Update::Block(digested(TestBlock::new(0, 0)), ack));
+            mailbox.report(block_update(digested(TestBlock::new(0, 0)), ack));
             waiter.await.expect("redelivered tip must be acknowledged");
             drop(mailbox.subscribe_databases().await);
             assert_eq!(
@@ -5790,7 +5790,7 @@ mod tests {
 
             // Finalizing the winner pauses the acquisition and waits for the losing execution.
             let (acknowledgement, mut receipt) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
+            let _ = mailbox.report(block_update(digested(winner), acknowledgement));
             parked
                 .await
                 .expect("finalization must pause the acquisition");
@@ -5858,7 +5858,7 @@ mod tests {
             // Finalizing the winner pauses its verification's acquisition. The block arrives
             // during the pause, and the losing execution then finishes and is rejected.
             let (acknowledgement, mut receipt) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
+            let _ = mailbox.report(block_update(digested(winner), acknowledgement));
             parked
                 .await
                 .expect("finalization must pause the acquisition");
@@ -5939,7 +5939,7 @@ mod tests {
             // Finalization retains that processing. Its hook stays open, so the retained step
             // finishes and selects the stale block while the finalization is still active.
             let (acknowledgement, receipt) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(finalized), acknowledgement));
+            let _ = mailbox.report(block_update(digested(finalized), acknowledgement));
             finalized_started
                 .await
                 .expect("finalization must reach its hook");

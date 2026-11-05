@@ -11,12 +11,15 @@ use crate::dkg::{
 use commonware_actor::mailbox;
 use commonware_consensus::{
     CertifiableAutomaton, Heightable, Relay, Reporter,
-    marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
+    marshal::{
+        Finality,
+        core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
+    },
     simplex::{
         self, Floor, ForwardPolicy, Plan, SkipPolicy,
         elector::Config as Elector,
         scheme,
-        types::{Activity, Context, Finalization},
+        types::{Activity, Context},
     },
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
@@ -86,6 +89,22 @@ where
     floor: Floor<S, D>,
     info: EpochInfo<V, P, Dir>,
 }
+
+/// Messages marshal sends the orchestrator through its [`Mailbox`].
+type Reports<P, MV, ACK> = Message<
+    <MV as MarshalVariant>::ApplicationBlock,
+    <P as Provider>::Scheme,
+    <MV as MarshalVariant>::Commitment,
+    ACK,
+>;
+
+/// The orchestrator's [`Mailbox`], installed as a marshal reporter.
+type MarshalReporter<P, MV, ACK> = Mailbox<
+    <MV as MarshalVariant>::ApplicationBlock,
+    <P as Provider>::Scheme,
+    <MV as MarshalVariant>::Commitment,
+    ACK,
+>;
 
 /// Simplex settings applied to every epoch engine.
 ///
@@ -214,7 +233,7 @@ where
     ACK: Acknowledgement,
 {
     context: ContextCell<E>,
-    mailbox: mailbox::Receiver<Message<MV::ApplicationBlock, ACK>>,
+    mailbox: mailbox::Receiver<Reports<P, MV, ACK>>,
     oracle: B,
     manager: M,
     provider: P,
@@ -261,7 +280,7 @@ where
     pub fn new(
         context: E,
         config: Config<B, M, P, MV, A, L, T>,
-    ) -> (Self, Mailbox<MV::ApplicationBlock, ACK>) {
+    ) -> (Self, MarshalReporter<P, MV, ACK>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let latest_epoch = context.gauge("latest_epoch", "current epoch");
 
@@ -386,6 +405,7 @@ where
             } => match message {
                 Message::Finalized {
                     block,
+                    finality,
                     acknowledgement,
                 } => {
                     let keep_running = self
@@ -393,6 +413,7 @@ where
                             &epocher,
                             &mut active,
                             block,
+                            finality,
                             acknowledgement,
                             &mut channels,
                         )
@@ -454,21 +475,7 @@ where
         self.resolve_boundary(epoch, epocher).await
     }
 
-    /// Reads the boundary block at `height` with marshal's finalization of it, if any.
-    ///
-    /// Returns `None` if marshal cannot supply the block. Marshal answers no request once it
-    /// closes, so reading the finalization first makes a returned block show that marshal was
-    /// still running when it reported no finalization.
-    async fn read_boundary(
-        &mut self,
-        height: Height,
-    ) -> Option<(MV::Block, Option<Finalization<P::Scheme, MV::Commitment>>)> {
-        let finalization = self.marshal.get_finalization(height).await;
-        let block = self.marshal.get_block(height).await?;
-        Some((block, finalization))
-    }
-
-    /// Records `boundary` and marshal's `finalization` of it, if any, as the checkpoint of `epoch`.
+    /// Records `boundary` and its `finality` as the checkpoint of `epoch`.
     ///
     /// Checkpoints of epochs before the one recovered from marshal's processed height are dropped.
     /// Marshal reports a processed height only after syncing it, so no later restart recovers an
@@ -477,8 +484,8 @@ where
         &mut self,
         epocher: &FixedEpocher,
         epoch: Epoch,
-        boundary: MV::Block,
-        finalization: Option<Finalization<P::Scheme, MV::Commitment>>,
+        boundary: Digested<MV::ApplicationBlock>,
+        finality: Finality<P::Scheme, MV::Commitment>,
     ) {
         let retained_from = self
             .marshal
@@ -487,11 +494,12 @@ where
             .map_or_else(Epoch::zero, |processed| {
                 state_sync::recovered_epoch(processed, epocher)
             });
+        let boundary = MV::from_application_block(boundary, finality.commitment);
         self.state_sync
             .record(
                 self.context.as_present().child("checkpoint"),
                 epoch,
-                Checkpoint::new(boundary, finalization),
+                Checkpoint::new(boundary, finality.finalization),
                 retained_from,
             )
             .await;
@@ -500,8 +508,9 @@ where
     /// Resolves `epoch` from the finalized boundary block that carries its
     /// [`EpochInfo`] and records the epoch's checkpoint.
     ///
-    /// Returns `None` if marshal cannot supply the block. Panics if the block
-    /// carries no [`EpochInfo`] or one for another epoch.
+    /// Reads the block and its finalization, if any, from marshal. Returns
+    /// `None` if marshal cannot supply the block. Panics if the block carries
+    /// no [`EpochInfo`] or one for another epoch.
     async fn resolve_boundary(
         &mut self,
         epoch: Epoch,
@@ -519,12 +528,17 @@ where
             .previous()
             .and_then(|epoch| epocher.last(epoch))
             .unwrap_or_else(Height::zero);
-        let Some((boundary, finalization)) = self.read_boundary(height).await else {
+
+        // Marshal answers no request once it closes, so reading the finalization before the
+        // block makes a returned block show that marshal was still running when it reported no
+        // finalization.
+        let finalization = self.marshal.get_finalization(height).await;
+        let Some(boundary) = self.marshal.get_block(height).await else {
             error!(%epoch, %height, "boundary block unavailable, shutting down orchestrator");
             return None;
         };
         let commitment = MV::commitment(&boundary);
-        let block = MV::into_shared(boundary.clone());
+        let block = MV::into_shared(boundary);
         let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
             panic!("boundary block {height} missing epoch info");
         };
@@ -535,7 +549,11 @@ where
             );
         }
 
-        self.record_checkpoint(epocher, epoch, boundary, finalization)
+        let finality = Finality {
+            commitment,
+            finalization,
+        };
+        self.record_checkpoint(epocher, epoch, block, finality)
             .await;
         Some(ResolvedStart {
             epoch,
@@ -621,15 +639,16 @@ where
     /// Acknowledges any block below the active epoch's final block
     /// immediately. For the final block, records the next epoch's checkpoint,
     /// enters the next epoch, and acknowledges the block once the new engine
-    /// has started. Returns `false` if marshal cannot supply the block or the
-    /// next epoch cannot be entered. Panics if the block is above the active
-    /// epoch's final block (marshal skipped the final block) or if the final
-    /// block does not carry the next epoch's [`EpochInfo`].
+    /// has started. Returns `false` if the next epoch cannot be entered. Panics
+    /// if the block is above the active epoch's final block (marshal skipped
+    /// the final block) or if the final block does not carry the next epoch's
+    /// [`EpochInfo`].
     async fn handle_finalized<S>(
         &mut self,
         epocher: &FixedEpocher,
         active: &mut ActiveEpoch,
         block: Digested<MV::ApplicationBlock>,
+        finality: Finality<P::Scheme, MV::Commitment>,
         acknowledgement: ACK,
         channels: &mut Channels<S>,
     ) -> bool
@@ -661,16 +680,12 @@ where
             );
         }
 
-        let Some((boundary, finalization)) = self.read_boundary(height).await else {
-            debug!(%height, "boundary block unavailable, shutting down orchestrator");
-            return false;
-        };
-        let floor = Floor::Genesis(MV::commitment(&boundary));
+        let floor = Floor::Genesis(finality.commitment);
 
         // Record the next epoch's checkpoint before acknowledging the final block. Once
         // marshal's processed height passes the block, a restart recovers the next epoch
         // and marshal may have pruned the block that carries its info.
-        self.record_checkpoint(epocher, next_epoch, boundary, finalization)
+        self.record_checkpoint(epocher, next_epoch, block, finality)
             .await;
 
         let next = self.enter_epoch(next_epoch, floor, &info, channels).await;
