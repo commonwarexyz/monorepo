@@ -262,6 +262,25 @@ pub struct Delta<F: Graftable, D: Digest, const N: usize> {
     pub grafted_nodes: Vec<(Position<F>, D)>,
 }
 
+/// Everything a publisher stores for one batch: the operations it appends, the operations-tree
+/// frontier they extend, and the [`Delta`] it makes to the current-state commitment.
+///
+/// Replaying `operations` onto `pinned_nodes` recomputes `ops_root`, and `delta.witness` binds
+/// that root to `delta.root`.
+#[derive(Clone)]
+pub struct Publication<F: Graftable, D: Digest, U: update::Update, const N: usize> {
+    /// Location of the first operation.
+    pub start: Location<F>,
+    /// Operations-tree frontier at `start`, in [`merkle::Family::nodes_to_pin`] order.
+    pub pinned_nodes: Vec<D>,
+    /// Operations the batch appends from `start`, ending with its commit.
+    pub operations: Arc<Vec<Operation<F, U>>>,
+    /// Operations-tree root after the batch.
+    pub ops_root: D,
+    /// What the batch changed in the current-state commitment.
+    pub delta: Delta<F, D, N>,
+}
+
 /// A speculative batch of operations whose root digest has been computed, in contrast to
 /// [`UnmerkleizedBatch`].
 ///
@@ -1243,9 +1262,8 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
     /// Return the operations this batch appends to the ops log and the location of the first.
     ///
     /// Delegates to the wrapped ops-level batch. The bitmap state contributes to the canonical
-    /// root but appends no log operations. Replaying the operations onto
-    /// [`Self::ops_pinned_nodes`] recomputes [`Self::ops_root`], and [`Self::ops_root_witness`]
-    /// binds that root to the canonical [`Self::root`].
+    /// root but appends no log operations. [`Self::publication`] pairs the operations with the
+    /// frontier they extend and the batch's [`Delta`].
     pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, U>>>) {
         self.inner.operations()
     }
@@ -1288,22 +1306,30 @@ where
         )
     }
 
-    /// Return the operations-tree frontier at this batch's first operation.
+    /// Return this batch's [`Publication`].
     ///
-    /// It has the staleness and retention requirements of
+    /// The frontier has the staleness and retention requirements of
     /// [`any::batch::MerkleizedBatch::pinned_nodes`], so read it before the batch's changes are
-    /// flushed. Replaying the batch's operations onto these nodes recomputes [`Self::ops_root`].
-    pub fn ops_pinned_nodes<E, C, I, H>(
+    /// flushed. Everything else copies state the batch owns.
+    pub fn publication<E, C, I, H>(
         &self,
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<Vec<D>, Error<F>>
+    ) -> Result<Publication<F, D, U, N>, Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
         H: Hasher<Digest = D>,
     {
-        self.inner.pinned_nodes(&db.any)
+        let pinned_nodes = self.inner.pinned_nodes(&db.any)?;
+        let (start, operations) = self.inner.operations();
+        Ok(Publication {
+            start,
+            pinned_nodes,
+            operations,
+            ops_root: self.ops_root(),
+            delta: self.delta(),
+        })
     }
 
     /// Read through: local diff -> ancestor diffs -> database.
@@ -2189,19 +2215,21 @@ mod tests {
         }
     }
 
-    /// Check that a batch's operations, proof, and pinned nodes verify against its operations root.
-    fn check_frontier<F: Graftable, const N: usize>(
+    /// Check that a batch's publication carries its delta and that its operations, proof, and
+    /// pinned nodes verify against its operations root.
+    fn check_publication<F: Graftable + PartialEq, const N: usize>(
         batch: &MerkleizedBatch<F, Digest, TestUpdate, N, Sequential>,
         db: &TestDb<F, N>,
     ) {
-        let (start, operations) = batch.operations();
+        let publication = batch.publication(db).unwrap();
+        assert_eq!(publication.delta, batch.delta());
+        assert_eq!(publication.ops_root, batch.ops_root());
         let proof = batch.inner.proof(&db.any).unwrap();
-        let pins = batch.ops_pinned_nodes(db).unwrap();
         assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
-            start,
-            &operations,
-            &pins,
-            &batch.ops_root(),
+            publication.start,
+            &publication.operations,
+            &publication.pinned_nodes,
+            &publication.ops_root,
         ));
     }
 
@@ -2239,8 +2267,8 @@ mod tests {
         let mut published = Published::from_db(&db);
 
         // Each round writes more than two chunks of operations, and every round after the first
-        // supersedes the previous round's writes, so deltas clear bits in earlier chunks as
-        // well as setting new ones. Each batch's frontier verifies against its operations root.
+        // supersedes the previous round's writes, so deltas clear bits in earlier chunks as well
+        // as setting new ones. Each batch's publication verifies against its operations root.
         let count = (N * 16 + 5) as u64;
         for round in 0..3u64 {
             let batch = write_keys(db.new_batch(), 0..count, round)
@@ -2248,7 +2276,7 @@ mod tests {
                 .await
                 .unwrap();
             let delta = batch.delta();
-            check_frontier(&batch, &db);
+            check_publication(&batch, &db);
             db = db.apply_batch(batch).await.unwrap();
             published.apply(&delta);
             published.check(&db, &delta);
@@ -2490,8 +2518,8 @@ mod tests {
 
             // The held copy writes the same 16 keys as the child, so once merkleized after pruning
             // it has the saved child's root, witness, chunks, and grafted nodes. It records the
-            // boundary at merkleize, not when it was written, and the saved child's frontier still
-            // verifies.
+            // boundary at merkleize, not when it was written, and the saved child's publication
+            // still verifies.
             let post_prune = held.merkleize_with(&db, &mut Hold).await.unwrap();
             let post_delta = post_prune.delta();
             assert_eq!(post_prune.root(), child.root());
@@ -2499,19 +2527,19 @@ mod tests {
             assert_eq!(post_delta.grafted_nodes, saved.grafted_nodes);
             assert_eq!(post_delta.pruned_chunks, db.bitmap().pruned_chunks() as u64);
             assert_eq!(post_prune.ops_root_witness(), child.ops_root_witness());
-            check_frontier(&child, &db);
+            check_publication(&child, &db);
 
             // The post-prune child's delta keeps the mirror in step.
             db = db.apply_batch(Arc::clone(&post_prune)).await.unwrap();
             published.apply(&post_delta);
             published.check(&db, &post_delta);
 
-            // Once the database moves past the saved child's chain, reading the child's pinned
-            // nodes fails as stale, but the child's delta is unchanged after the parent and the
-            // post-prune child are dropped and the database is destroyed.
+            // Once the database moves past the saved child's chain, publishing the child fails as
+            // stale, but its delta is unchanged after the parent and the post-prune child are
+            // dropped and the database is destroyed.
             let successor = db.new_batch().merkleize_with(&db, &mut Hold).await.unwrap();
             db = db.apply_batch(successor).await.unwrap();
-            assert!(matches!(child.ops_pinned_nodes(&db), Err(Error::StaleRead)));
+            assert!(matches!(child.publication(&db), Err(Error::StaleRead)));
             drop(parent);
             drop(post_prune);
             db.destroy().await.unwrap();
