@@ -1,9 +1,9 @@
 //! Accounting of the time threads spend executing a run.
 //!
-//! [`measure`] returns a run's busy time, the wall time its threads spend executing it. Busy time
-//! includes time the operating system deschedules those threads. It excludes time spent handing
-//! off a job, waiting for one, searching for work, sleeping, or running unrelated jobs, so a run
-//! queued behind other jobs is not charged for the queue.
+//! [`measure_with`] returns a run's busy time, the wall time its threads spend executing it. Busy
+//! time includes time the operating system deschedules those threads. It excludes time spent
+//! handing off a job, waiting for one, searching for work, sleeping, or running unrelated jobs, so
+//! a run queued behind other jobs is not charged for the queue.
 //!
 //! Each thread has a context, the meter it charges or none, and charges the previous meter whenever
 //! its context changes, so a thread with no context never reads the clock. A job its creator waits
@@ -23,11 +23,18 @@ use std::{
 #[cfg(test)]
 mod test;
 
-/// Runs `op` as a measured run and returns its result with the run's busy time. An enclosing run
-/// is charged that busy time once `op` returns or unwinds.
+/// Runs `op` through [`measure_with`] on the system clock.
+#[cfg(test)]
 pub(crate) fn measure<R>(op: impl FnOnce() -> R) -> (R, Duration) {
+    measure_with(Clock::Wall, op)
+}
+
+/// Runs `op` as a measured run on `clock` and returns its result with the run's busy time. An
+/// enclosing run is charged that busy time once `op` returns or unwinds.
+pub(crate) fn measure_with<R>(clock: Clock, op: impl FnOnce() -> R) -> (R, Duration) {
     let meter = Meter {
         busy: AtomicU64::new(0),
+        clock,
     };
 
     // The guard charges the enclosing context after `enter` restores it, even when `op` unwinds.
@@ -48,7 +55,7 @@ pub(crate) fn charge(busy: Duration) {
         // SAFETY: a thread's current context is none or points to a live meter, as described on
         // `Context`.
         if let Some(meter) = unsafe { current.get().meter.as_ref() } {
-            meter.charge_nanos(u64::try_from(busy.as_nanos()).unwrap_or(u64::MAX));
+            meter.charge_nanos(nanos(busy));
         }
     });
 }
@@ -61,6 +68,8 @@ struct Meter {
     // Relaxed accesses suffice. A thread charges before setting the latch the run waits on, and
     // that latch orders the charge before the run reads its total.
     busy: AtomicU64,
+    /// The clock the run's threads read.
+    clock: Clock,
 }
 
 impl Meter {
@@ -75,8 +84,72 @@ impl Meter {
     }
 }
 
-/// Charges a nested run's busy time to the enclosing context. It drops after [`measure`] restores
-/// that context, so the nested meter holds every charge the run waited for.
+/// The clock a run's busy time is read from.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Clock {
+    /// The monotonic system clock.
+    Wall,
+    /// A clock tests advance explicitly, so busy time is exact.
+    #[cfg(test)]
+    Virtual(TestClock),
+}
+
+impl Clock {
+    #[inline]
+    fn now(&self) -> Instant {
+        match self {
+            Self::Wall => Instant::now(),
+            #[cfg(test)]
+            Self::Virtual(clock) => clock.now(),
+        }
+    }
+}
+
+/// A clock tests advance. [`TestClock::spin`] passes time for the calling thread alone, and
+/// [`TestClock::elapse`] passes it for every thread.
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TestClock(std::sync::Arc<AtomicU64>);
+
+#[cfg(test)]
+impl PartialEq for TestClock {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+#[cfg(test)]
+impl TestClock {
+    /// Passes `duration` on the calling thread alone, so only its context is charged for it.
+    pub(crate) fn spin(&self, duration: Duration) {
+        SPUN.with(|spun| spun.set(spun.get() + nanos(duration)));
+    }
+
+    /// Passes `duration` for every thread, so every context on this clock is charged for it.
+    pub(crate) fn elapse(&self, duration: Duration) {
+        self.0.fetch_add(nanos(duration), Ordering::SeqCst);
+    }
+
+    fn now(&self) -> Instant {
+        static ANCHOR: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        let nanos = self.0.load(Ordering::SeqCst) + SPUN.with(Cell::get);
+        *ANCHOR.get_or_init(Instant::now) + Duration::from_nanos(nanos)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The nanoseconds the calling thread has spun on virtual clocks.
+    static SPUN: Cell<u64> = const { Cell::new(0) };
+}
+
+/// A duration in nanoseconds, saturating at `u64::MAX`.
+fn nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// Charges a nested run's busy time to the enclosing context. It drops after [`measure_with`]
+/// restores that context, so the nested meter holds every charge the run waited for.
 struct ChargeOuter<'a> {
     /// The meter whose total is charged.
     inner: &'a Meter,
@@ -99,7 +172,8 @@ impl Drop for ChargeOuter<'_> {
 /// A thread's current context is none or points to a live meter. Each entry into a meter's
 /// context ends before the meter can drop:
 ///
-/// - [`measure`] holds the meter and restores the previous context before it returns or unwinds.
+/// - [`measure_with`] holds the meter and restores the previous context before it returns or
+///   unwinds.
 /// - A stack job runs in its creator's context, and the creator waits on the job's latch.
 /// - A suspension enters [`Context::NONE`] and restores a context whose scope encloses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,7 +224,7 @@ impl Drop for Restore {
 struct Current {
     /// The meter the thread charges, or null for no context.
     meter: *const Meter,
-    /// When the thread entered its context, or `None` before its first switch.
+    /// When the thread entered its meter's context, or `None` while it has no context.
     since: Option<Instant>,
 }
 
@@ -175,19 +249,24 @@ fn switch(to: *const Meter) -> *const Meter {
             return to;
         }
 
-        // The previous meter is charged up to the instant `to` starts from, so no time is charged
-        // twice or lost between them.
-        let now = Instant::now();
         // SAFETY: `previous` is still the thread's current context, so it is none or points to a
         // live meter, as described on `Context`.
-        if let (Some(meter), Some(since)) = (unsafe { previous.meter.as_ref() }, previous.since) {
-            let elapsed = now.saturating_duration_since(since).as_nanos();
-            meter.charge_nanos(u64::try_from(elapsed).unwrap_or(u64::MAX));
+        let previous_meter = unsafe { previous.meter.as_ref() };
+
+        // SAFETY: `to` is none or points to a live meter, by the contract of `Context::enter`.
+        let next_meter = unsafe { to.as_ref() };
+
+        // The previous meter is charged up to the instant the next one starts from, so no time is
+        // charged twice or lost between meters on one clock.
+        let now = previous_meter.map(|meter| meter.clock.now());
+        if let (Some(meter), Some(since), Some(now)) = (previous_meter, previous.since, now) {
+            meter.charge_nanos(nanos(now.saturating_duration_since(since)));
         }
-        current.set(Current {
-            meter: to,
-            since: Some(now),
+        let since = next_meter.map(|next| match (previous_meter, now) {
+            (Some(previous), Some(now)) if previous.clock == next.clock => now,
+            _ => next.clock.now(),
         });
+        current.set(Current { meter: to, since });
         previous.meter
     })
 }

@@ -78,7 +78,8 @@
 //! - Added group eligibility, wake propagation, and placement-restoration tests, plus Loom
 //!   models of the wake protocol.
 //! - Added a busy-time meter for measured runs. Stack jobs run in their creator's context, and
-//!   hand-offs, scheduler waits, yields, and detached jobs run in none.
+//!   hand-offs, scheduler waits, yields, and detached jobs run in none. Busy-time tests read a
+//!   virtual clock.
 //!
 //! [rayon-core]: https://crates.io/crates/rayon-core/1.13.0
 //! [rayon]: https://crates.io/crates/rayon/1.12.0
@@ -102,6 +103,8 @@ mod unwind;
 #[cfg(all(test, feature = "loom"))]
 mod wake_loom_tests;
 
+#[cfg(test)]
+pub(crate) use self::meter::TestClock;
 #[cfg(any(test, all(target_os = "linux", not(miri))))]
 pub(crate) use self::thread_pool::current_thread_index;
 #[cfg(test)]
@@ -110,7 +113,7 @@ pub use self::thread_pool::{ThreadPool, Yield};
 pub(crate) use self::{
     bridge::{fold_init, map_collect_vec, map_init_collect_vec, try_fold, try_map_collect_vec},
     join::join,
-    meter::{charge, measure},
+    meter::{Clock, charge, measure_with},
     registry::Placement,
     sort::{par_mergesort, par_quicksort},
 };

@@ -1526,6 +1526,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         // The placement a copy made by `placed` runs its parallel bodies under when the caller is
         // not a worker of the strategy's pool, or `None` outside such a copy.
         placement: Option<rayon::Placement>,
+
+        // The clock that measured runs and spawned jobs read their busy time from.
+        clock: rayon::Clock,
     }
 
     /// Where a run's parallel body may run. It decides the body's placement when the caller is not
@@ -1576,6 +1579,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy: Some(policy::Policy::default()),
                 groups,
                 placement: None,
+                clock: rayon::Clock::Wall,
             }
         }
 
@@ -1622,6 +1626,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy: None,
                 groups: Arc::clone(&self.groups),
                 placement: Some(placement),
+                clock: self.clock.clone(),
             }
         }
 
@@ -1736,7 +1741,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 let _nudge = nudge;
                 match plan.execution {
                     policy::RunExecution::Parallel if plan.measure => {
-                        let (result, busy) = rayon::measure(|| run(plan.execution, placement));
+                        let (result, busy) =
+                            rayon::measure_with(self.clock.clone(), || run(plan.execution, placement));
                         (result, Some(busy))
                     }
                     policy::RunExecution::Parallel | policy::RunExecution::Serial => {
@@ -1884,6 +1890,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     let s = self.clone();
                     let pool = self.groups.pool().clone();
                     let worker_pool = self.groups.pool().clone();
+                    let clock = self.clock.clone();
                     let recorder = if plan.measure {
                         policy.cloned().map(|policy| (policy, caller, len, threads))
                     } else {
@@ -1918,7 +1925,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         // The pool aborts on an uncaught panic in a spawned job, so catch the
                         // panic and propagate it to the awaiting task. The job measures its own
                         // busy time for the run that awaits it.
-                        let (result, busy) = rayon::measure(|| {
+                        let (result, busy) = rayon::measure_with(clock, || {
                             panic::catch_unwind(AssertUnwindSafe(|| {
                                 worker_pool.install_in(placement, || f(s))
                             }))
@@ -2279,7 +2286,7 @@ mod test {
     use crate::{
         Grid, MAX_UNITS, Rayon, Sequential, Strategy,
         mocks::Explorer,
-        rayon::{self, Placement, ThreadPoolBuilder, spin, timed_spin},
+        rayon::{self, Placement, ThreadPoolBuilder},
     };
     use commonware_utils::{
         NZUsize, Widen,
@@ -2355,11 +2362,18 @@ mod test {
     /// finishes a job, including the samples it records for the job, before it sleeps, so a quiet
     /// pool has no bookkeeping in flight.
     fn wait_until_asleep(pool: &rayon::ThreadPool) {
+        wait_until_sleeping(pool, pool.current_num_threads());
+    }
+
+    /// Waits up to ten seconds until at least `count` workers of `pool` are registered as asleep. A
+    /// sleeping worker waits with its context suspended, so virtual time that passes afterwards is
+    /// not charged to it.
+    fn wait_until_sleeping(pool: &rayon::ThreadPool, count: usize) {
         let start = Instant::now();
-        while pool.sleeping_workers() < pool.current_num_threads() {
+        while pool.sleeping_workers() < count {
             assert!(
                 start.elapsed() < Duration::from_secs(10),
-                "every worker of the pool must go to sleep within 10 seconds"
+                "{count} workers of the pool must go to sleep within 10 seconds"
             );
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -3777,96 +3791,99 @@ mod test {
         strategy.policy.as_ref().map_or(0, |policy| policy.len())
     }
 
-    /// The wall-time and busy-time estimates `strategy` recorded at `caller` for `len` items.
-    /// Panics unless a parallel run at `caller` has been measured.
-    fn recorded(
-        strategy: &Rayon,
-        caller: &'static Location<'static>,
-        len: usize,
-    ) -> (Duration, Duration) {
-        let policy = strategy.policy.as_ref().unwrap();
-        let (wide, local) = policy
-            .run_placement_estimates(caller, len, len, strategy.parallelism)
-            .unwrap();
-        let (wide_busy, local_busy) = policy
-            .run_busy_estimates(caller, len, len, strategy.parallelism)
-            .unwrap();
-        (
-            Duration::from_nanos(wide.or(local).unwrap()),
-            Duration::from_nanos(wide_busy.or(local_busy).unwrap()),
-        )
+    /// A strategy over four workers whose measured runs read the returned virtual clock.
+    fn virtual_strategy() -> (Rayon, rayon::TestClock) {
+        let clock = rayon::TestClock::default();
+        let mut strategy = parallel_strategy();
+        strategy.clock = rayon::Clock::Virtual(clock.clone());
+        (strategy, clock)
     }
 
-    /// Maps `len` items that each spin for `each`, and returns the run's call site and the items'
-    /// total spin time.
+    /// The busy-time estimate `strategy` recorded at `caller` for `len` items. Panics unless a
+    /// parallel run at `caller` has been measured.
+    fn recorded(strategy: &Rayon, caller: &'static Location<'static>, len: usize) -> Duration {
+        let policy = strategy.policy.as_ref().unwrap();
+        let (wide, local) = policy
+            .run_busy_estimates(caller, len, len, strategy.parallelism)
+            .unwrap();
+        Duration::from_nanos(wide.or(local).unwrap())
+    }
+
+    /// Maps `len` items that each spin for `each` on `clock`, and returns the run's call site.
     #[track_caller]
     fn spin_map(
         strategy: &Rayon,
+        clock: &rayon::TestClock,
         len: usize,
         each: Duration,
-    ) -> (&'static Location<'static>, Duration) {
-        let items = strategy.map_collect_vec(0..len, |_| timed_spin(each));
-        (Location::caller(), items.into_iter().sum())
+    ) -> &'static Location<'static> {
+        strategy.map_collect_vec(0..len, |_| clock.spin(each));
+        Location::caller()
     }
 
-    /// A run of 32 items that each spin for 1ms records at least 32ms of busy time, and at most
-    /// five times its wall time, since four workers charge it and the caller only around the
-    /// install.
+    /// A run of 32 items that each spin for 1ms records 32ms of busy time, since each spin charges
+    /// the run on whichever thread executes the item.
     #[test]
     fn measured_run_records_busy_time_of_all_items() {
-        // Map 32 items that each spin for 1ms.
-        let strategy = parallel_strategy();
-        let len = 32;
-        let (caller, _) = spin_map(&strategy, len, Duration::from_millis(1));
-
-        // The recorded busy time covers every item and stays within five threads' wall time.
-        let (wall, busy) = recorded(&strategy, caller, len);
-        assert!(
-            busy >= Duration::from_millis(32) && busy <= wall * 5,
-            "busy time {busy:?} must cover every item and stay within five times the wall {wall:?}"
-        );
+        let (strategy, clock) = virtual_strategy();
+        let caller = spin_map(&strategy, &clock, 32, Duration::from_millis(1));
+        assert_eq!(recorded(&strategy, caller, 32), Duration::from_millis(32));
     }
 
-    /// A join of 5ms and 40ms sides is charged for both sides, but not for the worker that finishes
-    /// the short side and waits for the long one.
+    /// A join is charged its 5ms side and the 40ms that pass on the thief of its other side. The
+    /// joining worker sleeps before the 40ms pass, so its wait is not charged.
     #[test]
     fn measured_join_excludes_idle_waits() {
         #[track_caller]
-        fn spin_join(strategy: &Rayon) -> (&'static Location<'static>, Duration) {
-            let (short, long) = strategy.join(
-                || timed_spin(Duration::from_millis(5)),
-                || timed_spin(Duration::from_millis(40)),
+        fn spin_join(strategy: &Rayon, clock: &rayon::TestClock) -> &'static Location<'static> {
+            let stolen = AtomicBool::new(false);
+            strategy.join(
+                // The first side returns once the second is stolen, so the joiner has to wait.
+                || {
+                    clock.spin(Duration::from_millis(5));
+                    let start = Instant::now();
+                    while !stolen.load(Ordering::Acquire) {
+                        assert!(
+                            start.elapsed() < Duration::from_secs(10),
+                            "the second side must be stolen within 10s"
+                        );
+                        std::hint::spin_loop();
+                    }
+                },
+                || {
+                    stolen.store(true, Ordering::Release);
+                    wait_until_sleeping(strategy.groups.pool(), 3);
+                    clock.elapse(Duration::from_millis(40));
+                },
             );
-            (Location::caller(), short + long)
+            Location::caller()
         }
 
-        // Join a 5ms side with a 40ms side from outside the pool.
-        let strategy = parallel_strategy();
-        let (caller, sides) = spin_join(&strategy);
-
-        // Both sides are charged, and the wait for the long side is not.
-        let (wall, busy) = recorded(&strategy, caller, 1);
-        assert!(
-            busy >= Duration::from_millis(45) && busy < sides + Duration::from_millis(15),
-            "busy time {busy:?} must cover both sides {sides:?} and exclude the wait, wall {wall:?}"
-        );
+        let (strategy, clock) = virtual_strategy();
+        let caller = spin_join(&strategy, &clock);
+        assert_eq!(recorded(&strategy, caller, 1), Duration::from_millis(45));
     }
 
-    /// A run that queues behind busy workers records the queue in its wall time but not in its busy
-    /// time.
+    /// A run that queues behind busy workers is charged its four 1ms items but not the 200ms that
+    /// the four occupied workers let pass while it waits in the queue.
     #[test]
     fn measured_run_excludes_queueing() {
-        let strategy = parallel_strategy();
+        let (strategy, clock) = virtual_strategy();
 
-        // Occupy every worker until the measured run queues behind them, and then for 50ms more.
+        // Occupy every worker until the measured run queues behind them, and have each let 50ms
+        // pass. No worker is released before all four have done so, so the run's items start only
+        // after the 200ms.
         let started = Arc::new(std::sync::Barrier::new(5));
+        let released = Arc::new(std::sync::Barrier::new(4));
         let missed = Arc::new(AtomicBool::new(false));
         let queued = Arc::new(AtomicBool::new(false));
         {
             let pool = Arc::clone(strategy.groups.pool());
             let started = Arc::clone(&started);
+            let released = Arc::clone(&released);
             let missed = Arc::clone(&missed);
             let queued = Arc::clone(&queued);
+            let clock = clock.clone();
             strategy.groups.pool().spawn_broadcast(move |_| {
                 started.wait();
 
@@ -3880,18 +3897,20 @@ mod test {
                     }
                     if Instant::now() >= deadline {
                         missed.store(true, Ordering::Relaxed);
-                        return;
+                        break;
                     }
                     core::hint::spin_loop();
                 }
-                spin(Duration::from_millis(50));
+                if !missed.load(Ordering::Relaxed) {
+                    clock.elapse(Duration::from_millis(50));
+                }
+                released.wait();
             });
         }
         started.wait();
 
         // The run waits through the queue but executes only its own four 1ms items.
-        let len = 4;
-        let (caller, items) = spin_map(&strategy, len, Duration::from_millis(1));
+        let caller = spin_map(&strategy, &clock, 4, Duration::from_millis(1));
 
         // Wait for every blocker to finish before checking that the run queued.
         strategy.groups.pool().broadcast(|_| ());
@@ -3899,44 +3918,33 @@ mod test {
             !missed.load(Ordering::Relaxed),
             "the measured run must queue behind the occupied workers within 10s"
         );
-
-        // The wall time includes the queue, and the busy time covers only the four items.
-        let (wall, busy) = recorded(&strategy, caller, len);
-        assert!(
-            wall >= Duration::from_millis(40),
-            "wall {wall:?} must include the queue"
-        );
-        assert!(
-            busy >= Duration::from_millis(4) && busy < items + Duration::from_millis(15),
-            "busy time {busy:?} must exclude the queue, items {items:?}, wall {wall:?}"
-        );
+        assert_eq!(recorded(&strategy, caller, 4), Duration::from_millis(4));
     }
 
-    /// Runs a body that spawns a 20ms job and blocks on its result, and returns the run's call
-    /// site. The first run at a site is a measured parallel run.
-    #[track_caller]
-    fn spawn_and_block(strategy: &Rayon) -> &'static Location<'static> {
-        let body = || block_on_nested(strategy.spawn(1, |_| spin(Duration::from_millis(20))));
-        strategy.run(1, body, body);
-        Location::caller()
-    }
-
-    /// A spawn awaited by a run outside the pool is charged once, through the run's park in its
-    /// context, which spans the job.
+    /// A spawn awaited by a run outside the pool is charged once, for the 20ms that pass while the
+    /// run parks on it.
     #[test]
     fn spawns_awaited_outside_the_pool_are_charged_once() {
-        let strategy = parallel_strategy();
-        let caller = spawn_and_block(&strategy);
-        let (wall, busy) = recorded(&strategy, caller, 1);
-        assert!(
-            busy >= Duration::from_millis(20) && busy <= wall,
-            "busy time {busy:?} must cover the job once and stay within the wall {wall:?}"
-        );
+        #[track_caller]
+        fn spawn_and_block(
+            strategy: &Rayon,
+            clock: &rayon::TestClock,
+        ) -> &'static Location<'static> {
+            let body = || {
+                let clock = clock.clone();
+                block_on_nested(strategy.spawn(1, move |_| clock.elapse(Duration::from_millis(20))))
+            };
+            strategy.run(1, body, body);
+            Location::caller()
+        }
+
+        let (strategy, clock) = virtual_strategy();
+        let caller = spawn_and_block(&strategy, &clock);
+        assert_eq!(recorded(&strategy, caller, 1), Duration::from_millis(20));
     }
 
-    /// A spawn awaited by a run on a worker is charged once, on receipt, and the worker's wait
-    /// for it is not charged. The job holds another worker and starts its work only once the run
-    /// awaits it, so the awaiting worker waits instead of running the job on its own stack.
+    /// A spawn awaited by a run on a worker is charged once, on receipt, for the 20ms that pass on
+    /// the job's worker while the awaiting worker sleeps.
     #[test]
     fn spawns_awaited_on_a_worker_are_charged_once() {
         #[track_caller]
@@ -3954,15 +3962,16 @@ mod test {
             Location::caller()
         }
 
-        // Spawn from outside the pool a job that waits on a worker for the run's signal and then
-        // spins for 20ms.
-        let strategy = parallel_strategy();
+        // Spawn a job from outside the pool. It holds a worker until the run starts and the
+        // awaiting worker sleeps, and then lets 20ms pass.
+        let (strategy, clock) = virtual_strategy();
         let (held, on_worker) = std::sync::mpsc::channel();
         let (start, started) = std::sync::mpsc::channel();
-        let future = strategy.spawn(1, move |_| {
+        let future = strategy.spawn(1, move |strategy| {
             held.send(()).unwrap();
             started.recv().unwrap();
-            spin(Duration::from_millis(20));
+            wait_until_sleeping(strategy.groups.pool(), 3);
+            clock.elapse(Duration::from_millis(20));
         });
         on_worker.recv().unwrap();
 
@@ -3971,49 +3980,52 @@ mod test {
             .groups
             .pool()
             .install(|| await_on_a_worker(&strategy, future, start));
-        let (wall, busy) = recorded(&strategy, caller, 1);
-        assert!(
-            busy >= Duration::from_millis(20) && busy < wall + Duration::from_millis(10),
-            "busy time {busy:?} must cover the job once and stay under the wall {wall:?} plus 10ms"
-        );
+        assert_eq!(recorded(&strategy, caller, 1), Duration::from_millis(20));
     }
 
     /// A spawn issued by a worker inside a run and awaited by the run's caller outside the pool is
-    /// charged at most once: the caller's park covers the part of the job that overlaps it, and
-    /// nothing charges the job again.
+    /// charged once, for the 20ms that pass while the caller parks on it, and never on receipt.
     #[test]
     fn worker_spawns_awaited_outside_the_pool_are_charged_at_most_once() {
         #[track_caller]
-        fn spawn_on_a_worker_and_block(strategy: &Rayon) -> &'static Location<'static> {
+        fn spawn_on_a_worker_and_block(
+            strategy: &Rayon,
+            clock: &rayon::TestClock,
+        ) -> &'static Location<'static> {
             let body = || {
-                let future = strategy
-                    .groups
-                    .pool()
-                    .install(|| strategy.spawn(1, |_| spin(Duration::from_millis(20))));
+                let (start, started) = std::sync::mpsc::channel();
+                let clock = clock.clone();
+                let future = strategy.groups.pool().install(|| {
+                    strategy.spawn(1, move |_| {
+                        started.recv().unwrap();
+                        clock.elapse(Duration::from_millis(20));
+                    })
+                });
+                start.send(()).unwrap();
                 block_on_nested(future)
             };
             strategy.run(1, body, body);
             Location::caller()
         }
 
-        let strategy = parallel_strategy();
-        let caller = spawn_on_a_worker_and_block(&strategy);
-        let (wall, busy) = recorded(&strategy, caller, 1);
-        assert!(
-            busy <= wall + Duration::from_millis(10),
-            "busy time {busy:?} must not charge the job beyond the park, wall {wall:?}"
-        );
+        let (strategy, clock) = virtual_strategy();
+        let caller = spawn_on_a_worker_and_block(&strategy, &clock);
+        assert_eq!(recorded(&strategy, caller, 1), Duration::from_millis(20));
     }
 
-    /// A spawn issued inside a nested measured run and awaited by the enclosing run on a worker
-    /// is charged to the enclosing run, which observes the result.
+    /// Spawns issued inside a nested measured run and awaited by the enclosing run on a worker are
+    /// charged on receipt to the enclosing run, so the two 20ms jobs charge it 40ms.
     #[test]
     fn enclosing_runs_are_charged_for_spawns_of_nested_runs() {
         #[track_caller]
-        fn spawn_in_a_nested_run_and_block(strategy: &Rayon) -> &'static Location<'static> {
+        fn spawn_in_a_nested_run_and_block(
+            strategy: &Rayon,
+            clock: &rayon::TestClock,
+        ) -> &'static Location<'static> {
             let body = || {
                 let futures = strategy.map_collect_vec(0..2, |_| {
-                    strategy.spawn(1, |_| spin(Duration::from_millis(20)))
+                    let clock = clock.clone();
+                    strategy.spawn(1, move |_| clock.spin(Duration::from_millis(20)))
                 });
                 for future in futures {
                     block_on_nested(future);
@@ -4023,16 +4035,12 @@ mod test {
             Location::caller()
         }
 
-        let strategy = parallel_strategy();
+        let (strategy, clock) = virtual_strategy();
         let caller = strategy
             .groups
             .pool()
-            .install(|| spawn_in_a_nested_run_and_block(&strategy));
-        let (wall, busy) = recorded(&strategy, caller, 1);
-        assert!(
-            busy >= Duration::from_millis(40) && busy <= wall * 3,
-            "busy time {busy:?} must cover both jobs and stay within three times the wall {wall:?}"
-        );
+            .install(|| spawn_in_a_nested_run_and_block(&strategy, &clock));
+        assert_eq!(recorded(&strategy, caller, 1), Duration::from_millis(40));
     }
 
     /// A measured run outside the pool can await a spawn under the standard futures executor, and
@@ -4076,15 +4084,21 @@ mod test {
         );
     }
 
-    /// A run outside the pool that fans out several spawns and parks on each is charged for its
-    /// parks, which the concurrent jobs overlap, and never for the jobs again.
+    /// A run outside the pool that fans out four spawns and parks on each is charged for the 80ms
+    /// its four jobs let pass while it parks, and never for the jobs again.
     #[test]
     fn fan_out_outside_the_pool_is_charged_for_its_parks() {
         #[track_caller]
-        fn spawn_four_and_block(strategy: &Rayon) -> &'static Location<'static> {
+        fn spawn_four_and_block(
+            strategy: &Rayon,
+            clock: &rayon::TestClock,
+        ) -> &'static Location<'static> {
             let body = || {
                 let futures: Vec<_> = (0..4)
-                    .map(|_| strategy.spawn(1, |_| spin(Duration::from_millis(20))))
+                    .map(|_| {
+                        let clock = clock.clone();
+                        strategy.spawn(1, move |_| clock.elapse(Duration::from_millis(20)))
+                    })
                     .collect();
                 for future in futures {
                     block_on_nested(future);
@@ -4094,24 +4108,24 @@ mod test {
             Location::caller()
         }
 
-        let strategy = parallel_strategy();
-        let caller = spawn_four_and_block(&strategy);
-        let (wall, busy) = recorded(&strategy, caller, 1);
-        assert!(
-            busy >= Duration::from_millis(20) && busy <= wall,
-            "busy time {busy:?} must cover the parks and stay within the wall {wall:?}"
-        );
+        let (strategy, clock) = virtual_strategy();
+        let caller = spawn_four_and_block(&strategy, &clock);
+        assert_eq!(recorded(&strategy, caller, 1), Duration::from_millis(80));
     }
 
     /// A spawned job that panics is still measured, so the run on a worker that awaits it is
-    /// charged for the job's work before the panic reaches it.
+    /// charged the job's 20ms spin before the panic reaches it.
     #[test]
     fn panicking_spawns_are_charged_before_they_propagate() {
         #[track_caller]
-        fn spawn_and_catch(strategy: &Rayon) -> &'static Location<'static> {
+        fn spawn_and_catch(
+            strategy: &Rayon,
+            clock: &rayon::TestClock,
+        ) -> &'static Location<'static> {
             let body = || {
-                let future = strategy.spawn(1, |_| {
-                    spin(Duration::from_millis(20));
+                let clock = clock.clone();
+                let future = strategy.spawn(1, move |_| {
+                    clock.spin(Duration::from_millis(20));
                     panic!("spawned job");
                 });
                 let result = panic::catch_unwind(AssertUnwindSafe(|| block_on_nested(future)));
@@ -4124,48 +4138,34 @@ mod test {
             Location::caller()
         }
 
-        let strategy = parallel_strategy();
+        let (strategy, clock) = virtual_strategy();
         let caller = strategy
             .groups
             .pool()
-            .install(|| spawn_and_catch(&strategy));
-        let (wall, busy) = recorded(&strategy, caller, 1);
-        assert!(
-            busy >= Duration::from_millis(20) && busy < wall + Duration::from_millis(10),
-            "busy time {busy:?} must cover the job once and stay under the wall {wall:?} plus 10ms"
-        );
+            .install(|| spawn_and_catch(&strategy, &clock));
+        assert_eq!(recorded(&strategy, caller, 1), Duration::from_millis(20));
     }
 
-    /// A `Strategy::run` body that spins for 2ms and then runs a nested map is charged the nested
-    /// busy time once, plus the body's own time.
+    /// A `Strategy::run` body that spins for 2ms and then maps 16 items that each spin for 1ms is
+    /// charged its own 2ms plus the nested run's 16ms once.
     #[test]
     fn measured_run_includes_nested_runs() {
         #[track_caller]
-        fn run_body(strategy: &Rayon) -> (&'static Location<'static>, &'static Location<'static>) {
+        fn run_body(
+            strategy: &Rayon,
+            clock: &rayon::TestClock,
+        ) -> (&'static Location<'static>, &'static Location<'static>) {
             let body = || {
-                spin(Duration::from_millis(2));
-                spin_map(strategy, 16, Duration::from_millis(1)).0
+                clock.spin(Duration::from_millis(2));
+                spin_map(strategy, clock, 16, Duration::from_millis(1))
             };
             (Location::caller(), strategy.run(2, body, body))
         }
 
-        // Run a body that spins for 2ms and then maps 16 items that each spin for 1ms.
-        let strategy = parallel_strategy();
-        let (outer, inner) = run_body(&strategy);
-
-        // The body's own time is between its 2ms spin and the outer wall minus the inner, plus 2ms.
-        let (outer_wall, outer) = recorded(&strategy, outer, 2);
-        let (inner_wall, inner) = recorded(&strategy, inner, 16);
-        let body = outer_wall - inner_wall;
-        assert!(
-            inner >= Duration::from_millis(16),
-            "inner busy time {inner:?} must cover every item"
-        );
-        assert!(
-            outer >= inner + Duration::from_millis(2)
-                && outer < inner + body + Duration::from_millis(2),
-            "outer busy time {outer:?} must add the body's {body:?} to the inner {inner:?}"
-        );
+        let (strategy, clock) = virtual_strategy();
+        let (outer, inner) = run_body(&strategy, &clock);
+        assert_eq!(recorded(&strategy, inner, 16), Duration::from_millis(16));
+        assert_eq!(recorded(&strategy, outer, 2), Duration::from_millis(18));
     }
 
     /// A strategy that does not split runs the whole input once as the single range `0..len` on
