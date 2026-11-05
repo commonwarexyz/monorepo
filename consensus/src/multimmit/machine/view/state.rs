@@ -113,7 +113,6 @@ pub(crate) struct ViewState<S: Scheme, D: Digest> {
     /// Everything retained for each view.
     pub(super) views: BTreeMap<View, ViewEntry<S, D>>,
     /// The view and signer of every retained view message.
-    pub(super) message_locations: BTreeMap<ArtifactId<D>, (View, Participant)>,
     /// Slots claimed by artifacts awaiting verification.
     pub(super) claims: ClaimIndex<D>,
     /// Certificate jobs in flight.
@@ -265,7 +264,6 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
             parents: BTreeMap::from([(genesis.vqc(), parent)]),
             parents_by_view: BTreeMap::from([(View::zero(), vec![genesis.vqc()])]),
             views: BTreeMap::new(),
-            message_locations: BTreeMap::new(),
             claims: ClaimIndex::default(),
             certificate_jobs: JobTable::new(),
             forwarded_nullifications: BTreeSet::new(),
@@ -381,13 +379,7 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
         self.retired_transitions = floor;
         let retained = |view: &View| *view > floor;
 
-        for (_, entry) in drain_prefix(&mut self.views, |view| !retained(view)) {
-            for records in entry.messages.values() {
-                for (id, _) in records.iter() {
-                    self.message_locations.remove(&id);
-                }
-            }
-        }
+        drain_prefix(&mut self.views, |view| !retained(view)).for_each(drop);
         self.claims.retire_through(floor);
         self.certificate_jobs.retain(|job| retained(&job.view()));
         for views in [
@@ -765,14 +757,21 @@ mod tests {
             }
             insert_claims(&mut views.claims, View::new(view));
         }
-        let mut expected_messages = views.message_locations.clone();
+        let mut expected_messages = views
+            .views
+            .iter()
+            .flat_map(|(view, entry)| {
+                entry.messages.iter().flat_map(move |(signer, records)| {
+                    records.iter().map(move |(id, _)| (id, (*view, *signer)))
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut retired = View::zero();
         for floor in [0, 1, 1, 0, 2, u64::MAX] {
             let floor = View::new(floor);
             views.retire_transitions_through(floor);
             retired = retired.max(floor);
             expected_messages.retain(|_, (view, _)| *view > floor);
-            assert_eq!(views.message_locations, expected_messages);
             let mut expected_claims = ClaimIndex::default();
             for view in [1, 2, 3]
                 .map(View::new)
