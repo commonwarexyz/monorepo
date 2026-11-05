@@ -293,7 +293,6 @@ impl<F> Fp12<F> {
             #[cfg_attr(not(debug_assertions), inline(always))]
             |k| {
                 let k = DEGREE[k];
-                let acc = |sum, x: Fp2<F>, y| Fp2::<F>::accumulate_product(simd, sum, x, y);
                 // Coefficient k sums a_j b_(k - j), where b_(k - j) for j above k is the twisted
                 // coefficient of w^(k + 6 - j).
                 let mut sum = a[0].product(simd, b[k]);
@@ -302,7 +301,7 @@ impl<F> Fp12<F> {
                     |j| {
                         let j = j + 1;
                         let factor = if j <= k { b[k - j] } else { twisted[k + 5 - j] };
-                        sum = acc(sum, a[j], factor);
+                        sum = acc(simd, sum, a[j], factor);
                     },
                 );
                 sum
@@ -352,17 +351,25 @@ impl<F> Fp12<F> {
             simd,
             #[cfg_attr(not(debug_assertions), inline(always))]
             |k| {
-                let acc = |sum, x: Fp2<F>, y| Fp2::<F>::accumulate_product(simd, sum, x, y);
-                let square = |x: Fp2<F>| x.square_product::<K, S>(simd);
                 // Coefficient k sums a_j a_l over pairs whose degrees add to k, or to k + 6 with
                 // the twisted coefficient t[l - 1] of w^(l + 6) in place of a_l.
+                let square = |x: Fp2<F>| x.square_product::<K, S>(simd);
                 match DEGREE[k] {
-                    0 => acc(acc(acc(square(a[0]), d[1], t[4]), d[2], t[3]), t[2], a[3]),
-                    1 => acc(acc(d[0].product(simd, a[1]), d[2], t[4]), d[3], t[3]),
-                    2 => acc(acc(acc(square(a[1]), d[0], a[2]), d[3], t[4]), t[3], a[4]),
-                    3 => acc(acc(d[0].product(simd, a[3]), d[1], a[2]), d[4], t[4]),
-                    4 => acc(acc(acc(square(a[2]), d[0], a[4]), d[1], a[3]), t[4], a[5]),
-                    _ => acc(acc(d[0].product(simd, a[5]), d[1], a[4]), d[2], a[3]),
+                    0 => {
+                        let sum = acc(simd, square(a[0]), d[1], t[4]);
+                        acc(simd, acc(simd, sum, d[2], t[3]), t[2], a[3])
+                    }
+                    1 => acc(simd, acc(simd, d[0].product(simd, a[1]), d[2], t[4]), d[3], t[3]),
+                    2 => {
+                        let sum = acc(simd, square(a[1]), d[0], a[2]);
+                        acc(simd, acc(simd, sum, d[3], t[4]), t[3], a[4])
+                    }
+                    3 => acc(simd, acc(simd, d[0].product(simd, a[3]), d[1], a[2]), d[4], t[4]),
+                    4 => {
+                        let sum = acc(simd, square(a[2]), d[0], a[4]);
+                        acc(simd, acc(simd, sum, d[1], a[3]), t[4], a[5])
+                    }
+                    _ => acc(simd, acc(simd, d[0].product(simd, a[5]), d[1], a[4]), d[2], a[3]),
                 }
             },
         ))
@@ -410,16 +417,15 @@ impl<F> Fp12<F> {
             simd,
             #[cfg_attr(not(debug_assertions), inline(always))]
             |k| {
-                let acc = |sum, x: Fp2<F>, y| Fp2::<F>::accumulate_product(simd, sum, x, y);
                 // Coefficient k sums a_k l0, a_(k - 2) l2, and a_(k - 3) l3, with the twisted
                 // line coefficients against a_(k + 4) and a_(k + 3) where the degree wraps.
                 match DEGREE[k] {
-                    0 => acc(acc(a[0].product(simd, l0), a[4], t2), a[3], t3),
-                    1 => acc(acc(a[1].product(simd, l0), a[5], t2), a[4], t3),
-                    2 => acc(acc(a[2].product(simd, l0), a[0], l2), a[5], t3),
-                    3 => acc(acc(a[3].product(simd, l0), a[1], l2), a[0], l3),
-                    4 => acc(acc(a[4].product(simd, l0), a[2], l2), a[1], l3),
-                    _ => acc(acc(a[5].product(simd, l0), a[3], l2), a[2], l3),
+                    0 => acc(simd, acc(simd, a[0].product(simd, l0), a[4], t2), a[3], t3),
+                    1 => acc(simd, acc(simd, a[1].product(simd, l0), a[5], t2), a[4], t3),
+                    2 => acc(simd, acc(simd, a[2].product(simd, l0), a[0], l2), a[5], t3),
+                    3 => acc(simd, acc(simd, a[3].product(simd, l0), a[1], l2), a[0], l3),
+                    4 => acc(simd, acc(simd, a[4].product(simd, l0), a[2], l2), a[1], l3),
+                    _ => acc(simd, acc(simd, a[5].product(simd, l0), a[3], l2), a[2], l3),
                 }
             },
         ))
@@ -431,7 +437,8 @@ impl<F> Fp12<F> {
     /// sixth degree extensions" (2010), on the pairs of coefficients of `w^k` and `w^(k + 3)`,
     /// elements `x + y s` of `Fp4 = Fp2[s] / (s^2 - (1 + i))` for `s = w^3`: each output is three
     /// times a part of the square of such a pair, plus or minus twice an input coefficient. That
-    /// takes nine extension squarings. The result is unspecified outside the subgroup.
+    /// takes nine extension squarings, or six squarings and six products accumulated as they form
+    /// for [`Field::SCHOOLBOOK`]. The result is unspecified outside the subgroup.
     /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn cyclotomic_square<S: Simd>(&self, simd: S) -> Self
@@ -441,6 +448,9 @@ impl<F> Fp12<F> {
         simd.execute(
             #[inline(always)]
             move |simd: S| {
+                if F::SCHOOLBOOK {
+                    return Self::cyclotomic_square_schoolbook(simd, self);
+                }
                 // The coefficients a0, ..., a5 of 1, w, ..., w^5.
                 let (a0, a1, a2) = (self.c0.c0, self.c1.c0, self.c0.c1);
                 let (a3, a4, a5) = (self.c1.c1, self.c0.c2, self.c1.c2);
@@ -462,6 +472,40 @@ impl<F> Fp12<F> {
                 ))
             },
         )
+    }
+
+    /// Returns the cyclotomic square of `a` with every product accumulated into its output as it
+    /// forms.
+    ///
+    /// For the pair `x + y s`, the real part of the square is `x^2 + (1 + i) y^2`, with the
+    /// nonresidue multiplied into one factor of `y^2`, and the imaginary part is `(2 x) y`. Each
+    /// output is three times such a part, accumulated three times, plus or minus twice a
+    /// coefficient, lifted into the sum.
+    #[inline(always)]
+    fn cyclotomic_square_schoolbook<S: Simd>(simd: S, a: &Self) -> Self
+    where
+        F: Field<S>,
+    {
+        let a = coefficients(a);
+        from_coefficients(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
+            simd,
+            #[cfg_attr(not(debug_assertions), inline(always))]
+            |k| {
+                // The pairs are (a0, a3), (a1, a4), and (a2, a5); the imaginary part of the last
+                // lands on w^7 = (1 + i) w.
+                match DEGREE[k] {
+                    0 => cyclotomic_real::<S, F>(simd, a[0], a[3], a[0]),
+                    2 => cyclotomic_real::<S, F>(simd, a[1], a[4], a[2]),
+                    4 => cyclotomic_real::<S, F>(simd, a[2], a[5], a[4]),
+                    1 => {
+                        let twisted = nonresidue::<{ BOUND + 1 }, S, F>(simd, a[2]);
+                        cyclotomic_imaginary::<S, F>(simd, doubled(simd, twisted), a[5], a[1])
+                    }
+                    3 => cyclotomic_imaginary::<S, F>(simd, doubled(simd, a[0]), a[3], a[3]),
+                    _ => cyclotomic_imaginary::<S, F>(simd, doubled(simd, a[1]), a[4], a[5]),
+                }
+            },
+        ))
     }
 
     /// Returns the conjugate `c0 - c1 w`, which is `self^(p^6)` and the inverse in the cyclotomic
@@ -658,9 +702,72 @@ fn twist<const K: u64, S: Simd, F: Field<S>>(simd: S, a: &[Fp2<F>; 6]) -> [Fp2<F
     let mut twisted = [a[1]; 5];
     unroll::<5>(
         #[inline(always)]
-        |l| twisted[l] = a[l + 1].mul_by_nonresidue::<K, S>(simd).carry(simd),
+        |l| twisted[l] = nonresidue::<K, S, F>(simd, a[l + 1]),
     );
     twisted
+}
+
+/// Returns `a (1 + i)`, carried, with the bias `K` covering its imaginary component.
+#[inline(always)]
+fn nonresidue<const K: u64, S: Simd, F: Field<S>>(simd: S, a: Fp2<F>) -> Fp2<F> {
+    a.mul_by_nonresidue::<K, S>(simd).carry(simd)
+}
+
+/// Returns `2 a`, carried.
+#[inline(always)]
+fn doubled<S: Simd, F: Field<S>>(simd: S, a: Fp2<F>) -> Fp2<F> {
+    a.double(simd).carry(simd)
+}
+
+/// Returns `sum + x * y`, as [`Fp2::accumulate_product`] does.
+#[inline(always)]
+fn acc<S: Simd, F: Field<S>>(
+    simd: S,
+    sum: super::fp2::Product<F, S>,
+    x: Fp2<F>,
+    y: Fp2<F>,
+) -> super::fp2::Product<F, S> {
+    Fp2::<F>::accumulate_product(simd, sum, x, y)
+}
+
+/// Returns `3 part`, accumulated.
+#[inline(always)]
+fn tripled<S: Simd, F: Field<S>>(
+    simd: S,
+    part: super::fp2::Product<F, S>,
+) -> super::fp2::Product<F, S> {
+    Fp2::<F>::accumulate(simd, part, Fp2::<F>::accumulate(simd, part, part))
+}
+
+/// Returns `3 (x^2 + (1 + i) y^2) - 2 c`, the real part of the cyclotomic square of the pair
+/// `x + y s` tripled less twice the coefficient `c`, with every product accumulated as it forms.
+///
+/// The nonresidue multiplies into one factor of `y^2`, and `2 c` is negated and lifted into the
+/// sum.
+#[inline(always)]
+fn cyclotomic_real<S: Simd, F: Field<S>>(
+    simd: S,
+    x: Fp2<F>,
+    y: Fp2<F>,
+    c: Fp2<F>,
+) -> super::fp2::Product<F, S> {
+    let square = x.square_product::<{ BOUND + 1 }, S>(simd);
+    let sum = acc(simd, square, nonresidue::<{ BOUND + 1 }, S, F>(simd, y), y);
+    let negated = doubled(simd, c).neg::<{ 2 * BOUND + 1 }, S>(simd);
+    Fp2::<F>::accumulate_lift(simd, tripled::<S, F>(simd, sum), negated)
+}
+
+/// Returns `3 x2 y + 2 c`, the imaginary part of the cyclotomic square of the pair `x + y s`
+/// tripled plus twice the coefficient `c`, given the doubled factor `x2 = 2 x`.
+#[inline(always)]
+fn cyclotomic_imaginary<S: Simd, F: Field<S>>(
+    simd: S,
+    x2: Fp2<F>,
+    y: Fp2<F>,
+    c: Fp2<F>,
+) -> super::fp2::Product<F, S> {
+    let product = x2.product(simd, y);
+    Fp2::<F>::accumulate_lift(simd, tripled::<S, F>(simd, product), doubled(simd, c))
 }
 
 /// Returns the parts of `(x + y s)^2` in `Fp4`, `x^2 + (1 + i) y^2` and `2 x y`, as carried
@@ -695,7 +802,7 @@ fn three_times<S: Simd, F: Field<S>, const ADD: bool>(
     part: super::fp2::Product<F, S>,
     a: Fp2<F>,
 ) -> super::fp2::Product<F, S> {
-    let tripled = Fp2::<F>::accumulate(simd, part, Fp2::<F>::accumulate(simd, part, part));
+    let tripled = tripled::<S, F>(simd, part);
     let doubled = a.double(simd).lift(simd);
     if ADD {
         Fp2::<F>::accumulate(simd, tripled, doubled)
