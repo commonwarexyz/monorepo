@@ -48,6 +48,56 @@ const REPLAY_CHUNK: u64 = 64;
 /// Chunks a chunked replay reads and hashes concurrently.
 const REPLAY_TASKS: usize = 8;
 
+/// Height of the subtree over a [REPLAY_CHUNK]-aligned chunk of leaves.
+const SUBTREE_HEIGHT: u32 = REPLAY_CHUNK.trailing_zeros();
+
+/// The digests of a complete subtree over the [REPLAY_CHUNK] leaves from `first_leaf`, a multiple
+/// of [REPLAY_CHUNK]. `levels[h][i]` is the node of height `h` whose ordinal is
+/// `(first_leaf >> h) + i`.
+struct Subtree<D> {
+    first_leaf: u64,
+    levels: Vec<Vec<D>>,
+}
+
+impl<D: Copy> Subtree<D> {
+    /// The node of height `h` with `ordinal`, if this subtree holds it.
+    fn get(&self, h: u32, ordinal: u64) -> Option<D> {
+        let level = self.levels.get(h as usize)?;
+        let index = ordinal.checked_sub(self.first_leaf >> h)?;
+        level.get(usize::try_from(index).ok()?).copied()
+    }
+}
+
+/// What a chunk task returns: a complete aligned subtree, or the leaf digests of a partial chunk
+/// at either end of the replay.
+enum Chunk<D> {
+    Subtree(Subtree<D>),
+    Leaves(Vec<D>),
+}
+
+/// Hash every node of the subtree over `leaves`, the leaf digests from `first_leaf`, a multiple of
+/// [REPLAY_CHUNK].
+fn hash_subtree<F: Family, D: Digest, H: Hasher<F, Digest = D>>(
+    hasher: &H,
+    first_leaf: u64,
+    leaves: Vec<D>,
+) -> Subtree<D> {
+    let mut levels = Vec::with_capacity(SUBTREE_HEIGHT as usize + 1);
+    levels.push(leaves);
+    for h in 1..=SUBTREE_HEIGHT {
+        let below = &levels[h as usize - 1];
+        let level = (0..below.len() / 2)
+            .map(|i| {
+                let leaf = Location::new(first_leaf + ((i as u64) << h));
+                let pos = F::subtree_root_position(leaf, h);
+                hasher.node_digest(pos, &below[2 * i], &below[2 * i + 1])
+            })
+            .collect();
+        levels.push(level);
+    }
+    Subtree { first_leaf, levels }
+}
+
 /// Regions filled concurrently by one request.
 const CONCURRENT_FILLS: usize = 8;
 
@@ -407,13 +457,23 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     {
         self.check_replay_range(&**journal, end)?;
         let buffer = self.replay_buffer;
-        let mut starts = (*self.leaves()..*end)
-            .step_by(usize::try_from(REPLAY_CHUNK).expect("chunk size fits usize"));
+
+        // Chunks end at multiples of `REPLAY_CHUNK`, so every chunk but the first and last covers
+        // a complete subtree that its task hashes up to the subtree's root.
+        let mut next_start = *self.leaves();
+        let end_leaf = *end;
+        let mut chunks = core::iter::from_fn(move || {
+            let start = next_start;
+            if start >= end_leaf {
+                return None;
+            }
+            next_start = ((start / REPLAY_CHUNK + 1) * REPLAY_CHUNK).min(end_leaf);
+            Some((start, next_start - start))
+        });
         let mut spawn_next = |pending: &mut VecDeque<_>| {
-            let Some(start) = starts.next() else {
+            let Some((start, len)) = chunks.next() else {
                 return;
             };
-            let len = REPLAY_CHUNK.min(*end - start);
             let hold = ChunkHold {
                 journal: journal.clone(),
                 _done: done.clone(),
@@ -445,7 +505,10 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                             merkle::Error::DataCorrupted("replay ended before its range").into(),
                         );
                     }
-                    Ok::<_, super::Error<F>>(digests)
+                    if len == REPLAY_CHUNK {
+                        return Ok(Chunk::Subtree(hash_subtree(&hasher, start, digests)));
+                    }
+                    Ok::<_, super::Error<F>>(Chunk::Leaves(digests))
                 });
             pending.push_back(task.abort_on_drop());
         };
@@ -457,13 +520,98 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             spawn_next(&mut pending);
         }
         while let Some(task) = pending.pop_front() {
-            let digests = task.join().await.map_err(JournalError::from)??;
+            let chunk = task.join().await.map_err(JournalError::from)??;
             spawn_next(&mut pending);
-            self = self.apply_digests(hasher, digests).await?;
+            self = match chunk {
+                Chunk::Subtree(subtree) => {
+                    self.apply_subtree(hasher, &subtree)?;
+                    self
+                }
+                Chunk::Leaves(digests) => self.apply_digests(hasher, digests).await?,
+            };
         }
         // Every chunk returned exactly the leaves of its range.
         debug_assert_eq!(self.leaves(), end);
         Ok(self)
+    }
+
+    /// Append the leaves of `subtree`, whose first leaf is the next to append, copying the nodes
+    /// it holds instead of hashing them again. Only nodes above it, and nodes born late inside
+    /// earlier subtrees, are hashed here.
+    fn apply_subtree<H>(&mut self, hasher: &H, subtree: &Subtree<D>) -> Result<(), merkle::Error<F>>
+    where
+        H: Hasher<F, Digest = D>,
+    {
+        debug_assert_eq!(*self.leaves(), subtree.first_leaf);
+        let leaves = Location::<F>::new(subtree.first_leaf + REPLAY_CHUNK);
+        let initial = self.size();
+        let end = F::location_to_position(leaves);
+        let born = born(end);
+
+        // Gather every node the tree keeps that this subtree's leaves bring into being, before
+        // changing anything.
+        let mut computed = BTreeMap::new();
+        let mut added = Vec::with_capacity(self.resident.levels.len());
+        for (index, level) in self.resident.levels.iter().enumerate() {
+            let h = self.resident.height + index as u32;
+            let nodes = (level.end()..born[h as usize])
+                .map(|ordinal| self.stitch_node(hasher, subtree, &mut computed, h, ordinal))
+                .collect::<Result<Vec<_>, _>>()?;
+            added.push(nodes);
+        }
+        let peaks = F::nodes_to_pin(leaves)
+            .filter(|&pos| pos >= initial)
+            .map(|pos| {
+                let h = F::pos_to_height(pos);
+                let ordinal = *F::leftmost_leaf(pos, h) >> h;
+                Ok((
+                    pos,
+                    self.stitch_node(hasher, subtree, &mut computed, h, ordinal)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, merkle::Error<F>>>()?;
+
+        for (level, nodes) in self.resident.levels.iter_mut().zip(added) {
+            level.nodes.extend(nodes);
+        }
+        Arc::make_mut(&mut self.mem).skip_to(leaves, peaks)?;
+        self.flush();
+        self.metrics.replayed_leaves.inc_by(REPLAY_CHUNK);
+        Ok(())
+    }
+
+    /// The node of height `h` with `ordinal`, born by the end of `subtree`. It comes from
+    /// `subtree`, the nodes already computed for it, a pinned or resident node, or else the
+    /// hash of its children, which are then born and so held in one of those places.
+    fn stitch_node<H>(
+        &self,
+        hasher: &H,
+        subtree: &Subtree<D>,
+        computed: &mut BTreeMap<(u32, u64), D>,
+        h: u32,
+        ordinal: u64,
+    ) -> Result<D, merkle::Error<F>>
+    where
+        H: Hasher<F, Digest = D>,
+    {
+        if let Some(digest) = computed.get(&(h, ordinal)).copied() {
+            return Ok(digest);
+        }
+        if let Some(digest) = subtree.get(h, ordinal) {
+            return Ok(digest);
+        }
+        let pos = F::subtree_root_position(Location::new(ordinal << h), h);
+        if let Some(digest) = self.held(pos, h) {
+            return Ok(digest);
+        }
+        if h == 0 {
+            return Err(merkle::Error::MissingNode(pos));
+        }
+        let left = self.stitch_node(hasher, subtree, computed, h - 1, 2 * ordinal)?;
+        let right = self.stitch_node(hasher, subtree, computed, h - 1, 2 * ordinal + 1)?;
+        let digest = hasher.node_digest(pos, &left, &right);
+        computed.insert((h, ordinal), digest);
+        Ok(digest)
     }
 
     /// Append leaves with `digests`, hashing their parents on the strategy.
