@@ -1,7 +1,7 @@
 //! An immutable authenticated db that discards historical operations, retaining only a witness
 //! for each applied batch.
 //!
-//! Mirrors the API of [`crate::qmdb::immutable::Immutable`] (`new_batch -> merkleize ->
+//! Mirrors the API of [`crate::qmdb::immutable::Db`] (`new_batch -> merkleize ->
 //! apply_batch -> commit / sync / start_sync`, pipelined batch chains, `StaleBatch` validation)
 //! but is backed by the peak-only [`crate::merkle::compact`]. Because history is discarded,
 //! the db has no `get` / `proof` / `bounds` methods. A merkleized batch can prove only its own
@@ -19,7 +19,7 @@
 //! # Inactivity floor
 //!
 //! Commits carry an inactivity floor for wire-format compatibility with
-//! [`crate::qmdb::immutable::Immutable`]: the root is computed over the encoded operation
+//! [`crate::qmdb::immutable::Db`]: the root is computed over the encoded operation
 //! sequence, and that sequence must include the same floor to produce the same root as the
 //! full variant. The floor has no effect on pruning or snapshot rebuilding here; all
 //! historical in-memory state is discarded whenever a batch is applied.
@@ -297,7 +297,7 @@ where
     /// Resolve mutations into operations, merkleize, and return the batch.
     ///
     /// The commit records the batch's inactivity floor (see [`Self::with_inactivity_floor`]) for
-    /// wire-format parity with [`crate::qmdb::immutable::Immutable`].
+    /// wire-format parity with [`crate::qmdb::immutable::Db`].
     ///
     /// # Errors
     ///

@@ -317,11 +317,6 @@ where
         Location::new(bounds.start)..Location::new(bounds.end)
     }
 
-    /// Return the Location of the next operation appended to this db.
-    pub fn size(&self) -> Location {
-        Location::new(self.log.size())
-    }
-
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
     pub const fn inactivity_floor_loc(&self) -> Location {
@@ -331,7 +326,7 @@ where
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         // The log always ends with a commit operation.
-        let Operation::CommitFloor(metadata, _) = self.log.read(*self.size() - 1).await? else {
+        let Operation::CommitFloor(metadata, _) = self.log.read(self.log.size() - 1).await? else {
             unreachable!("last commit should be a commit floor operation");
         };
 
@@ -523,7 +518,7 @@ where
     where
         P: Policy<crate::mmr::Family, K, V>,
     {
-        let start_loc = self.size();
+        let start_loc = Location::new(self.log.size());
         let Changeset { diff, metadata } = batch;
 
         let mut resolved = {
@@ -838,9 +833,9 @@ mod test {
         db: TestStore,
         iter: impl IntoIterator<Item = (Digest, Option<Vec<u8>>)> + Send,
     ) -> (TestStore, Range<Location>) {
-        let applied_start = db.size();
+        let applied_start = db.bounds().end;
         let db = db.apply_batch(iter.into_iter().collect()).await.unwrap();
-        let applied_end = db.size();
+        let applied_end = db.bounds().end;
         (db, applied_start..applied_end)
     }
 
@@ -863,7 +858,7 @@ mod test {
                     .with_metadata(Some(vec![10]))
                     .finalize();
                 let db = db.apply_batch(batch).await.unwrap();
-                let first_size = db.size();
+                let first_size = db.bounds().end;
                 let batch = db
                     .new_batch()
                     .update(a, vec![3])
@@ -872,7 +867,7 @@ mod test {
                     .with_metadata(Some(vec![20]))
                     .finalize();
                 let db = db.apply_batch(batch).await.unwrap();
-                let latest_size = db.size();
+                let latest_size = db.bounds().end;
                 _ = db.sync().await.unwrap();
 
                 // Exact, in-between, equal-tip, and above-tip caps must select the latest commit at
@@ -889,7 +884,7 @@ mod test {
                 let db = TestStore::init(context.child("cap"), cfg.clone(), Some(cap))
                     .await
                     .unwrap();
-                assert_eq!(db.size(), expected_size);
+                assert_eq!(db.bounds().end, expected_size);
                 assert_bitmap_consistent(&db).await;
                 assert_eq!(
                     db.get_metadata().await.unwrap(),
@@ -907,7 +902,7 @@ mod test {
                 let db = TestStore::init(context.child("reopen"), cfg.clone(), None)
                     .await
                     .unwrap();
-                assert_eq!(db.size(), expected_size);
+                assert_eq!(db.bounds().end, expected_size);
                 assert_bitmap_consistent(&db).await;
                 assert_eq!(
                     db.get(&a).await.unwrap(),
@@ -921,13 +916,13 @@ mod test {
                     .update(c, vec![6])
                     .finalize();
                 let db = db.apply_batch(batch).await.unwrap();
-                let appended_size = db.size();
+                let appended_size = db.bounds().end;
                 assert!(appended_size > expected_size);
                 drop(db.commit().await.unwrap());
                 let db = TestStore::init(context.child("after_append"), cfg, None)
                     .await
                     .unwrap();
-                assert_eq!(db.size(), appended_size);
+                assert_eq!(db.bounds().end, appended_size);
                 assert_bitmap_consistent(&db).await;
                 assert_eq!(db.get(&a).await.unwrap(), Some(vec![5]));
                 assert_eq!(db.get(&b).await.unwrap(), old.then(|| vec![2]));
@@ -945,7 +940,7 @@ mod test {
                 .unwrap();
             let key = Blake3::hash(&[b"key"]);
             let (db, _) = apply_entries(db, [(key, Some(vec![1]))]).await;
-            let size = db.size();
+            let size = db.bounds().end;
             _ = db.sync().await.unwrap();
             assert!(matches!(
                 TestStore::init(context.child("zero"), cfg.clone(), Some(Location::new(0))).await,
@@ -954,7 +949,7 @@ mod test {
             let db = TestStore::init(context.child("unchanged"), cfg, None)
                 .await
                 .unwrap();
-            assert_eq!(db.size(), size);
+            assert_eq!(db.bounds().end, size);
             assert_eq!(db.get(&key).await.unwrap(), Some(vec![1]));
         });
     }
@@ -971,7 +966,7 @@ mod test {
             for value in [1, 2] {
                 (db, _) = apply_entries(db, (0..KEYS).map(|i| (key(i), Some(vec![value])))).await;
             }
-            let target = db.size();
+            let target = db.bounds().end;
             let target_floor = db.inactivity_floor_loc();
             let prune_loc = target_floor + KEYS / 2;
             assert!(prune_loc < target);
@@ -1087,13 +1082,13 @@ mod test {
             let handle;
             (db, handle) = db.start_sync().await.unwrap();
             handle.await.unwrap();
-            let size = db.size();
+            let size = db.bounds().end;
             drop(db);
 
             let db = open_delayed_store(ctx.child("reopen"), "start-sync-overlap", &pending)
                 .await
                 .unwrap();
-            assert_eq!(db.size(), size);
+            assert_eq!(db.bounds().end, size);
             assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
             db.destroy().await.unwrap();
         });
@@ -1151,7 +1146,7 @@ mod test {
             drop(db);
 
             let db = create_test_store(context.child("recover")).await;
-            assert_eq!(*db.size(), 1);
+            assert_eq!(*db.bounds().end, 1);
             assert_eq!(db.get(&key).await.unwrap(), None);
         });
         traces
@@ -1181,13 +1176,13 @@ mod test {
             let handle;
             (db, handle) = db.start_sync().await.unwrap();
             handle.await.unwrap();
-            let size = db.size();
+            let size = db.bounds().end;
             drop(db);
 
             let db = open_delayed_store(ctx.child("reopen"), "start-sync-recovery", &pending)
                 .await
                 .unwrap();
-            assert_eq!(db.size(), size);
+            assert_eq!(db.bounds().end, size);
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             db.destroy().await.unwrap();
         });
@@ -1258,9 +1253,9 @@ mod test {
                 .new_batch()
                 .with_metadata(Some(metadata.clone()))
                 .finalize();
-            let applied_start = db.size();
+            let applied_start = db.bounds().end;
             let db = db.apply_batch(batch).await.unwrap();
-            let range = applied_start..db.size();
+            let range = applied_start..db.bounds().end;
             assert_eq!(range.start, 1);
             assert_eq!(range.end, 2);
             let db = db.commit().await.unwrap();
@@ -1338,9 +1333,9 @@ mod test {
                 .update(key, value.clone())
                 .with_metadata(Some(metadata.clone()))
                 .finalize();
-            let applied_start = db.size();
+            let applied_start = db.bounds().end;
             let db = db.apply_batch(batch).await.unwrap();
-            let range = applied_start..db.size();
+            let range = applied_start..db.bounds().end;
             assert_eq!(*range.start, 1);
             assert_eq!(*range.end, 4);
             let db = db.commit().await.unwrap();
@@ -1693,7 +1688,7 @@ mod test {
         }
         assert_eq!(live.keys().copied().collect::<BTreeSet<_>>(), expected);
         assert_eq!(live.len(), db.active_keys);
-        assert_bound(db.inactivity_floor_loc(), db.size(), live);
+        assert_bound(db.inactivity_floor_loc(), db.bounds().end, live);
         db
     }
 
@@ -1778,7 +1773,7 @@ mod test {
                 // Seed 20 keys in key order at 1..21. The previous commit's entry moves the first
                 // update to 21, and the commit lies at 22.
                 let (db, _) = apply(db, seed.clone(), &mut Proportional).await;
-                assert_eq!((*db.inactivity_floor_loc(), *db.size()), (2, 23));
+                assert_eq!((*db.inactivity_floor_loc(), *db.bounds().end), (2, 23));
                 db
             };
 
@@ -2026,9 +2021,9 @@ mod test {
                 .update(key, value.clone())
                 .with_metadata(Some(metadata.clone()))
                 .finalize();
-            let applied_start = db.size();
+            let applied_start = db.bounds().end;
             let db = db.apply_batch(batch).await.unwrap();
-            let range = applied_start..db.size();
+            let range = applied_start..db.bounds().end;
             assert_eq!(range.start, 1);
             assert_eq!(range.end, 4);
             let db = db.commit().await.unwrap();
@@ -2155,12 +2150,12 @@ mod test {
         V: VariableValue,
         P: Policy<crate::mmr::Family, sha256::Digest, V>,
     {
-        let applied_start = db.size();
+        let applied_start = db.bounds().end;
         let db = db
             .apply_batch_with(writes.into_iter().collect(), policy)
             .await
             .unwrap();
-        let applied_end = db.size();
+        let applied_end = db.bounds().end;
         (db, applied_start..applied_end)
     }
 
@@ -2201,7 +2196,7 @@ mod test {
             let deletes = [seed[0].0, seed[2].0, seed[3].0, created].map(|key| (key, None));
             let (db, _) = apply(db, deletes, &mut Hold).await;
             assert!(db.is_empty());
-            assert_eq!(db.inactivity_floor_loc(), db.size() - 1);
+            assert_eq!(db.inactivity_floor_loc(), db.bounds().end - 1);
             db.destroy().await.unwrap();
         });
     }
@@ -2295,9 +2290,9 @@ mod test {
 
             // An empty batch moves one update for its previous commit.
             lookups.store(0, Ordering::Relaxed);
-            let applied_start = db.size();
+            let applied_start = db.bounds().end;
             let db = db.apply_batch(core::iter::empty().collect()).await.unwrap();
-            assert_eq!(*db.size() - *applied_start, 2);
+            assert_eq!(*db.bounds().end - *applied_start, 2);
             assert_eq!(lookups.load(Ordering::Relaxed), 1);
             assert_bitmap_consistent(&db).await;
             db.destroy().await.unwrap();
@@ -2312,7 +2307,7 @@ mod test {
             let db = open(context.child("store"), "replace").await;
             let seed = seed(3);
             let (db, _) = apply(db, seed.clone(), &mut Hold).await;
-            let tip = db.size();
+            let tip = db.bounds().end;
 
             // Keep the first and last updates and replace the second.
             let (replaced, value) = (seed[1].0, digest(201));
@@ -2454,7 +2449,7 @@ mod test {
             let db = open(child(0), "recover").await;
             let seed = seed(4);
             let (db, _) = apply(db, seed.clone(), &mut Hold).await;
-            assert_eq!(*db.size(), 6);
+            assert_eq!(*db.bounds().end, 6);
 
             // The batch updates the second key, deletes the third, and creates a fifth. Its
             // operations follow key order from 6, so its updates lie at 6 and 7 and its delete at 8.
@@ -2502,10 +2497,10 @@ mod test {
 
             // The state survives commit and reopen.
             let db = db.commit().await.unwrap();
-            let (size, floor) = (db.size(), db.inactivity_floor_loc());
+            let (size, floor) = (db.bounds().end, db.inactivity_floor_loc());
             drop(db);
             let db: PolicyStore<sha256::Digest> = open(child(1), "recover").await;
-            assert_eq!((db.size(), db.inactivity_floor_loc()), (size, floor));
+            assert_eq!((db.bounds().end, db.inactivity_floor_loc()), (size, floor));
             for (key, value) in expected {
                 assert_eq!(db.get(&key).await.unwrap(), value);
             }
@@ -2514,7 +2509,7 @@ mod test {
             let db = db.prune(floor).await.unwrap();
             drop(db);
             let db: PolicyStore<sha256::Digest> = open(child(2), "recover").await;
-            assert_eq!((db.size(), db.inactivity_floor_loc()), (size, floor));
+            assert_eq!((db.bounds().end, db.inactivity_floor_loc()), (size, floor));
             for (key, value) in expected {
                 assert_eq!(db.get(&key).await.unwrap(), value);
             }
@@ -2573,7 +2568,7 @@ mod test {
                     for _ in 0..rounds {
                         (db, _) = apply(db, rewrites.clone(), &mut Hold).await;
                     }
-                    assert_eq!(*db.size(), tip);
+                    assert_eq!(*db.bounds().end, tip);
 
                     // The walk decides and reaches what [`walk_model`] predicts, and reads each
                     // update it decides once.
@@ -2657,7 +2652,7 @@ mod test {
                         trial += 1;
                         let (db, _) = apply(db, seed.clone(), &mut Hold).await;
                         let (db, _) = apply(db, updates.clone(), &mut Hold).await;
-                        assert_eq!((*db.inactivity_floor_loc(), *db.size()), (0, 12));
+                        assert_eq!((*db.inactivity_floor_loc(), *db.bounds().end), (0, 12));
 
                         // The floor and the decided updates match [`walk_model`].
                         let (expected, decisions) =
@@ -2711,7 +2706,7 @@ mod test {
             let db = open(child(0), "own").await;
             let seed = [1, 2, 4, 5].map(|i| (key(i), Some(digest(u64::from(i)))));
             let (db, _) = apply(db, seed, &mut Hold).await;
-            assert_eq!(*db.size(), 6);
+            assert_eq!(*db.bounds().end, 6);
 
             // The batch rewrites every seeded key and creates key 3. In key order its updates lie
             // at 6..11, and they supersede 1..5.
@@ -2770,7 +2765,7 @@ mod test {
             let db = db.commit().await.unwrap();
             drop(db);
             let db: PolicyStore<sha256::Digest> = open(child(1), "own").await;
-            assert_eq!((*db.size(), *db.inactivity_floor_loc()), (16, 10));
+            assert_eq!((*db.bounds().end, *db.inactivity_floor_loc()), (16, 10));
             for (key, value) in values {
                 assert_eq!(db.get(&key).await.unwrap(), value);
             }
@@ -2981,7 +2976,7 @@ mod test {
                 skips: u64::MAX,
             };
             let (db, _) = apply(db, [], &mut policy).await;
-            assert_eq!((*db.inactivity_floor_loc(), *db.size()), (603, 904));
+            assert_eq!((*db.inactivity_floor_loc(), *db.bounds().end), (603, 904));
 
             // Pruning to the floor retains the log section starting at 602 and drops the bitmap's
             // first 512-bit chunk.

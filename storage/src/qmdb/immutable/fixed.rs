@@ -2,7 +2,7 @@
 //!
 //! For variable-size values, use [super::variable] instead.
 
-use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
+use super::{Config as BaseConfig, operation::Operation as BaseOperation};
 use crate::{
     journal::contiguous::fixed::{self, Config as JournalConfig},
     qmdb::any::value::FixedEncoding,
@@ -13,7 +13,7 @@ pub type Operation<F, K, V> = BaseOperation<F, K, FixedEncoding<V>>;
 
 /// Type alias for the fixed-size immutable database.
 pub type Db<F, E, K, V, H, T, S> =
-    Immutable<F, E, K, FixedEncoding<V>, fixed::Journal<E, Operation<F, K, V>>, H, T, S>;
+    super::Db<F, E, K, FixedEncoding<V>, fixed::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the fixed-size compact immutable db.
 pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, FixedEncoding<V>, H, S>;
@@ -306,7 +306,7 @@ mod tests {
             let db = apply.await.unwrap();
             handle.await.unwrap();
             assert_eq!(db.root(), root);
-            assert_eq!(db.size(), Location::new(36));
+            assert_eq!(db.bounds().end, Location::new(36));
             let db = db.sync().await.unwrap();
             drop(db);
 

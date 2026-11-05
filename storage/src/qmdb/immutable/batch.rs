@@ -1,6 +1,6 @@
 //! Batch mutation API for Immutable QMDBs.
 
-use super::Immutable;
+use super::Db;
 use crate::{
     Context,
     journal::{authenticated, contiguous::Mutable},
@@ -119,7 +119,7 @@ where
 {
     /// Create a batch from the DB (no parent chain).
     pub(super) fn new<E, C, T>(
-        immutable: &Immutable<F, E, K, V, C, H, T, S>,
+        immutable: &Db<F, E, K, V, C, H, T, S>,
         base: Commitment<F, H::Digest>,
     ) -> Self
     where
@@ -166,7 +166,7 @@ where
 
     /// The inactivity floor this batch builds on: its parent's, or `db`'s for a batch with no
     /// parent.
-    fn floor<E, C, T>(&self, db: &Immutable<F, E, K, V, C, H, T, S>) -> Location<F>
+    fn floor<E, C, T>(&self, db: &Db<F, E, K, V, C, H, T, S>) -> Location<F>
     where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
@@ -184,8 +184,8 @@ where
     #[allow(clippy::type_complexity)]
     fn compatible<'a, E, C, T>(
         &self,
-        db: &'a Immutable<F, E, K, V, C, H, T, S>,
-    ) -> Result<Compatible<'a, Immutable<F, E, K, V, C, H, T, S>>, Error<F>>
+        db: &'a Db<F, E, K, V, C, H, T, S>,
+    ) -> Result<Compatible<'a, Db<F, E, K, V, C, H, T, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
@@ -217,7 +217,7 @@ where
     pub async fn get<E, C, T>(
         &self,
         key: &K,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
@@ -252,7 +252,7 @@ where
     pub async fn get_many<E, C, T>(
         &self,
         keys: &[&K],
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
@@ -317,7 +317,7 @@ where
     #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
     pub async fn merkleize<E, C, T>(
         mut self,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> MerkleizeResult<F, H::Digest, K, V, S>
     where
         E: Context,
@@ -428,10 +428,10 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
     /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
-    /// operations (such as a batch from [`Immutable::to_batch`]).
+    /// operations (such as a batch from [`Db::to_batch`]).
     pub fn proof<E, C, H, T>(
         &self,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Proof<F, D>, Error<F>>
     where
         E: Context,
@@ -463,7 +463,7 @@ where
     /// dropped unapplied ancestor.
     pub fn pinned_nodes<E, C, H, T>(
         &self,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<D>, Error<F>>
     where
         E: Context,
@@ -519,7 +519,7 @@ where
     pub async fn get<E, C, H, T>(
         &self,
         key: &K,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
@@ -548,7 +548,7 @@ where
     pub async fn get_many<E, C, H, T>(
         &self,
         keys: &[&K],
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
@@ -615,7 +615,7 @@ where
     }
 }
 
-impl<F, E, K, V, C, H, T, S> Immutable<F, E, K, V, C, H, T, S>
+impl<F, E, K, V, C, H, T, S> Db<F, E, K, V, C, H, T, S>
 where
     F: Family,
     E: Context,

@@ -23,7 +23,7 @@ use commonware_storage::{
         Error,
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         keyless::{
-            Keyless, Operation,
+            Db, Operation,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
             fixed, initial_root, variable,
         },
@@ -48,7 +48,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     batch: UnmerkleizedBatch<F, H, V, S>,
-    db: Shared<Keyless<F, E, V, C, H, S>>,
+    db: Shared<Db<F, E, V, C, H, S>>,
 }
 
 impl<F, E, V, C, H, S> Deref for KeylessUnmerkleized<F, E, V, C, H, S>
@@ -144,7 +144,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, V, S>>,
-    db: Shared<Keyless<F, E, V, C, H, S>>,
+    db: Shared<Db<F, E, V, C, H, S>>,
 }
 
 impl<F, E, V, C, H, S> Clone for KeylessMerkleized<F, E, V, C, H, S>

@@ -406,16 +406,8 @@ pub(crate) mod harnesses {
         Sha256,
         Sequential,
     >;
-    type FullDb<F, V, C> = immutable::Immutable<
-        F,
-        deterministic::Context,
-        sha256::Digest,
-        V,
-        C,
-        Sha256,
-        TwoCap,
-        Sequential,
-    >;
+    type FullDb<F, V, C> =
+        immutable::Db<F, deterministic::Context, sha256::Digest, V, C, Sha256, TwoCap, Sequential>;
     type CompactDb<F, V> =
         immutable::CompactDb<F, deterministic::Context, sha256::Digest, V, Sha256, Sequential>;
     type BaseOperation<F, V> = immutable::Operation<F, sha256::Digest, V>;

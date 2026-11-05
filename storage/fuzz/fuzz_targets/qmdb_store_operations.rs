@@ -192,7 +192,7 @@ fn fuzz(input: FuzzInput) {
                         &mut model,
                         inherited,
                         db.inactivity_floor_loc(),
-                        db.size() - 1,
+                        db.bounds().end - 1,
                     );
                     db.commit().await.expect("Commit should not fail")
                 }
