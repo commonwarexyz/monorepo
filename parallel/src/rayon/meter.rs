@@ -7,17 +7,16 @@
 //!
 //! Each thread has a context, the meter it charges or none, and charges the previous meter whenever
 //! its context changes, so a thread with no context never reads the clock. A job its creator waits
-//! for (a join, install, or broadcast) runs in the creator's context. A detached job runs in none,
-//! so a spawner whose wait is suspended enters a [`MeterHandle`] around the job's work. A thread
-//! outside the pool blocks in its context and is charged for the wait, which spans the job.
+//! for (a join, install, or broadcast) runs in the creator's context. A detached job runs in none.
+//! The strategy's spawn measures its job and, when the awaiting run is on a pool worker with its
+//! wait suspended, charges the job's busy time to that run through [`charge`] on receipt. A thread
+//! outside the pool parks in its context and is charged for each park, which covers the jobs that
+//! overlap it.
 
 use std::{
     cell::Cell,
     ptr,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -27,10 +26,9 @@ mod test;
 /// Runs `op` as a measured run and returns its result with the run's busy time. An enclosing run
 /// is charged that busy time once `op` returns or unwinds.
 pub(crate) fn measure<R>(op: impl FnOnce() -> R) -> (R, Duration) {
-    // A handle may outlive this frame, so the meter is shared.
-    let meter = Arc::new(Meter {
+    let meter = Meter {
         busy: AtomicU64::new(0),
-    });
+    };
 
     // The guard charges the enclosing context after `enter` restores it, even when `op` unwinds.
     let _charge_outer = ChargeOuter {
@@ -39,39 +37,20 @@ pub(crate) fn measure<R>(op: impl FnOnce() -> R) -> (R, Duration) {
     };
 
     // SAFETY: this frame holds the meter for the whole call, so it outlives `enter`.
-    let result = unsafe { Context(Arc::as_ptr(&meter)).enter(op) };
+    let result = unsafe { Context(&meter).enter(op) };
     (result, meter.busy())
 }
 
-/// Holds the meter of the run that was current at capture, or none, so work that may outlive the
-/// run can charge it. The default holds none.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct MeterHandle(Option<Arc<Meter>>);
-
-impl MeterHandle {
-    /// Captures the calling thread's context.
-    pub(crate) fn capture() -> Self {
-        let meter = Context::current().0;
-        if meter.is_null() {
-            return Self(None);
+/// Charges `busy` to the calling thread's run, or to nothing outside a run. A run that awaits a
+/// detached job with its wait suspended charges the job's busy time this way on receipt.
+pub(crate) fn charge(busy: Duration) {
+    CURRENT.with(|current| {
+        // SAFETY: a thread's current context is none or points to a live meter, as described on
+        // `Context`.
+        if let Some(meter) = unsafe { current.get().meter.as_ref() } {
+            meter.charge_nanos(u64::try_from(busy.as_nanos()).unwrap_or(u64::MAX));
         }
-        // SAFETY: a current context points to a meter that `measure` holds in a live `Arc`, so
-        // the pointer came from that `Arc` and its count can grow.
-        Self(Some(unsafe {
-            Arc::increment_strong_count(meter);
-            Arc::from_raw(meter)
-        }))
-    }
-
-    /// Runs `op` in the captured context and charges that context before returning the result.
-    pub(crate) fn enter<R>(&self, op: impl FnOnce() -> R) -> R {
-        let context = self
-            .0
-            .as_ref()
-            .map_or(Context::NONE, |meter| Context(Arc::as_ptr(meter)));
-        // SAFETY: this handle holds the meter until it returns, so the meter outlives `enter`.
-        unsafe { context.enter(op) }
-    }
+    });
 }
 
 /// The busy time of one run.
@@ -79,9 +58,8 @@ impl MeterHandle {
 struct Meter {
     /// The nanoseconds charged so far.
     //
-    // Relaxed accesses suffice. A thread charges before setting the latch or sending the result
-    // the run waits on, and that hand-off orders the charge before the run reads its total. Work
-    // the run does not wait for may charge after that read.
+    // Relaxed accesses suffice. A thread charges before setting the latch the run waits on, and
+    // that latch orders the charge before the run reads its total.
     busy: AtomicU64,
 }
 
@@ -123,7 +101,6 @@ impl Drop for ChargeOuter<'_> {
 ///
 /// - [`measure`] holds the meter and restores the previous context before it returns or unwinds.
 /// - A stack job runs in its creator's context, and the creator waits on the job's latch.
-/// - A [`MeterHandle`] holds its meter while work runs in it.
 /// - A suspension enters [`Context::NONE`] and restores a context whose scope encloses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Context(*const Meter);

@@ -162,10 +162,7 @@ where
 ///
 /// (Probably `StackJob` should be refactored in a similar fashion.)
 ///
-/// The job may outlive the run that spawned it, so it executes without a context. A spawner can
-/// charge its work through a [`MeterHandle`].
-///
-/// [`MeterHandle`]: super::meter::MeterHandle
+/// The job may outlive the run that spawned it, so it executes without a context.
 pub(super) struct HeapJob<BODY>
 where
     BODY: FnOnce() + Send,

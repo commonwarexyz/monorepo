@@ -24,8 +24,8 @@
 //! affordable.
 //!
 //! A serial sample at or over the budget records each placement's busy time. Serial is probed again
-//! from a placement only once its busy time falls below that level, so a call site whose busy time
-//! understates its serial cost pays one over-budget sample until its busy time falls.
+//! from a placement only once its busy time falls below that level, so an over-budget serial probe
+//! is not repeated at an unchanged busy time while parallel stays preferred.
 //!
 //! # Placement
 //!
@@ -1320,10 +1320,15 @@ mod tests {
         record(RunExecution::Serial, 5, 5);
         assert_eq!(busy(), None);
 
-        // A later serial run leaves the parallel run's 3ms busy time in place.
+        // A later serial run leaves the parallel run's 3ms busy time in place, and the Wide run
+        // leaves the Local estimate empty.
         record(RunExecution::Parallel, 1, 3);
         record(RunExecution::Serial, 50, 50);
         assert_eq!(busy(), Some(3_000_000));
+        let local = policy
+            .run_busy_estimates(location, 10, 10, PARALLELISM)
+            .and_then(|(_, local)| local);
+        assert_eq!(local, None);
     }
 
     /// Each placement gates serial on the busy time of its own runs, independently of the other

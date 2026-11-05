@@ -1,9 +1,8 @@
-use super::{Context, MeterHandle, measure};
+use super::{Context, charge, measure};
 use crate::rayon::{ThreadPoolBuilder, Yield, join, spin, timed_spin};
 use commonware_utils::NZUsize;
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
-    pin::pin,
     time::{Duration, Instant},
 };
 
@@ -126,14 +125,14 @@ fn unwinding_nested_run_charges_the_enclosing_run() {
 }
 
 /// An install from outside the pool charges the worker's 20ms spin but not the caller's wait, so
-/// busy time exceeds wall time by at most the hand-off.
+/// busy time stays within the wall time, with slack for clock skew between threads.
 #[test]
 fn installs_charge_the_worker_but_not_the_wait() {
     // Install a 20ms spin from outside the pool.
     let pool = ThreadPoolBuilder::new(NZUsize!(2)).build().unwrap();
     let (busy, wall) = timed(|| pool.install(|| spin(20 * MS)));
 
-    // The worker's spin is charged, and the caller's wait adds nothing beyond the hand-off.
+    // The worker's spin is charged, and the caller's wait adds nothing.
     assert!(
         busy >= 20 * MS && busy < wall + 10 * MS,
         "busy time {busy:?} must cover the 20ms spin and stay under the wall {wall:?} plus 10ms"
@@ -149,7 +148,7 @@ fn broadcasts_charge_the_worker_but_not_the_wait() {
         pool.broadcast(|_| spin(20 * MS));
     });
 
-    // The worker's spin is charged, and the caller's wait adds nothing beyond the hand-off.
+    // The worker's spin is charged, and the caller's wait adds nothing.
     assert!(
         busy >= 20 * MS && busy < wall + 10 * MS,
         "busy time {busy:?} must cover the 20ms spin and stay under the wall {wall:?} plus 10ms"
@@ -191,7 +190,7 @@ fn nested_runs_on_workers_charge_the_enclosing_run_once() {
     });
     let wall = start.elapsed();
 
-    // The outer run adds the nested charge to the 1ms spin, and the wait adds only the hand-off.
+    // The outer run adds the nested charge to the 1ms spin, and the wait adds nothing.
     assert!(
         inner >= 30 * MS,
         "inner busy time {inner:?} must cover the 30ms spin"
@@ -241,50 +240,28 @@ fn spawned_broadcasts_charge_nothing() {
     );
 }
 
-/// Work a spawned job enters through a handle is charged to the captured run before the job sends
-/// its result, and the run's wait for that result is not charged.
+/// A charge lands on the calling thread's run, and a charge outside any run lands nowhere.
 #[test]
-fn handles_charge_the_captured_run_before_the_result() {
-    // Spawn a 20ms job that enters the install's handle, and await its result on the worker.
-    let pool = ThreadPoolBuilder::new(NZUsize!(2)).build().unwrap();
+fn charges_land_on_the_current_run() {
+    // Charge 20ms inside a run that spins for 1ms, and 20ms more outside any run.
+    charge(20 * MS);
     let (busy, wall) = timed(|| {
-        pool.install(|| {
-            let handle = MeterHandle::capture();
-            let (sender, receiver) = futures::channel::oneshot::channel();
-            pool.spawn(move || {
-                handle.enter(|| spin(20 * MS));
-                sender.send(()).unwrap();
-            });
-            pool.block_on_worker(pin!(receiver)).unwrap().unwrap();
-        });
+        spin(MS);
+        charge(20 * MS);
     });
 
-    // The job's 20ms is charged, and the wait for it is not.
+    // The run holds its spin plus the charge, and nothing from the charge outside it.
     assert!(
-        busy >= 20 * MS && busy < wall + 10 * MS,
-        "busy time {busy:?} must include the entered work and exclude the wait, wall {wall:?}"
+        busy >= 21 * MS && busy <= wall + 20 * MS,
+        "busy time {busy:?} must add the 20ms charge to the 1ms spin, wall {wall:?}"
     );
 }
 
-/// Work entered through a handle captured outside any run charges nothing, even inside a run.
+/// A thread that blocks in its context is charged for the wait, so a run suspends its context
+/// around a wait it does not want charged.
 #[test]
-fn handles_captured_without_a_context_charge_nothing() {
-    // Capture outside any run, then enter 20ms of work inside a measured run.
-    let handle = MeterHandle::capture();
-    let (busy, wall) = timed(|| handle.enter(|| spin(20 * MS)));
-
-    // The work ran in no context, so the run is charged only for the time around it.
-    assert!(
-        busy < wall - 10 * MS,
-        "busy time {busy:?} must exclude work entered through an empty handle, wall {wall:?}"
-    );
-}
-
-/// A thread outside the pool that blocks in its context is charged for the wait, which spans the
-/// spawned job, so the job needs no handle.
-#[test]
-fn outside_blockers_are_charged_for_the_wait() {
-    // Spawn a 20ms job without a handle, and block on its result on the test thread.
+fn blocked_threads_are_charged_for_the_wait() {
+    // Spawn a 20ms job and block on its result on the test thread, in its context.
     let pool = ThreadPoolBuilder::new(NZUsize!(1)).build().unwrap();
     let (busy, wall) = timed(|| {
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -303,8 +280,8 @@ fn outside_blockers_are_charged_for_the_wait() {
 }
 
 /// A worker that yields on empty queues searches in no context, so a measured install that keeps
-/// yielding is charged only for its time between yields. A descheduled attempt is retried, with
-/// ten attempts at most.
+/// yielding is charged only for its time between yields. A descheduled attempt is retried. The
+/// oracle assumes a clock read costs less than an idle search.
 #[test]
 fn idle_yields_charge_nothing() {
     const ITERATIONS: usize = 20_000;
@@ -333,13 +310,15 @@ fn idle_yields_charge_nothing() {
             continue;
         }
 
-        // Busy time stays within the time outside the yields, plus the hand-off.
+        // The yields are not charged, so the busy time leaves out most of their total; a charged
+        // search would bring it up to the wall time.
         assert!(
-            busy < wall - total + 5 * MS,
+            busy + total / 2 < wall,
             "busy time {busy:?} must exclude the {total:?} spent in idle searches, wall {wall:?}"
         );
         return;
     }
+    panic!("some attempt must run without a deschedule in ten tries");
 }
 
 /// Contexts restore across an install, a join with a nested run, and a nested run that unwinds on
