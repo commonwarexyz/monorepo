@@ -451,8 +451,8 @@ where
 
     /// Inclusion proof for the operations returned by [`Self::operations`], anchored at
     /// this batch's tip. The pair verifies against [`Self::root`] via
-    /// [`crate::qmdb::verify_proof`]. Together with [`Self::pinned_nodes`] they verify via
-    /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    /// [`crate::qmdb::ProofExt::verify`]. Together with [`Self::pinned_nodes`] they verify via
+    /// [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
     /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
@@ -481,7 +481,7 @@ where
     /// The Merkle frontier at the first operation returned by [`Self::operations`]
     /// ([`Family::nodes_to_pin`]), which lets a consumer holding only this batch's base rebuild
     /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
-    /// nodes verify against [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    /// nodes verify against [`Self::root`] via [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
     /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],

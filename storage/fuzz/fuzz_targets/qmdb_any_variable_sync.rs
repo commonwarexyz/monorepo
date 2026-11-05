@@ -8,8 +8,8 @@ use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{Family as MerkleFamily, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
+        ProofExt as _,
         any::{VariableConfig as Config, unordered::variable::Db},
-        verify_proof,
     },
     translator::TwoCap,
 };
@@ -251,7 +251,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         && let Ok((proof, log)) = db.proof(start_loc, *max_ops).await
                     {
                         let root = db.root();
-                        assert!(verify_proof::<Sha256, _, _>(&proof, start_loc, &log, &root,));
+                        assert!(proof.verify::<Sha256, _>(start_loc, &log, &root));
                     }
                     db
                 }
@@ -290,7 +290,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         let root = historical_roots
                             .get(&op_count)
                             .expect("historical root missing for known commit point");
-                        assert!(verify_proof::<Sha256, _, _>(&proof, start_loc, &log, root,));
+                        assert!(proof.verify::<Sha256, _>(start_loc, &log, root));
                     }
                     db
                 }

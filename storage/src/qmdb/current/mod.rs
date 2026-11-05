@@ -320,10 +320,11 @@
 //! against the ops root, not the canonical root.
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
-//! verifying ops proofs directly should use [`crate::qmdb::verify_proof`]. After sync, the bitmap
-//! and grafted tree are reconstructed deterministically from the operations, and the canonical root
-//! is computed. [proof::OpsRootWitness] can be used to validate that a particular ops root is
-//! committed by a trusted canonical root; the sync engine does not perform this check itself.
+//! verifying ops proofs directly should use [`crate::qmdb::ProofExt::verify`]. After sync, the
+//! bitmap and grafted tree are reconstructed deterministically from the operations, and the
+//! canonical root is computed. [proof::OpsRootWitness] can be used to validate that a particular
+//! ops root is committed by a trusted canonical root; the sync engine does not perform this check
+//! itself.
 
 use crate::{
     Context,
@@ -594,6 +595,7 @@ pub mod tests {
         journal::contiguous::Mutable,
         merkle::{self, mmb, mmr, storage::Storage as _},
         qmdb::{
+            ProofExt as _,
             any::{
                 ValueEncoding,
                 batch::Slot,
@@ -617,7 +619,6 @@ pub mod tests {
             chain::Bounds,
             floor::{Bounded, Hold},
             store::tests::{TestKey, TestValue},
-            verify_proof,
         },
         translator::Translator,
     };
@@ -5064,12 +5065,7 @@ pub mod tests {
                 .unwrap();
 
             // Verifies under the QMDB ops-tree hasher configuration.
-            assert!(verify_proof::<Sha256, _, _>(
-                &proof,
-                Location::new(0),
-                &ops,
-                &ops_root
-            ));
+            assert!(proof.verify::<Sha256, _>(Location::new(0), &ops, &ops_root));
 
             db.destroy().await.unwrap();
         });

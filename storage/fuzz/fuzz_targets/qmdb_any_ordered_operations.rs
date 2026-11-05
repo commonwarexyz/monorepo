@@ -10,6 +10,7 @@ use commonware_storage::{
     merkle::{Family as MerkleFamily, Location, Proof, mmb, mmr},
     mmr::full::Config as MerkleConfig,
     qmdb::{
+        ProofExt as _,
         any::{
             FixedConfig as Config,
             db::Db as AnyDb,
@@ -17,7 +18,6 @@ use commonware_storage::{
             traits::DbAny as _,
             value::FixedEncoding,
         },
-        verify_proof,
     },
     translator::EightCap,
 };
@@ -255,8 +255,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                 .expect("proof should not fail");
 
                             assert!(
-                                verify_proof::<Sha256, _, _>(
-                                    &proof,
+                                proof.verify::<Sha256, _>(
                                     adjusted_start,
                                     &log,
                                     &current_root),
@@ -286,8 +285,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             if let Ok(res) = db
                                 .proof(adjusted_start, *max_ops)
                                 .await {
-                                    let _ = verify_proof::<Sha256, _, _>(
-                                        &proof,
+                                    let _ = proof.verify::<Sha256, _>(
                                         adjusted_start,
                                         &res.1,
                                         &current_root);

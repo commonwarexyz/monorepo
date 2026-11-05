@@ -15,7 +15,7 @@ use commonware_cryptography::{Digest, Hasher, Keccak256, Sha256};
 use commonware_storage::{
     merkle::{Family, Graftable, Location, PendingChunk as _, mem::Mem, mmb, mmr},
     qmdb::{
-        self,
+        self, ProofExt as _,
         any::{
             ordered::fixed,
             unordered,
@@ -371,7 +371,7 @@ fn plain_proof<F: Family, H: Hasher, O: Encode>(
         )
         .map_err(|e| e.to_string())?;
     let op = operation(tree.location);
-    if !qmdb::verify_proof::<H, F, _>(&proof, location, core::slice::from_ref(&op), &root) {
+    if !proof.verify::<H, _>(location, core::slice::from_ref(&op), &root) {
         return Err("Commonware rejected the materialized operations proof".into());
     }
     let bytes32 = |digest: H::Digest| -> [u8; 32] { digest.as_ref().try_into().unwrap() };
@@ -1496,7 +1496,7 @@ mod tests {
         let op = Operation::<F>::decode(Copying(output.operation.as_ref())).unwrap();
         let root = digest(output.root.as_slice());
         let verify = |proof: &Proof<F, H::Digest>, op: &Operation<F>, root: &H::Digest| {
-            qmdb::verify_proof::<H, F, _>(proof, location, core::slice::from_ref(op), root)
+            proof.verify::<H, _>(location, core::slice::from_ref(op), root)
         };
         assert!(verify(&proof, &op, &root));
         let mut bad_root = output.root.0;
@@ -1569,12 +1569,7 @@ mod tests {
                     }
                     _ => panic!("unexpected operation"),
                 }
-                assert!(qmdb::verify_proof::<H, F, _>(
-                    &proof,
-                    location,
-                    &[op],
-                    &root
-                ));
+                assert!(proof.verify::<H, _>(location, &[op], &root));
             }
             _ => {
                 let op = keyless::variable::Operation::<F, Vec<u8>>::decode_cfg(
@@ -1592,12 +1587,7 @@ mod tests {
                     }
                     _ => panic!("unexpected operation"),
                 }
-                assert!(qmdb::verify_proof::<H, F, _>(
-                    &proof,
-                    location,
-                    &[op],
-                    &root
-                ));
+                assert!(proof.verify::<H, _>(location, &[op], &root));
             }
         }
         if *proof.leaves == 1 {
@@ -1684,8 +1674,7 @@ mod tests {
                     .map(|d| digest(d.as_slice()))
                     .collect(),
             };
-            assert!(qmdb::verify_proof::<H, F, _>(
-                &proof,
+            assert!(proof.verify::<H, _>(
                 Location::new(u64::try_from(output.location).unwrap()),
                 &[op],
                 &digest(output.root.as_slice())

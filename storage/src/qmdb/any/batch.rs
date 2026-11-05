@@ -3251,8 +3251,8 @@ where
 
     /// Inclusion proof for the operations returned by [`Self::operations`], anchored at
     /// this batch's tip. The pair verifies against [`Self::root`] via
-    /// [`crate::qmdb::verify_proof`]. Together with [`Self::pinned_nodes`] they verify via
-    /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    /// [`crate::qmdb::ProofExt::verify`]. Together with [`Self::pinned_nodes`] they verify via
+    /// [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
     /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
@@ -3285,7 +3285,7 @@ where
     /// The Merkle frontier at the first operation returned by [`Self::operations`]
     /// ([`Family::nodes_to_pin`]), which lets a consumer holding only this batch's base rebuild
     /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
-    /// nodes verify against [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    /// nodes verify against [`Self::root`] via [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
     /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
@@ -3449,6 +3449,7 @@ pub(crate) mod tests {
     use crate::{
         mmr,
         qmdb::{
+            ProofExt as _,
             any::{
                 BITMAP_CHUNK_BYTES,
                 ordered::fixed::Db as OrderedFixedDb,
@@ -5742,12 +5743,8 @@ pub(crate) mod tests {
                 let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
                 assert_eq!(log_ops, *ops);
                 assert_eq!(log_proof, proof);
-                assert!(crate::qmdb::verify_proof::<Sha256, _, _>(
-                    &proof, start, &ops, &root
-                ));
-                assert!(crate::qmdb::verify_proof_and_pinned_nodes::<Sha256, _, _>(
-                    &proof, start, &ops, &pins, &root
-                ));
+                assert!(proof.verify::<Sha256, _>(start, &ops, &root));
+                assert!(proof.verify_with_pinned_nodes::<Sha256, _>(start, &ops, &pins, &root));
             }
 
             // Flushing the applied batch prunes the store to its peaks. The late batch's base is
@@ -5784,8 +5781,7 @@ pub(crate) mod tests {
             let flushed_root = flushed.root();
             let flushed_proof = flushed.proof(&db).unwrap();
             let flushed_pins = flushed.pinned_nodes(&db).unwrap();
-            assert!(crate::qmdb::verify_proof_and_pinned_nodes::<Sha256, _, _>(
-                &flushed_proof,
+            assert!(flushed_proof.verify_with_pinned_nodes::<Sha256, _>(
                 flushed_start,
                 &flushed_ops,
                 &flushed_pins,
