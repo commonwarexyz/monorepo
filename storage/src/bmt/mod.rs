@@ -572,8 +572,7 @@ impl<D: Digest> Proof<D> {
         leaf: &D,
         root: &D,
     ) -> Result<(), Error> {
-        let reconstructed = self.reconstruct_element_root::<H>(position, leaf)?;
-        Self::ensure_root_matches(reconstructed, root)
+        Self::ensure_root_matches(self.reconstruct_element_root::<H>(position, leaf)?, root)
     }
 
     /// Reconstruct the finalized root from this proof and the `leaf` at `position`, or return
@@ -667,8 +666,7 @@ impl<D: Digest> Proof<D> {
         elements: &[(u32, D)],
         root: &D,
     ) -> Result<(), Error> {
-        let reconstructed = self.reconstruct_multi_root::<H>(elements)?;
-        Self::ensure_root_matches(reconstructed, root)
+        Self::ensure_root_matches(self.reconstruct_multi_root::<H>(elements)?, root)
     }
 
     /// Reconstruct the finalized root from this proof and the `(position, leaf)` `elements`,
@@ -822,8 +820,7 @@ impl<D: Digest> Proof<D> {
         leaves: &[D],
         root: &D,
     ) -> Result<(), Error> {
-        let reconstructed = self.reconstruct_range_root::<H>(position, leaves)?;
-        Self::ensure_root_matches(reconstructed, root)
+        Self::ensure_root_matches(self.reconstruct_range_root::<H>(position, leaves)?, root)
     }
 
     /// Reconstruct the finalized root from this proof and the consecutive `leaves` starting
