@@ -138,6 +138,14 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         self.capacity
     }
 
+    /// Returns the maximum number of entries Main can hold, which bounds how many expected
+    /// entries survive together (see [Self::get_or_insert_mut_expected]).
+    #[commonware_macros::stability(ALPHA)]
+    #[inline]
+    pub const fn main_capacity(&self) -> usize {
+        self.main.capacity
+    }
+
     /// Returns the number of entries currently in the cache.
     #[inline]
     pub fn len(&self) -> usize {
