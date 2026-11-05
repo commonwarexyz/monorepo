@@ -83,7 +83,7 @@ use commonware_parallel::{
     rayon::{ThreadPoolBuildError, ThreadPoolBuilder},
 };
 use commonware_utils::{
-    Cached, SystemTimeExt,
+    Cached, NZUsize, SystemTimeExt,
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
 };
@@ -1216,8 +1216,7 @@ fn shared_thread_pool() -> Result<ThreadPool, ThreadPoolBuildError> {
     let pool = Cached::take(
         &THREAD_POOL,
         || {
-            ThreadPoolBuilder::new()
-                .num_threads(1)
+            ThreadPoolBuilder::new(NZUsize!(1))
                 .use_current_thread()
                 .build()
                 .map(Arc::new)

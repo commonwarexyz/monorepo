@@ -249,7 +249,7 @@ mod tests {
         test_variable_inactivity_floor_tracking => run_inactivity_floor_tracking, open;
         test_variable_floor_monotonicity => run_floor_monotonicity, open;
         test_variable_floor_monotonicity_violation => run_floor_monotonicity_violation, open;
-        test_variable_floor_beyond_size => run_floor_beyond_size, open;
+        test_variable_floor_beyond_commit => run_floor_beyond_commit, open;
         test_variable_chained_floor_regression => run_chained_floor_regression, open;
         test_variable_chained_floor_beyond_commit => run_chained_floor_beyond_commit, open;
         test_variable_bounded_initialization_restores_floor => run_bounded_initialization_restores_floor, open_with_max;
@@ -289,19 +289,20 @@ mod tests {
         let v2 = Sha256::fill(22u8);
         let metadata = Sha256::fill(99u8);
 
-        let floor = db.inactivity_floor_loc();
         let retained = db
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
-            .merkleize(&db, Some(metadata), floor)
+            .with_metadata(Some(metadata))
+            .merkleize(&db)
             .await
             .unwrap();
         let compact_batch = compact
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
-            .merkleize(&compact, Some(metadata), floor)
+            .with_metadata(Some(metadata))
+            .merkleize(&compact)
             .await
             .unwrap();
 

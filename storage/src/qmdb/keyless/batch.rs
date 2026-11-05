@@ -34,6 +34,12 @@ where
     H: Hasher,
     Operation<F, V>: EncodeShared,
 {
+    /// Metadata for this batch's commit.
+    metadata: Option<V::Value>,
+
+    /// Application-declared floor, inherited when this batch is created.
+    inactivity_floor: Location<F>,
+
     /// Authenticated journal batch for computing the speculative Merkle root.
     journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, V>, S>,
 
@@ -150,6 +156,8 @@ where
             journal_batch: keyless.journal.new_batch(),
             appends: Vec::new(),
             parent: None,
+            metadata: None,
+            inactivity_floor: keyless.inactivity_floor_loc,
             base,
         }
     }
@@ -157,6 +165,24 @@ where
     /// The location that the next appended value will be placed at.
     pub fn size(&self) -> Location<F> {
         self.base.size + self.appends.len() as u64
+    }
+
+    /// Set the metadata recorded in this batch's commit. Defaults to `None` and is not inherited by
+    /// child batches.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<V::Value>>) -> Self {
+        self.metadata = metadata.into();
+        self
+    }
+
+    /// Set the inactivity floor recorded in this batch's commit. Defaults to the database or parent
+    /// batch's floor when the batch is created.
+    ///
+    /// The floor must be at least the parent batch's (or database's) floor and at most this
+    /// batch's commit location. Merkleizing the batch checks both bounds.
+    /// A floor past the commit would let a later `prune(floor)` remove the last readable commit.
+    pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
+        self.inactivity_floor = floor;
+        self
     }
 
     /// The recorded database boundary for this batch chain.
@@ -319,28 +345,25 @@ where
 
     /// Resolve appends into operations, merkleize, and return the batch.
     ///
-    /// `inactivity_floor` is the application-declared floor embedded in the commit. It must be at
-    /// least the floor this batch builds on (its parent's, or the database's) and at most this
-    /// batch's own commit location (`total_size - 1`). A floor past the commit would let a later
-    /// `prune(floor)` remove the last readable commit.
+    /// The commit records the batch's inactivity floor (see [`Self::with_inactivity_floor`]).
     ///
     /// # Errors
     ///
     /// - Returns [`Error::StaleBatch`] if `db` is not at a state of this batch's chain or an
     ///   unapplied ancestor was dropped.
     /// - Returns [`Error::FloorRegressed`] if `inactivity_floor` is below the floor this batch
-    ///   builds on, and [`Error::FloorBeyondSize`] if it is past the commit location.
+    ///   builds on, and [`Error::FloorBeyondCommit`] if it is past the commit location.
     #[tracing::instrument(name = "qmdb.keyless.batch.merkleize", level = "info", skip_all)]
     pub async fn merkleize<E, C>(
-        self,
+        mut self,
         db: &Keyless<F, E, V, C, H, S>,
-        metadata: Option<V::Value>,
-        inactivity_floor: Location<F>,
     ) -> MerkleizeResult<F, H::Digest, V, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
+        let metadata = self.metadata.take();
+        let inactivity_floor = self.inactivity_floor;
         let live_ancestors: Vec<_> =
             chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
                 .collect();
@@ -428,8 +451,8 @@ where
 
     /// Inclusion proof for the operations returned by [`Self::operations`], anchored at
     /// this batch's tip. The pair verifies against [`Self::root`] via
-    /// [`crate::qmdb::verify_proof`]. Together with [`Self::pinned_nodes`] they verify via
-    /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    /// [`crate::qmdb::ProofExt::verify`]. Together with [`Self::pinned_nodes`] they verify via
+    /// [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
     /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
@@ -458,7 +481,7 @@ where
     /// The Merkle frontier at the first operation returned by [`Self::operations`]
     /// ([`Family::nodes_to_pin`]), which lets a consumer holding only this batch's base rebuild
     /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
-    /// nodes verify against [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    /// nodes verify against [`Self::root`] via [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
     /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
@@ -594,6 +617,8 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             appends: Vec::new(),
             parent: Some(Arc::clone(self)),
+            metadata: None,
+            inactivity_floor: self.bounds.inactivity_floor,
             base: self.commitment(),
         }
     }

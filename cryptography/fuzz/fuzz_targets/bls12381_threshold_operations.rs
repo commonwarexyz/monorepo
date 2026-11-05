@@ -8,10 +8,10 @@ use commonware_cryptography::bls12381::primitives::{
     sharing::{ModeVersion, Sharing},
     variant::{MinPk, MinSig, PartialSignature, Variant},
 };
-use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{Participant, non_empty, test_rng};
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
+use commonware_utils::{NZUsize, Participant, non_empty, test_rng};
 use libfuzzer_sys::fuzz_target;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroU32;
 
 mod common;
 use common::{
@@ -433,7 +433,7 @@ fn fuzz(op: FuzzOperation) {
                     .iter()
                     .map(|group| group.iter().collect())
                     .collect();
-                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+                let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap();
                 let _ = threshold::recover_multiple(&sharing, groups_refs, &strategy);
             }
         }
@@ -448,7 +448,7 @@ fn fuzz(op: FuzzOperation) {
                     .iter()
                     .map(|group| group.iter().collect())
                     .collect();
-                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+                let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap();
                 let _ = threshold::recover_multiple(&sharing, groups_refs, &strategy);
             }
         }

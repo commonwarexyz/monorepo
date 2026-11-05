@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::rayon::{ThreadPoolBuilder, unwind};
-use commonware_utils::test_rng;
+use commonware_utils::{NZUsize, test_rng};
 use rand::Rng as _;
 use std::sync::Barrier;
 
@@ -36,8 +36,7 @@ fn random_data(len: usize) -> Vec<u32> {
 
 /// Runs `op` on a worker of a new pool.
 fn in_pool<R: Send>(op: impl FnOnce() -> R + Send) -> R {
-    ThreadPoolBuilder::new()
-        .num_threads(4)
+    ThreadPoolBuilder::new(NZUsize!(4))
         .build()
         .unwrap()
         .install(op)
@@ -56,7 +55,7 @@ fn sort() {
 fn sort_in_pool() {
     let mut data = random_data(12 * 1024);
 
-    let pool = ThreadPoolBuilder::new().build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(4)).build().unwrap();
     let mut sorted_data = data.clone();
     sorted_data.sort();
     pool.install(|| quick_sort(&mut data));
@@ -93,7 +92,7 @@ fn panic_b_still_executes() {
 #[test]
 fn join_context_neither() {
     // If we're already in a 1-thread pool, neither job should be stolen.
-    let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(1)).build().unwrap();
     let (a_migrated, b_migrated) =
         pool.install(|| join_context(|a| a.migrated(), |b| b.migrated()));
     assert!(!a_migrated);
@@ -104,7 +103,7 @@ fn join_context_neither() {
 fn join_context_second() {
     // If we're already in a 2-thread pool, the second job should be stolen.
     let barrier = Barrier::new(2);
-    let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(2)).build().unwrap();
     let (a_migrated, b_migrated) = pool.install(|| {
         join_context(
             |a| {
@@ -127,7 +126,7 @@ fn join_counter_overflow() {
 
     let mut i = 0;
     let mut j = 0;
-    let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(2)).build().unwrap();
 
     // Hammer on join a bunch of times, which used to hit overflow debug-assertions
     // in JEC on 32-bit targets: https://github.com/rayon-rs/rayon/issues/797

@@ -6,6 +6,7 @@ use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::{Blocker, Provider, Receiver as P2pReceiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_utils::NonZeroDuration;
 use rand_core::Rng;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -34,10 +35,11 @@ where
     pub mailbox_size: NonZeroUsize,
 
     /// Timeout for requests.
-    pub timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
 
-    /// Retry timeout for the fetcher.
-    pub fetch_retry_timeout: Duration,
+    /// Delay after an unresolved attempt before retrying its fetch.
+    /// Zero permits immediate retries, subject to the sender's rate limit.
+    pub fetch_retry_delay: Duration,
 
     /// Whether requests are sent with priority over other network messages
     pub priority_requests: bool,
@@ -77,8 +79,8 @@ where
             producer: handler,
             mailbox_size: config.mailbox_size,
             me: Some(config.public_key),
-            timeout: config.timeout,
-            fetch_retry_timeout: config.fetch_retry_timeout,
+            fetch_timeout: config.fetch_timeout,
+            fetch_retry_delay: config.fetch_retry_delay,
             priority_requests: config.priority_requests,
             priority_responses: config.priority_responses,
         },

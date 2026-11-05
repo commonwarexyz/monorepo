@@ -191,6 +191,7 @@ async fn disseminate<P: Simplex>(
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: oracle.control(node.clone()),
             strategy: Sequential,
         },
     );

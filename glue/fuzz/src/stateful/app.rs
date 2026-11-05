@@ -7,11 +7,13 @@
 //! result of executing it.
 //!
 //! The faulty application deviates only where the `Application` trait permits:
-//! it may withhold a verdict, abstain from a verification, decline a proposal,
-//! or propose a block committing to a different execution result. It never
-//! returns a proposal whose commitments disagree with its merkleized result and
-//! never returns a replay result that disagrees with the block being replayed,
-//! because `Stateful` panics deliberately on both.
+//! it may reject a candidate, delay a candidate's result past the view's
+//! timeouts, decline a proposal, or propose a block committing to a different
+//! execution result. It never returns a proposal whose commitments disagree
+//! with its merkleized result and never rejects a finalized block, because
+//! `Stateful` panics deliberately on both. Processing always finishes: the
+//! trait lets a candidate's result be delayed but not withheld, since
+//! finalization and pruning wait for processing to end.
 //!
 //! Both applications are generic over the database backend, which owns the
 //! workload one block applies and the extraction of the commitment a block
@@ -27,6 +29,7 @@ use super::{
     },
     invariants::{Applied, EngineObservations},
     marshal::Marshal,
+    stack::{CERTIFICATION_TIMEOUT, LEADER_TIMEOUT},
 };
 use commonware_codec::{
     Buf, Encode, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt as _,
@@ -39,8 +42,8 @@ use commonware_consensus::{
     types::{Epoch, Height, Round, View},
 };
 use commonware_cryptography::{Digest as _, Digestible, Hasher, Sha256};
-use commonware_glue::stateful::{Application, Input, Proposed};
-use commonware_runtime::{BufMut, deterministic};
+use commonware_glue::stateful::{Application, Finality, Input, Proposed};
+use commonware_runtime::{BufMut, Clock as _, deterministic};
 use commonware_utils::FuzzRng;
 use futures::StreamExt;
 use rand::RngExt as _;
@@ -270,11 +273,15 @@ impl<B: Backend, M: Marshal> Application<deterministic::Context> for CorrectApp<
         Some(Proposed { block, merkleized })
     }
 
-    async fn verify(
+    /// Executes the block and accepts it only if its commitment matches the
+    /// result, for candidates and finalized blocks alike: `Stateful` checks
+    /// only the sync targets, so the full commitment is checked here.
+    async fn process(
         &mut self,
         _context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: Batches<B>,
+        _finality: Finality,
     ) -> Option<MerkleizedBatches<B>> {
         let mut ancestry = Box::pin(ancestry);
         let tip = ancestry.next().await?;
@@ -292,26 +299,6 @@ impl<B: Backend, M: Marshal> Application<deterministic::Context> for CorrectApp<
         self.observations
             .record_verdict(tip.inner().digest(), accepted);
         accepted.then_some(merkleized)
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (deterministic::Context, Self::Context),
-        block: &Self::Block,
-        batches: Batches<B>,
-    ) -> Option<MerkleizedBatches<B>> {
-        Some(
-            B::execute(
-                Transition {
-                    view: block.context.round.view(),
-                    parent: block.parent,
-                    height: block.height(),
-                    bump: CORRECT_BUMP,
-                },
-                batches,
-            )
-            .await,
-        )
     }
 
     async fn capture(
@@ -356,9 +343,11 @@ impl<B: Backend, M: Marshal> Application<deterministic::Context> for CorrectApp<
 pub(super) enum Fault {
     /// Behave exactly like the correct application.
     None,
-    /// Return no verdict, which the trait models as permanent invalidity.
+    /// Reject a candidate, which the trait models as permanent invalidity.
     RejectVerification,
-    /// Decline to resolve a verification, which the trait defines as abstention.
+    /// Delay a candidate's result past the view's leader and certification
+    /// timeouts, so the vote misses the view. The trait permits a delay but
+    /// not an unbounded one: processing must finish.
     AbstainVerification,
     /// Propose a block committing to a different execution result.
     DivergentProposal,
@@ -509,26 +498,29 @@ impl<B: Backend, M: Marshal> Application<deterministic::Context> for FaultyApp<B
         }
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: Batches<B>,
+        finality: Finality,
     ) -> Option<MerkleizedBatches<B>> {
-        match self.schedule.at(context.1.round.view()) {
-            Fault::RejectVerification => None,
-            Fault::AbstainVerification => std::future::pending().await,
-            _ => self.inner.verify(context, ancestry, batches).await,
+        // A finalized block must produce its state, so faults apply to candidates only.
+        if finality == Finality::Candidate {
+            match self.schedule.at(context.1.round.view()) {
+                Fault::RejectVerification => return None,
+                Fault::AbstainVerification => {
+                    context
+                        .0
+                        .sleep(LEADER_TIMEOUT + CERTIFICATION_TIMEOUT)
+                        .await;
+                }
+                _ => {}
+            }
         }
-    }
-
-    async fn apply(
-        &mut self,
-        context: (deterministic::Context, Self::Context),
-        block: &Self::Block,
-        batches: Batches<B>,
-    ) -> Option<MerkleizedBatches<B>> {
-        self.inner.apply(context, block, batches).await
+        self.inner
+            .process(context, ancestry, batches, finality)
+            .await
     }
 
     async fn capture(

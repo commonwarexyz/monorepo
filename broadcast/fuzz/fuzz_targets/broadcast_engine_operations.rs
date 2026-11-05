@@ -17,16 +17,16 @@ use commonware_runtime::{
     BufMut, Clock, IoBuf, Quota, Runner, Spawner as _, Supervisor as _, deterministic,
 };
 use commonware_utils::{
-    FuzzRng, NZUsize, Probability, TestRng, channel::oneshot, futures::Pool, ordered::Set,
+    FuzzRng, NZU32, NZUsize, Probability, TestRng, channel::oneshot, futures::Pool, ordered::Set,
     probability, vec::Bounded,
 };
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
 use rand::seq::SliceRandom;
-use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
 /// Default rate limit set high enough to not interfere with normal operation
-const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
 /// Maximum sleep duration in milliseconds for fuzz tests.
 ///
@@ -400,13 +400,14 @@ fn fuzz(input: FuzzInput) {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(public_key.clone()),
                 strategy: Sequential,
             };
 
             // Create engine
             let engine_context = context.child("peer").with_attribute("index", i);
             let (engine, mailbox) =
-                Engine::<_, PublicKey, FuzzMessage, _, _>::new(engine_context, config);
+                Engine::<_, PublicKey, FuzzMessage, _, _, _>::new(engine_context, config);
             mailboxes.insert(public_key.clone(), mailbox);
             engine.start((sender, receiver));
         }

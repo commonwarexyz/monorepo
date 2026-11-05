@@ -107,6 +107,7 @@ async fn setup_prunable_validator_cert_mock(
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: control.clone(),
             strategy: Sequential,
         },
     );

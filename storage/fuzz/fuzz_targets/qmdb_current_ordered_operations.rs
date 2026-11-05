@@ -135,7 +135,7 @@ async fn commit_pending<F: Graftable>(
         batch = batch.write(k, v);
     }
     let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
-    let merkleized = batch.merkleize(&db, None, &mut policy).await.unwrap();
+    let merkleized = batch.merkleize_with(&db, &mut policy).await.unwrap();
     let db = db
         .apply_batch(merkleized)
         .await
@@ -366,8 +366,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             .expect("Range proof should not fail");
 
                         assert!(
-                            Db::<F>::verify_range_proof(
-                                &proof,
+                            proof.verify::<Sha256, _, _>(
                                 start_loc,
                                 &ops,
                                 &chunks,
@@ -409,8 +408,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         if range_proof.proof.digests != bad_digests {
                             let mut bad_digest_proof = range_proof.clone();
                             bad_digest_proof.proof.digests = bad_digests;
-                            assert!(!Db::<F>::verify_range_proof(
-                                &bad_digest_proof,
+                            assert!(!bad_digest_proof.verify::<Sha256, _, _>(
                                 start_loc,
                                 &ops,
                                 &chunks,
@@ -424,8 +422,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         {
                             let mut bad_pending_proof = range_proof.clone();
                             bad_pending_proof.pending_chunk_digest = bad_pending;
-                            assert!(!Db::<F>::verify_range_proof(
-                                &bad_pending_proof,
+                            assert!(!bad_pending_proof.verify::<Sha256, _, _>(
                                 start_loc,
                                 &ops,
                                 &chunks,
@@ -437,8 +434,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         if range_proof.partial_chunk_digest != bad_partial_digest {
                             let mut bad_partial_proof = range_proof.clone();
                             bad_partial_proof.partial_chunk_digest = bad_partial_digest;
-                            assert!(!Db::<F>::verify_range_proof(
-                                &bad_partial_proof,
+                            assert!(!bad_partial_proof.verify::<Sha256, _, _>(
                                 start_loc,
                                 &ops,
                                 &chunks,
@@ -455,8 +451,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             corrupted
                         }).collect();
                         if chunks != bad_chunks {
-                            assert!(!Db::<F>::verify_range_proof(
-                                &range_proof,
+                            assert!(!range_proof.verify::<Sha256, _, _>(
                                 start_loc,
                                 &ops,
                                 &bad_chunks,
@@ -478,9 +473,10 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     committed_op_count = db.bounds().end;
                     let current_root = db.root();
 
-                    match db.key_value_proof(k.clone()).await {
-                        Ok(proof) => {
-                            let value = db.get(&k).await.expect("get should not fail").expect("key should exist");
+                    match db.key_value_proof(&k).await {
+                        Ok((proof, value)) => {
+                            let expected = committed_state.get(key).copied().expect("key should exist in committed state");
+                            assert_eq!(value, Value::new(expected));
                             let verification_result = proof.verify::<Sha256, FixedEncoding<Value>>(k, value, &current_root);
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");
                         }

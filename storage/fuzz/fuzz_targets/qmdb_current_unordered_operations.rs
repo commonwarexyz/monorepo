@@ -8,15 +8,13 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
+        ProofExt as _,
         any::{
             traits::DbAny as _,
             unordered::{Update as UnorderedUpdate, fixed::Operation as UnorderedOperation},
+            value::FixedEncoding,
         },
-        current::{
-            FixedConfig as Config, proof::verify_proof_and_extract_digests,
-            unordered::fixed::Db as CurrentDb,
-        },
-        verify_proof, verify_proof_and_pinned_nodes,
+        current::{FixedConfig as Config, unordered::fixed::Db as CurrentDb},
     },
     translator::TwoCap,
 };
@@ -141,7 +139,7 @@ async fn commit_pending<F: Graftable>(
         batch = batch.write(k, v);
     }
     let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
-    let merkleized = batch.merkleize(&db, None, &mut policy).await.unwrap();
+    let merkleized = batch.merkleize_with(&db, &mut policy).await.unwrap();
     let db = db
         .apply_batch(merkleized)
         .await
@@ -405,7 +403,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             .await
                             .expect("ops historical proof should not fail");
                         assert!(
-                            verify_proof::<Sha256, _, _>(&proof, start, &ops, &db.ops_root()),
+                            proof.verify::<Sha256, _>(start, &ops, &db.ops_root()),
                             "ops historical proof should verify against the ops root"
                         );
                         db
@@ -438,8 +436,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             .await
                             .expect("pinned node lookup should not fail");
                         assert!(
-                            verify_proof_and_pinned_nodes::<Sha256, _, _>(
-                                &proof,
+                            proof.verify_with_pinned_nodes::<Sha256, _>(
                                 start,
                                 &ops,
                                 &pinned,
@@ -521,28 +518,18 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             .expect("Range proof should not fail");
 
                         assert!(
-                            Db::<F>::verify_range_proof(
-                                &proof,
-                                start_loc,
-                                &ops,
-                                &chunks,
-                                &current_root,
-                            ),
+                            proof.verify::<Sha256, _, _>(start_loc, &ops, &chunks, &current_root),
                             "database range proof verification should succeed",
                         );
                         assert!(
-                            proof.verify::<Sha256, _, 32>(start_loc, &ops, &chunks, &current_root,),
-                            "range proof should verify against the canonical root",
-                        );
-                        assert!(
-                            verify_proof_and_extract_digests::<F, _, Sha256, 32>(
-                                &proof,
-                                start_loc,
-                                &ops,
-                                &chunks,
-                                &current_root,
-                            )
-                            .is_ok(),
+                            proof
+                                .verify_and_extract_digests::<Sha256, _, 32>(
+                                    start_loc,
+                                    &ops,
+                                    &chunks,
+                                    &current_root,
+                                )
+                                .is_ok(),
                             "verified range proof should yield positioned digests"
                         );
                     }
@@ -584,13 +571,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             let mut bad_digest_proof = range_proof.clone();
                             bad_digest_proof.proof.digests = bad_digests;
                             assert!(
-                                !Db::<F>::verify_range_proof(
-                                    &bad_digest_proof,
-                                    start_loc,
-                                    &ops,
-                                    &chunks,
-                                    &root
-                                ),
+                                !bad_digest_proof
+                                    .verify::<Sha256, _, _>(start_loc, &ops, &chunks, &root),
                                 "proof with bad digests should not verify"
                             );
                         }
@@ -603,13 +585,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             let mut bad_pending_proof = range_proof.clone();
                             bad_pending_proof.pending_chunk_digest = bad_pending;
                             assert!(
-                                !Db::<F>::verify_range_proof(
-                                    &bad_pending_proof,
-                                    start_loc,
-                                    &ops,
-                                    &chunks,
-                                    &root
-                                ),
+                                !bad_pending_proof
+                                    .verify::<Sha256, _, _>(start_loc, &ops, &chunks, &root),
                                 "proof with bad pending chunk digest should not verify"
                             );
                         }
@@ -619,13 +596,8 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             let mut bad_partial_proof = range_proof.clone();
                             bad_partial_proof.partial_chunk_digest = bad_partial_digest;
                             assert!(
-                                !Db::<F>::verify_range_proof(
-                                    &bad_partial_proof,
-                                    start_loc,
-                                    &ops,
-                                    &chunks,
-                                    &root
-                                ),
+                                !bad_partial_proof
+                                    .verify::<Sha256, _, _>(start_loc, &ops, &chunks, &root),
                                 "proof with bad partial chunk digest should not verify"
                             );
                         }
@@ -643,8 +615,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             .collect();
                         if chunks != bad_chunks {
                             assert!(
-                                !Db::<F>::verify_range_proof(
-                                    &range_proof,
+                                !range_proof.verify::<Sha256, _, _>(
                                     start_loc,
                                     &ops,
                                     &bad_chunks,
@@ -671,27 +642,27 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     committed_op_count = db.bounds().end;
                     let current_root = db.root();
 
-                    match db.key_value_proof(k.clone()).await {
-                        Ok(proof) => {
-                            let value = db
-                                .get(&k)
-                                .await
-                                .expect("get should not fail")
-                                .expect("key should exist");
+                    match db.key_value_proof(&k).await {
+                        Ok((proof, value)) => {
+                            let expected = committed_state
+                                .get(key)
+                                .copied()
+                                .flatten()
+                                .expect("key should exist in committed state");
+                            assert_eq!(value, Value::new(expected));
                             let operation: UnorderedOperation<F, Key, Value> =
                                 UnorderedOperation::Update(UnorderedUpdate(
                                     k.clone(),
                                     value.clone(),
                                 ));
                             assert!(
-                                proof.verify::<Sha256, _>(operation, &current_root),
+                                proof.proof.verify::<Sha256, _>(operation, &current_root),
                                 "operation proof should verify against the canonical root",
                             );
                             assert!(
-                                Db::<F>::verify_key_value_proof(
+                                proof.verify::<Sha256, FixedEncoding<Value>, _>(
                                     k.clone(),
                                     value.clone(),
-                                    &proof,
                                     &current_root,
                                 ),
                                 "Key value proof verification failed for key {key:?}"
@@ -699,10 +670,9 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             let other_value = Value::new(*key);
                             if other_value != value {
                                 assert!(
-                                    !Db::<F>::verify_key_value_proof(
+                                    !proof.verify::<Sha256, FixedEncoding<Value>, _>(
                                         k,
                                         other_value,
-                                        &proof,
                                         &current_root,
                                     ),
                                     "key value proof should reject a different value",

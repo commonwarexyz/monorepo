@@ -1,4 +1,4 @@
-use super::{latch::Latch, unwind};
+use super::{latch::Latch, registry::Tag, unwind};
 use std::{any::Any, cell::UnsafeCell, mem, sync::Arc};
 
 pub(super) enum JobResult<T> {
@@ -28,6 +28,7 @@ pub(super) trait Job {
 pub(super) struct JobRef {
     pointer: *const (),
     execute_fn: unsafe fn(*const ()),
+    tag: Tag,
 }
 
 // SAFETY: every constructor of a job reference requires its job to be safe to execute on another
@@ -47,7 +48,20 @@ impl JobRef {
         Self {
             pointer: data as *const (),
             execute_fn: <T as Job>::execute,
+            tag: Tag::Wide,
         }
+    }
+
+    /// Returns this reference stamped with `tag`, the tag of the queue it is about to enter.
+    #[inline]
+    pub(super) const fn tagged(self, tag: Tag) -> Self {
+        Self { tag, ..self }
+    }
+
+    /// The tag the job runs under.
+    #[inline]
+    pub(super) const fn tag(&self) -> Tag {
+        self.tag
     }
 
     /// Returns an opaque handle that can be saved and compared,

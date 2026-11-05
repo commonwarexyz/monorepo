@@ -259,18 +259,12 @@ fn bench_keyless_generate(c: &mut Criterion) {
                                     let v = make_var_value(&mut rng);
                                     batch = batch.append(v);
                                     if rng.next_u32().is_multiple_of(KEYLESS_COMMIT_FREQ) {
-                                        let merkleized = batch
-                                            .merkleize(&db, None, db.inactivity_floor_loc())
-                                            .await
-                                            .unwrap();
+                                        let merkleized = batch.merkleize(&db).await.unwrap();
                                         db = db.apply_batch(merkleized).await.unwrap();
                                         batch = db.new_batch();
                                     }
                                 }
-                                let merkleized = batch
-                                    .merkleize(&db, None, db.inactivity_floor_loc())
-                                    .await
-                                    .unwrap();
+                                let merkleized = batch.merkleize(&db).await.unwrap();
                                 let db = db.apply_batch(merkleized).await.unwrap();
                                 let db = db.sync().await.unwrap();
 

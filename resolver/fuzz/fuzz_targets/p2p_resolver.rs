@@ -20,7 +20,7 @@ use commonware_resolver::{
 use commonware_runtime::{
     Clock, Quota, Runner, Supervisor as _, deterministic, telemetry::metrics::count_running_tasks,
 };
-use commonware_utils::{FuzzRng, NZUsize, ordered::Set, probability, vec::NonEmptyVec};
+use commonware_utils::{FuzzRng, NZDuration, NZUsize, ordered::Set, probability, vec::NonEmptyVec};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -53,8 +53,8 @@ const MIN_QUOTA_PER_SECOND: u32 = 1;
 const MAX_QUOTA_PER_SECOND: u32 = 64;
 const MIN_FETCH_TIMEOUT_MS: u64 = 10;
 const MAX_FETCH_TIMEOUT_MS: u64 = 300;
-const MIN_FETCH_RETRY_TIMEOUT_MS: u64 = 1;
-const MAX_FETCH_RETRY_TIMEOUT_MS: u64 = 100;
+const MIN_FETCH_RETRY_DELAY_MS: u64 = 1;
+const MAX_FETCH_RETRY_DELAY_MS: u64 = 100;
 const MIN_COMPLETION_WINDOW_MS: u64 = 200;
 const MAX_COMPLETION_WINDOW_MS: u64 = 2_000;
 const CHANNEL: u64 = 0;
@@ -156,7 +156,7 @@ struct FuzzInput {
     small_mailbox: bool,
     quota_per_second: u32,
     fetch_timeout_ms: u64,
-    fetch_retry_timeout_ms: u64,
+    fetch_retry_delay_ms: u64,
     completion_window_ms: u64,
     priority_requests: bool,
     priority_responses: bool,
@@ -340,10 +340,10 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         } else {
             u.int_in_range(MIN_FETCH_TIMEOUT_MS..=MAX_FETCH_TIMEOUT_MS)?
         };
-        let fetch_retry_timeout_ms = if u.is_empty() {
-            MIN_FETCH_RETRY_TIMEOUT_MS
+        let fetch_retry_delay_ms = if u.is_empty() {
+            MIN_FETCH_RETRY_DELAY_MS
         } else {
-            u.int_in_range(MIN_FETCH_RETRY_TIMEOUT_MS..=MAX_FETCH_RETRY_TIMEOUT_MS)?
+            u.int_in_range(MIN_FETCH_RETRY_DELAY_MS..=MAX_FETCH_RETRY_DELAY_MS)?
         };
         let completion_window_ms = if u.is_empty() {
             MIN_COMPLETION_WINDOW_MS
@@ -371,7 +371,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             small_mailbox,
             quota_per_second,
             fetch_timeout_ms,
-            fetch_retry_timeout_ms,
+            fetch_retry_delay_ms,
             completion_window_ms,
             priority_requests,
             priority_responses,
@@ -558,8 +558,8 @@ fn run(input: FuzzInput) -> String {
                     producer: producers[index].clone(),
                     mailbox_size: NonZeroUsize::new(mailbox_size).unwrap(),
                     me: Some(scheme.public_key()),
-                    timeout: Duration::from_millis(input.fetch_timeout_ms),
-                    fetch_retry_timeout: Duration::from_millis(input.fetch_retry_timeout_ms),
+                    fetch_timeout: NZDuration!(Duration::from_millis(input.fetch_timeout_ms)),
+                    fetch_retry_delay: Duration::from_millis(input.fetch_retry_delay_ms),
                     priority_requests: input.priority_requests,
                     priority_responses: input.priority_responses,
                 },
@@ -715,11 +715,11 @@ fn run(input: FuzzInput) -> String {
                     let settle = Duration::from_millis(
                         settle_ms
                             .max(input.completion_window_ms)
-                            .max(input.fetch_timeout_ms + input.fetch_retry_timeout_ms)
+                            .max(input.fetch_timeout_ms + input.fetch_retry_delay_ms)
                             .max(
                                 quota_window_ms
                                     + input.fetch_timeout_ms
-                                    + input.fetch_retry_timeout_ms,
+                                    + input.fetch_retry_delay_ms,
                             ),
                     );
                     // Isolate this liveness oracle from background fetch retries

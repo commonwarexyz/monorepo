@@ -852,11 +852,11 @@ mod tests {
         stage.term_length = TermLength::new(commonware_utils::NZU32!(3));
         stage.handoff = Handoff::Stage(());
         let standard = [
-            (connected, "54834a7a"),
-            (adaptive, "df335d5f"),
-            (honest, "0561e3ec"),
-            (vote, "76b820d4"),
-            (stage, "67cdd41e"),
+            (connected, "be7a0558"),
+            (adaptive, "4e634062"),
+            (honest, "c3adbdf0"),
+            (vote, "98c0e330"),
+            (stage, "57e82ee5"),
         ];
         for (input, expected) in standard {
             for happens_before in [false, true] {
@@ -875,8 +875,8 @@ mod tests {
         let mut twins = input(13, 3, N4F1C3);
         twins.strategy = small;
         for (role, expected) in [
-            (TwinsRole::Campaign, "85411cbd"),
-            (TwinsRole::Mutator, "10a6df73"),
+            (TwinsRole::Campaign, "32d28146"),
+            (TwinsRole::Mutator, "8a55e196"),
         ] {
             let input = twins.clone();
             let cfg = bounded_fuzz_runtime_config(
@@ -905,7 +905,7 @@ mod tests {
     /// entry had a prefix hook.
     #[test]
     fn ordinary_omission_runs_are_unchanged() {
-        for (raw_bytes, expected) in [(vec![0, 7, 7], "7ee5945b"), (vec![2, 9, 9], "aeb1b0cd")] {
+        for (raw_bytes, expected) in [(vec![0, 7, 7], "84d97b6c"), (vec![2, 9, 9], "383572ff")] {
             let mut input = input(0, 4, N4F0C4);
             let victim = usize::from(raw_bytes[0]);
             input.raw_bytes = raw_bytes;

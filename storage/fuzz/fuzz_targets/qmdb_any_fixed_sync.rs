@@ -9,7 +9,6 @@ use commonware_storage::{
     merkle::{Family as MerkleFamily, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
         any::{FixedConfig as Config, unordered::fixed::Db},
-        floor::Proportional,
         sync,
     },
     translator::TwoCap,
@@ -132,7 +131,7 @@ where
     let db_config = test_config(test_name);
     let expected_root = target.root;
 
-    let sync_config: sync::engine::Config<FixedDb<F>, R> = sync::engine::Config {
+    let sync_config: sync::Config<FixedDb<F>, R> = sync::Config {
         context: context.child("sync").with_attribute("id", sync_id),
         update_rx: None,
         finish_rx: None,
@@ -205,7 +204,8 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch
-                        .merkleize(&db, Some(FixedBytes::new(commit_id)), &mut Proportional)
+                        .with_metadata(Some(FixedBytes::new(commit_id)))
+                        .merkleize(&db)
                         .await
                         .unwrap();
                     let db = db
@@ -232,7 +232,8 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch
-                        .merkleize(&db, Some(FixedBytes::new(commit_id)), &mut Proportional)
+                        .with_metadata(Some(FixedBytes::new(commit_id)))
+                        .merkleize(&db)
                         .await
                         .unwrap();
                     let db = db
@@ -284,7 +285,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
         for (k, v) in pending_writes.drain(..) {
             batch = batch.write(k, v);
         }
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db
             .apply_batch(merkleized)
             .await

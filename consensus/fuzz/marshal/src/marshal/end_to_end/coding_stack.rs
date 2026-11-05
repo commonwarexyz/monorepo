@@ -61,7 +61,7 @@ use commonware_runtime::{
     Clock as _, Handle, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{FuzzRng, NZU64, NZUsize};
+use commonware_utils::{FuzzRng, NZDuration, NZU64, NZUsize};
 use rand::RngExt as _;
 use std::{fmt, future::Future, num::NonZeroUsize, sync::Arc, time::Duration};
 
@@ -276,8 +276,8 @@ where
             peer_provider: oracle.manager(),
             blocker: tap_blocker(tap, oracle.control(validator.clone())),
             mailbox_size: config.mailbox_size,
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         },
@@ -778,7 +778,8 @@ where
             leader_timeout: Duration::from_secs(1),
             certification_timeout: Duration::from_secs(2),
             timeout_retry: Duration::from_secs(10),
-            fetch_timeout: Duration::from_secs(1),
+            fetch_timeout: NZDuration!(Duration::from_secs(1)),
+            fetch_retry_delay: Duration::from_millis(100),
             view_retention: Delta::new(10),
             skip: SkipPolicy::Enabled {
                 timeout: Duration::from_secs(11),

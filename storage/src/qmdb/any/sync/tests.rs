@@ -10,8 +10,8 @@ use crate::{
     qmdb::{
         self,
         sync::{
-            self, Engine, Feedback, Target,
-            engine::{Config, NextStep},
+            self, Config, Engine, Feedback, Target,
+            engine::NextStep,
             harness::{DbOf, JournalOf, OpOf, SyncTestHarness},
             source::{self, Request, Response, Source},
         },
@@ -971,7 +971,7 @@ where
             corrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
-        let config = sync::engine::Config {
+        let config = sync::Config {
             db_config,
             fetch_batch_size: NZU64!(100),
             target: Target {
@@ -1617,7 +1617,6 @@ mod harnesses {
     use super::SyncTestHarness;
     use crate::{
         merkle::{self, mmb, mmr},
-        qmdb::floor::Proportional,
         translator::TwoCap,
     };
     use commonware_cryptography::sha256::Digest;
@@ -1786,14 +1785,12 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch
-                .merkleize(&db, None::<Digest>, &mut Proportional)
-                .await
-                .unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, metadata, &mut Proportional)
+                .with_metadata(metadata)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -1869,14 +1866,12 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch
-                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
-                .await
-                .unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, metadata, &mut Proportional)
+                .with_metadata(metadata)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -1951,14 +1946,12 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch
-                .merkleize(&db, None::<Digest>, &mut Proportional)
-                .await
-                .unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, metadata, &mut Proportional)
+                .with_metadata(metadata)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -2033,14 +2026,12 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch
-                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
-                .await
-                .unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, metadata, &mut Proportional)
+                .with_metadata(metadata)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();

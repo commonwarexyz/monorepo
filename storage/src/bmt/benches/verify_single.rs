@@ -38,7 +38,7 @@ fn bench_verify_single(c: &mut Criterion) {
                         for (pos, element, proof) in samples.iter() {
                             assert!(
                                 proof
-                                    .verify_element_inclusion::<Sha256>(element, *pos, &root)
+                                    .verify_element_inclusion::<Sha256>(*pos, element, &root)
                                     .is_ok()
                             );
                         }

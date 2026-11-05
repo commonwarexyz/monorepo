@@ -8,9 +8,8 @@ use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{Family as MerkleFamily, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
+        ProofExt as _,
         any::{VariableConfig as Config, unordered::variable::Db},
-        floor::Proportional,
-        verify_proof,
     },
     translator::TwoCap,
 };
@@ -221,7 +220,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch
-                        .merkleize(&db, metadata_bytes.clone(), &mut Proportional)
+                        .with_metadata(metadata_bytes.clone())
+                        .merkleize(&db)
                         .await
                         .unwrap();
                     let expected_end = merkleized.bounds().tip.size;
@@ -283,7 +283,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                    let merkleized = batch.merkleize(&db).await.unwrap();
                     let expected_end = merkleized.bounds().tip.size;
                     let applied_start = db.bounds().end;
                     let db = db
@@ -316,7 +316,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         && let Ok((proof, log)) = db.proof(start_loc, *max_ops).await
                     {
                         let root = db.root();
-                        assert!(verify_proof::<Sha256, _, _>(&proof, start_loc, &log, &root,));
+                        assert!(proof.verify::<Sha256, _>(start_loc, &log, &root));
                     }
                     db
                 }
@@ -331,7 +331,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                    let merkleized = batch.merkleize(&db).await.unwrap();
                     let expected_end = merkleized.bounds().tip.size;
                     let applied_start = db.bounds().end;
                     let db = db
@@ -373,7 +373,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         let root = historical_roots
                             .get(&op_count)
                             .expect("historical root missing for known commit point");
-                        assert!(verify_proof::<Sha256, _, _>(&proof, start_loc, &log, root,));
+                        assert!(proof.verify::<Sha256, _>(start_loc, &log, root));
                     }
                     db
                 }
@@ -383,7 +383,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                    let merkleized = batch.merkleize(&db).await.unwrap();
                     let expected_end = merkleized.bounds().tip.size;
                     let applied_start = db.bounds().end;
                     let db = db
@@ -441,7 +441,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                    let merkleized = batch.merkleize(&db).await.unwrap();
                     let expected_end = merkleized.bounds().tip.size;
                     let expected_root = merkleized.root();
                     let applied_start = db.bounds().end;
@@ -524,7 +524,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
         for (k, v) in pending_writes.drain(..) {
             batch = batch.write(k, v);
         }
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         let expected_end = merkleized.bounds().tip.size;
         let applied_start = db.bounds().end;
         let db = db

@@ -70,8 +70,8 @@ pub(super) const CHANNEL_BROADCAST: u64 = 4;
 pub(super) const CHANNEL_DATABASE: u64 = 5;
 pub(super) const CHANNEL_PROBE: u64 = 6;
 
-const LEADER_TIMEOUT: Duration = Duration::from_millis(250);
-const CERTIFICATION_TIMEOUT: Duration = Duration::from_millis(500);
+pub(super) const LEADER_TIMEOUT: Duration = Duration::from_millis(250);
+pub(super) const CERTIFICATION_TIMEOUT: Duration = Duration::from_millis(500);
 const TIMEOUT_RETRY: Duration = Duration::from_millis(250);
 const FETCH_TIMEOUT: Duration = Duration::from_millis(500);
 const SKIP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -265,8 +265,8 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
             peer_provider: oracle.manager(),
             blocker: oracle.control(identity.clone()),
             mailbox_size: MAILBOX_SIZE,
-            timeout: RESOLVER_TIMEOUT,
-            fetch_retry_timeout: RESOLVER_RETRY,
+            fetch_timeout: NZDuration!(RESOLVER_TIMEOUT),
+            fetch_retry_delay: RESOLVER_RETRY,
             priority_requests: false,
             priority_responses: false,
         },
@@ -374,8 +374,8 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
                 database: None,
                 mailbox_size: MAILBOX_SIZE,
                 me: Some(identity.clone()),
-                timeout: RESOLVER_TIMEOUT,
-                fetch_retry_timeout: RESOLVER_RETRY,
+                fetch_timeout: NZDuration!(RESOLVER_TIMEOUT),
+                fetch_retry_delay: RESOLVER_RETRY,
                 max_serve_ops: NZU64!(16),
                 priority_requests: false,
                 priority_responses: false,
@@ -446,7 +446,8 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
                 timeout: SKIP_TIMEOUT,
                 budget: simplex::SkipBudget::Participants,
             },
-            fetch_timeout: FETCH_TIMEOUT,
+            fetch_timeout: NZDuration!(FETCH_TIMEOUT),
+            fetch_retry_delay: FETCH_TIMEOUT,
             forward: ForwardPolicy::Disabled,
             track_historical_votes: false,
         },

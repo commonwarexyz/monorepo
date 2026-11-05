@@ -13,7 +13,7 @@ use crate::{
     },
 };
 use bytes::BufMut;
-use commonware_codec::{Buf, Codec, EncodeSize, Read, ReadExt as _, Write};
+use commonware_codec::{Buf, Encode, EncodeSize, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::range::contains_cyclic;
 
@@ -57,7 +57,7 @@ impl<F: Graftable, K: Key, D: Digest, C: AsRef<[u8]>> KeyValueProof<F, K, D, C> 
     where
         H: Hasher<Digest = D>,
         V: ValueEncoding,
-        Operation<F, K, V>: Codec,
+        Operation<F, K, V>: Encode,
     {
         let op = Operation::<F, K, V>::Update(Update {
             key,
@@ -138,7 +138,7 @@ where
     V: ValueEncoding,
     D: Digest,
     C: AsRef<[u8]>,
-    Operation<F, K, V>: Codec,
+    Operation<F, K, V>: Encode,
 {
     /// Return true if the proof authenticates that `key` does not exist in the database with
     /// the provided `root`.

@@ -1371,10 +1371,14 @@ mod tests {
     /// Several Byzantine-led views with shard and backfill faults armed; the
     /// honest nodes must still reach the target, and the poisoner, which only
     /// answers backfill requests, must have answered at least once.
+    ///
+    /// The resolver samples backfill peers by the useful bytes they served, so once
+    /// an honest peer answers, the never-credited poisoner is rarely asked: these
+    /// seeds are ones whose runs ask it.
     #[test]
     fn coding_block_poison_runs_under_certificate_mock() {
         assert_adversary_acted(&[coding_disrupter::BACKFILL_POISON_ACTOR], || {
-            for seed in [vec![0], vec![7, 42, 199, 3, 88]] {
+            for seed in [vec![1], vec![2], vec![7], vec![10], vec![11]] {
                 fuzz_marshal_coding_block_poison::<SimplexCertificateMock>(MarshalDisrupterInput {
                     degraded_network: true,
                     ..smoke_input(seed, 6)

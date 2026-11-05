@@ -55,7 +55,7 @@ use commonware_runtime::{
     Clock, Handle, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{NZU64, NZUsize, channel::oneshot};
+use commonware_utils::{NZDuration, NZU64, NZUsize, channel::oneshot};
 use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
 
 pub const DEFAULT_MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
@@ -544,8 +544,8 @@ pub(crate) async fn setup_validator_tapped<P: Simplex>(
                     peer_provider: oracle.manager(),
                     blocker: tap_blocker(tap, oracle.control(validator.clone())),
                     mailbox_size: config.mailbox_size,
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(100),
+                    fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -563,6 +563,7 @@ pub(crate) async fn setup_validator_tapped<P: Simplex>(
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: tap_blocker(tap, oracle.control(validator.clone())),
             strategy: Sequential,
         },
     );
@@ -828,7 +829,8 @@ where
             leader_timeout: LEADER_TIMEOUT,
             certification_timeout: CERTIFICATION_TIMEOUT,
             timeout_retry: Duration::from_secs(10),
-            fetch_timeout: Duration::from_secs(1),
+            fetch_timeout: NZDuration!(Duration::from_secs(1)),
+            fetch_retry_delay: Duration::from_millis(100),
             view_retention: Delta::new(10),
             skip: SkipPolicy::Enabled {
                 timeout: Duration::from_secs(11),

@@ -9,14 +9,11 @@ use commonware_storage::{
     journal::contiguous::fixed::{Config as FConfig, Journal},
     merkle::{Family as MerkleFamily, Location, mmb, mmr},
     mmr::full::Config as MerkleConfig,
-    qmdb::{
-        any::{
-            FixedConfig as Config,
-            db::Db as AnyDb,
-            ordered::{Operation, Update},
-            value::FixedEncoding,
-        },
-        floor::Proportional,
+    qmdb::any::{
+        FixedConfig as Config,
+        db::Db as AnyDb,
+        ordered::{Operation, Update},
+        value::FixedEncoding,
     },
     translator::EightCap,
 };
@@ -93,10 +90,7 @@ async fn commit_pending<F: MerkleFamily>(
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = batch
-        .merkleize(&db, metadata, &mut Proportional)
-        .await
-        .unwrap();
+    let merkleized = batch.with_metadata(metadata).merkleize(&db).await.unwrap();
     assert_eq!(
         *merkleized.bounds().base.size,
         *db.bounds().end,
@@ -149,10 +143,9 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 init_concurrency: (),
             };
 
-            let mut db: GenericDb<F> =
-                commonware_storage::qmdb::any::init(context.child("storage"), cfg, None)
-                    .await
-                    .expect("init qmdb");
+            let mut db = GenericDb::<F>::init(context.child("storage"), cfg, None)
+                .await
+                .expect("init qmdb");
             let mut last_commit = None;
             let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 

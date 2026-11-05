@@ -83,7 +83,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, IoBuf, Runner, Supervisor, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{FuzzRng, NZUsize};
+use commonware_utils::{FuzzRng, NZDuration, NZUsize};
 use rand::RngExt as _;
 use std::{cmp::Ordering, collections::HashSet, sync::Arc, time::Duration};
 
@@ -361,7 +361,8 @@ fn spawn_twin_pair<P: Simplex>(
             leader_timeout: Duration::from_secs(1),
             certification_timeout: Duration::from_millis(1_500),
             timeout_retry: Duration::from_secs(10),
-            fetch_timeout: Duration::from_secs(1),
+            fetch_timeout: NZDuration!(Duration::from_secs(1)),
+            fetch_retry_delay: Duration::from_millis(100),
             view_retention: Delta::new(10),
             skip: SkipPolicy::Enabled {
                 timeout: Duration::from_secs(11),
@@ -428,7 +429,8 @@ fn spawn_twin_pair<P: Simplex>(
             leader_timeout: Duration::from_secs(1),
             certification_timeout: Duration::from_millis(1_500),
             timeout_retry: Duration::from_secs(10),
-            fetch_timeout: Duration::from_secs(1),
+            fetch_timeout: NZDuration!(Duration::from_secs(1)),
+            fetch_retry_delay: Duration::from_millis(100),
             view_retention: Delta::new(10),
             skip: SkipPolicy::Enabled {
                 timeout: Duration::from_secs(11),

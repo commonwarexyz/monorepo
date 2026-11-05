@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_storage::{
     merkle::{Family as MerkleFamily, Location, Proof, mmb, mmr},
-    qmdb::verify::verify_multi_proof,
+    qmdb::verify::ProofExt as _,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -29,7 +29,7 @@ impl<'a> Arbitrary<'a> for OperationInput {
 }
 
 // `proof_leaves` is typed `Location<F>` so that `Arbitrary` bounds it to `F::MAX_LEAVES`;
-// otherwise `verify_multi_proof` would reject on overflow before exercising its inner logic.
+// otherwise `ProofExt::verify_multi` would reject on overflow before exercising its inner logic.
 #[derive(Debug)]
 struct FuzzInput<F: MerkleFamily> {
     proof_leaves: Location<F>,
@@ -103,7 +103,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
     }
 
     let root = Digest::from(input.root);
-    let verified = verify_multi_proof::<Sha256, _, _>(&proof, operations.as_slice(), &root);
+    let verified = proof.verify_multi::<Sha256, _>(operations.as_slice(), &root);
     if verified {
         assert!(
             operations.iter().all(|(loc, _)| *loc < proof.leaves),
@@ -113,11 +113,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
         let mut tampered_root = input.root;
         tampered_root[0] ^= 1;
         assert!(
-            !verify_multi_proof::<Sha256, _, _>(
-                &proof,
-                operations.as_slice(),
-                &Digest::from(tampered_root),
-            ),
+            !proof.verify_multi::<Sha256, _>(operations.as_slice(), &Digest::from(tampered_root)),
             "a multi-proof must reject a different root",
         );
     }
@@ -128,7 +124,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
         assert!(!verified);
         operations.sort_by_key(|(location, _)| *location);
         operations.dedup_by_key(|(location, _)| *location);
-        let _ = verify_multi_proof::<Sha256, _, _>(&proof, operations.as_slice(), &root);
+        let _ = proof.verify_multi::<Sha256, _>(operations.as_slice(), &root);
     }
 }
 

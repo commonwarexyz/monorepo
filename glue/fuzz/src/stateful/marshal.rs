@@ -364,12 +364,13 @@ mod standard {
             let (engine, buffer) = buffered::Engine::new(
                 context,
                 buffered::Config {
-                    public_key: identity,
+                    public_key: identity.clone(),
                     mailbox_size: MAILBOX_SIZE,
                     deque_size: 10,
                     priority: false,
                     codec_config: (),
                     peer_provider: oracle.manager(),
+                    blocker: oracle.control(identity),
                     strategy: Sequential,
                 },
             );

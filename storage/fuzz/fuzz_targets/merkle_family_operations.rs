@@ -62,7 +62,7 @@ fn verify_element_proof<F: MerkleFamily>(
 ) -> Result<bool, Error<F>> {
     let proof = merkle.proof(hasher, loc, 0)?;
     let root = merkle.root(hasher, 0)?;
-    Ok(proof.verify_element_inclusion(hasher, element, loc, &root))
+    Ok(proof.verify_element_inclusion(hasher, loc, element, &root))
 }
 
 struct ReferenceMerkle<F: MerkleFamily> {

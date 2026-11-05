@@ -49,7 +49,7 @@ use commonware_runtime::{
     telemetry::traces::collector::{CollectingLayer, TraceStorage},
 };
 use commonware_utils::{
-    FuzzRng, NZUsize, SystemTimeExt as _, probability, sequence::U64, sync::Once,
+    FuzzRng, NZDuration, NZUsize, SystemTimeExt as _, probability, sequence::U64, sync::Once,
 };
 use futures::future::join_all;
 use std::{
@@ -1330,7 +1330,8 @@ impl<P: simplex::Simplex> MockTwinsBackend<P> {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_millis(1_500),
                 timeout_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention: Delta::new(10),
                 skip: SkipPolicy::Enabled {
                     timeout: Duration::from_secs(11),

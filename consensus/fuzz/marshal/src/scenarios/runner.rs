@@ -623,14 +623,16 @@ mod tests {
                 backfill: BackfillFault::Poison,
                 consensus: ConsensusMutation::Corrupt,
             },
-            // A schedule the fuzzer produces: the input decoder pins
-            // `fault_rounds` to two for this bound. The disrupter acts only
-            // while its observed view is one of its sampled faulty views, so
-            // the run must be long enough to reach one; a one-container run
-            // ends before the inline variant reaches a faulty view.
-            fault_rounds: 2,
-            fault_rounds_bound: 7,
-            required_containers: 7,
+            // A schedule the fuzzer produces: the input decoder allows at most
+            // `fault_rounds_bound / FAULT_INJECTION_RATIO` (six) fault rounds for
+            // this bound. The disrupter acts only while its observed view is one
+            // of its faulty views, sampled from the live window of
+            // `required_containers + LIVE_FAULT_MARGIN` views above the attack
+            // view. Six faulty views among those 35 put at least one in the 30
+            // the run reaches, whatever the runtime's random stream draws.
+            fault_rounds: 6,
+            fault_rounds_bound: 30,
+            required_containers: 30,
             degraded_network: false,
             partition: Partition::Connected,
             forwarding: ForwardPolicy::Disabled,

@@ -281,6 +281,7 @@ pub(crate) fn start_with<P: Simplex>(
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: oracle.control(byzantine.clone()),
             strategy: Sequential,
         },
     );

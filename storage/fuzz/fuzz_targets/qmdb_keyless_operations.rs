@@ -10,9 +10,8 @@ use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{Family, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        Error,
+        Error, ProofExt as _,
         keyless::variable::{Config, Db as Keyless},
-        verify_proof, verify_proof_and_pinned_nodes,
     },
 };
 use commonware_utils::{FuzzRng, NZU16, NZU64, NZUsize};
@@ -27,13 +26,13 @@ type CodecConfig = (commonware_codec::RangeCfg<usize>, ());
 #[derive(Debug, Clone, Copy)]
 enum BadFloorExpect {
     Regression,
-    BeyondSize,
+    BeyondCommit,
 }
 
 fn assert_bad_floor_error<F: Family>(err: &Error<F>, kind: BadFloorExpect) {
     match (err, kind) {
         (Error::FloorRegressed(_, _), BadFloorExpect::Regression) => {}
-        (Error::FloorBeyondSize(_, _), BadFloorExpect::BeyondSize) => {}
+        (Error::FloorBeyondCommit(_, _), BadFloorExpect::BeyondCommit) => {}
         _ => panic!("unexpected error for {kind:?}: {err:?}"),
     }
 }
@@ -48,7 +47,7 @@ enum FloorKind {
     AdvanceToCommit,
     /// Floor one below the current floor. It must be rejected as `FloorRegressed`.
     BadRegression,
-    /// Floor one past the commit location. It must be rejected as `FloorBeyondSize`.
+    /// Floor one past the commit location. It must be rejected as `FloorBeyondCommit`.
     BadBeyondCommit,
 }
 
@@ -76,7 +75,7 @@ enum Operation {
     },
     /// Build a two-level batch chain (parent -> child) with a valid parent and a child floor that
     /// regresses below the parent's floor or passes the child's own commit location. Merkleizing
-    /// the child must return `FloorRegressed` or `FloorBeyondSize`.
+    /// the child must return `FloorRegressed` or `FloorBeyondCommit`.
     BadChainedCommit {
         child_kind: FloorKind,
     },
@@ -316,21 +315,22 @@ fn fuzz_family<F: Family, S: Strategy>(
 
                     // Pick the floor for this commit. `Bad*` kinds are guaranteed to trigger
                     // the expected error; Valid kinds (Current/AdvanceToCommit) apply cleanly.
+                    // `None` keeps the floor the batch inherits.
                     let (floor, expect_err) = match floor_kind {
-                        FloorKind::Current => (current_floor, None),
-                        FloorKind::AdvanceToCommit => (Location::<F>::new(commit_loc), None),
+                        FloorKind::Current => (None, None),
+                        FloorKind::AdvanceToCommit => (Some(Location::<F>::new(commit_loc)), None),
                         FloorKind::BadRegression => {
                             // Only meaningful when current floor > 0; otherwise fall back to Current.
                             if current_floor.as_u64() == 0 {
-                                (current_floor, None)
+                                (None, None)
                             } else {
                                 let bad = Location::<F>::new(current_floor.as_u64() - 1);
-                                (bad, Some(BadFloorExpect::Regression))
+                                (Some(bad), Some(BadFloorExpect::Regression))
                             }
                         }
                         FloorKind::BadBeyondCommit => {
                             let bad = Location::<F>::new(commit_loc + 1);
-                            (bad, Some(BadFloorExpect::BeyondSize))
+                            (Some(bad), Some(BadFloorExpect::BeyondCommit))
                         }
                     };
 
@@ -338,7 +338,10 @@ fn fuzz_family<F: Family, S: Strategy>(
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, metadata_bytes.clone(), floor).await;
+                    if let Some(floor) = floor {
+                        batch = batch.with_inactivity_floor(floor);
+                    }
+                    let merkleized = batch.with_metadata(metadata_bytes.clone()).merkleize(&db).await;
 
                     match expect_err {
                         None => {
@@ -352,7 +355,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                             let db = db.commit().await.expect("Commit should not fail");
                             assert_eq!(db.bounds().end, expected_size);
                             assert_eq!(db.root(), expected_root);
-                            assert_eq!(db.inactivity_floor_loc(), floor);
+                            assert_eq!(db.inactivity_floor_loc(), floor.unwrap_or(current_floor));
                             assert_eq!(db.get_metadata().await.unwrap(), metadata_bytes.clone());
                             expected_metadata = metadata_bytes.clone();
                             commit_history.push((
@@ -388,7 +391,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                         ),
                         FloorKind::BadBeyondCommit => (
                             Location::<F>::new(child_commit_loc + 1),
-                            BadFloorExpect::BeyondSize,
+                            BadFloorExpect::BeyondCommit,
                         ),
                         _ => continue, // only bad kinds are meaningful here
                     };
@@ -397,13 +400,13 @@ fn fuzz_family<F: Family, S: Strategy>(
                     let parent = db
                         .new_batch()
                         .append(vec![0u8; 1])
-                        .merkleize(&db, None, Location::<F>::new(parent_commit_loc))
+                        .with_inactivity_floor(Location::<F>::new(parent_commit_loc)).merkleize(&db)
                         .await
                         .expect("valid parent must merkleize");
                     let Err(err) = parent
                         .new_batch::<Sha256>()
                         .append(vec![1u8; 1])
-                        .merkleize(&db, None, child_floor)
+                        .with_inactivity_floor(child_floor).merkleize(&db)
                         .await
                     else {
                         panic!("bad child floor must be rejected");
@@ -470,7 +473,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                             let expected = batch.get(loc, &db).await.unwrap();
                             assert_eq!(batch.get_many(&[loc], &db).await.unwrap(), vec![expected]);
                         }
-                        let merkleized = batch.merkleize(&db, None, floor).await.unwrap();
+                        let merkleized = batch.merkleize(&db).await.unwrap();
                         if loc < floor {
                             assert!(matches!(
                                 merkleized.get(loc, &db).await,
@@ -510,7 +513,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     // at a stale floor would.
                     let end = db.bounds().end;
                     let floor = Location::<F>::new(end.as_u64() + pending_count);
-                    let merkleized = batch.merkleize(&db, None, floor).await.unwrap();
+                    let merkleized = batch.with_inactivity_floor(floor).merkleize(&db).await.unwrap();
                     let expected_root = merkleized.root();
                     let db = db.apply_batch(merkleized).await.expect("Commit should not fail");
                     let db = db.commit().await.expect("Commit should not fail");
@@ -534,7 +537,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await.unwrap();
+                    let merkleized = batch.merkleize(&db).await.unwrap();
                     let db = db.apply_batch(merkleized).await.expect("Commit should not fail");
                     let expected_root = db.root();
                     let expected_size = db.bounds().end;
@@ -619,10 +622,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     for value in &pending_appends {
                         batch = batch.append(value.clone());
                     }
-                    let merkleized = batch
-                        .merkleize(&db, None, db.inactivity_floor_loc())
-                        .await
-                        .unwrap();
+                    let merkleized = batch.merkleize(&db).await.unwrap();
                     assert!(db.validate_batch(&merkleized).is_ok());
                     assert_eq!(
                         (db.bounds(), db.root(), db.inactivity_floor_loc()),
@@ -645,7 +645,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await.unwrap();
+                    let merkleized = batch.merkleize(&db).await.unwrap();
                     let expected_root = merkleized.root();
                     let db = db.apply_batch(merkleized).await.expect("Commit should not fail");
                     let db = db.commit().await.expect("Commit should not fail");
@@ -684,7 +684,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await.unwrap();
+                    let merkleized = batch.merkleize(&db).await.unwrap();
                     let db = db.apply_batch(merkleized).await.expect("Commit should not fail");
                     let db = db.commit().await.expect("Commit should not fail");
                     expected_metadata = None;
@@ -700,16 +700,14 @@ fn fuzz_family<F: Family, S: Strategy>(
                     let root = db.root();
                     if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
                         assert!(
-                            verify_proof::<Sha256, _, _>(
-                                &proof,
+                            proof.verify::<Sha256, _>(
                                 start_loc,
                                 &ops,
                                 &root),
                             "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
                         );
                         let pinned = db.pinned_nodes_at(start_loc).await.unwrap();
-                        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
-                            &proof,
+                        assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
                             start_loc,
                             &ops,
                             &pinned,
@@ -736,7 +734,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await.unwrap();
+                    let merkleized = batch.merkleize(&db).await.unwrap();
                     let db = db.apply_batch(merkleized).await.expect("Commit should not fail");
                     let db = db.commit().await.expect("Commit should not fail");
                     expected_metadata = None;
@@ -761,7 +759,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                         .await
                         .expect("retained commit should produce a historical proof");
                     assert!(
-                        verify_proof::<Sha256, _, _>(&proof, start_loc, &ops, &expected.1),
+                        proof.verify::<Sha256, _>(start_loc, &ops, &expected.1),
                         "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
                     );
                     db
@@ -835,7 +833,7 @@ fn fuzz_family<F: Family, S: Strategy>(
         for v in pending_appends.drain(..) {
             batch = batch.append(v);
         }
-        let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db
             .apply_batch(merkleized)
             .await

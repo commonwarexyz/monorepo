@@ -10,6 +10,7 @@ use commonware_storage::{
     merkle::{Family as MerkleFamily, Location, Proof, mmb, mmr},
     mmr::full::Config as MerkleConfig,
     qmdb::{
+        ProofExt as _,
         any::{
             FixedConfig as Config,
             db::Db as AnyDb,
@@ -17,10 +18,6 @@ use commonware_storage::{
             traits::DbAny as _,
             value::FixedEncoding,
         },
-        create_multi_proof, create_proof_store,
-        floor::Proportional,
-        verify_multi_proof, verify_proof, verify_proof_and_extract_digests,
-        verify_proof_and_pinned_nodes,
     },
     translator::EightCap,
 };
@@ -138,7 +135,7 @@ async fn commit_pending<F: MerkleFamily>(
         batch = batch.write(k, v);
     }
     let mut policy = Recorder::new(plan, |seed| Value::new([seed; 64]));
-    let merkleized = batch.merkleize(&db, None, &mut policy).await.unwrap();
+    let merkleized = batch.merkleize_with(&db, &mut policy).await.unwrap();
     let expected_end = merkleized.bounds().tip.size;
     let applied_start = db.bounds().end;
     let db = db
@@ -221,8 +218,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 init_concurrency: (),
             };
 
-            let mut db: GenericDb<F> =
-                commonware_storage::qmdb::any::init(context.child("storage"), cfg, None)
+            let mut db = GenericDb::<F>::init(context.child("storage"), cfg, None)
                     .await
                     .expect("init qmdb");
 
@@ -306,8 +302,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                 .expect("proof should not fail");
 
                             assert!(
-                                verify_proof::<Sha256, _, _>(
-                                    &proof,
+                                proof.verify::<Sha256, _>(
                                     adjusted_start,
                                     &log,
                                     &current_root),
@@ -319,8 +314,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                 .await
                                 .expect("pinned nodes should be available at the proof start");
                             assert!(
-                                verify_proof_and_pinned_nodes::<Sha256, _, _>(
-                                    &proof,
+                                proof.verify_with_pinned_nodes::<Sha256, _>(
                                     adjusted_start,
                                     &log,
                                     &pinned_nodes,
@@ -329,16 +323,14 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                 "Proof and database-provided pinned nodes should verify",
                             );
 
-                            let extracted = verify_proof_and_extract_digests::<Sha256, _, _>(
-                                &proof,
+                            let extracted = proof.verify_and_extract_digests::<Sha256, _>(
                                 adjusted_start,
                                 &log,
                                 &current_root,
                             )
                             .expect("Verified proof should yield authenticated digests");
 
-                            let proof_store = create_proof_store::<Sha256, _, _>(
-                                &proof,
+                            let proof_store = proof.to_proof_store::<Sha256, _>(
                                 adjusted_start,
                                 &log,
                                 &current_root,
@@ -353,7 +345,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                 .collect::<Vec<_>>();
                             assert!(!locations.is_empty(), "Generated proof should contain operations");
 
-                            match create_multi_proof(&proof_store, &locations, &extracted) {
+                            match proof_store.multi_proof(&locations, &extracted) {
                                 Ok(multi_proof) => {
                                     let selected_ops = locations
                                         .iter()
@@ -361,8 +353,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                         .zip(log.iter().cloned())
                                         .collect::<Vec<_>>();
                                     assert!(
-                                        verify_multi_proof::<Sha256, _, _>(
-                                            &multi_proof,
+                                        multi_proof.verify_multi::<Sha256, _>(
                                             &selected_ops,
                                             &current_root,
                                         ),
@@ -399,12 +390,8 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             if let Ok((expected_proof, log)) =
                                 db.proof(adjusted_start, *max_ops).await
                             {
-                                let verified = verify_proof::<Sha256, _, _>(
-                                    &proof,
-                                    adjusted_start,
-                                    &log,
-                                    &current_root,
-                                );
+                                let verified =
+                                    proof.verify::<Sha256, _>(adjusted_start, &log, &current_root);
                                 assert!(
                                     !verified
                                         || (proof.leaves == expected_proof.leaves
@@ -583,7 +570,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 assert_neighbors(&db, &committed_state, key).await;
             }
 
-            let batch = db.new_batch().merkleize(&db, None, &mut Proportional).await.unwrap();
+            let batch = db.new_batch().merkleize(&db).await.unwrap();
             let db = db
                 .apply_batch(batch)
                 .await

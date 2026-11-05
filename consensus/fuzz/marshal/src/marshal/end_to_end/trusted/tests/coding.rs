@@ -224,6 +224,19 @@ struct HeldShards {
 
 type HoldShardsSeen = Arc<Mutex<Option<HeldShards>>>;
 
+/// Whether every honest node other than `r` has processed a height above `r`'s.
+async fn others_passed(cx: &PrefixContext<Mock>, honest: &[usize], r: usize) -> bool {
+    let Some(Some(held)) = cx.processed_height(r).await else {
+        return false;
+    };
+    for other in honest.iter().filter(|other| **other != r) {
+        if !matches!(cx.processed_height(*other).await, Some(Some(height)) if height > held) {
+            return false;
+        }
+    }
+    true
+}
+
 /// A prefix that holds every marshal message to R, the last participant, while B echoes
 /// the others' votes, so the others finalize blocks R cannot reconstruct; then it passes
 /// what R holds.
@@ -247,6 +260,17 @@ impl Prefix<Mock> for HoldShards {
             while cx.now() < until {
                 echo.step_as::<Mock, Commit>(&cx, &honest);
                 cx.sleep(STEP).await;
+            }
+            // The lossy poison base may finalize its first blocks near the end of that
+            // window, so keep holding until every other honest node has processed past
+            // R, leaving the rest of the budget for R to catch up.
+            let until = cx.now() + Duration::from_secs(8);
+            while cx.now() < until && !others_passed(&cx, &honest, r).await {
+                let check = cx.now() + Duration::from_millis(500);
+                while cx.now() < check {
+                    echo.step_as::<Mock, Commit>(&cx, &honest);
+                    cx.sleep(STEP).await;
+                }
             }
             let held = cx.held_marshal(r);
             let shards = held

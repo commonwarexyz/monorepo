@@ -45,7 +45,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, Handle, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{FuzzRng, NZU16, NZU32, NZUsize, channel::mpsc, probability};
+use commonware_utils::{FuzzRng, NZDuration, NZU16, NZU32, NZUsize, channel::mpsc, probability};
 #[cfg(any(feature = "mocks", test))]
 pub use simplex::{
     SimplexCertificateMock, SimplexCertificateMockByzantineFirstLeader,
@@ -1129,7 +1129,8 @@ where
         leader_timeout,
         certification_timeout,
         timeout_retry: Duration::from_secs(10),
-        fetch_timeout: Duration::from_secs(1),
+        fetch_timeout: NZDuration!(Duration::from_secs(1)),
+        fetch_retry_delay: Duration::from_millis(100),
         view_retention: Delta::new(10),
         skip: SkipPolicy::Enabled {
             timeout: Duration::from_secs(11),

@@ -11,11 +11,11 @@ use commonware_math::{
     algebra::{Additive, CryptoGroup, Field, FieldNTT, HashToGroup, Ring, Space},
     poly::Poly,
 };
-use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::Participant;
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
+use commonware_utils::{NZUsize, Participant};
 use libfuzzer_sys::fuzz_target;
 use rand::{SeedableRng, rngs::StdRng};
-use std::{collections::HashSet, num::NonZeroUsize};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 enum FuzzOperation {
@@ -695,7 +695,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::G1MsmParallel { points, scalars } => {
             let len = points.len().min(scalars.len());
             if len > 0 {
-                let strategy = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
+                let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(4))).unwrap();
                 let _ = G1::msm(&points[..len], &scalars[..len], &strategy);
             }
         }
@@ -703,7 +703,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::G2MsmParallel { points, scalars } => {
             let len = points.len().min(scalars.len());
             if len > 0 {
-                let strategy = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
+                let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(4))).unwrap();
                 let _ = G2::msm(&points[..len], &scalars[..len], &strategy);
             }
         }

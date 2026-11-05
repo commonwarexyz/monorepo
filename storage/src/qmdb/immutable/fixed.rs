@@ -49,7 +49,7 @@ mod tests {
         reschedule,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability};
-    use core::{future::Future, pin::Pin};
+    use core::{future::Future, pin::Pin, time::Duration};
     use futures::FutureExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -85,6 +85,55 @@ mod tests {
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
         let cfg = config("partition");
         Db::init(context, cfg, None).await.unwrap()
+    }
+
+    /// New batches inherit the parent's or database's inactivity floor but never its metadata, in
+    /// both the standard and compact variants.
+    #[test_traced]
+    fn test_batch_inherits_floor_but_not_metadata() {
+        deterministic::Runner::default().start(|context| async move {
+            // `$($await)*` is `.await.unwrap()` for the standard variant, whose `get_metadata` is
+            // async, and empty for the compact variant.
+            macro_rules! check {
+                ($db:expr, $($await:tt)*) => {{
+                    let db = $db;
+                    let parent = db
+                        .new_batch()
+                        .set(Digest::from([1; 32]), Digest::from([9; 32]))
+                        .with_metadata(Digest::from([9; 32]))
+                        .with_inactivity_floor(Location::new(1));
+                    let parent = parent.merkleize(&db).await.unwrap();
+                    let child = parent.new_batch::<Sha256>().merkleize(&db).await.unwrap();
+                    let explicit = parent
+                        .new_batch::<Sha256>()
+                        .with_metadata(Digest::from([9; 32]))
+                        .with_metadata(None)
+                        .with_inactivity_floor(Location::new(1));
+                    let explicit = explicit.merkleize(&db).await.unwrap();
+                    assert_eq!(child.root(), explicit.root());
+                    assert_eq!(child.bounds().inactivity_floor, Location::new(1));
+                    let regressed = parent
+                        .new_batch::<Sha256>()
+                        .with_inactivity_floor(Location::new(0))
+                        .merkleize(&db)
+                        .await;
+                    assert!(matches!(regressed, Err(Error::FloorRegressed(..))));
+                    let db = db.apply_batch(parent).await.unwrap();
+                    assert_eq!(db.get_metadata()$($await)*, Some(Digest::from([9; 32])));
+                    // A batch from the database matches `explicit` only if it skipped the
+                    // database's metadata and inherited its floor.
+                    let fresh = db.new_batch().merkleize(&db).await.unwrap();
+                    assert_eq!(fresh.root(), explicit.root());
+                    let db = db.apply_batch(explicit).await.unwrap();
+                    assert_eq!(db.get_metadata()$($await)*, None);
+                    let next = db.new_batch().merkleize(&db).await.unwrap();
+                    assert_eq!(next.bounds().inactivity_floor, Location::new(1));
+                    db.destroy().await.unwrap();
+                }};
+            }
+            check!(open_db::<mmr::Family>(context.child("standard")).await, .await.unwrap());
+            check!(open_compact::<mmr::Family>(context.child("compact")).await,);
+        });
     }
 
     async fn open_compact<F: Family>(
@@ -154,7 +203,8 @@ mod tests {
         let batch = db
             .new_batch()
             .set(key, value)
-            .merkleize(&db, None, floor)
+            .with_inactivity_floor(floor)
+            .merkleize(&db)
             .await
             .unwrap();
         db.apply_batch(batch).await.unwrap()
@@ -215,6 +265,61 @@ mod tests {
                 .unwrap();
             assert_eq!(db.root(), root);
             assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_apply_indexes_while_journal_waits() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(ctx.child("delayed"), "apply-overlap", &pending);
+            let db = drive_pending_syncs(&pending, open).await.unwrap();
+            let db = apply_set(db, Sha256::fill(1u8), Sha256::fill(101u8), Location::new(0)).await;
+            let (db, handle) = db.start_sync().await.unwrap();
+
+            // Exceed the write buffer so the append must await the outstanding sync.
+            let mut batch = db.new_batch();
+            for i in 2u8..34 {
+                batch = batch.set(Sha256::fill(i), Sha256::fill(i + 100));
+            }
+            let batch = batch.merkleize(&db).await.unwrap();
+            let root = batch.root();
+            let completions_before = pending.completions();
+            let mut handle = std::pin::pin!(handle);
+            assert!(handle.as_mut().now_or_never().is_none());
+            let mut apply = std::pin::pin!(db.apply_batch(batch));
+            assert!(apply.as_mut().now_or_never().is_none());
+
+            // Indexing finishes while journal I/O is parked; publication waits for both.
+            let metrics = ctx.encode();
+            assert!(
+                metrics
+                    .lines()
+                    .any(|line| line == "delayed_snapshot_items 33"),
+                "snapshot inserts must progress while the journal is pending"
+            );
+            assert!(metrics.lines().any(|line| line == "delayed_size 3"));
+            assert_eq!(pending.completions(), completions_before);
+
+            pending.unblock();
+            let db = apply.await.unwrap();
+            handle.await.unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.size(), Location::new(36));
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            let db = open_delayed_db(ctx.child("reopen"), "apply-overlap", &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            for i in 1u8..34 {
+                assert_eq!(
+                    db.get(&Sha256::fill(i)).await.unwrap(),
+                    Some(Sha256::fill(i + 100))
+                );
+            }
             db.destroy().await.unwrap();
         });
     }
@@ -323,13 +428,7 @@ mod tests {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
             let key = Sha256::fill(1u8);
             let value = Sha256::fill(2u8);
-            let floor = db.inactivity_floor_loc();
-            let batch = db
-                .new_batch()
-                .set(key, value)
-                .merkleize(&db, None, floor)
-                .await
-                .unwrap();
+            let batch = db.new_batch().set(key, value).merkleize(&db).await.unwrap();
             let db = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             assert_eq!(db.get_many(&[&key]).await.unwrap(), vec![Some(value)]);
@@ -516,7 +615,7 @@ mod tests {
         test_fixed_inactivity_floor_tracking => run_inactivity_floor_tracking, open;
         test_fixed_floor_monotonicity => run_floor_monotonicity, open;
         test_fixed_floor_monotonicity_violation => run_floor_monotonicity_violation, open;
-        test_fixed_floor_beyond_size => run_floor_beyond_size, open;
+        test_fixed_floor_beyond_commit => run_floor_beyond_commit, open;
         test_fixed_chained_floor_regression => run_chained_floor_regression, open;
         test_fixed_chained_floor_beyond_commit => run_chained_floor_beyond_commit, open;
         test_fixed_bounded_initialization_restores_floor => run_bounded_initialization_restores_floor, open_with_max;
@@ -555,19 +654,20 @@ mod tests {
         let v2 = Sha256::fill(22u8);
         let metadata = Sha256::fill(99u8);
 
-        let floor = db.inactivity_floor_loc();
         let retained = db
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
-            .merkleize(&db, Some(metadata), floor)
+            .with_metadata(Some(metadata))
+            .merkleize(&db)
             .await
             .unwrap();
         let compact_batch = compact
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
-            .merkleize(&compact, Some(metadata), floor)
+            .with_metadata(Some(metadata))
+            .merkleize(&compact)
             .await
             .unwrap();
 
@@ -655,10 +755,7 @@ mod tests {
                 for i in 1..=100 {
                     batch = batch.set(key(i), value(1, i));
                 }
-                let batch = batch
-                    .merkleize(&db, None, db.inactivity_floor_loc())
-                    .await
-                    .unwrap();
+                let batch = batch.merkleize(&db).await.unwrap();
                 let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 102);
                 let root_a = db.root();
@@ -668,10 +765,7 @@ mod tests {
                 for i in 101..=200 {
                     batch = batch.set(key(i), value(2, i));
                 }
-                let batch = batch
-                    .merkleize(&db, None, db.inactivity_floor_loc())
-                    .await
-                    .unwrap();
+                let batch = batch.merkleize(&db).await.unwrap();
                 let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 203);
                 let root_b = db.root();
@@ -694,10 +788,7 @@ mod tests {
                 for i in 201..=250 {
                     batch = batch.set(key(i), value(3, i));
                 }
-                let batch = batch
-                    .merkleize(&db, None, db.inactivity_floor_loc())
-                    .await
-                    .unwrap();
+                let batch = batch.merkleize(&db).await.unwrap();
                 let root_n = batch.root();
                 let applied_start = db.bounds().end;
                 let db = db.apply_batch(batch).await.unwrap();
@@ -745,7 +836,7 @@ mod tests {
                 let batch = db
                     .new_batch()
                     .set(key(255), value(5, 255))
-                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();

@@ -42,7 +42,7 @@ use commonware_resolver::{
     Consumer as _, Delivery, Fetch, Outcome, Resolver, TargetedResolver, p2p,
 };
 use commonware_runtime::{Metrics, Supervisor as _, deterministic};
-use commonware_utils::{NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec};
+use commonware_utils::{NZDuration, NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec};
 use std::{sync::Arc, time::Duration};
 
 /// A recorded backfill request: its peer-visible key and local annotation.
@@ -354,8 +354,8 @@ pub async fn init_injectable<P: Simplex>(
             producer: handler.clone(),
             mailbox_size: NZUsize!(100),
             me: Some(validator),
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         },
@@ -382,6 +382,7 @@ mod tests {
     use commonware_cryptography::{
         Digestible as _, Hasher as _, Sha256, certificate::ConstantProvider,
     };
+    use commonware_resolver::Resolution;
     use commonware_runtime::{Runner, deterministic};
 
     type P = SimplexCertificateMock;
@@ -500,7 +501,7 @@ mod tests {
             );
             assert_eq!(
                 resolver.wait_for_delivery_response().await,
-                Outcome::Complete,
+                Outcome::Resolved(Resolution::Complete),
                 "notarized delivery must validate"
             );
 
