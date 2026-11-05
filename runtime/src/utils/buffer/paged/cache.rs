@@ -15,8 +15,8 @@
 //! every waiting reader drives, so no reader depends on a slow or dropped one, and each
 //! underlying read is polled about once per wake however many readers are waiting.
 //!
-//! A warm ([CacheRef::warm]) joins and starts batches like a batched miss. It caches the pages it
-//! reads, and marks the pages it joins, as expected entries.
+//! A warm ([CacheRef::warm]) joins and starts batches like a batched miss. It caches the pages
+//! its own batch reads as expected entries, and marks each page it joins expected as it arrives.
 //!
 //! A reader joins everything it needs before driving any of it, examining its misses over a few
 //! holds of the cache's write lock and registering its own batch only at the end of the last
