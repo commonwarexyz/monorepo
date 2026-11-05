@@ -244,13 +244,23 @@ jobs:
             cpu-features: "avx2 bmi2 adx avx512f avx512bw avx512vl"
             partition: 2/2
             skip-cache-save: true
-          # Zen 2 has AVX2 and SHA-NI without AVX-512, VAES, or VPCLMULQDQ.
+          # Zen 2 has AVX2 and SHA-NI without AVX-512, VAES, or VPCLMULQDQ. QEMU emulates it on
+          # every runner without that exact feature set, so the full row splits its tests in two.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: EPYC-Rome
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx sha"
+            partition: 1/2
+            skip-cache-save: true
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            qemu: EPYC-Rome
+            simd-backend: x86_v3
+            cpu-features: "avx2 bmi2 adx sha"
+            partition: 2/2
             skip-cache-save: true
           - os: ubuntu-latest
             package: commonware-cryptography
@@ -259,13 +269,23 @@ jobs:
             static-features: "avx2 sha !avx512f"
             qemu: EPYC-Rome
             cpu-features: "avx2 bmi2 adx sha"
-          # Broadwell has AVX2, BMI2, and ADX without SHA-NI or AVX-512.
+          # Broadwell has AVX2, BMI2, and ADX without SHA-NI or AVX-512. Its full row splits its
+          # tests in two as well.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: Broadwell
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx"
+            partition: 1/2
+            skip-cache-save: true
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            qemu: Broadwell
+            simd-backend: x86_v3
+            cpu-features: "avx2 bmi2 adx"
+            partition: 2/2
             skip-cache-save: true
           # Neoverse N2 has SHA-3 and SVE2.
           - os: ubuntu-24.04-arm

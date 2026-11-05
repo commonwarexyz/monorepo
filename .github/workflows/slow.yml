@@ -262,8 +262,8 @@ jobs:
           fi
           echo "All tests passed successfully!"
 
-  # Each architecture builds the conformance tests once, checks that every fixture still has a
-  # test, and archives the tests for the partitions below.
+  # Each architecture builds the conformance tests once, x86_64 on a larger runner, checks that
+  # every fixture still has a test, and archives the tests for the partitions below.
   Conformance-Build:
     name: "Breaking Changes (${{ matrix.name }}) (build)"
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
@@ -273,7 +273,7 @@ jobs:
       matrix:
         include:
           - name: x86_64
-            os: ubuntu-latest
+            os: ubuntu-latest-16
           - name: arm64
             os: ubuntu-24.04-arm
     steps:
@@ -309,7 +309,7 @@ jobs:
   conformance:
     # Run conformance tests on multiple architectures to catch platform-specific
     # encoding differences. The tests read and update each crate's conformance.toml at the build
-    # job's checkout path, which is the same for every job on a runner image.
+    # job's checkout path, which is the same on every GitHub-hosted Linux runner.
     name: "Breaking Changes (${{ matrix.name }}) (partition: ${{ matrix.partition }}/8)"
     needs: Conformance-Build
     runs-on: ${{ matrix.os }}
