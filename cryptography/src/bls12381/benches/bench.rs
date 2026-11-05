@@ -25,13 +25,13 @@ mod tle_decrypt;
 mod tle_encrypt;
 mod utils;
 
-/// Whether `just test-benches` requested the smallest inputs.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
+/// Whether to run benchmarks with their smallest inputs.
 fn smoke() -> bool {
     std::env::var_os("COMMONWARE_BENCH_SMOKE").is_some()
 }
-
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(
     batch_to_affine::benches,
