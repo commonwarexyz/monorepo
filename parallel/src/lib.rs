@@ -1890,7 +1890,14 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         None
                     };
                     let worker_recorder = recorder.clone();
-                    let handle = rayon::MeterHandle::capture();
+
+                    // A worker awaits the job with its context suspended, so the handle charges the
+                    // job's work to the run. A thread outside the pool blocks in its context and is
+                    // charged for the wait, which spans the job.
+                    let handle = own
+                        .is_some()
+                        .then(rayon::MeterHandle::capture)
+                        .unwrap_or_default();
                     let job = move || {
                         let job_start = worker_recorder.is_some().then(Instant::now);
 
@@ -3901,6 +3908,44 @@ mod test {
         assert!(
             busy >= Duration::from_millis(4) && busy < items + Duration::from_millis(15),
             "busy time {busy:?} must exclude the queue, items {items:?}, wall {wall:?}"
+        );
+    }
+
+    /// Runs a body that spawns a 20ms job and blocks on its result, and returns the run's call
+    /// site. The first run at a site is a measured parallel run.
+    #[track_caller]
+    fn spawn_and_block(strategy: &Rayon) -> &'static Location<'static> {
+        let body = || block_on_nested(strategy.spawn(1, |_| spin(Duration::from_millis(20))));
+        strategy.run(1, body, body);
+        Location::caller()
+    }
+
+    /// A spawn awaited by a run outside the pool is charged once, through the caller's blocked
+    /// wait, so the busy time stays within the wall time.
+    #[test]
+    fn spawns_awaited_outside_the_pool_are_charged_once() {
+        let strategy = parallel_strategy();
+        let caller = spawn_and_block(&strategy);
+        let (wall, busy) = recorded(&strategy, caller, 1);
+        assert!(
+            busy >= Duration::from_millis(20) && busy <= wall,
+            "busy time {busy:?} must cover the job once and stay within the wall {wall:?}"
+        );
+    }
+
+    /// A spawn awaited by a run on a worker is charged once, through the handle, since the
+    /// worker's wait is suspended.
+    #[test]
+    fn spawns_awaited_on_a_worker_are_charged_once() {
+        let strategy = parallel_strategy();
+        let caller = strategy
+            .groups
+            .pool()
+            .install(|| spawn_and_block(&strategy));
+        let (wall, busy) = recorded(&strategy, caller, 1);
+        assert!(
+            busy >= Duration::from_millis(20) && busy < wall + Duration::from_millis(10),
+            "busy time {busy:?} must cover the job once and stay under the wall {wall:?} plus 10ms"
         );
     }
 

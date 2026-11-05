@@ -280,26 +280,25 @@ fn handles_captured_without_a_context_charge_nothing() {
     );
 }
 
-/// A thread outside the pool that blocks in its context stays charged while it waits, so the
-/// job's entered work and the wait are both charged.
+/// A thread outside the pool that blocks in its context is charged for the wait, which spans the
+/// spawned job, so the job needs no handle.
 #[test]
-fn outside_blockers_stay_charged_while_they_wait() {
-    // Spawn a 20ms job through a handle, and block on its result on the test thread.
+fn outside_blockers_are_charged_for_the_wait() {
+    // Spawn a 20ms job without a handle, and block on its result on the test thread.
     let pool = ThreadPoolBuilder::new(NZUsize!(1)).build().unwrap();
     let (busy, wall) = timed(|| {
-        let handle = MeterHandle::capture();
         let (sender, receiver) = std::sync::mpsc::channel();
         pool.spawn(move || {
-            handle.enter(|| spin(20 * MS));
+            spin(20 * MS);
             sender.send(()).unwrap();
         });
         receiver.recv().unwrap();
     });
 
-    // The job's 20ms and the blocked wait are both charged.
+    // The blocked wait covers the job once.
     assert!(
-        busy >= 40 * MS && busy <= wall * 2,
-        "busy time {busy:?} must include the job and the blocked wait, wall {wall:?}"
+        busy >= 20 * MS && busy <= wall,
+        "busy time {busy:?} must cover the blocked wait and stay within the wall {wall:?}"
     );
 }
 

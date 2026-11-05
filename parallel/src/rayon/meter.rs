@@ -8,8 +8,8 @@
 //! Each thread has a context, the meter it charges or none, and charges the previous meter whenever
 //! its context changes, so a thread with no context never reads the clock. A job its creator waits
 //! for (a join, install, or broadcast) runs in the creator's context. A detached job runs in none,
-//! so a spawner that wants its work charged enters a [`MeterHandle`] around that work. A thread
-//! outside the pool that blocks in its context stays charged while it waits.
+//! so a spawner whose wait is suspended enters a [`MeterHandle`] around the job's work. A thread
+//! outside the pool blocks in its context and is charged for the wait, which spans the job.
 
 use std::{
     cell::Cell,
@@ -44,8 +44,8 @@ pub(crate) fn measure<R>(op: impl FnOnce() -> R) -> (R, Duration) {
 }
 
 /// Holds the meter of the run that was current at capture, or none, so work that may outlive the
-/// run can charge it.
-#[derive(Clone, Debug)]
+/// run can charge it. The default holds none.
+#[derive(Clone, Debug, Default)]
 pub(crate) struct MeterHandle(Option<Arc<Meter>>);
 
 impl MeterHandle {
