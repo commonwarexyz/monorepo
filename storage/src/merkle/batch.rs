@@ -415,10 +415,13 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     ///
     /// # Panics
     ///
-    /// Panics if a node it reads is in neither the batch chain nor `base`, which happens when
-    /// `base` has been pruned past a leaf this batch updates. A batch merkleized after an unapplied
-    /// ancestor was dropped does not panic, but [`Mem::apply_batch`] rejects it. The
-    /// [module docs](crate::merkle::batch) describe both cases under "Batch invalidation".
+    /// Panics if a node it reads is in neither the batch chain nor `base`. That happens when `base`
+    /// has been pruned past a leaf this batch updates, or when an unapplied ancestor was dropped
+    /// before the parent was merkleized and appended a node this batch reads, such as a peak of
+    /// its tip. A batch merkleized after an unapplied ancestor was dropped does not retain that
+    /// ancestor's records, so [`Mem::apply_batch`] rejects it unless the structure already holds
+    /// them. The [module docs](crate::merkle::batch) describe these cases under "Batch
+    /// invalidation".
     pub fn merkleize(
         mut self,
         base: &Mem<F, D>,

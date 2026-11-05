@@ -617,7 +617,7 @@ where
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
     /// Also tries to advance the recovery watermark to bound startup recovery. Use
-    /// [Self::sync] to guarantee no recovery is needed.
+    /// [Self::sync] to guarantee the backing journal needs none.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         let handle;
         (self.journal, handle) = self.journal.start_sync().await?;
@@ -799,7 +799,8 @@ where
         Ok(())
     }
 
-    /// Durably persist the journal, ensuring no recovery is required on startup.
+    /// Durably persist the journal, ensuring the backing journal needs no recovery on startup.
+    /// Startup still replays the retained operations to rebuild the Merkle digests.
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         self.journal = self.journal.sync().await?;
         self.merkle.flush();
