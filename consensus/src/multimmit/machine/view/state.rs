@@ -5,6 +5,7 @@ use super::slot::ViewTransition;
 use super::{
     certificate::{CertificateScan, ViewCertificateId, ViewCertificateJob},
     claims::{Claim, ClaimIndex, ClaimKind},
+    forward::ForwardCandidates,
     history::{HistoryRecord, HistoryReports, LeaderHistory},
     proposal::{PassRestarts, RegularSignPass, TimeoutCutoff, ViewMetrics},
     slot::{SlotError, ViewSlotSnapshot},
@@ -121,10 +122,16 @@ pub(crate) struct ViewState<S: Scheme, D: Digest> {
     pub(super) forwarded_nullifications: BTreeSet<View>,
     /// The V-QC forwarded for each view.
     pub(super) forwarded_vqcs: BTreeMap<View, CertificateId<D>>,
-    /// Views holding a nullification not yet forwarded.
+    /// Live views holding a nullification not yet forwarded that no earlier unresolved exit
+    /// holds back. Whether a local assembly holds it back is decided when forwarding is tried.
     pub(super) forwardable_nullifications: BTreeSet<View>,
-    /// Views holding a V-QC not yet forwarded.
+    /// Live views holding a V-QC not yet forwarded that no earlier unresolved exit holds back.
     pub(super) forwardable_vqcs: BTreeSet<View>,
+    /// Forwarding candidates of views whose certificate scan ran since their last change.
+    ///
+    /// The scan costs a pass over the view's participants, so it runs when forwarding is tried,
+    /// at most once per change of the view, rather than on every input.
+    pub(super) forward_scans: BTreeMap<View, ForwardCandidates<S, D>>,
     /// Views with enough settled messages or nullify shares for certificate work.
     pub(super) ready_certificate_views: BTreeSet<View>,
     /// The certificate scan in progress, if any.
@@ -270,6 +277,7 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
             forwarded_vqcs: BTreeMap::new(),
             forwardable_nullifications: BTreeSet::new(),
             forwardable_vqcs: BTreeSet::new(),
+            forward_scans: BTreeMap::new(),
             ready_certificate_views: BTreeSet::new(),
             certificate_scan: None,
             regular_sign_pass: None,
@@ -389,6 +397,7 @@ impl<S: Scheme, D: Digest> ViewState<S, D> {
         ] {
             views.extract_if(..=floor, |_| true).for_each(drop);
         }
+        drain_prefix(&mut self.forward_scans, |view| !retained(view)).for_each(drop);
         if self
             .certificate_scan
             .as_ref()

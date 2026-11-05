@@ -687,7 +687,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
     }
 
     pub(super) fn next_artifact_forwarding(
-        &self,
+        &mut self,
         required: Option<&Lqc<S, H::Digest>>,
     ) -> Result<Option<Change<S, H::Digest>>, StepError> {
         let Some(artifact) = self.views.next_forward() else {

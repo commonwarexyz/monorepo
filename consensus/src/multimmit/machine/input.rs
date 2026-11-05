@@ -392,7 +392,7 @@ impl From<FinalityError> for StepError {
         match error {
             FinalityError::IdentifierExhausted => Self::IdentifierExhausted,
             FinalityError::CompletionMismatch => Self::CompletionMismatch,
-            FinalityError::LeaderCollision | FinalityError::Invariant => Self::FinalityInvariant,
+            FinalityError::Invariant => Self::FinalityInvariant,
         }
     }
 }
