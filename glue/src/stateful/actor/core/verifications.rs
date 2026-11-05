@@ -1,14 +1,14 @@
 //! Concurrent speculative requests for the processing loop.
 //!
 //! A verification, or a proposal whose parent state may be missing, becomes a [`Work`] that the
-//! [`Handler`] polls alongside the actor's other duties. A request first acquires its blocks and
-//! the missing path back to known state, then runs one execution step per missing block (see
-//! [`Verifier::next`]), and finally answers its caller or, for a proposal, queues a build.
-//! Maintenance pauses acquisition and waits only for the execution steps it cannot retain, so
-//! unrelated requests keep progressing.
+//! [`Handler`] polls alongside the actor's other duties. A request first finds where its missing
+//! path back to known state starts, then acquires each missing block from its selected branch and
+//! runs one execution step per block (see [`Verifier::next`]), and finally answers its caller or,
+//! for a proposal, queues a build. Maintenance pauses acquisition and waits only for the execution
+//! steps it cannot retain, so unrelated requests keep progressing.
 
 use super::{
-    mailbox::{ProposalRequest, Verification, WeakAncestry},
+    mailbox::{ProposalRequest, Verification, WeakBlock},
     processing::Action,
 };
 use crate::stateful::{
@@ -16,13 +16,13 @@ use crate::stateful::{
     actor::{
         BlockDigest,
         processor::{
-            Disposition, ExecutionStep, FinalizationBoundary, PrepareBatchesError, Prepared,
+            Disposition, ExecutionStep, FinalizationBoundary, Next, PrepareBatchesError, Prepared,
             Verifier,
         },
     },
 };
 use commonware_consensus::marshal::{
-    ancestry::BlockProvider,
+    blocks::Blocks,
     core::{Mailbox as MarshalMailbox, Variant},
 };
 use commonware_macros::select;
@@ -36,13 +36,18 @@ use std::{
 };
 use tracing::{Instrument as _, Span, info_span};
 
-/// A verification request that holds its caller's ancestry through a [`WeakAncestry`].
+/// A verification request that holds its caller's block and parent through [`WeakBlock`]s.
+///
+/// Restarting the request reuses its caller's bodies and selected history without taking
+/// ownership of the bodies.
 pub(super) struct VerificationRequest<E, A>
 where
     A: Application<E>,
 {
     pub(super) span: Span,
-    pub(super) ancestry: WeakAncestry<A::Block>,
+    pub(super) block: WeakBlock<A::Block>,
+    pub(super) parent: WeakBlock<A::Block>,
+    pub(super) blocks: Blocks<A::Block>,
     pub(super) verification: Verification,
 }
 
@@ -102,8 +107,9 @@ where
     A: Application<E>,
 {
     /// A finished execution step awaiting the end of pruning.
-    Ready { prepared: Prepared<A::Block> },
-    /// Acquiring the request's blocks. `future` is `None` while maintenance pauses acquisition.
+    Ready { prepared: Box<Prepared<A::Block>> },
+    /// Finding or acquiring the request's missing blocks. `future` is `None` while maintenance
+    /// pauses acquisition.
     Acquiring {
         future: Option<BoxFuture<'static, PhaseResult<A::Block>>>,
     },
@@ -215,7 +221,7 @@ where
     A: Application<E>,
     V: Variant,
 {
-    /// Source of blocks for acquisition and for ancestry reads during execution.
+    /// Source of canonical blocks for verifications at or below the branch anchor.
     marshal: MarshalMailbox<A::SigningScheme, V>,
     /// Template for the application instance each execution step runs on.
     verifier: Verifier<E, A>,
@@ -233,7 +239,6 @@ where
     E: Supervisor + Clock,
     A: Application<E>,
     V: Variant<ApplicationBlock = A::Block>,
-    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
 {
     pub(super) fn new(
         marshal: MarshalMailbox<A::SigningScheme, V>,
@@ -249,8 +254,8 @@ where
         }
     }
 
-    /// Returns the future that acquires `request`'s blocks, or `None` if its caller has cancelled
-    /// or released its ancestry.
+    /// Returns the future that finds `request`'s missing path, or `None` if its caller has
+    /// cancelled or released its bodies.
     fn acquisition(
         &self,
         request: &Request<E, A>,
@@ -259,28 +264,32 @@ where
             return None;
         }
 
-        // A verification reads the ancestry its caller still owns and recovers state for the
-        // block's parent. A proposal owns its ancestry, and its first block is the parent to build
-        // on.
-        let (ancestry, verify) = match request {
-            Request::Verify(request) => (request.ancestry.upgrade()?, true),
-            Request::Recover(request) => (request.ancestry.clone(), false),
+        // A verification recovers state for the block's parent, and a proposal for the parent it
+        // builds on. Both bodies are held by the caller and are never acquired.
+        let (block, parent, blocks) = match request {
+            Request::Verify(request) => (
+                Some(request.block.upgrade()?),
+                request.parent.upgrade()?,
+                request.blocks.clone(),
+            ),
+            Request::Recover(request) => (None, request.parent.upgrade()?, request.blocks.clone()),
         };
         Some(
             self.verifier
                 .prepare(
                     self.context.child("acquire"),
                     self.marshal.clone(),
-                    ancestry,
-                    verify,
+                    block,
+                    parent,
+                    blocks,
                 )
                 .instrument(request.process_span())
                 .boxed(),
         )
     }
 
-    /// Starts acquiring `request`'s blocks, or drops the request if its caller has cancelled or
-    /// released its ancestry.
+    /// Starts finding `request`'s missing path, or drops the request if its caller has cancelled
+    /// or released its bodies.
     pub(super) fn schedule(&mut self, request: Request<E, A>) {
         assert!(matches!(self.admission, Admission::Open));
         let Some(future) = self.acquisition(&request) else {
@@ -387,7 +396,7 @@ where
                 } => {
                     self.advance(
                         request.expect("ready request must be retained"),
-                        prepared,
+                        *prepared,
                         actions,
                     );
                     continue;
@@ -438,7 +447,9 @@ where
                     if matches!(self.admission, Admission::Pruning) {
                         self.jobs.push(Work {
                             request: Some(request),
-                            phase: Phase::Ready { prepared },
+                            phase: Phase::Ready {
+                                prepared: Box::new(prepared),
+                            },
                         });
                         return;
                     }
@@ -457,7 +468,8 @@ where
         self.advance(request, prepared, actions);
     }
 
-    /// Starts the request's next execution step, or answers the request once no step remains.
+    /// Starts the request's next acquisition or execution step, or answers the request once no
+    /// step remains.
     ///
     /// A next step that the current admission does not retain rejects the request.
     fn advance(
@@ -474,38 +486,56 @@ where
         // concurrently and a shared call can outlive the request that started it. A step joins
         // the block's processing as it is admitted, so it stays alive for that step even if every
         // other holder is dropped before the step is first polled.
-        if let Some((step, ancestry)) =
-            self.verifier
-                .next(&self.context, &self.marshal, &mut prepared)
-        {
-            if self.admission.disposition(&step) != Disposition::Retain {
-                request.reject();
-                return;
-            }
-            let span = request.process_span();
-            let processing = self
-                .verifier
-                .process(self.context.child("process"), ancestry);
-            self.jobs.push(Work {
-                request: Some(request),
-                phase: Phase::Executing {
-                    step,
-                    future: async move { processing.await.map(|()| prepared) }
-                        .instrument(span)
-                        .boxed(),
-                },
-            });
+        let Ok(next) = self.verifier.next(&self.context, &mut prepared) else {
+            request.reject();
             return;
-        }
-
-        // Every step is done. A verification accepts, and a recovered proposal queues its build
-        // with the ancestry it acquired.
-        let ancestry = prepared.finish(&self.context);
-        match request {
-            Request::Verify(request) => request.verification.respond(true),
-            Request::Recover(mut request) => {
-                request.ancestry = ancestry;
-                actions.push_back(Action::Build(request));
+        };
+        match next {
+            Next::Process {
+                step,
+                block,
+                blocks,
+            } => {
+                if self.admission.disposition(&step) != Disposition::Retain {
+                    request.reject();
+                    return;
+                }
+                let span = request.process_span();
+                let processing =
+                    self.verifier
+                        .process(self.context.child("process"), block, blocks);
+                self.jobs.push(Work {
+                    request: Some(request),
+                    phase: Phase::Executing {
+                        step,
+                        future: async move { processing.await.map(|()| prepared) }
+                            .instrument(span)
+                            .boxed(),
+                    },
+                });
+            }
+            Next::Acquire => {
+                // Acquisition reads only the selected branch, so it runs under the current
+                // admission. Maintenance pauses it, and the request then restarts its search.
+                let span = request.process_span();
+                let future = if matches!(self.admission, Admission::Open) {
+                    Some(Verifier::<E, A>::acquire(prepared).instrument(span).boxed())
+                } else {
+                    None
+                };
+                self.jobs.push(Work {
+                    request: Some(request),
+                    phase: Phase::Acquiring { future },
+                });
+            }
+            Next::Done => {
+                // Every step is done. A verification accepts, and a recovered proposal queues its
+                // build on the parent it holds.
+                prepared.finish(&self.context);
+                match request {
+                    Request::Verify(request) => request.verification.respond(true),
+                    Request::Recover(request) => actions.push_back(Action::Build(request)),
+                }
             }
         }
     }

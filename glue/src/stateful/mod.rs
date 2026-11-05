@@ -92,14 +92,14 @@
 //!
 //! # Lazy Recovery
 //!
-//! When a parent has no pending or applied state, [`Stateful`] walks its ancestry through a
-//! [`BlockProvider`](commonware_consensus::marshal::ancestry::BlockProvider) to the nearest known
-//! state, then processes the missing blocks forward with [`Application::process`] as
-//! [`Finality::Candidate`] blocks. Each recovered state is retained once its processing
-//! completes, even if the request is later cancelled, and it answers the block's own verification.
+//! When a parent has no pending or applied state, [`Stateful`] uses the selected branch
+//! commitments to find the nearest known state, acquires the missing blocks in forward order,
+//! and processes them with [`Application::process`] as [`Finality::Candidate`] blocks. Each
+//! recovered state is retained once its processing completes, even if the request is later
+//! cancelled, and it answers the block's own verification.
 //!
 //! Recovery runs alongside other requests and processes one block at a time. Finalization can
-//! proceed while a request waits for ancestry, and the request then restarts its walk from the
+//! proceed while a request waits for history, and the request then restarts its search from the
 //! finalized state. Pruning waits for every active processing call before removing history.
 //!
 //! Once its parent's state is ready, a proposal forks batches from it and builds. Finalization
@@ -126,9 +126,9 @@
 //! [`coding::Marshaled`]: commonware_consensus::marshal::coding::Marshaled
 
 use commonware_consensus::{
-    CertifiableBlock, Epochable, Handoff, Viewable, marshal::ancestry::Ancestry,
+    CertifiableBlock, Epochable, Handoff, Viewable, marshal::blocks::Blocks,
 };
-use commonware_cryptography::certificate::Scheme;
+use commonware_cryptography::{Digested, certificate::Scheme};
 use db::DatabaseSet;
 use std::future::Future;
 
@@ -215,25 +215,28 @@ pub trait Application<E>: Clone + Send + 'static {
     /// Returns the block used to initialize the consensus engine in the first epoch.
     fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
 
-    /// Builds a block on top of the provided parent ancestry before the parent certifies, or
-    /// declines with [`Handoff::Wait`].
+    /// Builds a block on top of `parent` before `parent` certifies, or declines with
+    /// [`Handoff::Wait`].
     ///
-    /// Like [`propose`](Self::propose), including its requirements on the merkleized state and
-    /// on cancellation. With [`Handoff::Vote`] or [`Handoff::Stage`], the block's state is cached
-    /// and the block reaches consensus under that decision. See
+    /// Like [`propose`](Self::propose), including its requirements on `blocks`, on the merkleized
+    /// state, and on cancellation. With [`Handoff::Vote`] or [`Handoff::Stage`], the block's state
+    /// is cached and the block reaches consensus under that decision. See
     /// [`commonware_consensus::Application::prepare`] for the contract, including the trust an
     /// early vote places in the outgoing leader. The default declines.
     fn prepare(
         &mut self,
         _context: (E, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        _parent: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Handoff<Proposed<Self, E>>> + Send {
         async { Handoff::Wait }
     }
 
-    /// Builds a block on top of the provided parent ancestry.
+    /// Builds a block on top of `parent`, using the selected history in `blocks`.
+    ///
+    /// `blocks` is the selected branch ending at `parent` (`blocks.tip() == parent.height()`).
     ///
     /// Returns the block and its merkleized state, or [`None`] if no block is built.
     ///
@@ -248,7 +251,8 @@ pub trait Application<E>: Clone + Send + 'static {
     fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Digested<Self::Block>,
+        blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
@@ -259,17 +263,25 @@ pub trait Application<E>: Clone + Send + 'static {
     /// [`Stateful`] calls this to verify a peer's block, to build on an uncertified parent, to
     /// recover missing ancestry, and to finalize a block without pending state. Concurrent
     /// requests for the same block share one call, and a pending state answers every later
-    /// verification of its block. `ancestry` starts with the block, followed by its parent and
-    /// earlier ancestors fetched on demand, and [`Ancestry::peek`] returns the block without
-    /// fetching its parent. `context` pairs the block's consensus context with a runtime context
-    /// that [`Stateful`] owns, since one call can serve several requests.
+    /// verification of its block. `context` pairs the block's consensus context with a runtime
+    /// context that [`Stateful`] owns, since one call can serve several requests.
+    ///
+    /// `blocks` is the branch ending at the block's parent (`blocks.tip().next() ==
+    /// block.height()`) and excludes `block`. Ranges acquire blocks only when polled, so the
+    /// parent is read as the range `blocks.tip()..=blocks.tip()`. For a [`Finality::Candidate`],
+    /// `blocks` is the consensus-selected branch. For a [`Finality::Finalized`] block, it is
+    /// canonical finalized history. Acquiring a range can fail with a
+    /// [`blocks::Error`](commonware_consensus::marshal::blocks::Error). `Unavailable` means the
+    /// history could not be acquired, which is not a verdict, so keep the call pending.
+    /// `InvalidParent`, `InvalidHeight`, and `InvalidDigest` mean the supplied history is
+    /// inconsistent, so a candidate is invalid under it.
     ///
     /// For a [`Finality::Candidate`], check every rule a vote depends on: signatures, the
-    /// context, the ancestry, and the parent's state. Return [`None`] only for permanent
-    /// invalidity under the supplied context, ancestry, and batches. [`Stateful`] then rejects
-    /// the block and every block built on it.
+    /// context, the selected history, and the parent's state. Return [`None`] only for permanent
+    /// invalidity under the supplied context, selected history, and batches. [`Stateful`] then
+    /// rejects the block and every block built on it.
     ///
-    /// A rule fixed by the block and its ancestry can establish permanent invalidity. A rule
+    /// A rule fixed by the block and its history can establish permanent invalidity. A rule
     /// that depends on the local clock or on local readiness cannot, so such a condition may
     /// only delay the result. Bound any delay that block data controls with a permanent rule.
     /// For example, reject a timestamp more than a fixed interval after the parent's before
@@ -280,7 +292,7 @@ pub trait Application<E>: Clone + Send + 'static {
     /// still produce its state, and [`None`] or mismatched sync targets make [`Stateful`] panic.
     ///
     /// Processing must finish without waiting for a later finalization, including through
-    /// further ancestry reads, and may await other asynchronous I/O. Pruning, and finalization of
+    /// further history reads, and may await other asynchronous I/O. Pruning, and finalization of
     /// this block or of a competing block, wait for this call to end, and [`Stateful`] handles no
     /// other message meanwhile. Data needed to produce finalized state must survive pruning and
     /// state sync.
@@ -298,7 +310,8 @@ pub trait Application<E>: Clone + Send + 'static {
     fn process(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Digested<Self::Block>,
+        blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         finality: Finality,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;

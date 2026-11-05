@@ -105,16 +105,15 @@
 //! - At the final block, proposers call [`Mailbox::epoch_info`], include the
 //!   payload from [`EpochInfoResponse::Available`], and do not propose on any
 //!   other response. Verifiers call it too and must reject a block whose
-//!   payload differs. [`Application`] rejects a mismatched payload and leaves
-//!   verification unresolved on [`EpochInfoResponse::Unavailable`].
+//!   payload differs. [`Application`] leaves verification unresolved on
+//!   [`EpochInfoResponse::Unavailable`].
 //!
-//! The final-block call receives the blocks between the last finalized block the
-//! actor has applied and the block under construction or verification. Dealer
-//! logs in those blocks count toward the derived
-//! [`EpochInfo`](crate::dkg::types::EpochInfo), but they become durable only
-//! when their blocks finalize. A participating actor answers once it has applied
-//! every block before the midpoint, so a call from a node still replaying the
-//! dealing window waits for that point.
+//! The final-block call receives the selected parent branch as a forward
+//! [`Blocks`](commonware_consensus::marshal::blocks::Blocks) source ending at the
+//! block's parent. The actor scans the blocks above its finalized tip, and dealer
+//! logs in them count toward the derived [`EpochInfo`](crate::dkg::types::EpochInfo),
+//! but they become durable only when their blocks finalize. A participating actor
+//! waits until it has applied every block before the midpoint before answering.
 //!
 //! Marshal must report finalized blocks to [`Mailbox`], which implements
 //! [`Reporter`](commonware_consensus::Reporter). The actor acknowledges a

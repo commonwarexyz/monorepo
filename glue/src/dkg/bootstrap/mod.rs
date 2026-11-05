@@ -58,7 +58,7 @@ use commonware_consensus::{
     Application, Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
     marshal::{
         self, Start,
-        ancestry::Ancestry,
+        blocks::Blocks,
         core::Actor as MarshalActor,
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
@@ -737,10 +737,10 @@ where
     async fn propose(
         &mut self,
         (_, context): (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         input: Self::Input,
     ) -> Option<Digested<Self::Block>> {
-        let parent = ancestry.peek()?.clone();
         let height = parent.height().next();
         let block = Block::new(context, parent.digest(), height, input.payload);
         Some(Digested::compute(block, &self.strategy).await)
@@ -749,7 +749,9 @@ where
     async fn verify(
         &mut self,
         _: (E, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        _candidate: Digested<Self::Block>,
+        _parent: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
     ) -> bool {
         // reshare::Application already rejects a mismatched final block and an
         // earlier block carrying any payload except a dealer log from the

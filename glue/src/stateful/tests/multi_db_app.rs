@@ -23,8 +23,8 @@ use commonware_consensus::{
     Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
-        ancestry::Ancestry,
-        core::{Actor as MarshalActor, CommitmentFallback},
+        blocks::Blocks,
+        core::Actor as MarshalActor,
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
     },
@@ -38,7 +38,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
     certificate::{ConstantProvider, mocks::Fixture},
     ed25519, sha256,
 };
@@ -65,7 +65,6 @@ use commonware_storage::{
 use commonware_utils::{
     NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, test_rng,
 };
-use futures::StreamExt;
 use std::{sync::Arc, time::Duration};
 
 /// The full (journaled) QMDB used as DB-A in the multi-db e2e tests.
@@ -315,12 +314,11 @@ impl<E: Spawner + StorageContext> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
-        let mut ancestry = Box::pin(ancestry);
-        let parent = ancestry.next().await?;
         let height = Height::new(parent.height().get() + 1);
         let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
         let bounds_a = merkleized_a.bounds();
@@ -343,11 +341,12 @@ impl<E: Spawner + StorageContext> Application<E> for App {
     async fn process(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        let block = ancestry.peek()?.inner();
+        let block = block.inner();
         let (height, range_b) = (block.height(), block.range_b.clone());
         let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
 
@@ -731,7 +730,7 @@ impl EngineDefinition for MultiDbEngine {
         if should_state_sync {
             let finalization = sync_floor.expect("sync floor missing");
             let block = marshal_mailbox
-                .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
+                .acquire(finalization.proposal.payload)
                 .await
                 .expect("sync floor block must be available");
             state_sync_height = Some(block.height().get());

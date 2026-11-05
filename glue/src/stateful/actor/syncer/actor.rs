@@ -221,7 +221,7 @@ mod tests {
     use commonware_consensus::{
         Heightable as _, Reporter as _,
         marshal::{
-            ancestry::Ancestry,
+            blocks::Blocks,
             core::{Cutoff, Processed},
         },
         simplex::{
@@ -231,7 +231,7 @@ mod tests {
         types::{Epoch, Height, Round, View},
     };
     use commonware_cryptography::{
-        Digest, Digestible as _, ed25519,
+        Digest, Digested, Digestible as _, ed25519,
         sha256::{Digest as Sha256Digest, Sha256},
     };
     use commonware_parallel::Sequential;
@@ -354,7 +354,8 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _ancestry: impl Ancestry<Self::Block>,
+            _parent: Digested<Self::Block>,
+            _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -364,7 +365,8 @@ mod tests {
         async fn process(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _ancestry: impl Ancestry<Self::Block>,
+            _block: Digested<Self::Block>,
+            _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
             _finality: Finality,
         ) -> Option<TestMerkleized> {

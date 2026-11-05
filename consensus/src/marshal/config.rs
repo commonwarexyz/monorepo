@@ -30,13 +30,17 @@ pub enum Start<S: Scheme, C: Digest, B> {
 ///
 /// # Epocher and Provider Coverage
 ///
-/// Any height marshal is asked to sync must be covered by both the
-/// [epocher](Self::epocher) and the [provider](Self::provider). If either returns `None` for a
-/// requested height, responses to resolver requests for it are ignored: the request is retired
-/// without validating the response, attributing it to the serving peer, or retrying. If the data
-/// is no longer needed (say a duplicate request for a height we've long since processed), this is
-/// harmless. However, failing to provide either the epocher or the provider for a height we still
-/// require to process the canonical chain will lead marshal to stall.
+/// The [epocher](Self::epocher) and [provider](Self::provider) must cover the
+/// heights and epochs used for consensus and floor installation. Exact body
+/// acquisition validates commitments independently of this coverage; caching
+/// certified bodies additionally requires a known epoch for their height.
+///
+/// If either returns `None` for a requested finalized height, responses to resolver requests for
+/// it are ignored: the request is retired without validating the response, attributing it to the
+/// serving peer, or retrying. If the data is no longer needed (say a duplicate request for a
+/// height we've long since processed), this is harmless. However, failing to provide either the
+/// epocher or the provider for a height we still require to process the canonical chain will lead
+/// marshal to stall.
 ///
 /// ## Safe Pruning
 ///
@@ -112,11 +116,14 @@ where
     /// block bound this configuration reports.
     pub block_codec_config: AB::Cfg,
 
-    /// Maximum number of missing finalized heights fetched from peers at a time.
+    /// Maximum combined number of speculative fetches and prefetched bodies.
     ///
-    /// Repair fetches the lowest missing heights above the processed height and moves up as they
-    /// fill, so a larger value fills a gap with more parallel requests. Blocks requested by
-    /// commitment, hints, and subscriptions are not counted.
+    /// Also bounds the finalized heights requested in one forward gap-repair pass and the
+    /// number of resolver messages handled in one batch. Sources from
+    /// [`Mailbox::blocks`](super::core::Mailbox::blocks) give each range an additional
+    /// window of this size for pending acquisitions and buffered bodies.
+    /// Direct acquisitions are not limited by the shared capacity; each stays active until
+    /// its block is delivered or its receiver is dropped.
     pub max_repair: NonZeroUsize,
 
     /// Maximum number of dispatched blocks awaiting application acknowledgement,

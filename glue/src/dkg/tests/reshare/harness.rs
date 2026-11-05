@@ -38,8 +38,8 @@ use commonware_consensus::{
     Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable, Reporters,
     marshal::{
         self,
-        ancestry::Ancestry,
-        core::{Actor as MarshalActor, CommitmentFallback, Mailbox as MarshalMailbox},
+        blocks::Blocks,
+        core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
     },
@@ -508,11 +508,11 @@ impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
-        let parent = ancestry.peek()?.clone();
         let height = Height::new(parent.height().get() + 1);
         // The reshare::Application wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
@@ -532,13 +532,14 @@ impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
     async fn process(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        tip: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         // The surrounding `reshare::Application` wrapper validates the final block's reshare
         // payload, so this inner app only executes state.
-        let height = ancestry.peek()?.height();
+        let height = tip.height();
         Some(Self::execute(height, batches).await)
     }
 
@@ -1403,13 +1404,7 @@ impl EngineDefinition for ReshareEngine {
             context
                 .child("sync_floor_recorder")
                 .spawn(move |_| async move {
-                    let Ok(block) = marshal
-                        .subscribe_by_commitment(
-                            finalization.proposal.payload,
-                            CommitmentFallback::Wait,
-                        )
-                        .await
-                    else {
+                    let Ok(block) = marshal.acquire(finalization.proposal.payload).await else {
                         return;
                     };
                     state_syncs.lock().insert(public_key, block.height().get());

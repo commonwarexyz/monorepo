@@ -2,10 +2,10 @@
 
 use crate::types::{Block, Database, Scheme};
 use commonware_consensus::{
-    Heightable as _, marshal::ancestry::Ancestry, simplex::types::Context, types::Height,
+    Heightable as _, marshal::blocks::Blocks, simplex::types::Context, types::Height,
 };
 use commonware_cryptography::{
-    Digestible as _, bls12381::primitives::variant::MinSig, ed25519, sha256,
+    Digested, Digestible as _, bls12381::primitives::variant::MinSig, ed25519, sha256,
 };
 use commonware_glue::{
     dkg::reshare::Input as ReshareInput,
@@ -17,7 +17,6 @@ use commonware_glue::{
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::qmdb::sync::Target;
 use commonware_utils::{non_empty_range, sequence::U64};
-use futures::StreamExt;
 
 const HEIGHT_KEY: U64 = U64::new(0);
 
@@ -64,13 +63,13 @@ where
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        mut ancestry: impl Ancestry<Self::Block>,
+        parent: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         // The `reshare::Application` wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
-        let parent = ancestry.next().await?;
         let height = parent.height().next();
         let merkleized = Self::execute(height, batches).await;
         let bounds = merkleized.bounds();
@@ -90,7 +89,8 @@ where
     async fn process(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
@@ -100,7 +100,7 @@ where
         // - Epoch validation is handled by `Deferred`
         // - QMDB root / range validation is handled by `stateful::Application`
         // - Reshare `Payload` validation is handled by `reshare::Application`
-        let height = ancestry.peek()?.height();
+        let height = block.height();
         Some(Self::execute(height, batches).await)
     }
 

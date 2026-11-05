@@ -1,0 +1,401 @@
+use super::Variant;
+use commonware_utils::channel::oneshot;
+use std::{
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    future::poll_fn,
+    ops::Range,
+    sync::Arc,
+    task::Poll,
+};
+
+enum Phase<B> {
+    Queued(u64),
+    Active,
+    Ready(B),
+}
+
+struct Demand<V: Variant> {
+    owners: BTreeSet<u64>,
+    phase: Phase<V::Block>,
+}
+
+struct Lease<C> {
+    commitments: Arc<[C]>,
+    range: Range<usize>,
+    sender: oneshot::Sender<()>,
+}
+
+/// Speculative commitment demand with a shared bound on active fetches and unconsumed bodies.
+///
+/// Leases register metadata for an entire range. Fulfillment or transfer to an explicit
+/// caller retires all demand for that commitment; only a subsequent lease can enqueue it again.
+pub(super) struct Prefetches<V: Variant> {
+    capacity: usize,
+    entries: BTreeMap<V::Commitment, Demand<V>>,
+    queue: BTreeMap<u64, V::Commitment>,
+    next_queued: u64,
+    leases: BTreeMap<u64, Lease<V::Commitment>>,
+    next_lease: u64,
+}
+
+impl<V: Variant> Prefetches<V> {
+    pub(super) const fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: BTreeMap::new(),
+            queue: BTreeMap::new(),
+            next_queued: 0,
+            leases: BTreeMap::new(),
+            next_lease: 0,
+        }
+    }
+
+    fn demand(&mut self, commitment: V::Commitment) -> &mut Demand<V> {
+        match self.entries.entry(commitment) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let id = self.next_queued;
+                self.next_queued = id.checked_add(1).expect("prefetch queue IDs exhausted");
+                self.queue.insert(id, commitment);
+                entry.insert(Demand {
+                    owners: BTreeSet::new(),
+                    phase: Phase::Queued(id),
+                })
+            }
+        }
+    }
+
+    pub(super) fn lease(
+        &mut self,
+        commitments: Arc<[V::Commitment]>,
+        range: Range<usize>,
+        sender: oneshot::Sender<()>,
+    ) {
+        if sender.is_closed() {
+            return;
+        }
+        let Some(selected) = commitments.get(range.clone()) else {
+            return;
+        };
+        if selected.is_empty() {
+            return;
+        }
+        let id = self.next_lease;
+        self.next_lease = id.checked_add(1).expect("prefetch lease IDs exhausted");
+        for commitment in selected {
+            self.demand(*commitment).owners.insert(id);
+        }
+        self.leases.insert(
+            id,
+            Lease {
+                commitments,
+                range,
+                sender,
+            },
+        );
+    }
+
+    pub(super) fn ready(&self) -> bool {
+        !self.queue.is_empty() && self.entries.len() - self.queue.len() < self.capacity
+    }
+
+    /// Reserves a speculative body slot before returning the next commitment to fetch.
+    pub(super) fn next(&mut self) -> Option<V::Commitment> {
+        if !self.ready() {
+            return None;
+        }
+        let (_, commitment) = self.queue.pop_first()?;
+        self.entries
+            .get_mut(&commitment)
+            .expect("queued commitment has demand")
+            .phase = Phase::Active;
+        Some(commitment)
+    }
+
+    fn remove(&mut self, commitment: &V::Commitment) -> Option<Demand<V>> {
+        let demand = self.entries.remove(commitment)?;
+        if let Phase::Queued(id) = &demand.phase {
+            self.queue.remove(id);
+        }
+        Some(demand)
+    }
+
+    pub(super) fn get_ready(&self, commitment: &V::Commitment) -> Option<V::Block> {
+        match &self.entries.get(commitment)?.phase {
+            Phase::Ready(block) => Some(block.clone()),
+            Phase::Queued(_) | Phase::Active => None,
+        }
+    }
+
+    /// Retires speculative demand and reports whether its phase was Active.
+    /// The caller owns any corresponding resolver request.
+    pub(super) fn retire(&mut self, commitment: V::Commitment) -> bool {
+        self.remove(&commitment)
+            .is_some_and(|demand| matches!(demand.phase, Phase::Active))
+    }
+
+    /// Retains a prefetched body only in a slot reserved by an active request.
+    ///
+    /// Returns whether the demand was active, which means its fetch is still outstanding.
+    pub(super) fn complete(&mut self, block: V::Block) -> bool {
+        let commitment = V::commitment(&block);
+        if let Some(demand) = self.entries.get_mut(&commitment)
+            && !matches!(demand.phase, Phase::Queued(_))
+        {
+            let active = matches!(demand.phase, Phase::Active);
+            demand.phase = Phase::Ready(block);
+            return active;
+        }
+        self.retire(commitment);
+        false
+    }
+
+    /// Removes closed leases and returns active fetches whose final owner disappeared.
+    pub(super) async fn closed(&mut self) -> Vec<V::Commitment> {
+        poll_fn(|cx| {
+            let closed: Vec<_> = self
+                .leases
+                .iter_mut()
+                .filter_map(|(id, lease)| lease.sender.poll_closed(cx).is_ready().then_some(*id))
+                .collect();
+            if closed.is_empty() {
+                return Poll::Pending;
+            }
+            let mut removed = Vec::new();
+            for id in closed {
+                let lease = self.leases.remove(&id).expect("closed lease exists");
+                for commitment in &lease.commitments[lease.range] {
+                    let Some(demand) = self.entries.get_mut(commitment) else {
+                        continue;
+                    };
+                    demand.owners.remove(&id);
+                    if demand.owners.is_empty() && self.retire(*commitment) {
+                        removed.push(*commitment);
+                    }
+                }
+            }
+            Poll::Ready(removed)
+        })
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        marshal::{
+            mocks::block::{EmptyBlock, ready},
+            standard::Standard,
+        },
+        types::Height,
+    };
+    use commonware_cryptography::{
+        Digested, Digestible,
+        sha256::{Digest, Sha256},
+    };
+    use commonware_macros::select;
+    use commonware_runtime::{Clock, Runner as _, deterministic};
+    use futures::FutureExt;
+
+    type TestBlock = EmptyBlock<Sha256>;
+    type TestPrefetches = Prefetches<Standard<TestBlock>>;
+
+    fn block(height: u64) -> Digested<TestBlock> {
+        ready(TestBlock::new(Sha256::fill(0), Height::new(height), height))
+    }
+
+    // Counts references to the block body, excluding the probe itself.
+    fn strong_count(block: &Digested<TestBlock>) -> usize {
+        Arc::strong_count(&block.inner_shared()) - 1
+    }
+
+    fn lease(prefetch: &mut TestPrefetches, commitments: &[Digest]) -> oneshot::Receiver<()> {
+        let (sender, receiver) = oneshot::channel();
+        prefetch.lease(Arc::from(commitments), 0..commitments.len(), sender);
+        receiver
+    }
+
+    #[test]
+    fn forward_order_shares_slots_between_active_and_ready() {
+        let mut prefetch = TestPrefetches::new(2);
+        let blocks: Vec<_> = (1..=4).map(block).collect();
+        let commitments: Vec<_> = blocks.iter().map(Digestible::digest).collect();
+        let _lease = lease(&mut prefetch, &commitments);
+        assert_eq!(prefetch.entries.len(), 4);
+        assert_eq!(prefetch.next(), Some(commitments[0]));
+        assert_eq!(prefetch.next(), Some(commitments[1]));
+        assert_eq!(prefetch.next(), None);
+        prefetch.complete(blocks[1].clone());
+        assert_eq!(prefetch.next(), None);
+        assert!(prefetch.get_ready(&commitments[0]).is_none());
+        prefetch.complete(blocks[0].clone());
+        assert_eq!(prefetch.next(), None);
+        assert_eq!(
+            prefetch.get_ready(&commitments[0]).unwrap().digest(),
+            commitments[0]
+        );
+        assert_eq!(prefetch.next(), None);
+        assert_eq!(
+            prefetch.get_ready(&commitments[0]).unwrap().digest(),
+            commitments[0]
+        );
+        prefetch.retire(commitments[0]);
+        assert!(prefetch.get_ready(&commitments[0]).is_none());
+        assert_eq!(prefetch.next(), Some(commitments[2]));
+        assert_eq!(prefetch.next(), None);
+        assert_eq!(
+            prefetch.get_ready(&commitments[1]).unwrap().digest(),
+            commitments[1]
+        );
+        assert_eq!(prefetch.next(), None);
+        prefetch.retire(commitments[1]);
+        assert_eq!(prefetch.next(), Some(commitments[3]));
+    }
+
+    #[test]
+    fn complete_reports_only_active_demand() {
+        let mut prefetch = TestPrefetches::new(2);
+        let blocks: Vec<_> = (1..=3).map(block).collect();
+        let commitments: Vec<_> = blocks.iter().map(Digestible::digest).collect();
+        let _lease = lease(&mut prefetch, &commitments);
+        assert_eq!(prefetch.next(), Some(commitments[0]));
+        assert_eq!(prefetch.next(), Some(commitments[1]));
+        assert!(!prefetch.complete(blocks[2].clone()));
+        assert!(!prefetch.entries.contains_key(&commitments[2]));
+        assert!(prefetch.complete(blocks[0].clone()));
+        assert!(!prefetch.complete(blocks[0].clone()));
+        assert!(prefetch.get_ready(&commitments[0]).is_some());
+        assert!(!prefetch.complete(block(4)));
+        assert!(prefetch.get_ready(&commitments[1]).is_none());
+    }
+
+    #[test]
+    fn overlapping_leases_share_and_release_ready_bodies() {
+        let mut prefetch = TestPrefetches::new(1);
+        let body = block(1);
+        let commitment = body.digest();
+        let first = lease(&mut prefetch, &[commitment]);
+        let second = lease(&mut prefetch, &[commitment]);
+        assert_eq!(prefetch.next(), Some(commitment));
+        assert_eq!(prefetch.next(), None);
+        prefetch.complete(body.clone());
+        assert_eq!(strong_count(&body), 2);
+        drop(first);
+        assert_eq!(prefetch.closed().now_or_never(), Some(Vec::new()));
+        assert_eq!(strong_count(&body), 2);
+        drop(second);
+        assert_eq!(prefetch.closed().now_or_never(), Some(Vec::new()));
+        assert_eq!(strong_count(&body), 1);
+        assert!(prefetch.entries.is_empty());
+    }
+
+    #[test]
+    fn claimed_active_request_releases_slot_and_old_lease_cannot_cancel_new_demand() {
+        let mut prefetch = TestPrefetches::new(1);
+        let first = block(1).digest();
+        let second = block(2).digest();
+        let old = lease(&mut prefetch, &[first]);
+        let _pending = lease(&mut prefetch, &[second]);
+        assert!(prefetch.ready());
+        assert_eq!(prefetch.next(), Some(first));
+        assert!(!prefetch.ready());
+        assert!(prefetch.retire(first));
+        assert!(prefetch.ready());
+        let _new = lease(&mut prefetch, &[first]);
+        drop(old);
+        assert_eq!(prefetch.closed().now_or_never(), Some(Vec::new()));
+        assert_eq!(prefetch.next(), Some(second));
+        prefetch.retire(second);
+        assert_eq!(prefetch.next(), Some(first));
+        prefetch.retire(first);
+        assert!(!prefetch.retire(first));
+        let _renewed = lease(&mut prefetch, &[second]);
+        assert_eq!(prefetch.next(), Some(second));
+    }
+
+    #[test]
+    fn duplicate_and_reinserted_keys_preserve_fifo() {
+        let mut prefetch = TestPrefetches::new(3);
+        let first = block(1).digest();
+        let second = block(2).digest();
+        let old = lease(&mut prefetch, &[first, first]);
+        let _second = lease(&mut prefetch, &[second]);
+        drop(old);
+        assert_eq!(prefetch.closed().now_or_never(), Some(Vec::new()));
+        let _first = lease(&mut prefetch, &[first]);
+        assert_eq!(prefetch.next(), Some(second));
+        assert_eq!(prefetch.next(), Some(first));
+        assert_eq!(prefetch.next(), None);
+    }
+
+    #[test]
+    fn zero_capacity_and_unsolicited_bodies_retain_no_body() {
+        let mut prefetch = TestPrefetches::new(0);
+        let body = block(1);
+        let retained = lease(&mut prefetch, &[body.digest()]);
+        assert_eq!(prefetch.next(), None);
+        prefetch.complete(body.clone());
+        assert!(prefetch.entries.is_empty());
+        assert_eq!(strong_count(&body), 1);
+        let canceled = lease(&mut prefetch, &[]);
+        assert!(canceled.now_or_never().unwrap().is_err());
+        drop(retained);
+        assert_eq!(prefetch.closed().now_or_never(), Some(Vec::new()));
+        assert!(prefetch.leases.is_empty());
+    }
+
+    #[test]
+    fn lease_range_shares_metadata_and_rejects_invalid_bounds() {
+        let mut prefetch = TestPrefetches::new(2);
+        let commitments: Arc<[_]> = (1..=3).map(|height| block(height).digest()).collect();
+        for range in [
+            0..0,
+            Range { start: 2, end: 1 },
+            0..4,
+            usize::MAX..usize::MAX,
+        ] {
+            let (sender, receiver) = oneshot::channel();
+            prefetch.lease(commitments.clone(), range, sender);
+            assert!(receiver.now_or_never().unwrap().is_err());
+            assert!(prefetch.entries.is_empty());
+            assert!(prefetch.leases.is_empty());
+        }
+        let (sender, receiver) = oneshot::channel();
+        prefetch.lease(commitments.clone(), 1..3, sender);
+        assert_eq!(Arc::strong_count(&commitments), 2);
+        assert!(!prefetch.entries.contains_key(&commitments[0]));
+        assert_eq!(prefetch.next(), Some(commitments[1]));
+        assert_eq!(prefetch.next(), Some(commitments[2]));
+        drop(receiver);
+        assert_eq!(
+            prefetch.closed().now_or_never(),
+            Some(vec![commitments[1], commitments[2]])
+        );
+        assert_eq!(Arc::strong_count(&commitments), 1);
+    }
+
+    #[test]
+    fn cancellation_wakes_idle_scheduler_and_releases_active_slot() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut prefetch = TestPrefetches::new(1);
+            let first = block(1).digest();
+            let second = block(2).digest();
+            let receiver = lease(&mut prefetch, &[first]);
+            assert_eq!(prefetch.next(), Some(first));
+            let _second = lease(&mut prefetch, &[second]);
+            select! {
+                removed = prefetch.closed() => assert_eq!(removed, vec![first]),
+                _ = async {
+                    context.sleep(std::time::Duration::from_millis(1)).await;
+                    drop(receiver);
+                    std::future::pending::<()>().await;
+                } => unreachable!(),
+                _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                    panic!("lease cancellation must wake the scheduler");
+                },
+            }
+            assert_eq!(prefetch.next(), Some(second));
+        });
+    }
+}

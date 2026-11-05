@@ -15,11 +15,8 @@ use crate::stateful::{
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
-    CertifiableBlock, Epochable, Heightable, Viewable,
-    marshal::{
-        ancestry::BlockProvider,
-        core::{Mailbox as MarshalMailbox, Variant},
-    },
+    CertifiableBlock, Epochable, Heightable, History, Viewable,
+    marshal::core::{Mailbox as MarshalMailbox, Variant},
 };
 use commonware_cryptography::{Digested, Digestible};
 use commonware_macros::{select, select_loop};
@@ -31,7 +28,7 @@ use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
 };
-use std::{collections::VecDeque, mem};
+use std::{collections::VecDeque, mem, sync::Arc};
 use tracing::{Instrument as _, debug, error, info_span};
 
 /// A retained finalization classified against the converged sync anchor.
@@ -108,7 +105,6 @@ where
     A: Application<E>,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
-    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
     T: Strategy,
 {
     pub async fn run(mut self) {
@@ -273,8 +269,20 @@ where
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     if !processor.redelivered(&block) {
+                        // An uncached finalized block is processed on canonical finalized
+                        // history, which is read only if the application ranges it.
+                        let parent_height = block
+                            .height()
+                            .previous()
+                            .expect("finalized block above the anchor must have a parent");
+                        let marshal = &self.marshal;
                         let Applied { prune, .. } = processor
-                            .finalize(self.context.as_present(), &self.marshal, &block, false)
+                            .finalize(
+                                self.context.as_present(),
+                                || marshal.blocks(parent_height, History::ready(Arc::from([]))),
+                                &block,
+                                false,
+                            )
                             .await;
                         pending_prune = prune.or(pending_prune);
                         completed_height = block.height();
@@ -406,7 +414,7 @@ mod tests {
             fixtures::{self, MarshalFixture},
             mocks::{
                 FlushControl, TestApp, TestBlock, TestDb, TestScheme, TestVariant, anchor,
-                digested, test_databases,
+                digested, digested_shared, test_databases,
             },
         },
     };
@@ -414,7 +422,7 @@ mod tests {
     use commonware_consensus::{
         Application as _, CertifiableBlock as _, Heightable, Reporter as _,
         marshal::{
-            self, Update, ancestry,
+            self, Update,
             core::{Mailbox as MarshalMailbox, Processed},
         },
         simplex::{mocks::scheme as scheme_mocks, types::Activity},
@@ -433,7 +441,11 @@ mod tests {
     };
     use commonware_utils::{Acknowledgement, NZUsize, acknowledgement::Exact, channel::oneshot};
     use futures::poll;
-    use std::{collections::VecDeque, sync::atomic::Ordering, time::Duration};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, atomic::Ordering},
+        time::Duration,
+    };
 
     fn pending(block: TestBlock) -> PendingFinalization<Digested<TestBlock>> {
         let (acknowledgement, _waiter) = Exact::handle();
@@ -1165,12 +1177,17 @@ mod tests {
                     Feedback::Ok
                 ));
                 parent = block;
-                let proposal = TestBlock::new(height + 10, digest + 10);
+                let proposal_parent = Arc::new(TestBlock::new(height + 9, digest + 9));
+                let proposal = TestBlock::child(&proposal_parent, digest + 10);
                 assert!(
                     mailbox
                         .propose(
                             (context.child("queue_fence"), proposal.context()),
-                            ancestry::from_iter([]),
+                            digested_shared(&proposal_parent),
+                            fixtures::blocks(
+                                proposal_parent.height(),
+                                std::slice::from_ref(&proposal_parent),
+                            ),
                             (),
                         )
                         .await
@@ -1253,12 +1270,17 @@ mod tests {
                     Feedback::Ok
                 ));
                 parent = block;
-                let proposal = TestBlock::new(height + 10, digest + 10);
+                let proposal_parent = Arc::new(TestBlock::new(height + 9, digest + 9));
+                let proposal = TestBlock::child(&proposal_parent, digest + 10);
                 assert!(
                     mailbox
                         .propose(
                             (queue_context.child("queue_fence"), proposal.context()),
-                            ancestry::from_iter([]),
+                            digested_shared(&proposal_parent),
+                            fixtures::blocks(
+                                proposal_parent.height(),
+                                std::slice::from_ref(&proposal_parent),
+                            ),
                             (),
                         )
                         .await
