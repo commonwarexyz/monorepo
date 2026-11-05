@@ -1,4 +1,5 @@
 use crate::rayon::{ThreadPoolBuilder, unwind};
+use commonware_utils::NZUsize;
 use std::{
     sync::{
         Arc,
@@ -10,7 +11,7 @@ use std::{
 
 #[test]
 fn broadcast_pool() {
-    let pool = ThreadPoolBuilder::new().num_threads(7).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(7)).build().unwrap();
     let v = pool.broadcast(|ctx| ctx.index());
     assert!(v.into_iter().eq(0..7));
 }
@@ -18,7 +19,7 @@ fn broadcast_pool() {
 #[test]
 fn spawn_broadcast_pool() {
     let (tx, rx) = channel();
-    let pool = ThreadPoolBuilder::new().num_threads(7).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(7)).build().unwrap();
     pool.spawn_broadcast(move |ctx| tx.send(ctx.index()).unwrap());
 
     let mut v: Vec<_> = rx.into_iter().collect();
@@ -28,7 +29,7 @@ fn spawn_broadcast_pool() {
 
 #[test]
 fn broadcast_self() {
-    let pool = ThreadPoolBuilder::new().num_threads(7).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(7)).build().unwrap();
     let v = pool.install(|| pool.broadcast(|ctx| ctx.index()));
     assert!(v.into_iter().eq(0..7));
 }
@@ -36,7 +37,7 @@ fn broadcast_self() {
 #[test]
 fn spawn_broadcast_self() {
     let (tx, rx) = channel();
-    let pool = Arc::new(ThreadPoolBuilder::new().num_threads(7).build().unwrap());
+    let pool = Arc::new(ThreadPoolBuilder::new(NZUsize!(7)).build().unwrap());
     pool.spawn({
         let pool = Arc::clone(&pool);
         move || pool.spawn_broadcast(move |ctx| tx.send(ctx.index()).unwrap())
@@ -50,8 +51,8 @@ fn spawn_broadcast_self() {
 #[test]
 fn broadcast_mutual() {
     let count = AtomicUsize::new(0);
-    let pool1 = ThreadPoolBuilder::new().num_threads(3).build().unwrap();
-    let pool2 = ThreadPoolBuilder::new().num_threads(7).build().unwrap();
+    let pool1 = ThreadPoolBuilder::new(NZUsize!(3)).build().unwrap();
+    let pool2 = ThreadPoolBuilder::new(NZUsize!(7)).build().unwrap();
     pool1.install(|| {
         pool2.broadcast(|_| {
             pool1.broadcast(|_| {
@@ -65,8 +66,8 @@ fn broadcast_mutual() {
 #[test]
 fn spawn_broadcast_mutual() {
     let (tx, rx) = channel();
-    let pool1 = Arc::new(ThreadPoolBuilder::new().num_threads(3).build().unwrap());
-    let pool2 = ThreadPoolBuilder::new().num_threads(7).build().unwrap();
+    let pool1 = Arc::new(ThreadPoolBuilder::new(NZUsize!(3)).build().unwrap());
+    let pool2 = ThreadPoolBuilder::new(NZUsize!(7)).build().unwrap();
     pool1.spawn({
         let pool1 = Arc::clone(&pool1);
         move || {
@@ -82,8 +83,8 @@ fn spawn_broadcast_mutual() {
 #[test]
 fn broadcast_mutual_sleepy() {
     let count = AtomicUsize::new(0);
-    let pool1 = ThreadPoolBuilder::new().num_threads(3).build().unwrap();
-    let pool2 = ThreadPoolBuilder::new().num_threads(7).build().unwrap();
+    let pool1 = ThreadPoolBuilder::new(NZUsize!(3)).build().unwrap();
+    let pool2 = ThreadPoolBuilder::new(NZUsize!(7)).build().unwrap();
     pool1.install(|| {
         thread::sleep(time::Duration::from_secs(1));
         pool2.broadcast(|_| {
@@ -100,8 +101,8 @@ fn broadcast_mutual_sleepy() {
 #[test]
 fn spawn_broadcast_mutual_sleepy() {
     let (tx, rx) = channel();
-    let pool1 = Arc::new(ThreadPoolBuilder::new().num_threads(3).build().unwrap());
-    let pool2 = ThreadPoolBuilder::new().num_threads(7).build().unwrap();
+    let pool1 = Arc::new(ThreadPoolBuilder::new(NZUsize!(3)).build().unwrap());
+    let pool2 = ThreadPoolBuilder::new(NZUsize!(7)).build().unwrap();
     pool1.spawn({
         let pool1 = Arc::clone(&pool1);
         move || {
@@ -122,7 +123,7 @@ fn spawn_broadcast_mutual_sleepy() {
 #[test]
 fn broadcast_panic_one() {
     let count = AtomicUsize::new(0);
-    let pool = ThreadPoolBuilder::new().num_threads(7).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(7)).build().unwrap();
     let result = unwind::halt_unwinding(|| {
         pool.broadcast(|ctx| {
             count.fetch_add(1, Ordering::Relaxed);
@@ -138,7 +139,7 @@ fn broadcast_panic_one() {
 #[test]
 fn broadcast_panic_many() {
     let count = AtomicUsize::new(0);
-    let pool = ThreadPoolBuilder::new().num_threads(7).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(7)).build().unwrap();
     let result = unwind::halt_unwinding(|| {
         pool.broadcast(|ctx| {
             count.fetch_add(1, Ordering::Relaxed);
@@ -154,7 +155,7 @@ fn broadcast_panic_many() {
 #[test]
 fn broadcast_sleep_race() {
     let test_duration = time::Duration::from_secs(1);
-    let pool = ThreadPoolBuilder::new().num_threads(7).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(7)).build().unwrap();
     let start = time::Instant::now();
     while start.elapsed() < test_duration {
         pool.broadcast(|ctx| {
@@ -168,7 +169,7 @@ fn broadcast_sleep_race() {
 #[test]
 fn broadcast_after_spawn_broadcast() {
     let (tx, rx) = channel();
-    let pool = ThreadPoolBuilder::new().num_threads(7).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(7)).build().unwrap();
 
     // Queue a non-blocking spawn_broadcast.
     pool.spawn_broadcast(move |ctx| tx.send(ctx.index()).unwrap());
@@ -185,7 +186,7 @@ fn broadcast_after_spawn_broadcast() {
 #[test]
 fn broadcast_after_spawn() {
     let (tx, rx) = channel();
-    let pool = ThreadPoolBuilder::new().num_threads(7).build().unwrap();
+    let pool = ThreadPoolBuilder::new(NZUsize!(7)).build().unwrap();
 
     // Queue a regular spawn on a thread-local deque.
     pool.install(|| pool.spawn(move || tx.send(22).unwrap()));

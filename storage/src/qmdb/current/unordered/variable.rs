@@ -56,10 +56,7 @@ mod test {
     use super::*;
     use crate::{
         mmr,
-        qmdb::{
-            current::{tests::variable_config, unordered::tests as shared},
-            floor::Proportional,
-        },
+        qmdb::current::{tests::variable_config, unordered::tests as shared},
         translator::TwoCap,
     };
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
@@ -149,7 +146,7 @@ mod test {
             let merkleized = db
                 .new_batch()
                 .write(key.clone(), Some(value))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -158,10 +155,9 @@ mod test {
             let root = db.root();
             let (proof, proved_value) = db.key_value_proof(&key).await.unwrap();
             assert_eq!(proved_value, value);
-            assert!(VecKeyTest::verify_key_value_proof(
+            assert!(proof.verify::<Sha256, VariableEncoding<Digest>, _>(
                 key.clone(),
                 proved_value,
-                &proof,
                 &root
             ));
             drop(db);

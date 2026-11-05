@@ -10,6 +10,7 @@ use commonware_storage::{
     merkle::{Family as MerkleFamily, Location, Proof, mmb, mmr},
     mmr::full::Config as MerkleConfig,
     qmdb::{
+        ProofExt as _,
         any::{
             FixedConfig as Config,
             db::Db as AnyDb,
@@ -17,8 +18,6 @@ use commonware_storage::{
             traits::DbAny as _,
             value::FixedEncoding,
         },
-        floor::Proportional,
-        verify_proof,
     },
     translator::EightCap,
 };
@@ -107,7 +106,7 @@ async fn commit_pending<F: MerkleFamily>(
         batch = batch.write(k, v);
     }
     let mut policy = Recorder::new(plan, |seed| Value::new([seed; 64]));
-    let merkleized = batch.merkleize(&db, None, &mut policy).await.unwrap();
+    let merkleized = batch.merkleize_with(&db, &mut policy).await.unwrap();
     let db = db
         .apply_batch(merkleized)
         .await
@@ -256,8 +255,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                 .expect("proof should not fail");
 
                             assert!(
-                                verify_proof::<Sha256, _, _>(
-                                    &proof,
+                                proof.verify::<Sha256, _>(
                                     adjusted_start,
                                     &log,
                                     &current_root),
@@ -287,8 +285,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             if let Ok(res) = db
                                 .proof(adjusted_start, *max_ops)
                                 .await {
-                                    let _ = verify_proof::<Sha256, _, _>(
-                                        &proof,
+                                    let _ = proof.verify::<Sha256, _>(
                                         adjusted_start,
                                         &res.1,
                                         &current_root);
@@ -374,7 +371,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 assert_neighbors(&db, &committed_state, key).await;
             }
 
-            let batch = db.new_batch().merkleize(&db, None, &mut Proportional).await.unwrap();
+            let batch = db.new_batch().merkleize(&db).await.unwrap();
             let db = db
                 .apply_batch(batch)
                 .await

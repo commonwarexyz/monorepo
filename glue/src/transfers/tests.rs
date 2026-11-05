@@ -17,7 +17,6 @@ use commonware_storage::{
             traits::{BatchableDb, DbAny, MerkleizedBatch},
         },
         current,
-        floor::Proportional,
     },
     translator::TwoCap,
 };
@@ -651,7 +650,7 @@ macro_rules! impl_test_db {
                 let (reads, staged) = self.new_batch().stage(keys, self).await.unwrap();
                 let slots = settle(reads)?;
                 Ok(staged
-                    .merkleize(slots, Vec::new(), None, self, &mut Proportional)
+                    .merkleize(slots, Vec::new(), self)
                     .await
                     .unwrap())
             }
@@ -1358,7 +1357,7 @@ fn selection_reads_later_rounds_through_expand() {
             ]
         );
         let merkleized = staged
-            .merkleize(slots, Vec::new(), None, &proposer, &mut Proportional)
+            .merkleize(slots, Vec::new(), &proposer)
             .await
             .unwrap();
         let proposed = merkleized.root();

@@ -29,7 +29,7 @@ fn bench_verify_single_element_family<F: Family>(c: &mut Criterion, family: &str
                     |(root, proofs)| {
                         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
                         for (loc, element, proof) in proofs {
-                            assert!(proof.verify_element_inclusion(&hasher, &element, loc, &root));
+                            assert!(proof.verify_element_inclusion(&hasher, loc, &element, &root));
                         }
                     },
                     BatchSize::LargeInput,

@@ -44,17 +44,20 @@ where
     type Metadata = V::Value;
     type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>;
 
+    fn with_metadata(self, metadata: impl Into<Option<V::Value>>) -> Self {
+        Self::with_metadata(self, metadata)
+    }
+
     fn write(self, key: K, value: Option<V::Value>) -> Self {
         Self::write(self, key, value)
     }
 
-    fn merkleize<P: Policy<F, K, V::Value> + Send>(
+    fn merkleize_with<P: Policy<F, K, V::Value> + Send>(
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
         policy: &mut P,
     ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
-        self.merkleize(db, metadata, policy)
+        self.merkleize_with(db, policy)
     }
 }
 
@@ -78,17 +81,20 @@ where
     type Metadata = V::Value;
     type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>;
 
+    fn with_metadata(self, metadata: impl Into<Option<V::Value>>) -> Self {
+        Self::with_metadata(self, metadata)
+    }
+
     fn write(self, key: K, value: Option<V::Value>) -> Self {
         Self::write(self, key, value)
     }
 
-    fn merkleize<P: Policy<F, K, V::Value> + Send>(
+    fn merkleize_with<P: Policy<F, K, V::Value> + Send>(
         self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
         policy: &mut P,
     ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
-        self.merkleize(db, metadata, policy)
+        self.merkleize_with(db, policy)
     }
 }
 
