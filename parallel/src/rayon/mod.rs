@@ -113,7 +113,7 @@ pub use self::thread_pool::{ThreadPool, Yield};
 pub(crate) use self::{
     bridge::{fold_init, map_collect_vec, map_init_collect_vec, try_fold, try_map_collect_vec},
     join::join,
-    meter::{Clock, charge, measure_with},
+    meter::{Clock, Parked, Waiting, charge, is_waiting, measure_with, unparked},
     registry::Placement,
     sort::{par_mergesort, par_quicksort},
 };

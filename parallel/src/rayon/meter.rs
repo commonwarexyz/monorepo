@@ -5,13 +5,19 @@
 //! handing off a job, waiting for one, searching for work, sleeping, or running unrelated jobs, so
 //! a run queued behind other jobs is not charged for the queue.
 //!
-//! Each thread has a context, the meter it charges or none, and charges the previous meter whenever
-//! its context changes, so a thread with no context never reads the clock. A job its creator waits
-//! for (a join, install, or broadcast) runs in the creator's context. A detached job runs in none.
-//! The strategy's spawn measures its job and, when the awaiting run is on a pool worker with its
-//! wait suspended, charges the job's busy time to that run through [`charge`] on receipt. A thread
-//! outside the pool parks in its context and is charged for each park, which covers the jobs that
-//! overlap it.
+//! Each thread has a context: the meter it charges, or none. A thread charges the previous meter
+//! whenever its context changes, so a thread with no context never reads the clock.
+//!
+//! A job its creator waits for (a join, install, or broadcast) runs in the creator's context. A
+//! detached job runs in none.
+//!
+//! The strategy's spawn measures its job and sends the busy time with the result. A run that waits
+//! for the result on a pool worker has its wait suspended, and one that waits through the
+//! strategy's blocking wait has its context parked. Either adds the job's busy time through
+//! [`charge`] on receipt.
+//!
+//! A thread that blocks any other way is charged for its park. That park covers only the jobs
+//! that overlap it.
 
 use std::{
     cell::Cell,
@@ -210,13 +216,117 @@ impl Context {
 }
 
 /// Restores a thread's previous context when dropped.
-struct Restore(*const Meter);
+struct Restore(Current);
 
 impl Drop for Restore {
     #[inline]
     fn drop(&mut self) {
-        switch(self.0);
+        restore(self.0);
     }
+}
+
+/// Marks the calling thread as waiting through the strategy's blocking wait, whose wait is never
+/// charged, so a job's busy time received meanwhile is charged on receipt.
+pub(crate) struct Waiting;
+
+impl Waiting {
+    pub(crate) fn new() -> Self {
+        WAITING.with(|waiting| waiting.set(waiting.get() + 1));
+        Self
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        WAITING.with(|waiting| waiting.set(waiting.get() - 1));
+    }
+}
+
+/// Whether the calling thread is waiting through the strategy's blocking wait.
+pub(crate) fn is_waiting() -> bool {
+    WAITING.with(|waiting| waiting.get() > 0)
+}
+
+/// Parks the calling thread's context while it blocks outside the pool. The meter stays current,
+/// so work the thread does through [`unparked`] and results it receives are charged to it, and
+/// the park itself is not. Dropping the guard resumes charging.
+pub(crate) struct Parked {
+    /// Whether the context was charging when parked, so that dropping resumes it.
+    resume: bool,
+}
+
+impl Parked {
+    pub(crate) fn new() -> Self {
+        Self { resume: park() }
+    }
+}
+
+impl Drop for Parked {
+    fn drop(&mut self) {
+        if self.resume {
+            resume();
+        }
+    }
+}
+
+/// Runs `op` with the calling thread's context charging, resuming a parked context for its
+/// duration, since work a parked thread does itself is still the run's work.
+pub(crate) fn unparked<R>(op: impl FnOnce() -> R) -> R {
+    /// Parks the context again when dropped, even if `op` unwinds.
+    struct Repark;
+    impl Drop for Repark {
+        fn drop(&mut self) {
+            park();
+        }
+    }
+
+    if !is_parked() {
+        return op();
+    }
+    resume();
+    let _repark = Repark;
+    op()
+}
+
+/// Parks a charging context, charging it up to now, and returns whether it was charging.
+fn park() -> bool {
+    CURRENT.with(|current| {
+        let state = current.get();
+        // SAFETY: a thread's current context is none or points to a live meter, as described on
+        // `Context`.
+        let (Some(meter), Some(since)) = (unsafe { state.meter.as_ref() }, state.since) else {
+            return false;
+        };
+        let now = meter.clock.now();
+        meter.charge_nanos(nanos(now.saturating_duration_since(since)));
+        current.set(Current {
+            meter: state.meter,
+            since: None,
+        });
+        true
+    })
+}
+
+/// Resumes charging a parked context from now.
+fn resume() {
+    CURRENT.with(|current| {
+        let state = current.get();
+        // SAFETY: a thread's current context is none or points to a live meter, as described on
+        // `Context`.
+        let since = unsafe { state.meter.as_ref() }.map(|meter| meter.clock.now());
+        current.set(Current {
+            meter: state.meter,
+            since,
+        });
+    })
+}
+
+/// Whether the calling thread's context is parked.
+pub(crate) fn is_parked() -> bool {
+    CURRENT.with(|current| {
+        let state = current.get();
+        !state.meter.is_null() && state.since.is_none()
+    })
 }
 
 /// A thread's context and the instant from which its time is charged to it.
@@ -224,11 +334,15 @@ impl Drop for Restore {
 struct Current {
     /// The meter the thread charges, or null for no context.
     meter: *const Meter,
-    /// When the thread entered its meter's context, or `None` while it has no context.
+    /// When the thread's current charge began, or `None` while it has no context or its context
+    /// is parked.
     since: Option<Instant>,
 }
 
 thread_local! {
+    /// How many of the strategy's blocking waits the calling thread is inside.
+    static WAITING: Cell<u32> = const { Cell::new(0) };
+
     /// The calling thread's context, initially none.
     static CURRENT: Cell<Current> = const {
         Cell::new(Current {
@@ -238,15 +352,15 @@ thread_local! {
     };
 }
 
-/// Makes `to` the calling thread's context and returns the previous one. A change charges the
-/// previous meter for the time since it was entered.
+/// Makes `to` the calling thread's context, charging it from now, and returns the previous state.
+/// A change charges the previous meter for the time since its charge began.
 #[inline]
-fn switch(to: *const Meter) -> *const Meter {
+fn switch(to: *const Meter) -> Current {
     CURRENT.with(|current| {
         // Entering the current context keeps its meter charging from the instant it was entered.
         let previous = current.get();
         if previous.meter == to {
-            return to;
+            return previous;
         }
 
         // SAFETY: `previous` is still the thread's current context, so it is none or points to a
@@ -256,17 +370,54 @@ fn switch(to: *const Meter) -> *const Meter {
         // SAFETY: `to` is none or points to a live meter, by the contract of `Context::enter`.
         let next_meter = unsafe { to.as_ref() };
 
-        // The previous meter is charged up to the instant the next one starts from, so no time is
-        // charged twice or lost between meters on one clock.
-        let now = previous_meter.map(|meter| meter.clock.now());
-        if let (Some(meter), Some(since), Some(now)) = (previous_meter, previous.since, now) {
-            meter.charge_nanos(nanos(now.saturating_duration_since(since)));
-        }
-        let since = next_meter.map(|next| match (previous_meter, now) {
-            (Some(previous), Some(now)) if previous.clock == next.clock => now,
-            _ => next.clock.now(),
-        });
+        let since = hand_off(previous_meter, previous.since, next_meter);
         current.set(Current { meter: to, since });
-        previous.meter
+        previous
+    })
+}
+
+/// Returns the calling thread to `previous`, a state it was in before a matching [`switch`]. A
+/// context that was parked stays parked.
+#[inline]
+fn restore(previous: Current) {
+    CURRENT.with(|current| {
+        // Returning to the current context keeps its charge as it stands.
+        let state = current.get();
+        if state.meter == previous.meter && state.since.is_some() == previous.since.is_some() {
+            return;
+        }
+
+        // SAFETY: `state` is the thread's current context, so it is none or points to a live
+        // meter, as described on `Context`.
+        let state_meter = unsafe { state.meter.as_ref() };
+
+        // SAFETY: `previous` was a context of this thread whose scope encloses this call, so it is
+        // none or points to a live meter.
+        let resuming = unsafe { previous.meter.as_ref() }.filter(|_| previous.since.is_some());
+
+        let since = hand_off(state_meter, state.since, resuming);
+        current.set(Current {
+            meter: previous.meter,
+            since,
+        });
+    })
+}
+
+/// Charges `leaving` for the time since its charge began at `since` and returns the instant
+/// `entering` starts charging from. One clock reading serves both when the meters share a clock,
+/// so no time is charged twice or lost between them.
+#[inline]
+fn hand_off(
+    leaving: Option<&Meter>,
+    since: Option<Instant>,
+    entering: Option<&Meter>,
+) -> Option<Instant> {
+    let now = leaving.map(|meter| meter.clock.now());
+    if let (Some(meter), Some(since), Some(now)) = (leaving, since, now) {
+        meter.charge_nanos(nanos(now.saturating_duration_since(since)));
+    }
+    entering.map(|next| match (leaving, now) {
+        (Some(leaving), Some(now)) if leaving.clock == next.clock => now,
+        _ => next.clock.now(),
     })
 }

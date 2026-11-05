@@ -1,4 +1,6 @@
-use super::{Clock, Context, TestClock, charge, measure, measure_with};
+use super::{
+    Clock, Context, Parked, TestClock, charge, is_parked, measure, measure_with, unparked,
+};
 use crate::rayon::{Placement, ThreadPool, ThreadPoolBuilder, Yield, join, spin};
 use commonware_utils::NZUsize;
 use std::{
@@ -253,6 +255,76 @@ fn blocked_threads_are_charged_for_the_wait() {
         receiver.recv().unwrap();
     });
     assert_eq!(busy, 20 * MS);
+}
+
+/// Time that passes while the context is parked is not charged, and spins on either side are.
+#[commonware_macros::test_group("miri")]
+#[test]
+fn parked_contexts_charge_nothing_until_resumed() {
+    let busy = measured(|clock| {
+        clock.spin(MS);
+        {
+            let _parked = Parked::new();
+            assert!(is_parked());
+            clock.elapse(50 * MS);
+            clock.spin(MS);
+        }
+        assert!(!is_parked());
+        clock.spin(MS);
+    });
+    assert_eq!(busy, 2 * MS);
+}
+
+/// A parked context stays current: a charge lands on it, and a nested run returns to it parked.
+#[commonware_macros::test_group("miri")]
+#[test]
+fn parked_contexts_receive_charges_and_nested_runs() {
+    let mut inner = Duration::ZERO;
+    let outer = measured(|clock| {
+        let _parked = Parked::new();
+        charge(20 * MS);
+        inner = measure_with(Clock::Virtual(clock.clone()), || clock.spin(2 * MS)).1;
+        assert!(is_parked());
+        clock.elapse(50 * MS);
+    });
+    assert_eq!(inner, 2 * MS);
+    assert_eq!(outer, 22 * MS);
+}
+
+/// Work a parked thread does through `unparked` is charged, and the context is parked again after.
+#[commonware_macros::test_group("miri")]
+#[test]
+fn unparked_work_on_a_parked_context_is_charged() {
+    let busy = measured(|clock| {
+        let _parked = Parked::new();
+        unparked(|| {
+            assert!(!is_parked());
+            clock.spin(5 * MS);
+        });
+        assert!(is_parked());
+        clock.elapse(50 * MS);
+    });
+    assert_eq!(busy, 5 * MS);
+}
+
+/// Parking a thread with no context, or one already parked, changes nothing.
+#[commonware_macros::test_group("miri")]
+#[test]
+fn parking_nests_and_ignores_no_context() {
+    {
+        let _parked = Parked::new();
+        assert!(!is_parked());
+    }
+    let busy = measured(|clock| {
+        let _outer = Parked::new();
+        {
+            let _inner = Parked::new();
+            clock.elapse(10 * MS);
+        }
+        assert!(is_parked());
+        clock.elapse(10 * MS);
+    });
+    assert_eq!(busy, Duration::ZERO);
 }
 
 /// A worker that yields on empty queues searches in no context. The searches dominate a loop of

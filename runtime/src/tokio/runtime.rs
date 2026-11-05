@@ -1578,7 +1578,7 @@ mod tests {
         assert!(run_with_returned_strategy(false).is_none());
 
         let strategy = run_with_returned_strategy(true).unwrap();
-        assert_eq!(futures::executor::block_on(strategy.spawn(1, |_| 42)), 42);
+        assert_eq!(strategy.block_on(strategy.spawn(1, |_| 42)), 42);
     }
 
     #[test]
@@ -1607,7 +1607,7 @@ mod tests {
             .expect("Runner::start did not resume the strategy panic payload");
         runner.join().unwrap();
         let _ = std::fs::remove_dir_all(storage_directory);
-        assert_eq!(futures::executor::block_on(strategy.spawn(1, |_| 42)), 42);
+        assert_eq!(strategy.block_on(strategy.spawn(1, |_| 42)), 42);
     }
 
     #[test]

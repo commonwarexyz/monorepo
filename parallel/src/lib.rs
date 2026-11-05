@@ -91,7 +91,7 @@ commonware_macros::stability_scope!(BETA {
                 pin::Pin,
                 sync::{
                     Arc,
-                    atomic::{AtomicUsize, Ordering as AtomicOrdering},
+                    atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
                 },
                 task::Poll,
                 time::Instant,
@@ -665,7 +665,8 @@ commonware_macros::stability_scope!(BETA {
         /// synchronization or I/O inside the job can occupy execution capacity until it returns.
         /// When the polling thread itself belongs to the strategy's execution resources (e.g. a
         /// runtime whose executor thread is registered as a pool worker), the job (and other
-        /// pending work) may be executed inline on that thread rather than waited on.
+        /// pending work) may be executed inline on that thread rather than waited on. Synchronous
+        /// code waits for the result with [`Self::block_on`].
         ///
         /// If the job panics, the panic is propagated to the caller; it never aborts the process.
         #[track_caller]
@@ -677,6 +678,20 @@ commonware_macros::stability_scope!(BETA {
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static;
+
+        /// Blocks on `future` and returns its output. A run that waits for a spawned job this
+        /// way is charged the job's work, not the wait. The default busy-waits, which suits jobs
+        /// that complete before [`Self::spawn`] returns.
+        fn block_on<F: core::future::Future>(&self, future: F) -> F::Output {
+            let mut future = core::pin::pin!(future);
+            let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+            loop {
+                if let core::task::Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+                    return output;
+                }
+                core::hint::spin_loop();
+            }
+        }
 
         /// Runs either a serial or parallel body.
         #[track_caller]
@@ -1788,6 +1803,56 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 },
             );
         }
+
+        /// Blocks on `future` like [`Strategy::block_on`], calling `park` to park the calling
+        /// thread between polls when it is not a worker of the pool.
+        fn block_on_with<F: Future>(&self, future: F, park: impl FnMut()) -> F::Output {
+            let _waiting = rayon::Waiting::new();
+            let mut future = core::pin::pin!(future);
+            if let Some(output) = self.groups.pool().block_on_worker(future.as_mut()) {
+                return output;
+            }
+            let _parked = rayon::Parked::new();
+            park_on(future, park)
+        }
+    }
+
+    /// Drives `future` to completion on the calling thread, calling `park` between polls. Each poll
+    /// runs with the thread's context charging, so a parked context is charged for the future's
+    /// own work and not for the parks. Each call tracks its own wakes, since the thread's park
+    /// token is shared with a `park_on` nested inside a poll, whose park would otherwise consume a
+    /// wake meant for this loop.
+    fn park_on<F: Future>(future: F, mut park: impl FnMut()) -> F::Output {
+        struct Unpark {
+            thread: std::thread::Thread,
+            woken: AtomicBool,
+        }
+        impl std::task::Wake for Unpark {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.woken.store(true, AtomicOrdering::Release);
+                self.thread.unpark();
+            }
+        }
+
+        let unpark = Arc::new(Unpark {
+            thread: std::thread::current(),
+            woken: AtomicBool::new(false),
+        });
+        let waker = std::task::Waker::from(Arc::clone(&unpark));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut future = core::pin::pin!(future);
+        loop {
+            if let Poll::Ready(output) = rayon::unparked(|| future.as_mut().poll(&mut cx)) {
+                return output;
+            }
+            while !unpark.woken.swap(false, AtomicOrdering::Acquire) {
+                park();
+            }
+        }
     }
 
     impl Strategy for Rayon {
@@ -1962,11 +2027,11 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                             panic!("strategy job must not be dropped before completion")
                         });
 
-                        // A worker awaits with its context suspended, so it charges its run the
-                        // job's busy time on receipt. A thread outside the pool parks in its
-                        // context, so its run's charge for the park covers the part of the job
-                        // that overlaps it.
-                        if pool.current_placement().is_some() {
+                        // A worker awaits with its context suspended, and a thread in `block_on`
+                        // with its park uncharged, so either charges its run the job's busy time
+                        // on receipt. A thread blocking any other way is charged for its park,
+                        // which covers the part of the job that overlaps it.
+                        if pool.current_placement().is_some() || rayon::is_waiting() {
                             rayon::charge(busy);
                         }
                         match result {
@@ -1999,6 +2064,14 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     })
                 }
             }
+        }
+
+        /// A worker of the strategy's pool runs queued jobs while it waits. Any other thread parks
+        /// between polls with its context parked, so a measured run is charged the future's own
+        /// work and the spawned jobs it receives, and not the wait. A wait nested inside the future
+        /// should go through `block_on` as well: a foreign executor's park there is charged.
+        fn block_on<F: Future>(&self, future: F) -> F::Output {
+            self.block_on_with(future, std::thread::park)
         }
 
         #[track_caller]
@@ -2328,22 +2401,7 @@ mod test {
     /// this because a worker awaiting one job can run another waiting job on its own stack, and
     /// `futures::executor::block_on` panics when called inside itself.
     fn block_on_nested<F: core::future::Future>(future: F) -> F::Output {
-        struct Unpark(std::thread::Thread);
-        impl std::task::Wake for Unpark {
-            fn wake(self: Arc<Self>) {
-                self.0.unpark();
-            }
-        }
-
-        let waker = std::task::Waker::from(Arc::new(Unpark(std::thread::current())));
-        let mut cx = std::task::Context::from_waker(&waker);
-        let mut future = std::pin::pin!(future);
-        loop {
-            if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut cx) {
-                return output;
-            }
-            std::thread::park();
-        }
+        super::park_on(future, std::thread::park)
     }
 
     /// Spins until `bit` is set in `release`. Returns `false` if that takes more than 60 seconds.
@@ -4166,6 +4224,252 @@ mod test {
         let (outer, inner) = run_body(&strategy, &clock);
         assert_eq!(recorded(&strategy, inner, 16), Duration::from_millis(16));
         assert_eq!(recorded(&strategy, outer, 2), Duration::from_millis(18));
+    }
+
+    /// A run outside the pool that waits through `block_on` is charged a spawned job's spin on
+    /// receipt and nothing for the parks, during which the thread's own time advances.
+    #[test]
+    fn block_on_outside_the_pool_charges_the_job_not_the_wait() {
+        #[track_caller]
+        fn wait_for_a_spawn(
+            strategy: &Rayon,
+            clock: &rayon::TestClock,
+        ) -> &'static Location<'static> {
+            let body = || {
+                let job_clock = clock.clone();
+                let future = async {
+                    assert!(rayon::is_waiting(), "the wait must be marked");
+                    strategy
+                        .spawn(1, move |_| job_clock.spin(Duration::from_millis(20)))
+                        .await
+                };
+                strategy.block_on_with(future, || {
+                    clock.spin(Duration::from_millis(50));
+                    std::thread::park();
+                });
+            };
+            strategy.run(1, body, body);
+            Location::caller()
+        }
+
+        let (strategy, clock) = virtual_strategy();
+        let caller = wait_for_a_spawn(&strategy, &clock);
+        assert_eq!(recorded(&strategy, caller, 1), Duration::from_millis(20));
+    }
+
+    /// A run outside the pool that waits through `block_on` is charged the work the future does
+    /// itself between parks.
+    #[test]
+    fn block_on_outside_the_pool_charges_the_future_s_own_work() {
+        #[track_caller]
+        fn work_then_wait(
+            strategy: &Rayon,
+            clock: &rayon::TestClock,
+        ) -> &'static Location<'static> {
+            let body = || {
+                let job_clock = clock.clone();
+                strategy.block_on(async {
+                    clock.spin(Duration::from_millis(7));
+                    strategy
+                        .spawn(1, move |_| job_clock.spin(Duration::from_millis(20)))
+                        .await
+                });
+            };
+            strategy.run(1, body, body);
+            Location::caller()
+        }
+
+        let (strategy, clock) = virtual_strategy();
+        let caller = work_then_wait(&strategy, &clock);
+        assert_eq!(recorded(&strategy, caller, 1), Duration::from_millis(27));
+    }
+
+    /// A run outside the pool that waits for four spawns through `block_on` is charged the sum of
+    /// their spins, and a nested run issued meanwhile is charged too.
+    #[test]
+    fn block_on_outside_the_pool_sums_jobs_and_nested_runs() {
+        #[track_caller]
+        fn wait_for_spawns(
+            strategy: &Rayon,
+            clock: &rayon::TestClock,
+        ) -> &'static Location<'static> {
+            let body = || {
+                strategy.block_on(async {
+                    strategy.map_collect_vec(0..16, |_| clock.spin(Duration::from_millis(1)));
+                    for _ in 0..4 {
+                        let clock = clock.clone();
+                        strategy
+                            .spawn(1, move |_| clock.spin(Duration::from_millis(20)))
+                            .await;
+                    }
+                });
+            };
+            strategy.run(1, body, body);
+            Location::caller()
+        }
+
+        let (strategy, clock) = virtual_strategy();
+        let caller = wait_for_spawns(&strategy, &clock);
+        assert_eq!(recorded(&strategy, caller, 1), Duration::from_millis(96));
+    }
+
+    /// A single-worker strategy runs every spawn inline. Inline jobs on a thread waiting in
+    /// `block_on`, including one that panics, are charged as the run's own work.
+    #[test]
+    fn inline_spawns_while_waiting_are_charged() {
+        let clock = rayon::TestClock::default();
+        let mut strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(1))).unwrap();
+        strategy.clock = rayon::Clock::Virtual(clock.clone());
+        let (_, busy) = rayon::measure_with(rayon::Clock::Virtual(clock.clone()), || {
+            let spin = clock.clone();
+            strategy.block_on(async {
+                strategy
+                    .spawn(1, move |_| spin.spin(Duration::from_millis(20)))
+                    .await
+            });
+            let spin = clock.clone();
+            let panicked = panic::catch_unwind(AssertUnwindSafe(|| {
+                strategy.block_on(async {
+                    strategy
+                        .spawn(1, move |_| {
+                            spin.spin(Duration::from_millis(5));
+                            panic!("spawned job");
+                        })
+                        .await
+                })
+            }));
+            assert!(panicked.is_err());
+            clock.spin(Duration::from_millis(3));
+        });
+        assert_eq!(busy, Duration::from_millis(28));
+    }
+
+    /// A run on a worker that waits through `block_on` services the pool while it waits and is
+    /// charged the job on receipt.
+    #[test]
+    fn block_on_on_a_worker_is_charged_the_job() {
+        #[track_caller]
+        fn wait_for_a_spawn(
+            strategy: &Rayon,
+            clock: &rayon::TestClock,
+        ) -> &'static Location<'static> {
+            let body = || {
+                let clock = clock.clone();
+                strategy
+                    .block_on(strategy.spawn(1, move |_| clock.spin(Duration::from_millis(20))));
+            };
+            strategy.run(1, body, body);
+            Location::caller()
+        }
+
+        let (strategy, clock) = virtual_strategy();
+        let caller = strategy
+            .groups
+            .pool()
+            .install(|| wait_for_a_spawn(&strategy, &clock));
+        assert_eq!(recorded(&strategy, caller, 1), Duration::from_millis(20));
+    }
+
+    /// A run on a worker of one strategy that waits through that strategy's `block_on` for another
+    /// strategy's spawn is charged the job on receipt.
+    #[test]
+    fn block_on_on_a_worker_is_charged_another_strategy_s_job() {
+        #[track_caller]
+        fn wait_for_other(
+            first: &Rayon,
+            other: &Rayon,
+            clock: &rayon::TestClock,
+        ) -> &'static Location<'static> {
+            let body = || {
+                let clock = clock.clone();
+                first.block_on(other.spawn(1, move |_| clock.spin(Duration::from_millis(20))));
+            };
+            first.run(1, body, body);
+            Location::caller()
+        }
+
+        let (first, clock) = virtual_strategy();
+        let mut other = parallel_strategy();
+        other.clock = rayon::Clock::Virtual(clock.clone());
+        let caller = first
+            .groups
+            .pool()
+            .install(|| wait_for_other(&first, &other, &clock));
+        assert_eq!(recorded(&first, caller, 1), Duration::from_millis(20));
+    }
+
+    /// The only worker of a pool that waits in `block_on` runs the queued job it waits for.
+    #[test]
+    fn block_on_on_a_worker_runs_queued_jobs() {
+        let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(1))).unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let output = strategy.groups.pool().install(|| {
+                let (tx, rx) = futures::channel::oneshot::channel();
+                strategy.groups.pool().spawn(move || {
+                    let _ = tx.send(7);
+                });
+                strategy.block_on(rx).unwrap()
+            });
+            done.send(output).unwrap();
+        });
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(10)),
+            Ok(7),
+            "the only worker must run the job it waits for"
+        );
+    }
+
+    /// A `block_on` nested inside a future that `block_on` drives outside the pool keeps the outer
+    /// loop's wake: a sibling that completes while the inner loop runs is polled again.
+    #[test]
+    fn nested_block_on_keeps_the_outer_wake() {
+        let strategy = parallel_strategy();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let sibling_waker: Arc<Mutex<Option<std::task::Waker>>> = Arc::new(Mutex::new(None));
+            let sibling_ready = Arc::new(AtomicBool::new(false));
+            let sibling = {
+                let (waker, ready) = (Arc::clone(&sibling_waker), Arc::clone(&sibling_ready));
+                std::future::poll_fn(move |cx| {
+                    if ready.load(Ordering::SeqCst) {
+                        return std::task::Poll::Ready(());
+                    }
+                    *waker.lock() = Some(cx.waker().clone());
+                    std::task::Poll::Pending
+                })
+            };
+            let nested = async {
+                strategy.block_on(async {
+                    // The sibling completes and wakes the outer loop, then the inner loop parks
+                    // once on the shared thread token before its future is ready.
+                    sibling_ready.store(true, Ordering::SeqCst);
+                    sibling_waker.lock().take().unwrap().wake();
+                    let mut yielded = false;
+                    std::future::poll_fn(move |cx| {
+                        if yielded {
+                            return std::task::Poll::Ready(());
+                        }
+                        yielded = true;
+                        cx.waker().wake_by_ref();
+                        std::task::Poll::Pending
+                    })
+                    .await
+                })
+            };
+            strategy.block_on(futures::future::join(sibling, nested));
+            done.send(()).unwrap();
+        });
+        assert!(
+            finished.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "the outer loop must keep the sibling's wake"
+        );
+    }
+
+    /// The default `block_on` drives a ready future to completion on the calling thread.
+    #[test]
+    fn sequential_block_on_returns_the_output() {
+        assert_eq!(Sequential.block_on(Sequential.spawn(1, |_| 7)), 7);
     }
 
     /// A strategy that does not split runs the whole input once as the single range `0..len` on

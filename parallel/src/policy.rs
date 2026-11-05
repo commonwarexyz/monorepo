@@ -1619,6 +1619,7 @@ mod tests {
         }
         assert_eq!(choose(&mut entry), (RunExecution::Serial, true));
 
+        // The probe's sample blends into the stale estimate, closing a fifth of the gap.
         entry.record(RunExecution::Serial, Duration::from_micros(300));
         assert_eq!(entry.serial_ns.get(), Some(12_060_000));
     }
