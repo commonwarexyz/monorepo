@@ -1547,7 +1547,7 @@ mod tests {
         let expected_value = leaf(seed, *location);
         let encoded = output.operation.as_ref();
         let verify = |bytes: &[u8]| {
-            proof.verify_element_inclusion(&qmdb::hasher::<H>(), bytes, location, &root)
+            proof.verify_element_inclusion(&qmdb::hasher::<H>(), location, bytes, &root)
         };
         match encoding {
             "fixed" => {

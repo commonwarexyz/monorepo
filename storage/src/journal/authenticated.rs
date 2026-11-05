@@ -1617,13 +1617,13 @@ mod tests {
     /// structure.
     fn verify_proof<F: Family + PartialEq>(
         proof: &Proof<F, <Sha256 as commonware_cryptography::Hasher>::Digest>,
-        operations: &[TestOp<F>],
-        start_loc: Location<F>,
-        root: &<Sha256 as commonware_cryptography::Hasher>::Digest,
         hasher: &StandardHasher<Sha256>,
+        start_loc: Location<F>,
+        operations: &[TestOp<F>],
+        root: &<Sha256 as commonware_cryptography::Hasher>::Digest,
     ) -> bool {
         let encoded_ops: Vec<_> = operations.iter().map(|op| op.encode()).collect();
-        proof.verify_range_inclusion(hasher, &encoded_ops, start_loc, root)
+        proof.verify_range_inclusion(hasher, start_loc, &encoded_ops, root)
     }
 
     /// Verify that new() creates an empty authenticated journal.
@@ -2142,10 +2142,10 @@ mod tests {
                 assert_eq!(ops.len() as u64, size);
                 assert!(verify_proof(
                     &proof,
-                    &ops,
+                    &StandardHasher::new(ForwardFold),
                     Location::new(0),
-                    &root,
-                    &StandardHasher::new(ForwardFold)
+                    &ops,
+                    &root
                 ));
                 journal.destroy().await.unwrap();
             });
@@ -2951,10 +2951,10 @@ mod tests {
         let root = journal_root(&journal);
         assert!(verify_proof(
             &proof,
-            &ops,
+            &hasher,
             Location::<F>::new(0),
-            &root,
-            &hasher
+            &ops,
+            &root
         ));
     }
 
@@ -2993,10 +2993,10 @@ mod tests {
         let root = journal_root(&journal);
         assert!(verify_proof(
             &proof,
-            &ops,
+            &hasher,
             Location::<F>::new(0),
-            &root,
-            &hasher
+            &ops,
+            &root
         ));
     }
 
@@ -3040,10 +3040,10 @@ mod tests {
         let root = journal_root(&journal);
         assert!(verify_proof(
             &proof,
-            &ops,
+            &hasher,
             Location::<F>::new(40),
-            &root,
-            &hasher
+            &ops,
+            &root
         ));
     }
 
@@ -3158,10 +3158,10 @@ mod tests {
         // Verify the proof is valid against the historical root
         assert!(verify_proof(
             &proof,
-            &ops,
+            &hasher,
             Location::<F>::new(0),
-            &historical_root,
-            &hasher
+            &ops,
+            &historical_root
         ));
     }
 

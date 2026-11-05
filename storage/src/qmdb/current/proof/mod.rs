@@ -525,8 +525,8 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
         let merkle_root = match self.proof.reconstruct_root_inner(
             &grafting_verifier,
-            &elements,
             start_loc,
+            &elements,
             collected,
         ) {
             Ok(root) => root,
@@ -553,7 +553,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         start_loc: Location<F>,
         ops: &[O],
         chunks: &[[u8; N]],
-        root: &H::Digest,
+        root: &D,
     ) -> bool {
         self.verify_with_chunk_size::<H, O>(start_loc, ops, chunks, N, root)
     }
