@@ -27,9 +27,9 @@
 //! - If it is below the active epoch's final block, acknowledge it.
 //! - If it is above the active epoch's final block, panic.
 //! - Otherwise, read the next epoch's [`EpochInfo`] from it and record the
-//!   block as that epoch's checkpoint in the [`state_sync::Plan`], with
-//!   marshal's finalization of it when marshal has one. Then enter the next
-//!   epoch from the block's commitment, stop the previous engine, and only then
+//!   block and any finalization marshal delivered with it as that epoch's
+//!   checkpoint in the [`state_sync::Plan`]. Then enter the next epoch from
+//!   the block's commitment, stop the previous engine, and only then
 //!   acknowledge the block.
 //!
 //! ```text
@@ -106,8 +106,9 @@
 //! # Failures
 //!
 //! The actor exits cleanly if the gate closes, peer activation fails, marshal
-//! cannot supply a boundary block, its mailbox or a consensus muxer closes, the
-//! active Simplex engine stops without error, or the runtime stops.
+//! cannot supply the boundary block of an epoch without a checkpoint at
+//! startup, its mailbox or a consensus muxer closes, the active Simplex engine
+//! stops without error, or the runtime stops.
 //!
 //! The actor panics if:
 //!
@@ -221,6 +222,9 @@ mod tests {
     };
     type TestStateSync = StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
     type TestPlan = StateSyncPlan<mocks::TestScheme, mocks::TestMarshalVariant>;
+    type TestUpdate = marshal::Update<mocks::TestBlock, mocks::TestScheme, mocks::TestDigest>;
+    type TestMailbox =
+        super::Mailbox<mocks::TestBlock, mocks::TestScheme, mocks::TestDigest, Exact>;
 
     /// Roles that the cluster's epoch infos assign and faults that its nodes exhibit.
     #[derive(Clone, Default)]
@@ -442,7 +446,7 @@ mod tests {
 
     struct Node {
         marshal: mocks::TestMarshalMailbox,
-        orchestrator: super::Mailbox<mocks::TestBlock, Exact>,
+        orchestrator: TestMailbox,
         application: mocks::MockApplication,
         lagging: LaggingReporter,
         acks: AckObserver,
@@ -466,10 +470,10 @@ mod tests {
     }
 
     impl Reporter for LaggingReporter {
-        type Activity = marshal::Update<mocks::TestBlock>;
+        type Activity = TestUpdate;
 
         fn report(&mut self, activity: Self::Activity) -> Feedback {
-            if let marshal::Update::Block(block, ack) = activity {
+            if let marshal::Update::Block(block, _, ack) = activity {
                 let mut held = self.held.lock();
                 if held.0 == Some(block.height()) {
                     held.1.push(ack);
@@ -490,7 +494,7 @@ mod tests {
     /// acknowledgement is held, so its processed height stays below the block.
     #[derive(Clone)]
     struct AckObserver {
-        orchestrator: super::Mailbox<mocks::TestBlock, Exact>,
+        orchestrator: TestMailbox,
         observed: Arc<Mutex<Option<Height>>>,
         held: Arc<Mutex<Option<Exact>>>,
         private: Arc<Mutex<Option<Exact>>>,
@@ -498,7 +502,7 @@ mod tests {
     }
 
     impl AckObserver {
-        fn new(orchestrator: super::Mailbox<mocks::TestBlock, Exact>) -> Self {
+        fn new(orchestrator: TestMailbox) -> Self {
             Self {
                 orchestrator,
                 observed: Arc::new(Mutex::new(None)),
@@ -525,19 +529,21 @@ mod tests {
     }
 
     impl Reporter for AckObserver {
-        type Activity = marshal::Update<mocks::TestBlock>;
+        type Activity = TestUpdate;
 
         fn report(&mut self, activity: Self::Activity) -> Feedback {
-            let marshal::Update::Block(block, ack) = activity else {
+            let marshal::Update::Block(block, finality, ack) = activity else {
                 return self.orchestrator.report(activity);
             };
             if *self.observed.lock() != Some(block.height()) {
-                return self.orchestrator.report(marshal::Update::Block(block, ack));
+                return self
+                    .orchestrator
+                    .report(marshal::Update::Block(block, finality, ack));
             }
             let private = self.private.lock().take().expect("observer must be armed");
             *self.held.lock() = Some(ack);
             self.orchestrator
-                .report(marshal::Update::Block(block, private))
+                .report(marshal::Update::Block(block, finality, private))
         }
     }
 
@@ -1143,7 +1149,7 @@ mod tests {
                 .await;
 
             let (_fence, gate) = Fence::new();
-            let (actor, _mailbox): (_, super::Mailbox<mocks::TestBlock, Exact>) = Actor::new(
+            let (actor, _mailbox): (_, TestMailbox) = Actor::new(
                 context.child("orchestrator"),
                 Config {
                     oracle: control.clone(),
@@ -1199,35 +1205,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn missing_boundary_block_stops_cleanly() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(10));
-        runner.start(|mut context| async move {
-            let mut cluster = Cluster::start_with_seeded_first(&mut context, 1, false).await;
-            let proposal = wait_for_proposal(&context, &cluster.nodes, Epoch::zero()).await;
-            assert_eq!(proposal.round.epoch(), Epoch::zero());
-
-            let boundary =
-                Digested::precomputed(cluster.boundary.clone(), cluster.boundary.digest());
-            let node = &mut cluster.nodes[0];
-            let (acknowledgement, _waiter) = Exact::handle();
-            assert_eq!(
-                node.orchestrator
-                    .report(marshal::Update::Block(boundary, acknowledgement)),
-                Feedback::Ok
-            );
-
-            select! {
-                result = &mut node.orchestrator_handle => {
-                    result.expect("orchestrator should stop cleanly");
-                },
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("orchestrator stayed alive after boundary block lookup failed");
-                },
-            };
-        });
-    }
-
     /// Marshal delivers finalized blocks in height order, so a block above the active epoch's
     /// final block means marshal skipped that final block. The orchestrator panics instead of
     /// acknowledging the block and remaining in the previous epoch.
@@ -1246,11 +1223,18 @@ mod tests {
             // zero.
             let skipped = mocks::child(&cluster.boundary);
             let skipped = Digested::precomputed(skipped.clone(), skipped.digest());
+            let finality = marshal::Finality {
+                commitment: skipped.digest(),
+                finalization: None,
+            };
             let node = &mut cluster.nodes[0];
             let (acknowledgement, waiter) = Exact::handle();
             assert_eq!(
-                node.orchestrator
-                    .report(marshal::Update::Block(skipped, acknowledgement)),
+                node.orchestrator.report(marshal::Update::Block(
+                    skipped,
+                    finality,
+                    acknowledgement
+                )),
                 Feedback::Ok
             );
             let _ = waiter.await;
@@ -1451,7 +1435,10 @@ mod tests {
             let manager = mocks::DirectoryManager::new(oracle.manager());
             let (fence, gate) = Fence::new();
             fence.mark(synced_epoch);
-            let (actor, mailbox): (_, super::Mailbox<AddressedBlock, Exact>) = Actor::new(
+            let (actor, mailbox): (
+                _,
+                super::Mailbox<AddressedBlock, mocks::TestScheme, mocks::TestDigest, Exact>,
+            ) = Actor::new(
                 context.child("orchestrator"),
                 Config {
                     oracle: control.clone(),

@@ -406,7 +406,7 @@ mod tests {
             fixtures::{self, MarshalFixture},
             mocks::{
                 FlushControl, TestApp, TestBlock, TestDb, TestScheme, TestVariant, anchor,
-                digested, test_databases,
+                block_update, digested, test_databases,
             },
         },
     };
@@ -414,7 +414,7 @@ mod tests {
     use commonware_consensus::{
         Application as _, CertifiableBlock as _, Heightable, Reporter as _,
         marshal::{
-            self, Update, ancestry,
+            self, ancestry,
             core::{Mailbox as MarshalMailbox, Processed},
         },
         simplex::{mocks::scheme as scheme_mocks, types::Activity},
@@ -1161,7 +1161,7 @@ mod tests {
                 let block = TestBlock::child(&parent, digest);
                 let (acknowledgement, mut waiter) = Exact::handle();
                 assert!(matches!(
-                    mailbox.report(Update::Block(digested(block.clone()), acknowledgement)),
+                    mailbox.report(block_update(digested(block.clone()), acknowledgement)),
                     Feedback::Ok
                 ));
                 parent = block;
@@ -1249,7 +1249,7 @@ mod tests {
                 let block = TestBlock::child(&parent, digest);
                 let (acknowledgement, mut waiter) = Exact::handle();
                 assert!(matches!(
-                    mailbox.report(Update::Block(digested(block.clone()), acknowledgement)),
+                    mailbox.report(block_update(digested(block.clone()), acknowledgement)),
                     Feedback::Ok
                 ));
                 parent = block;

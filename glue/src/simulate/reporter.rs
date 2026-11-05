@@ -7,8 +7,8 @@
 
 use super::tracker::FinalizationUpdate;
 use commonware_actor::Feedback;
-use commonware_consensus::{Block, Reporter, marshal::Update};
-use commonware_cryptography::PublicKey;
+use commonware_consensus::{Block, Reporter, marshal::Update, simplex::scheme::Scheme};
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_utils::channel::mpsc;
 
 /// Wraps another [`Reporter`] and forwards marshal [`Update`]
@@ -38,13 +38,15 @@ impl<P: PublicKey, R> MonitorReporter<P, R> {
     }
 }
 
-impl<P, B, R> Reporter for MonitorReporter<P, R>
+impl<P, B, S, D, R> Reporter for MonitorReporter<P, R>
 where
     P: PublicKey,
     B: Block,
-    R: Reporter<Activity = Update<B>>,
+    S: Scheme<D>,
+    D: Digest,
+    R: Reporter<Activity = Update<B, S, D>>,
 {
-    type Activity = Update<B>;
+    type Activity = Update<B, S, D>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         if let Update::Tip(round, height, ref digest) = activity {
