@@ -348,8 +348,10 @@ where
     C: Contiguous<Item: Operation<F>>,
     Fut: Future<Output = bool> + Send,
 {
-    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
-    // the init cache, not the OS cache, decides which probes hit.
+    // Unless this scan hashes the journal's leaves too, the Merkle replay reads these operations
+    // again. Neither reader keeps them in the OS page cache, so init doesn't depend on the cache
+    // to share them, at the cost of reading them from disk twice. The init cache, not the OS
+    // cache, decides which probes hit.
     let stream = log
         .replay(range, routing.init_buffer, ReadOptions::DONT_CACHE)
         .await?;

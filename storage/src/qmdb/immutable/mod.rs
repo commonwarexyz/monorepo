@@ -145,8 +145,9 @@ where
             .expect("operations since the floor must fit in usize"),
     );
 
-    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
-    // the init cache, not the OS cache, decides which probes hit.
+    // The Merkle replay reads these operations too. Neither reader keeps them in the OS page
+    // cache, so init doesn't depend on the cache to share them, at the cost of reading them from
+    // disk twice.
     let stream = log
         .replay(
             *inactivity_floor_loc..end,

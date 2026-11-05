@@ -27,6 +27,7 @@ use commonware_codec::{Encode, EncodeShared, Write as _};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{ReadOptions, Spawner, telemetry::metrics::GaugeExt as _};
+use commonware_utils::channel::mpsc;
 use futures::{Stream, StreamExt as _, TryStreamExt as _, pin_mut, stream};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -221,6 +222,13 @@ impl<F: Family> Encoded<F> {
     }
 }
 
+/// A chunk task's clone of the journal, and a clone of the replay's done sender that it drops only
+/// after the journal. Fields drop in declaration order.
+struct ChunkHold<C> {
+    journal: Arc<C>,
+    _done: mpsc::Sender<()>,
+}
+
 /// The Merkle digests of an authenticated journal. Only `mem` is shared with batches.
 pub(crate) struct Tree<F: Family, D: Digest, S: Strategy> {
     mem: Arc<Mem<F, D>>,
@@ -285,13 +293,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         C: Contiguous<Item: EncodeShared>,
         H: Hasher<F, Digest = D> + 'static,
     {
-        if !end.is_valid()
-            || end < self.leaves()
-            || *end > journal.bounds().end
-            || *self.leaves() < journal.bounds().start
-        {
-            return Err(merkle::Error::RangeOutOfBounds(end).into());
-        }
+        self.check_replay_range(journal, end)?;
         let stream = journal
             .replay(
                 *self.leaves()..*end,
@@ -367,21 +369,12 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         Ok(self)
     }
 
-    /// Like [Self::replay], but reads, encodes, and hashes the leaves of contiguous chunks on
-    /// concurrent tasks spawned from `context`, so only parent hashing waits for earlier chunks.
-    /// Reads bypass the OS page cache.
-    pub(crate) async fn replay_chunked<E, C, H>(
-        mut self,
-        context: E,
-        journal: &Arc<C>,
-        hasher: &H,
+    /// Check that `journal` holds the operations from the current size to `end`.
+    fn check_replay_range<C: Contiguous>(
+        &self,
+        journal: &C,
         end: Location<F>,
-    ) -> Result<Self, super::Error<F>>
-    where
-        E: Spawner,
-        C: Contiguous<Item: EncodeShared> + 'static,
-        H: Hasher<F, Digest = D> + 'static,
-    {
+    ) -> Result<(), super::Error<F>> {
         if !end.is_valid()
             || end < self.leaves()
             || *end > journal.bounds().end
@@ -389,6 +382,30 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         {
             return Err(merkle::Error::RangeOutOfBounds(end).into());
         }
+        Ok(())
+    }
+
+    /// Like [Self::replay], but reads, encodes, and hashes the leaves of contiguous chunks on
+    /// concurrent tasks spawned from `context`, so only parent hashing waits for earlier chunks.
+    /// Reads bypass the OS page cache.
+    ///
+    /// Each chunk task holds a clone of `done` until it drops its clone of `journal`, so once
+    /// every clone of `done` is dropped, no chunk task still holds the journal, even after the
+    /// replay is aborted or fails.
+    pub(crate) async fn replay_chunked<E, C, H>(
+        mut self,
+        context: E,
+        journal: &Arc<C>,
+        hasher: &H,
+        end: Location<F>,
+        done: mpsc::Sender<()>,
+    ) -> Result<Self, super::Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: EncodeShared> + 'static,
+        H: Hasher<F, Digest = D> + 'static,
+    {
+        self.check_replay_range(&**journal, end)?;
         let buffer = self.replay_buffer;
         let mut starts = (*self.leaves()..*end)
             .step_by(usize::try_from(REPLAY_CHUNK).expect("chunk size fits usize"));
@@ -397,12 +414,17 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 return;
             };
             let len = REPLAY_CHUNK.min(*end - start);
-            let (journal, hasher) = (journal.clone(), hasher.clone());
+            let hold = ChunkHold {
+                journal: journal.clone(),
+                _done: done.clone(),
+            };
+            let hasher = hasher.clone();
             let task = context
                 .child("replay_chunk")
                 .dedicated()
                 .spawn(move |_| async move {
-                    let stream = journal
+                    let stream = hold
+                        .journal
                         .replay(start..start + len, buffer, ReadOptions::DONT_CACHE)
                         .await?;
                     pin_mut!(stream);
@@ -439,9 +461,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             spawn_next(&mut pending);
             self = self.apply_digests(hasher, digests).await?;
         }
-        if self.leaves() != end {
-            return Err(merkle::Error::DataCorrupted("replay ended before its range").into());
-        }
+        // Every chunk returned exactly the leaves of its range.
+        debug_assert_eq!(self.leaves(), end);
         Ok(self)
     }
 

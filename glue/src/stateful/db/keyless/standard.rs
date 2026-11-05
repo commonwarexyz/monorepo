@@ -12,7 +12,7 @@ use crate::stateful::db::{
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, Spawner};
 use commonware_storage::{
     Context,
     journal::contiguous::{
@@ -277,7 +277,7 @@ where
 impl<F, E, V, H, S> ManagedDb<E> for fixed::Db<F, E, V, H, S>
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     V: FixedValue,
     H: Hasher,
     S: Strategy,
@@ -350,7 +350,7 @@ where
 impl<F, E, V, H, S> ManagedDb<E> for variable::Db<F, E, V, H, S>
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     V: VariableValue,
     H: Hasher,
     S: Strategy,
@@ -435,7 +435,7 @@ where
 impl<F, E, V, H, S, R> StateSyncDb<E, R> for fixed::Db<F, E, V, H, S>
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     V: FixedValue,
     H: Hasher,
     S: Strategy,
@@ -470,7 +470,7 @@ where
 impl<F, E, V, H, S, R> StateSyncDb<E, R> for variable::Db<F, E, V, H, S>
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     V: VariableValue,
     H: Hasher,
     S: Strategy,

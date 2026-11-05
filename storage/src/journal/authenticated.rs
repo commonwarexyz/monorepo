@@ -866,9 +866,9 @@ where
         Self::assemble(journal, merkle, self.frontier, self.hasher).await
     }
 
-    /// Like [Self::finish], but runs `read` over the selected operations while their Merkle
-    /// digests are rebuilt on a task of their own. `read` must drop every clone of the journal
-    /// before it completes.
+    /// Like [Self::finish], but runs `read` over the selected operations while a task of its own
+    /// rebuilds their Merkle digests, hashing chunks of them on several more. `read` must drop
+    /// every clone of the journal before it completes.
     pub(crate) async fn finish_with<T, X, Fut>(
         self,
         read: impl FnOnce(Arc<C>) -> Fut,
@@ -881,14 +881,19 @@ where
     {
         let journal = Arc::new(Self::persist(self.journal, self.selected_end).await?);
 
-        // A reader sharing this task would starve the replay until it finished.
+        // A reader sharing this task would starve the replay until it finished. The replay's chunk
+        // tasks each hold a clone of `done` until they drop the journal, so `done_rx` closing
+        // means none of them holds it.
+        let (done, mut done_rx) = mpsc::channel::<()>(1);
         let replay = {
             let (journal, merkle, hasher) = (journal.clone(), self.merkle, self.hasher.clone());
             self.context
                 .dedicated()
                 .spawn(move |context| async move {
                     let end = Location::new(journal.bounds().end);
-                    let merkle = merkle.replay_chunked(context, &journal, &hasher, end).await;
+                    let merkle = merkle
+                        .replay_chunked(context, &journal, &hasher, end, done)
+                        .await;
                     drop(journal);
                     merkle
                 })
@@ -897,13 +902,27 @@ where
         let value = match read(journal.clone()).await {
             Ok(value) => value,
             Err(error) => {
-                // Release the replay's clone of the journal before returning.
+                // Release every replay clone of the journal, its chunk tasks' included, before
+                // returning.
                 replay.abort().await;
+                while done_rx.recv().await.is_some() {}
                 return Err(error);
             }
         };
-        let merkle = replay.join().await.map_err(JournalError::from);
-        let merkle = merkle.map_err(Error::from)??;
+        let merkle = replay
+            .join()
+            .await
+            .map_err(JournalError::from)
+            .map_err(Error::from)
+            .and_then(|merkle| merkle);
+        let merkle = match merkle {
+            Ok(merkle) => merkle,
+            Err(error) => {
+                // A failed chunk can leave others running until they next yield.
+                while done_rx.recv().await.is_some() {}
+                return Err(error.into());
+            }
+        };
         let journal = Arc::into_inner(journal).expect("read must drop every journal clone");
         Ok((
             Self::assemble(journal, merkle, self.frontier, self.hasher).await?,
@@ -2916,33 +2935,39 @@ mod tests {
     fn test_finish_with_failed_read_releases_journal() {
         deterministic::Runner::default().start(|context| async move {
             type F = mmr::Family;
-            drop(create_journal_with_ops::<F>(context.child("initial"), "failed-read", 50).await);
-            let recovery = TestJournal::<F>::prepare(
-                context.child("failed"),
-                merkle_config("failed-read"),
-                journal_config("failed-read"),
-                None,
-                |_| true,
-                ForwardFold,
-            )
-            .await
-            .unwrap();
-            let result: Result<(_, ()), Error<F>> = recovery
-                .finish_with(|_| async { Err(Error::Merkle(merkle::Error::DataCorrupted("read"))) })
-                .await;
-            assert!(matches!(
-                result,
-                Err(Error::Merkle(merkle::Error::DataCorrupted(_)))
-            ));
-            TestJournal::<F>::new(
-                context.child("reopened"),
-                merkle_config("failed-read"),
-                journal_config("failed-read"),
-                |_| true,
-                ForwardFold,
-            )
-            .await
-            .unwrap();
+            // One replay chunk, and many replay chunks still in flight when the read fails.
+            for count in [50, 1000] {
+                let suffix = format!("failed-read-{count}");
+                drop(create_journal_with_ops::<F>(context.child("initial"), &suffix, count).await);
+                let recovery = TestJournal::<F>::prepare(
+                    context.child("failed"),
+                    merkle_config(&suffix),
+                    journal_config(&suffix),
+                    None,
+                    |_| true,
+                    ForwardFold,
+                )
+                .await
+                .unwrap();
+                let result: Result<(_, ()), Error<F>> = recovery
+                    .finish_with(|_| async {
+                        Err(Error::Merkle(merkle::Error::DataCorrupted("read")))
+                    })
+                    .await;
+                assert!(matches!(
+                    result,
+                    Err(Error::Merkle(merkle::Error::DataCorrupted(_)))
+                ));
+                TestJournal::<F>::new(
+                    context.child("reopened"),
+                    merkle_config(&suffix),
+                    journal_config(&suffix),
+                    |_| true,
+                    ForwardFold,
+                )
+                .await
+                .unwrap();
+            }
         });
     }
 
