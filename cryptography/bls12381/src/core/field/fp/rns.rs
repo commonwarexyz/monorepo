@@ -853,8 +853,26 @@ impl<S: X86V4C> Rns<S> {
         let half = if SUMS <= PASS { SUMS } else { SUMS.div_ceil(2) };
         Self::reduce_pass(simd, 0, half, &mut sums, &mut m, &mut n, &mut bounds);
         if half < SUMS {
+            // The second pass forms its sums only once the first has reduced its own. Returning
+            // the first pass's results on an opaque branch, never taken, ends the basic block
+            // with those results complete, so the compiler neither schedules the second pass's
+            // products among the first pass's reductions, which would spill them, nor sinks the
+            // first pass's steps below this point.
+            if black_box(false) {
+                return Self::reduced(&m, &n, &bounds);
+            }
             Self::reduce_pass(simd, half, SUMS, &mut sums, &mut m, &mut n, &mut bounds);
         }
+        Self::reduced(&m, &n, &bounds)
+    }
+
+    /// Returns the values with the residues `m` and `n` and the bounds `bounds`.
+    #[inline(always)]
+    fn reduced<const SUMS: usize>(
+        m: &[S::U64; SUMS],
+        n: &[S::U64; SUMS],
+        bounds: &[DebugCounter; SUMS],
+    ) -> [Self; SUMS] {
         let mut reduced = [Self {
             m: m[0],
             n: n[0],
@@ -1086,6 +1104,9 @@ impl<S: X86V4C> Field<S> for Rns<S> {
     const PRODUCTS: usize = SUM_PRODUCTS;
 
     const INTERLEAVE: usize = BATCH;
+
+    /// Products multiply-add into their sums, so extension formulas form every product.
+    const SCHOOLBOOK: bool = true;
 
     /// Runs inline: a multiplication is about 200 instructions, and the calling kernel keeps the
     /// operands in registers rather than passing them through memory.
