@@ -58,9 +58,9 @@ const LOCAL_COMPLETION_HEADROOM: usize = 4;
 /// Returns the largest multiple of the artifact byte limit that any core lane's byte bound takes,
 /// or `None` when that multiple overflows.
 ///
-/// [`CoreLimits::derive`] sizes every lane from the same resources, so an artifact byte limit
-/// whose product with this multiple fits cannot overflow a lane.
-pub(crate) fn max_lane_artifacts(resources: &ResourceLimits) -> Option<usize> {
+/// [`CoreLimits::derive`] sizes every lane from the same resources and `chains`, so an artifact
+/// byte limit whose product with this multiple fits cannot overflow a lane.
+pub(crate) fn max_lane_artifacts(resources: &ResourceLimits, chains: usize) -> Option<usize> {
     // One observation retains two artifact ceilings (see `CoreLimits::derive`).
     let batch = resources.max_verification_batch().checked_mul(2)?;
     let local = resources
@@ -72,7 +72,7 @@ pub(crate) fn max_lane_artifacts(resources: &ResourceLimits) -> Option<usize> {
     Some(
         local
             .max(peer)
-            .max(resources.max_dependency_waiters())
+            .max(resources.max_dependency_waiters().checked_add(chains)?)
             .max(TIMER_LANE_ITEMS)
             .max(PERSISTENCE_LANE_ITEMS),
     )
@@ -144,7 +144,12 @@ impl CoreLimits {
             .checked_add(resources.max_outbox_effects())
             .and_then(|items| items.checked_add(LOCAL_COMPLETION_HEADROOM))
             .ok_or(CoreError::CapacityOverflow)?;
-        let resolver_items = resources.max_dependency_waiters();
+        // View-proof requests share the dependency-work bound; DA-certificate requests add at
+        // most one per chain.
+        let resolver_items = resources
+            .max_dependency_waiters()
+            .checked_add(machine.profile().codec().chains())
+            .ok_or(CoreError::CapacityOverflow)?;
         let peer_items = resources.max_inflight_verifications();
         let local_bytes = local_items
             .checked_mul(batch_bytes)
@@ -500,7 +505,7 @@ const fn input_lane<S: Scheme, D: Digest>(input: &Input<S, D>) -> Lane {
     match input {
         Input::Persisted(_) => Lane::PersistenceCompletion,
         Input::TimerFired(_) | Input::ProducerWake | Input::ProductionTimerFired(_) => Lane::Timer,
-        Input::ResolutionCompleted(_) => Lane::ResolverResult,
+        Input::ResolutionCompleted(_) | Input::CertificateResolved(_) => Lane::ResolverResult,
         Input::Observe(_) => Lane::PeerObservation,
         Input::Start
         | Input::RecoveryComplete
@@ -536,7 +541,9 @@ fn input_bytes<S: Scheme, D: Digest>(
                 total.checked_add(artifact.encode_size())
             })
             .ok_or(CoreError::CapacityOverflow)?,
-        Input::ResolutionCompleted(_) | Input::Crypto(_) => per_item_limit,
+        Input::ResolutionCompleted(_) | Input::CertificateResolved(_) | Input::Crypto(_) => {
+            per_item_limit
+        }
         _ => size_of_val(input),
     };
     Ok(measured.max(supplied).max(1))

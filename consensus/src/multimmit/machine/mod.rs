@@ -129,7 +129,9 @@ pub(crate) use reducer::MAX_STAGED_BARRIERS;
 pub(crate) use reducer::machine::Machine;
 pub use reducer::machine::{ChainProgress, Inspection};
 pub(crate) use reducer::{MAX_BATCH_BYTES, MAX_BATCH_EVENTS, MAX_INFLIGHT_BARRIERS};
-pub(crate) use resolution::{ResolutionCompletion, ResolutionJob};
+pub(crate) use resolution::{
+    CertificateCompletion, CertificateJob, ResolutionCompletion, ResolutionJob,
+};
 pub(crate) use scheduler::Lane;
 pub use verification::JobId;
 #[cfg(test)]

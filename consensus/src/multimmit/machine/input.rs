@@ -12,7 +12,7 @@ use crate::{
             finality::{FinalityError, LqcAggregateCompletion},
             job::Generation,
             producer::{BuildCompletion, CustodyCancellation, CustodyCompletion, ProductionTimer},
-            resolution::{ResolutionCompletion, ResolutionError},
+            resolution::{CertificateCompletion, ResolutionCompletion, ResolutionError},
             verification::VerificationCompletion,
             view::{NullificationRecoveryCompletion, ViewError, ViewTimer, VqcAggregateCompletion},
             vote_body::VoteBuilds,
@@ -57,6 +57,8 @@ pub(crate) enum Input<S: Scheme, D: Digest> {
     CustodyCancelled(CustodyCancellation),
     /// Complete one machine-issued view-proof request.
     ResolutionCompleted(ResolutionCompletion<S, D>),
+    /// Complete one machine-issued DA-certificate request.
+    CertificateResolved(CertificateCompletion<S, D>),
     /// Fire one producer deadline bound to a parent.
     ProductionTimerFired(ProductionTimer<D>),
     /// Complete one recovery or aggregation job, which stages a durable change.
@@ -129,6 +131,20 @@ pub(crate) enum Rejection {
     VerificationJobsFull,
     /// The observation cohort exceeds the configured batch bound.
     VerificationBatchTooLarge,
+}
+
+impl Rejection {
+    /// Returns whether the rejection reflects local admission capacity rather than the artifact:
+    /// the same artifact may be admitted once capacity frees.
+    pub(crate) const fn is_capacity(&self) -> bool {
+        matches!(
+            self,
+            Self::FutureArtifactsFull
+                | Self::ArtifactCacheFull
+                | Self::DependencyWaitersFull
+                | Self::VerificationJobsFull
+        )
+    }
 }
 
 /// Result of admitting one item in an observation cohort.

@@ -851,12 +851,35 @@ where
 
     /// Ingests one resolver completion.
     fn ingest_message(&mut self, message: Message<T::Scheme, DigestOf<T>>) -> Result<(), Failure> {
-        let Message::Resolution {
-            span,
-            root,
-            round,
-            completion,
-        } = message;
+        let (span, root, round, completion) = match message {
+            Message::Resolution {
+                span,
+                root,
+                round,
+                completion,
+            } => (span, root, round, completion),
+            Message::Certificate {
+                span,
+                root,
+                completion,
+            } => {
+                let resolved = info_span!(
+                    parent: &span,
+                    "multimmit.voter.resolve_certificate.complete",
+                    chain = completion.job().chain().get().traced(),
+                    after = completion.job().after().get().traced()
+                );
+                return resolved
+                    .in_scope(|| {
+                        self.track_transition(
+                            |core| core.enqueue(Input::CertificateResolved(completion)),
+                            &root,
+                        )?;
+                        Ok::<_, Fatal>(())
+                    })
+                    .at(&root);
+            }
+        };
         let kind = ViewProofKind::from(completion.proof());
         let resolved = info_span!(
             parent: &span,

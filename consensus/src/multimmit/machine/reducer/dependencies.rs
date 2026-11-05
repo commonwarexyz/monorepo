@@ -13,11 +13,12 @@ use crate::{
             capability::Capability,
             durability::Retained,
             input::{Step, StepError, StepStatus},
+            scheduler::{ProtocolComponent, WorkKey},
             util::remove_indexed,
             verification::{Observation, Verdict},
         },
         scheme::Scheme,
-        types::{Anchor, Artifact, ArtifactId},
+        types::{Anchor, Artifact, ArtifactId, LeaderBlock},
     },
     types::Participant,
 };
@@ -518,14 +519,19 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         for key in self.resolution.verification_ready(id) {
             self.cancel_resolution(key);
         }
+        for chain in self.resolution.certificate_verification_ready(id) {
+            self.cancel_certificate_resolution(chain);
+        }
         match artifact.as_ref() {
             Artifact::Nullification(certificate) => {
                 self.cancel_resolution(certificate.view());
             }
             Artifact::Vqc(certificate) => {
                 self.cancel_resolution(certificate.view());
+                self.carry_certificates(certificate.leader());
             }
             Artifact::Lqc(certificate) => {
+                self.carry_certificates(certificate.leader());
                 let covered = self
                     .resolution
                     .keys()
@@ -563,6 +569,40 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
                 .view_observed = true;
         }
         Ok(())
+    }
+
+    /// Queues the DA certificates `leader` carries, so a node that missed the leader block itself
+    /// still admits them, verified like any observed certificate. Only the highest certificate per
+    /// chain above what this node holds is kept.
+    pub(super) fn carry_certificates(&mut self, leader: &LeaderBlock<S, H::Digest>) {
+        if !self.chain.implies_certificates() {
+            return;
+        }
+        let mut carried = false;
+        for proposal in leader.proposals() {
+            let Anchor::Certificate(certificate) = proposal.anchor() else {
+                continue;
+            };
+            let (chain, height) = (certificate.header().chain(), certificate.header().height());
+            if !self.chain.placement_implies_certificate(chain)
+                || self.chain.da.certified_anchor(chain).height() >= height
+            {
+                continue;
+            }
+            let higher = self
+                .resolution
+                .carried
+                .get(&chain)
+                .is_none_or(|held| held.header().height() < height);
+            if higher {
+                self.resolution.carried.insert(chain, certificate.clone());
+                carried = true;
+            }
+        }
+        if carried {
+            self.scheduler
+                .enqueue(WorkKey::Drive(ProtocolComponent::Da));
+        }
     }
 
     /// Makes `provisions` available and queues every artifact that waited only on one of them.

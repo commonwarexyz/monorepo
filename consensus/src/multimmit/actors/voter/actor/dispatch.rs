@@ -8,7 +8,7 @@ use crate::{
     Viewable as _,
     multimmit::{
         actors::{
-            resolver::ResolveRequest,
+            resolver::{CertificateRequest, ResolveRequest},
             voter::{
                 egress::Transmission,
                 tasks::{TaskClass, TaskError, TaskPermit},
@@ -20,7 +20,7 @@ use crate::{
             DurableJob, EffectId, Generation, Publication, ResolverCommand, SendRequest,
             SignRequest, StepError, TimerCommand, VerifyJob,
         },
-        types::{Artifact, ChainId, ViewProof},
+        types::{Artifact, ChainId, DaCertificate, ViewProof},
     },
     types::{Participant, Round},
 };
@@ -357,6 +357,23 @@ where
             }
             ResolverCommand::Cancel(job) => self.resolver.cancel(job),
             ResolverCommand::Reject(job) => self.resolver.reject(job),
+            ResolverCommand::ResolveCertificate(job) => {
+                let span = info_span!(
+                    "multimmit.voter.resolve_certificate",
+                    epoch = self.epoch.get().traced(),
+                    chain = job.chain().get().traced(),
+                    after = job.after().get().traced(),
+                    id = job.issued().id().get().traced(),
+                    generation = job.issued().generation().get().traced()
+                );
+                self.resolver.resolve_certificate(CertificateRequest {
+                    span,
+                    root: root.clone(),
+                    job,
+                })
+            }
+            ResolverCommand::CancelCertificate(job) => self.resolver.cancel_certificate(job),
+            ResolverCommand::RejectCertificate(job) => self.resolver.reject_certificate(job),
             ResolverCommand::Prune(through) => self.resolver.prune(through),
         };
         if !feedback.accepted() {
@@ -523,15 +540,34 @@ where
     }
 
     /// Makes one authenticated proof available after its local signature exposure floor.
+    ///
+    /// A DA certificate is served only once its advance is durable, so peers fetch only
+    /// certificates the server will still hold after a restart.
     pub(crate) fn retain_served(
         &mut self,
         artifact: &Artifact<T::Scheme, DigestOf<T>>,
         boundary: RetentionBoundary,
     ) -> Result<(), Fatal> {
+        if let Artifact::DaCertificate(certificate) = artifact {
+            if boundary == RetentionBoundary::Acknowledged {
+                return self.retain_certificate(certificate.clone());
+            }
+            return Ok(());
+        }
         let Some(proof) = ViewProof::from_artifact(artifact) else {
             return Ok(());
         };
         self.retain(proof, boundary)
+    }
+
+    fn retain_certificate(
+        &mut self,
+        certificate: DaCertificate<T::Scheme, DigestOf<T>>,
+    ) -> Result<(), Fatal> {
+        if !self.resolver.retain_certificate(certificate).accepted() {
+            return Err(Fatal::Closed);
+        }
+        Ok(())
     }
 
     /// Seeds the resolver with the retention floor and every proof durable state still holds.
@@ -542,6 +578,9 @@ where
         }
         for proof in proofs {
             self.retain(proof, RetentionBoundary::Recovered)?;
+        }
+        for certificate in self.machine.machine().resolver_certificates() {
+            self.retain_certificate(certificate)?;
         }
         Ok(())
     }

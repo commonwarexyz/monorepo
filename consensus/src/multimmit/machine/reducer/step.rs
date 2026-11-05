@@ -286,6 +286,9 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
                 self.complete_custody_cancellation(cancellation)
             }
             Input::ResolutionCompleted(completion) => self.complete_resolution(completion),
+            Input::CertificateResolved(completion) => {
+                self.complete_certificate_resolution(completion)
+            }
             Input::ProductionTimerFired(timer) => self.fire_production_timer(timer),
             // Recovery and aggregation completions stage a durable change, so they always park
             // and drain through the scheduler: one FIFO decides staging order for every durable
