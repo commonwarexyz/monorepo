@@ -886,14 +886,9 @@ where
             let (journal, merkle, hasher) = (journal.clone(), self.merkle, self.hasher.clone());
             self.context
                 .dedicated()
-                .spawn(move |_| async move {
-                    let merkle = Journal::<F, E, C, H, S>::align(
-                        merkle,
-                        &journal,
-                        &hasher,
-                        APPLY_BATCH_SIZE,
-                    )
-                    .await;
+                .spawn(move |context| async move {
+                    let end = Location::new(journal.bounds().end);
+                    let merkle = merkle.replay_chunked(context, &journal, &hasher, end).await;
                     drop(journal);
                     merkle
                 })

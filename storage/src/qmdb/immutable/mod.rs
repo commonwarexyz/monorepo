@@ -145,12 +145,13 @@ where
             .expect("operations since the floor must fit in usize"),
     );
 
-    // The journal replays these operations too, so they stay in the OS page cache.
+    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
+    // the init cache, not the OS cache, decides which probes hit.
     let stream = log
         .replay(
             *inactivity_floor_loc..end,
             init_buffer,
-            ReadOptions::default(),
+            ReadOptions::DONT_CACHE,
         )
         .await?;
     pin_mut!(stream);

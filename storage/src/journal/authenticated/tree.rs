@@ -23,10 +23,10 @@ use crate::{
     },
     merkle::{self, Family, Location, Position, Readable, batch, hasher::Hasher, mem::Mem},
 };
-use commonware_codec::{Encode, EncodeShared};
+use commonware_codec::{Encode, EncodeShared, Write as _};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::{ReadOptions, telemetry::metrics::GaugeExt as _};
+use commonware_runtime::{ReadOptions, Spawner, telemetry::metrics::GaugeExt as _};
 use futures::{Stream, StreamExt as _, TryStreamExt as _, pin_mut, stream};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -37,6 +37,15 @@ use std::{
 
 /// Encoded bytes after which a replay batch ends.
 const REPLAY_BATCH_BYTES: usize = 8 * 1024 * 1024;
+
+/// Leaves each task of a chunked replay reads, encodes, and hashes.
+#[cfg(not(test))]
+const REPLAY_CHUNK: u64 = 1 << 17;
+#[cfg(test)]
+const REPLAY_CHUNK: u64 = 64;
+
+/// Chunks a chunked replay reads and hashes concurrently.
+const REPLAY_TASKS: usize = 8;
 
 /// Regions filled concurrently by one request.
 const CONCURRENT_FILLS: usize = 8;
@@ -350,6 +359,108 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             .strategy
             .spawn(encoded.leaves.len(), move |strategy| {
                 let digests = encoded.hash(&strategy, &hasher);
+                batch.add_leaf_digests(digests).merkleize(&mem, &hasher)
+            })
+            .await;
+        self = self.apply_batch(&batch)?;
+        self.flush();
+        Ok(self)
+    }
+
+    /// Like [Self::replay], but reads, encodes, and hashes the leaves of contiguous chunks on
+    /// concurrent tasks spawned from `context`, so only parent hashing waits for earlier chunks.
+    /// Reads bypass the OS page cache.
+    pub(crate) async fn replay_chunked<E, C, H>(
+        mut self,
+        context: E,
+        journal: &Arc<C>,
+        hasher: &H,
+        end: Location<F>,
+    ) -> Result<Self, super::Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: EncodeShared> + 'static,
+        H: Hasher<F, Digest = D> + 'static,
+    {
+        if !end.is_valid()
+            || end < self.leaves()
+            || *end > journal.bounds().end
+            || *self.leaves() < journal.bounds().start
+        {
+            return Err(merkle::Error::RangeOutOfBounds(end).into());
+        }
+        let buffer = self.replay_buffer;
+        let mut starts = (*self.leaves()..*end)
+            .step_by(usize::try_from(REPLAY_CHUNK).expect("chunk size fits usize"));
+        let mut spawn_next = |pending: &mut VecDeque<_>| {
+            let Some(start) = starts.next() else {
+                return;
+            };
+            let len = REPLAY_CHUNK.min(*end - start);
+            let (journal, hasher) = (journal.clone(), hasher.clone());
+            let task = context
+                .child("replay_chunk")
+                .dedicated()
+                .spawn(move |_| async move {
+                    let stream = journal
+                        .replay(start..start + len, buffer, ReadOptions::DONT_CACHE)
+                        .await?;
+                    pin_mut!(stream);
+                    let mut digests = Vec::with_capacity(len as usize);
+                    let mut encoded = Vec::new();
+                    let mut loc = Location::<F>::new(start);
+                    while let Some(batch) = stream.next().await {
+                        for item in batch?.items {
+                            encoded.clear();
+                            item.write(&mut encoded);
+                            digests
+                                .push(hasher.leaf_digest(F::location_to_position(loc), &encoded));
+                            loc += 1;
+                        }
+                    }
+                    if digests.len() as u64 != len {
+                        return Err(
+                            merkle::Error::DataCorrupted("replay ended before its range").into(),
+                        );
+                    }
+                    Ok::<_, super::Error<F>>(digests)
+                });
+            pending.push_back(task.abort_on_drop());
+        };
+
+        // Hash chunks ahead of applying them, with at most `REPLAY_TASKS` in flight, and apply
+        // them in position order.
+        let mut pending = VecDeque::with_capacity(REPLAY_TASKS);
+        for _ in 0..REPLAY_TASKS {
+            spawn_next(&mut pending);
+        }
+        while let Some(task) = pending.pop_front() {
+            let digests = task.join().await.map_err(JournalError::from)??;
+            spawn_next(&mut pending);
+            self = self.apply_digests(hasher, digests).await?;
+        }
+        if self.leaves() != end {
+            return Err(merkle::Error::DataCorrupted("replay ended before its range").into());
+        }
+        Ok(self)
+    }
+
+    /// Append leaves with `digests`, hashing their parents on the strategy.
+    async fn apply_digests<H>(
+        mut self,
+        hasher: &H,
+        digests: Vec<D>,
+    ) -> Result<Self, super::Error<F>>
+    where
+        H: Hasher<F, Digest = D> + 'static,
+    {
+        self.metrics.replayed_leaves.inc_by(digests.len() as u64);
+        let mem = self.snapshot();
+        let hasher = hasher.clone();
+        let batch = self.new_batch();
+        let batch = self
+            .strategy
+            .spawn(digests.len(), move |_| {
                 batch.add_leaf_digests(digests).merkleize(&mem, &hasher)
             })
             .await;

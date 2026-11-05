@@ -302,9 +302,10 @@ where
     C: Contiguous<Item: Operation<F>>,
     Fut: Future<Output = bool> + Send,
 {
-    // The journal replays these operations too, so they stay in the OS page cache.
+    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
+    // the init cache, not the OS cache, decides which probes hit.
     let stream = log
-        .replay(range, routing.init_buffer, ReadOptions::default())
+        .replay(range, routing.init_buffer, ReadOptions::DONT_CACHE)
         .await?;
     pin_mut!(stream);
     let mut batches: Vec<RoutedBatch<_>> = (0..routing.workers)
@@ -440,7 +441,7 @@ where
         reader,
         snapshot,
         init_buffer,
-        ReadOptions::default(),
+        ReadOptions::DONT_CACHE,
         cache_size,
         |is_active, old_loc| {
             activity.push(is_active);
