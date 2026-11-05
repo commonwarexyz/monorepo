@@ -652,27 +652,38 @@ impl<S: Scheme, D: Digest> DaState<S, D> {
     /// it as a `DaVotesOffer`; this drains those offers instead of scanning a block store.
     /// A chain with a reservation in flight is skipped (one unacknowledged run at a time), and the
     /// already-voted prefix is filtered so a lagging offer never re-proposes a durable choice. Each
-    /// chain contributes at most `run_limit` consecutive blocks, and `limit` bounds the total.
+    /// chain contributes at most `run_limit` consecutive blocks and at most its `credit` (indexed
+    /// by chain), and `limit` bounds the total. A chain without credit is skipped, so its full
+    /// duty family never holds back the votes of another chain.
+    ///
+    /// Also returns whether a chain with an eligible vote was skipped for lack of credit.
     pub(super) fn ready_votes(
         &self,
         limit: usize,
         run_limit: usize,
-    ) -> Vec<Arc<SignedTransactionBlock<S, D>>> {
+        credit: &[usize],
+    ) -> (Vec<Arc<SignedTransactionBlock<S, D>>>, bool) {
         if limit == 0 || run_limit == 0 {
-            return Vec::new();
+            return (Vec::new(), false);
         }
         let mut ready = Vec::with_capacity(limit.min(self.chains.len()));
+        let mut starved = false;
         for index in self.idle_chains_round_robin() {
             let remaining = limit - ready.len();
+            let credit = credit.get(index).copied().unwrap_or(0);
+            if credit == 0 {
+                starved |= self.eligible_offered(index, 1).next().is_some();
+                continue;
+            }
             ready.extend(
-                self.eligible_offered(index, run_limit.min(remaining))
+                self.eligible_offered(index, run_limit.min(remaining).min(credit))
                     .cloned(),
             );
             if ready.len() == limit {
                 break;
             }
         }
-        ready
+        (ready, starved)
     }
 
     /// Returns chain indexes without a DA-vote reservation in flight, in round-robin order from the

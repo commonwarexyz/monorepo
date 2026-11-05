@@ -26,9 +26,12 @@ const DA_PUBLICATIONS_PER_SLOT: usize = 3;
 const OWN_MESSAGES_PER_VIEW: usize = 4;
 
 /// Outstanding discharges per bounded family, or the bound on them.
-#[derive(Default)]
 pub(crate) struct ObligationCounts {
-    pub(crate) da: usize,
+    /// Data-availability duties, by chain index.
+    ///
+    /// Each chain has its own bound, so a chain whose duties cannot retire (its certificates are
+    /// late or lost) holds back signing for that chain alone.
+    pub(crate) da: Vec<usize>,
     pub(crate) own_messages: usize,
 }
 
@@ -55,17 +58,16 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
     /// the messages of the views below it but not of its own view (an L-QC that sets the floor
     /// is still published), so the duties span the retired view through the current one: one
     /// view more than the window.
+    ///
+    /// Data-availability duties are bounded per chain, by three per slot of its pipeline window.
     pub(crate) fn obligation_family_bounds(&self) -> ObligationCounts {
         let da = self
             .profile
             .protocol()
             .chain_limits()
             .iter()
-            .try_fold(0usize, |slots, limits| {
-                slots.checked_add(limits.pipeline_window() as usize)
-            })
-            .and_then(|slots| slots.checked_mul(DA_PUBLICATIONS_PER_SLOT))
-            .unwrap_or(usize::MAX);
+            .map(|limits| (limits.pipeline_window() as usize).saturating_mul(DA_PUBLICATIONS_PER_SLOT))
+            .collect();
         let durable_window = self
             .durable
             .state
@@ -132,9 +134,46 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         }
     }
 
+    /// Returns how many more data-availability duties each chain's family admits, by chain index.
+    ///
+    /// A DA vote carries at most one duty, so this many more votes fit on the chain.
+    pub(super) fn da_credit(&self) -> Vec<usize> {
+        let bounds = self.obligation_family_bounds();
+        let Some(counts) = self.obligation_counts(core::iter::empty()) else {
+            return vec![0; bounds.da.len()];
+        };
+        bounds
+            .da
+            .iter()
+            .zip(&counts.da)
+            .map(|(bound, count)| bound.saturating_sub(*count))
+            .collect()
+    }
+
     /// Returns whether the outstanding duties plus `added` fit every family bound.
     fn family_fits(&self, added: impl Iterator<Item = DischargeKind>) -> bool {
-        let mut counts = ObligationCounts::default();
+        let bounds = self.obligation_family_bounds();
+        self.obligation_counts(added).is_some_and(|counts| {
+            counts.own_messages <= bounds.own_messages
+                && counts
+                    .da
+                    .iter()
+                    .zip(&bounds.da)
+                    .all(|(count, bound)| count <= bound)
+        })
+    }
+
+    /// Returns the outstanding duties plus `added`, or `None` when one names a chain outside the
+    /// epoch.
+    fn obligation_counts(
+        &self,
+        added: impl Iterator<Item = DischargeKind>,
+    ) -> Option<ObligationCounts> {
+        let chains = self.profile.protocol().chain_limits().iter().count();
+        let mut counts = ObligationCounts {
+            da: vec![0; chains],
+            own_messages: 0,
+        };
         // A batch can outlive its certified items. Family limits count outstanding duties;
         // the artifact cache independently bounds every payload retained by the whole batch.
         let queued = self
@@ -157,10 +196,11 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
             .filter(|until| !self.discharge_satisfied(*until, Successor::Current))
         {
             match until {
-                DischargeKind::BlockCertifiedAtLeast { .. }
-                | DischargeKind::VoteCertifiedAtLeast { .. }
-                | DischargeKind::CertificateSupersededAbove { .. } => {
-                    counts.da = counts.da.saturating_add(1);
+                DischargeKind::BlockCertifiedAtLeast { chain, .. }
+                | DischargeKind::VoteCertifiedAtLeast { chain, .. }
+                | DischargeKind::CertificateSupersededAbove { chain, .. } => {
+                    let count = counts.da.get_mut(chain.index())?;
+                    *count = count.saturating_add(1);
                 }
                 // Exit publications are already bounded by the durable outbox. Their proofs may
                 // outlive compacted forwarding history until a higher exit replaces them.
@@ -170,8 +210,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
                 }
             }
         }
-        let bounds = self.obligation_family_bounds();
-        counts.da <= bounds.da && counts.own_messages <= bounds.own_messages
+        Some(counts)
     }
 
     /// Returns the fact that ends the publication of `artifact`, or `None` when it already holds.

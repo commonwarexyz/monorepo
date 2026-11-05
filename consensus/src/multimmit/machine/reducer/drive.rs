@@ -295,9 +295,20 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         // per producer chain, so a reservation may never exceed that ceiling.
         let encodable = self.profile.codec().chains().saturating_mul(DA_VOTE_RUN);
         let available = resource_slots.min(budget.remaining()).min(encodable);
-        let blocks = self.chain.ready_da_votes(available.max(1), DA_VOTE_RUN);
+        // Each chain's run stops at the duties its family still admits, so a chain whose
+        // certificates are late holds back only its own votes; it waits for a certificate to
+        // retire its duties.
+        let credit = self.da_credit();
+        let (blocks, starved) =
+            self.chain
+                .ready_da_votes(available.max(1), DA_VOTE_RUN, &credit);
         if blocks.is_empty() {
-            return Ok((WorkStatus::Complete, Capabilities::new()));
+            let status = if starved {
+                WorkStatus::Blocked
+            } else {
+                WorkStatus::Complete
+            };
+            return Ok((status, Capabilities::new()));
         }
         if blocks.len() > resource_slots {
             return Ok((WorkStatus::Blocked, Capabilities::new()));

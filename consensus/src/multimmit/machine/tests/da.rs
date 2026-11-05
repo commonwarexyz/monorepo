@@ -16,9 +16,9 @@ use crate::{
             capability::{Capability, ChainCommand, ObservedBlock, ValidatorCommand},
             chain::ChainState,
             durability::{
-                Change, DischargeKind, DomainEvent, DomainEventCodecConfig, DurableEffect,
-                EffectCompletion, OutboxEntry, PersistDirective, Publication, SendRequest,
-                SignEffect, SignRequest, Snapshot, SnapshotCodecConfig,
+                Change, Cursor, DischargeKind, DomainEvent, DomainEventCodecConfig, DurableEffect,
+                EffectCompletion, EffectId, OutboxEntry, PersistDirective, Publication,
+                SendRequest, SignEffect, SignRequest, Snapshot, SnapshotCodecConfig,
             },
             input::{
                 CryptoCompletion, DaVotesOffer, Input, ObservationStatus, Rejection, StepError,
@@ -566,7 +566,7 @@ fn certified_items_in_mixed_da_batches_do_not_exhaust_live_obligations() {
             .values()
             .flat_map(OutboxEntry::discharges)
             .count()
-            > machine.obligation_family_bounds().da
+            > machine.obligation_family_bounds().da.iter().sum::<usize>()
     );
     assert_eq!(snapshot.certified_tips()[0].height(), Height::zero());
     assert!(
@@ -586,7 +586,8 @@ fn typed_obligation_family_bounds_match_their_retained_state() {
     let retained_views = usize::try_from(machine.profile().view_retention().get() + 2).unwrap();
 
     assert_eq!(bounds.own_messages, retained_views * 4);
-    assert_eq!(bounds.da, participants * depth * 3);
+    // Each chain bounds its own data-availability duties.
+    assert_eq!(bounds.da, vec![depth * 3; participants]);
 }
 
 #[test]
@@ -952,6 +953,57 @@ fn da_votes_eligible_behind_one_barrier_reserve_as_one_batch() {
         .cloned()
         .collect::<Vec<_>>();
     assert_eq!(coalesced, vec![expected]);
+}
+
+#[test]
+fn a_chain_with_a_full_duty_family_does_not_hold_back_another_chains_da_votes() {
+    let profile = Harness::validator(0)
+        .participants(6)
+        .depth(4)
+        .resources(
+            TEST_RESOURCES
+                .with_max_cached_artifacts(NZUsize!(64))
+                .with_max_inflight_verifications(NZUsize!(3))
+                .with_max_outbox_effects(NZUsize!(64)),
+        )
+        .profile();
+    let (mut machine, _) = start_profile(profile);
+    let runs = (1..=2)
+        .map(|chain| da_run_headers(&machine, chain, 2, "saturated"))
+        .collect::<Vec<_>>();
+    let routed = (1..=2u32)
+        .map(|chain| route_blocks(&mut machine, chain, &runs[(chain - 1) as usize]))
+        .collect::<Vec<_>>();
+
+    // Chain one's certificates never arrived: blocks signed for it fill its duty family.
+    let bound = machine.obligation_family_bounds().da[1] as u64;
+    let epoch = machine.profile().protocol().epoch();
+    let tip = machine.profile().protocol().genesis().tips()[1];
+    let stuck = (100..100 + bound)
+        .map(|height| {
+            SignRequest::TransactionBlock(
+                TransactionBlockHeader::new(
+                    epoch,
+                    ChainId::new(1),
+                    Height::new(height),
+                    tip.digest(),
+                    digest(&height.to_be_bytes()),
+                )
+                .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    machine.durable.state.signing_reservations.insert(
+        EffectId::from_cursor(Cursor::new(1_000)),
+        SignEffect::new(stuck.into()),
+    );
+    assert_eq!(machine.da_credit()[1], 0);
+
+    // Both chains offer eligible votes: only chain two's are reserved, and chain one waits.
+    stage_eligible(&mut machine, 1, &routed[0]);
+    stage_eligible(&mut machine, 2, &routed[1]);
+    let step = machine.settle(poll_seed(), Until::CursorAdvance);
+    assert_eq!(reserved_da_runs(&step.persist_job()), vec![runs[1].clone()]);
 }
 
 #[test]

@@ -758,6 +758,10 @@ derives every remaining ceiling before startup.
 - Own-message publications stay outstanding until their view retires, so their family bound counts
   the larger of `W + 1` and the views the durable state still holds. After a restart under a smaller
   view retention, the writer's larger window fits until the next exit compacts it.
+- Data-availability publications (a block, a DA vote and a certificate per pipeline slot) are
+  bounded per chain, three per slot of its pipeline window. A chain whose certificates are late
+  holds back signing for that chain only: a DA-vote batch takes each chain's run up to the
+  duties its family still admits.
 - Verification, application, signing, recovery, and aggregation jobs each consume a class-specific
   permit plus reserved completion capacity before becoming mandatory. Remote application work has
   `min(d, max_verification_batch)` slots per producer and that width times the producer count
