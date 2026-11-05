@@ -68,15 +68,17 @@ where
     Participate(Box<PreparedEpoch<V, C>>),
 }
 
-/// State-sync epoch metadata paired with the block height of its certified floor.
-pub(super) struct StateSyncStart<V, P, D>
+/// Epoch info recovered from the plan at startup, with the height of the
+/// certified floor when it comes from state-sync material and no floor when it
+/// comes from a checkpoint.
+pub(super) struct RecoveredStart<V, P, D>
 where
     V: BlsVariant,
     P: PublicKey,
     D: Directory<P>,
 {
     pub(super) info: EpochInfo<V, P, D>,
-    pub(super) floor: Height,
+    pub(super) floor: Option<Height>,
 }
 
 /// Returns whether a state-sync floor lies after its epoch's midpoint, so the
@@ -215,7 +217,7 @@ where
     pub(super) async fn setup(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
-        state_sync: Option<StateSyncStart<V, C::PublicKey, B::Directory>>,
+        recovered: Option<RecoveredStart<V, C::PublicKey, B::Directory>>,
     ) -> Setup<V, C> {
         self.metrics.set_phase(Phase::Setup);
 
@@ -227,16 +229,16 @@ where
         let epoch = bounds.epoch();
         self.metrics.set_epoch(epoch.get());
 
-        // Prefer the epoch committed earlier in this run, then state-sync
-        // material, then the finalized boundary block.
+        // Prefer the epoch committed earlier in this run, then the material
+        // recovered from the plan, then the finalized boundary block.
         let current = store
             .current()
             .filter(|current| current.epoch == epoch)
             .cloned();
         let already_committed = current.is_some();
-        let state_sync_floor = state_sync.as_ref().map(|start| start.floor);
+        let state_sync_floor = recovered.as_ref().and_then(|start| start.floor);
         let follow = state_sync_skips_inclusion_prefix(&self.epocher, state_sync_floor);
-        let info = match current.or_else(|| state_sync.map(|start| start.info)) {
+        let info = match current.or_else(|| recovered.map(|start| start.info)) {
             Some(info) => info,
             None => {
                 let Some(info) = self.boundary_epoch_info(epoch).await else {

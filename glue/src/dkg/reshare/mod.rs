@@ -210,9 +210,11 @@
 //! and finalized dealer logs) are journaled under [`Config::partition_prefix`].
 //! Secret material is held only in the [`SecretStore`](crate::dkg::SecretStore).
 //! The current epoch's [`EpochInfo`](crate::dkg::types::EpochInfo) is not
-//! journaled: after a restart it is read from the finalized boundary block, or
-//! from the [`state_sync::Plan`](crate::dkg::state_sync::Plan) after state sync.
-//! If neither is available locally, the actor follows that epoch.
+//! journaled. After a restart, the actor reads it from state-sync material or the
+//! epoch's checkpoint in the [`state_sync::Plan`](crate::dkg::state_sync::Plan),
+//! and otherwise from the finalized boundary block. If none is available locally,
+//! the actor follows that epoch. [Marshal Retention](crate::dkg#marshal-retention)
+//! describes when each source applies.
 //!
 //! A player records a dealing before acknowledging it. Before acknowledging a
 //! finalized inclusion-window block, a participating actor records any dealer log

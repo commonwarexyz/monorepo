@@ -9,8 +9,9 @@
 //! # Epoch Lifecycle
 //!
 //! Upon startup, the orchestrator reads the active epoch, its [`EpochInfo`], and
-//! the certified root its Simplex engine starts from: from the
-//! [`state_sync::Plan`] if it resolves to material, and otherwise from marshal (see
+//! the certified root its Simplex engine starts from. It takes them from
+//! state-sync material or the epoch's checkpoint in the [`state_sync::Plan`],
+//! and otherwise from the epoch's boundary block in marshal (see
 //! [Marshal Boundary](#marshal-boundary)).
 //!
 //! Upon entering an epoch, the orchestrator:
@@ -25,12 +26,12 @@
 //!
 //! - If it is below the active epoch's final block, acknowledge it.
 //! - If it is above the active epoch's final block, panic.
-//! - Otherwise, read the next epoch's [`EpochInfo`] from it, enter the next epoch
-//!   from the block's commitment, stop the previous engine, and only then
-//!   acknowledge the block.
+//! - Otherwise, read the next epoch's [`EpochInfo`] from it, record that epoch's
+//!   checkpoint in the [`state_sync::Plan`], enter the next epoch from the block's
+//!   commitment, stop the previous engine, and only then acknowledge the block.
 //!
 //! ```text
-//! finalized boundary or state-sync artifact: EpochInfo(N)
+//! state-sync artifact, checkpoint, or finalized boundary: EpochInfo(N)
 //!                         |
 //!                         v
 //!              Gate(N) -> activate peers
@@ -48,7 +49,7 @@
 //!              final block carries EpochInfo(N + 1)
 //!                         |
 //!                         v
-//!              enter N + 1 -> stop N -> acknowledge
+//!              checkpoint N + 1 -> enter N + 1 -> stop N -> acknowledge
 //! ```
 //!
 //! Once started, the orchestrator requires marshal to deliver every finalized
@@ -62,9 +63,10 @@
 //! Epoch zero is anchored by marshal's height-zero block, and each later epoch by
 //! the final block of the previous epoch. Without state-sync material, the
 //! orchestrator recovers the epoch containing marshal's next unprocessed height
-//! and reads that epoch's [`EpochInfo`] and Simplex root from its boundary block,
-//! which must remain in marshal's finalized block archive (see the
-//! [retention requirement](crate::dkg#marshal-retention)).
+//! and takes that epoch's [`EpochInfo`] and Simplex root from its
+//! [checkpoint](crate::dkg#marshal-retention). For an epoch without a checkpoint,
+//! such as epoch zero on a new node, it reads them from the boundary block in
+//! marshal's finalized block archive and records the checkpoint.
 //!
 //! # Catching Up
 //!
@@ -147,7 +149,7 @@ mod tests {
     use crate::dkg::{
         fence::Fence,
         network::{Addresses, Manager},
-        state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
+        state_sync::{Checkpoint, Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
         tests::{
             max_supported_mode,
             mocks::{self, FilteredReceiver},
@@ -177,14 +179,20 @@ mod tests {
         Clock as _, Handle, Quota, Runner, Spawner as _, Supervisor as _, buffer::paged::CacheRef,
         deterministic,
     };
-    use commonware_storage::archive::immutable;
+    use commonware_storage::{archive::prunable, translator::TwoCap};
     use commonware_utils::{
         Acknowledgement, N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng,
-        acknowledgement::Exact, non_empty, ordered::Set, probability, sequence::Unit,
+        acknowledgement::{Exact, ExactWaiter},
+        non_empty,
+        ordered::Set,
+        probability,
+        sequence::Unit,
+        sync::Mutex,
     };
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::Arc,
         time::Duration,
     };
 
@@ -200,6 +208,7 @@ mod tests {
         success_rate: probability!(1.0),
     };
     type TestStateSync = StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
+    type TestPlan = StateSyncPlan<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
 
     /// Roles that the cluster's epoch infos assign and faults that its nodes exhibit.
     #[derive(Clone, Default)]
@@ -345,14 +354,16 @@ mod tests {
                 } else {
                     None
                 };
+                let context = context.child("node").with_attribute("index", index);
+                let plan = node_plan(context.child("state_sync_plan"), index, state_sync).await;
                 started.push(
                     Node::start(
-                        context.child("node").with_attribute("index", index),
+                        context,
                         &oracle,
                         fixture,
                         index,
                         boundary,
-                        state_sync,
+                        plan,
                         gate_epoch,
                         oracle.manager(),
                         dealers,
@@ -377,14 +388,29 @@ mod tests {
             index: usize,
         ) {
             self.nodes[index].stop().await;
+            let plan = node_plan(context.child("state_sync_plan"), index, None).await;
+            self.recover(context, fixture, index, plan, Epoch::new(1))
+                .await;
+        }
+
+        /// Starts stopped node `index` from its storage with `plan`, with its gate
+        /// open through `gate_epoch`.
+        async fn recover(
+            &mut self,
+            context: deterministic::Context,
+            fixture: &mocks::SchemeFixture,
+            index: usize,
+            plan: TestPlan,
+            gate_epoch: Epoch,
+        ) {
             self.nodes[index] = Node::start(
                 context,
                 &self.oracle,
                 fixture,
                 index,
                 None,
-                None,
-                Epoch::new(1),
+                plan,
+                gate_epoch,
                 self.oracle.manager(),
                 &fixture.participants,
                 false,
@@ -406,10 +432,101 @@ mod tests {
         marshal: mocks::TestMarshalMailbox,
         orchestrator: super::Mailbox<mocks::TestBlock, Exact>,
         application: mocks::MockApplication,
+        lagging: LaggingReporter,
+        acks: AckObserver,
         orchestrator_handle: Handle<()>,
         marshal_handle: Handle<()>,
         // Held so the epoch gate stays open for the node's lifetime.
         _fence: Fence,
+    }
+
+    /// A marshal reporter that withholds its acknowledgement of one height, holding
+    /// marshal's processed height below it while the other reporters move on.
+    #[derive(Clone, Default)]
+    struct LaggingReporter {
+        held: Arc<Mutex<(Option<Height>, Vec<Exact>)>>,
+    }
+
+    impl LaggingReporter {
+        fn hold(&self, height: Height) {
+            self.held.lock().0 = Some(height);
+        }
+    }
+
+    impl Reporter for LaggingReporter {
+        type Activity = marshal::Update<mocks::TestBlock>;
+
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
+            if let marshal::Update::Block(block, ack) = activity {
+                let mut held = self.held.lock();
+                if held.0 == Some(block.height()) {
+                    held.1.push(ack);
+                } else {
+                    ack.acknowledge();
+                }
+            }
+            Feedback::Ok
+        }
+    }
+
+    /// Forwards marshal's updates to the orchestrator and observes when it acknowledges one
+    /// chosen height.
+    ///
+    /// The orchestrator receives that height's block with a private acknowledgement whose
+    /// waiter [`Self::acknowledged`] awaits. Marshal's own acknowledgement is held, so its
+    /// processed height stays below the block.
+    #[derive(Clone)]
+    struct AckObserver {
+        orchestrator: super::Mailbox<mocks::TestBlock, Exact>,
+        observed: Arc<Mutex<Option<Height>>>,
+        held: Arc<Mutex<Option<Exact>>>,
+        waiter: Arc<Mutex<Option<ExactWaiter>>>,
+    }
+
+    impl AckObserver {
+        fn new(orchestrator: super::Mailbox<mocks::TestBlock, Exact>) -> Self {
+            Self {
+                orchestrator,
+                observed: Arc::new(Mutex::new(None)),
+                held: Arc::new(Mutex::new(None)),
+                waiter: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn observe(&self, height: Height) {
+            *self.observed.lock() = Some(height);
+        }
+
+        /// Waits until the orchestrator acknowledges the observed height.
+        async fn acknowledged(&self, context: &deterministic::Context) {
+            let waiter = loop {
+                if let Some(waiter) = self.waiter.lock().take() {
+                    break waiter;
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            };
+            waiter
+                .await
+                .expect("orchestrator must acknowledge the observed block");
+        }
+    }
+
+    impl Reporter for AckObserver {
+        type Activity = marshal::Update<mocks::TestBlock>;
+
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
+            let marshal::Update::Block(block, ack) = activity else {
+                return self.orchestrator.report(activity);
+            };
+            if *self.observed.lock() != Some(block.height()) {
+                return self.orchestrator.report(marshal::Update::Block(block, ack));
+            }
+            let (private, waiter) = Exact::handle();
+            *self.held.lock() = Some(ack);
+            *self.waiter.lock() = Some(waiter);
+            self.orchestrator
+                .report(marshal::Update::Block(block, private))
+        }
     }
 
     impl Node {
@@ -420,7 +537,7 @@ mod tests {
             fixture: &mocks::SchemeFixture,
             index: usize,
             boundary: Option<mocks::TestBlock>,
-            state_sync: Option<TestStateSync>,
+            state_sync: TestPlan,
             gate_epoch: Epoch,
             manager: M,
             dealers: &[mocks::TestPublicKey],
@@ -432,7 +549,7 @@ mod tests {
             let public_key = fixture.participants[index].clone();
             let control = oracle.control(public_key.clone());
             let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(16));
-            let partition_prefix = format!("orchestrator-node-{index}");
+            let partition_prefix = node_partition_prefix(index);
 
             let (backfill_sender, backfill_receiver) = control
                 .register(BACKFILL_CHANNEL, TEST_QUOTA)
@@ -459,7 +576,7 @@ mod tests {
             );
 
             let finalizations_by_height =
-                immutable::Archive::init(context.child("finalizations_by_height"), {
+                prunable::Archive::init(context.child("finalizations_by_height"), {
                     let _: () = mocks::TestScheme::certificate_codec_config_unbounded();
                     archive_config(
                         &partition_prefix,
@@ -470,7 +587,7 @@ mod tests {
                 })
                 .await
                 .expect("failed to initialize finalizations archive");
-            let finalized_blocks = immutable::Archive::init(
+            let finalized_blocks = prunable::Archive::init(
                 context.child("finalized_blocks"),
                 archive_config(&partition_prefix, "finalized_blocks", page_cache, ()),
             )
@@ -508,16 +625,6 @@ mod tests {
                 },
             )
             .await;
-            let state_sync = StateSyncPlan::init(
-                context.child("state_sync_plan"),
-                StateSyncConfig {
-                    partition_prefix: partition_prefix.clone(),
-                    max_participants: NZU32!(16),
-                    max_supported_mode: max_supported_mode(),
-                },
-                state_sync,
-            )
-            .await;
             let application = mocks::MockApplication::default();
 
             // Mark the epoch in the reshare actor's place, as the actor does
@@ -543,30 +650,16 @@ mod tests {
                 },
             );
             let orchestrator = mailbox.clone();
-            let reporters = Reporters::from((mocks::MarshalApplication::default(), mailbox));
+            let acks = AckObserver::new(mailbox);
+            let lagging = LaggingReporter::default();
+            let reporters = Reporters::from((
+                Reporters::from((mocks::MarshalApplication::default(), acks.clone())),
+                lagging.clone(),
+            ));
             let marshal_handle = marshal_actor.start_unbuffered(reporters, resolver);
 
             if let Some(block) = &boundary {
-                assert!(
-                    marshal
-                        .certified(
-                            block.context().round,
-                            Digested::precomputed(block.clone(), block.digest())
-                        )
-                        .await
-                );
-                let finalization = make_finalization(
-                    Proposal::new(
-                        Round::new(Epoch::zero(), View::new(1)),
-                        View::zero(),
-                        block.digest(),
-                    ),
-                    &fixture.schemes,
-                );
-                assert_eq!(
-                    marshal.report(Activity::Finalization(finalization)),
-                    Feedback::Ok
-                );
+                finalize(&mut marshal, block, &fixture.schemes).await;
             }
 
             let votes = control
@@ -587,6 +680,8 @@ mod tests {
                 marshal,
                 orchestrator,
                 application,
+                lagging,
+                acks,
                 orchestrator_handle,
                 marshal_handle,
                 _fence: fence,
@@ -606,31 +701,78 @@ mod tests {
         }
     }
 
+    fn node_partition_prefix(index: usize) -> String {
+        format!("orchestrator-node-{index}")
+    }
+
+    /// Opens the plan stored under node `index`'s partition prefix, persisting
+    /// `state_sync` if given.
+    async fn node_plan(
+        context: deterministic::Context,
+        index: usize,
+        state_sync: Option<TestStateSync>,
+    ) -> TestPlan {
+        StateSyncPlan::init(
+            context,
+            StateSyncConfig {
+                partition_prefix: node_partition_prefix(index),
+                max_participants: NZU32!(16),
+                max_supported_mode: max_supported_mode(),
+            },
+            state_sync,
+        )
+        .await
+    }
+
+    /// Returns a prunable finalized archive config whose sections hold one height each.
+    ///
+    /// Marshal's prune does nothing to an immutable archive. With one height per section,
+    /// pruning marshal below a height removes every block beneath it.
     fn archive_config<C>(
         prefix: &str,
         name: &str,
         page_cache: CacheRef,
         codec_config: C,
-    ) -> immutable::Config<C> {
-        immutable::Config {
+    ) -> prunable::Config<TwoCap, C> {
+        prunable::Config {
+            translator: TwoCap,
             metadata_partition: format!("{prefix}-{name}-metadata"),
-            freezer_table_partition: format!("{prefix}-{name}-freezer-table"),
-            freezer_table_initial_size: 64,
-            freezer_table_resize_frequency: 10,
-            freezer_table_resize_chunk_size: 10,
-            freezer_key_partition: format!("{prefix}-{name}-freezer-key"),
-            freezer_key_page_cache: page_cache,
-            freezer_value_partition: format!("{prefix}-{name}-freezer-value"),
-            freezer_value_target_size: 1024,
-            freezer_value_compression: None,
-            ordinal_partition: format!("{prefix}-{name}-ordinal"),
-            items_per_section: NZU64!(10),
+            key_partition: format!("{prefix}-{name}-key"),
+            key_page_cache: page_cache,
+            value_partition: format!("{prefix}-{name}-value"),
+            compression: None,
             codec_config,
+            items_per_section: NZU64!(1),
+            key_write_buffer: NZUsize!(1024),
+            value_write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
-            freezer_key_write_buffer: NZUsize!(1024),
-            freezer_value_write_buffer: NZUsize!(1024),
-            ordinal_write_buffer: NZUsize!(1024),
         }
+    }
+
+    /// Certifies `block` in `marshal` and reports its finalization in the round of
+    /// its context.
+    async fn finalize(
+        marshal: &mut mocks::TestMarshalMailbox,
+        block: &mocks::TestBlock,
+        schemes: &[mocks::TestScheme],
+    ) {
+        let context = block.context();
+        assert!(
+            marshal
+                .certified(
+                    context.round,
+                    Digested::precomputed(block.clone(), block.digest())
+                )
+                .await
+        );
+        let finalization = make_finalization(
+            Proposal::new(context.round, context.parent.0, block.digest()),
+            schemes,
+        );
+        assert_eq!(
+            marshal.report(Activity::Finalization(finalization)),
+            Feedback::Ok
+        );
     }
 
     async fn wait_for_block(
@@ -671,6 +813,74 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
         }
         panic!("missing application proposal");
+    }
+
+    async fn wait_for_processed(
+        context: &deterministic::Context,
+        marshal: &mocks::TestMarshalMailbox,
+        height: Height,
+    ) {
+        for _ in 0..100 {
+            let processed = marshal.get_processed().await;
+            if processed.map(|processed| processed.height()) == Some(height) {
+                return;
+            }
+            context.sleep(Duration::from_millis(10)).await;
+        }
+        panic!("marshal must process height {height}");
+    }
+
+    /// Finalizes the first block of epoch one on `node`, waits until marshal has
+    /// processed it, and prunes marshal below it until the boundary block at height
+    /// one that introduced epoch one is gone. Returns the first block of epoch one.
+    async fn prune_epoch_one_boundary(
+        context: &deterministic::Context,
+        node: &mut Node,
+        boundary: &mocks::TestBlock,
+        schemes: &[mocks::TestScheme],
+    ) -> mocks::TestBlock {
+        let first = make_child_block(
+            boundary,
+            Round::new(Epoch::new(1), View::new(1)),
+            View::zero(),
+            None,
+        );
+        finalize(&mut node.marshal, &first, schemes).await;
+        wait_for_processed(context, &node.marshal, first.height()).await;
+
+        node.marshal.prune(first.height());
+        for _ in 0..100 {
+            if node.marshal.get_block(boundary.height()).await.is_none() {
+                return first;
+            }
+            context.sleep(Duration::from_millis(10)).await;
+        }
+        panic!("marshal must prune the boundary block");
+    }
+
+    /// Builds the block after `parent`, proposed in `round` on a parent notarized in
+    /// `parent_view`, carrying `info` if given.
+    fn make_child_block(
+        parent: &mocks::TestBlock,
+        round: Round,
+        parent_view: View,
+        info: Option<EpochInfo<mocks::TestBlsVariant, mocks::TestPublicKey>>,
+    ) -> mocks::TestBlock {
+        let context = mocks::TestContext {
+            round,
+            leader: parent.context().leader.clone(),
+            parent: (parent_view, parent.digest()),
+        };
+        let height = parent.height().next();
+        let block = mocks::TestBlock::new::<Sha256>(context, parent.digest(), height, height.get());
+        match info {
+            Some(info) => block
+                .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestPublicKey>(
+                    NZU32!(16),
+                    Payload::EpochInfo(info),
+                ),
+            None => block,
+        }
     }
 
     fn make_height_one_block(
@@ -794,13 +1004,15 @@ mod tests {
             )
             .await;
             let network = network.start();
+            let node_context = context.child("node");
+            let plan = node_plan(node_context.child("state_sync_plan"), 0, None).await;
             let mut node = Node::start(
-                context.child("node"),
+                node_context,
                 &oracle,
                 &fixture,
                 0,
                 None,
-                None,
+                plan,
                 Epoch::new(1),
                 mocks::FailingManager(oracle.manager()),
                 &fixture.participants,
@@ -867,7 +1079,7 @@ mod tests {
             let partition_prefix = "orchestrator-marshal-shutdown".to_string();
 
             let finalizations_by_height =
-                immutable::Archive::init(context.child("finalizations_by_height"), {
+                prunable::Archive::init(context.child("finalizations_by_height"), {
                     let _: () = mocks::TestScheme::certificate_codec_config_unbounded();
                     archive_config(
                         &partition_prefix,
@@ -878,7 +1090,7 @@ mod tests {
                 })
                 .await
                 .expect("failed to initialize finalizations archive");
-            let finalized_blocks = immutable::Archive::init(
+            let finalized_blocks = prunable::Archive::init(
                 context.child("finalized_blocks"),
                 archive_config(&partition_prefix, "finalized_blocks", page_cache, ()),
             )
@@ -1161,7 +1373,7 @@ mod tests {
                 backfill,
             );
             let finalizations_by_height =
-                immutable::Archive::init(context.child("finalizations_by_height"), {
+                prunable::Archive::init(context.child("finalizations_by_height"), {
                     let _: () = mocks::TestScheme::certificate_codec_config_unbounded();
                     archive_config(
                         &partition_prefix,
@@ -1172,7 +1384,7 @@ mod tests {
                 })
                 .await
                 .expect("failed to initialize finalizations archive");
-            let finalized_blocks = immutable::Archive::init(
+            let finalized_blocks = prunable::Archive::init(
                 context.child("finalized_blocks"),
                 archive_config(&partition_prefix, "finalized_blocks", page_cache, ()),
             )
@@ -1368,6 +1580,283 @@ mod tests {
             let proposal = wait_for_proposal(&context, &cluster.nodes[0..1], Epoch::new(1)).await;
 
             assert_eq!(proposal.round.epoch(), Epoch::new(1));
+        });
+    }
+
+    /// A node restarts after marshal pruned the boundary block that introduced its
+    /// epoch, so only the checkpoint recorded at that boundary can supply the epoch.
+    #[test]
+    fn restart_after_boundary_pruned_starts_from_checkpoint() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut cluster = Cluster::start_with_fixture(&mut context, &fixture, true).await;
+            let boundary = cluster.boundary.clone();
+            prune_epoch_one_boundary(&context, &mut cluster.nodes[0], &boundary, &fixture.schemes)
+                .await;
+
+            cluster
+                .restart(
+                    context
+                        .child("node")
+                        .with_attribute("index", 0)
+                        .with_attribute("restart", 1),
+                    &fixture,
+                    0,
+                )
+                .await;
+            let proposal = wait_for_proposal(&context, &cluster.nodes[0..1], Epoch::new(1)).await;
+
+            assert_eq!(proposal.round.epoch(), Epoch::new(1));
+        });
+    }
+
+    /// A crash after the orchestrator records the next epoch's checkpoint but before it
+    /// acknowledges the final block leaves marshal's processed height in the earlier epoch.
+    /// The test stages that state while the node is stopped, recording epoch two's
+    /// checkpoint with epoch one's final block unprocessed and its boundary block pruned.
+    /// Restart must start epoch one from its checkpoint and enter epoch two once marshal
+    /// delivers the final block.
+    #[test]
+    fn restart_before_final_block_acknowledged_starts_from_previous_checkpoint() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut cluster = Cluster::start_with_fixture(&mut context, &fixture, true).await;
+            let boundary = cluster.boundary.clone();
+            let first = prune_epoch_one_boundary(
+                &context,
+                &mut cluster.nodes[0],
+                &boundary,
+                &fixture.schemes,
+            )
+            .await;
+            let info = make_epoch_info(
+                Epoch::new(2),
+                fixture.participants.iter().cloned(),
+                fixture.participants.iter().cloned(),
+            );
+            let last = make_child_block(
+                &first,
+                Round::new(Epoch::new(1), View::new(2)),
+                View::new(1),
+                Some(info.clone()),
+            );
+
+            cluster.nodes[0].stop().await;
+            let restart = context
+                .child("node")
+                .with_attribute("index", 0)
+                .with_attribute("restart", 1);
+            let plan = node_plan(restart.child("state_sync_plan"), 0, None).await;
+            plan.record(
+                restart.child("crash_cut"),
+                Checkpoint {
+                    info,
+                    boundary: last.digest(),
+                },
+                Epoch::new(1),
+            )
+            .await;
+            cluster
+                .recover(restart, &fixture, 0, plan, Epoch::new(2))
+                .await;
+            let proposal = wait_for_proposal(&context, &cluster.nodes[0..1], Epoch::new(1)).await;
+            assert_eq!(proposal.round.epoch(), Epoch::new(1));
+
+            let node = &mut cluster.nodes[0];
+            finalize(&mut node.marshal, &last, &fixture.schemes).await;
+
+            // The orchestrator acknowledges the final block only after entering epoch two.
+            wait_for_processed(&context, &node.marshal, last.height()).await;
+        });
+    }
+
+    /// A disabled plan neither records nor reads checkpoints, so a node restarted
+    /// with one after marshal pruned the boundary block that introduced its epoch
+    /// has no source for the epoch and stops cleanly.
+    #[test]
+    fn disabled_plan_restart_after_boundary_pruned_stops_cleanly() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut cluster = Cluster::start_with_fixture(&mut context, &fixture, true).await;
+            let boundary = cluster.boundary.clone();
+            prune_epoch_one_boundary(&context, &mut cluster.nodes[0], &boundary, &fixture.schemes)
+                .await;
+
+            cluster.nodes[0].stop().await;
+            cluster
+                .recover(
+                    context
+                        .child("node")
+                        .with_attribute("index", 0)
+                        .with_attribute("restart", 1),
+                    &fixture,
+                    0,
+                    StateSyncPlan::disabled(),
+                    Epoch::new(1),
+                )
+                .await;
+            let node = &mut cluster.nodes[0];
+            select! {
+                result = &mut node.orchestrator_handle => {
+                    result.expect("orchestrator must stop cleanly");
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("orchestrator must exit without a source for its epoch");
+                },
+            };
+            assert!(node.application.proposals().is_empty());
+        });
+    }
+
+    /// The next epoch's checkpoint must be durable before the orchestrator acknowledges the
+    /// final block that carries it, since that acknowledgement lets marshal's processed
+    /// height pass the block and pruning remove it. Stopping the node as soon as the
+    /// orchestrator acknowledges epoch one's final block must leave epoch two's checkpoint
+    /// stored.
+    #[test]
+    fn checkpoint_is_durable_before_final_block_acknowledged() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut cluster =
+                Cluster::start_with_gate_epoch(&mut context, &fixture, true, Epoch::new(2)).await;
+            let boundary = cluster.boundary.clone();
+            let first = prune_epoch_one_boundary(
+                &context,
+                &mut cluster.nodes[0],
+                &boundary,
+                &fixture.schemes,
+            )
+            .await;
+            let participants = || fixture.participants.iter().cloned();
+            let last_one = make_child_block(
+                &first,
+                Round::new(Epoch::new(1), View::new(2)),
+                View::new(1),
+                Some(make_epoch_info(
+                    Epoch::new(2),
+                    participants(),
+                    participants(),
+                )),
+            );
+
+            // Stop the node as soon as the orchestrator acknowledges epoch one's final block.
+            let node = &mut cluster.nodes[0];
+            node.acks.observe(last_one.height());
+            finalize(&mut node.marshal, &last_one, &fixture.schemes).await;
+            node.acks.acknowledged(&context).await;
+            node.stop().await;
+
+            let plan = node_plan(context.child("state_sync_plan"), 0, None).await;
+            assert!(
+                plan.checkpoint(context.child("verify"), Epoch::new(2))
+                    .await
+                    .is_some(),
+                "checkpoint 2 must be durable once the final block of epoch 1 is acknowledged"
+            );
+        });
+    }
+
+    /// Marshal delivers up to its pending acknowledgement window ahead of its processed
+    /// height, so while another reporter withholds one acknowledgement the orchestrator
+    /// can cross two boundaries and record two newer checkpoints. A restart still recovers
+    /// epoch one from marshal's processed height, so checkpoint one must survive them.
+    #[test]
+    fn checkpoint_retention_follows_processed_height() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut cluster =
+                Cluster::start_with_gate_epoch(&mut context, &fixture, true, Epoch::new(3)).await;
+            let boundary = cluster.boundary.clone();
+            let first = prune_epoch_one_boundary(
+                &context,
+                &mut cluster.nodes[0],
+                &boundary,
+                &fixture.schemes,
+            )
+            .await;
+
+            // Withhold the lagging reporter's acknowledgement of epoch one's final block, then
+            // finalize through epoch two's final block so the orchestrator enters epoch three
+            // while marshal's processed height stays at 2.
+            let participants = || fixture.participants.iter().cloned();
+            let last_one = make_child_block(
+                &first,
+                Round::new(Epoch::new(1), View::new(2)),
+                View::new(1),
+                Some(make_epoch_info(
+                    Epoch::new(2),
+                    participants(),
+                    participants(),
+                )),
+            );
+            let first_two = make_child_block(
+                &last_one,
+                Round::new(Epoch::new(2), View::new(1)),
+                View::zero(),
+                None,
+            );
+            let last_two = make_child_block(
+                &first_two,
+                Round::new(Epoch::new(2), View::new(2)),
+                View::new(1),
+                Some(make_epoch_info(
+                    Epoch::new(3),
+                    participants(),
+                    participants(),
+                )),
+            );
+            let node = &mut cluster.nodes[0];
+            node.lagging.hold(last_one.height());
+            for block in [&last_one, &first_two, &last_two] {
+                finalize(&mut node.marshal, block, &fixture.schemes).await;
+            }
+            wait_for_proposal(&context, &cluster.nodes[0..1], Epoch::new(3)).await;
+            let node = &mut cluster.nodes[0];
+            assert_eq!(
+                node.marshal
+                    .get_processed()
+                    .await
+                    .map(|processed| processed.height()),
+                Some(first.height())
+            );
+            assert!(node.marshal.get_block(boundary.height()).await.is_none());
+
+            // The stopped node holds a checkpoint for every epoch from the recovered epoch one
+            // through epoch three.
+            node.stop().await;
+            let restart = context
+                .child("node")
+                .with_attribute("index", 0)
+                .with_attribute("restart", 1);
+            let plan = node_plan(restart.child("state_sync_plan"), 0, None).await;
+            for epoch in 1..=3 {
+                assert!(
+                    plan.checkpoint(restart.child("verify"), Epoch::new(epoch))
+                        .await
+                        .is_some(),
+                    "checkpoint {epoch} must survive"
+                );
+            }
+
+            // Marshal redelivers heights 3 through 5 together, so the restarted orchestrator
+            // may leave epoch one before Simplex proposes in it. Any proposal shows that it
+            // started, since without checkpoint one it would exit before entering an epoch.
+            cluster
+                .recover(restart, &fixture, 0, plan, Epoch::new(3))
+                .await;
+            let node = &cluster.nodes[0];
+            for _ in 0..50 {
+                if !node.application.proposals().is_empty() {
+                    return;
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            panic!("restarted orchestrator must produce a proposal");
         });
     }
 }
