@@ -1864,12 +1864,14 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     ) -> impl Future<Output = ()> + Send + 'static + use<E, A> {
         let item_size = Inner::<E, A>::CHUNK_SIZE_U64;
         let mut warm = super::blobs::Warm::new(self.metrics.prefetch.clone());
+        let mut budget = super::blobs::Budget::default();
         for (run, blob, first) in self.immutable_runs(positions) {
             let ranges = positions[run]
                 .iter()
                 .map(|&pos| ((pos - first).saturating_mul(item_size), item_size));
-            warm.push(blob, ranges);
+            warm.push(blob, ranges, &mut budget);
         }
+        budget.finish();
         warm.run()
     }
 
@@ -2474,6 +2476,39 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_fixed_prefetch_stays_within_budget() {
+        deterministic::Runner::default().start(|context| async move {
+            // A 50-page cache gives each prefetch a budget of half of Main's 45 pages.
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(50));
+            let cfg = Config {
+                page_cache: cache.clone(),
+                ..test_cfg(NZU64!(100))
+            };
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for i in 0..400u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // A prefetch covering far more pages than its budget, across three blobs, reads at
+            // most the budget, starting from its first positions.
+            cache.clear();
+            let positions: Vec<u64> = (0..300).collect();
+            journal.prefetch(&positions).await;
+            let read = counter(&context.encode(), "prefetched_pages");
+            assert!(read > 0 && read <= 22, "read={read}");
+            let served = journal.try_read_many_sync(&positions);
+            assert_eq!(served[0], Some(test_digest(0)));
+            // A sealed blob's partial last page stays in memory, so check items read from pages.
+            assert!(served[100..190].iter().all(Option::is_none));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_fixed_prefetch_survives_full_cache() {
         deterministic::Runner::default().start(|context| async move {
             // A 50-page cache admits demand-read pages through a 5-page probation queue.
@@ -2494,9 +2529,9 @@ mod tests {
             let filler: Vec<u64> = (0..200).collect();
             journal.read_many(&filler).await.unwrap();
 
-            // Prefetched items spanning 22 pages, more than the probation queue holds but within
-            // the cache, are all served from the cache.
-            let positions: Vec<u64> = (250..280).collect();
+            // Prefetched items spanning 19 pages, more than the probation queue holds but within
+            // the prefetch budget (half of Main's 45 pages), are all served from the cache.
+            let positions: Vec<u64> = (250..275).collect();
             assert!(
                 journal
                     .try_read_many_sync(&positions)

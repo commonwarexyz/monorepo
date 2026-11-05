@@ -242,9 +242,10 @@ where
     /// The future does not borrow the database, so it can run alongside any database operation,
     /// and it can be dropped at any point. Prefetching is best effort. Failures are logged, and
     /// warmed pages are not pinned: they stay cached until read only while the page cache's Main
-    /// section has room for them. Warms in flight that together cover more pages than Main holds
-    /// evict each other's pages before they are read, which can cost more reads than not
-    /// prefetching. Warmed pages also displace Main residents not read since the eviction sweep
+    /// section has room for them. One prefetch warms at most half as many pages as Main holds,
+    /// skipping the rest with a warning, but warms in flight that together cover more pages than
+    /// Main holds evict each other's pages before they are read, which can cost more reads than
+    /// not prefetching. Warmed pages also displace Main residents not read since the eviction sweep
     /// last passed them, so prefetching many cold keys evicts the existing working set faster
     /// than reading them on demand would.
     pub fn prefetch(

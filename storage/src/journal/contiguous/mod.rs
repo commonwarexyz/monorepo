@@ -244,6 +244,9 @@ pub trait Contiguous: Send + Sync {
     /// The future does not borrow the journal, so it can run alongside any journal operation, and
     /// it can be dropped at any point. Prefetching is best effort. Positions outside `bounds()`
     /// are skipped, and failures are logged.
+    ///
+    /// One prefetch warms at most half as many pages as the page cache's Main section holds,
+    /// starting from the lowest positions. The rest are skipped and a warning is logged.
     #[commonware_macros::stability(ALPHA)]
     fn prefetch(&self, positions: &[u64]) -> impl Future<Output = ()> + Send + 'static + use<Self>;
 

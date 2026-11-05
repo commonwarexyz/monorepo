@@ -684,6 +684,13 @@ impl CacheRef {
         self.page_size
     }
 
+    /// The number of pages the page cache's Main section holds, which bounds how many warmed pages
+    /// stay cached together until read.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn main_capacity(&self) -> usize {
+        self.cache.read().cache.main_capacity()
+    }
+
     /// Returns a unique id for the next blob that will use this page cache.
     pub fn next_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)

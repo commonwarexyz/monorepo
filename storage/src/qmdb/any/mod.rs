@@ -2684,8 +2684,8 @@ pub(crate) mod test {
     }
 
     // Instantiate the prefetch tests for one variant over a page cache the tests can clear. The
-    // tests expect prefetched keys to be served from the cache, so the cache's Main section must
-    // hold every page they warm.
+    // tests expect prefetched keys to be served from the cache, so each prefetch's page budget,
+    // half of the cache's Main section, must cover every page they warm.
     macro_rules! prefetch_test {
         ($name:ident, $db:ty, $cfg:ident) => {
             paste::paste! {

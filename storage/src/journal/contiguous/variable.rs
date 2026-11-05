@@ -496,6 +496,11 @@ pub struct Reader<'a, E: Context, V: Codec> {
     metrics: Arc<Metrics<E>>,
 }
 
+/// The share of a prefetch's remaining page budget its offset pages may use, as a divisor, so the
+/// frames they resolve keep the rest.
+#[commonware_macros::stability(ALPHA)]
+const OFFSETS_SHARE: usize = 2;
+
 /// The frames a prefetch warms: every frame position interleaved with its same-blob successor,
 /// and the immutable views of the data blobs holding them.
 #[commonware_macros::stability(ALPHA)]
@@ -530,8 +535,14 @@ impl<B: RBlob> PrefetchFrames<B> {
         Some((start, end.checked_sub(start)?))
     }
 
-    /// Collect the frames not yet `warmed` whose ranges `offsets` resolves, marking them warmed.
-    fn warm(&self, offsets: &[Option<u64>], warmed: &mut [bool]) -> super::blobs::Warm<B> {
+    /// Collect the frames not yet `warmed` whose ranges `offsets` resolves, as far as `budget`
+    /// allows, marking them warmed.
+    fn warm(
+        &self,
+        offsets: &[Option<u64>],
+        warmed: &mut [bool],
+        budget: &mut super::blobs::Budget,
+    ) -> super::blobs::Warm<B> {
         let mut warm = super::blobs::Warm::new(self.metrics.clone());
         let (mut frames, mut warmed) = (self.frames.as_slice(), warmed);
         for (blob, view) in &self.blobs {
@@ -550,7 +561,7 @@ impl<B: RBlob> PrefetchFrames<B> {
                 *warmed = true;
                 Some(range)
             });
-            warm.push(view.clone(), ranges);
+            warm.push(view.clone(), ranges, budget);
         }
         warm
     }
@@ -604,59 +615,62 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         let offset_metrics = self.offsets.prefetch_metrics();
 
         async move {
+            let mut budget = super::blobs::Budget::default();
+
             // Warm the frames whose offsets are resolved while reading the others.
             let mut warmed = vec![false; plan.frames.len()];
-            let early = plan.warm(&offsets, &mut warmed).run();
+            let early = plan.warm(&offsets, &mut warmed, &mut budget).run();
 
-            // Warm the pages of every offset in an immutable view, resolved or not, then read the
-            // missing offsets from the warmed pages, one batched read per offsets blob, and warm
-            // the frames they resolve.
+            // Warm the pages of every offset in an immutable view, resolved or not, within a share
+            // of the budget that leaves the rest to the frames they resolve, then resolve the
+            // missing offsets from the cache and warm those frames. An offset whose page the
+            // budget skipped stays unresolved, so its frame is skipped too.
             let late = async {
                 let offset_size = fixed::Inner::<E, u64>::CHUNK_SIZE;
                 let item_size = offset_size.get() as u64;
-                let (lookups, resolved, offset_metrics) =
-                    (&plan.lookups, &offsets, &offset_metrics);
-                let reads = offset_runs
+                let lookups = &plan.lookups;
+                let runs: Vec<_> = offset_runs
                     .into_iter()
-                    .map(|(run, blob, first)| async move {
-                        let ranges: Vec<(u64, u64)> = lookups[run.clone()]
+                    .map(|(run, blob, first)| {
+                        let ranges = lookups[run.clone()]
                             .iter()
-                            .map(|&pos| ((pos - first).saturating_mul(item_size), item_size))
-                            .collect();
-                        let warm = blob.warm(&ranges).await;
-                        let warm_failed = warm.is_err();
-                        offset_metrics.record(warm);
-
-                        // Only offsets the view holds entirely can be read from it.
-                        let written = first.saturating_add(blob.size() / item_size);
-                        let missing: Vec<usize> = run
-                            .filter(|&idx| resolved[idx].is_none() && lookups[idx] < written)
-                            .collect();
-                        let items: Vec<u64> = missing
-                            .iter()
-                            .map(|&idx| (lookups[idx] - first) * item_size)
-                            .collect();
-                        let mut buf = vec![0u8; items.len() * offset_size.get()];
-
-                        // The read is served from the pages just warmed, so only its failure
-                        // counts, and only after a successful warm, which would otherwise have
-                        // counted the pages the read then fails on.
-                        match blob.read_many_into(&mut buf, &items, offset_size).await {
-                            Ok(_) => Some((missing, buf)),
-                            Err(err) => {
-                                if !warm_failed {
-                                    offset_metrics.record(Err(err));
-                                }
-                                None
-                            }
+                            .map(|&pos| ((pos - first).saturating_mul(item_size), item_size));
+                        let ranges = budget.admit_share(&blob, ranges, OFFSETS_SHARE);
+                        (run, blob, first, ranges)
+                    })
+                    .collect();
+                let warms = runs.iter().map(|(_, blob, _, ranges)| blob.warm(ranges));
+                for result in join_all(warms).await {
+                    offset_metrics.record(result);
+                }
+                for (run, blob, first, _) in &runs {
+                    // Only offsets the view holds entirely can be read from it.
+                    let written = first.saturating_add(blob.size() / item_size);
+                    let missing: Vec<usize> = run
+                        .clone()
+                        .filter(|&idx| offsets[idx].is_none() && lookups[idx] < written)
+                        .collect();
+                    let items: Vec<u64> = missing
+                        .iter()
+                        .map(|&idx| (lookups[idx] - first) * item_size)
+                        .collect();
+                    let mut buf = vec![0u8; items.len() * offset_size.get()];
+                    let mut uncached = blob
+                        .try_read_many_sync_into(&mut buf, &items, offset_size)
+                        .into_iter()
+                        .peekable();
+                    for (at, (idx, item)) in missing
+                        .into_iter()
+                        .zip(buf.chunks(offset_size.get()))
+                        .enumerate()
+                    {
+                        if uncached.next_if_eq(&at).is_none() {
+                            offsets[idx] = <u64 as DecodeExt<()>>::decode(Copying(item)).ok();
                         }
-                    });
-                for (missing, buf) in join_all(reads).await.into_iter().flatten() {
-                    for (idx, item) in missing.into_iter().zip(buf.chunks(offset_size.get())) {
-                        offsets[idx] = <u64 as DecodeExt<()>>::decode(Copying(item)).ok();
                     }
                 }
-                plan.warm(&offsets, &mut warmed).run().await;
+                plan.warm(&offsets, &mut warmed, &mut budget).run().await;
+                budget.finish();
             };
             futures::join!(early, late);
         }
@@ -3179,6 +3193,48 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_variable_prefetch_shares_its_budget_across_offsets_and_frames() {
+        deterministic::Runner::default().start(|context| async move {
+            // A 50-page cache gives each prefetch a budget of half of Main's 45 pages.
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(50));
+            let cfg = Config {
+                partition: "prefetch-budget".into(),
+                items_per_section: NZU64!(1000),
+                compression: None,
+                codec_config: ((..=64).into(), ()),
+                page_cache: cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, Vec<u8>>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for i in 0..2000u64 {
+                (journal, _) = journal.append(&vec![i as u8; 10]).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // A cold prefetch of frames needing far more offset and frame pages than its budget
+            // reads at most the budget across both journals, and skips the rest.
+            cache.clear();
+            let positions: Vec<u64> = (0..60).map(|i| 13 * i).collect();
+            journal.prefetch(&positions).await;
+            let read: u64 = context
+                .encode()
+                .lines()
+                .filter(|l| l.contains("prefetched_pages") && !l.starts_with('#'))
+                .map(|l| l.split_whitespace().last().unwrap().parse::<u64>().unwrap())
+                .sum();
+            assert!(read > 0 && read <= 22, "read={read}");
+            let served = journal.try_read_many_sync(&positions);
+            assert!(served[0].is_some());
+            assert!(served[40..].iter().all(Option::is_none));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_variable_prefetch_survives_full_cache() {
         deterministic::Runner::default().start(|context| async move {
             // A 50-page cache admits demand-read pages through a 5-page probation queue.
@@ -3205,10 +3261,10 @@ mod tests {
             let filler: Vec<u64> = (0..400).collect();
             journal.read_many(&filler).await.unwrap();
 
-            // Prefetched frames whose offsets span 12 offset pages, more than the probation queue
-            // holds, and whose offset and frame pages together fit in the cache, are all served
-            // from the cache.
-            let positions: Vec<u64> = (0..12).map(|i| 500 + 13 * i).collect();
+            // Prefetched frames whose offsets span 8 offset pages, more than the probation queue
+            // holds, and whose offset and frame pages together fit in the prefetch budget (half of
+            // Main's 45 pages), are all served from the cache.
+            let positions: Vec<u64> = (0..8).map(|i| 500 + 13 * i).collect();
             assert!(
                 journal
                     .try_read_many_sync(&positions)

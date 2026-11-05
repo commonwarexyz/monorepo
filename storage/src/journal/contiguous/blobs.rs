@@ -21,6 +21,8 @@ use commonware_utils::futures::try_join_all;
 use futures::{FutureExt as _, future};
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
+#[commonware_macros::stability(ALPHA)]
+use tracing::warn;
 
 /// Metrics for a journal's blobs.
 struct Metrics {
@@ -495,9 +497,15 @@ impl<B: RBlob> Warm<B> {
         }
     }
 
-    /// Add `blob`'s `(offset, len)` byte ranges, given in ascending offset order.
-    pub(super) fn push(&mut self, blob: Sealed<B>, ranges: impl IntoIterator<Item = (u64, u64)>) {
-        let ranges: ByteRanges = ranges.into_iter().collect();
+    /// Add `blob`'s `(offset, len)` byte ranges, given in ascending offset order, as far as
+    /// `budget` allows.
+    pub(super) fn push(
+        &mut self,
+        blob: Sealed<B>,
+        ranges: impl IntoIterator<Item = (u64, u64)>,
+        budget: &mut Budget,
+    ) {
+        let ranges = budget.admit(&blob, ranges);
         if !ranges.is_empty() {
             self.groups.push((blob, ranges));
         }
@@ -512,6 +520,98 @@ impl<B: RBlob> Warm<B> {
             .map(|(blob, ranges)| async move { blob.warm(&ranges).await });
         for result in future::join_all(reads).await {
             self.metrics.record(result);
+        }
+    }
+}
+
+/// How many of the page cache's Main pages one logical prefetch may warm, as a divisor of Main's
+/// capacity. Warmed pages survive until read only while they fit in Main, so half lets two
+/// prefetches in flight fit together.
+#[commonware_macros::stability(ALPHA)]
+const MAIN_SHARE: usize = 2;
+
+/// The pages one logical prefetch may still warm, shared by every blob it reads.
+///
+/// Ranges are admitted in order until one covers more pages than remain, after which the rest are
+/// skipped, so one oversized prefetch does not evict its own pages before they are read. Every
+/// page a range covers counts, whether the warm reads it, joins another read of it, or finds it
+/// resident.
+#[commonware_macros::stability(ALPHA)]
+#[derive(Default)]
+pub(super) struct Budget {
+    /// The page cache's Main capacity and the remaining pages, once the first range is admitted.
+    state: Option<(usize, usize)>,
+    /// Whether a range was skipped, after which every later one is.
+    exhausted: bool,
+    /// Pages the skipped ranges cover.
+    skipped: u64,
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl Budget {
+    /// Keep the ranges (ascending by offset) of `blob` that fit, counting a page shared by
+    /// consecutive ranges once. Once a range does not fit, every later range is skipped.
+    pub(super) fn admit<B: RBlob>(
+        &mut self,
+        blob: &Sealed<B>,
+        ranges: impl IntoIterator<Item = (u64, u64)>,
+    ) -> ByteRanges {
+        self.admit_share(blob, ranges, 1)
+    }
+
+    /// Like [Self::admit], spending at most `1 / share` of the remaining pages, so a later
+    /// [Self::admit] keeps the rest. Skipping a range here skips only this call's later ranges.
+    pub(super) fn admit_share<B: RBlob>(
+        &mut self,
+        blob: &Sealed<B>,
+        ranges: impl IntoIterator<Item = (u64, u64)>,
+        share: usize,
+    ) -> ByteRanges {
+        let page_size = u64::from(blob.page_cache().page_size().get());
+        let size = blob.size();
+        let (_, remaining) = self.state.get_or_insert_with(|| {
+            let main = blob.page_cache().main_capacity();
+            (main, (main / MAIN_SHARE).max(1))
+        });
+        let mut allowance = *remaining / share;
+        let mut skipping = self.exhausted;
+        let mut admitted = Vec::new();
+        let mut next_page = 0;
+        for (offset, len) in ranges {
+            let end = offset.saturating_add(len).min(size);
+            if offset >= end {
+                continue;
+            }
+            let first = (offset / page_size).max(next_page);
+            let last = (end - 1) / page_size;
+            let pages = (last + 1).saturating_sub(first);
+            if skipping || usize::try_from(pages).map_or(true, |pages| pages > allowance) {
+                skipping = true;
+                self.skipped += pages;
+                continue;
+            }
+            allowance -= pages as usize;
+            *remaining -= pages as usize;
+            next_page = next_page.max(last + 1);
+            admitted.push((offset, len));
+        }
+        if share == 1 {
+            self.exhausted = skipping;
+        }
+        admitted
+    }
+
+    /// Log, once, how many pages the budget skipped, if any.
+    pub(super) fn finish(&self) {
+        if let Some((main, _)) = self.state
+            && self.skipped > 0
+        {
+            warn!(
+                main_capacity = main,
+                budget = (main / MAIN_SHARE).max(1),
+                skipped_pages = self.skipped,
+                "prefetch truncated by its page budget"
+            );
         }
     }
 }

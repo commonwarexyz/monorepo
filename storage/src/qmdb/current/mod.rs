@@ -2359,8 +2359,8 @@ pub mod tests {
     }
 
     // Instantiate the prefetch tests for one variant over a page cache the tests can clear. The
-    // tests expect prefetched keys to be served from the cache, so the cache's Main section must
-    // hold every page they warm.
+    // tests expect prefetched keys to be served from the cache, so each prefetch's page budget,
+    // half of the cache's Main section, must cover every page they warm.
     macro_rules! prefetch_tests {
         ($label:ident, $db:ty, $cfg:ident) => {
             paste::paste! {
@@ -2392,7 +2392,7 @@ pub mod tests {
             }
         };
         (@open $context:ident, $db:ty, $cfg:ident) => {{
-            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(256));
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(512));
             let mut cfg = $cfg::<OneCap>("prefetch");
             cfg.merkle_config.page_cache = cache.clone();
             cfg.journal_config.page_cache = cache.clone();

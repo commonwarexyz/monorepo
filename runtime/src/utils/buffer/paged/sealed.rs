@@ -81,6 +81,12 @@ impl<B: Blob> Sealed<B> {
         self.inner.size
     }
 
+    /// Returns the page cache the view reads through.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn page_cache(&self) -> &CacheRef {
+        &self.inner.cache_ref
+    }
+
     /// Logical offset at which the partial-page bytes begin. Equal to `size` when there is no
     /// partial page.
     fn partial_offset(&self) -> u64 {
