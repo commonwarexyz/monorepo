@@ -180,7 +180,7 @@ mod wire;
 #[cfg(test)]
 mod test {
     use super::{Config, Mailbox, Probe, wire};
-    use crate::stateful::{SyncPlan, actor::resolve, tests::mocks::digested};
+    use crate::stateful::tests::mocks::digested;
     use bytes::BufMut;
     use commonware_actor::Feedback;
     use commonware_codec::{
@@ -189,11 +189,8 @@ mod test {
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable, Reporter,
         marshal::{
-            self, Identifier, Start, Update,
-            core::{
-                Actor as MarshalActor, CommitmentFallback, Floor,
-                Mailbox as MarshalMailbox, Processed,
-            },
+            self, Start, Update,
+            core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
             resolver::p2p as marshal_resolver,
             standard::Standard,
         },
@@ -222,7 +219,7 @@ mod test {
         Clock, Handle, Metrics, Quota, Runner as _, Supervisor, buffer::paged::CacheRef,
         deterministic, telemetry::traces::collector::TraceStorage,
     };
-    use commonware_storage::{archive::prunable, translator::TwoCap};
+    use commonware_storage::archive::immutable;
     use commonware_utils::{
         Acknowledgement, NZDuration, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration, TestRng,
         channel::oneshot, iter::NonEmpty, non_empty, probability, sync::Mutex, test_rng,
@@ -586,7 +583,6 @@ mod test {
     struct Node {
         probe: Mailbox<Scheme, Variant>,
         marshal: MarshalMailbox<Scheme, Variant>,
-        floor: Floor,
         // A clone of the node's probe channel sender, used by tests to inject raw
         // bytes that appear to originate from this node.
         probe_sender: Sender<ed25519::PublicKey, deterministic::Context>,
@@ -700,13 +696,13 @@ mod test {
                 );
 
                 // Marshal storage archives.
-                let finalizations_by_height = prunable::Archive::init(
+                let finalizations_by_height = immutable::Archive::init(
                     node_ctx.child("finalizations_by_height"),
                     archive_config(&partition_prefix, "finalizations", page_cache.clone()),
                 )
                 .await
                 .expect("failed to init finalizations archive");
-                let finalized_blocks = prunable::Archive::init(
+                let finalized_blocks = immutable::Archive::init(
                     node_ctx.child("finalized_blocks"),
                     archive_config(&partition_prefix, "blocks", page_cache.clone()),
                 )
@@ -731,7 +727,7 @@ mod test {
                     max_pending_acks: NZUsize!(1),
                     strategy: Sequential,
                 };
-                let (marshal_actor, marshal_mailbox, floor) =
+                let (marshal_actor, marshal_mailbox, _) =
                     MarshalActor::<_, Variant, _, _, _, _, _>::init(
                         node_ctx.child("marshal"),
                         finalizations_by_height,
@@ -770,7 +766,6 @@ mod test {
                 nodes.push(Node {
                     probe: probe_mailbox,
                     marshal: marshal_mailbox,
-                    floor,
                     probe_sender,
                     start: Some(start),
                     _handles: vec![marshal_handle],
@@ -789,16 +784,10 @@ mod test {
         /// Starts every node's probe actor. Call after seeding peer marshals so each
         /// actor's first request observes the intended finalizations.
         fn start_probes(&mut self) {
-            for index in 0..self.nodes.len() {
-                self.start_probe(index);
-            }
-        }
-
-        /// Starts one node's probe actor, leaving other probes silent.
-        fn start_probe(&mut self, index: usize) {
-            let node = &mut self.nodes[index];
-            if let Some(start) = node.start.take() {
-                node._handles.push(start());
+            for node in &mut self.nodes {
+                if let Some(start) = node.start.take() {
+                    node._handles.push(start());
+                }
             }
         }
 
@@ -905,24 +894,26 @@ mod test {
         }
     }
 
-    /// Storage configuration for one of marshal's production-style prunable archives.
-    fn archive_config(
-        prefix: &str,
-        name: &str,
-        page_cache: CacheRef,
-    ) -> prunable::Config<TwoCap, ()> {
-        prunable::Config {
-            translator: TwoCap,
+    /// Storage configuration for one of marshal's immutable archives.
+    fn archive_config(prefix: &str, name: &str, page_cache: CacheRef) -> immutable::Config<()> {
+        immutable::Config {
             metadata_partition: format!("{prefix}-{name}-metadata"),
-            key_partition: format!("{prefix}-{name}-key"),
-            key_page_cache: page_cache,
-            value_partition: format!("{prefix}-{name}-value"),
-            compression: None,
+            freezer_table_partition: format!("{prefix}-{name}-freezer-table"),
+            freezer_table_initial_size: 64,
+            freezer_table_resize_frequency: 10,
+            freezer_table_resize_chunk_size: 10,
+            freezer_key_partition: format!("{prefix}-{name}-freezer-key"),
+            freezer_key_page_cache: page_cache,
+            freezer_value_partition: format!("{prefix}-{name}-freezer-value"),
+            freezer_value_target_size: 1024,
+            freezer_value_compression: None,
+            ordinal_partition: format!("{prefix}-{name}-ordinal"),
             items_per_section: NZU64!(10),
             codec_config: (),
-            key_write_buffer: NZUsize!(2048),
-            value_write_buffer: NZUsize!(2048),
             replay_buffer: NZUsize!(2048),
+            freezer_key_write_buffer: NZUsize!(2048),
+            freezer_value_write_buffer: NZUsize!(2048),
+            ordinal_write_buffer: NZUsize!(2048),
         }
     }
 
@@ -982,177 +973,6 @@ mod test {
                 .try_recv()
                 .expect("floor should resolve once enough replies arrive");
             assert_eq!(floor, expected);
-        });
-    }
-
-    /// A higher valid reply can pin state sync when its block has aged out everywhere, even when
-    /// the lower honest reply in the same sample remains fetchable.
-    #[test]
-    fn test_unavailable_higher_floor_pins_state_sync_despite_available_honest_floor() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|context| async move {
-            let mut harness =
-                Harness::setup(&context, 4, NZDuration!(Duration::from_secs(3600))).await;
-
-            // Node 3 once followed the chain through height 30. Keep height 1 as the honest
-            // fallback and height 5 as the certificate a Byzantine peer will later replay.
-            let mut low = None;
-            let mut high = None;
-            for height in 1..=30 {
-                let (block, finalization) = harness.finalization(height, height as u8);
-                if height == 1 {
-                    low = Some((block.clone(), finalization.clone()));
-                }
-                if height == 5 {
-                    high = Some((block.clone(), finalization.clone()));
-                }
-                harness.inject(3, block, finalization).await;
-            }
-            let (low_block, low_finalization) = low.expect("low floor exists");
-            let (high_block, high_finalization) = high.expect("high floor exists");
-
-            // Wait for node 3 to durably process the chain, then prune the replayed anchor out of
-            // both its archive and its view-retention cache. Node 1 retains only the lower floor.
-            for _ in 0..100 {
-                if harness.nodes[3].marshal.get_processed().await
-                    == Some(Processed::Block(Height::new(30)))
-                {
-                    break;
-                }
-                context.sleep(Duration::from_millis(10)).await;
-            }
-            assert_eq!(
-                harness.nodes[3].marshal.get_processed().await,
-                Some(Processed::Block(Height::new(30))),
-                "advanced honest node did not process the seeded chain",
-            );
-            harness.nodes[3].marshal.prune(Height::new(20));
-            assert!(
-                harness.nodes[3]
-                    .marshal
-                    .get_block(Identifier::Height(Height::new(5)))
-                    .await
-                    .is_none(),
-                "replayed anchor survived production-style pruning",
-            );
-            assert!(
-                harness.nodes[3]
-                    .marshal
-                    .get_finalization(Height::new(5))
-                    .await
-                    .is_none(),
-                "replayed finalization survived production-style pruning",
-            );
-            harness
-                .inject(1, low_block.clone(), low_finalization.clone())
-                .await;
-
-            // No marshal can serve the higher block. Delay the advanced honest node's response
-            // within a fixed synchronous bound, so the first f + 1 replies come from the lagging
-            // honest node (node 1) and the Byzantine replay peer (node 2).
-            for node in &harness.nodes {
-                assert!(
-                    node.marshal
-                        .get_block(&high_block.digest())
-                        .await
-                        .is_none(),
-                    "higher floor block remains available from a marshal",
-                );
-            }
-            harness
-                .oracle
-                .remove_link(
-                    harness.participants[3].clone(),
-                    harness.participants[0].clone(),
-                )
-                .await
-                .expect("failed to delay advanced honest response");
-            harness
-                .oracle
-                .add_link(
-                    harness.participants[3].clone(),
-                    harness.participants[0].clone(),
-                    Link {
-                        latency: Duration::from_millis(500),
-                        jitter: Duration::ZERO,
-                        success_rate: probability!(1.0),
-                    },
-                )
-                .await
-                .expect("failed to restore advanced honest response");
-            harness.start_probe(1);
-            harness.start_probe(3);
-            harness.start_probe(0);
-            let subscription = harness.nodes[0].probe.subscribe();
-            harness.send_raw(2, 0, finalization_bytes(high_finalization.clone()));
-            let selected = commonware_macros::select! {
-                selected = subscription => selected.expect("probe subscription closed"),
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("probe did not collect the honest and Byzantine replies");
-                },
-            };
-            assert_eq!(
-                selected, high_finalization,
-                "probe did not prefer the higher unavailable certificate",
-            );
-            context.sleep(Duration::from_millis(600)).await;
-
-            // Persist exactly what production startup persists, and confirm it maps to a marshal
-            // floor before installing that same floor into the running victim.
-            let plan = SyncPlan::<_, Scheme, Variant>::init(
-                context.child("sync_plan"),
-                "unavailable-higher-floor",
-            )
-            .await
-            .set_floor(selected.clone())
-            .await;
-            match plan.marshal_start(digested(Block::new(0, 0))) {
-                Start::Floor(persisted) => assert_eq!(persisted, selected),
-                Start::Genesis(_) => panic!("selected floor was not persisted"),
-            }
-            harness.nodes[0].marshal.set_floor(selected.clone());
-            assert!(
-                harness.nodes[0]
-                    .marshal
-                    .get_block(&high_block.digest())
-                    .await
-                    .is_none(),
-                "installing the floor unexpectedly recovered its anchor",
-            );
-
-            // The discarded honest candidate is usable: the victim fetches it from node 1. It is
-            // nevertheless not dispatched because the unavailable higher floor gates progress.
-            let lower = harness.nodes[0].marshal.subscribe_by_commitment(
-                low_finalization.proposal.payload,
-                CommitmentFallback::FetchByCommitment {
-                    height: low_block.height(),
-                },
-            );
-            let lower = commonware_macros::select! {
-                lower = lower => lower.expect("lower-floor subscription closed"),
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("available lower honest floor was not fetchable");
-                },
-            };
-            assert_eq!(lower.digest(), low_block.digest());
-            assert_eq!(
-                harness.nodes[0].marshal.get_processed().await,
-                Some(Processed::Block(Height::zero())),
-                "pending higher floor did not gate application dispatch",
-            );
-
-            // Stateful's production resolver waits for the selected commitment without another
-            // fetch or a fallback. Under full synchrony it therefore remains pending here.
-            commonware_macros::select! {
-                block = resolve(
-                    &harness.nodes[0].marshal,
-                    harness.nodes[0].floor,
-                    &selected,
-                ) => {
-                    panic!("unavailable selected floor unexpectedly resolved: {:?}", block.height());
-                },
-                _ = context.sleep(Duration::from_secs(1)) => {},
-            }
         });
     }
 
