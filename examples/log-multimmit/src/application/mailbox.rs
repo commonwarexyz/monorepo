@@ -212,6 +212,7 @@ impl<C: Clock> Reporter for Mailbox<C> {
             | Activity::TransactionProposed { .. }
             | Activity::CommitmentsAccepted { .. }
             | Activity::HistoryAccepted { .. }
+            | Activity::Proven { .. }
             | Activity::CertificateRecorded { .. } => return Feedback::Ok,
         };
         self.sender.enqueue(message)

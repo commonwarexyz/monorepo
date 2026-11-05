@@ -668,7 +668,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
                 .into_iter()
                 .map(history_accepted),
         );
-        self.report_placement(&[], &mut activities);
+        self.report_placement(Vec::new(), &mut activities);
         Ok(activities)
     }
 

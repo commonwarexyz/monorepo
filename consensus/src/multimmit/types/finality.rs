@@ -1,7 +1,7 @@
 //! Leader-finality facts reported by the machine.
 
 use crate::{
-    multimmit::types::{ArtifactId, BlockRef, CertificateId, Position},
+    multimmit::types::{BlockRef, CertificateId, Position},
     types::{Height, Round},
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -16,8 +16,8 @@ use commonware_cryptography::Digest;
 pub enum FinalityId<D: Digest> {
     /// Digest of the canonical arrival-first vote evidence in a local pool.
     Direct(D),
-    /// One independently authenticated L-QC witness.
-    Lqc(ArtifactId<D>),
+    /// Identifier of one independently authenticated L-QC.
+    Lqc(CertificateId<D>),
 }
 
 /// The finality of one leader block: the evidence that finalized it and, for every producer
@@ -256,7 +256,7 @@ mod tests {
         assert!(!short_settled.is_well_formed(epoch, codec));
 
         let mut lqc = fact(round, quorum, &[0, 1], 2);
-        lqc.id = FinalityId::Lqc(ArtifactId::new(Sha256::hash(&[b"witness"])));
+        lqc.id = FinalityId::Lqc(CertificateId::new(Sha256::hash(&[b"witness"])));
         assert!(!lqc.is_well_formed(epoch, codec));
     }
 }
