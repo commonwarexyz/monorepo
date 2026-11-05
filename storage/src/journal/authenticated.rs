@@ -767,7 +767,7 @@ where
         prune_loc: Location<F>,
     ) -> Result<(Self, Location<F>, bool), Error<F>> {
         let old = self.merkle.bounds().start;
-        let boundary = Location::new(self.journal.prune_target(*prune_loc)).max(old);
+        let boundary = Location::new(self.prune_target(*prune_loc));
         if boundary > old {
             let pins = self.pinned_nodes_at(boundary).await?;
             // The frontier must never get ahead of durable operations, and the new boundary may be
@@ -1170,13 +1170,8 @@ where
     }
 
     async fn prune(self, min_position: u64) -> Result<(Self, bool), JournalError> {
-        let prune_to = {
-            let bounds = self.journal.bounds();
-            min_position.min(bounds.end)
-        };
-
         let (journal, _, pruned) = self
-            .prune_inner(Location::new(prune_to))
+            .prune_inner(Location::new(min_position))
             .await
             .map_err(Self::map_error)?;
         Ok((journal, pruned))

@@ -571,8 +571,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         if !reads.is_empty() {
             let items = journal.read_many(&reads).await?;
             let mut encoded = Encoded::new();
-            for (&loc, item) in reads.iter().zip(&items) {
-                encoded.push(F::location_to_position(Location::new(loc)), item);
+            for (&loc, item) in reads.iter().zip(items) {
+                encoded.push(F::location_to_position(Location::new(loc)), &item);
             }
             self.metrics.filled_leaves.inc_by(reads.len() as u64);
             let hasher = hasher.clone();

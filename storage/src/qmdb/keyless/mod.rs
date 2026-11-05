@@ -192,13 +192,17 @@ where
     {
         // Keyless restores commit fields without replaying a keyed snapshot, so its logical floor
         // may precede the retained operation prefix.
-        let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
+        let pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle,
             cfg.log,
             max_size,
         )
         .await?;
+        let inactivity_floor_loc = crate::qmdb::validate_initialization(&pending, false)
+            .await?
+            .unwrap_or(Location::new(0));
+        let mut journal = pending.finish().await?;
         let metrics = Metrics::new(context);
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
@@ -208,21 +212,7 @@ where
             journal = journal.sync().await?;
         }
 
-        let (last_commit_loc, inactivity_floor_loc) = {
-            let bounds = journal.bounds();
-            let last_commit_loc = Location::new(
-                bounds
-                    .end
-                    .checked_sub(1)
-                    .expect("at least one commit should exist"),
-            );
-            let op = journal.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = op
-                .has_floor()
-                .expect("last operation should be a commit with floor");
-            (last_commit_loc, inactivity_floor_loc)
-        };
-        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
+        let inactive_peaks = F::inactive_peaks(journal.size(), inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let db = Self {
