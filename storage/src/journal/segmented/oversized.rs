@@ -746,6 +746,8 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
             index,
             phase,
             tracking: self.tracking,
+            in_progress: false,
+            interrupted: false,
         })
     }
 }
@@ -1047,6 +1049,8 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
             index,
             phase: ReplayPhase::Live(values),
             tracking,
+            in_progress: false,
+            interrupted: false,
         })
     }
 
@@ -1273,6 +1277,8 @@ pub struct Replay<E: Context, I: Record, V: Codec> {
     /// Value ownership phase, with validation state only during tracked startup recovery.
     phase: ReplayPhase<E, V>,
     tracking: Option<Tracking<E>>,
+    in_progress: bool,
+    interrupted: bool,
 }
 
 /// Retain the ownership phase while an index replay is in progress.
@@ -1294,9 +1300,27 @@ impl<E: Context, I: Record, V: CodecShared> Replay<E, I, V> {
     /// An index error ends the section that produced it, and iteration continues with
     /// the next section. A value-verification error is returned without ending its
     /// section and dooms the tracked replay: finishing it fails with
-    /// [Error::ReplayFailed]. Errors while mutating storage to repair a section, and
-    /// [Error::ReplayInterrupted], end the replay.
+    /// [Error::ReplayFailed]. Errors while mutating storage to repair a section end the
+    /// replay. Dropping a pending call also ends it. The next call returns
+    /// [Error::ReplayInterrupted] and both finishing methods fail.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, I), Error>> {
+        if self.interrupted {
+            return None;
+        }
+        if self.in_progress {
+            self.in_progress = false;
+            self.interrupted = true;
+            return Some(Err(Error::ReplayInterrupted));
+        }
+
+        // Leave this set if the future is dropped at any await in the replay.
+        self.in_progress = true;
+        let result = self.next_inner().await;
+        self.in_progress = false;
+        result
+    }
+
+    async fn next_inner(&mut self) -> Option<Result<(u64, u64, I), Error>> {
         loop {
             let result = self.index.next().await?;
             let (section, position, entry) = match result {
@@ -1348,6 +1372,9 @@ impl<E: Context, I: Record, V: CodecShared> Replay<E, I, V> {
     /// Fails when the reader was not fully drained or yielded an error: the journal is
     /// destroyed and recovery is re-initialization.
     pub fn finish(self) -> Result<Oversized<E, I, V>, Error> {
+        if self.in_progress || self.interrupted {
+            return Err(Error::ReplayFailed);
+        }
         let ReplayPhase::Live(values) = self.phase else {
             return Err(Error::ReplayFailed);
         };
@@ -1360,6 +1387,9 @@ impl<E: Context, I: Record, V: CodecShared> Replay<E, I, V> {
 
     /// Finish marker-aware startup recovery and return the tracked journal.
     pub async fn finish_tracked(self) -> Result<Oversized<E, I, V>, Error> {
+        if self.in_progress || self.interrupted {
+            return Err(Error::ReplayFailed);
+        }
         let ReplayPhase::Tracked { values, validation } = self.phase else {
             return Err(Error::ReplayFailed);
         };
@@ -1401,8 +1431,8 @@ mod tests {
         buffer::paged::{CacheRef, corrupt_page},
         deterministic,
         mocks::{
-            DeferredSync, DelayedSyncContext, PendingSyncs, SyncFaultContext, WriteFaultContext,
-            WriteFaults, drive_pending_syncs, next_pending_sync,
+            DeferredSync, DelayedSyncContext, PendingSyncs, ReadGateContext, SyncFaultContext,
+            WriteFaultContext, WriteFaults, drive_pending_syncs, next_pending_sync,
         },
     };
     use commonware_utils::{NZU16, NZUsize, probability};
@@ -6865,6 +6895,210 @@ mod tests {
             .await;
             assert!(matches!(result, Err(Error::Corruption(_))));
             assert_eq!(context.scan(&cfg.value_partition).await.unwrap().len(), 3);
+        });
+    }
+
+    /// Cancelling value validation cannot skip an entry or publish a marker beyond it.
+    #[rstest::rstest]
+    #[case::valid_finish(false, false)]
+    #[case::valid_next(false, true)]
+    #[case::corrupt_finish(true, false)]
+    #[case::corrupt_next(true, true)]
+    fn test_oversized_replay_dropped_during_value_read_fails_replay(
+        #[case] corrupt: bool,
+        #[case] resume: bool,
+    ) {
+        deterministic::Runner::default().start(|context| async move {
+            const SECTION: u64 = 1;
+            const MARKERS: &str = "cancel-value-markers";
+            let cfg = test_cfg();
+            let mut journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("seed"), cfg.clone())
+                    .await
+                    .unwrap();
+            let mut second_offset = 0;
+            for id in 0..3 {
+                let offset;
+                (journal, _, offset, _) = journal
+                    .append(SECTION, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                    .await
+                    .unwrap();
+                if id == 1 {
+                    second_offset = offset;
+                }
+            }
+            drop(journal.sync_all().await.unwrap());
+
+            // Only the first entry is committed. The remaining values require verification.
+            let mut markers: Metadata<_, SectionKey, u64> = Metadata::init(
+                context.child("seed_markers"),
+                MetadataConfig {
+                    partition: MARKERS.into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap();
+            markers.put(SectionKey::new(SECTION), 1);
+            drop(markers.sync().await.unwrap());
+            if corrupt {
+                let (blob, _) = context
+                    .open(&cfg.value_partition, &SECTION.to_be_bytes())
+                    .await
+                    .unwrap();
+                blob.write_at(second_offset, vec![0xff], WriteOptions::SYNC)
+                    .await
+                    .unwrap();
+            }
+
+            let (gated, gate) =
+                ReadGateContext::new(context.child("cancel"), cfg.value_partition.clone());
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                gated,
+                cfg.clone(),
+                MARKERS.into(),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
+
+            // Dropping a call before it is polled starts no read and leaves the replay usable.
+            drop(replay.next());
+
+            // Warm the index while yielding the committed entry, then stop only a value read.
+            assert_eq!(replay.next().await.unwrap().unwrap().2.id, 0);
+            gate.arm();
+            {
+                let next = replay.next();
+                futures::pin_mut!(next);
+                assert!(futures::poll!(next.as_mut()).is_pending());
+                assert_eq!(gate.blocked(), 1);
+            }
+            gate.disarm();
+            if resume {
+                assert!(matches!(
+                    replay.next().await,
+                    Some(Err(Error::ReplayInterrupted))
+                ));
+                assert!(replay.next().await.is_none());
+                assert!(replay.next().await.is_none());
+            }
+            assert!(matches!(
+                replay.finish_tracked().await,
+                Err(Error::ReplayFailed)
+            ));
+
+            let markers: Metadata<_, SectionKey, u64> = Metadata::init(
+                context.child("check_markers"),
+                MetadataConfig {
+                    partition: MARKERS.into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(markers.get(&SectionKey::new(SECTION)), Some(&1));
+            drop(markers);
+
+            // Recovery rechecks the interrupted entry and retains only the valid prefix.
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                context.child("reopen"),
+                cfg,
+                MARKERS.into(),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
+            let retained = if corrupt { 1 } else { 3 };
+            for id in 0..retained {
+                let (section, position, entry) = replay.next().await.unwrap().unwrap();
+                assert_eq!((section, position, entry.id), (SECTION, id, id));
+            }
+            assert!(replay.next().await.is_none());
+            let journal = replay.finish_tracked().await.unwrap();
+            assert_eq!(
+                journal.size(SECTION).unwrap(),
+                retained * TestEntry::SIZE as u64
+            );
+            assert_eq!(
+                journal
+                    .tracking
+                    .as_ref()
+                    .unwrap()
+                    .metadata
+                    .get(&SectionKey::new(SECTION)),
+                Some(&retained)
+            );
+            for id in 0..retained {
+                let entry = journal.get(SECTION, id).await.unwrap();
+                assert_eq!(
+                    journal
+                        .get_value(SECTION, entry.value_offset, entry.value_size)
+                        .await
+                        .unwrap(),
+                    [id as u8; 16]
+                );
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Live replay has the same cancellation contract as tracked startup replay.
+    #[rstest::rstest]
+    #[case::finish(false)]
+    #[case::next(true)]
+    fn test_oversized_live_replay_dropped_during_read_fails_replay(#[case] resume: bool) {
+        deterministic::Runner::default().start(|context| async move {
+            const SECTION: u64 = 1;
+            let cfg = test_cfg();
+            let mut journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("seed"), cfg.clone())
+                    .await
+                    .unwrap();
+            for id in 0..4 {
+                (journal, _, _, _) = journal
+                    .append(SECTION, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                    .await
+                    .unwrap();
+            }
+            drop(journal.sync_all().await.unwrap());
+
+            let (gated, gate) =
+                ReadGateContext::new(context.child("cancel"), cfg.index_partition.clone());
+            let journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(gated, cfg.clone()).await.unwrap();
+            let mut replay = journal
+                .replay(SECTION, 0, NZUsize!(64), ReadOptions::default())
+                .await
+                .unwrap();
+
+            // Dropping a call before it is polled starts no read and leaves the replay usable.
+            drop(replay.next());
+            gate.arm();
+            {
+                let next = replay.next();
+                futures::pin_mut!(next);
+                assert!(futures::poll!(next.as_mut()).is_pending());
+                assert!(gate.blocked() > 0);
+            }
+            gate.disarm();
+            if resume {
+                assert!(matches!(
+                    replay.next().await,
+                    Some(Err(Error::ReplayInterrupted))
+                ));
+                assert!(replay.next().await.is_none());
+                assert!(replay.next().await.is_none());
+            }
+            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
+
+            let journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("reopen"), cfg).await.unwrap();
+            assert_eq!(journal.size(SECTION).unwrap(), 4 * TestEntry::SIZE as u64);
+            for id in 0..4 {
+                assert_eq!(journal.get(SECTION, id).await.unwrap().id, id);
+            }
+            journal.destroy().await.unwrap();
         });
     }
 }
