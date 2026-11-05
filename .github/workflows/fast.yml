@@ -188,7 +188,7 @@ jobs:
         --partition slice:${{ matrix.shard.partition }}/${{ matrix.shard.partitions }} --verbose
 
   Tests-Subset:
-    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\"${{ matrix.rustflags && format(', rustflags: \"{0}\"', matrix.rustflags) || '' }}, cpu: \"${{ matrix.sde && format('native, else sde -{0}', matrix.sde) || matrix.qemu && format('native, else qemu -cpu {0}', matrix.qemu) || 'native' }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) || '' }}\")"
+    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\"${{ matrix.rustflags && format(', rustflags: \"{0}\"', matrix.rustflags) || '' }}, cpu: \"${{ matrix.sde && format('native, else sde -{0}', matrix.sde) || matrix.qemu && format('native, else qemu -cpu {0}', matrix.qemu) || 'native' }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) || '' }}\")${{ matrix.partition && format(' (partition: {0})', matrix.partition) || '' }}"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -210,13 +210,23 @@ jobs:
           - os: ubuntu-latest
             package: commonware-allocator
             flags: "--features commonware-allocator/large-objects-4mb"
-          # Ice Lake-SP has SHA-NI, AVX-512, IFMA, VNNI, GFNI, VAES, and VPCLMULQDQ.
+          # Ice Lake-SP has SHA-NI, AVX-512, IFMA, VNNI, GFNI, VAES, and VPCLMULQDQ. SDE emulates
+          # AVX-512 slowly on runners without it, so the SDE rows split their tests in two.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             sde: icx
             simd-backend: x86_v4c
             cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma avx512vnni gfni vaes vpclmulqdq"
+            partition: 1/2
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            sde: icx
+            simd-backend: x86_v4c
+            cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma avx512vnni gfni vaes vpclmulqdq"
+            partition: 2/2
+            skip-cache-save: true
           # Skylake-SP has AVX-512 without SHA-NI, IFMA, VNNI, GFNI, VAES, or VPCLMULQDQ.
           - os: ubuntu-latest
             package: commonware-cryptography
@@ -224,6 +234,15 @@ jobs:
             sde: skx
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx avx512f avx512bw avx512vl"
+            partition: 1/2
+            skip-cache-save: true
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            sde: skx
+            simd-backend: x86_v3
+            cpu-features: "avx2 bmi2 adx avx512f avx512bw avx512vl"
+            partition: 2/2
             skip-cache-save: true
           # Zen 2 has AVX2 and SHA-NI without AVX-512, VAES, or VPCLMULQDQ.
           - os: ubuntu-latest
@@ -408,7 +427,7 @@ jobs:
       if: ${{ !matrix.no-std }}
       env:
         COMMONWARE_SIMD_EXPECT_BACKEND: ${{ matrix.simd-backend }}
-      run: just test ${{ matrix.flags }} -p ${{ matrix.package }} --verbose
+      run: just test ${{ matrix.flags }} -p ${{ matrix.package }} --verbose ${{ matrix.partition && format('--partition slice:{0}', matrix.partition) || '' }}
     - name: Run subset doc tests
       if: ${{ !matrix.sde && !matrix.qemu && !matrix.no-std }}
       run: just test-docs ${{ matrix.flags }} -p ${{ matrix.package }}
