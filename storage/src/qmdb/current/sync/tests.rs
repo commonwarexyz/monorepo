@@ -655,7 +655,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
 }
 
 /// Persisting a sync result writes the grafted metadata before the operation frontier, so a
-/// failure between the two leaves a database that opens at the target.
+/// catch-up sync whose boundary prune fails reopens at the target.
 #[test_traced]
 fn test_current_sync_persist_failure_reopens_at_target() {
     type Db = crate::qmdb::current::unordered::fixed::Db<
@@ -703,8 +703,8 @@ fn test_current_sync_persist_failure_reopens_at_target() {
         };
         let canonical_root = source.root();
         assert!(
-            *target.range.start() >= 256,
-            "the target must prune chunk 0"
+            *target.range.start() >= 2 * commonware_utils::bitmap::Prunable::<32>::CHUNK_SIZE_BITS,
+            "chunk 0's root must not be a pinned node"
         );
         assert_eq!(local.root(), canonical_root);
         drop(local);

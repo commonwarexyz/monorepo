@@ -54,6 +54,9 @@ where
 }
 
 /// Create or open a database and sync it to the target in `config`.
+///
+/// If the sync fails or is interrupted, sync again before opening the database with its
+/// `init`.
 #[boxed]
 pub async fn sync<DB, S>(
     config: Config<DB, S>,
