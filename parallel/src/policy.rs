@@ -11,23 +11,21 @@
 //!
 //! # Serial budget
 //!
-//! A large serial run keeps the caller busy without help from the pool, so serial is seeded or
-//! probed only while the busy time of parallel runs fits under [`SERIAL_SAMPLE_BUDGET_NS`]. A run's
-//! busy time is the time its threads spend executing it. It approximates the cost of the same run
-//! on one thread, inflated by parallel overhead and by any time those threads are descheduled.
-//!
-//! Preferring serial also requires the serial estimate to fit. Parallel samples keep refreshing the
-//! busy-time estimate while serial is excluded. A shorter busy time can make serial eligible again,
-//! and a longer one keeps a stale serial estimate from being preferred after the input grows within
-//! its bucket. A serial sample over the budget refutes serial at the busy time it was sampled at:
-//! serial is probed again from a placement only once that placement's busy time falls below the
-//! level it had then, so a call site whose busy time understates its serial cost pays one
-//! over-budget sample rather than one per probe interval.
-//!
 //! Wall time decides which path is faster, and busy time decides whether serial is affordable. A
-//! parallel run's wall time includes queueing behind other work on a group, since the caller waits
-//! through it, but its busy time does not. Contention therefore steers callers toward serial on
-//! their own threads while the parallel busy time fits the budget.
+//! parallel run's busy time is the time its threads spend executing it and approximates the cost
+//! of the same run on one thread. A large serial run keeps the caller busy without help from the
+//! pool, so serial is seeded or probed only while the parallel busy-time estimate fits under
+//! [`SERIAL_SAMPLE_BUDGET_NS`], and preferred only while the serial estimate fits too.
+//!
+//! Parallel samples keep the busy-time estimate current. A shorter busy time can make serial
+//! eligible again, and a longer one stops a stale serial estimate from winning after the input
+//! grows within its bucket. Queueing behind other work on a group lengthens a parallel run's wall
+//! time but not its busy time, so contention steers callers toward serial while it stays
+//! affordable.
+//!
+//! A serial sample at or over the budget records each placement's busy time. Serial is probed again
+//! from a placement only once its busy time falls below that level, so a call site whose busy time
+//! understates its serial cost pays one over-budget sample until its busy time falls.
 //!
 //! # Placement
 //!
@@ -755,9 +753,9 @@ struct RunEntry {
     /// Every caller on one cadence compares serial against the same placement, so each probe lands
     /// on a caller that can act on it.
     cadences: [Cadence<RunExecution>; 2],
-    /// The busy-time estimate of each placement when a serial sample last exceeded the budget,
-    /// indexed by placement, or `None` after a sample within it. Serial is probed from a placement
-    /// again only once its busy time falls below this level.
+    /// Each placement's busy-time estimate when the last serial sample reached the budget, or
+    /// `None` otherwise. Serial is probed from a placement again only while its busy time is below
+    /// this level.
     refuted_ns: [Option<u64>; 2],
 }
 
@@ -780,9 +778,8 @@ impl RunEntry {
         }
     }
 
-    /// Records a serial sample. A sample over the budget notes each placement's busy time, so
-    /// serial is not probed from that placement again until its busy time falls, and a sample
-    /// within the budget clears that note.
+    /// Records a serial sample. A sample at or over the budget refutes serial at each placement's
+    /// current busy time, and one within it clears the refutation.
     fn record_serial(&mut self, wall_ns: u64) {
         self.serial_ns.record(wall_ns);
         self.refuted_ns = if wall_ns >= SERIAL_SAMPLE_BUDGET_NS {
@@ -839,9 +836,8 @@ impl RunEntry {
             return (RunExecution::Parallel, true);
         };
 
-        // Serial is eligible only while the parallel busy time is below the budget and below the
-        // level at which a serial sample last exceeded it. Periodic parallel samples refresh the
-        // busy time, so a shorter one can make serial eligible again.
+        // Serial is eligible only while the parallel busy time is below both the budget and the
+        // refuted level.
         let can_sample_serial = busy_ns < SERIAL_SAMPLE_BUDGET_NS
             && refuted_ns.is_none_or(|refuted_ns| busy_ns < refuted_ns);
 
@@ -872,9 +868,9 @@ impl RunEntry {
         );
 
         // Exactly one caller crosses the boundary, and a serial seed whose sample never lands is
-        // offered again at the next boundary. A serial seed or probe requires the live busy-time
-        // estimate to fit the budget. A parallel probe is always allowed, since the capped
-        // interval amortizes its cost even when it queues behind other work on the pool.
+        // offered again at the next boundary. Only an eligible serial path is seeded or probed. A
+        // parallel probe is always allowed, since the capped interval amortizes its cost even when
+        // it queues on the pool.
         let probe_allowed = preferred == RunExecution::Serial || can_sample_serial;
         cadence.arbitrate(preferred, loser, winner_ns, loser_ns, probe_allowed)
     }
@@ -1101,8 +1097,8 @@ mod tests {
     /// The strategy parallelism the tests plan with.
     const PARALLELISM: usize = 4;
 
-    /// The busy time of a parallel run with wall time `wall` and perfect speedup on
-    /// [`PARALLELISM`] workers, whatever strategy parallelism the run's key carries.
+    /// The busy time of a run that keeps [`PARALLELISM`] workers busy for `wall`, whatever
+    /// parallelism its key carries.
     fn perfect_busy(wall: Duration) -> Duration {
         wall * PARALLELISM as u32
     }
@@ -1296,12 +1292,10 @@ mod tests {
         }
     }
 
-    /// The serial estimate holds a serial run's busy time as its wall time, so recording a serial
-    /// run must not feed the busy-time estimate that gates serial.
+    /// Recording a serial run leaves the parallel busy-time estimate that gates serial untouched.
     #[test]
     fn serial_runs_leave_the_busy_estimate_untouched() {
-        // Record runs at one call site with explicit wall and busy times, and read back the Wide
-        // busy-time estimate.
+        // Record runs with explicit wall and busy times, and read back the Wide busy-time estimate.
         let policy = Policy::default();
         let location = Location::caller();
         let plan = |execution| RunPlan {
@@ -1332,9 +1326,8 @@ mod tests {
         assert_eq!(busy(), Some(3_000_000));
     }
 
-    /// Each placement gates serial on the busy time of its own runs. Wide runs busy past the
-    /// budget do not hold serial out of a Local caller whose runs fit, and the Local runs do not
-    /// let serial in against Wide.
+    /// Each placement gates serial on the busy time of its own runs, independently of the other
+    /// placement.
     #[test]
     fn placements_gate_serial_on_their_own_busy_time() {
         // Wide runs are busy for 300ms, Local runs for 6ms, and serial beats Local's 8ms wall time.
@@ -1358,9 +1351,8 @@ mod tests {
         assert_eq!(entry.choose(Placement::Wide).0, RunExecution::Parallel);
     }
 
-    /// Queueing behind other work on the pool lifts a parallel run's wall time to 25ms, but its
-    /// busy time stays at 2ms. Serial takes 5ms on the caller's own thread, so it is affordable
-    /// and faster, and the policy must seed it at once and then prefer it.
+    /// Queueing that lifts a parallel run's wall time to 25ms leaves its 2ms busy time within the
+    /// budget, so a faster 5ms serial path is seeded at once and then preferred.
     #[test]
     fn queueing_does_not_gate_serial() {
         // Parallel seeds with a queued run, serial seeds on the next call, and serial is preferred.
@@ -1551,9 +1543,8 @@ mod tests {
     /// bring it under serial, and the preference flips.
     #[test]
     fn recovers_from_stale_estimate() {
-        // An established parallel estimate of 2ms favors serial at 1ms. The busy time remains
-        // under budget (2ms on each of 4 workers = 8ms), so probes can discover parallel's current
-        // cost of 0.5ms.
+        // An established parallel estimate of 2ms favors serial at 1ms. The 8ms busy time fits
+        // the budget, so probes can discover parallel's current cost of 0.5ms.
         let mut entry = RunEntry::default();
         for _ in 0..2 {
             entry.record(RunExecution::Parallel, Duration::from_millis(2));
@@ -1626,9 +1617,8 @@ mod tests {
         assert_eq!(choose(&mut entry).0, RunExecution::Parallel);
     }
 
-    /// A serial sample over the budget refutes serial at the busy time it was sampled at. The
-    /// policy does not probe serial again while the busy time stays there, and probes it at the
-    /// next boundary once the busy time falls below that level.
+    /// After an over-budget serial sample, serial is probed again only once the busy time falls
+    /// below its level at that sample.
     #[test]
     fn reprobes_refuted_serial_once_busy_time_falls() {
         // Parallel runs at 500us wall and 2ms busy, and serial was sampled at 15ms.
@@ -1646,8 +1636,7 @@ mod tests {
             assert_eq!(choose(&mut entry).0, RunExecution::Parallel);
         }
 
-        // A parallel sample with a lower busy time makes serial eligible, and the next boundary
-        // probes it.
+        // A lower busy time makes serial eligible, and the next boundary probes it.
         entry.record_parallel(
             Placement::Wide,
             Duration::from_micros(500),
@@ -2670,10 +2659,9 @@ mod tests {
         assert_eq!(parallel_local, calls - wide_probes - serial_runs);
     }
 
-    /// The serial budget applies to the busy time of parallel runs, whatever the strategy's
-    /// parallelism. A 200us Local run on four workers is busy for 800us and fits the budget under a
-    /// 64-worker strategy, so serial is sampled. An affordable, faster serial path must also slow
-    /// the probes of the Wide placement.
+    /// The serial budget applies to busy time whatever the strategy's parallelism, so a 200us Local
+    /// run busy for 800us lets serial be sampled under a 64-worker strategy. A faster serial path
+    /// must also slow the Wide probes.
     #[test]
     fn busy_budget_ignores_strategy_parallelism() {
         for pools in [EITHER, confined(Placement::Local)] {
@@ -3197,10 +3185,8 @@ mod tests {
         }
     }
 
-    /// The entry prefers the other placement and serial beats the caller's placement, but the
-    /// caller's placement is busy past the budget the policy arbitrates within. A confined caller
-    /// therefore stays on its placement, where the policy leaves big work, and never samples
-    /// serial, whatever the other placement's busy time.
+    /// A confined caller whose placement is busy past the budget stays parallel and never samples
+    /// serial, even when serial is faster and the preferred other placement fits the budget.
     #[test]
     fn confined_calls_keep_big_work_parallel() {
         for pool in [Placement::Wide, Placement::Local] {
@@ -3472,10 +3458,9 @@ mod tests {
         );
     }
 
-    /// The parallel busy time exceeds the budget, so serial never runs, and every call is parallel
-    /// and advances a cadence. Only timed Local runs refresh the Local estimate. Whatever rhythm
-    /// the confined callers keep with the caller that has a choice, Local's run cadence must keep
-    /// timing that caller's Local runs, so the estimate follows Local when it slows down.
+    /// The busy time exceeds the budget, so every call is parallel and advances a cadence. Whatever
+    /// rhythm confined callers keep with the caller that has a choice, Local's cadence must keep
+    /// timing that caller's Local runs, so the Local estimate follows Local when it slows down.
     #[test]
     fn interleaved_callers_refresh_local_estimate() {
         let wall = |slow: bool| {

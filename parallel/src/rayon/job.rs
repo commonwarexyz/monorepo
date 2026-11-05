@@ -84,8 +84,9 @@ impl JobRef {
 /// the stack frame is later popped.  The function parameter indicates
 /// `true` if the job was stolen and executed on a different thread.
 ///
-/// The job executes in the context of the thread that created it, so the run that waits for it is
-/// charged for its time.
+/// The job runs in its creator's context and charges it before setting the latch. On a thread
+/// already in that context, the activation that entered it charges instead, before it sets its own
+/// latch or returns from `measure`.
 pub(super) struct StackJob<L, F, R>
 where
     L: Latch + Sync,
@@ -140,12 +141,9 @@ where
 {
     unsafe fn execute(this: *const ()) {
         // SAFETY: `this` came from `as_job_ref` on a job its owner keeps in place until the latch
-        // is set, and a job reference executes once, so nothing else touches the cells. The job
-        // runs in the context it captured from its owner. On a thread that was in another
-        // context it leaves that context, charging the meter, before setting the latch. On a
-        // thread already in that context it charges nothing itself, and the activation that put
-        // the thread there charges the meter before setting its own latch or returning from
-        // `measure`. The owner waits on the latch, so the meter outlives every charge.
+        // is set, and a job reference executes once, so nothing else touches the cells. The owner
+        // was in the captured context and waits on the latch, so the context's meter outlives
+        // `enter`.
         unsafe {
             let this = &*(this as *const Self);
             let abort = unwind::AbortIfPanic;
@@ -164,8 +162,8 @@ where
 ///
 /// (Probably `StackJob` should be refactored in a similar fashion.)
 ///
-/// The job may outlive the run that spawned it, so it executes without a context. A spawner that
-/// wants the job's work charged to its run holds a [`MeterHandle`] and enters it around that work.
+/// The job may outlive the run that spawned it, so it executes without a context. A spawner can
+/// charge its work through a [`MeterHandle`].
 ///
 /// [`MeterHandle`]: super::meter::MeterHandle
 pub(super) struct HeapJob<BODY>

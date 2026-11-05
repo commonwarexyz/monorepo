@@ -16,8 +16,7 @@ fn timed(op: impl FnOnce()) -> (Duration, Duration) {
     (busy, start.elapsed())
 }
 
-/// The calling thread is charged for its time in the run, never for more than the wall time, and
-/// it leaves the context when the run returns.
+/// A run charges the calling thread's time up to the wall time and leaves its context on return.
 #[test]
 fn charges_the_calling_thread_until_it_leaves() {
     // Spin for 2ms in a measured run.
@@ -31,8 +30,7 @@ fn charges_the_calling_thread_until_it_leaves() {
     assert_eq!(Context::current(), Context::NONE);
 }
 
-/// Entering the context that is already current leaves it current throughout, so both spins are
-/// charged.
+/// Re-entering the current context keeps it current, so spins inside and after it are charged.
 #[test]
 fn entering_the_current_context_keeps_charging() {
     // Re-enter the current context around one spin, then spin again after it returns.
@@ -95,8 +93,7 @@ fn nested_runs_charge_the_enclosing_run_once() {
         spin(MS);
     });
 
-    // The outer charge adds the nested charge to its own 2ms, and counting the nested charge
-    // twice would exceed the wall time.
+    // The outer run adds the nested charge once to its own 2ms, within the wall time.
     assert!(
         inner >= 2 * MS,
         "inner busy time {inner:?} must cover the 2ms spin"
@@ -128,9 +125,8 @@ fn unwinding_nested_run_charges_the_enclosing_run() {
     );
 }
 
-/// An install from outside the pool charges the worker's 20ms on the run, while the caller is
-/// suspended while it hands off and waits, so the busy time exceeds the wall time only by the
-/// hand-off.
+/// An install from outside the pool charges the worker's 20ms spin but not the caller's wait, so
+/// busy time exceeds wall time by at most the hand-off.
 #[test]
 fn installs_charge_the_worker_but_not_the_wait() {
     // Install a 20ms spin from outside the pool.
@@ -144,8 +140,7 @@ fn installs_charge_the_worker_but_not_the_wait() {
     );
 }
 
-/// A broadcast from outside the pool charges the worker's 20ms on the run, and the caller's
-/// wait on the broadcast's latch is not charged.
+/// A broadcast from outside the pool charges the worker's 20ms spin but not the caller's wait.
 #[test]
 fn broadcasts_charge_the_worker_but_not_the_wait() {
     // Broadcast a 20ms spin to the only worker from outside the pool.
@@ -161,9 +156,8 @@ fn broadcasts_charge_the_worker_but_not_the_wait() {
     );
 }
 
-/// A join charges both sides for the time their threads spend in them. When the long side is
-/// stolen, the worker that finishes the short side waits for it uncharged, so the busy time
-/// exceeds the sum of both sides by at most the hand-off overhead.
+/// A join charges both sides but not the worker that finishes the short side and waits for the
+/// long one.
 #[test]
 fn joins_charge_both_sides_but_not_the_wait() {
     // Join a 5ms side with a 40ms side on two workers, timing each side on its own thread.
@@ -181,8 +175,8 @@ fn joins_charge_both_sides_but_not_the_wait() {
     );
 }
 
-/// On a worker, a nested run measures a 30ms spin and the worker then spins for 1ms more. The
-/// enclosing run includes the nested busy time once, plus that 1ms, and no charged wait.
+/// A nested run on a worker charges its busy time to the enclosing run once, and the caller's
+/// wait adds nothing.
 #[test]
 fn nested_runs_on_workers_charge_the_enclosing_run_once() {
     // On a worker, measure a nested 30ms spin and then spin for 1ms in the installed run.
@@ -197,8 +191,7 @@ fn nested_runs_on_workers_charge_the_enclosing_run_once() {
     });
     let wall = start.elapsed();
 
-    // The outer charge adds the nested charge to the 1ms, and the caller's wait adds nothing
-    // beyond the hand-off.
+    // The outer run adds the nested charge to the 1ms spin, and the wait adds only the hand-off.
     assert!(
         inner >= 30 * MS,
         "inner busy time {inner:?} must cover the 30ms spin"
@@ -209,8 +202,8 @@ fn nested_runs_on_workers_charge_the_enclosing_run_once() {
     );
 }
 
-/// On a pool with one worker, a spawned job runs when the worker yields inside the measured
-/// install. A detached job is not part of the run, so its 50ms charges nothing.
+/// A spawned job that the worker runs while yielding inside a measured install charges nothing to
+/// the install.
 #[test]
 fn spawned_jobs_charge_nothing() {
     // Spawn a 50ms job from a measured install, and yield so the only worker runs it.
@@ -229,8 +222,7 @@ fn spawned_jobs_charge_nothing() {
     );
 }
 
-/// A spawned broadcast run by the yielding worker is detached like a spawned job, so its 50ms
-/// charges nothing to the measured install.
+/// A spawned broadcast that the worker runs while yielding charges nothing to the install.
 #[test]
 fn spawned_broadcasts_charge_nothing() {
     // Spawn a 50ms broadcast from a measured install, and yield so the only worker runs it.
@@ -249,10 +241,8 @@ fn spawned_broadcasts_charge_nothing() {
     );
 }
 
-/// A spawned job that enters a handle captured in a measured install charges the install for
-/// the work it enters, and the charge lands before the result it then sends. The install awaits
-/// the result through the worker's suspended wait, so the busy time stays within the wall time
-/// plus the hand-offs.
+/// Work a spawned job enters through a handle is charged to the captured run before the job sends
+/// its result, and the run's wait for that result is not charged.
 #[test]
 fn handles_charge_the_captured_run_before_the_result() {
     // Spawn a 20ms job that enters the install's handle, and await its result on the worker.
@@ -276,27 +266,25 @@ fn handles_charge_the_captured_run_before_the_result() {
     );
 }
 
-/// A handle captured without a context charges nothing, so work entered through it outside any
-/// run is free to the run that later measures it.
+/// Work entered through a handle captured outside any run charges nothing, even inside a run.
 #[test]
 fn handles_captured_without_a_context_charge_nothing() {
     // Capture outside any run, then enter 20ms of work inside a measured run.
     let handle = MeterHandle::capture();
     let (busy, wall) = timed(|| handle.enter(|| spin(20 * MS)));
 
-    // The work ran in no context, so the run is charged only for the hand-off around it.
+    // The work ran in no context, so the run is charged only for the time around it.
     assert!(
         busy < wall - 10 * MS,
         "busy time {busy:?} must exclude work entered through an empty handle, wall {wall:?}"
     );
 }
 
-/// A thread outside the pool that blocks in its context on a spawned job's result stays charged
-/// while it waits, so the busy time covers the job's entered work and the wait.
+/// A thread outside the pool that blocks in its context stays charged while it waits, so the
+/// job's entered work and the wait are both charged.
 #[test]
 fn outside_blockers_stay_charged_while_they_wait() {
-    // Spawn a 20ms job through a handle from a measured run on the test thread, and block on its
-    // result there.
+    // Spawn a 20ms job through a handle, and block on its result on the test thread.
     let pool = ThreadPoolBuilder::new(NZUsize!(1)).build().unwrap();
     let (busy, wall) = timed(|| {
         let handle = MeterHandle::capture();
@@ -315,12 +303,9 @@ fn outside_blockers_stay_charged_while_they_wait() {
     );
 }
 
-/// A worker that yields on empty queues searches for work with its context suspended, so a
-/// measured install that keeps yielding is charged only for its time between the yields.
-///
-/// Each yield is timed. A thread descheduled during a yield shows as one far longer than the
-/// median, and one descheduled between yields shows as a wall time far above their sum, so a
-/// disturbed run is tried again instead of measured, up to a few times.
+/// A worker that yields on empty queues searches in no context, so a measured install that keeps
+/// yielding is charged only for its time between yields. A descheduled attempt is retried, with
+/// ten attempts at most.
 #[test]
 fn idle_yields_charge_nothing() {
     const ITERATIONS: usize = 20_000;
@@ -341,7 +326,7 @@ fn idle_yields_charge_nothing() {
         });
         let wall = start.elapsed();
 
-        // Try again when the thread was descheduled during the loop.
+        // An outlier yield or excess wall time means the thread was descheduled, so retry.
         yields.sort_unstable();
         let median = yields[ITERATIONS / 2].max(Duration::from_nanos(100));
         let total: Duration = yields.iter().sum();
@@ -349,8 +334,7 @@ fn idle_yields_charge_nothing() {
             continue;
         }
 
-        // The searches are not charged, so the busy time stays within the time outside the yields
-        // plus the hand-off.
+        // Busy time stays within the time outside the yields, plus the hand-off.
         assert!(
             busy < wall - total + 5 * MS,
             "busy time {busy:?} must exclude the {total:?} spent in idle searches, wall {wall:?}"
@@ -359,15 +343,12 @@ fn idle_yields_charge_nothing() {
     }
 }
 
-/// Enters and restores contexts through a measured install from outside the pool, a join whose
-/// stolen side measures a nested run, and a nested run that unwinds on a worker, for Miri's
-/// borrow and aliasing checks of the raw context pointers.
+/// Contexts restore across an install, a join with a nested run, and a nested run that unwinds on
+/// a worker, under Miri's checks of the raw context pointers.
 #[commonware_macros::test_group("miri")]
 #[test]
 fn contexts_are_scoped_to_their_runs() {
-    // The install runs in the outer context on a worker, and either join side may run on either
-    // worker. The context is compared by address, since the closure sent to the pool cannot hold
-    // the raw pointer itself.
+    // Each step sees the outer context, compared by address since raw pointers are not `Send`.
     let pool = ThreadPoolBuilder::new(NZUsize!(2)).build().unwrap();
     let address = || Context::current().0.addr();
     let (inner, outer) = measure(|| {

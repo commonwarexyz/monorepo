@@ -78,14 +78,13 @@ where
     // executed.
     let job_refs = jobs.iter().map(|job| unsafe { job.as_job_ref() });
 
-    // The hand-off and the wait run with the context suspended, so the run is charged for the
-    // jobs but not for either.
+    // The hand-off and the wait run in no context, so the run is charged for the jobs alone.
     Context::suspend(|| {
         registry.inject_broadcast(job_refs);
         latch.wait(current_thread);
     });
 
-    // Every job has completed, so collect the results, maybe propagating a panic.
+    // Collect the results, maybe propagating a panic.
     // SAFETY: every job has executed, so each holds its result.
     jobs.into_iter()
         .map(|job| unsafe { job.into_result() })

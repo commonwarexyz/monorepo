@@ -460,9 +460,8 @@ impl Registry {
                 LatchRef::new(l),
             );
 
-            // The thread hands off the job and blocks with its context suspended, so the run is
-            // charged for the job but not for the hand-off or the wait. The wait also resets this
-            // thread's latch for its next call.
+            // The hand-off and the wait run in no context, so the run is charged for the job
+            // alone. The wait resets this thread's latch for its next call.
             //
             // SAFETY: the job stays on this stack frame until its latch is set, which happens
             // once it has executed.
@@ -506,8 +505,8 @@ impl Registry {
             },
             latch,
         );
-        // The hand-off and the wait run with the context suspended, so the run is charged for the
-        // job alone, and the jobs this worker runs meanwhile charge their own contexts.
+
+        // The hand-off and the wait run in no context, so the run is charged for the job alone.
         //
         // SAFETY: the job stays on this stack frame until its latch is set, which happens once it
         // has executed, and `current_thread` is this thread's worker state.
@@ -950,7 +949,7 @@ impl WorkerThread {
     }
 
     pub(super) fn yield_now(&self) -> Yield {
-        // The search runs with the context suspended, and the job found enters its own.
+        // The search runs in no context, and the job found runs in its own.
         Context::suspend(|| self.find_work()).map_or(Yield::Idle, |job| {
             // SAFETY: a job taken from a queue executes once, on a worker of its pool.
             unsafe { self.execute(job) };

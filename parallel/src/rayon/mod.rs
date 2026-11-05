@@ -77,10 +77,8 @@
 //!   available.
 //! - Added group eligibility, wake propagation, and placement-restoration tests, plus Loom
 //!   models of the wake protocol.
-//! - Added a busy-time meter for measured runs. Stack jobs execute in their creator's context, a
-//!   handle lets a spawner charge a detached job's work to its run, and hand-offs, scheduler waits,
-//!   and yields run without a context, so a run's busy time covers its work and excludes its waits
-//!   for the pool.
+//! - Added a busy-time meter for measured runs. Stack jobs run in their creator's context, and
+//!   hand-offs, scheduler waits, and yields run in none.
 //!
 //! [rayon-core]: https://crates.io/crates/rayon-core/1.13.0
 //! [rayon]: https://crates.io/crates/rayon/1.12.0

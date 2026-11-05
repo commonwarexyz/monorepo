@@ -1728,8 +1728,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 }
             };
 
-            // A measured run is timed, and a measured parallel run also meters the busy time of the
-            // threads that execute it. A serial run's busy time is its wall time.
+            // A measured parallel run also meters its busy time. A serial run's busy time is its
+            // wall time.
             let start = plan.measure.then(Instant::now);
             let (result, busy) = {
                 // The guard requests the caller's original mask when the body returns or unwinds.
@@ -1917,9 +1917,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         };
 
                         // The pool aborts on an uncaught panic in a spawned job, so catch the
-                        // panic and propagate it to the awaiting task. The job's work is charged
-                        // to the spawning run before the result is sent, so a run that awaits it
-                        // observes the charge.
+                        // panic and propagate it to the awaiting task. The handle charges the
+                        // spawning run before the result is sent.
                         let result = handle.enter(|| {
                             panic::catch_unwind(AssertUnwindSafe(|| {
                                 worker_pool.install_in(placement, || f(s))
@@ -3791,8 +3790,8 @@ mod test {
         )
     }
 
-    /// Maps `len` items that each spin for `each`, and returns the call site of the run and the
-    /// wall time the items spent spinning in total.
+    /// Maps `len` items that each spin for `each`, and returns the run's call site and the items'
+    /// total spin time.
     #[track_caller]
     fn spin_map(
         strategy: &Rayon,
@@ -3803,9 +3802,8 @@ mod test {
         (Location::caller(), items.into_iter().sum())
     }
 
-    /// Measures a parallel run of 32 items on four workers, each spinning for 1ms. The busy time
-    /// covers the 32ms the items spin, and the caller and four workers each charge disjoint
-    /// intervals within the run, so it stays within five times the wall time.
+    /// A run of 32 items that each spin for 1ms records at least 32ms of busy time, and at most
+    /// five times its wall time since only the caller and four workers charge it.
     #[test]
     fn measured_run_records_busy_time_of_all_items() {
         // Map 32 items that each spin for 1ms.
@@ -3821,10 +3819,8 @@ mod test {
         );
     }
 
-    /// Measures a join, called from outside the pool, with sides that spin for 5ms and 40ms. Each
-    /// side is charged for the time its thread spends in it, and a worker that finishes the short
-    /// side is not charged while it waits for the long one, so the busy time stays within the
-    /// sides' own wall times plus the hand-offs.
+    /// A join of 5ms and 40ms sides is charged for both sides, but not for the worker that finishes
+    /// the short side and waits for the long one.
     #[test]
     fn measured_join_excludes_idle_waits() {
         #[track_caller]
@@ -3848,9 +3844,8 @@ mod test {
         );
     }
 
-    /// Measures a run submitted while every worker is occupied. The workers keep spinning for 50ms
-    /// after the run queues, so its wall time includes the queue, but its busy time stays within
-    /// the time its own items spent spinning plus the hand-offs.
+    /// A run that queues behind busy workers records the queue in its wall time but not in its busy
+    /// time.
     #[test]
     fn measured_run_excludes_queueing() {
         let strategy = parallel_strategy();
@@ -3867,9 +3862,8 @@ mod test {
             strategy.groups.pool().spawn_broadcast(move |_| {
                 started.wait();
 
-                // The observation stays available after another worker takes the queued job, so
-                // a worker descheduled past that point still releases its thread. Give up after
-                // 10s and flag the miss, so the test fails when the run never queues.
+                // One worker seeing the queued run releases them all, so a worker descheduled past
+                // the dequeue still stops. A miss after 10s fails the test.
                 let deadline = Instant::now() + Duration::from_secs(10);
                 while !queued.load(Ordering::Relaxed) {
                     if pool.has_injected_job() {
@@ -3891,7 +3885,7 @@ mod test {
         let len = 4;
         let (caller, items) = spin_map(&strategy, len, Duration::from_millis(1));
 
-        // Every blocker finishes before its outcome is checked and the pool is released.
+        // Wait for every blocker to finish before checking that the run queued.
         strategy.groups.pool().broadcast(|_| ());
         assert!(
             !missed.load(Ordering::Relaxed),
@@ -3910,9 +3904,8 @@ mod test {
         );
     }
 
-    /// Measures a `Strategy::run` whose body spins for 2ms on the caller and then maps 16 items
-    /// that each spin for 1ms. The run's busy time includes the nested run's busy time once, plus
-    /// the time the caller spends in the body outside the nested run.
+    /// A `Strategy::run` body that spins for 2ms and then runs a nested map is charged the nested
+    /// busy time once, plus the body's own time.
     #[test]
     fn measured_run_includes_nested_runs() {
         #[track_caller]
@@ -3928,8 +3921,7 @@ mod test {
         let strategy = parallel_strategy();
         let (outer, inner) = run_body(&strategy);
 
-        // The outer busy time adds the body's own time to the inner busy time. The body's own time
-        // is at least the 2ms spin and at most the outer wall time minus the inner, with 2ms slack.
+        // The body's own time is between its 2ms spin and the outer wall minus the inner, plus 2ms.
         let (outer_wall, outer) = recorded(&strategy, outer, 2);
         let (inner_wall, inner) = recorded(&strategy, inner, 16);
         let body = outer_wall - inner_wall;
