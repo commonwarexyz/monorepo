@@ -45,6 +45,7 @@ use crate::{
             verification::JobId,
             view::{TimeoutCutoff, ViewState},
         },
+        order::Lanes,
         scheme::Scheme,
         types::{
             Artifact, ArtifactId, BlockRef, ChainId, Context, DaCertificate, FinalityFact,
@@ -377,7 +378,11 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
             Role::Observer => Height::zero(),
         };
         let genesis_tips = genesis.tips().to_vec();
-        let placement = PlacementState::new(genesis_history::<H>(genesis), &genesis_tips);
+        let placement = PlacementState::new(
+            genesis_history::<H>(genesis),
+            &genesis_tips,
+            Lanes::from_parameters(profile.protocol().parameters()),
+        );
         Self {
             profile,
             lifecycle: Lifecycle::Fresh,
