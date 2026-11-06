@@ -177,6 +177,8 @@ impl Drop for ArmGuard<'_> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Waiter {
     /// A ring wait, whose wake posts a completion that the driver reaps later.
+    /// Only the persistent ring wait models queue one.
+    #[cfg_attr(not(test), allow(dead_code))]
     Ring,
     /// A wait that blocks its caller until a wake releases it, identified by
     /// its ticket.
