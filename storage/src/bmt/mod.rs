@@ -1203,9 +1203,9 @@ mod tests {
                 .is_ok()
         );
 
-        // Leaves that yield fewer or more than their reported length are rejected, even when
-        // the leaves they yield are the proof's range.
-        for (yielded, reported) in [(3, 4), (4, 3)] {
+        // Reject missing leaves and valid leaves with incorrect length metadata. The four-leaf
+        // cases isolate the check against the number actually consumed.
+        for (yielded, reported) in [(3, 4), (4, 3), (4, 5)] {
             let leaves = Misreported {
                 inner: digests[2..2 + yielded].iter().copied(),
                 len: reported,
