@@ -7,7 +7,7 @@ use super::{
 use crate::core::{
     curve::{g1, g2},
     field::{
-        arithmetic::Field,
+        arithmetic::{Field, TIGHT},
         fp::BYTES as FP_BYTES,
         fp2::{BYTES as FP2_BYTES, Fp2},
         fp12::{self, BYTES, Fp12},
@@ -15,9 +15,9 @@ use crate::core::{
     pairing::{G1Affine, G2Affine, Pair, final_exponentiation, miller_loop},
 };
 use commonware_math::algebra::{Multiplicative, Object};
+use alloc::{vec, vec::Vec};
 use commonware_simd::Simd;
 use core::{
-    array,
     fmt::{self, Debug, Formatter},
     ops::{Mul, MulAssign},
 };
@@ -124,25 +124,21 @@ impl Pairings<'_> {
         // Pairs with an identity contribute one, so only the others are prepared. Unused lanes
         // hold the fill pair.
         let fill = fill();
-        let mut pairs = self
+        let points: Vec<_> = self
             .0
             .iter()
             .filter(|(p, q)| !p.is_identity() && !q.is_identity())
-            .peekable();
+            .map(|(p, q)| (*p.coordinates(), *q.coordinates()))
+            .collect();
+        let affine = to_affine::<S, F>(simd, &points);
         let mut prepared = [Pair::<F>::load(simd, &[], &fill); SHARED];
         let mut count = 0;
         let mut product: Option<Fp12<F>> = None;
-        while pairs.peek().is_some() {
-            let mut points = [(g1::IDENTITY, g2::IDENTITY); MAX_LANES];
-            let mut lanes = 0;
-            for (p, q) in pairs.by_ref().take(F::LANES) {
-                points[lanes] = (*p.coordinates(), *q.coordinates());
-                lanes += 1;
-            }
-            let affine = to_affine::<S, F>(simd, &points[..lanes]);
-            prepared[count] = Pair::load(simd, &affine[..lanes], &fill);
+        let mut groups = affine.chunks(F::LANES).peekable();
+        while let Some(group) = groups.next() {
+            prepared[count] = Pair::load(simd, group, &fill);
             count += 1;
-            if count == SHARED || pairs.peek().is_none() {
+            if count == SHARED || groups.peek().is_none() {
                 let lines = miller_loop(simd, &prepared[..count]);
                 product = Some(product.map_or(lines, |product| product.mul(simd, &lines)));
                 count = 0;
@@ -198,20 +194,25 @@ impl Kernel for Each<'_> {
         filler.0[2][FP_BYTES - 1] = 1;
         filler.1 = *<G2 as commonware_math::algebra::CryptoGroup>::generator().coordinates();
         let count = self.0.len().min(self.1.len());
-        for (pairs, outputs) in self.0[..count]
+        // Pairs with an identity pair to one, so their lanes hold the fill pair, which the
+        // conversion to affine coordinates accepts.
+        let points: Vec<_> = self.0[..count]
+            .iter()
+            .map(|(p, q)| {
+                if p.is_identity() || q.is_identity() {
+                    filler
+                } else {
+                    (*p.coordinates(), *q.coordinates())
+                }
+            })
+            .collect();
+        let affine = to_affine::<S, F>(simd, &points);
+        for ((pairs, affine), outputs) in self.0[..count]
             .chunks(F::LANES)
+            .zip(affine.chunks(F::LANES))
             .zip(self.1[..count].chunks_mut(F::LANES))
         {
-            // Pairs with an identity pair to one, so their lanes hold the fill pair, which the
-            // conversion to affine coordinates accepts.
-            let mut points = [filler; MAX_LANES];
-            for (lane, (p, q)) in pairs.iter().enumerate() {
-                if !p.is_identity() && !q.is_identity() {
-                    points[lane] = (*p.coordinates(), *q.coordinates());
-                }
-            }
-            let affine = to_affine::<S, F>(simd, &points[..pairs.len()]);
-            let prepared = Pair::<F>::load(simd, &affine[..pairs.len()], &fill);
+            let prepared = Pair::<F>::load(simd, affine, &fill);
             let lines = miller_loop(simd, &[prepared]);
             let mut results = [fp12::ONE; MAX_LANES];
             final_exponentiation(simd, lines).store(simd, &mut results[..pairs.len()]);
@@ -226,40 +227,85 @@ impl Kernel for Each<'_> {
     }
 }
 
-/// Returns the affine coordinates of each lane's pair of points, none of which may be the
-/// identity.
+/// Returns the affine coordinates of each pair of points, none of which may be the identity.
 ///
-/// Runs as its own kernel, so that the conversions have the backend's instructions.
+/// One inversion serves every pair, as Montgomery's trick: the G1 denominators and the norms of
+/// the G2 denominators multiply up in turn, the total inverts, and each inverse unwinds from the
+/// total with the running products. Runs as its own kernel, so that the conversions have the
+/// backend's instructions.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn to_affine<S: Simd, F: Field<S>>(
     simd: S,
     points: &[(g1::Coordinates, g2::Coordinates)],
-) -> [(G1Affine, G2Affine); MAX_LANES] {
-    let mut g1 = [g1::IDENTITY; MAX_LANES];
-    let mut g2 = [g2::IDENTITY; MAX_LANES];
-    for (lane, (p, q)) in points.iter().enumerate() {
-        g1[lane] = *p;
-        g2[lane] = *q;
+) -> Vec<(G1Affine, G2Affine)> {
+    const { assert!(F::LANES <= MAX_LANES) };
+    if points.is_empty() {
+        return Vec::new();
     }
-    let lanes = points.len();
+    // Unused lanes hold points with denominator one, which leave the products unchanged.
+    let mut p_fill = g1::IDENTITY;
+    p_fill[2][FP_BYTES - 1] = 1;
+    let mut q_fill = g2::IDENTITY;
+    q_fill[2][FP2_BYTES - 1] = 1;
     simd.execute(
         #[inline(always)]
         move |simd: S| {
-            let p = g1::Point::<F>::load(simd, &g1[..lanes], &g1::IDENTITY);
-            let q = g2::Point::<F>::load(simd, &g2[..lanes], &g2::IDENTITY);
-            // Loaded coordinates are tight with limb bound one, as inversion requires, and
-            // multiplying them by tight inverses stays within every product bound.
-            let p_inverse = p.z.invert(simd);
-            let q_inverse = q.z.invert(simd);
-            let mut px = [[0; FP_BYTES]; MAX_LANES];
-            let mut py = [[0; FP_BYTES]; MAX_LANES];
-            let mut qx = [[0; FP2_BYTES]; MAX_LANES];
-            let mut qy = [[0; FP2_BYTES]; MAX_LANES];
-            p.x.mul(simd, p_inverse).store(simd, &mut px);
-            p.y.mul(simd, p_inverse).store(simd, &mut py);
-            Fp2::mul::<64, S>(q.x, simd, q_inverse).store(simd, &mut qx);
-            Fp2::mul::<64, S>(q.y, simd, q_inverse).store(simd, &mut qy);
-            array::from_fn(|lane| ([px[lane], py[lane]], [qx[lane], qy[lane]]))
+            let groups = points.len().div_ceil(F::LANES);
+            let mut loaded = Vec::with_capacity(groups);
+            // The G1 denominator and the norm of the G2 denominator of each group, tight with
+            // limb bound one, as inversion requires.
+            let mut denominators = Vec::with_capacity(2 * groups);
+            for group in points.chunks(F::LANES) {
+                let mut g1 = [p_fill; MAX_LANES];
+                let mut g2 = [q_fill; MAX_LANES];
+                for (lane, (p, q)) in group.iter().enumerate() {
+                    g1[lane] = *p;
+                    g2[lane] = *q;
+                }
+                let p = g1::Point::<F>::load(simd, &g1[..group.len()], &p_fill);
+                let q = g2::Point::<F>::load(simd, &g2[..group.len()], &q_fill);
+                let norm = F::accumulate_product(simd, q.z.c0.product(simd, q.z.c0), q.z.c1, q.z.c1);
+                denominators.push(p.z);
+                denominators.push(F::reduce_tight(simd, norm));
+                loaded.push((p, q));
+            }
+            let mut running = Vec::with_capacity(denominators.len());
+            let mut total = denominators[0];
+            running.push(total);
+            for &denominator in &denominators[1..] {
+                total = F::reduce_tight(simd, total.product(simd, denominator));
+                running.push(total);
+            }
+            let mut inverse = total.invert(simd);
+            let mut inverses = vec![inverse; denominators.len()];
+            for i in (1..denominators.len()).rev() {
+                inverses[i] = F::reduce_tight(simd, inverse.product(simd, running[i - 1]));
+                inverse = F::reduce_tight(simd, inverse.product(simd, denominators[i]));
+            }
+            inverses[0] = inverse;
+
+            let mut affine = Vec::with_capacity(points.len());
+            for (group, (p, q)) in loaded.into_iter().enumerate() {
+                let lanes = (points.len() - group * F::LANES).min(F::LANES);
+                let (p_inverse, norm_inverse) = (inverses[2 * group], inverses[2 * group + 1]);
+                // The inverse of the G2 denominator is its conjugate over its norm.
+                let conjugate = q.z.conjugate::<{ TIGHT + 1 }, S>(simd).carry(simd);
+                let q_inverse = Fp2::reduce_tight::<1, S>(simd, conjugate.product_base(simd, norm_inverse));
+                // Multiplying tight coordinates by tight inverses stays within every product
+                // bound.
+                let mut px = [[0; FP_BYTES]; MAX_LANES];
+                let mut py = [[0; FP_BYTES]; MAX_LANES];
+                let mut qx = [[0; FP2_BYTES]; MAX_LANES];
+                let mut qy = [[0; FP2_BYTES]; MAX_LANES];
+                p.x.mul(simd, p_inverse).store(simd, &mut px);
+                p.y.mul(simd, p_inverse).store(simd, &mut py);
+                Fp2::mul::<64, S>(q.x, simd, q_inverse).store(simd, &mut qx);
+                Fp2::mul::<64, S>(q.y, simd, q_inverse).store(simd, &mut qy);
+                for lane in 0..lanes {
+                    affine.push(([px[lane], py[lane]], [qx[lane], qy[lane]]));
+                }
+            }
+            affine
         },
     )
 }
