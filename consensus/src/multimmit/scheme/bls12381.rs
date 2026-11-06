@@ -1,12 +1,16 @@
-//! BLS12-381 multisig ordinary keys with threshold data-availability and nullification keys.
+//! BLS12-381 multisig ordinary keys with threshold or aggregate data-availability keys and
+//! threshold nullification keys.
 //!
 //! This is Multimmit's default suite:
 //!
 //! - ordinary keys sign BLS multi-signatures ([`ordinary`]), so a V-QC or L-QC aggregates its
 //!   transcript into one signature that verifies with one pairing per distinct message;
-//! - a threshold sharing at the epoch's [`DaQuorum`](crate::multimmit::types::DaQuorum) (`n-2f`,
-//!   or `n-f` for binding certificates) produces constant-size data-availability certificates
-//!   ([`da`] or [`da_binding`]); and
+//! - data-availability certificates at `n-2f` come from one of two DA roles:
+//!   - [`Threshold`] (the default): an `n-2f` threshold sharing produces constant-size
+//!     certificates ([`da`]); or
+//!   - [`Aggregate`]: ordinary keys sign DA votes too, and a certificate aggregates them with a
+//!     signer bitmap ([`da_aggregate`]), so it can count `n-f` signers and serve as a payment
+//!     chain's receipt (the specification's one-signature-scheme variant); and
 //! - a `2f+1` threshold sharing produces constant-size nullifications ([`nullify`]).
 //!
 //! # Registration
@@ -14,24 +18,24 @@
 //! Aggregating BLS signatures over different messages is only sound when no participant chose
 //! its key as a function of others' keys. [`Roster`] verifies a proof of possession for every
 //! ordinary key, bound to the participant's identity, before any scheme can be constructed. The
-//! DA and nullification sharings must be generated independently: constructors check their public
+//! threshold sharings must be generated independently: constructors check their public
 //! structure, thresholds, and distinct group identities, but cannot prove how key material was
 //! generated.
 //!
 //! # Roles
 //!
-//! A signer holds its ordinary key and both threshold shares, a verifier holds both public
-//! sharings, and a certificate verifier holds only both group identities. A certificate verifier
-//! checks ordinary signatures and recovered certificates but cannot check or recover shares.
+//! A signer holds its ordinary key and its threshold shares, a verifier holds the public
+//! sharings, and a certificate verifier holds only the group identities. A certificate verifier
+//! checks ordinary signatures and complete certificates but cannot check or recover shares.
 
-use super::{Available, Binding, DaFaults, DaSubject, Error, Generic, Marker, RoleDigest};
+use super::{Available, DaSubject, Error, Generic, Marker, RoleDigest};
 use crate::multimmit::config::Parameters;
 use bytes::BytesMut;
-use commonware_codec::{Read as _, Write as _};
+use commonware_codec::{Read, Write as _};
 use commonware_cryptography::{
     PublicKey,
     bls12381::{
-        certificate::threshold,
+        certificate::{multisig, threshold},
         primitives::{
             group::{Private, Scalar, Share},
             ops,
@@ -39,7 +43,7 @@ use commonware_cryptography::{
             variant::Variant,
         },
     },
-    certificate,
+    certificate::{self, Verifier},
 };
 use commonware_math::{algebra::Additive, poly::Poly};
 use commonware_parallel::{Sequential, Strategy};
@@ -60,8 +64,7 @@ pub mod ordinary {
     impl_certificate_bls12381_multisig!(OrdinarySubject, Namespace, N5f1);
 }
 
-/// Threshold data-availability keys at the `n-2f` quorum of
-/// [`DaQuorum::Available`](crate::multimmit::types::DaQuorum::Available).
+/// Threshold data-availability keys at `n-2f`, the [`Threshold`] DA role.
 pub mod da {
     use crate::multimmit::scheme::{Available, DaSubject, Namespace};
     use commonware_cryptography::impl_certificate_bls12381_threshold;
@@ -69,13 +72,13 @@ pub mod da {
     impl_certificate_bls12381_threshold!(DaSubject, Namespace, Available);
 }
 
-/// Threshold data-availability keys at the `n-f` quorum of
-/// [`DaQuorum::Binding`](crate::multimmit::types::DaQuorum::Binding).
-pub mod da_binding {
-    use crate::multimmit::scheme::{Binding, DaSubject, Namespace};
-    use commonware_cryptography::impl_certificate_bls12381_threshold;
+/// Ordinary keys signing data-availability votes, aggregated at `n-2f` or more with a signer
+/// bitmap, the [`Aggregate`] DA role.
+pub mod da_aggregate {
+    use crate::multimmit::scheme::{Available, DaSubject, Namespace};
+    use commonware_cryptography::impl_certificate_bls12381_multisig;
 
-    impl_certificate_bls12381_threshold!(DaSubject, Namespace, Binding);
+    impl_certificate_bls12381_multisig!(DaSubject, Namespace, Available);
 }
 
 /// `2f+1` threshold nullification keys.
@@ -86,131 +89,122 @@ pub mod nullify {
     impl_certificate_bls12381_threshold!(NullifySubject, Namespace, NullifyFaults);
 }
 
-/// A data-availability fault model with a BLS12-381 threshold DA role.
+/// Data-availability certificates from an `n-2f` threshold sharing (the default).
 ///
-/// Implemented by [`Available`] ([`da`]) and [`Binding`] ([`da_binding`]).
-pub trait Quorum: DaFaults {
-    /// The threshold DA role at this quorum.
+/// Certificates are constant-size and verify against one group key, but do not reveal their
+/// signers, so an epoch with payment chains cannot use them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Threshold;
+
+/// Data-availability certificates that aggregate ordinary-key signatures with a signer bitmap.
+///
+/// Certificates grow by a bitmap of `ceil(n/8)` bytes and are not unique as bit strings, but count
+/// their signers, so a payment chain's producer can form `n-f` receipts. No DA key sharing is
+/// dealt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Aggregate;
+
+/// A BLS12-381 data-availability role: [`Threshold`] or [`Aggregate`].
+pub trait DaRole: Copy + fmt::Debug + Default + Eq + Hash + Send + Sync + 'static {
+    /// The DA role scheme over identities `P` and BLS variant `V`.
     type Da<P: PublicKey, V: Variant>: for<'a> certificate::Scheme<
             PublicKey = P,
-            Faults = Self,
-            Certificate = threshold::Certificate<V>,
+            Faults = Available,
             Signature = V::Signature,
             Subject<'a, RoleDigest> = DaSubject,
         >;
 
-    /// Builds a DA signer. The sharing must be validated first.
+    /// Returns the decoding configuration of a certificate in a committee of `participants`.
     #[doc(hidden)]
-    fn signer<P: PublicKey, V: Variant>(
-        namespace: &[u8],
-        participants: Set<P>,
-        sharing: Sharing<V>,
-        share: Share,
-    ) -> Option<Self::Da<P, V>>;
+    fn certificate_config<P: PublicKey, V: Variant>(
+        participants: usize,
+    ) -> <<Self::Da<P, V> as Verifier>::Certificate as Read>::Cfg;
 
-    /// Builds a DA verifier. The sharing must be validated first.
+    /// Returns how many signers a certificate aggregates, or `None` when it does not reveal them.
     #[doc(hidden)]
-    fn verifier<P: PublicKey, V: Variant>(
-        namespace: &[u8],
-        participants: Set<P>,
-        sharing: Sharing<V>,
-    ) -> Self::Da<P, V>;
-
-    /// Builds a DA certificate verifier.
-    #[doc(hidden)]
-    fn certificate_verifier<P: PublicKey, V: Variant>(
-        namespace: &[u8],
-        identity: V::Public,
-    ) -> Self::Da<P, V>;
+    fn signers<P: PublicKey, V: Variant>(
+        certificate: &<Self::Da<P, V> as Verifier>::Certificate,
+    ) -> Option<usize>;
 }
 
-macro_rules! impl_quorum {
-    ($faults:ty, $module:ident) => {
-        impl Quorum for $faults {
-            type Da<P: PublicKey, V: Variant> = $module::Scheme<P, V>;
+impl DaRole for Threshold {
+    type Da<P: PublicKey, V: Variant> = da::Scheme<P, V>;
 
-            fn signer<P: PublicKey, V: Variant>(
-                namespace: &[u8],
-                participants: Set<P>,
-                sharing: Sharing<V>,
-                share: Share,
-            ) -> Option<Self::Da<P, V>> {
-                $module::Scheme::signer(namespace, participants, sharing, share)
-            }
+    fn certificate_config<P: PublicKey, V: Variant>(_: usize) {}
 
-            fn verifier<P: PublicKey, V: Variant>(
-                namespace: &[u8],
-                participants: Set<P>,
-                sharing: Sharing<V>,
-            ) -> Self::Da<P, V> {
-                $module::Scheme::verifier(namespace, participants, sharing)
-            }
-
-            fn certificate_verifier<P: PublicKey, V: Variant>(
-                namespace: &[u8],
-                identity: V::Public,
-            ) -> Self::Da<P, V> {
-                $module::Scheme::certificate_verifier(namespace, identity)
-            }
-        }
-    };
+    fn signers<P: PublicKey, V: Variant>(_: &threshold::Certificate<V>) -> Option<usize> {
+        None
+    }
 }
 
-impl_quorum!(Available, da);
-impl_quorum!(Binding, da_binding);
+impl DaRole for Aggregate {
+    type Da<P: PublicKey, V: Variant> = da_aggregate::Scheme<P, V>;
 
-/// The BLS12-381 multisig suite over identities `P` and BLS variant `V`, with DA certificates at
-/// the quorum `Q`.
+    fn certificate_config<P: PublicKey, V: Variant>(participants: usize) -> usize {
+        participants
+    }
+
+    fn signers<P: PublicKey, V: Variant>(certificate: &multisig::Certificate<V>) -> Option<usize> {
+        Some(certificate.signers.count())
+    }
+}
+
+/// The BLS12-381 multisig suite over identities `P` and BLS variant `V`, with the DA role `R`.
 ///
 /// `V` may be either [`MinPk`](commonware_cryptography::bls12381::primitives::variant::MinPk)
 /// or [`MinSig`](commonware_cryptography::bls12381::primitives::variant::MinSig).
-pub struct Scheme<P, V, Q = Available>(Marker<(P, V, Q)>);
+pub struct Scheme<P, V, R = Threshold>(Marker<(P, V, R)>);
 
-impl<P, V, Q> Clone for Scheme<P, V, Q> {
+impl<P, V, R> Clone for Scheme<P, V, R> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<P, V, Q> Copy for Scheme<P, V, Q> {}
+impl<P, V, R> Copy for Scheme<P, V, R> {}
 
-impl<P, V, Q> Default for Scheme<P, V, Q> {
+impl<P, V, R> Default for Scheme<P, V, R> {
     fn default() -> Self {
         Self(Marker::default())
     }
 }
 
-impl<P, V, Q> PartialEq for Scheme<P, V, Q> {
+impl<P, V, R> PartialEq for Scheme<P, V, R> {
     fn eq(&self, _: &Self) -> bool {
         true
     }
 }
 
-impl<P, V, Q> Eq for Scheme<P, V, Q> {}
+impl<P, V, R> Eq for Scheme<P, V, R> {}
 
-impl<P, V, Q> Hash for Scheme<P, V, Q> {
+impl<P, V, R> Hash for Scheme<P, V, R> {
     fn hash<H: core::hash::Hasher>(&self, _: &mut H) {}
 }
 
-impl<P, V, Q> fmt::Debug for Scheme<P, V, Q> {
+impl<P, V, R> fmt::Debug for Scheme<P, V, R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("bls12381::Scheme")
     }
 }
 
-impl<P: PublicKey, V: Variant, Q: Quorum> super::Scheme for Scheme<P, V, Q> {
+impl<P: PublicKey, V: Variant, R: DaRole> super::Scheme for Scheme<P, V, R> {
     type PublicKey = P;
-    type DaFaults = Q;
     type Ordinary = ordinary::Scheme<P, V>;
-    type Da = Q::Da<P, V>;
+    type Da = R::Da<P, V>;
     type Nullify = nullify::Scheme<P, V>;
 
-    fn da_certificate_config(_: usize) {}
+    fn da_certificate_config(participants: usize) -> <super::DaCertificateOf<Self> as Read>::Cfg {
+        R::certificate_config::<P, V>(participants)
+    }
 
     fn nullification_config(_: usize) {}
+
+    fn da_signers(_: &Self::Da, certificate: &super::DaCertificateOf<Self>) -> Option<usize> {
+        R::signers::<P, V>(certificate)
+    }
 }
 
-/// The local participant's secret key material.
+/// The local participant's secret key material under the [`Threshold`] DA role.
 ///
 /// Both shares must belong to the participant whose ordinary key is `ordinary`.
 #[derive(Clone)]
@@ -223,7 +217,22 @@ pub struct SignerKeys {
     pub nullification: Share,
 }
 
-impl<P: PublicKey, V: Variant, Q: Quorum> Scheme<P, V, Q> {
+/// Returns the local participant of a roster, by its ordinary public key.
+fn roster_participant<P: PublicKey, V: Variant>(
+    roster: &Roster<P, V>,
+    ordinary: &Private,
+) -> Result<Participant, Error> {
+    let ordinary = ops::compute_public::<V>(ordinary);
+    roster
+        .participants
+        .values()
+        .iter()
+        .position(|public| public == &ordinary)
+        .map(Participant::from_usize)
+        .ok_or(Error::UnknownKey)
+}
+
+impl<P: PublicKey, V: Variant> Scheme<P, V, Threshold> {
     /// Creates a signer from the local participant's ordinary key and threshold shares.
     ///
     /// See the module-level security requirements. Fails when any key, share, sharing, or
@@ -236,16 +245,8 @@ impl<P: PublicKey, V: Variant, Q: Quorum> Scheme<P, V, Q> {
         nullification: Sharing<V>,
     ) -> Result<Generic<Self>, Error> {
         roster.ensure_namespace(parameters)?;
-        ensure_da_quorum::<Q>(parameters)?;
         validate_sharings(parameters, &da, &nullification)?;
-        let ordinary = ops::compute_public::<V>(&keys.ordinary);
-        let participant = roster
-            .participants
-            .values()
-            .iter()
-            .position(|public| public == &ordinary)
-            .map(Participant::from_usize)
-            .ok_or(Error::UnknownKey)?;
+        let participant = roster_participant(&roster, &keys.ordinary)?;
         validate_shares(
             participant,
             &keys.da,
@@ -257,7 +258,7 @@ impl<P: PublicKey, V: Variant, Q: Quorum> Scheme<P, V, Q> {
         let identities = roster.participants.keys().clone();
         let ordinary = ordinary::Scheme::signer(namespace, roster.participants, keys.ordinary)
             .ok_or(Error::UnknownKey)?;
-        let da = Q::signer(namespace, identities.clone(), da, keys.da).ok_or(Error::Share)?;
+        let da = da::Scheme::signer(namespace, identities.clone(), da, keys.da).ok_or(Error::Share)?;
         let nullify =
             nullify::Scheme::signer(namespace, identities, nullification, keys.nullification)
                 .ok_or(Error::Share)?;
@@ -275,12 +276,11 @@ impl<P: PublicKey, V: Variant, Q: Quorum> Scheme<P, V, Q> {
         nullification: Sharing<V>,
     ) -> Result<Generic<Self>, Error> {
         roster.ensure_namespace(parameters)?;
-        ensure_da_quorum::<Q>(parameters)?;
         validate_sharings(parameters, &da, &nullification)?;
         let namespace = parameters.namespace();
         let identities = roster.participants.keys().clone();
         let ordinary = ordinary::Scheme::verifier(namespace, roster.participants);
-        let da = Q::verifier(namespace, identities.clone(), da);
+        let da = da::Scheme::verifier(namespace, identities.clone(), da);
         let nullify = nullify::Scheme::verifier(namespace, identities, nullification);
         Generic::new(parameters, ordinary, da, nullify)
     }
@@ -299,7 +299,7 @@ impl<P: PublicKey, V: Variant, Q: Quorum> Scheme<P, V, Q> {
         validate_identities::<V>(&da_identity, &nullification_identity)?;
         let namespace = parameters.namespace();
         let ordinary = ordinary::Scheme::verifier(namespace, roster.participants);
-        let da = Q::certificate_verifier(namespace, da_identity);
+        let da = da::Scheme::certificate_verifier(namespace, da_identity);
         let nullify = nullify::Scheme::certificate_verifier(namespace, nullification_identity);
         Generic::new(parameters, ordinary, da, nullify).map(Generic::certificates_only)
     }
@@ -312,25 +312,8 @@ impl<P: PublicKey, V: Variant, Q: Quorum> Scheme<P, V, Q> {
         rng: &mut impl CryptoRng,
         parameters: &Arc<Parameters>,
         identities: &Set<P>,
-    ) -> Result<Dealt<P, V, Q>, Error> {
-        let codec = parameters.codec_config();
-        let mut ordinary = Vec::with_capacity(identities.len());
-        let roster_input = identities
-            .iter()
-            .map(|identity| {
-                let (private, public) = ops::keypair::<_, V>(&mut *rng);
-                let proof =
-                    Roster::<P, V>::proof_of_possession(parameters.namespace(), identity, &private);
-                ordinary.push(private);
-                (identity.clone(), public, proof)
-            })
-            .collect();
-        let roster = Roster::verify(
-            parameters.namespace(),
-            codec.participants(),
-            roster_input,
-            &Sequential,
-        )?;
+    ) -> Result<Dealt<P, V>, Error> {
+        let (roster, ordinary) = deal_roster::<P, V>(rng, parameters, identities)?;
         let (da, nullification) = deal_sharings::<V>(rng, parameters)?;
         let signers = ordinary
             .into_iter()
@@ -366,8 +349,135 @@ impl<P: PublicKey, V: Variant, Q: Quorum> Scheme<P, V, Q> {
     }
 }
 
-/// A committee dealt by [`Scheme::deal`].
-pub struct Dealt<P: PublicKey, V: Variant, Q: Quorum = Available> {
+impl<P: PublicKey, V: Variant> Scheme<P, V, Aggregate> {
+    /// Creates a signer from the local participant's ordinary key and nullification share.
+    ///
+    /// The ordinary key also signs DA votes, under their own namespace. See the module-level
+    /// security requirements. Fails when the key, share, sharing, or participant index is
+    /// inconsistent with the epoch configuration.
+    pub fn signer(
+        parameters: &Arc<Parameters>,
+        roster: Roster<P, V>,
+        ordinary: Private,
+        nullification_share: Share,
+        nullification: Sharing<V>,
+    ) -> Result<Generic<Self>, Error> {
+        roster.ensure_namespace(parameters)?;
+        validate_nullification_sharing(parameters, &nullification)?;
+        let participant = roster_participant(&roster, &ordinary)?;
+        validate_share(participant, &nullification_share, &nullification)?;
+        let namespace = parameters.namespace();
+        let identities = roster.participants.keys().clone();
+        let da = da_aggregate::Scheme::signer(namespace, roster.participants.clone(), ordinary.clone())
+            .ok_or(Error::UnknownKey)?;
+        let ordinary = ordinary::Scheme::signer(namespace, roster.participants, ordinary)
+            .ok_or(Error::UnknownKey)?;
+        let nullify =
+            nullify::Scheme::signer(namespace, identities, nullification, nullification_share)
+                .ok_or(Error::Share)?;
+        Generic::new(parameters, ordinary, da, nullify)
+    }
+
+    /// Creates a verifier with the ordinary key roster and the public nullification sharing.
+    pub fn verifier(
+        parameters: &Arc<Parameters>,
+        roster: Roster<P, V>,
+        nullification: Sharing<V>,
+    ) -> Result<Generic<Self>, Error> {
+        roster.ensure_namespace(parameters)?;
+        validate_nullification_sharing(parameters, &nullification)?;
+        let namespace = parameters.namespace();
+        let identities = roster.participants.keys().clone();
+        let da = da_aggregate::Scheme::verifier(namespace, roster.participants.clone());
+        let ordinary = ordinary::Scheme::verifier(namespace, roster.participants);
+        let nullify = nullify::Scheme::verifier(namespace, identities, nullification);
+        Generic::new(parameters, ordinary, da, nullify)
+    }
+
+    /// Creates a verifier for complete certificates without retaining the public nullification
+    /// sharing.
+    ///
+    /// This role verifies ordinary signatures, V-QCs, L-QCs, DA certificates, receipts, and
+    /// recovered nullifications. It cannot verify DA votes or recover nullifications.
+    pub fn certificate_verifier(
+        parameters: &Arc<Parameters>,
+        roster: Roster<P, V>,
+        nullification_identity: V::Public,
+    ) -> Result<Generic<Self>, Error> {
+        roster.ensure_namespace(parameters)?;
+        if nullification_identity == V::Public::zero() {
+            return Err(Error::Sharing);
+        }
+        let namespace = parameters.namespace();
+        let da = da_aggregate::Scheme::verifier(namespace, roster.participants.clone());
+        let ordinary = ordinary::Scheme::verifier(namespace, roster.participants);
+        let nullify = nullify::Scheme::certificate_verifier(namespace, nullification_identity);
+        Generic::new(parameters, ordinary, da, nullify).map(Generic::certificates_only)
+    }
+
+    /// Deals a complete committee from one trusted dealer, for tests and local deployments.
+    ///
+    /// Every ordinary key, its proof of possession, and the nullification sharing derive from
+    /// `rng`, so whoever runs the dealer learns every secret. The roster lists `identities` in
+    /// order.
+    pub fn deal(
+        rng: &mut impl CryptoRng,
+        parameters: &Arc<Parameters>,
+        identities: &Set<P>,
+    ) -> Result<AggregateDealt<P, V>, Error> {
+        let (roster, ordinary) = deal_roster::<P, V>(rng, parameters, identities)?;
+        let nullification = deal_nullification_sharing::<V>(rng, parameters)?;
+        let signers = ordinary
+            .into_iter()
+            .zip(nullification.shares)
+            .map(|(ordinary, share)| {
+                Self::signer(
+                    parameters,
+                    roster.clone(),
+                    ordinary,
+                    share,
+                    nullification.sharing.clone(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let verifier = Self::verifier(parameters, roster.clone(), nullification.sharing.clone())?;
+        Ok(AggregateDealt {
+            roster,
+            nullification: nullification.sharing,
+            signers,
+            verifier,
+        })
+    }
+}
+
+/// Deals one ordinary key per identity with its proof of possession, and verifies the roster.
+fn deal_roster<P: PublicKey, V: Variant>(
+    rng: &mut impl CryptoRng,
+    parameters: &Parameters,
+    identities: &Set<P>,
+) -> Result<(Roster<P, V>, Vec<Private>), Error> {
+    let mut ordinary = Vec::with_capacity(identities.len());
+    let roster_input = identities
+        .iter()
+        .map(|identity| {
+            let (private, public) = ops::keypair::<_, V>(&mut *rng);
+            let proof =
+                Roster::<P, V>::proof_of_possession(parameters.namespace(), identity, &private);
+            ordinary.push(private);
+            (identity.clone(), public, proof)
+        })
+        .collect();
+    let roster = Roster::verify(
+        parameters.namespace(),
+        parameters.codec_config().participants(),
+        roster_input,
+        &Sequential,
+    )?;
+    Ok((roster, ordinary))
+}
+
+/// A committee dealt by [`Scheme::deal`] under the [`Threshold`] DA role.
+pub struct Dealt<P: PublicKey, V: Variant> {
     /// The verified ordinary-key roster.
     pub roster: Roster<P, V>,
     /// The data-availability sharing.
@@ -375,9 +485,21 @@ pub struct Dealt<P: PublicKey, V: Variant, Q: Quorum = Available> {
     /// The `2f+1` nullification sharing.
     pub nullification: Sharing<V>,
     /// One signer per participant, in roster order.
-    pub signers: Vec<Generic<Scheme<P, V, Q>>>,
+    pub signers: Vec<Generic<Scheme<P, V, Threshold>>>,
     /// A verifier holding both public sharings.
-    pub verifier: Generic<Scheme<P, V, Q>>,
+    pub verifier: Generic<Scheme<P, V, Threshold>>,
+}
+
+/// A committee dealt by [`Scheme::deal`] under the [`Aggregate`] DA role.
+pub struct AggregateDealt<P: PublicKey, V: Variant> {
+    /// The verified ordinary-key roster.
+    pub roster: Roster<P, V>,
+    /// The `2f+1` nullification sharing.
+    pub nullification: Sharing<V>,
+    /// One signer per participant, in roster order.
+    pub signers: Vec<Generic<Scheme<P, V, Aggregate>>>,
+    /// A verifier holding the public nullification sharing.
+    pub verifier: Generic<Scheme<P, V, Aggregate>>,
 }
 
 /// A sharing and every participant's share, dealt by one trusted dealer.
@@ -489,15 +611,6 @@ impl<P: PublicKey, V: Variant> Roster<P, V> {
     }
 }
 
-/// Checks that the suite's DA fault model matches the epoch's, before any threshold role is
-/// built over a sharing dealt for the epoch's quorum.
-pub(super) fn ensure_da_quorum<Q: DaFaults>(parameters: &Parameters) -> Result<(), Error> {
-    if Q::QUORUM != parameters.codec_config().da_quorum_kind() {
-        return Err(Error::DaQuorum);
-    }
-    Ok(())
-}
-
 /// Checks both group identities: nonzero and distinct.
 pub(super) fn validate_identities<V: Variant>(
     da: &V::Public,
@@ -554,6 +667,34 @@ pub(super) fn validate_shares<V: Variant>(
     Ok(())
 }
 
+/// Checks the public nullification sharing against the epoch configuration and precomputes its
+/// partial public keys.
+pub(super) fn validate_nullification_sharing<V: Variant>(
+    parameters: &Parameters,
+    nullification: &Sharing<V>,
+) -> Result<(), Error> {
+    let total = parameters.codec_config().participants();
+    if !valid_sharing(nullification, total, N5f1::nullification_quorum(total)) {
+        return Err(Error::Sharing);
+    }
+    nullification.precompute_partial_publics();
+    Ok(())
+}
+
+/// Checks that a share belongs to `participant` and to its sharing.
+pub(super) fn validate_share<V: Variant>(
+    participant: Participant,
+    share: &Share,
+    sharing: &Sharing<V>,
+) -> Result<(), Error> {
+    if share.index != participant
+        || sharing.partial_public(participant).map_err(|_| Error::Share)? != share.public::<V>()
+    {
+        return Err(Error::Share);
+    }
+    Ok(())
+}
+
 fn valid_sharing<V: Variant>(sharing: &Sharing<V>, total: usize, required: u32) -> bool {
     if sharing.total().get() as usize != total
         || sharing.required() != required
@@ -589,6 +730,19 @@ pub(super) fn deal_sharings<V: Variant>(
         u32::try_from(codec.nullification_quorum()).map_err(|_| Error::Participants)?,
     );
     Ok((da, nullification))
+}
+
+/// Deals the nullification sharing of an epoch.
+pub(super) fn deal_nullification_sharing<V: Variant>(
+    rng: &mut impl CryptoRng,
+    parameters: &Parameters,
+) -> Result<DealtSharing<V>, Error> {
+    let codec = parameters.codec_config();
+    Ok(deal_sharing::<V>(
+        rng,
+        u32::try_from(codec.participants()).map_err(|_| Error::Participants)?,
+        u32::try_from(codec.nullification_quorum()).map_err(|_| Error::Participants)?,
+    ))
 }
 
 /// Deals one sharing of `total` shares with threshold `required`.

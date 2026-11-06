@@ -278,9 +278,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
     /// The task assembles the certificate from admitted shares, so its cryptography is valid;
     /// the machine still owns the subject. On the own chain, a certificate whose block is no
     /// longer the current uncertified producer header (already certified, or retired while the
-    /// recovery was in flight) is stale rather than fatal. On a receipt chain this node does not
-    /// produce, every correct validator recovers a correct producer's certificate itself, so it is
-    /// admitted without a publication; forwarding still hands an unplaced one to upcoming leaders.
+    /// recovery was in flight) is stale rather than fatal.
     pub(super) fn recovered_certificate(
         &mut self,
         block: BlockRef<H::Digest>,
@@ -294,8 +292,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
             .get(chain)
             .is_some_and(|tip| block.height() > tip.height());
         let produced = self.chain.is_producer_header(certificate.header());
-        let receipt = self.chain.recovers_receipts(block.chain());
-        if certificate.block_ref::<H>() != block || !above_tip || !(produced || receipt) {
+        if certificate.block_ref::<H>() != block || !above_tip || !produced {
             return Ok(Capabilities::new());
         }
         let artifact = Arc::new(Artifact::DaCertificate(certificate.clone()));
@@ -305,18 +302,13 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         }
         let height = certificate.header().height();
         let retired = self.obligations_retired_by_da(block.chain(), height);
-        let publication = if produced {
-            let publication = self.next_effect_id()?;
-            let remaining = self.durable_effect_count().saturating_sub(retired.len());
-            if remaining >= self.profile.resources().max_outbox_effects() {
-                return Err(StepError::OutboxFull);
-            }
-            Some(publication)
-        } else {
-            None
-        };
+        let publication = self.next_effect_id()?;
+        let remaining = self.durable_effect_count().saturating_sub(retired.len());
+        if remaining >= self.profile.resources().max_outbox_effects() {
+            return Err(StepError::OutboxFull);
+        }
         let mut capabilities = self.reserve_change(Change::DaCertificateAdvanced {
-            publication,
+            publication: Some(publication),
             retired_publications: retired,
             artifact: Arc::clone(&artifact),
         })?;

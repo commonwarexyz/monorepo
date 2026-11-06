@@ -1,5 +1,5 @@
 //! Per-chain path limits: certified-only chains, per-chain extension bounds, the forwarding of
-//! unplaced certificates, and receipt chains, whose certificates every validator recovers.
+//! unplaced certificates, and payment chains, whose votes only their producer pools.
 
 use super::fixtures::{
     Harness, TestMachine, attestation, da_run_headers, digest, drain_da_choices,
@@ -14,16 +14,14 @@ use crate::{
         machine::{
             capability::{Capability, ChainCommand},
             chain::{ChainState, forwards_at},
-            durability::{
-                Change, EffectCompletion, PersistDirective, SendRequest, Snapshot, SnapshotReason,
-            },
+            durability::{EffectCompletion, PersistDirective, SendRequest, Snapshot, SnapshotReason},
             input::{CryptoCompletion, Input, ObservationStatus, Rejection, Step, StepStatus},
             reducer::machine::Machine,
             testing::{CapabilitiesExt as _, Drive as _, EffectExt as _, Until, cohort},
         },
         mocks::Bls,
         types::{
-            Anchor, Artifact, ChainId, ChainProposal, DaQuorum, DaVote, LeaderBlock, PathLimits,
+            Anchor, Artifact, ChainId, ChainProposal, DaVote, LeaderBlock, PathLimits,
             SignedTransactionBlock, TransactionBlockHeader,
         },
     },
@@ -471,14 +469,15 @@ fn only_the_views_forwarders_send_an_unplaced_certificate() {
     assert_eq!(forwarders, holders);
 }
 
-/// A six-validator profile at `participant` whose chain 1 has `receipt` limits, under `quorum`.
-fn receipt_profile(participant: u32, receipt: PathLimits, quorum: DaQuorum) -> Profile<Digest> {
-    let mut limits = vec![PathLimits::new(2, 1); 6];
-    limits[RECEIPTS.get() as usize] = receipt;
+/// A six-validator profile at `participant` whose chain 1 has `limits`, with payment chains when
+/// `payments` is set.
+fn payment_profile(participant: u32, limits: PathLimits, payments: bool) -> Profile<Digest> {
+    let mut chains = vec![PathLimits::new(2, 1); 6];
+    chains[RECEIPTS.get() as usize] = limits;
     Harness::validator(participant)
         .participants(6)
-        .chain_limits(limits)
-        .da_quorum(quorum)
+        .chain_limits(chains)
+        .payments(payments)
         .profile()
 }
 
@@ -496,7 +495,7 @@ fn observation(
 
 /// Verifies chain `chain`'s first block at `machine` and returns its header.
 fn verified_header(machine: &mut TestMachine, chain: u32) -> TransactionBlockHeader<Digest> {
-    let header = da_run_headers(machine, chain, 1, "receipt").remove(0);
+    let header = da_run_headers(machine, chain, 1, "payment").remove(0);
     let block = observe(
         machine,
         Artifact::TransactionBlock(SignedTransactionBlock::new(
@@ -509,22 +508,29 @@ fn verified_header(machine: &mut TestMachine, chain: u32) -> TransactionBlockHea
 }
 
 #[test]
-fn receipt_chain_votes_reach_every_validators_recovery() {
-    // Validator 5 produces neither chain 1 nor chain 2.
-    let (mut machine, _) =
-        start_profile(receipt_profile(5, PathLimits::new(0, 0), DaQuorum::Binding));
-    let receipt = verified_header(&mut machine, RECEIPTS.get());
-    // A wider pipeline window keeps a chain a receipt chain.
-    assert!(
-        receipt_profile(
-            5,
-            PathLimits::new(0, 0).with_pipeline_window(4).unwrap(),
-            DaQuorum::Binding
-        )
-        .protocol()
-        .receipt_chain(RECEIPTS)
+fn payment_chain_votes_reach_only_their_producer() {
+    let limits = PathLimits::new(0, 0).with_pipeline_window(4).unwrap();
+    // Validator 5 does not produce chain 1, so it drops chain 1's votes like any other chain's.
+    let (mut machine, _) = start_profile(payment_profile(5, limits, true));
+    assert!(machine.profile().protocol().payment_chain(RECEIPTS));
+    let payment = verified_header(&mut machine, RECEIPTS.get());
+    assert_eq!(
+        observation(
+            &mut machine,
+            Artifact::DaVote(DaVote::new(payment, threshold_share(2)))
+        ),
+        ObservationStatus::Rejected(Rejection::Unsolicited)
     );
-    let vote = DaVote::new(receipt, threshold_share(2));
+
+    // Its producer pools them for recovery.
+    let producer = machine
+        .profile()
+        .protocol()
+        .producer(RECEIPTS)
+        .expect("chain 1 has a producer");
+    let (mut machine, _) = start_profile(payment_profile(producer.get(), limits, true));
+    let payment = verified_header(&mut machine, RECEIPTS.get());
+    let vote = DaVote::new(payment, threshold_share(2));
     let verification = observe(&mut machine, Artifact::DaVote(vote.clone()));
     let verified = machine.verify(&verification, true, Until::CursorAdvance);
     assert!(verified.has(|capability| matches!(
@@ -532,78 +538,40 @@ fn receipt_chain_votes_reach_every_validators_recovery() {
         Capability::ChainDa(chain, ChainCommand::Observe(share))
             if *chain == RECEIPTS && share.as_ref() == &vote
     )));
+}
 
-    // Another producer's chain keeps the default route: its votes are only its producer's.
-    let pipelined = verified_header(&mut machine, 2);
-    assert_eq!(
-        observation(
-            &mut machine,
-            Artifact::DaVote(DaVote::new(pipelined, threshold_share(3)))
-        ),
-        ObservationStatus::Rejected(Rejection::Unsolicited)
+#[test]
+fn payment_chains_need_the_toggle_zero_depth_and_zero_extension() {
+    for (limits, payments) in [
+        (PathLimits::new(0, 0), false),
+        (PathLimits::new(0, 1), true),
+        (PathLimits::new(1, 0), true),
+    ] {
+        let profile = payment_profile(5, limits, payments);
+        assert!(!profile.protocol().payment_chain(RECEIPTS));
+    }
+    assert!(
+        payment_profile(5, PathLimits::new(0, 0), true)
+            .protocol()
+            .payment_chain(RECEIPTS)
     );
 }
 
 #[test]
-fn receipt_chains_need_binding_certificates_and_no_uncertified_placement() {
-    for (receipt, quorum) in [
-        (PathLimits::new(0, 0), DaQuorum::Available),
-        (PathLimits::new(0, 1), DaQuorum::Binding),
-        (PathLimits::new(1, 0), DaQuorum::Binding),
-    ] {
-        let profile = receipt_profile(5, receipt, quorum);
-        assert!(!profile.protocol().receipt_chain(RECEIPTS));
-        let (mut machine, _) = start_profile(profile);
-        let header = verified_header(&mut machine, RECEIPTS.get());
-        assert_eq!(
-            observation(
-                &mut machine,
-                Artifact::DaVote(DaVote::new(header, threshold_share(2)))
-            ),
-            ObservationStatus::Rejected(Rejection::Unsolicited)
-        );
-    }
-}
+fn a_validator_ignores_a_recovered_certificate_of_a_payment_chain_it_does_not_produce() {
+    let (mut machine, _) = start_profile(payment_profile(5, PathLimits::new(0, 0), true));
+    let payment = verified_header(&mut machine, RECEIPTS.get());
 
-#[test]
-fn receipt_chain_certificates_are_recovered_without_a_publication() {
-    let (mut machine, _) =
-        start_profile(receipt_profile(5, PathLimits::new(0, 0), DaQuorum::Binding));
-    let pipelined = verified_header(&mut machine, 2);
-    let receipt = verified_header(&mut machine, RECEIPTS.get());
-
-    // A recovered certificate of a chain this node neither produces nor recovers is stale.
+    // Only the chain's producer recovers its certificates, so a recovered one here is stale.
     let ignored = machine
         .step(Input::Crypto(CryptoCompletion::DaCertificate {
-            block: pipelined.block_ref::<Sha256>(),
-            certificate: symbolic_da_certificate(pipelined, 0),
+            block: payment.block_ref::<Sha256>(),
+            certificate: symbolic_da_certificate(payment, 1),
         }))
         .unwrap();
     let ignored = machine.settle(ignored, Until::Persist);
     assert!(!ignored.has(|capability| matches!(capability, Capability::Journal(_))));
-
-    // A receipt chain's certificate is admitted, and only its producer publishes it.
-    let certificate = symbolic_da_certificate(receipt.clone(), 1);
-    let recovered = machine
-        .step(Input::Crypto(CryptoCompletion::DaCertificate {
-            block: receipt.block_ref::<Sha256>(),
-            certificate: certificate.clone(),
-        }))
-        .unwrap();
-    let recovered = machine.settle(recovered, Until::CursorAdvance);
-    assert!(matches!(
-        recovered.persist_job().events()[0].change(),
-        Change::DaCertificateAdvanced {
-            publication: None,
-            artifact,
-            ..
-        } if matches!(artifact.as_ref(), Artifact::DaCertificate(actual) if actual == &certificate)
-    ));
-    assert!(recovered.has(|capability| matches!(
-        capability,
-        Capability::ChainDa(chain, ChainCommand::AnchorAdvanced(height))
-            if *chain == RECEIPTS && *height == receipt.height()
-    )));
+    assert!(!ignored.has(|capability| matches!(capability, Capability::ChainDa(..))));
 }
 
 #[test]
@@ -647,14 +615,14 @@ fn certified_only_chain_with_a_wide_window_votes_ahead_but_proposes_only_certifi
 }
 
 #[test]
-fn a_validator_pools_its_own_receipt_chain_share() {
-    let mut machine = Machine::new(receipt_profile(5, PathLimits::new(0, 0), DaQuorum::Binding));
+fn a_validator_sends_its_payment_chain_share_to_the_producer_only() {
+    let mut machine = Machine::new(payment_profile(5, PathLimits::new(0, 0), true));
     let start = machine.step(Input::Start).unwrap();
     machine.persist(&start.persist_job(), Until::CursorAdvance);
     let genesis = machine.profile().protocol().genesis().tips()[RECEIPTS.get() as usize];
-    let receipt = header(machine.profile(), RECEIPTS, 1, genesis.digest());
+    let payment = header(machine.profile(), RECEIPTS, 1, genesis.digest());
 
-    let reserved = validate_block(&mut machine, receipt.clone(), RECEIPTS.get());
+    let reserved = validate_block(&mut machine, payment.clone(), RECEIPTS.get());
     let sign = reserved
         .find(|effect| match effect {
             Capability::Released(job) if job.request().sign_one().is_some() => Some(job.clone()),
@@ -663,33 +631,30 @@ fn a_validator_pools_its_own_receipt_chain_share() {
         .expect("the staged DA choice releases signing");
     machine.persist(&reserved.persist_job(), Until::CursorAdvance);
 
-    // The node's own share joins its recovery like every peer's.
-    let vote = DaVote::new(receipt, threshold_share(5));
+    // The node's own share is published to the chain's producer and never pooled here.
+    let vote = DaVote::new(payment, threshold_share(5));
     let completed = machine
         .step(Input::EffectCompleted(EffectCompletion::signed(
             sign.issued(),
-            vec![Arc::new(Artifact::DaVote(vote.clone()))],
+            vec![Arc::new(Artifact::DaVote(vote))],
         )))
         .unwrap();
     let completed = machine.settle(completed, Until::CursorAdvance);
-    let pooled = |step: &Step<Bls<MinPk>, Digest>| {
-        step.has(|capability| {
-            matches!(
-                capability,
-                Capability::ChainDa(chain, ChainCommand::Observe(share))
-                    if *chain == RECEIPTS && share.as_ref() == &vote
-            )
-        })
-    };
-    // Like its publication, the share reaches recovery once its record is durable.
-    assert!(!pooled(&completed));
     let durable = machine.persist(&completed.persist_job(), Until::CursorAdvance);
-    assert!(pooled(&durable));
+    for step in [&completed, &durable] {
+        assert!(!step.has(|capability| matches!(capability, Capability::ChainDa(..))));
+    }
+    let producer = machine.profile().protocol().producer(RECEIPTS).unwrap();
+    assert!(durable.has(|capability| matches!(
+        capability,
+        Capability::Released(job)
+            if job.request().send_one().is_some_and(|request| request.recipient() == producer)
+    )));
 }
 
 #[test]
 fn a_producer_drops_a_recovered_certificate_for_a_header_it_did_not_sign() {
-    // The default route: validator 0 produces chain 0, and there are no receipt chains.
+    // Validator 0 produces chain 0, and there are no payment chains.
     let mut machine =
         Machine::<Sha256, Bls<MinPk>>::new(Harness::validator(0).participants(6).profile());
     let start = machine.step(Input::Start).unwrap();

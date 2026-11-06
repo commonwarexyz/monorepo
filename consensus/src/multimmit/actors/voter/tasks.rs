@@ -321,7 +321,7 @@ mod tests {
     use crate::{
         multimmit::{
             machine::testing::fixtures::Harness,
-            types::{DaQuorum, PathLimits},
+            types::PathLimits,
         },
         types::Participant,
     };
@@ -334,11 +334,10 @@ mod tests {
             Harness::builder(role)
                 .participants(6)
                 .chain_limits(limits.clone())
-                .da_quorum(DaQuorum::Binding)
                 .profile()
         };
         let custody = |role| TaskLimits::derive(&profile(role)).local_custody;
-        // Validator 5 produces a d = 2 chain and validator 1 the receipt chain.
+        // Validator 5 produces a d = 2 chain and validator 1 the certified-only chain.
         assert_eq!(custody(Role::Validator(Participant::new(5))), 2);
         assert_eq!(custody(Role::Validator(Participant::new(1))), 32);
         assert_eq!(custody(Role::Observer), 32);

@@ -9,7 +9,7 @@ use crate::{
     multimmit::{
         algebra::VqcExtraction,
         config::{LeaderSchedule, Protocol},
-        scheme::{DaFaults as _, Generic},
+        scheme::Generic,
         types::{
             Anchor, CertificateId, ChainId, ChainProposal, CodecConfig, DaCertificate, DaVote,
             DigestedLeader,
@@ -43,7 +43,7 @@ pub struct Committee<S: Fixture> {
 ///
 /// Unless set otherwise, the committee signs under the mock namespace, every participant produces
 /// the chain at its own index, pipelines every chain at depth two with extension bound one,
-/// certifies with the DA quorum the suite `S` fixes, and elects leaders round-robin.
+/// runs no payment chains, and elects leaders round-robin.
 pub struct CommitteeBuilder<S: Fixture> {
     seed: u64,
     participants: u32,
@@ -51,6 +51,7 @@ pub struct CommitteeBuilder<S: Fixture> {
     producers: Option<Vec<Participant>>,
     limits: PathLimits,
     chain_limits: Option<Vec<PathLimits>>,
+    payments: bool,
     leaders: Option<LeaderSchedule>,
     _variant: PhantomData<S>,
 }
@@ -80,6 +81,13 @@ impl<S: Fixture> CommitteeBuilder<S> {
         self
     }
 
+    /// Runs payment chains: every chain with `d = 0` and `e = 0` becomes one (see
+    /// [`Parameters::payment_chain`](crate::multimmit::config::Parameters::payment_chain)).
+    pub const fn payments(mut self, payments: bool) -> Self {
+        self.payments = payments;
+        self
+    }
+
     /// Elects leaders by `leaders`.
     pub fn leaders(mut self, leaders: LeaderSchedule) -> Self {
         self.leaders = Some(leaders);
@@ -102,8 +110,8 @@ impl<S: Fixture> CommitteeBuilder<S> {
             producers,
             self.limits,
         );
-        let mut parameters = Arc::unwrap_or_clone(Arc::clone(config.parameters()))
-            .with_da_quorum(S::DaFaults::QUORUM);
+        let mut parameters =
+            Arc::unwrap_or_clone(Arc::clone(config.parameters())).with_payments(self.payments);
         if let Some(limits) = self.chain_limits {
             parameters = parameters
                 .with_chain_limits(limits)
@@ -149,6 +157,7 @@ impl<S: Fixture> Committee<S> {
             producers: None,
             limits: PathLimits::new(2, 1),
             chain_limits: None,
+            payments: false,
             leaders: None,
             _variant: PhantomData,
         }

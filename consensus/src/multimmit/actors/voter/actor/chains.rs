@@ -1,11 +1,12 @@
 //! The DA recovery tasks and the per-chain plane tasks the voter starts and reconfigures.
 
 use super::{DigestOf, Fatal, VoterTypes, live::Live};
+use crate::Reporter as _;
 use crate::multimmit::{
     actors::voter::{
         chain_plane,
         config::chain_validation_parallelism,
-        da_recovery::{self, DaUpdate, RecoveryPermits},
+        da_recovery::{self, DaUpdate, ReceiptUpdate},
         telemetry::metrics::Metrics,
     },
     config::{Profile, Role},
@@ -13,7 +14,7 @@ use crate::multimmit::{
         CoreState, CryptoCompletion, DaVotesOffer, Generation, Input, StepStatus, ValidatorCommand,
     },
     scheme::{Generic, Scheme},
-    types::ChainId,
+    types::{Activity, ChainId},
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::{Digest, Hasher};
@@ -25,6 +26,8 @@ use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};
 pub(crate) enum ChainUpdate<S: Scheme, D: Digest> {
     /// An own-chain certificate from the DA recovery task.
     Recovered(DaUpdate<S, D>),
+    /// An own payment chain's receipt from the DA recovery task.
+    Receipt(ReceiptUpdate<S, D>),
     /// A chain plane's current eligible DA-vote run.
     DaVoteReady(DaVotesOffer<S, D>),
 }
@@ -33,7 +36,7 @@ pub(crate) enum ChainUpdate<S: Scheme, D: Digest> {
 /// voter, but a chain's DA-vote offer replaces any offer of the same chain still retained: the
 /// machine keeps only a chain's latest offer and re-checks its generation, so a superseded offer
 /// carries nothing. Retained work is therefore at most one offer per chain plus the recovery
-/// certificates, which the recovery windows bound.
+/// certificates and receipts, which the recovery and receipt windows bound.
 impl<S: Scheme, D: Digest> mailbox::Policy for ChainUpdate<S, D> {
     type Overflow = VecDeque<Self>;
 
@@ -51,6 +54,12 @@ impl<S: Scheme, D: Digest> mailbox::Policy for ChainUpdate<S, D> {
 impl<S: Scheme, D: Digest> From<DaUpdate<S, D>> for ChainUpdate<S, D> {
     fn from(update: DaUpdate<S, D>) -> Self {
         Self::Recovered(update)
+    }
+}
+
+impl<S: Scheme, D: Digest> From<ReceiptUpdate<S, D>> for ChainUpdate<S, D> {
+    fn from(update: ReceiptUpdate<S, D>) -> Self {
+        Self::Receipt(update)
     }
 }
 
@@ -94,7 +103,7 @@ type PlaneTask<T> =
 /// The tasks are built at startup and started on the first process generation. They live until the
 /// runtime stops or the voter exits, and every later generation reconfigures them.
 pub(crate) struct ChainTasks<T: VoterTypes> {
-    /// The DA recovery task of each chain whose certificates this validator recovers.
+    /// The DA recovery task of the chain this validator produces.
     da: Vec<DaTask<T>>,
     /// Each producer chain's plane, indexed by chain.
     planes: Vec<PlaneTask<T>>,
@@ -120,9 +129,8 @@ impl<T: VoterTypes> Default for ChainTasks<T> {
 impl<T: VoterTypes> ChainTasks<T> {
     /// Builds the tasks a validator runs under `profile`; an observer runs none.
     ///
-    /// Every validator runs one plane per producer chain, and one DA recovery task for each chain
-    /// whose certificates it recovers: the chain it produces, and every receipt chain. The tasks
-    /// of receipt chains it does not produce share one [`RecoveryPermits`] pool.
+    /// Every validator runs one plane per producer chain, and a producer runs one DA recovery task
+    /// for its own chain.
     pub(crate) fn new(
         context: &T::Context,
         profile: &Profile<<T::Hasher as Hasher>::Digest>,
@@ -139,42 +147,27 @@ impl<T: VoterTypes> ChainTasks<T> {
         let codec = protocol.codec_config();
         let (sender, updates) = mailbox::new(context.child("da_updates"), mailbox_size);
         let own_chain = protocol.producer_chain(participant);
-        // The receipt chains this node does not produce share one pool of assembly slots, as
-        // wide as the widest of their windows, so their recoveries together take no more of the
-        // strategy than one chain's would.
-        let permits = codec
-            .chain_ids()
-            .zip(protocol.chain_limits().iter())
-            .filter(|(chain, _)| Some(*chain) != own_chain && protocol.receipt_chain(*chain))
-            .map(|(_, limits)| limits.pipeline_window() as usize)
-            .max()
-            .and_then(NonZeroUsize::new)
-            .map(RecoveryPermits::new);
         let da = codec
             .chain_ids()
             .zip(protocol.chain_limits().iter())
-            .filter(|(chain, _)| Some(*chain) == own_chain || protocol.receipt_chain(*chain))
+            .filter(|(chain, _)| Some(*chain) == own_chain)
             .map(|(chain, limits)| {
-                // The own chain's task keeps the default route's labels, and each receipt chain's
-                // task is labelled by its chain.
-                let context = if Some(chain) == own_chain {
-                    context.child("da")
+                // A payment chain's producer keeps collecting votes toward receipts for a
+                // pipeline window of certified heights.
+                let receipt_window = if protocol.payment_chain(chain) {
+                    u64::from(limits.pipeline_window())
                 } else {
-                    context.child("da").with_attribute("chain", chain)
+                    0
                 };
                 let (actor, mailbox) = DaActor::<T>::new(
-                    context,
+                    context.child("da"),
                     da_recovery::Config {
                         scheme: Arc::clone(scheme),
                         strategy: strategy.clone(),
                         chain,
                         da_quorum: codec.da_quorum(),
                         recovery_slots: limits.pipeline_window() as usize,
-                        permits: if Some(chain) == own_chain {
-                            None
-                        } else {
-                            permits.clone()
-                        },
+                        receipt_window,
                         updates: sender.clone(),
                         latency: metrics.da_recovery_latency.clone(),
                         fallbacks: metrics.da_recovery_fallbacks.clone(),
@@ -265,7 +258,7 @@ impl<T: VoterTypes> ChainTasks<T> {
         }
     }
 
-    /// Returns `chain`'s DA recovery task, when this validator recovers its certificates.
+    /// Returns `chain`'s DA recovery task, when this validator produces it.
     pub(crate) fn da(
         &mut self,
         chain: ChainId,
@@ -335,6 +328,17 @@ where
                     }))
                 })?;
             }
+            ChainUpdate::Receipt(ReceiptUpdate {
+                generation,
+                receipt,
+            }) => {
+                if self.tasks.is_stale(generation) {
+                    self.telemetry.metrics.stale.inc();
+                    return Ok(());
+                }
+                self.telemetry.metrics.receipts.inc();
+                let _ = self.reporter.report(Activity::Receipt { receipt });
+            }
             ChainUpdate::DaVoteReady(offer) => {
                 let status = self.machine.offer(offer);
                 if matches!(status, StepStatus::StaleCompletion) {
@@ -375,7 +379,9 @@ mod tests {
             .iter()
             .map(|update| match update {
                 ChainUpdate::DaVoteReady(offer) => (offer.chain.get(), offer.ready_through.get()),
-                ChainUpdate::Recovered(_) => unreachable!("only offers were retained"),
+                ChainUpdate::Recovered(_) | ChainUpdate::Receipt(_) => {
+                    unreachable!("only offers were retained")
+                }
             })
             .collect::<Vec<_>>();
         assert_eq!(retained, vec![(0, 3), (1, 2)]);

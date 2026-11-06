@@ -1,37 +1,27 @@
-//! Data-availability quorum consistency between suites and epoch parameters.
+//! Data-availability quorums, payment epochs, and receipts across suites.
 
 use super::*;
 
 #[test]
 fn fault_models_match_the_codec_quorums() {
     for n in 1..=64usize {
-        let available = CodecConfig::new(n, 1, PathLimits::new(1, 0)).unwrap();
-        let binding = available.with_da_quorum(DaQuorum::Binding);
+        let codec = CodecConfig::new(n, 1, PathLimits::new(1, 0)).unwrap();
+        assert_eq!(Available::quorum(n) as usize, codec.da_quorum(), "n = {n}");
         assert_eq!(
-            Available::quorum(n) as usize,
-            available.da_quorum(),
+            NullifyFaults::quorum(n) as usize,
+            codec.nullification_quorum(),
             "n = {n}"
         );
-        assert_eq!(Binding::quorum(n) as usize, binding.da_quorum(), "n = {n}");
-        assert_eq!(Available::QUORUM, available.da_quorum_kind());
-        assert_eq!(Binding::QUORUM, binding.da_quorum_kind());
-        for codec in [available, binding] {
-            assert_eq!(
-                NullifyFaults::quorum(n) as usize,
-                codec.nullification_quorum(),
-                "n = {n}"
-            );
-            assert_eq!(N5f1::quorum(n) as usize, codec.view_quorum(), "n = {n}");
-            // A DA certificate always has a correct signer holding the block, and never needs
-            // more than a view quorum.
-            assert!(codec.da_quorum() > codec.max_faults(), "n = {n}");
-            assert!(codec.da_quorum() <= codec.view_quorum(), "n = {n}");
-        }
+        assert_eq!(N5f1::quorum(n) as usize, codec.view_quorum(), "n = {n}");
+        // A DA certificate always has a correct signer holding the block, and a receipt needs
+        // more signers than a certificate unless the committee tolerates no faults.
+        assert!(codec.da_quorum() > codec.max_faults(), "n = {n}");
+        assert!(codec.da_quorum() <= codec.view_quorum(), "n = {n}");
     }
 }
 
-/// Returns the fixture's parameters with DA certificates at `quorum`.
-fn parameters(quorum: DaQuorum) -> std::sync::Arc<Parameters> {
+/// Returns the fixture's parameters, with payment chains when §payments§ is set.
+fn parameters(payments: bool) -> std::sync::Arc<Parameters> {
     let config = keys::test_config(
         SEED,
         NAMESPACE,
@@ -40,7 +30,7 @@ fn parameters(quorum: DaQuorum) -> std::sync::Arc<Parameters> {
         PathLimits::new(2, 2),
     );
     std::sync::Arc::new(
-        std::sync::Arc::unwrap_or_clone(config.parameters().clone()).with_da_quorum(quorum),
+        std::sync::Arc::unwrap_or_clone(config.parameters().clone()).with_payments(payments),
     )
 }
 
@@ -60,57 +50,29 @@ fn identities() -> (
 }
 
 #[test]
-fn ed25519_constructors_reject_a_mismatched_da_quorum() {
+fn ed25519_runs_payment_epochs() {
     let (keys, participants) = identities();
-    for (quorum, matches) in [(DaQuorum::Available, true), (DaQuorum::Binding, false)] {
-        let parameters = parameters(quorum);
-        let verifier =
-            ed25519_suite::Scheme::<Available>::verifier(&parameters, participants.clone());
-        let signer = ed25519_suite::Scheme::<Available>::signer(
-            &parameters,
-            participants.clone(),
-            keys[0].clone(),
+    for payments in [false, true] {
+        let parameters = parameters(payments);
+        assert!(ed25519_suite::Scheme::verifier(&parameters, participants.clone()).is_ok());
+        assert!(
+            ed25519_suite::Scheme::signer(&parameters, participants.clone(), keys[0].clone())
+                .is_ok()
         );
-        let binding = ed25519_suite::Scheme::<Binding>::verifier(&parameters, participants.clone());
-        if matches {
-            assert!(verifier.is_ok() && signer.is_ok());
-            assert_eq!(binding.unwrap_err(), Error::DaQuorum);
-        } else {
-            assert_eq!(verifier.unwrap_err(), Error::DaQuorum);
-            assert_eq!(signer.unwrap_err(), Error::DaQuorum);
-            assert!(binding.is_ok());
-        }
     }
 }
 
 #[test]
-fn generic_new_rejects_a_mismatched_da_quorum() {
+fn generic_new_checks_the_committee_and_the_local_signer() {
     let (_, participants) = identities();
     let namespace = NAMESPACE;
-    let available = parameters(DaQuorum::Available);
-    let binding = parameters(DaQuorum::Binding);
-    let roles = || {
-        (
-            ed25519_suite::ordinary::Scheme::verifier(namespace, participants.clone()),
-            ed25519_suite::da::Scheme::verifier(namespace, participants.clone()),
-            ed25519_suite::da_binding::Scheme::verifier(namespace, participants.clone()),
-            ed25519_suite::nullify::Scheme::verifier(namespace, participants.clone()),
-        )
-    };
-    let (ordinary, da, _, nullify) = roles();
+    let available = parameters(false);
+    let (ordinary, da, nullify) = (
+        ed25519_suite::ordinary::Scheme::verifier(namespace, participants.clone()),
+        ed25519_suite::da::Scheme::verifier(namespace, participants.clone()),
+        ed25519_suite::nullify::Scheme::verifier(namespace, participants.clone()),
+    );
     assert!(Generic::<Ed25519>::new(&available, ordinary, da, nullify).is_ok());
-    let (ordinary, da, _, nullify) = roles();
-    assert_eq!(
-        Generic::<Ed25519>::new(&binding, ordinary, da, nullify).unwrap_err(),
-        Error::DaQuorum
-    );
-    let (ordinary, _, da, nullify) = roles();
-    assert!(Generic::<Ed25519<Binding>>::new(&binding, ordinary, da, nullify).is_ok());
-    let (ordinary, _, da, nullify) = roles();
-    assert_eq!(
-        Generic::<Ed25519<Binding>>::new(&available, ordinary, da, nullify).unwrap_err(),
-        Error::DaQuorum
-    );
 
     // Roles over another committee size, or disagreeing on the local signer, are rejected.
     let (keys, _) = identities();
@@ -170,102 +132,90 @@ fn generic_new_rejects_a_mismatched_da_quorum() {
     );
 }
 
-/// Checks that a BLS-family suite at one DA quorum cannot be built over parameters at the
-/// other, whichever material it is given.
-macro_rules! bls_quorum_test {
+/// Checks that a BLS-family suite runs payment epochs only with aggregate DA certificates.
+macro_rules! bls_payments_test {
     ($name:ident, $suite:ident) => {
         #[test]
         fn $name() {
             fn check<V: Variant>() {
                 let (_, identities) = identities();
-                let available = parameters(DaQuorum::Available);
-                let binding = parameters(DaQuorum::Binding);
+                let ordinary = parameters(false);
+                let payments = parameters(true);
                 let mut rng = TestRng::new(SEED);
-                // Dealing for the matching quorum succeeds, and for the other fails.
+                // Threshold DA certificates hide their signers, so they cannot form receipts.
                 assert!(
-                    $suite::Scheme::<Ed25519PublicKey, V, Available>::deal(
+                    $suite::Scheme::<Ed25519PublicKey, V, $suite::Threshold>::deal(
                         &mut rng,
-                        &available,
-                        &identities
-                    )
-                    .is_ok()
-                );
-                assert!(
-                    $suite::Scheme::<Ed25519PublicKey, V, Binding>::deal(
-                        &mut rng,
-                        &binding,
+                        &ordinary,
                         &identities
                     )
                     .is_ok()
                 );
                 assert!(matches!(
-                    $suite::Scheme::<Ed25519PublicKey, V, Available>::deal(
+                    $suite::Scheme::<Ed25519PublicKey, V, $suite::Threshold>::deal(
                         &mut rng,
-                        &binding,
+                        &payments,
                         &identities
                     ),
-                    Err(Error::DaQuorum)
+                    Err(Error::Receipts)
                 ));
-                assert!(matches!(
-                    $suite::Scheme::<Ed25519PublicKey, V, Binding>::deal(
-                        &mut rng,
-                        &available,
-                        &identities
-                    ),
-                    Err(Error::DaQuorum)
-                ));
-
-                // Material dealt at one quorum, verified at the other.
-                let dealt = $suite::Scheme::<Ed25519PublicKey, V, Binding>::deal(
+                let dealt = $suite::Scheme::<Ed25519PublicKey, V, $suite::Threshold>::deal(
                     &mut rng,
-                    &binding,
+                    &ordinary,
                     &identities,
                 )
                 .unwrap();
-                // The binding sharing fits the binding parameters, so only the suite's fault
-                // model rejects it.
                 assert_eq!(
-                    $suite::Scheme::<Ed25519PublicKey, V, Available>::verifier(
-                        &binding,
+                    $suite::Scheme::<Ed25519PublicKey, V, $suite::Threshold>::verifier(
+                        &payments,
                         dealt.roster.clone(),
                         dealt.da.clone(),
                         dealt.nullification.clone(),
                     )
                     .unwrap_err(),
-                    Error::DaQuorum
+                    Error::Receipts
                 );
                 assert_eq!(
-                    $suite::Scheme::<Ed25519PublicKey, V, Available>::certificate_verifier(
-                        &binding,
+                    $suite::Scheme::<Ed25519PublicKey, V, $suite::Threshold>::certificate_verifier(
+                        &payments,
                         dealt.roster.clone(),
                         *dealt.da.public(),
                         *dealt.nullification.public(),
                     )
                     .unwrap_err(),
-                    Error::DaQuorum
+                    Error::Receipts
                 );
-                // Under the available parameters the binding suite is rejected outright, and the
-                // binding sharing has the wrong threshold for the available suite.
-                assert_eq!(
-                    $suite::Scheme::<Ed25519PublicKey, V, Binding>::verifier(
-                        &available,
-                        dealt.roster.clone(),
-                        dealt.da.clone(),
-                        dealt.nullification.clone(),
+
+                // Aggregate DA certificates run either epoch, from the ordinary roster and the
+                // nullification sharing alone.
+                for parameters in [&ordinary, &payments] {
+                    let dealt = $suite::Scheme::<Ed25519PublicKey, V, $suite::Aggregate>::deal(
+                        &mut rng,
+                        parameters,
+                        &identities,
                     )
-                    .unwrap_err(),
-                    Error::DaQuorum
-                );
-                assert_eq!(
-                    $suite::Scheme::<Ed25519PublicKey, V, Available>::verifier(
-                        &available,
-                        dealt.roster.clone(),
-                        dealt.da.clone(),
-                        dealt.nullification.clone(),
-                    )
-                    .unwrap_err(),
-                    Error::Sharing
-                );
+                    .unwrap();
+                    assert_eq!(dealt.signers.len(), PARTICIPANTS as usize);
+                    assert!(
+                        $suite::Scheme::<Ed25519PublicKey, V, $suite::Aggregate>::certificate_verifier(
+                            parameters,
+                            dealt.roster.clone(),
+                            *dealt.nullification.public(),
+                        )
+                        .is_ok()
+                    );
+                    // A nullification sharing of the wrong threshold is rejected.
+                    let wrong = bls12381::deal_sharing::<V>(&mut rng, PARTICIPANTS, 2);
+                    assert_eq!(
+                        $suite::Scheme::<Ed25519PublicKey, V, $suite::Aggregate>::verifier(
+                            parameters,
+                            dealt.roster.clone(),
+                            wrong.sharing,
+                        )
+                        .unwrap_err(),
+                        Error::Sharing
+                    );
+                }
             }
             check::<MinPk>();
             check::<MinSig>();
@@ -273,11 +223,126 @@ macro_rules! bls_quorum_test {
     };
 }
 
-bls_quorum_test!(
-    bls12381_constructors_reject_a_mismatched_da_quorum,
-    bls12381
-);
-bls_quorum_test!(
-    bls12381_sas_constructors_reject_a_mismatched_da_quorum,
+bls_payments_test!(bls12381_runs_payment_epochs_only_with_aggregate_da, bls12381);
+bls_payments_test!(
+    bls12381_sas_runs_payment_epochs_only_with_aggregate_da,
     bls12381_sas
 );
+
+/// Checks that an attributable suite forms receipts from exactly `n - f` votes, and that a receipt
+/// verifies as a certificate while a certificate below `n - f` signers is no receipt.
+fn receipts_count_n_minus_f_signers<S: Suite>() {
+    let committee = Committee::<S>::builder(SEED, PARTICIPANTS)
+        .namespace(NAMESPACE)
+        .payments(true)
+        .build();
+    let codec = committee.codec();
+    let (certificate_quorum, receipt_quorum) = (codec.da_quorum(), codec.view_quorum());
+    assert!(certificate_quorum < receipt_quorum);
+    assert_eq!(committee.verifier.receipt_quorum(), receipt_quorum);
+
+    let header = committee.transaction_header(ChainId::new(0), digest(b"commitment", 0));
+    let votes = committee
+        .signers
+        .iter()
+        .map(|signer| signer.sign_da_vote(header.clone()).unwrap())
+        .collect::<Vec<_>>();
+    let mut rng = test_rng();
+    let verifier = &committee.verifier;
+
+    // A certificate counts its signers but is no receipt.
+    let certificate = verifier
+        .assemble_da_certificate(&mut rng, &votes[..certificate_quorum], &Sequential)
+        .unwrap();
+    assert_eq!(
+        verifier.da_signers(certificate.certificate()),
+        Some(certificate_quorum)
+    );
+    assert!(!verifier.is_receipt(certificate.certificate()));
+    assert!(verifier.verify_da_certificate(&mut rng, &certificate, &Sequential));
+    assert!(!verifier.verify_receipt(&mut rng, &certificate, &Sequential));
+
+    // A receipt needs exactly n - f votes.
+    for count in [certificate_quorum, receipt_quorum - 1, receipt_quorum + 1] {
+        assert_eq!(
+            verifier
+                .assemble_receipt(&mut rng, &votes[..count], &Sequential)
+                .unwrap_err(),
+            Error::Quorum,
+            "count = {count}"
+        );
+    }
+    let receipt = verifier
+        .assemble_receipt(&mut rng, &votes[..receipt_quorum], &Sequential)
+        .unwrap();
+    assert_eq!(verifier.da_signers(receipt.certificate()), Some(receipt_quorum));
+    assert!(verifier.is_receipt(receipt.certificate()));
+    assert!(verifier.verify_receipt(&mut rng, &receipt, &Sequential));
+    assert!(verifier.verify_da_certificate(&mut rng, &receipt, &Sequential));
+
+    // Every signer verifies the receipt, and it does not verify for another header.
+    for signer in &committee.signers {
+        assert!(signer.verify_receipt(&mut rng, &receipt, &Sequential));
+    }
+    let other = committee.transaction_header(ChainId::new(0), digest(b"commitment", 1));
+    let moved = DaCertificate::<S, Digest>::new(other, receipt.certificate().clone());
+    assert!(!verifier.verify_receipt(&mut rng, &moved, &Sequential));
+
+    // A duplicated vote does not count twice.
+    let mut duplicated = votes[..receipt_quorum - 1].to_vec();
+    duplicated.push(votes[0].clone());
+    assert!(
+        verifier
+            .assemble_receipt(&mut rng, &duplicated, &Sequential)
+            .is_err()
+    );
+}
+
+#[test]
+fn attributable_suites_form_receipts_from_n_minus_f_votes() {
+    receipts_count_n_minus_f_signers::<Bls<MinPk, bls12381::Aggregate>>();
+    receipts_count_n_minus_f_signers::<Bls<MinSig, bls12381::Aggregate>>();
+    receipts_count_n_minus_f_signers::<Sas<MinPk, bls12381::Aggregate>>();
+    receipts_count_n_minus_f_signers::<Sas<MinSig, bls12381::Aggregate>>();
+    receipts_count_n_minus_f_signers::<Ed25519>();
+    receipts_count_n_minus_f_signers::<Mock>();
+}
+
+/// Checks that a suite with threshold DA certificates neither forms nor recognizes receipts.
+fn threshold_suites_form_no_receipts<S: Suite>() {
+    let committee = Committee::<S>::builder(SEED, PARTICIPANTS)
+        .namespace(NAMESPACE)
+        .build();
+    let header = committee.transaction_header(ChainId::new(0), digest(b"commitment", 0));
+    let votes = committee
+        .signers
+        .iter()
+        .map(|signer| signer.sign_da_vote(header.clone()).unwrap())
+        .collect::<Vec<_>>();
+    let mut rng = test_rng();
+    let verifier = &committee.verifier;
+    let receipt_quorum = verifier.receipt_quorum();
+    assert_eq!(
+        verifier
+            .assemble_receipt(&mut rng, &votes[..receipt_quorum], &Sequential)
+            .unwrap_err(),
+        Error::Receipts
+    );
+    let certificate = verifier
+        .assemble_da_certificate(
+            &mut rng,
+            &votes[..committee.codec().da_quorum()],
+            &Sequential,
+        )
+        .unwrap();
+    assert_eq!(verifier.da_signers(certificate.certificate()), None);
+    assert!(!verifier.verify_receipt(&mut rng, &certificate, &Sequential));
+}
+
+#[test]
+fn threshold_suites_form_no_receipts_for_both_variants() {
+    threshold_suites_form_no_receipts::<Bls<MinPk>>();
+    threshold_suites_form_no_receipts::<Bls<MinSig>>();
+    threshold_suites_form_no_receipts::<Sas<MinPk>>();
+    threshold_suites_form_no_receipts::<Sas<MinSig>>();
+}

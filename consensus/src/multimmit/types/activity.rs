@@ -4,7 +4,8 @@ use crate::{
     multimmit::{
         scheme::Scheme,
         types::{
-            Artifact, ArtifactId, BlockRef, CertificateId, FinalityFact, FinalityId, Lqc, TipRecord,
+            Artifact, ArtifactId, BlockRef, CertificateId, DaCertificate, FinalityFact, FinalityId, Lqc,
+            TipRecord,
         },
     },
     types::{Height, View},
@@ -188,5 +189,18 @@ pub enum Activity<S: Scheme, D: Digest> {
         certified: BlockRef<D>,
         /// The highest height of the chain that the engine no longer verifies.
         released: Height,
+    },
+    /// This producer assembled a receipt for a block of its payment chain: a DA certificate
+    /// counting at least `n - f` signers (see
+    /// [`Parameters::payment_chain`](crate::multimmit::config::Parameters::payment_chain)).
+    ///
+    /// A receipt verifies with [`Generic::verify_receipt`](crate::multimmit::scheme::Generic::verify_receipt),
+    /// and as an ordinary DA certificate too. The engine neither persists nor publishes it:
+    /// it is reported at most once per block, after the block's `n - 2f` certificate, and a
+    /// restart or a vote lost after its signer recorded the certificate can leave a block without
+    /// one.
+    Receipt {
+        /// The receipt.
+        receipt: DaCertificate<S, D>,
     },
 }

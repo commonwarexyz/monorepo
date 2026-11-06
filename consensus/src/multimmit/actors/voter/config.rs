@@ -158,7 +158,7 @@ impl VoterLimits {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::multimmit::{machine::testing::fixtures::Harness, types::DaQuorum};
+    use crate::multimmit::machine::testing::fixtures::Harness;
 
     #[test]
     fn each_chain_validates_within_its_own_pipeline_window() {
@@ -167,14 +167,13 @@ mod tests {
         let profile = Harness::validator(5)
             .participants(6)
             .chain_limits(limits.clone())
-            .da_quorum(DaQuorum::Binding)
             .profile();
         let batch = profile.resources().max_verification_batch();
         let cached = profile.resources().max_cached_artifacts();
         assert_eq!(chain_validation_parallelism(&profile, limits[0]), 2);
-        let receipt = chain_validation_parallelism(&profile, limits[1]);
-        assert_eq!(receipt, batch.min(32));
-        assert_eq!(validation_capacity(&profile), (5 * 2 + receipt).min(cached));
+        let wide = chain_validation_parallelism(&profile, limits[1]);
+        assert_eq!(wide, batch.min(32));
+        assert_eq!(validation_capacity(&profile), (5 * 2 + wide).min(cached));
 
         // Uniform limits validate every chain at the shared width.
         let uniform = Harness::validator(5).participants(6).profile();

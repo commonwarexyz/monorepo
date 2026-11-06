@@ -33,7 +33,7 @@ mod checks;
 mod sign;
 mod transcript;
 
-use super::{DaFaults as _, Scheme};
+use super::{Available, DaCertificateOf, Scheme};
 use crate::{
     Epochable,
     multimmit::{
@@ -48,7 +48,7 @@ pub use assemble::SignatureVerification;
 pub(crate) use batch::CertificateVotes;
 use commonware_cryptography::{
     Digest,
-    certificate::{Membership, Scheme as _},
+    certificate::{self, Membership, Scheme as _},
 };
 use commonware_utils::{Faults as _, Participant, ordered::Set};
 use core::fmt;
@@ -105,10 +105,13 @@ pub enum Error {
     /// A threshold share does not belong to the local participant or to its sharing.
     #[error("threshold share mismatch")]
     Share,
-    /// The suite's data-availability quorum differs from the epoch's
-    /// [`DaQuorum`](crate::multimmit::types::DaQuorum).
-    #[error("suite DA quorum does not match the epoch")]
-    DaQuorum,
+    /// The epoch runs payment chains, whose receipts count DA signers, but the suite's DA
+    /// certificates do not reveal their signers.
+    #[error("payment chains need attributable DA certificates")]
+    Receipts,
+    /// A DA certificate has fewer than `n - f` signers, so it is not a receipt.
+    #[error("not a receipt")]
+    Receipt,
     /// The role schemes do not agree on the local participant.
     #[error("role schemes disagree on the local participant")]
     Membership,
@@ -172,9 +175,9 @@ impl<S: Scheme> Generic<S> {
     ///
     /// All roles must be constructed under `parameters`'s namespace over the same ordered
     /// participant set, which suite constructors guarantee. Fails when the ordinary participant
-    /// set does not match the committee size, when the suite's data-availability quorum differs
-    /// from the epoch's [`DaQuorum`](crate::multimmit::types::DaQuorum), or when the roles
-    /// disagree on whether and where the local participant signs.
+    /// set does not match the committee size, when the epoch runs payment chains
+    /// ([`Parameters::payments`]) over DA certificates that do not reveal their signers, or when
+    /// the roles disagree on whether and where the local participant signs.
     pub fn new(
         parameters: &Arc<Parameters>,
         ordinary: S::Ordinary,
@@ -182,10 +185,12 @@ impl<S: Scheme> Generic<S> {
         nullify: S::Nullify,
     ) -> Result<Self, Error> {
         let codec = parameters.codec_config();
-        if S::DaFaults::QUORUM != codec.da_quorum_kind()
-            || S::DaFaults::quorum(codec.participants()) as usize != codec.da_quorum()
-        {
-            return Err(Error::DaQuorum);
+        debug_assert_eq!(
+            Available::quorum(codec.participants()) as usize,
+            codec.da_quorum()
+        );
+        if parameters.payments() && !<S::Da as certificate::Scheme>::is_attributable() {
+            return Err(Error::Receipts);
         }
         let participants = ordinary.participants().len();
         if participants == 0 || participants != codec.participants() {
@@ -266,6 +271,24 @@ impl<S: Scheme> Generic<S> {
     /// Returns the nullification role scheme.
     pub const fn nullify(&self) -> &S::Nullify {
         &self.nullify
+    }
+
+    /// Returns how many DA votes form a payment chain's receipt: `n - f`.
+    pub fn receipt_quorum(&self) -> usize {
+        self.codec_config().view_quorum()
+    }
+
+    /// Returns how many distinct signers a DA certificate aggregates, or `None` when the suite's
+    /// DA certificates do not reveal their signers. The certificate is not verified.
+    pub fn da_signers(&self, certificate: &DaCertificateOf<S>) -> Option<usize> {
+        S::da_signers(&self.da, certificate)
+    }
+
+    /// Returns whether a DA certificate counts at least [`Self::receipt_quorum`] signers. The
+    /// certificate is not verified.
+    pub fn is_receipt(&self, certificate: &DaCertificateOf<S>) -> bool {
+        self.da_signers(certificate)
+            .is_some_and(|signers| signers >= self.receipt_quorum())
     }
 
     fn ensure_epoch(&self, epoch: Epoch) -> Result<(), Error> {

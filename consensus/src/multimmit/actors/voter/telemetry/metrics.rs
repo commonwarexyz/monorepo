@@ -242,6 +242,8 @@ pub(crate) struct Metrics {
     pub(crate) da_recovery_latency: Histogram,
     /// Recoveries whose single group check failed and fell back to attributing shares.
     pub(crate) da_recovery_fallbacks: Counter,
+    /// Receipts this producer assembled for its payment chain.
+    pub(crate) receipts: Counter,
     /// CPU latency of nullification certificate recovery.
     pub(crate) nullification_recovery_latency: Histogram,
     /// Leader-chain round latency. The consensus service objective.
@@ -467,6 +469,10 @@ impl Metrics {
             da_recovery_fallbacks: context.counter(
                 "da_recovery_fallbacks",
                 "DA recoveries that failed their group check and verified shares individually",
+            ),
+            receipts: context.counter(
+                "receipts",
+                "Receipts this producer assembled for its payment chain",
             ),
             nullification_recovery_latency: context.histogram(
                 "nullification_recovery_latency",

@@ -16,7 +16,7 @@ use crate::{
         },
         mocks::Bls,
         types::{
-            Anchor, Artifact, ChainId, ChainProposal, DaQuorum, LeaderBlock, PathLimits,
+            Anchor, Artifact, ChainId, ChainProposal, LeaderBlock, PathLimits,
             TransactionBlockHeader, ViewMessage,
         },
     },
@@ -26,7 +26,7 @@ use commonware_cryptography::{bls12381::primitives::variant::MinPk, sha256::Dige
 
 const CHAIN: ChainId = ChainId::new(1);
 
-/// Starts a validator that does not produce chain 1, a receipt chain with `d = 0` and `e = 0`,
+/// Starts a validator that does not produce chain 1, a certified-only chain with `d = 0` and `e = 0`,
 /// and exits view 1 on a V-QC whose leader block placed chain 1's first block through its
 /// certificate. The validator never saw that leader block. Returns the machine, the placed header,
 /// and the capabilities the exit issued.
@@ -41,7 +41,6 @@ fn exit_on_a_certified_placement() -> (
         Harness::validator(participant)
             .participants(6)
             .chain_limits(chain_limits.clone())
-            .da_quorum(DaQuorum::Binding)
     };
     let producer = harness(0)
         .profile()

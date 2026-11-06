@@ -155,7 +155,14 @@ where
 
 #[test]
 fn signatures_never_verify_across_roles_or_kinds_for_every_suite() {
-    for_each_suite!(signatures_never_verify_across_roles_or_kinds);
+    // Swapping certificates across roles needs one certificate type for both, so the suites with
+    // aggregate DA certificates are left out.
+    signatures_never_verify_across_roles_or_kinds::<Bls<MinPk>>();
+    signatures_never_verify_across_roles_or_kinds::<Bls<MinSig>>();
+    signatures_never_verify_across_roles_or_kinds::<Sas<MinPk>>();
+    signatures_never_verify_across_roles_or_kinds::<Sas<MinSig>>();
+    signatures_never_verify_across_roles_or_kinds::<Ed25519>();
+    signatures_never_verify_across_roles_or_kinds::<Mock>();
 }
 
 /// A vote and novote for one view share their period but not their namespace, so neither

@@ -156,6 +156,7 @@ fn every_subject_kind_signs_under_its_own_namespace() {
         &derived.view_period,
         &derived.leader_period,
         &derived.height_period,
+        &derived.da_period,
     ] {
         assert!(!distinct.contains(prefix));
     }

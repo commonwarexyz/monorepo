@@ -61,28 +61,77 @@ impl<S: Scheme> Generic<S> {
             verification: SignatureVerification,
             strategy: &impl Strategy,
         ) -> Result<DaCertificate<S, D>, Error> {
-            if !self.attestations {
-                return Err(Error::SharingUnavailable);
-            }
-            if votes.len() != self.codec_config().da_quorum() {
-                return Err(Error::Quorum);
-            }
-            let header = votes[0].header().clone();
-            self.ensure_chain(header.chain())?;
-            self.ensure_epoch(header.epoch())?;
-            if votes.iter().any(|vote| vote.header() != &header) {
-                return Err(Error::Transcript);
-            }
-            let certificate = assemble_role(
-                &self.da,
+            self.assemble_da(
                 rng,
-                DaSubject::new(&header),
-                votes.iter().map(DaVote::attestation),
+                votes,
+                self.codec_config().da_quorum(),
                 verification,
                 strategy,
-            )?;
-            Ok(DaCertificate::new(header, certificate))
+            )
         }
+    }
+
+    /// Assembles a payment chain's receipt from exactly [`Self::receipt_quorum`] votes for one
+    /// header, verifying each vote.
+    ///
+    /// Fails with [`Error::Receipts`] when the suite's DA certificates do not reveal their
+    /// signers.
+    pub fn assemble_receipt<R: CryptoRng, D: Digest>(
+        &self,
+        rng: &mut R,
+        votes: &[DaVote<S, D>],
+        strategy: &impl Strategy,
+    ) -> Result<DaCertificate<S, D>, Error> {
+        self.assemble_receipt_with(rng, votes, SignatureVerification::Checked, strategy)
+    }
+
+    fn assemble_receipt_with<R: CryptoRng, D: Digest>(
+        &self,
+        rng: &mut R,
+        votes: &[DaVote<S, D>],
+        verification: SignatureVerification,
+        strategy: &impl Strategy,
+    ) -> Result<DaCertificate<S, D>, Error> {
+        if !<S::Da as certificate::Scheme>::is_attributable() {
+            return Err(Error::Receipts);
+        }
+        let receipt = self.assemble_da(rng, votes, self.receipt_quorum(), verification, strategy)?;
+        if !self.is_receipt(receipt.certificate()) {
+            return Err(Error::Receipt);
+        }
+        Ok(receipt)
+    }
+
+    /// Assembles a data-availability certificate from exactly `quorum` votes for one header.
+    fn assemble_da<R: CryptoRng, D: Digest>(
+        &self,
+        rng: &mut R,
+        votes: &[DaVote<S, D>],
+        quorum: usize,
+        verification: SignatureVerification,
+        strategy: &impl Strategy,
+    ) -> Result<DaCertificate<S, D>, Error> {
+        if !self.attestations {
+            return Err(Error::SharingUnavailable);
+        }
+        if votes.len() != quorum {
+            return Err(Error::Quorum);
+        }
+        let header = votes[0].header().clone();
+        self.ensure_chain(header.chain())?;
+        self.ensure_epoch(header.epoch())?;
+        if votes.iter().any(|vote| vote.header() != &header) {
+            return Err(Error::Transcript);
+        }
+        let certificate = assemble_role(
+            &self.da,
+            rng,
+            DaSubject::new(&header),
+            votes.iter().map(DaVote::attestation),
+            verification,
+            strategy,
+        )?;
+        Ok(DaCertificate::new(header, certificate))
     }
 
     /// Assembles a data-availability certificate from votes that were not verified, attributing
@@ -94,12 +143,40 @@ impl<S: Scheme> Generic<S> {
         votes: &[DaVote<S, D>],
         strategy: &impl Strategy,
     ) -> Result<DaCertificate<S, D>, DaRecoveryError> {
-        let error = match self.assemble_da_certificate_with(
+        let assembled = self.assemble_da_certificate_with(
             rng,
             votes,
             SignatureVerification::Preverified,
             strategy,
-        ) {
+        );
+        self.attribute_da_failure(rng, votes, assembled, strategy)
+    }
+
+    /// Assembles a payment chain's receipt from votes that were not verified, attributing
+    /// invalid votes when the receipt does not verify.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn assemble_receipt_optimistic<R: CryptoRng, D: Digest>(
+        &self,
+        rng: &mut R,
+        votes: &[DaVote<S, D>],
+        strategy: &impl Strategy,
+    ) -> Result<DaCertificate<S, D>, DaRecoveryError> {
+        let assembled =
+            self.assemble_receipt_with(rng, votes, SignatureVerification::Preverified, strategy);
+        self.attribute_da_failure(rng, votes, assembled, strategy)
+    }
+
+    /// Returns an optimistic DA assembly's certificate, or attributes its signature failure to
+    /// the votes that fail on their own.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn attribute_da_failure<R: CryptoRng, D: Digest>(
+        &self,
+        rng: &mut R,
+        votes: &[DaVote<S, D>],
+        assembled: Result<DaCertificate<S, D>, Error>,
+        strategy: &impl Strategy,
+    ) -> Result<DaCertificate<S, D>, DaRecoveryError> {
+        let error = match assembled {
             Ok(certificate) => return Ok(certificate),
             Err(error) => error,
         };

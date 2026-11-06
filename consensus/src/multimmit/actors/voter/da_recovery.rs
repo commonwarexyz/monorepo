@@ -1,13 +1,18 @@
-//! Certificate recovery for one producer chain, run on its own task.
+//! Certificate recovery for the producer's own chain, run on its own task.
 //!
-//! A producer runs one task for its own chain, and every validator runs one for each receipt chain
-//! (see [`Parameters::receipt_chain`](crate::multimmit::config::Parameters::receipt_chain)).
-//! The tasks of receipt chains a validator does not produce share one [`RecoveryPermits`] pool.
-//! The voter forwards each of the chain's data-availability shares once the machine has ordered it
-//! and checked its structure, and reports every certified-anchor advance. The task pools shares
-//! per header and, once a header holds a quorum, assembles the certificate on the shared strategy
-//! and returns it for the machine to admit durably. It never touches durable state and publishes
-//! nothing.
+//! A producer runs one task for its own chain. The voter forwards each of the chain's
+//! data-availability shares once the machine has ordered it and checked its structure, and reports
+//! every certified-anchor advance. The task pools shares per header and, once a header holds a
+//! quorum, assembles the certificate on the shared strategy and returns it for the machine to
+//! admit durably. It never touches durable state and publishes nothing.
+//!
+//! On a payment chain (see
+//! [`Parameters::payment_chain`](crate::multimmit::config::Parameters::payment_chain)) the task
+//! keeps pooling the shares of a header it certified after the anchor passes it, for up to the
+//! chain's pipeline window of certified heights, and assembles `n - f` of them into a receipt it
+//! returns as a [`ReceiptUpdate`]. Receipts are volatile and best effort: a restart, a full
+//! queue, or a share lost after its signer recorded the certificate can leave a header without
+//! one.
 //!
 //! ```text
 //! voter                                        DA recovery task
@@ -15,13 +20,14 @@
 //!   |-- anchor_advanced(height) ------------------>| drop settled pools
 //!   |                                              | assemble a quorum on the strategy
 //!   |<------------------------- DaUpdate(cert) ----|
+//!   |<--------------------- ReceiptUpdate(rcpt) ---| payment chains: n - f shares
 //! ```
 //!
 //! The task holds only volatile state. After a restart the voter starts a fresh task seeded with the
 //! recovered certified anchor, and the pools refill from re-observed shares.
 //!
 //! The voter never blocks on the task. The mailbox marks a share at or below the latest certified
-//! height it sent as settled, since the task would drop it on arrival. Commands beyond
+//! height it sent, less the receipt window, as settled, since the task would drop it on arrival. Commands beyond
 //! `mailbox_size` wait in a [`DaOverflow`], which drops settled shares and keeps only the latest
 //! anchor and reconfiguration and the shares above the anchor, so its size is bounded by the
 //! unsettled shares of the chain rather than by how long the task stalls or how many settled shares
@@ -48,10 +54,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{Counter, Histogram, HistogramExt as _},
 };
-use commonware_utils::{
-    futures::Pool,
-    sync::{AsyncMutex, Mutex, Notify},
-};
+use commonware_utils::futures::Pool;
 use rand::{SeedableRng as _, rngs::StdRng};
 use rand_core::CryptoRng;
 use std::{
@@ -230,6 +233,15 @@ pub(crate) struct DaUpdate<S: Scheme, D: Digest> {
     pub(crate) certificate: DaCertificate<S, D>,
 }
 
+/// A payment chain's receipt assembled by the DA recovery task: a DA certificate counting at least
+/// `n - f` signers.
+pub(crate) struct ReceiptUpdate<S: Scheme, D: Digest> {
+    /// The process generation the task ran under.
+    pub(crate) generation: Generation,
+    /// The receipt.
+    pub(crate) receipt: DaCertificate<S, D>,
+}
+
 /// Configuration for the DA recovery task.
 pub(crate) struct Config<S: Scheme, D: Digest, T: Strategy> {
     /// Verifies and assembles shares.
@@ -246,12 +258,12 @@ pub(crate) struct Config<S: Scheme, D: Digest, T: Strategy> {
     /// many concurrent recoveries suffice and cannot exceed the machine's certificate capacity for
     /// the chain.
     pub(crate) recovery_slots: usize,
-    /// Assembly slots shared with other chains' tasks, or `None` for a task bounded only by
-    /// [`Self::recovery_slots`].
+    /// Certified heights below the anchor whose shares the task keeps pooling toward a receipt,
+    /// or zero when the chain forms no receipts.
     ///
-    /// The tasks of the receipt chains a validator does not produce share one pool, so they run
-    /// at most its size of assemblies on the strategy at once rather than a window per chain.
-    pub(crate) permits: Option<RecoveryPermits>,
+    /// A payment chain's task uses the chain's pipeline window, so it holds the shares of at
+    /// most two windows of headers.
+    pub(crate) receipt_window: u64,
     /// Receives assembled certificates.
     pub(crate) updates: mailbox::Sender<ChainUpdate<S, D>>,
     /// Observes recovery latency.
@@ -260,75 +272,6 @@ pub(crate) struct Config<S: Scheme, D: Digest, T: Strategy> {
     pub(crate) fallbacks: Counter,
     /// Commands the queue holds before the rest wait in its [`DaOverflow`].
     pub(crate) mailbox_size: NonZeroUsize,
-}
-
-/// A fair pool of certificate-assembly slots shared by DA recovery tasks.
-///
-/// Every validator recovers each receipt chain's certificates, so `R` receipt chains each with
-/// window `w` would otherwise run up to `R * w` assemblies of `n - f` shares at once on the shared
-/// strategy, outside the voter's crypto task budgets. The pool bounds them together: a recovery
-/// takes a slot before it assembles and returns it once the assembly ends, and waiters take
-/// released slots in arrival order. Each task still pools the shares of its own window, so a
-/// validator holds `O(R * w * n)` receipt-chain shares and receives `O(n)` DA votes per receipt
-/// height, `O(n^2)` messages across the committee.
-#[derive(Clone)]
-pub(crate) struct RecoveryPermits {
-    pool: Arc<PermitPool>,
-}
-
-struct PermitPool {
-    /// Slots not held by a recovery.
-    available: Mutex<usize>,
-    /// Signalled once per returned slot.
-    released: Notify,
-    /// Orders waiters, so only the earliest waits for a returned slot.
-    queue: AsyncMutex<()>,
-}
-
-/// One assembly slot taken from [`RecoveryPermits`], returned when dropped.
-///
-/// The offloaded assembly owns it, so a recovery dropped while its job still runs keeps the slot
-/// until the job ends or unwinds.
-pub(crate) struct RecoveryPermit {
-    pool: Arc<PermitPool>,
-}
-
-impl RecoveryPermits {
-    /// Creates a pool of `slots` assembly slots.
-    pub(crate) fn new(slots: NonZeroUsize) -> Self {
-        Self {
-            pool: Arc::new(PermitPool {
-                available: Mutex::new(slots.get()),
-                released: Notify::new(),
-                queue: AsyncMutex::new(()),
-            }),
-        }
-    }
-
-    /// Waits for a free slot behind every earlier waiter.
-    pub(crate) async fn acquire(&self) -> RecoveryPermit {
-        let _turn = self.pool.queue.lock().await;
-        loop {
-            {
-                let mut available = self.pool.available.lock();
-                if *available > 0 {
-                    *available -= 1;
-                    return RecoveryPermit {
-                        pool: Arc::clone(&self.pool),
-                    };
-                }
-            }
-            // A slot returned since the check stores its notification, so it is not lost.
-            self.pool.released.notified().await;
-        }
-    }
-}
-
-impl Drop for RecoveryPermit {
-    fn drop(&mut self) {
-        *self.pool.available.lock() += 1;
-        self.pool.released.notify_one();
-    }
 }
 
 /// Commands to the DA recovery task.
@@ -347,7 +290,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Records the certified height the task starts above, which settles every share at or below
     /// it.
     pub(crate) const fn started(&mut self, certified: Height) {
-        self.sent = SentHeight(certified);
+        self.sent.certified = certified;
     }
 
     /// Delivers one command the machine issued for the chain; a share the task would drop on
@@ -369,27 +312,33 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 }
 
-/// The task's certified height once it applies every command sent so far.
+/// The task's certified height once it applies every command sent so far, and its receipt window.
 ///
-/// The task drops a share at or below its certified height on arrival. The mailbox replaces such
-/// a share with [`DaCommand::Settled`], which a full queue drops: this watermark is what keeps
-/// settled shares, replayed or forged, out of a stalled task's queue.
+/// The task drops a share at or below its certified height less its receipt window on arrival. The
+/// mailbox replaces such a share with [`DaCommand::Settled`], which a full queue drops: this
+/// watermark is what keeps settled shares, replayed or forged, out of a stalled task's queue.
 #[derive(Clone, Copy, Default)]
-struct SentHeight(Height);
+struct SentHeight {
+    certified: Height,
+    receipt_window: u64,
+}
 
 impl SentHeight {
     /// Returns `command`, or [`DaCommand::Settled`] for a share the task would drop on arrival,
     /// recording the height the command sets.
     fn mark<S: Scheme, D: Digest>(&mut self, command: DaCommand<S, D>) -> DaCommand<S, D> {
         match &command {
-            DaCommand::Chain(ChainCommand::Observe(share)) if share.header().height() <= self.0 => {
+            DaCommand::Chain(ChainCommand::Observe(share))
+                if share.header().height().get()
+                    <= self.certified.get().saturating_sub(self.receipt_window) =>
+            {
                 return DaCommand::Settled;
             }
             DaCommand::Chain(ChainCommand::AnchorAdvanced(height)) => {
-                self.0 = self.0.max(*height);
+                self.certified = self.certified.max(*height);
             }
             DaCommand::Reconfigure(reconfiguration) => {
-                self.0 = reconfiguration.certified;
+                self.certified = reconfiguration.certified;
             }
             DaCommand::Chain(ChainCommand::Observe(_)) | DaCommand::Settled => {}
         }
@@ -413,6 +362,9 @@ struct VotePool<S: Scheme, D: Digest> {
     /// includes a share outside this set, and the pool waits for one when it holds none. Shares
     /// that arrive while a recovery runs are not in it. Bounded by the committee.
     tried: BTreeSet<Participant>,
+    /// Whether this task certified the header, so its pool may keep collecting toward a receipt
+    /// once the anchor passes it.
+    certified: bool,
 }
 
 impl<S: Scheme, D: Digest> VotePool<S, D> {
@@ -449,6 +401,8 @@ impl<S: Scheme, D: Digest> VotePool<S, D> {
 /// One completed recovery dispatch, correlated to its header digest.
 struct Recovery<S: Scheme, D: Digest> {
     header: D,
+    /// Whether the dispatch assembled a receipt rather than a certificate.
+    receipt: bool,
     block: BlockRef<D>,
     /// Signers of the shares the recovery assembled.
     signers: Vec<Participant>,
@@ -482,39 +436,71 @@ struct RecoveryState<S: Scheme, D: Digest> {
     certified_through: Height,
     /// The process generation stamped on results.
     generation: Generation,
+    /// Certified heights below `certified_through` whose headers keep collecting toward a
+    /// receipt; zero when the chain forms no receipts.
+    receipt_window: u64,
+    /// Header digest -> shares of a header this task certified, at or below `certified_through`
+    /// and within the receipt window, that has no receipt yet.
+    receipts: BTreeMap<D, VotePool<S, D>>,
+    /// Receipt pools that hold a receipt quorum and await a recovery slot.
+    receipt_ready: BTreeSet<D>,
+    /// Receipt pools with an assembly in flight.
+    receipt_pending: BTreeSet<D>,
+}
+
+/// Where a pooled share landed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pooled<D> {
+    /// The pool of a header above the certified height.
+    Certificate(D),
+    /// The receipt pool of a header this task certified.
+    Receipt(D),
 }
 
 impl<S: Scheme, D: Digest> RecoveryState<S, D> {
-    /// Returns empty state for process generation `generation` above `certified`.
-    const fn new(generation: Generation, certified: Height) -> Self {
+    /// Returns empty state for process generation `generation` above `certified`, keeping
+    /// certified headers' shares for `receipt_window` heights.
+    const fn new(generation: Generation, certified: Height, receipt_window: u64) -> Self {
         Self {
             pools: BTreeMap::new(),
             ready: BTreeSet::new(),
             pending: BTreeSet::new(),
             certified_through: certified,
             generation,
+            receipt_window,
+            receipts: BTreeMap::new(),
+            receipt_ready: BTreeSet::new(),
+            receipt_pending: BTreeSet::new(),
         }
     }
 
-    /// Pools one share of the chain above the certified height, keeping the first share per
-    /// signer that no failed recovery rejected, and returns the digest of the header it pooled
-    /// under.
+    /// Pools one share of the chain, keeping the first share per signer that no failed recovery
+    /// rejected, and returns where it pooled.
+    ///
+    /// A share above the certified height pools under its header. A share at or below it pools
+    /// only into the receipt pool of a header this task certified.
     fn pool<H: Hasher<Digest = D>>(
         &mut self,
         chain: ChainId,
         share: &Arc<DaVote<S, D>>,
-    ) -> Option<D> {
+    ) -> Option<Pooled<D>> {
         let header = share.header();
-        if header.chain() != chain || header.height() <= self.certified_through {
+        if header.chain() != chain {
             return None;
         }
         let digest = header.digest::<H>();
-        let pool = self.pools.entry(digest).or_insert_with(|| VotePool {
-            header: header.clone(),
-            shares: BTreeMap::new(),
-            rejected: BTreeSet::new(),
-            tried: BTreeSet::new(),
-        });
+        let (pool, pooled) = if header.height() <= self.certified_through {
+            (self.receipts.get_mut(&digest)?, Pooled::Receipt(digest))
+        } else {
+            let pool = self.pools.entry(digest).or_insert_with(|| VotePool {
+                header: header.clone(),
+                shares: BTreeMap::new(),
+                rejected: BTreeSet::new(),
+                tried: BTreeSet::new(),
+                certified: false,
+            });
+            (pool, Pooled::Certificate(digest))
+        };
         if pool.header != *header {
             return None;
         }
@@ -524,16 +510,20 @@ impl<S: Scheme, D: Digest> RecoveryState<S, D> {
                 .entry(signer)
                 .or_insert_with(|| Arc::clone(share));
         }
-        Some(digest)
+        Some(pooled)
     }
 
     /// Advances the certified height to `height` and drops every pool it settles, returning
     /// whether it advanced.
+    ///
+    /// A settled pool whose header this task certified moves to the receipt pools while it stays
+    /// within the receipt window, and receipt pools that fall out of the window are dropped.
     fn settle(&mut self, height: Height) -> bool {
         if height <= self.certified_through {
             return false;
         }
         self.certified_through = height;
+        let floor = height.get().saturating_sub(self.receipt_window);
         let settled = self
             .pools
             .iter()
@@ -541,10 +531,24 @@ impl<S: Scheme, D: Digest> RecoveryState<S, D> {
             .map(|(digest, _)| *digest)
             .collect::<Vec<_>>();
         for digest in settled {
-            self.pools.remove(&digest);
             self.ready.remove(&digest);
             self.pending.remove(&digest);
+            let Some(mut pool) = self.pools.remove(&digest) else {
+                continue;
+            };
+            if pool.certified && pool.header.height().get() > floor {
+                // Failures of certificate attempts say nothing about the receipt's shares.
+                pool.tried.clear();
+                self.receipts.insert(digest, pool);
+            }
         }
+        self.receipts
+            .retain(|_, pool| pool.header.height().get() > floor);
+        let receipts = &self.receipts;
+        self.receipt_ready
+            .retain(|digest| receipts.contains_key(digest));
+        self.receipt_pending
+            .retain(|digest| receipts.contains_key(digest));
         true
     }
 }
@@ -576,6 +580,7 @@ where
     ) -> (Self, Mailbox<S, H::Digest>) {
         let (commands, receiver) = mailbox::new(context.child("commands"), config.mailbox_size);
         let chain = config.chain;
+        let receipt_window = config.receipt_window;
         (
             Self {
                 context,
@@ -585,7 +590,10 @@ where
             Mailbox {
                 chain,
                 commands,
-                sent: SentHeight::default(),
+                sent: SentHeight {
+                    certified: Height::zero(),
+                    receipt_window,
+                },
             },
         )
     }
@@ -601,11 +609,12 @@ where
             commands,
         } = self;
         // The task runs under a `task` child so it and its command queue keep distinct labels.
+        let state = RecoveryState::new(generation, certified, config.receipt_window);
         let mut running = Running::<_, H, _, _> {
             context: ContextCell::new(context.child("task")),
             config,
             commands,
-            state: RecoveryState::new(generation, certified),
+            state,
         };
         spawn_cell!(running.context, running.run())
     }
@@ -669,7 +678,7 @@ where
                 // Dropping the pools rebuilds the projection from the new generation's re-observed
                 // shares. A recovery still running finishes under the new generation, and the
                 // machine rechecks it on admission.
-                self.state = RecoveryState::new(generation, certified);
+                self.state = RecoveryState::new(generation, certified, self.config.receipt_window);
             }
         }
     }
@@ -679,10 +688,11 @@ where
         recoveries: &mut Pool<'static, Recovery<S, H::Digest>>,
         share: &Arc<DaVote<S, H::Digest>>,
     ) {
-        let Some(digest) = self.state.pool::<H>(self.config.chain, share) else {
-            return;
-        };
-        self.refresh(digest);
+        match self.state.pool::<H>(self.config.chain, share) {
+            Some(Pooled::Certificate(digest)) => self.refresh(digest),
+            Some(Pooled::Receipt(digest)) => self.refresh_receipt(digest),
+            None => return,
+        }
         self.drive(recoveries);
     }
 
@@ -692,6 +702,10 @@ where
         height: Height,
     ) {
         if self.state.settle(height) {
+            let receipts = self.state.receipts.keys().copied().collect::<Vec<_>>();
+            for digest in receipts {
+                self.refresh_receipt(digest);
+            }
             self.drive(recoveries);
         }
     }
@@ -711,10 +725,24 @@ where
         }
     }
 
-    /// Dispatches ready recoveries up to the in-flight slot bound.
-    fn drive(&mut self, recoveries: &mut Pool<'static, Recovery<S, H::Digest>>) {
+    /// Recomputes one receipt pool's readiness.
+    fn refresh_receipt(&mut self, digest: H::Digest) {
         let state = &mut self.state;
+        let ready = self.config.scheme.receipt_quorum();
+        let ready = state.receipts.get(&digest).is_some_and(|pool| {
+            !state.receipt_pending.contains(&digest) && pool.armed(ready)
+        });
+        if ready {
+            state.receipt_ready.insert(digest);
+        } else {
+            state.receipt_ready.remove(&digest);
+        }
+    }
+
+    /// Dispatches ready recoveries up to the in-flight slot bound, certificates before receipts.
+    fn drive(&mut self, recoveries: &mut Pool<'static, Recovery<S, H::Digest>>) {
         while recoveries.len() < self.config.recovery_slots {
+            let state = &mut self.state;
             let Some(digest) = state.ready.iter().next().copied() else {
                 break;
             };
@@ -728,54 +756,92 @@ where
             let block = pool.header.block_ref::<H>();
             let (signers, votes) = pool.select(self.config.da_quorum);
             state.pending.insert(digest);
-            let scheme = Arc::clone(&self.config.scheme);
-            let strategy = self.config.strategy.clone();
-            let permits = self.config.permits.clone();
-            let mut rng = StdRng::from_rng(self.context.as_mut());
-            let started_at = self.context.current();
-            recoveries.push(async move {
-                let permit = match &permits {
-                    Some(permits) => Some(permits.acquire().await),
-                    None => None,
-                };
-                // The group check runs on the shared pool, and a worker panic is reconciled into
-                // an unattributed failure rather than escaping the task. The job owns the shared
-                // slot, since it keeps running if this recovery is dropped.
-                let weight = votes.len();
-                let (_, outcome) = offload(strategy, weight, Span::none(), move |strategy| {
-                    let _permit = permit;
-                    scheme.assemble_da_certificate_optimistic(&mut rng, &votes, &strategy)
-                })
-                .await;
-                let outcome = match outcome {
-                    Ok(Ok(certificate)) => RecoveryOutcome::Certificate(certificate),
-                    Ok(Err(DaRecoveryError::InvalidShares(invalid))) => {
-                        RecoveryOutcome::Invalid(invalid)
-                    }
-                    Ok(Err(DaRecoveryError::Scheme(_))) | Err(WorkerPanicked) => {
-                        RecoveryOutcome::Unattributed
-                    }
-                };
-                Recovery {
-                    header: digest,
-                    block,
-                    signers,
-                    started_at,
-                    outcome,
-                }
-            });
+            self.dispatch(recoveries, digest, block, signers, votes, false);
         }
+        let quorum = self.config.scheme.receipt_quorum();
+        while recoveries.len() < self.config.recovery_slots {
+            let state = &mut self.state;
+            let Some(digest) = state.receipt_ready.iter().next().copied() else {
+                break;
+            };
+            state.receipt_ready.remove(&digest);
+            let Some(pool) = state.receipts.get(&digest) else {
+                continue;
+            };
+            if !pool.armed(quorum) {
+                continue;
+            }
+            let block = pool.header.block_ref::<H>();
+            let (signers, votes) = pool.select(quorum);
+            state.receipt_pending.insert(digest);
+            self.dispatch(recoveries, digest, block, signers, votes, true);
+        }
+    }
+
+    /// Assembles `votes` into a certificate, or a receipt when `receipt` is set, on the strategy.
+    fn dispatch(
+        &mut self,
+        recoveries: &mut Pool<'static, Recovery<S, H::Digest>>,
+        digest: H::Digest,
+        block: BlockRef<H::Digest>,
+        signers: Vec<Participant>,
+        votes: Vec<DaVote<S, H::Digest>>,
+        receipt: bool,
+    ) {
+        let scheme = Arc::clone(&self.config.scheme);
+        let strategy = self.config.strategy.clone();
+        let mut rng = StdRng::from_rng(self.context.as_mut());
+        let started_at = self.context.current();
+        recoveries.push(async move {
+            // The group check runs on the shared pool, and a worker panic is reconciled into an
+            // unattributed failure rather than escaping the task.
+            let weight = votes.len();
+            let (_, outcome) = offload(strategy, weight, Span::none(), move |strategy| {
+                if receipt {
+                    scheme.assemble_receipt_optimistic(&mut rng, &votes, &strategy)
+                } else {
+                    scheme.assemble_da_certificate_optimistic(&mut rng, &votes, &strategy)
+                }
+            })
+            .await;
+            let outcome = match outcome {
+                Ok(Ok(certificate)) => RecoveryOutcome::Certificate(certificate),
+                Ok(Err(DaRecoveryError::InvalidShares(invalid))) => {
+                    RecoveryOutcome::Invalid(invalid)
+                }
+                Ok(Err(DaRecoveryError::Scheme(_))) | Err(WorkerPanicked) => {
+                    RecoveryOutcome::Unattributed
+                }
+            };
+            Recovery {
+                header: digest,
+                receipt,
+                block,
+                signers,
+                started_at,
+                outcome,
+            }
+        });
     }
 
     /// Applies one recovery completion; breaks once the voter stopped receiving results.
     fn recovered(&mut self, done: Recovery<S, H::Digest>) -> ControlFlow<()> {
+        if done.receipt {
+            return self.receipted(done);
+        }
         self.config
             .latency
             .observe_between(done.started_at, self.context.current());
         match done.outcome {
             RecoveryOutcome::Certificate(certificate) => {
                 // The block stays pending until the voter confirms the anchor, so a later share
-                // cannot re-arm a redundant recovery for a block already certified here.
+                // cannot re-arm a redundant recovery for a block already certified here. Its pool
+                // then keeps collecting toward a receipt, when the chain forms them.
+                if self.state.receipt_window > 0
+                    && let Some(pool) = self.state.pools.get_mut(&done.header)
+                {
+                    pool.certified = true;
+                }
                 let update = DaUpdate {
                     generation: self.state.generation,
                     block: done.block,
@@ -810,6 +876,46 @@ where
             }
         }
     }
+
+    /// Applies one receipt assembly's completion; breaks once the voter stopped receiving
+    /// results.
+    fn receipted(&mut self, done: Recovery<S, H::Digest>) -> ControlFlow<()> {
+        let state = &mut self.state;
+        state.receipt_pending.remove(&done.header);
+        match done.outcome {
+            RecoveryOutcome::Certificate(receipt) => {
+                // A header receives one receipt; later shares for it are dropped.
+                state.receipts.remove(&done.header);
+                state.receipt_ready.remove(&done.header);
+                let update = ReceiptUpdate {
+                    generation: state.generation,
+                    receipt,
+                };
+                return if self.config.updates.enqueue(update.into()).accepted() {
+                    ControlFlow::Continue(())
+                } else {
+                    ControlFlow::Break(())
+                };
+            }
+            RecoveryOutcome::Invalid(invalid) => {
+                self.config.fallbacks.inc();
+                if let Some(pool) = state.receipts.get_mut(&done.header) {
+                    for signer in &invalid {
+                        pool.shares.remove(signer);
+                        pool.rejected.insert(*signer);
+                    }
+                }
+            }
+            RecoveryOutcome::Unattributed => {
+                self.config.fallbacks.inc();
+                if let Some(pool) = state.receipts.get_mut(&done.header) {
+                    pool.unattributed(&done.signers);
+                }
+            }
+        }
+        self.refresh_receipt(done.header);
+        ControlFlow::Continue(())
+    }
 }
 
 #[cfg(test)]
@@ -819,10 +925,9 @@ mod tests {
         multimmit::{
             config::Protocol,
             mocks::Bls,
-            scheme::Generic,
+            scheme::{Generic, bls12381::Aggregate},
             types::{CertificateId, DaAttestation, EpochGenesis, PathLimits},
         },
-        simplex::marshal::mocks::strategy::GatedStrategy,
         types::{Epoch, Participant},
     };
     use commonware_codec::types::lazy::Lazy;
@@ -832,7 +937,6 @@ mod tests {
         ed25519::PrivateKey as Ed25519PrivateKey,
         sha256::Digest,
     };
-    use commonware_macros::select;
     use commonware_math::algebra::Additive as _;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -840,9 +944,7 @@ mod tests {
         deterministic::Runner,
         telemetry::metrics::{MetricsExt as _, histogram},
     };
-    use commonware_utils::{TestRng, channel::fallible::OneshotExt as _, ordered::Set, test_rng};
-    use core::{task::Poll, time::Duration};
-    use futures::poll;
+    use commonware_utils::{TestRng, ordered::Set, test_rng};
     use rand::TryRng as _;
     use std::num::NonZeroUsize;
 
@@ -924,7 +1026,7 @@ mod tests {
                     chain: ChainId::new(0),
                     da_quorum,
                     recovery_slots: 2,
-                    permits: None,
+                    receipt_window: 0,
                     updates,
                     latency: latency(&context),
                     fallbacks: context.counter("fallbacks", ""),
@@ -950,11 +1052,157 @@ mod tests {
                         &Sequential
                     ));
                 }
-                ChainUpdate::DaVoteReady(_) => {
-                    panic!("the recovery task never offers da-vote candidates")
+                ChainUpdate::DaVoteReady(_) | ChainUpdate::Receipt(_) => {
+                    panic!("the recovery task returns only a certificate here")
                 }
             }
         });
+    }
+
+    /// The suite with aggregate DA certificates.
+    type Payments = Bls<MinPk, Aggregate>;
+
+    /// Builds signers and a verifier with aggregate DA certificates for an epoch with payments.
+    fn payment_fixture() -> (Vec<Generic<Payments>>, Generic<Payments>) {
+        let protocol = config();
+        let parameters = Arc::new(
+            Arc::unwrap_or_clone(Arc::clone(protocol.parameters())).with_payments(true),
+        );
+        let identities = Set::try_from(
+            (0..PARTICIPANTS)
+                .map(|index| Ed25519PrivateKey::from_seed(u64::from(index) + 100).public_key())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let dealt =
+            Bls::<MinPk, Aggregate>::deal(&mut TestRng::new(7), &parameters, &identities).unwrap();
+        (dealt.signers, dealt.verifier)
+    }
+
+    /// A payment chain's producer keeps pooling the shares of a header it certified after the
+    /// anchor passes it, and assembles `n - f` of them into a receipt.
+    #[test]
+    fn a_payment_producer_assembles_a_receipt_after_its_certificate() {
+        Runner::default().start(|context| async move {
+            let (signers, verifier) = payment_fixture();
+            let da_quorum = verifier.codec_config().da_quorum();
+            let receipt_quorum = verifier.receipt_quorum();
+            assert!(da_quorum < receipt_quorum);
+            let scheme = Arc::new(verifier);
+            let header = own_header();
+            let (updates, mut update_rx) =
+                mailbox::new(context.child("updates"), NonZeroUsize::new(64).unwrap());
+            let verify = Arc::clone(&scheme);
+            let (actor, mut da) = Actor::<_, Sha256, Bls<MinPk, Aggregate>, _>::new(
+                context.child("da"),
+                Config {
+                    scheme,
+                    strategy: Sequential,
+                    chain: ChainId::new(0),
+                    da_quorum,
+                    recovery_slots: 2,
+                    receipt_window: 2,
+                    updates,
+                    latency: latency(&context),
+                    fallbacks: context.counter("fallbacks", ""),
+                    mailbox_size: NonZeroUsize::new(64).unwrap(),
+                },
+            );
+            let _task = actor.start(Generation::new(1), Height::zero());
+            let votes = signers
+                .iter()
+                .map(|signer| Arc::new(signer.sign_da_vote(header.clone()).unwrap()))
+                .collect::<Vec<_>>();
+            for vote in &votes[..da_quorum] {
+                assert!(da.command(ChainCommand::Observe(Arc::clone(vote))).accepted());
+            }
+            let Some(ChainUpdate::Recovered(DaUpdate { certificate, .. })) = update_rx.recv().await
+            else {
+                panic!("the task certifies first");
+            };
+            assert!(!verify.is_receipt(certificate.certificate()));
+
+            // The machine records the certificate and advances the anchor past the header; the
+            // remaining shares arrive late and complete a receipt.
+            assert!(
+                da.command(ChainCommand::AnchorAdvanced(header.height()))
+                    .accepted()
+            );
+            for vote in &votes[da_quorum..receipt_quorum] {
+                assert!(da.command(ChainCommand::Observe(Arc::clone(vote))).accepted());
+            }
+            let Some(ChainUpdate::Receipt(ReceiptUpdate {
+                generation,
+                receipt,
+            })) = update_rx.recv().await
+            else {
+                panic!("the task forms a receipt");
+            };
+            assert_eq!(generation, Generation::new(1));
+            assert_eq!(receipt.header(), &header);
+            assert_eq!(verify.da_signers(receipt.certificate()), Some(receipt_quorum));
+            assert!(verify.verify_receipt(&mut test_rng(), &receipt, &Sequential));
+        });
+    }
+
+    /// A late share pools toward a receipt only for a header the task certified, within the
+    /// receipt window, and only when the chain forms receipts.
+    #[test]
+    fn late_shares_pool_only_into_certified_headers_within_the_receipt_window() {
+        let (signers, _) = fixture();
+        let header = own_header();
+        let share = |signer: usize| Arc::new(signers[signer].sign_da_vote(header.clone()).unwrap());
+        for window in [0, 1] {
+            let mut state = RecoveryState::<Bls<MinPk>, Digest>::new(
+                Generation::new(0),
+                Height::zero(),
+                window,
+            );
+            let Some(Pooled::Certificate(digest)) = state.pool::<Sha256>(ChainId::new(0), &share(0))
+            else {
+                panic!("a share above the anchor pools for a certificate");
+            };
+            state.pools.get_mut(&digest).unwrap().certified = true;
+            assert!(state.settle(header.height()));
+            let late = state.pool::<Sha256>(ChainId::new(0), &share(1));
+            if window == 0 {
+                assert_eq!(late, None, "a chain without receipts drops late shares");
+                continue;
+            }
+            assert_eq!(late, Some(Pooled::Receipt(digest)));
+            assert_eq!(state.receipts[&digest].shares.len(), 2);
+
+            // A header past the window is dropped, and later shares for it with it.
+            assert!(state.settle(header.height().next()));
+            assert!(state.receipts.is_empty());
+            assert_eq!(state.pool::<Sha256>(ChainId::new(0), &share(2)), None);
+        }
+
+        // A header the task did not certify, such as one certified elsewhere, forms no receipt.
+        let mut state =
+            RecoveryState::<Bls<MinPk>, Digest>::new(Generation::new(0), Height::zero(), 2);
+        state.pool::<Sha256>(ChainId::new(0), &share(0));
+        assert!(state.settle(header.height()));
+        assert!(state.receipts.is_empty());
+        assert_eq!(state.pool::<Sha256>(ChainId::new(0), &share(1)), None);
+    }
+
+    /// The mailbox settles a share only below the receipt window under the latest anchor.
+    #[test]
+    fn the_mailbox_passes_late_shares_within_the_receipt_window() {
+        let late = || share(1, 0, 1);
+        for (window, passes) in [(0, false), (1, true)] {
+            let mut sent = SentHeight {
+                certified: Height::zero(),
+                receipt_window: window,
+            };
+            assert!(matches!(sent.mark(anchor(1)), DaCommand::Chain(_)));
+            let marked = sent.mark(late());
+            assert_eq!(!matches!(marked, DaCommand::Settled), passes, "window {window}");
+            // Once the anchor passes the window, the share is settled either way.
+            sent.mark(anchor(2));
+            assert!(matches!(sent.mark(late()), DaCommand::Settled));
+        }
     }
 
     /// A rejected share re-arms a fresh quorum that excludes its signer.
@@ -976,7 +1224,7 @@ mod tests {
                     chain: ChainId::new(0),
                     da_quorum,
                     recovery_slots: 2,
-                    permits: None,
+                    receipt_window: 0,
                     updates,
                     latency: latency(&context),
                     fallbacks: context.counter("fallbacks", ""),
@@ -1033,160 +1281,10 @@ mod tests {
                         &Sequential
                     ));
                 }
-                ChainUpdate::DaVoteReady(_) => {
-                    panic!("the recovery task never offers da-vote candidates")
+                ChainUpdate::DaVoteReady(_) | ChainUpdate::Receipt(_) => {
+                    panic!("the recovery task returns only a certificate here")
                 }
             }
-        });
-    }
-
-    /// Tasks sharing a permit pool assemble only with a free slot, and take returned slots.
-    #[test]
-    fn shared_permits_bound_recoveries_across_tasks() {
-        Runner::default().start(|context| async move {
-            let (signers, verifier) = fixture();
-            let da_quorum = verifier.codec_config().da_quorum();
-            let scheme = Arc::new(verifier);
-            let (updates, mut update_rx) =
-                mailbox::new(context.child("updates"), NonZeroUsize::new(64).unwrap());
-            let latency = latency(&context);
-            let fallbacks = context.counter("fallbacks", "");
-            let permits = RecoveryPermits::new(NonZeroUsize::new(1).unwrap());
-            // The only slot is held elsewhere before either task starts.
-            let held = permits.acquire().await;
-            let mut tasks = Vec::new();
-            let mut headers = Vec::new();
-            for chain in [1u32, 2] {
-                let (actor, mut da) = Actor::<_, Sha256, Bls<MinPk>, _>::new(
-                    context.child("da").with_attribute("chain", chain),
-                    Config {
-                        scheme: Arc::clone(&scheme),
-                        strategy: Sequential,
-                        chain: ChainId::new(chain),
-                        da_quorum,
-                        recovery_slots: 2,
-                        permits: Some(permits.clone()),
-                        updates: updates.clone(),
-                        latency: latency.clone(),
-                        fallbacks: fallbacks.clone(),
-                        mailbox_size: NonZeroUsize::new(64).unwrap(),
-                    },
-                );
-                tasks.push(actor.start(Generation::new(1), Height::zero()));
-                let header = TransactionBlockHeader::new(
-                    Epoch::new(9),
-                    ChainId::new(chain),
-                    Height::new(1),
-                    digest(b"genesis"),
-                    digest(b"receipt body"),
-                )
-                .unwrap();
-                for signer in signers.iter().take(da_quorum) {
-                    let vote = signer.sign_da_vote(header.clone()).unwrap();
-                    assert!(da.command(ChainCommand::Observe(Arc::new(vote))).accepted());
-                }
-                headers.push((header.block_ref::<Sha256>(), da));
-            }
-
-            // While the slot is held, neither ready quorum assembles.
-            select! {
-                _ = update_rx.recv() => panic!("a recovery assembled without a free slot"),
-                _ = context.sleep(Duration::from_secs(1)) => {},
-            }
-
-            // Returning the slot lets both tasks recover, one assembly at a time.
-            drop(held);
-            let mut recovered = Vec::new();
-            for _ in 0..2 {
-                match update_rx.recv().await.expect("the tasks return recoveries") {
-                    ChainUpdate::Recovered(DaUpdate { block, .. }) => recovered.push(block),
-                    ChainUpdate::DaVoteReady(_) => {
-                        panic!("the recovery task never offers da-vote candidates")
-                    }
-                }
-            }
-            recovered.sort();
-            let mut expected = headers.iter().map(|(block, _)| *block).collect::<Vec<_>>();
-            expected.sort();
-            assert_eq!(recovered, expected);
-        });
-    }
-
-    /// A recovery's slot stays taken until its assembly ends, even after the task stops awaiting it.
-    #[test]
-    fn stopped_recoveries_hold_their_slot_until_the_assembly_ends() {
-        Runner::default().start(|context| async move {
-            let (signers, verifier) = fixture();
-            let da_quorum = verifier.codec_config().da_quorum();
-            let (updates, _update_rx) =
-                mailbox::new(context.child("updates"), NonZeroUsize::new(64).unwrap());
-            let strategy = GatedStrategy::new(context.child("strategy"));
-            let gate = strategy.arm();
-            let permits = RecoveryPermits::new(NonZeroUsize::new(1).unwrap());
-            let (actor, mut da) = Actor::<_, Sha256, Bls<MinPk>, _>::new(
-                context.child("da"),
-                Config {
-                    scheme: Arc::new(verifier),
-                    strategy,
-                    chain: ChainId::new(1),
-                    da_quorum,
-                    recovery_slots: 1,
-                    permits: Some(permits.clone()),
-                    updates,
-                    latency: latency(&context),
-                    fallbacks: context.counter("fallbacks", ""),
-                    mailbox_size: NonZeroUsize::new(64).unwrap(),
-                },
-            );
-            let task = actor.start(Generation::new(1), Height::zero());
-            let header = TransactionBlockHeader::new(
-                Epoch::new(9),
-                ChainId::new(1),
-                Height::new(1),
-                digest(b"genesis"),
-                digest(b"receipt body"),
-            )
-            .unwrap();
-            for signer in signers.iter().take(da_quorum) {
-                let vote = signer.sign_da_vote(header.clone()).unwrap();
-                assert!(da.command(ChainCommand::Observe(Arc::new(vote))).accepted());
-            }
-            gate.started.await.expect("the assembly starts");
-
-            // Stopping the task drops the recovery awaiting the assembly, which keeps running.
-            drop(da);
-            task.await.expect("the task stops");
-            let mut waiting = Box::pin(permits.acquire());
-            assert!(poll!(&mut waiting).is_pending());
-
-            // The slot returns once the assembly ends.
-            gate.release.send_lossy(());
-            let _permit = waiting.await;
-        });
-    }
-
-    /// Waiters take returned slots in arrival order, and a cancelled waiter holds none back.
-    #[test]
-    fn permits_pass_in_arrival_order_past_cancelled_waiters() {
-        Runner::default().start(|_| async move {
-            let permits = RecoveryPermits::new(NonZeroUsize::new(1).unwrap());
-            let held = permits.acquire().await;
-            let mut cancelled = Box::pin(permits.acquire());
-            let mut first = Box::pin(permits.acquire());
-            let mut second = Box::pin(permits.acquire());
-            assert!(poll!(&mut cancelled).is_pending());
-            assert!(poll!(&mut first).is_pending());
-            assert!(poll!(&mut second).is_pending());
-            drop(cancelled);
-
-            drop(held);
-            assert!(poll!(&mut second).is_pending());
-            let Poll::Ready(first) = poll!(&mut first) else {
-                panic!("the earliest live waiter takes the returned slot");
-            };
-            assert!(poll!(&mut second).is_pending());
-            drop(first);
-            assert!(poll!(&mut second).is_ready());
         });
     }
 
@@ -1270,7 +1368,7 @@ mod tests {
     }
 
     fn fresh_state() -> RecoveryState<Bls<MinPk>, Digest> {
-        RecoveryState::new(Generation::new(0), Height::zero())
+        RecoveryState::new(Generation::new(0), Height::zero(), 0)
     }
 
     /// Applies `command` through the state transitions the running task calls.
@@ -1288,7 +1386,7 @@ mod tests {
             DaCommand::Reconfigure(Reconfiguration {
                 generation,
                 certified,
-            }) => *state = RecoveryState::new(generation, certified),
+            }) => *state = RecoveryState::new(generation, certified, state.receipt_window),
             DaCommand::Settled => {}
         }
     }
@@ -1302,7 +1400,10 @@ mod tests {
         let mut state = fresh_state();
         let add = |state: &mut RecoveryState<_, _>, index: usize| {
             let vote = Arc::new(signers[index].sign_da_vote(header.clone()).unwrap());
-            state.pool::<Sha256>(ChainId::new(0), &vote).unwrap()
+            match state.pool::<Sha256>(ChainId::new(0), &vote).unwrap() {
+                Pooled::Certificate(digest) => digest,
+                Pooled::Receipt(_) => panic!("shares above the anchor pool for a certificate"),
+            }
         };
         // The highest signers form the first quorum.
         let mut digest = None;

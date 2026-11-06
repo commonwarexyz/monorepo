@@ -43,9 +43,9 @@ pub(crate) enum Capability<S: Scheme, D: Digest> {
     Retire(Vec<EffectId>),
     /// Send each already-public artifact once to its recipient, without retries.
     ///
-    /// A node forwards only DA certificates it did not produce: ones it received, or recovered as
-    /// a non-producer on a receipt chain. Such a certificate is already public and authorizes
-    /// nothing, so forwarding it needs no durable record. A producer's own certificate leaves only
+    /// A node forwards only DA certificates it did not produce, which it received. Such a
+    /// certificate is already public and authorizes nothing, so forwarding it needs no durable
+    /// record. A producer's own certificate leaves only
     /// through its durable publication. A lost send is repeated at a later view entry while it
     /// still matters.
     Forward(Vec<SendRequest<S, D>>),
@@ -57,8 +57,7 @@ pub(crate) enum Capability<S: Scheme, D: Digest> {
     Timer(TimerCommand<D>),
     /// A command for the chain plane of one producer chain.
     Validator(ChainId, ValidatorCommand<S, D>),
-    /// A command for one chain's DA recovery task: the chain this node produces, or a receipt
-    /// chain.
+    /// A command for the DA recovery task of the chain this node produces.
     ChainDa(ChainId, ChainCommand<S, D>),
     /// A command for the resolver.
     Resolver(ResolverCommand),

@@ -10,7 +10,7 @@
 //!   into one [`Aggregate`](Aggregator::Aggregate), keyed by their compact signer-to-message
 //!   transcripts;
 //! - a data-availability [`certificate::Scheme`] signs [`DaSubject`]s and forms DA certificates at
-//!   the epoch's [`DaQuorum`] (see [`DaFaults`]); and
+//!   `n - 2f` ([`Available`]); and
 //! - a nullification [`certificate::Scheme`] signs [`NullifySubject`]s and forms nullifications
 //!   at `2f + 1` ([`NullifyFaults`]).
 //!
@@ -24,6 +24,16 @@
 //! - [`bls12381_sas`]: Pointcheval-Sanders synchronized aggregate ordinary keys with the same
 //!   threshold keys (ALPHA, research grade); and
 //! - [`ed25519`]: Ed25519 for every role, whose aggregates and certificates list signatures.
+//!
+//! # Receipts
+//!
+//! A payment chain's producer turns the DA votes of `n - f` validators into a receipt: a DA
+//! certificate whose signers it can count (see
+//! [`Parameters::payment_chain`](crate::multimmit::config::Parameters::payment_chain)). Threshold
+//! certificates hide their signers, so an epoch with payments needs a suite whose DA role is
+//! attributable: [`ed25519`], or a BLS suite with [`bls12381::Aggregate`] DA certificates, which
+//! aggregate ordinary-key signatures with a signer bitmap (the specification's one-signature-scheme
+//! variant). [`Scheme::da_signers`] counts a certificate's signers.
 //!
 //! # Namespaces
 //!
@@ -48,7 +58,9 @@
 //!   view;
 //! - a leader block has its own view period, because the leader also votes in its view; and
 //! - transaction-block headers share one period per epoch and height across chains, because each
-//!   producer owns exactly one chain and never signs two headers at one height.
+//!   producer owns exactly one chain and never signs two headers at one height; and
+//! - DA votes have one period per epoch, chain, and height, because a validator durably chooses at
+//!   most one header to DA-vote for at each position.
 //!
 //! Schemes without periods ignore them.
 //!
@@ -63,7 +75,7 @@
 use crate::{
     Epochable,
     multimmit::types::{
-        DaCertificate, DaQuorum, LeaderBlock, NoVote, TransactionBlockHeader, Vote, VoteBody,
+        ChainId, DaCertificate, LeaderBlock, NoVote, TransactionBlockHeader, Vote, VoteBody,
     },
     types::{Epoch, Height, Round},
 };
@@ -108,6 +120,7 @@ const PROOF_OF_KNOWLEDGE_SUFFIX: &[u8] = b"_PROOF_OF_KNOWLEDGE";
 const VIEW_PERIOD_SUFFIX: &[u8] = b"_VIEW_PERIOD";
 const LEADER_PERIOD_SUFFIX: &[u8] = b"_LEADER_PERIOD";
 const HEIGHT_PERIOD_SUFFIX: &[u8] = b"_HEIGHT_PERIOD";
+const DA_PERIOD_SUFFIX: &[u8] = b"_DA_PERIOD";
 
 /// Pre-computed namespaces for Multimmit's signed subjects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,6 +145,8 @@ pub struct Namespace {
     pub leader_period: Vec<u8>,
     /// Prefix of the period shared by transaction-block headers at one height.
     pub height_period: Vec<u8>,
+    /// Prefix of the period of a DA vote at one chain position.
+    pub da_period: Vec<u8>,
 }
 
 impl Namespace {
@@ -148,6 +163,7 @@ impl Namespace {
             view_period: union(namespace, VIEW_PERIOD_SUFFIX),
             leader_period: union(namespace, LEADER_PERIOD_SUFFIX),
             height_period: union(namespace, HEIGHT_PERIOD_SUFFIX),
+            da_period: union(namespace, DA_PERIOD_SUFFIX),
         }
     }
 
@@ -186,6 +202,8 @@ pub(crate) enum Period {
     Leader(Round),
     /// Transaction-block headers at one height, across every chain.
     Height(Epoch, Height),
+    /// DA votes at one chain position.
+    Da(Epoch, ChainId, Height),
 }
 
 impl Period {
@@ -195,11 +213,17 @@ impl Period {
             Self::View(_) => namespace.view_period.clone(),
             Self::Leader(_) => namespace.leader_period.clone(),
             Self::Height(..) => namespace.height_period.clone(),
+            Self::Da(..) => namespace.da_period.clone(),
         };
         match self {
             Self::View(round) | Self::Leader(round) => round.write(&mut encoded),
             Self::Height(epoch, height) => {
                 epoch.write(&mut encoded);
+                height.write(&mut encoded);
+            }
+            Self::Da(epoch, chain, height) => {
+                epoch.write(&mut encoded);
+                chain.write(&mut encoded);
                 height.write(&mut encoded);
             }
         }
@@ -311,9 +335,13 @@ impl Epochable for OrdinarySubject {
 
 /// A subject signed with a data-availability key: the canonical encoding of a
 /// transaction-block header.
+///
+/// Its [`Synchronized::period`] is the header's chain position (see the module documentation).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaSubject {
     epoch: Epoch,
+    chain: ChainId,
+    height: Height,
     encoded: Bytes,
 }
 
@@ -321,8 +349,16 @@ impl DaSubject {
     pub(crate) fn new<D: Digest>(header: &TransactionBlockHeader<D>) -> Self {
         Self {
             epoch: header.epoch(),
+            chain: header.chain(),
+            height: header.height(),
             encoded: header.encode(),
         }
+    }
+}
+
+impl Synchronized for DaSubject {
+    fn period(&self, derived: &Namespace) -> Bytes {
+        Period::Da(self.epoch, self.chain, self.height).encode(derived)
     }
 }
 
@@ -372,17 +408,10 @@ impl Epochable for NullifySubject {
     }
 }
 
-/// The fault model a suite's data-availability certificates are formed at.
+/// The `n - 2f` quorum of a data-availability certificate.
 ///
-/// Its [`Faults::quorum`] is the DA quorum, and [`Self::QUORUM`] names the [`DaQuorum`] an epoch
-/// must be configured with to use it: [`Generic::new`] rejects a suite whose DA quorum differs
-/// from its parameters'.
-pub trait DaFaults: Faults + Clone + Debug + Default + Eq + Hash + Send + Sync + 'static {
-    /// The epoch configuration this fault model matches.
-    const QUORUM: DaQuorum;
-}
-
-/// The `n - 2f` data-availability quorum of [`DaQuorum::Available`].
+/// Placement, the DA window, and DA-vote eligibility all use certificates at this quorum. A
+/// payment chain's receipt is a certificate with at least `n - f` signers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Available;
 
@@ -393,24 +422,6 @@ impl Faults for Available {
             .expect("n must be a non-negative integer that fits in u32");
         n - N5f1::da_quorum(n)
     }
-}
-
-impl DaFaults for Available {
-    const QUORUM: DaQuorum = DaQuorum::Available;
-}
-
-/// The `n - f` data-availability quorum of [`DaQuorum::Binding`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Binding;
-
-impl Faults for Binding {
-    fn max_faults(n: impl ToPrimitive) -> u32 {
-        N5f1::max_faults(n)
-    }
-}
-
-impl DaFaults for Binding {
-    const QUORUM: DaQuorum = DaQuorum::Binding;
 }
 
 /// The `2f + 1` nullification quorum of an `n = 5f + 1` committee.
@@ -457,13 +468,13 @@ pub type NullifySignature<S> = <<S as Scheme>::Nullify as certificate::Scheme>::
 ///   [`bls12381::Roster`] verifies).
 /// - A scheme synchronized on periods must never sign two ordinary subjects in one period.
 ///   Multimmit assigns periods to durable signing slots (see the module documentation).
-/// - [`Self::Da`] forms certificates at [`Self::DaFaults`], and [`Self::Nullify`] at `2f + 1`.
+/// - [`Self::Da`] forms certificates at `n - 2f` ([`Available`]), and [`Self::Nullify`] at `2f + 1`.
+/// - A DA role whose certificates count their signers must sign at most one header per
+///   [`DaSubject`] period when it is synchronized, which Multimmit's durable DA-vote choices
+///   guarantee.
 pub trait Scheme: Clone + Debug + Default + Eq + Hash + Send + Sync + 'static {
     /// The identity key of every participant.
     type PublicKey: PublicKey;
-
-    /// The fault model of the data-availability quorum.
-    type DaFaults: DaFaults;
 
     /// Signs transaction blocks, leader blocks, votes, and novotes, and aggregates them.
     type Ordinary: for<'a> Aggregator<PublicKey = Self::PublicKey, Subject<'a, RoleDigest> = OrdinarySubject>;
@@ -471,7 +482,7 @@ pub trait Scheme: Clone + Debug + Default + Eq + Hash + Send + Sync + 'static {
     /// Signs data-availability votes and forms DA certificates.
     type Da: for<'a> certificate::Scheme<
             PublicKey = Self::PublicKey,
-            Faults = Self::DaFaults,
+            Faults = Available,
             Subject<'a, RoleDigest> = DaSubject,
         >;
 
@@ -487,6 +498,12 @@ pub trait Scheme: Clone + Debug + Default + Eq + Hash + Send + Sync + 'static {
 
     /// Returns the decoding configuration of a nullification in a committee of `participants`.
     fn nullification_config(participants: usize) -> <NullificationOf<Self> as Read>::Cfg;
+
+    /// Returns how many distinct signers a DA certificate aggregates, or `None` when the suite's
+    /// DA certificates do not reveal their signers (threshold signatures).
+    ///
+    /// The count is read from the certificate without verifying it.
+    fn da_signers(da: &Self::Da, certificate: &DaCertificateOf<Self>) -> Option<usize>;
 }
 
 /// A locally verified message that can stand in for part of a batch-verified artifact.

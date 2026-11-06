@@ -21,7 +21,6 @@ use crate::{
     multimmit::{
         config::{Profile, Role, Tuning},
         machine::{Generation, Inspection},
-        scheme::Binding,
         testing::metric_total,
         types::{ChainId, Context, PathLimits, TransactionBlockHeader, ViewProof},
         wire::{CertificateMessage, ConsensusMessage, DataMessage, Envelope, EnvelopeConfig},
@@ -608,23 +607,24 @@ fn n11_f2_finalizes_under_partition_and_heal() {
     });
 }
 
-/// Runs a cluster whose chain 5 is a receipt chain while producer five receives no data-plane
-/// traffic, so it never sees a DA vote for its own blocks, and returns the height chain 5
-/// finalizes at every other node, once it passes `target` or `timeout` elapses.
-async fn receipt_chain_finality_without_votes_at_its_producer(
+/// Runs a cluster whose chain 5 is a payment chain, when `payments` is set, while producer five
+/// receives no data-plane traffic, so it never sees a DA vote for its own blocks, and returns the
+/// height chain 5 finalizes at every other node, once it passes `target` or `timeout` elapses.
+async fn finality_without_votes_at_the_producer(
     context: &deterministic::Context,
-    receipts: bool,
+    payments: bool,
     target: u64,
     timeout: Duration,
 ) -> u64 {
-    if receipts {
+    if payments {
         let mut chain_limits = vec![PathLimits::new(2, 1); 6];
-        chain_limits[RECEIPT_PRODUCER] = PathLimits::new(0, 0);
+        chain_limits[PAYMENT_PRODUCER] = PathLimits::new(0, 0);
         let options = ClusterOptions {
             chain_limits: Some(chain_limits),
+            payments: true,
             ..ClusterOptions::new(94, 6)
         };
-        finality_without_votes_at_producer::<Mock<Binding>>(context, options, target, timeout).await
+        finality_without_votes_at_producer::<Mock>(context, options, target, timeout).await
     } else {
         finality_without_votes_at_producer::<Suite>(
             context,
@@ -636,17 +636,17 @@ async fn receipt_chain_finality_without_votes_at_its_producer(
     }
 }
 
-/// The producer of chain 5 in [`receipt_chain_finality_without_votes_at_its_producer`].
-const RECEIPT_PRODUCER: usize = 5;
+/// The producer of chain 5 in [`finality_without_votes_at_the_producer`].
+const PAYMENT_PRODUCER: usize = 5;
 
-/// Runs [`receipt_chain_finality_without_votes_at_its_producer`] over suite `S` with `options`.
+/// Runs [`finality_without_votes_at_the_producer`] over suite `S` with `options`.
 async fn finality_without_votes_at_producer<S: Fixture>(
     context: &deterministic::Context,
     options: ClusterOptions,
     target: u64,
     timeout: Duration,
 ) -> u64 {
-    const PRODUCER: usize = RECEIPT_PRODUCER;
+    const PRODUCER: usize = PAYMENT_PRODUCER;
     let mut cluster = Cluster::<S>::new(context, options).await;
     let others = (0..6).filter(|node| *node != PRODUCER).collect::<Vec<_>>();
     cluster.start_all().await;
@@ -666,7 +666,7 @@ async fn finality_without_votes_at_producer<S: Fixture>(
                 .chain_progress()
                 .iter()
                 .find(|progress| progress.chain().get() == PRODUCER as u32)
-                .expect("receipt chain is tracked");
+                .expect("chain 5 is tracked");
             lowest = lowest.min(chain.finalized().get());
         }
         finalized = lowest;
@@ -675,75 +675,29 @@ async fn finality_without_votes_at_producer<S: Fixture>(
     finalized
 }
 
-/// A receipt chain's producer that receives view certificates but none of its chain's DA traffic
-/// and no leader block keeps building as finality advances, while its peers certify and place its
-/// blocks without it. Messages before GST may be lost, and peers never re-send a placed block's
-/// certificate, so unless the producer recovers the certificates its duties fill and it stops
-/// producing for good.
+/// A node that lost a certificate before GST, and that peers no longer send, recovers it: a
+/// validator cut off on every plane while the payment chain's producer certifies and its peers
+/// place its block, the producer then building nothing more, recovers the certificate of the
+/// placed tip once delivery recovers. No later proposal carries that certificate, since the chain
+/// no longer advances.
 #[test_traced]
-fn a_receipt_producer_cut_off_from_its_certificates_keeps_producing() {
-    const PRODUCER: usize = RECEIPT_PRODUCER;
+fn a_validator_recovers_the_certificate_of_a_placed_payment_tip() {
+    const PRODUCER: usize = PAYMENT_PRODUCER;
+    const LAGGARD: usize = 0;
     let executor = DeterministicRunner::timed(Duration::from_secs(600));
     executor.start(|context| async move {
         let mut chain_limits = vec![PathLimits::new(2, 1); 6];
         chain_limits[PRODUCER] = PathLimits::new(0, 0);
-        let mut cluster = Cluster::<Mock<Binding>>::new(
+        let mut cluster = Cluster::<Mock>::new(
             &context,
             ClusterOptions {
                 chain_limits: Some(chain_limits),
-                ..ClusterOptions::new(96, 6)
-            },
-        )
-        .await;
-        let others = (0..6).filter(|node| *node != PRODUCER).collect::<Vec<_>>();
-        let planes = [Plane::Data, Plane::Consensus, Plane::Resolver];
-        cluster.start_all().await;
-        for &node in &others {
-            for plane in planes {
-                cluster.block(plane, node, PRODUCER);
-            }
-        }
-        cluster.produce();
-
-        // The chain keeps finalizing far past its pipeline window while the producer is cut off.
-        let chain = [PRODUCER as u32];
-        cluster
-            .wait_finalized(&others, &chain, 12, Duration::from_secs(240))
-            .await;
-
-        // Once delivery recovers, every node keeps finalizing the chain.
-        for &node in &others {
-            for plane in planes {
-                cluster.unblock(plane, node, PRODUCER);
-            }
-        }
-        cluster
-            .wait_finalized(&cluster.all_nodes(), &chain, 20, Duration::from_secs(240))
-            .await;
-        cluster.observe_finality(&cluster.all_nodes()).await;
-    });
-}
-
-/// A node that lost a certificate before GST, and that peers no longer send, fetches it: the
-/// receipt chain's producer, cut off on every plane while its peers certify and place its block,
-/// then building nothing more, recovers the certificate of its placed tip once delivery recovers.
-/// No later proposal carries that certificate, since the chain no longer advances.
-#[test_traced]
-fn a_producer_recovers_the_certificate_of_its_placed_tip() {
-    const PRODUCER: usize = RECEIPT_PRODUCER;
-    let executor = DeterministicRunner::timed(Duration::from_secs(600));
-    executor.start(|context| async move {
-        let mut chain_limits = vec![PathLimits::new(2, 1); 6];
-        chain_limits[PRODUCER] = PathLimits::new(0, 0);
-        let mut cluster = Cluster::<Mock<Binding>>::new(
-            &context,
-            ClusterOptions {
-                chain_limits: Some(chain_limits),
+                payments: true,
                 ..ClusterOptions::new(97, 6)
             },
         )
         .await;
-        let others = (0..6).filter(|node| *node != PRODUCER).collect::<Vec<_>>();
+        let others = (0..6).filter(|node| *node != LAGGARD).collect::<Vec<_>>();
         let planes = [Plane::Data, Plane::Consensus, Plane::Certificates, Plane::Resolver];
         cluster.start_all().await;
         cluster.produce();
@@ -752,23 +706,23 @@ fn a_producer_recovers_the_certificate_of_its_placed_tip() {
             .wait_finalized(&cluster.all_nodes(), &chain, 3, Duration::from_secs(120))
             .await;
 
-        // Cut the producer off while its peers certify and place what it builds next.
+        // Cut the laggard off while its peers certify and place what the producer builds next.
         for &node in &others {
             for plane in planes {
-                cluster.block(plane, node, PRODUCER);
+                cluster.block(plane, node, LAGGARD);
             }
         }
         let certified = |inspection: &Inspection<Sha256Digest>| {
             inspection.chain_progress()[PRODUCER].certified()
         };
-        let behind = certified(&cluster.inspect(PRODUCER).await.expect("producer is live"));
+        let behind = certified(&cluster.inspect(LAGGARD).await.expect("laggard is live"));
         assert!(
             cluster
                 .wait_until(&others, Duration::from_secs(240), Duration::from_millis(100), |inspection| {
                     certified(inspection) > behind
                 })
                 .await,
-            "peers certify the producer's next block without it"
+            "peers certify the producer's next block without the laggard"
         );
         cluster.app(PRODUCER).pause_building();
         let mut placed = Height::new(u64::MAX);
@@ -777,56 +731,50 @@ fn a_producer_recovers_the_certificate_of_its_placed_tip() {
             placed = placed.min(certified(&inspection));
         }
 
-        // Once delivery recovers, the producer holds the certificate its peers placed.
+        // Once delivery recovers, the laggard holds the certificate its peers placed.
         for &node in &others {
             for plane in planes {
-                cluster.unblock(plane, node, PRODUCER);
+                cluster.unblock(plane, node, LAGGARD);
             }
         }
         assert!(
             cluster
-                .wait_until(&[PRODUCER], Duration::from_secs(240), Duration::from_millis(100), |inspection| {
+                .wait_until(&[LAGGARD], Duration::from_secs(240), Duration::from_millis(100), |inspection| {
                     certified(inspection) >= placed
                 })
                 .await,
-            "the producer recovers the certificate of its placed tip"
+            "the laggard recovers the certificate of the placed tip"
         );
     });
 }
 
-/// The pipeline window of chain 5 in [`receipt_chain_finality_without_votes_at_its_producer`]
-/// without receipt chains: how far it finalizes with no certificates at all.
+/// The pipeline window of chain 5 in [`finality_without_votes_at_the_producer`] without payment
+/// chains: how far it finalizes with no certificates at all.
 const UNCERTIFIED_WINDOW: u64 = 2;
 
-/// A receipt chain certifies without its producer: every validator receives every DA vote and
-/// recovers the certificates itself.
+/// Only a payment chain's producer assembles its certificates, from the DA votes sent to it alone,
+/// so a producer that receives no vote certifies nothing and the chain, which places only
+/// certified blocks, finalizes nothing.
 #[test_group("slow")]
 #[test_traced]
-fn receipt_chain_certifies_without_its_producer_receiving_a_vote() {
+fn payment_chain_stalls_when_its_producer_receives_no_vote() {
     let executor = DeterministicRunner::timed(Duration::from_secs(300));
     executor.start(|context| async move {
-        let finalized = receipt_chain_finality_without_votes_at_its_producer(
-            &context,
-            true,
-            UNCERTIFIED_WINDOW + 2,
-            Duration::from_secs(60),
-        )
-        .await;
-        assert!(
-            finalized > UNCERTIFIED_WINDOW + 2,
-            "receipt chain 5 finalized only {finalized}"
-        );
+        let finalized =
+            finality_without_votes_at_the_producer(&context, true, 0, Duration::from_secs(30))
+                .await;
+        assert_eq!(finalized, 0, "payment chain 5 finalized {finalized}");
     });
 }
 
-/// Without receipt chains only the producer recovers its certificates, so the same isolation
-/// stalls the chain within its pipeline window: the default route is unchanged.
+/// Without payment chains only the producer recovers its certificates, so the same isolation
+/// stalls the chain within its pipeline window.
 #[test_group("slow")]
 #[test_traced]
-fn chain_without_receipts_stalls_when_its_producer_receives_no_vote() {
+fn chain_without_payments_stalls_when_its_producer_receives_no_vote() {
     let executor = DeterministicRunner::timed(Duration::from_secs(300));
     executor.start(|context| async move {
-        let finalized = receipt_chain_finality_without_votes_at_its_producer(
+        let finalized = finality_without_votes_at_the_producer(
             &context,
             false,
             UNCERTIFIED_WINDOW,
@@ -840,10 +788,10 @@ fn chain_without_receipts_stalls_when_its_producer_receives_no_vote() {
     });
 }
 
-/// A certified-only chain under the default `n - 2f` quorum, whose certificates only its producer
-/// recovers and publishes, still certifies and finalizes at every node.
+/// A certified-only chain, whose certificates only its producer recovers and publishes, still
+/// certifies and finalizes at every node.
 #[test_traced]
-fn certified_only_chain_without_binding_certificates_stays_live() {
+fn certified_only_chain_stays_live() {
     const CHAIN: u32 = 5;
     let executor = DeterministicRunner::timed(Duration::from_secs(300));
     executor.start(|context| async move {
@@ -863,6 +811,37 @@ fn certified_only_chain_without_binding_certificates_stays_live() {
         cluster
             .wait_finalized(&nodes, &[CHAIN], 4, Duration::from_secs(60))
             .await;
+        // Without payment chains no producer forms receipts.
+        assert_eq!(metric_total(&context.encode(), "receipts_total"), 0);
+    });
+}
+
+/// A payment chain's producer collects `n - f` DA votes after each `n - 2f` certificate and forms
+/// receipts, while every node certifies and finalizes the chain.
+#[test_traced]
+fn a_payment_producer_forms_receipts() {
+    const CHAIN: u32 = 5;
+    let executor = DeterministicRunner::timed(Duration::from_secs(300));
+    executor.start(|context| async move {
+        let mut chain_limits = vec![PathLimits::new(2, 1); 6];
+        chain_limits[CHAIN as usize] = PathLimits::new(0, 0).with_pipeline_window(4).unwrap();
+        let mut cluster = Cluster::<Mock>::new(
+            &context,
+            ClusterOptions {
+                chain_limits: Some(chain_limits),
+                payments: true,
+                ..ClusterOptions::new(98, 6)
+            },
+        )
+        .await;
+        cluster.start_all().await;
+        cluster.produce();
+        let nodes = cluster.all_nodes();
+        cluster
+            .wait_finalized(&nodes, &[CHAIN], 4, Duration::from_secs(60))
+            .await;
+        let receipts = metric_total(&context.encode(), "receipts_total");
+        assert!(receipts >= 1, "the payment producer formed {receipts} receipts");
     });
 }
 
