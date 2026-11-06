@@ -8,12 +8,11 @@ use super::compact_engine_config;
 use crate::{
     merkle::{self, Location},
     qmdb::{
-        self,
+        self, ProofExt as _,
         sync::{
             self, Source as _,
             source::tests::{SequenceSource, fetch_compact_state},
         },
-        verify_proof_and_pinned_nodes,
     },
 };
 use commonware_cryptography::{Sha256, sha256};
@@ -821,8 +820,7 @@ pub(crate) fn test_compact_serve_refuses_previous_contents_while_import_pending<
         else {
             unreachable!("boundary request returns a boundary response");
         };
-        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
-            &proof,
+        assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
             target.size - 1,
             std::slice::from_ref(&op),
             &pinned_nodes,

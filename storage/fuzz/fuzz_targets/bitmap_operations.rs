@@ -224,7 +224,7 @@ fn fuzz(input: FuzzInput) {
                                     CHUNK_SIZE,
                                     Sequential,
                                 >::verify_bit_inclusion(
-                                    &hasher, &proof, &chunk, bit_offset, &root
+                                    &hasher, &proof, bit_offset, &chunk, &root
                                 ),
                                 "failed to verify bit {bit_offset}",
                             );

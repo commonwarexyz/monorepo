@@ -56,7 +56,7 @@ use commonware_storage::{
     journal::contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
     mmr::{self, Location, full::Config as MmrJournalConfig},
     qmdb::{
-        any::{FixedConfig, unordered::fixed},
+        any::unordered::fixed,
         immutable,
         sync::{CompactTarget, Target},
     },
@@ -88,11 +88,11 @@ pub(super) fn qmdb_config(
     prefix: &str,
     page_cache: CacheRef,
 ) -> (
-    FixedConfig<TwoCap, Sequential>,
+    fixed::Config<TwoCap, Sequential>,
     immutable::fixed::CompactConfig<Sequential>,
 ) {
-    let db_a = FixedConfig {
-        merkle_config: MmrJournalConfig {
+    let db_a = fixed::Config {
+        merkle: MmrJournalConfig {
             journal_partition: format!("{prefix}-qmdb-a-mmr-journal"),
             metadata_partition: format!("{prefix}-qmdb-a-mmr-metadata"),
             items_per_blob: NZU64!(11),
@@ -101,7 +101,7 @@ pub(super) fn qmdb_config(
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: FixedLogConfig {
+        log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-a-log-journal"),
             items_per_blob: NZU64!(7),
             page_cache: page_cache.clone(),
@@ -547,6 +547,7 @@ impl EngineDefinition for MultiDbEngine {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: oracle.control(public_key.clone()),
             strategy: Sequential,
         };
         let (broadcast_engine, buffer) =

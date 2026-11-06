@@ -6,6 +6,11 @@
 //! - [constant::OperationProof]: Proves a specific operation is active, with a fixed-size bitmap chunk.
 //! - [dynamic::OperationProof]: Uses a bitmap chunk size supplied when decoding.
 //!
+//! The `constant` and `dynamic` forms here and in the ordered and unordered proof modules differ
+//! only in how bitmap chunks are sized. Value encoding is a separate choice: key-value verifiers
+//! name [FixedEncoding](crate::qmdb::any::value::FixedEncoding) or
+//! [VariableEncoding](crate::qmdb::any::value::VariableEncoding) to match the source database.
+//!
 //! # Canonical root structure
 //!
 //! ```text
@@ -519,8 +524,8 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
         let merkle_root = match self.proof.reconstruct_root_inner(
             &grafting_verifier,
-            ops.iter().map(|op| op.encode()),
             start_loc,
+            ops.iter().map(|op| op.encode()),
             collected,
         ) {
             Ok(root) => root,
@@ -547,7 +552,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         start_loc: Location<F>,
         ops: &[O],
         chunks: &[[u8; N]],
-        root: &H::Digest,
+        root: &D,
     ) -> bool {
         self.verify_with_chunk_size::<H, O>(start_loc, ops, chunks, N, root)
     }
@@ -574,31 +579,54 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             Ok(reconstructed_root) if reconstructed_root == *root
         )
     }
-}
 
-/// Verify that a [RangeProof] is valid for a range of operations and return the positioned digests
-/// required to compute the peaks covering the proven range.
-pub fn verify_proof_and_extract_digests<F, Op, H, const N: usize>(
-    proof: &RangeProof<F, H::Digest>,
-    start_loc: Location<F>,
-    operations: &[Op],
-    chunks: &[[u8; N]],
-    target_root: &H::Digest,
-) -> Result<qmdb::verify::ExtractedDigests<F, H>, merkle::Error<F>>
-where
-    F: Graftable,
-    Op: Encode,
-    H: Hasher,
-{
-    let mut collected = Vec::new();
-    let reconstructed_root =
-        proof.reconstruct_root::<H, Op>(start_loc, operations, chunks, N, Some(&mut collected))?;
-    if reconstructed_root != *target_root {
-        debug!("verification failed, root mismatch");
-        return Err(merkle::Error::RootMismatch);
+    /// Verify the proof as [Self::verify] does and return the positioned digests required to
+    /// compute the peaks covering the proven range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [merkle::Error::RootMismatch] if the proof reconstructs a root other than `root`,
+    /// or [merkle::Error::InvalidProof] if the proof or its inputs are malformed.
+    pub fn verify_and_extract_digests<H: Hasher<Digest = D>, O: Encode, const N: usize>(
+        &self,
+        start_loc: Location<F>,
+        ops: &[O],
+        chunks: &[[u8; N]],
+        root: &D,
+    ) -> Result<qmdb::verify::ExtractedDigests<F, H>, merkle::Error<F>> {
+        self.verify_and_extract_digests_with_chunk_size::<H, O>(start_loc, ops, chunks, N, root)
     }
 
-    Ok(collected)
+    /// Verify the proof as [Self::verify_with_chunk_size] does and return the positioned digests
+    /// required to compute the peaks covering the proven range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [merkle::Error::RootMismatch] if the proof reconstructs a root other than `root`,
+    /// or [merkle::Error::InvalidProof] if the proof, its inputs, or `chunk_size` are malformed.
+    pub fn verify_and_extract_digests_with_chunk_size<H: Hasher<Digest = D>, O: Encode>(
+        &self,
+        start_loc: Location<F>,
+        ops: &[O],
+        chunks: &[impl AsRef<[u8]>],
+        chunk_size: usize,
+        root: &D,
+    ) -> Result<qmdb::verify::ExtractedDigests<F, H>, merkle::Error<F>> {
+        let mut collected = Vec::new();
+        let reconstructed_root = self.reconstruct_root::<H, O>(
+            start_loc,
+            ops,
+            chunks,
+            chunk_size,
+            Some(&mut collected),
+        )?;
+        if reconstructed_root != *root {
+            debug!("verification failed, root mismatch");
+            return Err(merkle::Error::RootMismatch);
+        }
+
+        Ok(collected)
+    }
 }
 
 impl<F: Graftable, D: Digest> Write for RangeProof<F, D> {
@@ -1233,7 +1261,7 @@ mod tests {
         let chunks = (start_chunk_idx..=end_chunk_idx)
             .map(|chunk_idx| <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx))
             .collect::<Vec<_>>();
-        assert!(proof.verify::<Sha256, _, N>(start_loc, &elements, &chunks, &root,));
+        assert!(proof.verify::<Sha256, _, N>(start_loc, &elements, &chunks, &root));
 
         // Flip a byte in the trailing partial chunk while preserving the window shape.
         let mut bad_chunks = chunks;
@@ -1322,10 +1350,10 @@ mod tests {
         // Tamper with the proof by injecting a fake partial chunk digest
         let mut tampered = proof.clone();
         tampered.partial_chunk_digest = Some(hasher.digest(b"fake partial chunk"));
-        assert!(!tampered.verify::<Sha256, _, N>(loc, &[element], &[chunk], &root,));
+        assert!(!tampered.verify::<Sha256, _, N>(loc, &[element], &[chunk], &root));
 
         proof.partial_chunk_digest = Some(hasher.digest(b"fake partial chunk"));
-        assert!(!proof.verify::<Sha256, _, N>(loc, &[element], &[chunk], &root,));
+        assert!(!proof.verify::<Sha256, _, N>(loc, &[element], &[chunk], &root));
     }
 
     async fn current_range_proof_fixture<F: Graftable, const N: usize>(
@@ -1419,22 +1447,42 @@ mod tests {
         (hasher, proof, operations, chunks, root, ops)
     }
 
-    async fn verify_proof_and_extract_digests_inner<F: Graftable>() {
+    async fn verify_and_extract_digests_inner<F: Graftable>() {
         const N: usize = 1;
         let start = Location::<F>::new(14);
         let end = Location::<F>::new(18);
         let (hasher, proof, operations, chunks, root, ops) =
             current_range_proof_fixture::<F, N>(18, start..end).await;
 
-        let extracted = verify_proof_and_extract_digests::<F, _, Sha256, N>(
-            &proof,
-            start,
-            &operations,
-            &chunks,
-            &root,
-        )
-        .unwrap();
+        let extracted = proof
+            .verify_and_extract_digests::<Sha256, _, N>(start, &operations, &chunks, &root)
+            .unwrap();
         assert!(!extracted.is_empty());
+
+        // Runtime-sized chunks extract the same digests, and a mismatched size is malformed.
+        let runtime_chunks = chunks.iter().map(|chunk| &chunk[..]).collect::<Vec<_>>();
+        assert_eq!(
+            proof
+                .verify_and_extract_digests_with_chunk_size::<Sha256, _>(
+                    start,
+                    &operations,
+                    &runtime_chunks,
+                    N,
+                    &root,
+                )
+                .unwrap(),
+            extracted
+        );
+        assert!(matches!(
+            proof.verify_and_extract_digests_with_chunk_size::<Sha256, _>(
+                start,
+                &operations,
+                &runtime_chunks,
+                N * 2,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
 
         // The extractor should return the authenticated digest for every proven leaf.
         for loc in *start..*end {
@@ -1451,8 +1499,7 @@ mod tests {
         // Root mismatches are reported distinctly from malformed proof inputs.
         let wrong_root = hasher.digest(b"wrong current root");
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, N>(
-                &proof,
+            proof.verify_and_extract_digests::<Sha256, _, N>(
                 start,
                 &operations,
                 &chunks,
@@ -1465,32 +1512,27 @@ mod tests {
         let mut wrong_operations = operations.clone();
         wrong_operations[0] = hasher.digest(b"wrong operation");
         assert!(
-            verify_proof_and_extract_digests::<F, _, Sha256, N>(
-                &proof,
-                start,
-                &wrong_operations,
-                &chunks,
-                &root,
-            )
-            .is_err()
+            proof
+                .verify_and_extract_digests::<Sha256, _, N>(
+                    start,
+                    &wrong_operations,
+                    &chunks,
+                    &root,
+                )
+                .is_err()
         );
 
         let mut bad_chunks = chunks;
         bad_chunks.last_mut().unwrap()[0] ^= 1;
         assert!(
-            verify_proof_and_extract_digests::<F, _, Sha256, N>(
-                &proof,
-                start,
-                &operations,
-                &bad_chunks,
-                &root,
-            )
-            .is_err()
+            proof
+                .verify_and_extract_digests::<Sha256, _, N>(start, &operations, &bad_chunks, &root)
+                .is_err()
         );
     }
 
     #[test_async]
-    async fn test_verify_proof_and_extract_digests_handles_no_grafted_chunks_mmb() {
+    async fn test_verify_and_extract_digests_handles_no_grafted_chunks_mmb() {
         type F = mmb::Family;
         const N: usize = 1;
         let start = Location::<F>::new(2);
@@ -1498,20 +1540,15 @@ mod tests {
         let (_, proof, operations, chunks, root, _ops) =
             current_range_proof_fixture::<F, N>(6, start..end).await;
 
-        let extracted = verify_proof_and_extract_digests::<F, _, Sha256, N>(
-            &proof,
-            start,
-            &operations,
-            &chunks,
-            &root,
-        )
-        .unwrap();
+        let extracted = proof
+            .verify_and_extract_digests::<Sha256, _, N>(start, &operations, &chunks, &root)
+            .unwrap();
 
         assert!(!extracted.is_empty());
     }
 
     #[test_async]
-    async fn test_verify_proof_and_extract_digests_rejects_malformed_inputs_mmb() {
+    async fn test_verify_and_extract_digests_rejects_malformed_inputs_mmb() {
         type F = mmb::Family;
         const N: usize = 1;
         let start = Location::<F>::new(14);
@@ -1521,20 +1558,13 @@ mod tests {
 
         let no_operations = Vec::<sha256::Digest>::new();
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, N>(
-                &proof,
-                start,
-                &no_operations,
-                &chunks,
-                &root,
-            ),
+            proof.verify_and_extract_digests::<Sha256, _, N>(start, &no_operations, &chunks, &root),
             Err(merkle::Error::InvalidProof)
         ));
 
         let no_chunks = Vec::<[u8; N]>::new();
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, N>(
-                &proof,
+            proof.verify_and_extract_digests::<Sha256, _, N>(
                 start,
                 &operations[..1],
                 &no_chunks,
@@ -1544,8 +1574,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, N>(
-                &proof,
+            proof.verify_and_extract_digests::<Sha256, _, N>(
                 F::MAX_LEAVES,
                 &operations[..1],
                 &chunks,
@@ -1555,8 +1584,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, N>(
-                &proof,
+            proof.verify_and_extract_digests::<Sha256, _, N>(
                 proof.proof.leaves,
                 &operations[..1],
                 &chunks,
@@ -1566,8 +1594,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, N>(
-                &proof,
+            proof.verify_and_extract_digests::<Sha256, _, N>(
                 start,
                 &operations,
                 &chunks[..chunks.len() - 1],
@@ -1579,8 +1606,7 @@ mod tests {
         let mut missing_partial = proof.clone();
         missing_partial.partial_chunk_digest = None;
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, N>(
-                &missing_partial,
+            missing_partial.verify_and_extract_digests::<Sha256, _, N>(
                 start,
                 &operations,
                 &chunks,
@@ -1593,8 +1619,7 @@ mod tests {
         assert!(!broken_merkle.proof.digests.is_empty());
         broken_merkle.proof.digests.clear();
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, N>(
-                &broken_merkle,
+            broken_merkle.verify_and_extract_digests::<Sha256, _, N>(
                 start,
                 &operations,
                 &chunks,
@@ -1605,7 +1630,7 @@ mod tests {
     }
 
     #[test_async]
-    async fn test_verify_proof_and_extract_digests_rejects_metadata_mismatches_mmb() {
+    async fn test_verify_and_extract_digests_rejects_metadata_mismatches_mmb() {
         type F = mmb::Family;
         const N: usize = 1;
         let start = Location::<F>::new(14);
@@ -1618,8 +1643,7 @@ mod tests {
         let mut missing_pending = proof.clone();
         missing_pending.pending_chunk_digest = None;
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, N>(
-                &missing_pending,
+            missing_pending.verify_and_extract_digests::<Sha256, _, N>(
                 start,
                 &operations,
                 &chunks,
@@ -1631,8 +1655,7 @@ mod tests {
         let mut wrong_pending = proof.clone();
         wrong_pending.pending_chunk_digest = Some(hasher.digest(b"wrong pending"));
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, N>(
-                &wrong_pending,
+            wrong_pending.verify_and_extract_digests::<Sha256, _, N>(
                 start,
                 &operations,
                 &chunks,
@@ -1651,8 +1674,7 @@ mod tests {
         let mut unexpected_partial = proof;
         unexpected_partial.partial_chunk_digest = Some(hasher.digest(b"unexpected partial"));
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, N>(
-                &unexpected_partial,
+            unexpected_partial.verify_and_extract_digests::<Sha256, _, N>(
                 aligned_start,
                 &operations,
                 &chunks,
@@ -1663,13 +1685,13 @@ mod tests {
     }
 
     #[test_async]
-    async fn test_verify_proof_and_extract_digests_mmr() {
-        verify_proof_and_extract_digests_inner::<mmr::Family>().await;
+    async fn test_verify_and_extract_digests_mmr() {
+        verify_and_extract_digests_inner::<mmr::Family>().await;
     }
 
     #[test_async]
-    async fn test_verify_proof_and_extract_digests_mmb() {
-        verify_proof_and_extract_digests_inner::<mmb::Family>().await;
+    async fn test_verify_and_extract_digests_mmb() {
+        verify_and_extract_digests_inner::<mmb::Family>().await;
     }
 
     /// Active chunks always have a single h=G peak; multi-peak structure can only appear
@@ -2238,7 +2260,7 @@ mod tests {
                 assert_eq!(dynamic.loc, loc);
                 assert_eq!(dynamic.chunk.as_ref(), native.chunk.as_slice());
                 assert!(dynamic.verify::<Sha256, _>(operations[0], &root));
-                assert!(!dynamic.verify::<Sha256, _>(Sha256::hash(&[b"wrong operation"]), &root,));
+                assert!(!dynamic.verify::<Sha256, _>(Sha256::hash(&[b"wrong operation"]), &root));
                 assert!(
                     !dynamic.verify::<Sha256, _>(operations[0], &Sha256::hash(&[b"wrong root"]),)
                 );

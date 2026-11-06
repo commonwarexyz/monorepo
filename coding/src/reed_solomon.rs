@@ -100,7 +100,7 @@ fn check_chunk<H: Hasher>(
     let digest = digest();
     shard
         .proof
-        .verify_element_inclusion::<H>(&digest, u32::from(index), commitment)
+        .verify_element_inclusion::<H>(u32::from(index), &digest, commitment)
         .map_err(|_| Error::InvalidProof)?;
 
     // Cache the verified digest with the commitment and shard it authenticates.
@@ -1385,6 +1385,7 @@ mod tests {
     use commonware_parallel::{
         Rayon, Sequential,
         mocks::{Explorer, explore, inline},
+        rayon::ThreadPoolBuilder,
     };
     use commonware_runtime::iobuf::EncodeExt;
     use commonware_utils::{NZU16, NZUsize};
@@ -2051,7 +2052,7 @@ mod tests {
 
     #[test]
     fn test_parallel_recovery_decode() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap();
+        let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(4))).unwrap();
         let data = vec![42u8; 256 * 1024];
         let total = 24u16;
         let min = 8u16;
@@ -2145,7 +2146,8 @@ mod tests {
     /// splits stripes into multiple tiles.
     #[test]
     fn test_striped_encode_into_matches_full_width() {
-        let strategy = Explorer::parallel(&Rayon::new(NZUsize!(4)).unwrap());
+        let strategy =
+            Explorer::parallel(&Rayon::new(ThreadPoolBuilder::new(NZUsize!(4))).unwrap());
         let mut tiled = false;
         for (k, m) in [(2usize, 2usize), (32, 64)] {
             for shard_len in [
@@ -2786,7 +2788,7 @@ mod tests {
 
     #[test]
     fn test_parallel_decode_rejects_mismatched_shard_lengths() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap();
+        let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(4))).unwrap();
         let data = vec![42u8; 256 * 1024];
         let total = 24u16;
         let min = 8u16;

@@ -41,8 +41,6 @@ where
 {
     batch: CompactUnmerkleizedBatch<F, H, V, S>,
     db: Shared<CompactDb<F, E, V, H, S>>,
-    metadata: Option<V::Value>,
-    inactivity_floor: Option<Location<F>>,
 }
 
 impl<F, E, V, H, S> Deref for KeylessUnjournaledUnmerkleized<F, E, V, H, S>
@@ -72,16 +70,17 @@ where
     Operation<F, V>: CodecRead,
     S: Strategy,
 {
-    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
-    pub fn with_metadata(mut self, metadata: V::Value) -> Self {
-        self.metadata = Some(metadata);
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize). `None` clears
+    /// it.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<V::Value>>) -> Self {
+        self.batch = self.batch.with_metadata(metadata);
         self
     }
 
     /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
-    /// (location 0 when unset).
-    pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.inactivity_floor = Some(floor);
+    /// (inherited from the database or parent batch when unset).
+    pub fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
+        self.batch = self.batch.with_inactivity_floor(floor);
         self
     }
 
@@ -157,14 +156,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self
-            .batch
-            .merkleize(
-                &db,
-                self.metadata,
-                self.inactivity_floor.unwrap_or_default(),
-            )
-            .await?;
+        let merkleized = self.batch.merkleize(&db).await?;
         Ok(KeylessUnjournaledMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -193,8 +185,6 @@ where
         KeylessUnjournaledUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             db: self.db.clone(),
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 }
@@ -237,8 +227,6 @@ where
         KeylessUnjournaledUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 
@@ -301,8 +289,6 @@ where
         KeylessUnjournaledUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 
@@ -498,11 +484,11 @@ mod tests {
         let source = FixedDb::init(context.child("db"), config, None)
             .await
             .unwrap();
-        let floor = source.inactivity_floor_loc();
         let batch = source
             .new_batch()
             .append(U64::new(7))
-            .merkleize(&source, Some(U64::new(9)), floor)
+            .with_metadata(Some(U64::new(9)))
+            .merkleize(&source)
             .await
             .unwrap();
         let source = source.apply_batch(batch).await.unwrap();
@@ -515,6 +501,70 @@ mod tests {
     where
         T: StateSyncDb<deterministic::Context, R>,
     {
+    }
+
+    #[test]
+    fn unset_inactivity_floor_inherits_parent_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("inherit-parent-floor");
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            let parent = db
+                .new_batch_for_test::<_>()
+                .await
+                .append(U64::new(7))
+                .with_inactivity_floor(mmr::Location::new(1));
+            let parent = crate::stateful::db::Unmerkleized::merkleize(parent)
+                .await
+                .unwrap();
+            let child = MerkleizedTrait::new_batch(&parent).append(U64::new(8));
+            let child = crate::stateful::db::Unmerkleized::merkleize(child)
+                .await
+                .unwrap();
+            assert_eq!(child.bounds().inactivity_floor, mmr::Location::new(1));
+        });
+    }
+
+    #[test]
+    fn unset_inactivity_floor_inherits_applied_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("inherit-applied-floor");
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            let first = db
+                .new_batch_for_test::<_>()
+                .await
+                .append(U64::new(7))
+                .with_inactivity_floor(mmr::Location::new(1));
+            let first = crate::stateful::db::Unmerkleized::merkleize(first)
+                .await
+                .unwrap();
+            {
+                let (slot, database) = db.write().await;
+                let database = <FixedDb as ManagedDb<_>>::apply(database, first)
+                    .await
+                    .unwrap();
+                slot.put(database);
+            }
+
+            let next = db.new_batch_for_test::<_>().await.append(U64::new(9));
+            let next = crate::stateful::db::Unmerkleized::merkleize(next)
+                .await
+                .unwrap();
+            assert_eq!(next.bounds().inactivity_floor, mmr::Location::new(1));
+            let (slot, database) = db.write().await;
+            let database = <FixedDb as ManagedDb<_>>::apply(database, next)
+                .await
+                .unwrap();
+            assert_eq!(database.inactivity_floor_loc(), mmr::Location::new(1));
+            slot.put(database);
+        });
     }
 
     #[test]
@@ -724,11 +774,11 @@ mod tests {
                     .await
                     .unwrap();
 
-            let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
                 .append(U64::new(7))
-                .merkleize(&source, Some(U64::new(9)), floor)
+                .with_metadata(Some(U64::new(9)))
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -738,11 +788,11 @@ mod tests {
                 size: source.bounds().end,
             };
 
-            let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
                 .append(U64::new(8))
-                .merkleize(&source, Some(U64::new(10)), floor)
+                .with_metadata(Some(U64::new(10)))
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -782,11 +832,11 @@ mod tests {
             let source = FixedDb::init(source_context, source_config, None)
                 .await
                 .unwrap();
-            let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
                 .append(U64::new(7))
-                .merkleize(&source, Some(U64::new(9)), floor)
+                .with_metadata(Some(U64::new(9)))
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -872,22 +922,22 @@ mod tests {
             .await
             .unwrap();
 
-            let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
                 .append(U64::new(7))
-                .merkleize(&source, Some(U64::new(9)), floor)
+                .with_metadata(Some(U64::new(9)))
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let stale_target = source.target();
 
-            let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
                 .append(U64::new(8))
-                .merkleize(&source, Some(U64::new(10)), floor)
+                .with_metadata(Some(U64::new(10)))
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -944,11 +994,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            let floor = db.inactivity_floor_loc();
             let batch = db
                 .new_batch()
                 .append(U64::new(1))
-                .merkleize(&db, Some(U64::new(11)), floor)
+                .with_metadata(Some(U64::new(11)))
+                .merkleize(&db)
                 .await
                 .unwrap();
             db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
@@ -956,11 +1006,11 @@ mod tests {
 
             // Add two ranges so reopening at the first target spans multiple commits.
             for i in [2u64, 3] {
-                let floor = db.inactivity_floor_loc();
                 let batch = db
                     .new_batch()
                     .append(U64::new(i))
-                    .merkleize(&db, Some(U64::new(i * 11)), floor)
+                    .with_metadata(Some(U64::new(i * 11)))
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
@@ -996,11 +1046,11 @@ mod tests {
             // Commit three ranges, recording each target.
             let mut targets = Vec::new();
             for i in [1u64, 2, 3] {
-                let floor = db.inactivity_floor_loc();
                 let batch = db
                     .new_batch()
                     .append(U64::new(i))
-                    .merkleize(&db, Some(U64::new(i * 11)), floor)
+                    .with_metadata(Some(U64::new(i * 11)))
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();

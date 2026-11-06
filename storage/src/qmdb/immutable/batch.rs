@@ -1,6 +1,6 @@
 //! Batch mutation API for Immutable QMDBs.
 
-use super::Immutable;
+use super::Db;
 use crate::{
     Context,
     journal::{authenticated, contiguous::Mutable},
@@ -62,6 +62,12 @@ where
     V: ValueEncoding,
     H: Hasher,
 {
+    /// Metadata for this batch's commit.
+    metadata: Option<V::Value>,
+
+    /// Application-declared floor, inherited when this batch is created.
+    inactivity_floor: Location<F>,
+
     /// Authenticated journal batch for computing the speculative Merkle root.
     journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, K, V>, S>,
 
@@ -114,7 +120,7 @@ where
 {
     /// Create a batch from the DB (no parent chain).
     pub(super) fn new<E, C, T>(
-        immutable: &Immutable<F, E, K, V, C, H, T, S>,
+        immutable: &Db<F, E, K, V, C, H, T, S>,
         base: Commitment<F, H::Digest>,
     ) -> Self
     where
@@ -127,8 +133,27 @@ where
             journal_batch: immutable.journal.new_batch(),
             mutations: BTreeMap::new(),
             parent: None,
+            metadata: None,
+            inactivity_floor: immutable.inactivity_floor_loc,
             base,
         }
+    }
+
+    /// Set the metadata recorded in this batch's commit. Defaults to `None` and is not inherited by
+    /// child batches.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<V::Value>>) -> Self {
+        self.metadata = metadata.into();
+        self
+    }
+
+    /// Set the inactivity floor recorded in this batch's commit. Defaults to the database or parent
+    /// batch's floor when the batch is created.
+    ///
+    /// The floor must be at least the parent batch's (or database's) floor and at most this
+    /// batch's commit location. Merkleizing the batch checks both bounds.
+    pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
+        self.inactivity_floor = floor;
+        self
     }
 
     /// The database boundary for this batch chain.
@@ -142,7 +167,7 @@ where
 
     /// The inactivity floor this batch builds on: its parent's, or `db`'s for a batch with no
     /// parent.
-    fn floor<E, C, T>(&self, db: &Immutable<F, E, K, V, C, H, T, S>) -> Location<F>
+    fn floor<E, C, T>(&self, db: &Db<F, E, K, V, C, H, T, S>) -> Location<F>
     where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
@@ -160,8 +185,8 @@ where
     #[allow(clippy::type_complexity)]
     fn compatible<'a, E, C, T>(
         &self,
-        db: &'a Immutable<F, E, K, V, C, H, T, S>,
-    ) -> Result<Compatible<'a, Immutable<F, E, K, V, C, H, T, S>>, Error<F>>
+        db: &'a Db<F, E, K, V, C, H, T, S>,
+    ) -> Result<Compatible<'a, Db<F, E, K, V, C, H, T, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
@@ -193,7 +218,7 @@ where
     pub async fn get<E, C, T>(
         &self,
         key: &K,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
@@ -228,7 +253,7 @@ where
     pub async fn get_many<E, C, T>(
         &self,
         keys: &[impl Borrow<K> + Sync],
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
@@ -282,22 +307,19 @@ where
 
     /// Resolve mutations into operations and return a merkleized batch.
     ///
-    /// `inactivity_floor` declares that all operations before this location are inactive. It must
-    /// be at least the floor this batch builds on (its parent's, or the database's) and at most
-    /// this batch's own commit location.
+    /// The commit records the batch's inactivity floor (see [`Self::with_inactivity_floor`]), which
+    /// declares every operation before it inactive.
     ///
     /// # Errors
     ///
     /// - Returns [`Error::StaleBatch`] if `db` is not at a state of this batch's chain or an
     ///   unapplied ancestor was dropped.
     /// - Returns [`Error::FloorRegressed`] if `inactivity_floor` is below the floor this batch
-    ///   builds on, and [`Error::FloorBeyondSize`] if it is past the commit location.
+    ///   builds on, and [`Error::FloorBeyondCommit`] if it is past the commit location.
     #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
     pub async fn merkleize<E, C, T>(
-        self,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
-        metadata: Option<V::Value>,
-        inactivity_floor: Location<F>,
+        mut self,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> MerkleizeResult<F, H::Digest, K, V, S>
     where
         E: Context,
@@ -305,6 +327,8 @@ where
         C::Item: EncodeShared,
         T: Translator,
     {
+        let metadata = self.metadata.take();
+        let inactivity_floor = self.inactivity_floor;
         let base = self.base.size;
 
         let live_ancestors: Vec<_> =
@@ -393,8 +417,8 @@ where
 
     /// Inclusion proof for the operations returned by [`Self::operations`], anchored at
     /// this batch's tip. The pair verifies against [`Self::root`] via
-    /// [`crate::qmdb::verify_proof`]. Together with [`Self::pinned_nodes`] they verify via
-    /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    /// [`crate::qmdb::ProofExt::verify`]. Together with [`Self::pinned_nodes`] they verify via
+    /// [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
     /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
@@ -406,10 +430,10 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
     /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
-    /// operations (such as a batch from [`Immutable::to_batch`]).
+    /// operations (such as a batch from [`Db::to_batch`]).
     pub fn proof<E, C, H, T>(
         &self,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Proof<F, D>, Error<F>>
     where
         E: Context,
@@ -427,7 +451,7 @@ where
     /// The Merkle frontier at the first operation returned by [`Self::operations`]
     /// ([`Family::nodes_to_pin`]), which lets a consumer holding only this batch's base rebuild
     /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
-    /// nodes verify against [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    /// nodes verify against [`Self::root`] via [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
     /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
@@ -441,7 +465,7 @@ where
     /// dropped unapplied ancestor.
     pub fn pinned_nodes<E, C, H, T>(
         &self,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<D>, Error<F>>
     where
         E: Context,
@@ -497,7 +521,7 @@ where
     pub async fn get<E, C, H, T>(
         &self,
         key: &K,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
@@ -526,7 +550,7 @@ where
     pub async fn get_many<E, C, H, T>(
         &self,
         keys: &[impl Borrow<K> + Sync],
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
@@ -587,12 +611,14 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             parent: Some(Arc::clone(self)),
+            metadata: None,
+            inactivity_floor: self.bounds.inactivity_floor,
             base: self.commitment(),
         }
     }
 }
 
-impl<F, E, K, V, C, H, T, S> Immutable<F, E, K, V, C, H, T, S>
+impl<F, E, K, V, C, H, T, S> Db<F, E, K, V, C, H, T, S>
 where
     F: Family,
     E: Context,

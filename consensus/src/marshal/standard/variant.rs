@@ -179,7 +179,6 @@ mod tests {
         sha256::{Digest as Sha256Digest, Sha256},
     };
     use commonware_parallel::Sequential;
-    use futures::executor::block_on;
 
     type TestBlock = MockBlock<Sha256Digest, u64>;
     type TestVariant = Standard<TestBlock>;
@@ -193,13 +192,14 @@ mod tests {
             ExpectedCommitment::Trusted(block.digest()),
             ExpectedCommitment::Untrusted(block.digest()),
         ] {
-            let decoded = block_on(TestVariant::decode_block(
-                encoded.clone(),
-                &(),
-                expected,
-                &Sequential,
-            ))
-            .unwrap();
+            let decoded = Sequential
+                .block_on(TestVariant::decode_block(
+                    encoded.clone(),
+                    &(),
+                    expected,
+                    &Sequential,
+                ))
+                .unwrap();
             assert_eq!(decoded.inner(), &block);
             assert_eq!(decoded.digest(), block.digest());
         }
@@ -211,13 +211,14 @@ mod tests {
             ExpectedCommitment::Untrusted(other),
         ] {
             assert!(
-                block_on(TestVariant::decode_block(
-                    encoded.clone(),
-                    &(),
-                    expected,
-                    &Sequential
-                ))
-                .is_err()
+                Sequential
+                    .block_on(TestVariant::decode_block(
+                        encoded.clone(),
+                        &(),
+                        expected,
+                        &Sequential
+                    ))
+                    .is_err()
             );
         }
     }

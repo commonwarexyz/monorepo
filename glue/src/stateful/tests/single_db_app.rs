@@ -52,10 +52,7 @@ use commonware_storage::{
     archive::prunable,
     journal::contiguous::fixed::Config as FixedLogConfig,
     mmr::{self, Location, full::Config as MmrJournalConfig},
-    qmdb::{
-        any::{FixedConfig, unordered::fixed},
-        sync::Target,
-    },
+    qmdb::{any::unordered::fixed, sync::Target},
     translator::TwoCap,
 };
 use commonware_utils::{
@@ -71,9 +68,9 @@ pub(super) type Qmdb<E> =
 pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
 
 /// Builds the QMDB configuration used by single-database tests.
-pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequential> {
-    FixedConfig {
-        merkle_config: MmrJournalConfig {
+pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<TwoCap, Sequential> {
+    fixed::Config {
+        merkle: MmrJournalConfig {
             journal_partition: format!("{prefix}-qmdb-mmr-journal"),
             metadata_partition: format!("{prefix}-qmdb-mmr-metadata"),
             items_per_blob: NZU64!(11),
@@ -82,7 +79,7 @@ pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<Two
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: FixedLogConfig {
+        log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-log-journal"),
             items_per_blob: NZU64!(7),
             page_cache,
@@ -440,6 +437,7 @@ impl EngineDefinition for SingleDbEngine {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: oracle.control(public_key.clone()),
             strategy: Sequential,
         };
         let (broadcast_engine, buffer) =

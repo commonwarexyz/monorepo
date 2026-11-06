@@ -66,6 +66,12 @@ where
         self.any.get_prev_key(key).await
     }
 
+    /// Returns the value of `key` and the next active key, wrapping from the last key to the first,
+    /// or `None` if `key` is not active.
+    pub async fn get_all(&self, key: &K) -> Result<Option<(V::Value, K)>, Error<F>> {
+        self.any.get_all(key).await
+    }
+
     /// Streams active (key, value) pairs in ascending key order within `range`.
     pub fn stream_range<'a>(
         &'a self,
@@ -97,27 +103,29 @@ impl<
 where
     Operation<F, K, V>: Codec,
 {
-    /// Generate and return a proof of the current value of `key`, along with the other
-    /// [KeyValueProof] required to verify the proof. Returns KeyNotFound error if the key is not
-    /// currently assigned any value.
+    /// Return a proof authenticating the current value of `key` against [`Self::root`], and that
+    /// value.
     ///
     /// # Errors
     ///
     /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
     pub async fn key_value_proof(
         &self,
-        key: K,
-    ) -> Result<KeyValueProof<F, K, H::Digest, N>, Error<F>> {
-        let op_loc = self.any.get_with_loc(&key).await?;
+        key: &K,
+    ) -> Result<(KeyValueProof<F, K, H::Digest, N>, V::Value), Error<F>> {
+        let op_loc = self.any.get_with_loc(key).await?;
         let Some((data, loc)) = op_loc else {
             return Err(Error::<F>::KeyNotFound);
         };
         let proof = self.operation_proof(loc).await?;
 
-        Ok(KeyValueProof {
-            proof,
-            next_key: data.next_key,
-        })
+        Ok((
+            KeyValueProof {
+                proof,
+                next_key: data.next_key,
+            },
+            data.value,
+        ))
     }
 
     /// Generate and return a proof that the specified `key` does not exist in the db.

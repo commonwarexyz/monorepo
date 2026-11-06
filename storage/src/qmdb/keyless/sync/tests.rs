@@ -11,8 +11,8 @@ use crate::{
         self,
         keyless::{self, Operation, fixed, variable},
         sync::{
-            self, Engine, Target,
-            engine::{Config, NextStep},
+            self, Config, Engine, Target,
+            engine::NextStep,
             harness::{
                 CompactConfigOf, CompactOpOf, CompactSyncTestHarness, ConfigOf, DbOf, JournalOf,
                 OpOf, PAGE_CACHE_SIZE, PAGE_SIZE, SyncTestHarness, compact_engine_config,
@@ -516,7 +516,7 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
             .new_batch()
             .append(vec![1, 2, 3])
             .append(vec![4, 5, 6])
-            .merkleize(&source, None, Location::new(0))
+            .merkleize(&source)
             .await
             .unwrap();
         let source = source.apply_batch(batch).await.unwrap();
@@ -528,7 +528,9 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
         let floor = source.bounds().end;
         let batch = source
             .new_batch()
-            .merkleize(&source, Some(metadata.clone()), floor)
+            .with_metadata(Some(metadata.clone()))
+            .with_inactivity_floor(floor)
+            .merkleize(&source)
             .await
             .unwrap();
         let source = source.apply_batch(batch).await.unwrap();
@@ -541,7 +543,7 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
         let source = Arc::new(source);
 
         // The sync range holds only the floor commit, so one boundary response supplies all of it.
-        let client: DbOf<harnesses::VariableHarness<F>> = sync::sync(sync::engine::Config {
+        let client: DbOf<harnesses::VariableHarness<F>> = sync::sync(sync::Config {
             context: context.child("client"),
             db_config: fine_config(&format!("{suffix}-client")),
             fetch_batch_size: NZU64!(2),
@@ -710,7 +712,8 @@ pub(crate) mod harnesses {
                 }
             }
         }
-        let merkleized = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let merkleized = batch.merkleize(&db).await.unwrap();
         db.apply_batch(merkleized).await.unwrap()
     }
 
@@ -774,7 +777,8 @@ pub(crate) mod harnesses {
             let db = if db.inactivity_floor_loc() > loc {
                 db
             } else {
-                let merkleized = db.new_batch().merkleize(&db, None, loc).await.unwrap();
+                let batch = db.new_batch().with_inactivity_floor(loc);
+                let merkleized = batch.merkleize(&db).await.unwrap();
                 let db = db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap()
             };
@@ -847,7 +851,7 @@ pub(crate) mod harnesses {
         variable::CompactDb<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
     type FixedDb<F> = fixed::Db<F, deterministic::Context, U64, Sha256, Sequential>;
     type CompactFixedDb<F> = fixed::CompactDb<F, deterministic::Context, U64, Sha256, Sequential>;
-    type FullDb<F, V, C> = keyless::Keyless<F, deterministic::Context, V, C, Sha256, Sequential>;
+    type FullDb<F, V, C> = keyless::Db<F, deterministic::Context, V, C, Sha256, Sequential>;
     type CompactDb<F, V> = keyless::CompactDb<F, deterministic::Context, V, Sha256, Sequential>;
 
     fn fixed_config(suffix: &str) -> fixed::Config<Sequential> {
@@ -906,7 +910,8 @@ pub(crate) mod harnesses {
         for value in values {
             batch = batch.append(value.clone());
         }
-        let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let batch = batch.merkleize(&db).await.unwrap();
         db.apply_batch(batch).await.unwrap()
     }
 
@@ -926,7 +931,8 @@ pub(crate) mod harnesses {
         for value in values {
             batch = batch.append(value.clone());
         }
-        let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let batch = batch.merkleize(&db).await.unwrap();
         db.apply_batch(batch).await.unwrap()
     }
 

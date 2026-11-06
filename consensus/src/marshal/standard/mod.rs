@@ -10009,10 +10009,7 @@ mod tests {
             )
             .await;
             let control = oracle.control(me.clone());
-            let network_channel = control
-                .register(0, Quota::per_second(NonZeroU32::MAX))
-                .await
-                .unwrap();
+            let network_channel = control.register(0, TEST_QUOTA).await.unwrap();
 
             let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(10));
             let partition_prefix = "stale-finalized-test".to_string();
@@ -10077,6 +10074,7 @@ mod tests {
                 priority: false,
                 codec_config: (),
                 peer_provider: oracle.manager(),
+                blocker: control.clone(),
                 strategy: Sequential,
             };
             let (broadcast_engine, buffer) =

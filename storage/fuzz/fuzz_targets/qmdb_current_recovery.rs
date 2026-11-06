@@ -18,8 +18,8 @@ use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        current::{VariableConfig, unordered::variable::Db as Current},
-        floor::Proportional,
+        any::value::VariableEncoding,
+        current::unordered::variable::{Config, Db as Current},
     },
     translator::TwoCap,
 };
@@ -99,7 +99,7 @@ struct ConfigParams {
     replay_buffer: NonZeroUsize,
 }
 
-fn make_config(suffix: &str, params: ConfigParams) -> VariableConfig<TwoCap, ((), ()), Sequential> {
+fn make_config(suffix: &str, params: ConfigParams) -> Config<TwoCap, ((), ()), Sequential> {
     let ConfigParams {
         page_size,
         page_cache_size,
@@ -109,8 +109,8 @@ fn make_config(suffix: &str, params: ConfigParams) -> VariableConfig<TwoCap, (()
         replay_buffer,
     } = params;
     let page_cache = CacheRef::new(page_size, page_cache_size);
-    VariableConfig {
-        merkle_config: MerkleConfig {
+    Config {
+        merkle: MerkleConfig {
             journal_partition: format!("crash-merkle-journal-{suffix}"),
             metadata_partition: format!("crash-merkle-metadata-{suffix}"),
             items_per_blob: NZU64!(merkle_items_per_blob),
@@ -119,7 +119,7 @@ fn make_config(suffix: &str, params: ConfigParams) -> VariableConfig<TwoCap, (()
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: VConfig {
+        log: VConfig {
             partition: format!("crash-log-{suffix}"),
             items_per_section: NZU64!(log_items_per_blob),
             write_buffer,
@@ -200,7 +200,7 @@ async fn commit_pending<F: Graftable>(
     // Merkleize only reads and hashes, and reads are never fault-injected, so an
     // error here is a real bug rather than a legal crash trigger.
     let merkleized = batch
-        .merkleize(&db, None, &mut Proportional)
+        .merkleize(&db)
         .await
         .expect("merkleize failed without any mutable operation");
     let post_root = merkleized.root();
@@ -414,12 +414,13 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 .zip(recovered)
                 .filter_map(|(key, value)| value.map(|value| (key, value)))
             {
-                let proof = db
-                    .key_value_proof(key.clone())
+                let (proof, proved_value) = db
+                    .key_value_proof(&key)
                     .await
                     .expect("proof generation failed for a recovered key");
+                assert_eq!(proved_value, value);
                 assert!(
-                    Db::<F>::verify_key_value_proof(key, value, &proof, &root),
+                    proof.verify::<Sha256, VariableEncoding<Value>, _>(key, proved_value, &root),
                     "key value proof failed to verify after crash recovery"
                 );
             }
@@ -434,7 +435,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                     .await
                     .expect("range proof generation failed after recovery");
                 assert!(
-                    Db::<F>::verify_range_proof(&proof, loc, &ops, &chunks, &root),
+                    proof.verify::<Sha256, _, _>(loc, &ops, &chunks, &root),
                     "range proof failed to verify after crash recovery at loc {loc}"
                 );
             }
@@ -445,7 +446,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             let batch = db
                 .new_batch()
                 .write(test_key, Some(test_value))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .expect("post-recovery merkleize failed");
             let db = db

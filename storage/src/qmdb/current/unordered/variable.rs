@@ -8,9 +8,12 @@
 
 use crate::{
     index::unordered::Index,
-    journal::contiguous::variable::Journal,
+    journal::contiguous::variable::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::any::{unordered::variable::Operation, value::VariableEncoding},
+    qmdb::{
+        any::{unordered::variable::Operation, value::VariableEncoding},
+        current,
+    },
 };
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
@@ -25,11 +28,15 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     S,
 >;
 
+/// Configuration for a [Db].
+pub type Config<T, C, S> = current::Config<T, JournalConfig<C>, S>;
+
 pub mod partitioned {
     //! A variant of [super] that uses a partitioned index for the snapshot.
 
     use super::*;
     use crate::index::partitioned::unordered::Index;
+    use core::num::NonZeroUsize;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -49,6 +56,9 @@ pub mod partitioned {
             N,
             S,
         >;
+
+    /// Configuration for a [Db].
+    pub type Config<T, C, S> = current::Config<T, JournalConfig<C>, S, NonZeroUsize>;
 }
 
 #[cfg(test)]
@@ -56,10 +66,7 @@ mod test {
     use super::*;
     use crate::{
         mmr,
-        qmdb::{
-            current::{tests::variable_config, unordered::tests as shared},
-            floor::Proportional,
-        },
+        qmdb::current::{tests::variable_config, unordered::tests as shared},
         translator::TwoCap,
     };
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
@@ -122,16 +129,16 @@ mod test {
         executor.start(|context| async move {
             // Configure the operation codec for variable-length keys.
             let base = variable_config::<TwoCap>("vec-keys");
-            let cfg = crate::qmdb::current::VariableConfig {
-                merkle_config: base.merkle_config.clone(),
-                journal_config: crate::journal::contiguous::variable::Config {
-                    partition: base.journal_config.partition.clone(),
-                    items_per_section: base.journal_config.items_per_section,
+            let cfg = Config {
+                merkle: base.merkle.clone(),
+                log: crate::journal::contiguous::variable::Config {
+                    partition: base.log.partition.clone(),
+                    items_per_section: base.log.items_per_section,
                     compression: None,
                     codec_config: (((0..).into(), ()), ()),
-                    page_cache: base.journal_config.page_cache.clone(),
-                    write_buffer: base.journal_config.write_buffer,
-                    replay_buffer: base.journal_config.replay_buffer,
+                    page_cache: base.log.page_cache.clone(),
+                    write_buffer: base.log.write_buffer,
+                    replay_buffer: base.log.replay_buffer,
                 },
                 grafted_metadata_partition: base.grafted_metadata_partition.clone(),
                 translator: TwoCap,
@@ -149,18 +156,18 @@ mod test {
             let merkleized = db
                 .new_batch()
                 .write(key.clone(), Some(value))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key).await.unwrap().unwrap(), value);
             let root = db.root();
-            let proof = db.key_value_proof(key.clone()).await.unwrap();
-            assert!(VecKeyTest::verify_key_value_proof(
+            let (proof, proved_value) = db.key_value_proof(&key).await.unwrap();
+            assert_eq!(proved_value, value);
+            assert!(proof.verify::<Sha256, VariableEncoding<Digest>, _>(
                 key.clone(),
-                value,
-                &proof,
+                proved_value,
                 &root
             ));
             drop(db);

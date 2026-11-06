@@ -129,7 +129,6 @@ struct SectionReplay<B: Blob> {
     skip_bytes: u64,
     offset: u64,
     valid_offset: u64,
-    pending: Option<(usize, usize)>,
 }
 
 /// The journal's state, boxed so the public [Journal] handle stays pointer-sized.
@@ -528,7 +527,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 skip_bytes,
                 offset: 0,
                 valid_offset: skip_bytes,
-                pending: None,
             });
         }
         let finished = sections.is_empty();
@@ -545,6 +543,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             finished,
             errored: false,
             repairing: false,
+            in_progress: false,
         };
 
         // A start offset beyond the front section's apparent tail can never resolve to an
@@ -703,6 +702,7 @@ pub struct Replay<E: Storage + Metrics, V: Codec> {
     finished: bool,
     errored: bool,
     repairing: bool,
+    in_progress: bool,
 }
 
 impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
@@ -767,8 +767,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             "torn page detected: truncating"
         );
 
-        // Once mutation begins, a dropped future drops the section's writer. Keep the interruption
-        // guard set until the repaired reader has replaced the stale one.
+        // Mark the repair incomplete until a new reader has replaced the stale view.
         self.repairing = true;
         let current = self
             .sections
@@ -786,7 +785,6 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             skip_bytes: 0,
             offset: valid_offset,
             valid_offset,
-            pending: None,
         });
         self.repairing = false;
         Ok(())
@@ -808,8 +806,8 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
         );
 
         // Tail repair is exceptional. Make it durable immediately so callers do not need to
-        // track replay-time repaired sections separately. Keep the interruption guard set
-        // until the repair is durable.
+        // track replay-time repaired sections separately. Mark the repair incomplete until
+        // it is durable.
         self.repairing = true;
         let writer = self.journal.0.manager.take(section).await?;
         let writer = writer.truncate(valid_offset).await?;
@@ -822,87 +820,84 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
     /// exhausted.
     ///
     /// An error ends the section that produced it, and iteration continues with the next section.
-    /// Errors while mutating storage to repair a section, and [Error::ReplayInterrupted], end the
-    /// replay.
+    /// Errors while mutating storage to repair a section end the replay. Dropping a pending call
+    /// also ends it. The next call returns [Error::ReplayInterrupted] and [Self::finish] fails.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, u32, V), Error>> {
-        // An unfinished repair may have dropped the section's writer. A cancelled repair still
-        // needs an error. A completed failure already yielded one.
+        if self.in_progress {
+            self.in_progress = false;
+            self.repairing = false;
+            self.sections.clear();
+            return self.fail(Error::ReplayInterrupted);
+        }
+
+        // Leave this set if the future is dropped at any await in the replay.
+        self.in_progress = true;
+        let result = self.next_inner().await;
+        self.in_progress = false;
+        result
+    }
+
+    async fn next_inner(&mut self) -> Option<Result<(u64, u64, u32, V), Error>> {
+        // A failed storage repair may have dropped its writer. Stop after its error.
         if self.repairing {
             self.repairing = false;
             self.sections.clear();
-            if !self.errored {
-                return self.fail(Error::ReplayInterrupted);
-            }
         }
         while let Some(current) = self.sections.front_mut() {
             let blob_size = current.reader.blob_size();
 
-            // Resume a recorded frame header or decode the next one
-            let (item_size, varint_len) = match current.pending {
-                Some(header) => header,
-                None => {
-                    // Ensure we have enough data for varint header.
-                    // ensure() returns Ok(false) if exhausted with fewer bytes,
-                    // but we still try to decode from remaining bytes.
-                    match current.reader.ensure(MAX_U32_VARINT_SIZE).await {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            // Reader exhausted - check if buffer is empty
-                            if current.reader.remaining() == 0 {
-                                self.sections.pop_front();
-                                continue;
-                            }
-                            // Buffer still has data - continue to try decoding
-                        }
-                        Err(err) => {
-                            if let Err(err) = self.repair(err).await {
-                                return self.fail(err);
-                            }
-                            continue;
-                        }
-                    }
-
-                    // Skip bytes if needed (for start_offset)
-                    if current.skip_bytes > 0 {
-                        let to_skip =
-                            current.skip_bytes.min(current.reader.remaining() as u64) as usize;
-                        current.reader.advance(to_skip);
-                        current.skip_bytes -= to_skip as u64;
-                        current.offset += to_skip as u64;
+            // Ensure we have enough data for varint header.
+            // ensure() returns Ok(false) if exhausted with fewer bytes,
+            // but we still try to decode from remaining bytes.
+            match current.reader.ensure(MAX_U32_VARINT_SIZE).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    // Reader exhausted - check if buffer is empty
+                    if current.reader.remaining() == 0 {
+                        self.sections.pop_front();
                         continue;
                     }
+                    // Buffer still has data - continue to try decoding
+                }
+                Err(err) => {
+                    if let Err(err) = self.repair(err).await {
+                        return self.fail(err);
+                    }
+                    continue;
+                }
+            }
 
-                    // Try to decode length prefix
-                    let before_remaining = current.reader.remaining();
-                    match decode_length_prefix(&mut current.reader) {
-                        Ok(header) => {
-                            // Record the header before awaiting the body so a dropped
-                            // next future resumes losslessly.
-                            current.pending = Some(header);
-                            header
-                        }
-                        Err(err) => {
-                            // Could be incomplete varint - check if reader exhausted
-                            if current.reader.is_exhausted()
-                                || before_remaining < MAX_U32_VARINT_SIZE
-                            {
-                                // Treat as trailing bytes
-                                if current.valid_offset < blob_size
-                                    && current.offset < blob_size
-                                    && let Err(err) = self
-                                        .repair_tail("trailing bytes detected: truncating")
-                                        .await
-                                {
-                                    self.sections.pop_front();
-                                    return self.fail(err);
-                                }
-                                self.sections.pop_front();
-                                continue;
-                            }
+            // Skip bytes if needed (for start_offset)
+            if current.skip_bytes > 0 {
+                let to_skip = current.skip_bytes.min(current.reader.remaining() as u64) as usize;
+                current.reader.advance(to_skip);
+                current.skip_bytes -= to_skip as u64;
+                current.offset += to_skip as u64;
+                continue;
+            }
+
+            // Try to decode length prefix
+            let before_remaining = current.reader.remaining();
+            let (item_size, varint_len) = match decode_length_prefix(&mut current.reader) {
+                Ok(header) => header,
+                Err(err) => {
+                    // Could be incomplete varint - check if reader exhausted
+                    if current.reader.is_exhausted() || before_remaining < MAX_U32_VARINT_SIZE {
+                        // Treat as trailing bytes
+                        if current.valid_offset < blob_size
+                            && current.offset < blob_size
+                            && let Err(err) = self
+                                .repair_tail("trailing bytes detected: truncating")
+                                .await
+                        {
                             self.sections.pop_front();
                             return self.fail(err);
                         }
+                        self.sections.pop_front();
+                        continue;
                     }
+                    self.sections.pop_front();
+                    return self.fail(err);
                 }
             };
 
@@ -945,7 +940,6 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                 self.journal.0.compression.is_some(),
             ) {
                 Ok(decoded) => {
-                    current.pending = None;
                     current.valid_offset = next_offset;
                     current.offset = next_offset;
                     return Some(Ok((
@@ -976,7 +970,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
     /// Fails when the reader was not fully drained or yielded an error: the journal is
     /// destroyed and recovery is re-initialization.
     pub fn finish(mut self) -> Result<Journal<E, V>, Error> {
-        if self.errored || !self.finished {
+        if self.in_progress || self.errored || !self.finished {
             return Err(Error::ReplayFailed);
         }
         if let Some(start) = self.recovered_from {
@@ -999,7 +993,10 @@ mod tests {
         Blob, BufMut, Runner, Storage, Supervisor as _, WriteOptions,
         buffer::paged::corrupt_page,
         deterministic,
-        mocks::{DelayedSyncContext, PendingSyncs, RecordingContext, release_pending_syncs},
+        mocks::{
+            DelayedSyncContext, PendingSyncs, ReadGateContext, RecordingContext,
+            release_pending_syncs,
+        },
     };
     use commonware_utils::{NZU16, NZUsize, probability};
     use std::num::NonZeroU16;
@@ -4066,6 +4063,90 @@ mod tests {
 
                 journal.destroy().await.expect("Failed to destroy");
             }
+        });
+    }
+
+    /// A cancellation after consuming a frame header cannot resume or finish its replay.
+    #[rstest::rstest]
+    #[case::finish(false)]
+    #[case::next(true)]
+    fn test_segmented_variable_replay_dropped_during_read_fails_replay(#[case] resume: bool) {
+        deterministic::Runner::default().start(|context| async move {
+            const SECTION: u64 = 0;
+            let cfg = Config {
+                partition: "variable-cancel-read".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::new(NZU16!(16), NZUsize!(8)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, [u8; 64]>::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            for value in 0..2 {
+                (journal, _, _) = journal.append(SECTION, &[value; 64]).await.unwrap();
+            }
+            drop(journal.sync_all().await.unwrap());
+
+            let (gated, gate) =
+                ReadGateContext::new(context.child("cancel"), cfg.partition.clone());
+            let journal = Journal::<_, [u8; 64]>::init(gated, cfg.clone())
+                .await
+                .unwrap();
+            let mut replay = journal
+                .replay(SECTION, 0, NZUsize!(16), ReadOptions::default())
+                .await
+                .unwrap();
+
+            // Buffer the header so next consumes it before the body read reaches the gate.
+            assert!(
+                replay
+                    .sections
+                    .front_mut()
+                    .unwrap()
+                    .reader
+                    .ensure(MAX_U32_VARINT_SIZE)
+                    .await
+                    .unwrap()
+            );
+
+            // Dropping a call before it is polled starts no read and leaves the replay usable.
+            drop(replay.next());
+            gate.arm();
+            {
+                let next = replay.next();
+                futures::pin_mut!(next);
+                assert!(futures::poll!(next.as_mut()).is_pending());
+                assert!(gate.blocked() > 0);
+            }
+            gate.disarm();
+
+            if resume {
+                assert!(matches!(
+                    replay.next().await,
+                    Some(Err(Error::ReplayInterrupted))
+                ));
+                assert!(replay.next().await.is_none());
+                assert!(replay.next().await.is_none());
+            }
+            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
+
+            let journal = Journal::<_, [u8; 64]>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            let mut replay = journal
+                .replay(SECTION, 0, NZUsize!(16), ReadOptions::default())
+                .await
+                .unwrap();
+            for value in 0..2 {
+                let (section, offset, size, item) = replay.next().await.unwrap().unwrap();
+                assert_eq!(
+                    (section, offset, size, item),
+                    (SECTION, u64::from(value) * 65, 64, [value; 64])
+                );
+            }
+            assert!(replay.next().await.is_none());
+            replay.finish().unwrap().destroy().await.unwrap();
         });
     }
 }

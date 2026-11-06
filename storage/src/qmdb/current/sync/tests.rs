@@ -7,7 +7,6 @@
 
 use crate::qmdb::{
     current::tests::{fixed_config, variable_config},
-    floor::Proportional,
     sync::{
         Database as SyncDatabase,
         harness::{ConfigOf, SyncTestHarness},
@@ -182,10 +181,7 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch
-                .merkleize(&db, metadata, &mut Proportional)
-                .await
-                .unwrap()
+            batch.with_metadata(metadata).merkleize(&db).await.unwrap()
         };
         let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -211,10 +207,7 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch
-                .merkleize(&db, metadata, &mut Proportional)
-                .await
-                .unwrap()
+            batch.with_metadata(metadata).merkleize(&db).await.unwrap()
         };
         let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -240,10 +233,7 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch
-                .merkleize(&db, metadata, &mut Proportional)
-                .await
-                .unwrap()
+            batch.with_metadata(metadata).merkleize(&db).await.unwrap()
         };
         let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -269,10 +259,7 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch
-                .merkleize(&db, metadata, &mut Proportional)
-                .await
-                .unwrap()
+            batch.with_metadata(metadata).merkleize(&db).await.unwrap()
         };
         let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -508,7 +495,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             let merkleized = target_db
                 .new_batch()
                 .write(key, expected)
-                .merkleize(&target_db, None, &mut Proportional)
+                .merkleize(&target_db)
                 .await
                 .unwrap();
             target_db = target_db.apply_batch(merkleized).await.unwrap();
@@ -535,7 +522,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         // Sync targets the ops root, which is what the engine verifies. `build_db` reconstructs
         // the canonical root without authenticating it, so the assertions below compare it
         // against `verification_root`.
-        let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::engine::Config {
+        let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::Config {
             context: context.child("client"),
             db_config: client_config.clone(),
             fetch_batch_size: commonware_utils::NZU64!(64),
@@ -603,7 +590,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             let merkleized = db
                 .new_batch()
                 .write(key, Some(Digest::from([round as u8; 32])))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             db = db.apply_batch(merkleized).await.unwrap();

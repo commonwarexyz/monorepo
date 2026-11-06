@@ -13,7 +13,7 @@ use commonware_storage::{
     merkle::{self, Family, full::Config as MerkleConfig},
     qmdb::{
         any::{
-            FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
+            Config as AnyConfig,
             ordered::{
                 fixed::{
                     Db as OFixed,
@@ -28,11 +28,10 @@ use commonware_storage::{
             },
         },
         current::{
-            FixedConfig as CurrentFixedConfig, VariableConfig as CurrentVariableConfig,
+            Config as CurrentConfig,
             ordered::{fixed::Db as OCFixed, variable::Db as OCVariable},
             unordered::{fixed::Db as UCFixed, variable::Db as UCVariable},
         },
-        floor::Proportional,
         immutable::fixed::{Config as ImmutableFixedConfig, Db as IFixed},
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
         store::db::{Config as StoreConfig, Db as Store},
@@ -160,7 +159,7 @@ fn var_log_cfg<C>(
     }
 }
 
-pub fn any_fix_cfg(ctx: &impl Strategizer) -> AnyFixedConfig<EightCap, Rayon> {
+pub fn any_fix_cfg(ctx: &impl Strategizer) -> AnyConfig<EightCap, FConfig, Rayon> {
     any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE)
 }
 
@@ -168,7 +167,7 @@ pub fn any_fix_cfg_with(
     ctx: &impl Strategizer,
     items_per_blob: NonZeroU64,
     page_cache_size: NonZeroUsize,
-) -> AnyFixedConfig<EightCap, Rayon> {
+) -> AnyConfig<EightCap, FConfig, Rayon> {
     any_fix_cfg_full(ctx, items_per_blob, page_cache_size, ())
 }
 
@@ -178,11 +177,11 @@ pub fn any_fix_cfg_full<B>(
     items_per_blob: NonZeroU64,
     page_cache_size: NonZeroUsize,
     init_concurrency: B,
-) -> AnyFixedConfig<EightCap, Rayon, B> {
+) -> AnyConfig<EightCap, FConfig, Rayon, B> {
     let page_cache = CacheRef::new(PAGE_SIZE, page_cache_size);
-    AnyFixedConfig {
-        merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
-        journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
+    AnyConfig {
+        merkle: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
+        log: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
@@ -196,25 +195,25 @@ pub fn imm_fix_cfg_with(
 ) -> ImmutableFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     ImmutableFixedConfig {
-        merkle_config: merkle_cfg(PARTITION_IMM, ctx, page_cache.clone(), items_per_blob),
+        merkle: merkle_cfg(PARTITION_IMM, ctx, page_cache.clone(), items_per_blob),
         log: fix_log_cfg(PARTITION_IMM, page_cache, items_per_blob),
         translator: EightCap,
         init_buffer: NZUsize!(1 << 21),
     }
 }
 
-pub fn cur_fix_cfg(ctx: &impl Strategizer) -> CurrentFixedConfig<EightCap, Rayon> {
+pub fn cur_fix_cfg(ctx: &impl Strategizer) -> CurrentConfig<EightCap, FConfig, Rayon> {
     cur_fix_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn cur_fix_cfg_with(
     ctx: &impl Strategizer,
     items_per_blob: NonZeroU64,
-) -> CurrentFixedConfig<EightCap, Rayon> {
+) -> CurrentConfig<EightCap, FConfig, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-    CurrentFixedConfig {
-        merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
-        journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
+    CurrentConfig {
+        merkle: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
+        log: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
@@ -223,18 +222,18 @@ pub fn cur_fix_cfg_with(
     }
 }
 
-pub fn any_var_digest_cfg(ctx: &impl Strategizer) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
+pub fn any_var_digest_cfg(ctx: &impl Strategizer) -> AnyConfig<EightCap, VConfig<((), ())>, Rayon> {
     any_var_digest_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn any_var_digest_cfg_with(
     ctx: &impl Strategizer,
     items_per_blob: NonZeroU64,
-) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
+) -> AnyConfig<EightCap, VConfig<((), ())>, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-    AnyVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
-        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
+    AnyConfig {
+        merkle: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        log: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
@@ -244,18 +243,18 @@ pub fn any_var_digest_cfg_with(
 
 pub fn cur_var_digest_cfg(
     ctx: &impl Strategizer,
-) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
+) -> CurrentConfig<EightCap, VConfig<((), ())>, Rayon> {
     cur_var_digest_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn cur_var_digest_cfg_with(
     ctx: &impl Strategizer,
     items_per_blob: NonZeroU64,
-) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
+) -> CurrentConfig<EightCap, VConfig<((), ())>, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-    CurrentVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
-        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
+    CurrentConfig {
+        merkle: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        log: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
@@ -267,18 +266,18 @@ pub fn cur_var_digest_cfg_with(
 /// Codec config for variable-length `Vec<u8>` values.
 type VarVecCfg = ((), (commonware_codec::RangeCfg<usize>, ()));
 
-pub fn any_var_vec_cfg(ctx: &impl Strategizer) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
+pub fn any_var_vec_cfg(ctx: &impl Strategizer) -> AnyConfig<EightCap, VConfig<VarVecCfg>, Rayon> {
     any_var_vec_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn any_var_vec_cfg_with(
     ctx: &impl Strategizer,
     items_per_blob: NonZeroU64,
-) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
+) -> AnyConfig<EightCap, VConfig<VarVecCfg>, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-    AnyVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
-        journal_config: var_log_cfg(
+    AnyConfig {
+        merkle: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        log: var_log_cfg(
             PARTITION_VAR,
             page_cache,
             ((), ((0..=10000).into(), ())),
@@ -293,18 +292,18 @@ pub fn any_var_vec_cfg_with(
 
 pub fn cur_var_vec_cfg(
     ctx: &impl Strategizer,
-) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
+) -> CurrentConfig<EightCap, VConfig<VarVecCfg>, Rayon> {
     cur_var_vec_cfg_with(ctx, ITEMS_PER_BLOB)
 }
 
 pub fn cur_var_vec_cfg_with(
     ctx: &impl Strategizer,
     items_per_blob: NonZeroU64,
-) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
+) -> CurrentConfig<EightCap, VConfig<VarVecCfg>, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-    CurrentVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
-        journal_config: var_log_cfg(
+    CurrentConfig {
+        merkle: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        log: var_log_cfg(
             PARTITION_VAR,
             page_cache,
             ((), ((0..=10000).into(), ())),
@@ -666,7 +665,7 @@ where
             batch = batch.write(key, Some(make_value(&mut rng)));
             pending += 1;
             if seed_batch.is_some_and(|n| pending >= n) {
-                let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                let merkleized = batch.merkleize(&db).await.unwrap();
                 db = db.apply_batch(merkleized).await.unwrap();
                 db = db.commit().await.unwrap();
                 commits += 1;
@@ -679,7 +678,7 @@ where
             }
         }
         if pending > 0 {
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
             db = db.commit().await.unwrap();
         }
@@ -708,7 +707,7 @@ where
             if let Some(freq) = commit_frequency
                 && rng.next_u32().is_multiple_of(freq)
             {
-                let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                let merkleized = batch.merkleize(&db).await.unwrap();
                 db = db.apply_batch(merkleized).await.unwrap();
                 db = db.commit().await.unwrap();
                 commits += 1;
@@ -719,7 +718,7 @@ where
                 batch = db.new_batch();
             }
         }
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         db = db.apply_batch(merkleized).await.unwrap();
         db = db.commit().await.unwrap();
     }
@@ -745,10 +744,7 @@ pub async fn gen_store_random_kv(
         let key = Sha256::hash(&[&i.to_be_bytes()]);
         changes.push((key, Some(make_value(&mut rng))));
     }
-    db = db
-        .apply_batch(changes.into_iter().collect(), &mut Proportional)
-        .await
-        .unwrap();
+    db = db.apply_batch(changes.into_iter().collect()).await.unwrap();
     db = db.commit().await.unwrap();
 
     // Perform `num_operations` random updates/deletes, committing periodically.
@@ -762,19 +758,13 @@ pub async fn gen_store_random_kv(
         changes.push((rand_key, Some(make_value(&mut rng))));
         if rng.next_u32().is_multiple_of(commit_frequency) {
             db = db
-                .apply_batch(
-                    std::mem::take(&mut changes).into_iter().collect(),
-                    &mut Proportional,
-                )
+                .apply_batch(std::mem::take(&mut changes).into_iter().collect())
                 .await
                 .unwrap();
             db = db.commit().await.unwrap();
         }
     }
-    let db = db
-        .apply_batch(changes.into_iter().collect(), &mut Proportional)
-        .await
-        .unwrap();
+    let db = db.apply_batch(changes.into_iter().collect()).await.unwrap();
     db.commit().await.unwrap()
 }
 
@@ -794,7 +784,7 @@ pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest
         let k = Sha256::hash(&[&i.to_be_bytes()]);
         batch = batch.write(k, Some(make_fixed_value(&mut rng)));
     }
-    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+    let merkleized = batch.merkleize(&db).await.unwrap();
     let db = db.apply_batch(merkleized).await.unwrap();
     db.commit().await.unwrap()
 }

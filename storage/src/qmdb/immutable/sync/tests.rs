@@ -10,8 +10,7 @@ use crate::{
         self,
         immutable::{self, variable::Operation},
         sync::{
-            self, Target,
-            engine::Config,
+            self, Config, Target,
             harness::{
                 CompactConfigOf, CompactOpOf, CompactSyncTestHarness, ConfigOf, DbOf, JournalOf,
                 OpOf, PAGE_CACHE_SIZE, PAGE_SIZE, SyncTestHarness, prune_boxed,
@@ -159,7 +158,7 @@ pub(crate) mod harnesses {
 
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -229,7 +228,8 @@ pub(crate) mod harnesses {
                 }
             }
         }
-        let merkleized = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let merkleized = batch.merkleize(&db).await.unwrap();
         db.apply_batch(merkleized).await.unwrap()
     }
 
@@ -289,7 +289,8 @@ pub(crate) mod harnesses {
         async fn prune(db: Self::Db, loc: Location<Self::Family>) -> Self::Db {
             // Advance the inactivity floor to `loc` via a commit before pruning,
             // since prune requires the floor to be at or beyond the prune target.
-            let merkleized = db.new_batch().merkleize(&db, None, loc).await.unwrap();
+            let batch = db.new_batch().with_inactivity_floor(loc);
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             db.prune(loc).await.unwrap()
@@ -405,16 +406,8 @@ pub(crate) mod harnesses {
         Sha256,
         Sequential,
     >;
-    type FullDb<F, V, C> = immutable::Immutable<
-        F,
-        deterministic::Context,
-        sha256::Digest,
-        V,
-        C,
-        Sha256,
-        TwoCap,
-        Sequential,
-    >;
+    type FullDb<F, V, C> =
+        immutable::Db<F, deterministic::Context, sha256::Digest, V, C, Sha256, TwoCap, Sequential>;
     type CompactDb<F, V> =
         immutable::CompactDb<F, deterministic::Context, sha256::Digest, V, Sha256, Sequential>;
     type BaseOperation<F, V> = immutable::Operation<F, sha256::Digest, V>;
@@ -424,7 +417,7 @@ pub(crate) mod harnesses {
     ) -> immutable::variable::Config<TwoCap, CodecConfig, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -450,7 +443,7 @@ pub(crate) mod harnesses {
     fn fixed_config(suffix: &str) -> immutable::fixed::Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -510,7 +503,8 @@ pub(crate) mod harnesses {
         for (loc, value) in (*db.size()..).zip(values) {
             batch = batch.set(key_at(loc), value.clone());
         }
-        let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let batch = batch.merkleize(&db).await.unwrap();
         db.apply_batch(batch).await.unwrap()
     }
 
@@ -530,7 +524,8 @@ pub(crate) mod harnesses {
         for (loc, value) in (*db.bounds().end..).zip(values) {
             batch = batch.set(key_at(loc), value.clone());
         }
-        let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let batch = batch.merkleize(&db).await.unwrap();
         db.apply_batch(batch).await.unwrap()
     }
 

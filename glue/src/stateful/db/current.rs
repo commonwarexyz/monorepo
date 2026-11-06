@@ -31,11 +31,15 @@ use commonware_storage::{
             value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
         },
         current::{
-            FixedConfig, VariableConfig,
             batch::{MerkleizedBatch, Slot, Staged, UnmerkleizedBatch},
             db::Db,
+            ordered::{
+                fixed::Config as OrderedFixedConfig, variable::Config as OrderedVariableConfig,
+            },
+            unordered::{
+                fixed::Config as UnorderedFixedConfig, variable::Config as UnorderedVariableConfig,
+            },
         },
-        floor::Proportional,
         operation::Key,
         sync::{self, Target as CurrentSyncTarget},
     },
@@ -66,7 +70,6 @@ where
 {
     batch: UnmerkleizedBatch<F, H, U, N, S>,
     db: Shared<Db<F, E, C, I, H, U, N, S>>,
-    metadata: Option<U::Value>,
 }
 
 /// A staged batch returned by [`CurrentUnmerkleized::stage`].
@@ -87,7 +90,6 @@ where
 {
     staged: Staged<F, H, U, N, S>,
     db: Shared<Db<F, E, C, I, H, U, N, S>>,
-    metadata: Option<U::Value>,
 }
 
 impl<F, E, C, I, H, U, const N: usize, S> CurrentUnmerkleized<F, E, C, I, H, U, N, S>
@@ -101,11 +103,12 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize). `None` clears
+    /// it.
     ///
     /// The metadata carries over to a batch returned by [`Self::stage`].
-    pub fn with_metadata(mut self, metadata: U::Value) -> Self {
-        self.metadata = Some(metadata);
+    pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
+        self.batch = self.batch.with_metadata(metadata);
         self
     }
 
@@ -133,23 +136,12 @@ where
         self,
         keys: &[impl Borrow<U::Key> + Sync],
     ) -> Result<(Vec<Option<U::Value>>, CurrentStaged<F, E, C, I, H, U, N, S>), Error<F>> {
-        let Self {
-            batch,
-            db,
-            metadata,
-        } = self;
+        let Self { batch, db } = self;
         let (values, staged) = {
             let guard = db.read().await;
             batch.stage(keys, &guard).await?
         };
-        Ok((
-            values,
-            CurrentStaged {
-                staged,
-                db,
-                metadata,
-            },
-        ))
+        Ok((values, CurrentStaged { staged, db }))
     }
 
     /// Records an upsert (`Some`) or a delete (`None`) of `key`.
@@ -242,9 +234,9 @@ where
     Operation<F, U>: Codec,
 {
     /// Sets the metadata committed by [`merkleize`](Self::merkleize), replacing any metadata set
-    /// before staging.
-    pub fn with_metadata(mut self, metadata: U::Value) -> Self {
-        self.metadata = Some(metadata);
+    /// before staging. `None` clears it.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
+        self.staged = self.staged.with_metadata(metadata);
         self
     }
 
@@ -270,24 +262,12 @@ where
         self,
         keys: &[impl Borrow<U::Key> + Sync],
     ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>> {
-        let Self {
-            staged,
-            db,
-            metadata,
-        } = self;
+        let Self { staged, db } = self;
         let (range, values, staged) = {
             let guard = db.read().await;
             staged.expand(keys, &guard).await?
         };
-        Ok((
-            range,
-            values,
-            Self {
-                staged,
-                db,
-                metadata,
-            },
-        ))
+        Ok((range, values, Self { staged, db }))
     }
 }
 
@@ -319,16 +299,10 @@ where
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
     ) -> Result<CurrentMerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>, Error<F>> {
-        let Self {
-            staged,
-            db,
-            metadata,
-        } = self;
+        let Self { staged, db } = self;
         let inner = {
             let guard = db.read().await;
-            staged
-                .merkleize(slots, unstaged, metadata, &guard, &mut Proportional)
-                .await?
+            staged.merkleize(slots, unstaged, &guard).await?
         };
         Ok(CurrentMerkleized { inner, db })
     }
@@ -362,16 +336,10 @@ where
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
     ) -> Result<CurrentMerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>, Error<F>> {
-        let Self {
-            staged,
-            db,
-            metadata,
-        } = self;
+        let Self { staged, db } = self;
         let inner = {
             let guard = db.read().await;
-            staged
-                .merkleize(slots, unstaged, metadata, &guard, &mut Proportional)
-                .await?
+            staged.merkleize(slots, unstaged, &guard).await?
         };
         Ok(CurrentMerkleized { inner, db })
     }
@@ -424,10 +392,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self
-            .batch
-            .merkleize(&db, self.metadata, &mut Proportional)
-            .await?;
+        let merkleized = self.batch.merkleize(&db).await?;
         Ok(CurrentMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -453,10 +418,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self
-            .batch
-            .merkleize(&db, self.metadata, &mut Proportional)
-            .await?;
+        let merkleized = self.batch.merkleize(&db).await?;
         Ok(CurrentMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -488,7 +450,6 @@ where
         CurrentUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             db: self.db.clone(),
-            metadata: None,
         }
     }
 }
@@ -534,7 +495,7 @@ where
         S,
     >;
     type Error = Error<F>;
-    type Config = FixedConfig<T, S>;
+    type Config = UnorderedFixedConfig<T, S>;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
 
     async fn init(
@@ -564,7 +525,6 @@ where
         CurrentUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
         }
     }
 
@@ -636,7 +596,7 @@ where
         S,
     >;
     type Error = Error<F>;
-    type Config = FixedConfig<T, S>;
+    type Config = OrderedFixedConfig<T, S>;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
 
     async fn init(
@@ -666,7 +626,6 @@ where
         CurrentUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
         }
     }
 
@@ -717,17 +676,15 @@ mod open {
                 value::{VariableEncoding, VariableValue},
             },
             current::{
-                VariableConfig, ordered::variable::Db as OrderedVariableDb, unordered::variable::Db,
+                ordered::variable::{Config as OrderedConfig, Db as OrderedVariableDb},
+                unordered::variable::{Config, Db},
             },
         },
     };
-    type VConfig<T, F, K, V, S> = VariableConfig<
-        T,
-        <Operation<F, unordered::Update<K, VariableEncoding<V>>> as Read>::Cfg,
-        S,
-    >;
+    type VConfig<T, F, K, V, S> =
+        Config<T, <Operation<F, unordered::Update<K, VariableEncoding<V>>> as Read>::Cfg, S>;
     type OrderedVConfig<T, F, K, V, S> =
-        VariableConfig<T, <Operation<F, ordered::Update<K, VariableEncoding<V>>> as Read>::Cfg, S>;
+        OrderedConfig<T, <Operation<F, ordered::Update<K, VariableEncoding<V>>> as Read>::Cfg, S>;
 
     pub(super) async fn variable<F, E, K, V, H, T, const N: usize, S>(
         context: E,
@@ -805,7 +762,7 @@ where
         S,
     >;
     type Error = Error<F>;
-    type Config = VariableConfig<
+    type Config = UnorderedVariableConfig<
         T,
         <Operation<F, unordered::Update<K, VariableEncoding<V>>> as CodecRead>::Cfg,
         S,
@@ -839,7 +796,6 @@ where
         CurrentUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
         }
     }
 
@@ -911,7 +867,7 @@ where
         S,
     >;
     type Error = Error<F>;
-    type Config = VariableConfig<
+    type Config = OrderedVariableConfig<
         T,
         <Operation<F, ordered::Update<K, VariableEncoding<V>>> as CodecRead>::Cfg,
         S,
@@ -945,7 +901,6 @@ where
         CurrentUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
         }
     }
 
@@ -1187,6 +1142,7 @@ mod tests {
         qmdb::{
             any::unordered::fixed::Operation as FixedOperation,
             current::{
+                Config as CurrentConfig,
                 ordered::{fixed as ordered_fixed, variable as ordered_variable},
                 unordered::{fixed, variable},
             },
@@ -1254,10 +1210,10 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn fixed_config(suffix: &str) -> FixedConfig<TwoCap, Sequential> {
+    fn fixed_config(suffix: &str) -> CurrentConfig<TwoCap, FixedJournalConfig, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        FixedConfig {
-            merkle_config: MerkleConfig {
+        CurrentConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -1266,7 +1222,7 @@ mod tests {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FixedJournalConfig {
+            log: FixedJournalConfig {
                 partition: format!("stateful-current-log-{suffix}"),
                 items_per_blob: NZU64!(7),
                 page_cache,
@@ -1281,10 +1237,12 @@ mod tests {
         }
     }
 
-    fn variable_config(suffix: &str) -> VariableConfig<TwoCap, ((), ()), Sequential> {
+    fn variable_config(
+        suffix: &str,
+    ) -> CurrentConfig<TwoCap, VariableJournalConfig<((), ())>, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        VariableConfig {
-            merkle_config: MerkleConfig {
+        CurrentConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -1293,7 +1251,7 @@ mod tests {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: VariableJournalConfig {
+            log: VariableJournalConfig {
                 partition: format!("stateful-current-log-{suffix}"),
                 items_per_section: NZU64!(7),
                 compression: None,
@@ -1733,15 +1691,14 @@ mod tests {
         // append of at most `CAPACITY` operations in memory, and a larger append bypasses it and
         // writes every page to the blob at once. One blob keeps the applied batch over the
         // discarded second target's bytes.
-        fn config() -> FixedConfig<TwoCap, Sequential> {
+        fn config() -> fixed::Config<TwoCap, Sequential> {
             let size = <FixedOp as FixedSize>::SIZE;
             let page_size = NonZeroU16::new(size as u16).unwrap();
             let mut config = fixed_config("bounded-init-crash");
-            config.journal_config.page_cache = CacheRef::new(page_size, PAGE_CACHE_SIZE);
-            config.journal_config.write_buffer =
-                NonZeroUsize::new(CAPACITY as usize * size).unwrap();
-            config.journal_config.items_per_blob = NZU64!(1000);
-            config.merkle_config.items_per_blob = NZU64!(1000);
+            config.log.page_cache = CacheRef::new(page_size, PAGE_CACHE_SIZE);
+            config.log.write_buffer = NonZeroUsize::new(CAPACITY as usize * size).unwrap();
+            config.log.items_per_blob = NZU64!(1000);
+            config.merkle.items_per_blob = NZU64!(1000);
             config
         }
 

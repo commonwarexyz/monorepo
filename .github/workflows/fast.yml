@@ -5,6 +5,11 @@ on:
     branches: [ "main" ]
   pull_request:
   merge_group:
+  # Nightly toolchains are published around 01:05 to 01:15 UTC. A run on main after that saves
+  # the nightly build jobs' caches. 03:30 UTC is a quiet hour in both California and Europe, and
+  # avoids the top of the hour, when GitHub delays scheduled runs the most.
+  schedule:
+    - cron: "30 3 * * *"
 
 permissions:
   contents: read
@@ -13,9 +18,10 @@ concurrency:
   group: tests-fast-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# rust-cache keys include every CARGO* and RUST* variable, so tool versions use other names.
 env:
   CARGO_TERM_COLOR: always
-  CARGO_COOLDOWN_VERSION: 0.3.4
+  COOLDOWN_VERSION: 0.3.4
   UDEPS_VERSION: 0.1.57
   NIGHTLY_VERSION: nightly-2026-08-20
   PANDOC_VERSION: 3.8.2.1
@@ -38,10 +44,10 @@ jobs:
         components: clippy
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
         additional-components: ${{ matrix.os == 'ubuntu-latest' && 'rustfmt,rustc-dev,llvm-tools-preview' || 'rustfmt' }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -106,10 +112,10 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install nextest
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -179,10 +185,10 @@ jobs:
       run: >-
         cargo-nextest nextest run --archive-file "$RUNNER_TEMP/tests.tar.zst"
         --workspace-remap "$GITHUB_WORKSPACE" --profile ${{ matrix.shard.profile }}
-        --partition hash:${{ matrix.shard.partition }}/${{ matrix.shard.partitions }} --verbose
+        --partition slice:${{ matrix.shard.partition }}/${{ matrix.shard.partitions }} --verbose
 
   Tests-Subset:
-    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\"${{ matrix.rustflags && format(', rustflags: \"{0}\"', matrix.rustflags) || '' }}, cpu: \"${{ matrix.sde && format('sde -{0}', matrix.sde) || matrix.qemu && format('qemu -cpu {0}', matrix.qemu) || 'native' }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) || '' }}\")"
+    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\"${{ matrix.rustflags && format(', rustflags: \"{0}\"', matrix.rustflags) || '' }}, cpu: \"${{ matrix.sde && format('native, else sde -{0}', matrix.sde) || matrix.qemu && format('native, else qemu -cpu {0}', matrix.qemu) || 'native' }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) || '' }}\")${{ matrix.partition && format(' (partition: {0})', matrix.partition) || '' }}"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -204,49 +210,91 @@ jobs:
           - os: ubuntu-latest
             package: commonware-allocator
             flags: "--features commonware-allocator/large-objects-4mb"
-          # Ice Lake-SP has SHA-NI, AVX-512, IFMA, GFNI, and VPCLMULQDQ.
+          # Ice Lake-SP has SHA-NI, AVX-512, IFMA, VNNI, GFNI, VAES, and VPCLMULQDQ. SDE emulates
+          # AVX-512 slowly on runners without it, so the SDE rows split their tests in two.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             sde: icx
             simd-backend: x86_v4c
-            cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma gfni vpclmulqdq"
-          # Skylake-SP has AVX-512 without SHA-NI, IFMA, GFNI, or VPCLMULQDQ.
+            cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma avx512vnni gfni vaes vpclmulqdq"
+            partition: 1/2
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            sde: icx
+            simd-backend: x86_v4c
+            cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma avx512vnni gfni vaes vpclmulqdq"
+            partition: 2/2
+            skip-cache-save: true
+          # Skylake-SP has AVX-512 without SHA-NI, IFMA, VNNI, GFNI, VAES, or VPCLMULQDQ.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             sde: skx
             simd-backend: x86_v3
-            cpu-features: "avx2 bmi2 adx !sha avx512f avx512bw avx512vl !avx512ifma !gfni !vpclmulqdq"
-          # Zen 2 has AVX2 and SHA-NI without AVX-512.
+            cpu-features: "avx2 bmi2 adx avx512f avx512bw avx512vl"
+            partition: 1/2
+            skip-cache-save: true
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            sde: skx
+            simd-backend: x86_v3
+            cpu-features: "avx2 bmi2 adx avx512f avx512bw avx512vl"
+            partition: 2/2
+            skip-cache-save: true
+          # Zen 2 has AVX2 and SHA-NI without AVX-512, VAES, or VPCLMULQDQ. QEMU emulates it on
+          # every runner without that exact feature set, so the full row splits its tests in two.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: EPYC-Rome
             simd-backend: x86_v3
-            cpu-features: "avx2 bmi2 adx sha !avx512f"
+            cpu-features: "avx2 bmi2 adx sha"
+            partition: 1/2
+            skip-cache-save: true
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            qemu: EPYC-Rome
+            simd-backend: x86_v3
+            cpu-features: "avx2 bmi2 adx sha"
+            partition: 2/2
+            skip-cache-save: true
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release --target x86_64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519"
             rustflags: "-C target-feature=+avx2,+sha"
             static-features: "avx2 sha !avx512f"
             qemu: EPYC-Rome
-            cpu-features: "avx2 bmi2 adx sha !avx512f"
-          # Broadwell has AVX2, BMI2, and ADX without SHA-NI or AVX-512.
+            cpu-features: "avx2 bmi2 adx sha"
+          # Broadwell has AVX2, BMI2, and ADX without SHA-NI or AVX-512. Its full row splits its
+          # tests in two as well.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: Broadwell
             simd-backend: x86_v3
-            cpu-features: "avx2 bmi2 adx !sha !avx512f"
+            cpu-features: "avx2 bmi2 adx"
+            partition: 1/2
+            skip-cache-save: true
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            qemu: Broadwell
+            simd-backend: x86_v3
+            cpu-features: "avx2 bmi2 adx"
+            partition: 2/2
+            skip-cache-save: true
           # Neoverse N2 has SHA-3 and SVE2.
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: neoverse-n2
             simd-backend: arm_v9
             cpu-features: "neon sha2 sha3 sve sve2"
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519"
             rustflags: "-C target-feature=+sha2,+sve2"
@@ -254,18 +302,19 @@ jobs:
             qemu: neoverse-n2
             cpu-features: "neon sha2 sha3 sve sve2"
           # Neoverse N1 has SHA-2 without SHA-3 or SVE.
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: neoverse-n1
             simd-backend: neon
-            cpu-features: "neon sha2 !sha3 !sve !sve2"
-          - os: ubuntu-24.04-arm
+            cpu-features: "neon sha2"
+            skip-cache-save: true
+          - os: ubuntu-26.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release --no-default-features --lib -p commonware-cryptography-curve25519"
             static-features: "!sha2 !sha3 !sve2"
             qemu: neoverse-n1
-            cpu-features: "neon sha2 !sha3 !sve !sve2"
+            cpu-features: "neon sha2"
           # Isolate SIMD so other packages cannot re-enable std.
           - os: ubuntu-latest
             package: commonware-simd
@@ -273,7 +322,7 @@ jobs:
             rustflags: "-C target-feature=+avx512f,+avx512bw,+gfni,+avx512ifma,+sha"
             static-features: "avx512f avx512bw gfni avx512ifma sha"
             sde: icx
-            cpu-features: "avx512f avx512bw gfni avx512ifma sha"
+            cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma avx512vnni gfni vaes vpclmulqdq"
             simd-backend: x86_v4c
           - os: ubuntu-latest
             package: commonware-simd
@@ -281,30 +330,30 @@ jobs:
             rustflags: "-C target-feature=+avx2"
             static-features: "avx2 !avx512f"
             qemu: Broadwell
-            cpu-features: "avx2 !avx512f"
+            cpu-features: "avx2 bmi2 adx"
             simd-backend: x86_v3
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             package: commonware-simd
             flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib"
             rustflags: "-C target-feature=+neon,+sha2,+sve,+sve2"
             static-features: "neon sha2 sve sve2"
             qemu: neoverse-n2
-            cpu-features: "neon sha2 sve sve2"
+            cpu-features: "neon sha2 sha3 sve sve2"
             simd-backend: arm_v9
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             package: commonware-simd
             flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib"
             rustflags: "-C target-feature=+neon,+sha2"
             static-features: "neon sha2 !sve !sve2"
             qemu: neoverse-n1
-            cpu-features: "neon sha2 !sve !sve2"
+            cpu-features: "neon sha2"
             simd-backend: neon
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             package: commonware-simd
             flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib"
             static-features: "neon !sha2 !sve !sve2"
             qemu: neoverse-n1
-            cpu-features: "neon sha2 !sve !sve2"
+            cpu-features: "neon sha2"
             simd-backend: scalar
           # Test each package with a std feature without std, one package at a time.
           - os: ubuntu-latest
@@ -320,16 +369,31 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-cache-key: ${{ matrix.flags || 'default' }}${{ matrix.rustflags }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        # Rows that differ only in the emulated CPU build the same target, so one of them saves.
+        rust-cache-save: ${{ !matrix.skip-cache-save }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just & nextest
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
+    # A row that names an emulated CPU runs natively when the runner matches its `cpu-features`
+    # exactly over the features the check knows, and under the emulator otherwise.
+    - name: Check native CPU features
+      if: ${{ matrix.sde || matrix.qemu }}
+      id: native
+      run: |
+        rustc --edition 2024 -O -o "$RUNNER_TEMP/check_cpu_features" .github/scripts/check_cpu_features.rs
+        if "$RUNNER_TEMP/check_cpu_features" ${{ matrix.cpu-features }}; then
+          echo "supported=true" >> "$GITHUB_OUTPUT"
+          echo "This runner matches the listed CPU features, so the tests run natively."
+        else
+          echo "This runner does not match the listed CPU features, so the tests run under the emulator."
+        fi
     - name: Install Intel SDE
-      if: ${{ matrix.sde }}
+      if: ${{ matrix.sde && steps.native.outputs.supported != 'true' }}
       env:
         SDE_URL: https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
         SDE_SHA256: 94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50
@@ -342,7 +406,7 @@ jobs:
         echo "EMULATOR=$emulator" >> "$GITHUB_ENV"
         echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=$emulator" >> "$GITHUB_ENV"
     - name: Install QEMU
-      if: ${{ matrix.qemu }}
+      if: ${{ matrix.qemu && steps.native.outputs.supported != 'true' }}
       run: |
         sudo apt-get update
         sudo apt-get install -y qemu-user
@@ -383,7 +447,7 @@ jobs:
       if: ${{ !matrix.no-std }}
       env:
         COMMONWARE_SIMD_EXPECT_BACKEND: ${{ matrix.simd-backend }}
-      run: just test ${{ matrix.flags }} -p ${{ matrix.package }} --verbose
+      run: just test ${{ matrix.flags }} -p ${{ matrix.package }} --verbose ${{ matrix.partition && format('--partition slice:{0}', matrix.partition) || '' }}
     - name: Run subset doc tests
       if: ${{ !matrix.sde && !matrix.qemu && !matrix.no-std }}
       run: just test-docs ${{ matrix.flags }} -p ${{ matrix.package }}
@@ -405,11 +469,13 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: ${{ matrix.level }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        # The level only changes how workspace crates are checked, so every level
+        # restores the same dependencies and one of them saves.
+        rust-cache-save: ${{ matrix.level == 'BETA' }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -432,10 +498,10 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -497,10 +563,10 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just & cargo-udeps
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -527,7 +593,7 @@ jobs:
     - name: Install just & cargo-cooldown
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
-        tool: just@1.43.0,cargo-cooldown@${{ env.CARGO_COOLDOWN_VERSION }}
+        tool: just@1.43.0,cargo-cooldown@${{ env.COOLDOWN_VERSION }}
     - name: Check dependency cooldown
       env:
         COOLDOWN_BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -546,10 +612,10 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Build entire workspace
       run: cargo build --workspace --all-targets
     - name: Check Cargo.lock unchanged
@@ -599,10 +665,10 @@ jobs:
       uses: ./.github/actions/setup
       with:
         targets: wasm32-unknown-unknown
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Build cryptography
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography.wasm"
     - name: Build cryptography-curve25519
@@ -743,10 +809,10 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.version }}
           rust-cache-save: ${{ matrix.partition.name == 'rest' }}
-          sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-          sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-          sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-          sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+          kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+          kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+          kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
       - name: Install just & cargo-hack
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:

@@ -22,7 +22,7 @@ use crate::{
         bitmap::{Candidates, Shared, fill_from},
         chain::Bounds,
         current::{db::compute_ops_root_witness, grafting},
-        floor::Policy,
+        floor::{Policy, Proportional},
         operation::Key,
     },
 };
@@ -289,6 +289,13 @@ where
         }
     }
 
+    /// Set the metadata recorded in this batch's commit. Defaults to `None` and is not inherited by
+    /// child batches. Carries over to the batch returned by [`Self::stage`].
+    pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
+        self.inner = self.inner.with_metadata(metadata);
+        self
+    }
+
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
     ///
     /// If the same key is written multiple times within a batch, the last
@@ -394,6 +401,12 @@ where
         self.inner.is_empty()
     }
 
+    /// Set the metadata recorded in the commit, replacing any set before staging.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
+        self.inner = self.inner.with_metadata(metadata);
+        self
+    }
+
     /// Expand this staged batch with more reads.
     ///
     /// Existing slots keep their positions. Newly read keys are appended to the staged read set
@@ -444,14 +457,15 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Apply `slots` to staged reads and `unstaged` writes to unread keys, advance the inactivity
-    /// floor with [`Policy`], then merkleize.
+    /// floor with [`Proportional`], then merkleize.
     ///
     /// Consumes the staged handle, `slots`, and `unstaged`. Call [`expand`](Staged::expand) before
     /// this method if more keys must be read into the staged read set.
     ///
     /// `slots` holds one [`Slot`] per staged read, in the order of the initial `stage` input
     /// followed by any [`expand`](Staged::expand) ranges. A key staged more than once takes its
-    /// last put or delete. `metadata` is committed with the returned batch.
+    /// last put or delete. Metadata set before or after staging (see [`Self::with_metadata`]) is
+    /// committed with the returned batch.
     ///
     /// The root is independent of slot order. Staging the keys in another order, or writing a key
     /// through a different slot, merkleizes to the same root when each key's final put or delete
@@ -465,17 +479,33 @@ where
     /// # Panics
     ///
     /// Panics if `slots` does not hold one entry per staged read.
+    pub async fn merkleize<E, C, I>(
+        self,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        self.merkleize_with(slots, unstaged, db, &mut Proportional)
+            .await
+    }
+
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors and panics.
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize.staged",
         level = "info",
         skip_all,
         fields(slots = slots.len() as u64, unstaged = unstaged.len() as u64),
     )]
-    pub async fn merkleize<E, C, I, P>(
+    pub async fn merkleize_with<E, C, I, P>(
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-        metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
@@ -496,7 +526,7 @@ where
             .resolve_updates_prefetched(slots, unstaged, &db.any, &*policy, &bitmap_parent)
             .await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
+            .walk_floor_and_merkleize(staged, &bitmap_parent, policy)
             .await?;
         compute_current_layer(
             inner,
@@ -518,14 +548,15 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Apply `slots` to staged reads and `unstaged` writes to unread keys, advance the inactivity
-    /// floor with [`Policy`], then merkleize.
+    /// floor with [`Proportional`], then merkleize.
     ///
     /// Consumes the staged handle, `slots`, and `unstaged`. Call [`expand`](Staged::expand) before
     /// this method if more keys must be read into the staged read set.
     ///
     /// `slots` holds one [`Slot`] per staged read, in the order of the initial `stage` input
     /// followed by any [`expand`](Staged::expand) ranges. A key staged more than once takes its
-    /// last put or delete. `metadata` is committed with the returned batch.
+    /// last put or delete. Metadata set before or after staging (see [`Self::with_metadata`]) is
+    /// committed with the returned batch.
     ///
     /// The root is independent of slot order. Staging the keys in another order, or writing a key
     /// through a different slot, merkleizes to the same root when each key's final put or delete
@@ -539,17 +570,33 @@ where
     /// # Panics
     ///
     /// Panics if `slots` does not hold one entry per staged read.
+    pub async fn merkleize<E, C, I>(
+        self,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+    {
+        self.merkleize_with(slots, unstaged, db, &mut Proportional)
+            .await
+    }
+
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors and panics.
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize.staged",
         level = "info",
         skip_all,
         fields(slots = slots.len() as u64, unstaged = unstaged.len() as u64),
     )]
-    pub async fn merkleize<E, C, I, P>(
+    pub async fn merkleize_with<E, C, I, P>(
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-        metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
@@ -568,7 +615,7 @@ where
         let (inner, staged) = inner.resolve_updates(slots, unstaged, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
+            .walk_floor_and_merkleize(staged, &bitmap_parent, policy)
             .await?;
         compute_current_layer(
             inner,
@@ -590,22 +637,35 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, advance the inactivity floor with [`Policy`], merkleize,
-    /// and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, advance the inactivity floor with
+    /// [`Proportional`], merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
     /// Returns [`Error::StaleBatch`] if `db` is not at a state of this batch's chain, an unapplied
     /// ancestor was dropped, or `db` is not the database instance that created the batch.
+    pub async fn merkleize<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        self.merkleize_with(db, &mut Proportional).await
+    }
+
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors.
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize",
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C, I, P>(
+    pub async fn merkleize_with<E, C, I, P>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
     where
@@ -622,7 +682,7 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
+            .walk_floor_and_merkleize(Vec::new(), &bitmap_parent, policy)
             .await?;
         compute_current_layer(
             inner,
@@ -644,22 +704,35 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, advance the inactivity floor with [`Policy`], merkleize,
-    /// and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, advance the inactivity floor with
+    /// [`Proportional`], merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
     /// Returns [`Error::StaleBatch`] if `db` is not at a state of this batch's chain, an unapplied
     /// ancestor was dropped, or `db` is not the database instance that created the batch.
+    pub async fn merkleize<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+    {
+        self.merkleize_with(db, &mut Proportional).await
+    }
+
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors.
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize",
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C, I, P>(
+    pub async fn merkleize_with<E, C, I, P>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
@@ -676,7 +749,7 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
+            .walk_floor_and_merkleize(Vec::new(), &bitmap_parent, policy)
             .await?;
         compute_current_layer(
             inner,
@@ -1263,7 +1336,7 @@ mod tests {
     use crate::{mmb, mmr, utils::detached::block_strategy};
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_parallel::{Rayon, mocks::Explorer};
+    use commonware_parallel::{Rayon, mocks::Explorer, rayon::ThreadPoolBuilder};
     use commonware_utils::{NZUsize, bitmap::Prunable as BitMap};
     use std::{
         future::Future as _,
@@ -1319,7 +1392,7 @@ mod tests {
     /// A detached grafted-tree merkleization owns the full ancestor chain after cancellation.
     #[test_traced]
     fn test_grafted_merkleize_retains_ancestors_after_cancellation() {
-        let pool = Rayon::new(NZUsize!(2)).unwrap();
+        let pool = Rayon::new(ThreadPoolBuilder::new(NZUsize!(2))).unwrap();
         let strategy = Explorer::parallel(&pool);
         let mem = Arc::new(Mem::<mmb::Family, <Sha256 as Hasher>::Digest>::new());
         let grafting_height = grafting::height::<1>();

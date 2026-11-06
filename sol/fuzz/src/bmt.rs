@@ -247,7 +247,7 @@ fn check<H: Hasher>(mode: Mode, encoded: &[u8]) -> bool {
         Mode::Single => {
             elements.len() == 1
                 && proof
-                    .verify_element_inclusion::<H>(&elements[0], start, &root)
+                    .verify_element_inclusion::<H>(start, &elements[0], &root)
                     .is_ok()
         }
         Mode::Range => proof
@@ -265,7 +265,7 @@ fn check<H: Hasher>(mode: Mode, encoded: &[u8]) -> bool {
             else {
                 return false;
             };
-            let elements = elements.into_iter().zip(positions);
+            let elements = positions.into_iter().zip(elements);
             proof.verify_multi_inclusion::<H>(elements, &root).is_ok()
         }
     }

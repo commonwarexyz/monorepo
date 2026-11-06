@@ -52,8 +52,8 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
     pub fn new<H, E>(
         hasher: &H,
         proof: &Proof<F, D>,
-        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         start_loc: Location<F>,
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         root: &D,
     ) -> Result<Self, Error<F>>
     where
@@ -67,8 +67,8 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         let mut elements_len = 0usize;
         let digests = proof.verify_range_inclusion_and_extract_digests(
             hasher,
-            elements.into_iter().inspect(|_| elements_len += 1),
             start_loc,
+            elements.into_iter().inspect(|_| elements_len += 1),
             root,
         )?;
         let map: AHashMap<Position<F>, D> = digests.into_iter().collect();
@@ -418,8 +418,8 @@ mod tests {
                 let proof_store = ProofStore::new(
                     &hasher,
                     &range_proof,
-                    &elements[range.to_usize_range()],
                     range_start,
+                    &elements[range.to_usize_range()],
                     &root,
                 )
                 .unwrap();
@@ -436,8 +436,8 @@ mod tests {
                         proof_store.range_proof(&hasher, sub_range.clone()).unwrap();
                     assert!(sub_range_proof.verify_range_inclusion(
                         &hasher,
-                        &elements[sub_range.to_usize_range()],
                         sub_range.start,
+                        &elements[sub_range.to_usize_range()],
                         &root
                     ));
                     subrange_start += 1;
@@ -476,8 +476,8 @@ mod tests {
             let proof_store = ProofStore::new(
                 &hasher,
                 &range_proof,
-                &elements[range.to_usize_range()],
                 range.start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -490,8 +490,8 @@ mod tests {
                     assert!(
                         sub_proof.verify_range_inclusion(
                             &hasher,
-                            &elements[sub_range.to_usize_range()],
                             sub_range.start,
+                            &elements[sub_range.to_usize_range()],
                             &root
                         ),
                         "sub-proof should verify for range {start}..{end}"
@@ -526,8 +526,8 @@ mod tests {
             let proof_store = ProofStore::new(
                 &hasher,
                 &range_proof,
-                &elements[range.to_usize_range()],
                 range.start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -539,8 +539,8 @@ mod tests {
                     assert!(
                         sub_proof.verify_range_inclusion(
                             &hasher,
-                            &elements[sub_range.to_usize_range()],
                             sub_range.start,
+                            &elements[sub_range.to_usize_range()],
                             &root
                         ),
                         "sub-proof should verify for MMB range {start}..{end}"
@@ -577,8 +577,8 @@ mod tests {
             let proof_store = ProofStore::new(
                 &hasher,
                 &proof,
-                &elements[range.to_usize_range()],
                 range.start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -586,8 +586,8 @@ mod tests {
             let same_range_proof = proof_store.range_proof(&hasher, range.clone()).unwrap();
             assert!(same_range_proof.verify_range_inclusion(
                 &hasher,
-                &elements[range.to_usize_range()],
                 range.start,
+                &elements[range.to_usize_range()],
                 &root
             ));
             assert!(matches!(
@@ -635,8 +635,8 @@ mod tests {
             let proof_store = ProofStore::new(
                 &hasher,
                 &range_proof,
-                &elements[range.to_usize_range()],
                 range.start,
+                &elements[range.to_usize_range()],
                 &root)
             .unwrap();
 
@@ -648,8 +648,8 @@ mod tests {
                     assert!(
                         sub_proof.verify_range_inclusion(
                             &hasher,
-                            &elements[sub_range.to_usize_range()],
                             sub_range.start,
+                            &elements[sub_range.to_usize_range()],
                             &root),
                         "sub-proof should verify for MMB range {start}..{end} with split_backward({inactive_peaks})"
                     );
@@ -689,7 +689,7 @@ mod tests {
             let target = vec![MmbLocation::new(0)];
             let selected: Vec<_> = target
                 .iter()
-                .map(|&loc| (elements[*loc as usize], loc))
+                .map(|&loc| (loc, elements[*loc as usize]))
                 .collect();
 
             // Direct multi-proof with the full witness verifies.
@@ -706,8 +706,8 @@ mod tests {
             let proof_store = ProofStore::new(
                 &hasher,
                 &range_proof,
-                &elements[range.to_usize_range()],
                 range.start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();

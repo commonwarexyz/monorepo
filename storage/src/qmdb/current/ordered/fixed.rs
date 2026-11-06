@@ -10,9 +10,12 @@
 
 use crate::{
     index::ordered::Index,
-    journal::contiguous::fixed::Journal,
+    journal::contiguous::fixed::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::any::{ordered::fixed::Operation, value::FixedEncoding},
+    qmdb::{
+        any::{ordered::fixed::Operation, value::FixedEncoding},
+        current,
+    },
 };
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
@@ -27,11 +30,15 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     S,
 >;
 
+/// Configuration for a [Db].
+pub type Config<T, S> = current::Config<T, JournalConfig, S>;
+
 pub mod partitioned {
     //! A variant of [super] that uses a partitioned index for the snapshot.
 
     use super::*;
     use crate::index::partitioned::ordered::Index;
+    use core::num::NonZeroUsize;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -51,6 +58,9 @@ pub mod partitioned {
             N,
             S,
         >;
+
+    /// Configuration for a [Db].
+    pub type Config<T, S> = current::Config<T, JournalConfig, S, NonZeroUsize>;
 }
 
 #[cfg(test)]
@@ -66,7 +76,6 @@ pub mod test {
                 ordered::tests as shared,
                 tests::{fixed_config, fixed_config_partitioned},
             },
-            floor::Proportional,
         },
         translator::OneCap,
     };
@@ -121,7 +130,7 @@ pub mod test {
                 let merkleized = db
                     .new_batch()
                     .write(key, Some(value))
-                    .merkleize(&db, None, &mut Proportional)
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 db = db.apply_batch(merkleized).await.unwrap();
@@ -143,6 +152,34 @@ pub mod test {
                 matches!(result, Err(Error::OperationPruned(_))),
                 "expected OperationPruned, got {result:?}"
             );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// `get_all` returns an active key's value with the next active key, wrapping from the last
+    /// key to the first, and `None` for an inactive key.
+    #[test_traced("DEBUG")]
+    fn test_current_db_get_all() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "get-all".to_string()).await;
+            let mut keys = [Sha256::fill(0x11), Sha256::fill(0x22), Sha256::fill(0x33)];
+            keys.sort();
+            let mut batch = db.new_batch();
+            for (i, key) in keys.iter().enumerate() {
+                batch = batch.write(*key, Some(Sha256::fill(i as u8)));
+            }
+            let merkleized = batch.merkleize(&db).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
+
+            for (i, key) in keys.iter().enumerate() {
+                assert_eq!(
+                    db.get_all(key).await.unwrap(),
+                    Some((Sha256::fill(i as u8), keys[(i + 1) % keys.len()])),
+                );
+            }
+            assert_eq!(db.get_all(&Sha256::fill(0x44)).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -208,7 +245,7 @@ pub mod test {
             for i in 0..8u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
-            let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let seed = seed.merkleize(&db).await.unwrap();
             let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Grandparent -> parent chain. The parent touches neither staged key, so the
@@ -217,13 +254,13 @@ pub mod test {
                 .new_batch()
                 .write(key(0), Some(val(1_000)))
                 .write(key(100), Some(val(1_001)))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let parent = grandparent
                 .new_batch::<Sha256>()
                 .write(key(1), Some(val(1_002)))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
 
@@ -254,17 +291,14 @@ pub mod test {
 
             // Merkleize the staged writes over the applied state.
             let slots = vec![Slot::Put(val(2_000)), Slot::Put(val(2_001))];
-            let staged = staged
-                .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
-                .await
-                .unwrap();
+            let staged = staged.merkleize(slots, Vec::new(), &db).await.unwrap();
 
             // The explicit path over the same applied state must agree.
             let explicit_root = parent
                 .new_batch::<Sha256>()
                 .write(key(0), Some(val(2_000)))
                 .write(key(100), Some(val(2_001)))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap()
                 .root();
@@ -328,7 +362,7 @@ pub mod test {
             let v = Sha256::hash(&[&(i * 7).to_be_bytes()]);
             batch = batch.write(k, Some(v));
         }
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
@@ -343,7 +377,7 @@ pub mod test {
             let k = Sha256::hash(&[&i.to_be_bytes()]);
             batch = batch.write(k, None);
         }
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
