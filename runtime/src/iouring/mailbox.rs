@@ -11,7 +11,7 @@
 //! The pool's idle state also signals a selected worker through its mailbox's
 //! [`Waker`], without a message. See [`super::idle`] for parking order.
 
-use super::{request::RequestOutput, sleep::TimerId, waiter::WaiterId, waker::Waker};
+use super::{request::RequestOutput, waiter::WaiterId, waker::Waker};
 use crate::Error;
 use commonware_utils::channel::oneshot;
 use std::mem;
@@ -30,26 +30,12 @@ pub enum Message {
     /// runnable, so unlike a task it cannot move to the waking worker or the
     /// global queue, and wakes from other threads reach it here.
     WakeRoot,
-    /// Transfer observation of an operation or timer to a channel.
-    Forward(Forward),
-    /// Release observation of an operation or timer.
-    Cancel(Cancel),
-}
-
-/// Registration and channel used to forward completion to another thread.
-pub enum Forward {
-    /// Deliver an operation's result through a thread-safe channel.
-    Waiter(WaiterId, oneshot::Sender<Result<RequestOutput, Error>>),
-    /// Deliver a timer's result through a thread-safe channel.
-    Timer(TimerId, oneshot::Sender<Result<(), Error>>),
-}
-
-/// Registration whose observer is being released.
-pub enum Cancel {
-    /// Stop observing an admitted operation or retained result.
-    Waiter(WaiterId),
-    /// Cancel a timer whose sleep future was dropped.
-    Timer(TimerId),
+    /// Deliver an operation's result through a thread-safe channel, for an
+    /// operation polled on another thread.
+    Forward(WaiterId, oneshot::Sender<Result<RequestOutput, Error>>),
+    /// Stop observing an admitted operation or retained result, for an
+    /// operation dropped on another thread.
+    Cancel(WaiterId),
 }
 
 /// Queue state synchronized between producers and the owning worker.
@@ -213,19 +199,15 @@ mod tests {
             index: 0,
             generation: 0,
         });
-        (
-            Message::Forward(Forward::Waiter(id, sender)),
-            receiver,
-            reentrant,
-        )
+        (Message::Forward(id, sender), receiver, reentrant)
     }
 
     /// A message with no payload to release.
     const fn cancel_message() -> Message {
-        Message::Cancel(Cancel::Waiter(WaiterId(Id {
+        Message::Cancel(WaiterId(Id {
             index: 0,
             generation: 0,
-        })))
+        }))
     }
 
     #[test]
@@ -291,7 +273,7 @@ mod tests {
         // Closing transfers queued messages to the caller for disposal.
         let queued = mailbox.close();
         assert!(!mailbox.is_open());
-        assert!(matches!(queued.as_slice(), [Message::Forward(_)]));
+        assert!(matches!(queued.as_slice(), [Message::Forward(..)]));
         assert!(!reentrant.woken.load(Ordering::Relaxed));
 
         drop(queued);
@@ -300,7 +282,7 @@ mod tests {
         // Rejected messages also reach the caller, without another publication.
         let (message, _receiver, reentrant) = forward_message(&mailbox);
         let rejected = mailbox.send(message);
-        assert!(matches!(rejected, Err(Message::Forward(_))));
+        assert!(matches!(rejected, Err(Message::Forward(..))));
         assert!(!reentrant.woken.load(Ordering::Relaxed));
         assert!(mailbox.waker.pending(0));
         assert!(!mailbox.waker.pending(1));

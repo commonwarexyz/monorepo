@@ -84,7 +84,7 @@ use std::{
     num::NonZeroU64,
     ops::Deref,
     pin::Pin,
-    ptr::NonNull,
+    ptr::{self, NonNull},
     sync::{Arc, Weak},
     task::{Context, Poll, RawWaker, RawWakerVTable, Wake, Waker},
     thread,
@@ -696,6 +696,21 @@ impl Task {
         // The state counts both references.
         let ptr = NonNull::from(Box::leak(cell)).cast();
         (Self(ptr), Runnable(Self(ptr)))
+    }
+
+    /// Whether `waker` is a task's waker, whose data pointer is its task's
+    /// header.
+    ///
+    /// Sleeps use this to match a task waker's identity by its address,
+    /// without the lock that guards their stored waker (see
+    /// [`super::sleep`]). A header outlives every reference to its task: the
+    /// cell is freed only after its last reference is released, by a thread
+    /// that has acquired every earlier release, and the allocator orders a
+    /// free before any later allocation at the same address. So a new task's
+    /// waker can share a consumed waker's identity only after everything that
+    /// preceded the consumption.
+    pub fn is_waker(waker: &Waker) -> bool {
+        ptr::eq(waker.vtable(), &WAKER_VTABLE)
     }
 
     /// The header pointer, with the allocation's provenance, holding no
