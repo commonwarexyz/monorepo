@@ -640,8 +640,9 @@ pub trait Field<S: Simd>: Copy {
     ///
     /// Requires a ready value with integer bound at most [`TIGHT`], so that every power stays
     /// within the limits of [`Self::mul`]. Returns the documented multiplication bounds.
-    /// Exponentiates with fixed four-bit windows, at the cost of about `380` squarings and `110`
-    /// multiplications, and runs as its own kernel.
+    /// The default exponentiates with fixed four-bit windows, at the cost of about `380`
+    /// squarings and `110` multiplications over every lane at once, and runs as its own kernel;
+    /// a representation of single elements inverts in scalar arithmetic instead.
     #[inline(always)]
     fn invert(self, simd: S) -> Self {
         simd.execute(
