@@ -178,7 +178,7 @@ use super::{
     pool::{MAX_WORKERS, Pool, Threads},
     request::{RequestOutput, RetiredResources},
     slab::Id,
-    sleep::{self, RESCUE_INTERVAL, Sleep, Timers},
+    sleep::{self, DROPPED_CAPACITY, RESCUE_INTERVAL, Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
     task::{AfterPoll, Ready, RootWaker, Runnable},
     tasks::Tasks,
@@ -1097,15 +1097,16 @@ pub struct Local {
     /// time, since only this worker registers, so service and parking can
     /// skip the timers' lock.
     pub timers_next: u64,
-    /// Registrations in `timers` whose sleeps were dropped on this worker
-    /// while it was not closing, which its next service pass, or its cleanup
-    /// before closing `timers`, removes, at most one
-    /// [`BUDGET`](super::wheel::BUDGET) per critical section. Each
+    /// Registrations in `timers` whose sleeps were dropped, or completed early
+    /// by a poll, on this worker while it was not closing, which its next
+    /// service pass, or its cleanup before closing `timers`, removes, at most
+    /// one [`BUDGET`](super::wheel::BUDGET) per critical section. Each
     /// registration here first removes the latest one and takes its slot (see
-    /// [`super::sleep`]). Only this worker pushes and drains it, and a drain
-    /// that empties it shrinks its capacity to
-    /// [`DROPPED_CAPACITY`](super::sleep::DROPPED_CAPACITY) if a burst grew it
-    /// beyond. While any remain, the worker serves again rather than park.
+    /// [`super::sleep`]). Only this worker pushes and drains it. Each service
+    /// pass leaves it empty and shrinks its capacity to [`DROPPED_CAPACITY`]
+    /// if a burst grew it beyond, whether the pass removed the burst's
+    /// registrations or later registrations took their slots. While any
+    /// remain, the worker serves again rather than park.
     pub timers_dropped: Vec<Id>,
     /// Reject new registration and send wakes to the global queue, while
     /// allowing idempotent cancellation.
@@ -1939,9 +1940,9 @@ impl Worker {
 
     /// Service the io_uring ring and timers using one time sample, collecting
     /// callbacks. Timer service first removes the registrations of sleeps
-    /// dropped on this worker since the last pass, then expires due ones. A
-    /// running pool worker also expires its peers' overdue timers, at most
-    /// once per [`RESCUE_INTERVAL`].
+    /// dropped or completed early on this worker since the last pass, then
+    /// expires due ones. A running pool worker also expires its peers' overdue
+    /// timers, at most once per [`RESCUE_INTERVAL`].
     /// Returns whether kernel service was deferred to an idle wait.
     fn service(&mut self, defer_kernel_service: bool) -> bool {
         let mut local = self.local.borrow_mut();
@@ -1975,6 +1976,13 @@ impl Worker {
         // wheel empty leaves no firing time to cache.
         if !timers_dropped.is_empty() && timers.drain(timers_dropped, deferred) {
             *timers_next = u64::MAX;
+        }
+
+        // The queue is empty now, whether this pass or registrations emptied
+        // it. Most passes queue far fewer, so this keeps the usual capacity
+        // and reallocates only after a burst.
+        if timers_dropped.capacity() > DROPPED_CAPACITY {
+            timers_dropped.shrink_to(DROPPED_CAPACITY);
         }
 
         // Expiry defers observer notifications until after this borrow ends.
