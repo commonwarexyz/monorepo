@@ -627,20 +627,6 @@ fn scalars<S: X86V4C>(simd: S, residues: S::U64) -> [u64; MODULI] {
     scalars
 }
 
-/// Calls `f` with each index from `start` to `end`, exclusive, below [`BATCH`], in order, as
-/// [`unroll`] does.
-#[inline(always)]
-fn each(start: usize, end: usize, mut f: impl FnMut(usize)) {
-    unroll::<BATCH>(
-        #[inline(always)]
-        |i| {
-            if start <= i && i < end {
-                f(i);
-            }
-        },
-    );
-}
-
 impl<S: X86V4C> Rns<S> {
     /// Returns every lane set to `element`.
     #[cfg(test)]
@@ -903,11 +889,12 @@ impl<S: X86V4C> Rns<S> {
     /// Returns `sums(0)`, ..., `sums(SUMS - 1)`, each within `BUDGET`, reduced to at most `REDUCED`
     /// as `Field::reduce` does.
     ///
-    /// A reduction is a chain of dependent steps, so this runs each step for every sum of a pass
-    /// before the next step, and the sums' chains overlap. More than [`PASS`] sums take two passes
-    /// of nearly equal sizes, and each pass forms its sums when it starts. The arithmetic, bounds,
-    /// and results are those of reducing each sum alone; only the order of the accumulations
-    /// differs.
+    /// A reduction is a chain of dependent steps, so a pass runs each step for every one of its
+    /// sums before the next step, and the sums' chains overlap. More than [`PASS`] sums take two
+    /// passes of nearly equal sizes, and each pass forms its sums when it starts. Each pass runs
+    /// as its own kernel, so that every formula shares one copy of a pass of each size. The
+    /// arithmetic, bounds, and results are those of reducing each sum alone; only the order of the
+    /// accumulations differs.
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn reduce_interleaved<const SUMS: usize>(
         simd: S,
@@ -915,181 +902,180 @@ impl<S: X86V4C> Rns<S> {
     ) -> [Self; SUMS] {
         const { assert!(0 < SUMS && SUMS <= BATCH) };
         let zero = simd.u64_splat(0);
-        let (mut m, mut n) = ([zero; SUMS], [zero; SUMS]);
-        let mut bounds = [DebugCounter::new(0); SUMS];
-        let half = if SUMS <= PASS { SUMS } else { SUMS.div_ceil(2) };
-        Self::reduce_pass(simd, 0, half, &mut sums, &mut m, &mut n, &mut bounds);
-        if half < SUMS {
-            // The second pass forms its sums only once the first has reduced its own. Returning
-            // the first pass's results on an opaque branch, never taken, ends the basic block
-            // with those results complete, so the compiler neither schedules the second pass's
-            // products among the first pass's reductions, which would spill them, nor sinks the
-            // first pass's steps below this point.
-            if black_box(false) {
-                return Self::reduced(&m, &n, &bounds);
-            }
-            Self::reduce_pass(simd, half, SUMS, &mut sums, &mut m, &mut n, &mut bounds);
-        }
-        Self::reduced(&m, &n, &bounds)
-    }
-
-    /// Returns the values with the residues `m` and `n` and the bounds `bounds`.
-    #[inline(always)]
-    fn reduced<const SUMS: usize>(
-        m: &[S::U64; SUMS],
-        n: &[S::U64; SUMS],
-        bounds: &[DebugCounter; SUMS],
-    ) -> [Self; SUMS] {
         let mut reduced = [Self {
-            m: m[0],
-            n: n[0],
-            bound: bounds[0],
+            m: zero,
+            n: zero,
+            bound: DebugCounter::new(0),
         }; SUMS];
-        unroll::<SUMS>(
-            #[inline(always)]
-            |i| {
-                reduced[i] = Self {
-                    m: m[i],
-                    n: n[i],
-                    bound: bounds[i],
-                };
-            },
-        );
+        // Each pass size is a constant of its own kernel.
+        macro_rules! passes {
+            ($($sums:literal => $first:literal $(+ $second:literal)?;)*) => {
+                match SUMS {
+                    $($sums => {
+                        Self::pass_into::<$first>(simd, &mut sums, &mut reduced, 0);
+                        $(Self::pass_into::<$second>(simd, &mut sums, &mut reduced, $first);)?
+                    })*
+                    _ => unreachable!("sums fit the passes"),
+                }
+            };
+        }
+        const { assert!(PASS == 6 && BATCH == 12) };
+        passes! {
+            1 => 1; 2 => 2; 3 => 3; 4 => 4; 5 => 5; 6 => 6;
+            7 => 4 + 3; 8 => 4 + 4; 9 => 5 + 4; 10 => 5 + 5; 11 => 6 + 5; 12 => 6 + 6;
+        }
         reduced
     }
 
-    /// Reduces the sums from `start` to `end`, exclusive, for [`Self::reduce_interleaved`], into
-    /// the residues `m` and `n` and the bounds `bounds` at the same indices.
+    /// Forms the sums from `start` and reduces them in one pass into `reduced` at the same
+    /// indices.
+    #[inline(always)]
+    fn pass_into<const SUMS: usize>(
+        simd: S,
+        sums: &mut impl FnMut(usize) -> Wide<S>,
+        reduced: &mut [Self],
+        start: usize,
+    ) {
+        let mut formed = [Wide::zero(simd); SUMS];
+        unroll::<SUMS>(
+            #[inline(always)]
+            |i| formed[i] = sums(start + i),
+        );
+        reduced[start..start + SUMS].copy_from_slice(&Self::pass(simd, formed));
+    }
+
+    /// Reduces the sums in one pass, as [`Self::reduce_interleaved`] describes.
     ///
     /// The steps are those of `Field::reduce`: the first-basis reduction and fold of every sum,
     /// the eight diagonals of every quotient's conversion, the second-basis reduction and fold,
     /// the quotient estimates of extension across the lanes, its eight broadcast rows and two
     /// corrections, and the final first-basis reduction and fold. A pass of fewer than [`CHAINS`]
     /// sums accumulates odd diagonals and rows separately, as [`Rns::mul`] does.
+    ///
+    /// Runs as its own kernel: a pass is several hundred instructions, which the formulas would
+    /// otherwise repeat for every reduction, beyond what the instruction cache holds.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    fn reduce_pass<const SUMS: usize>(
-        simd: S,
-        start: usize,
-        end: usize,
-        sums: &mut impl FnMut(usize) -> Wide<S>,
-        m: &mut [S::U64; SUMS],
-        n: &mut [S::U64; SUMS],
-        bounds: &mut [DebugCounter; SUMS],
-    ) {
-        let split = end - start < CHAINS;
-        let zero = simd.u64_splat(0);
-        let mut quotients = [zero; BATCH];
-        let mut even = [(zero, zero); BATCH];
-        let mut odd = [(zero, zero); BATCH];
+    fn pass<const SUMS: usize>(simd: S, sums: [Wide<S>; SUMS]) -> [Self; SUMS] {
+        const { assert!(0 < SUMS && SUMS <= PASS) };
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| {
+                let split = SUMS < CHAINS;
+                let zero = simd.u64_splat(0);
+                let mut quotients = [zero; SUMS];
+                let mut even = [(zero, zero); SUMS];
+                let mut odd = [(zero, zero); SUMS];
+                let mut bounds = [DebugCounter::new(0); SUMS];
+                let mut n = [zero; SUMS];
 
-        let (modulus, inverse) = (constant(simd, &M.moduli), constant(simd, &M.inverse));
-        let complement = constant(simd, &M.complement);
-        each(
-            start,
-            end,
-            #[inline(always)]
-            |i| {
-                let sum = sums(i);
-                sum.bound.assert_le(BUDGET);
-                let mut bound = sum.bound;
-                bound.div_ceil(M_OVER_P);
-                bound.add(DebugCounter::new(LIFT));
-                bound.assert_le(LIMIT);
-                bounds[i] = bound;
-                let reduced = reduce(simd, sum.m, modulus, inverse);
-                quotients[i] = fold(simd, reduced, complement);
-                even[i] = sum.n;
-            },
-        );
-
-        // Each diagonal is a separate inlined call with a constant rotation.
-        macro_rules! diagonals {
-            ($($even:literal $odd:literal)*) => {$(
-                each(start, end, #[inline(always)] |i| {
-                    even[i] = Self::diagonal::<$even>(simd, quotients[i], even[i]);
-                });
-                each(start, end, #[inline(always)] |i| {
-                    let chain = if split { &mut odd[i] } else { &mut even[i] };
-                    *chain = Self::diagonal::<$odd>(simd, quotients[i], *chain);
-                });
-            )*};
-        }
-        const { assert!(MODULI == 8) };
-        diagonals!(0 1 2 3 4 5 6 7);
-
-        let (modulus, inverse) = (constant(simd, &N.moduli), constant(simd, &N.inverse));
-        let complement = constant(simd, &N.complement);
-        each(
-            start,
-            end,
-            #[inline(always)]
-            |i| {
-                let reduced = reduce(simd, add_wide(simd, even[i], odd[i]), modulus, inverse);
-                n[i] = fold(simd, reduced, complement);
-            },
-        );
-
-        let mut residues = [[0; MODULI]; BATCH];
-        let mut estimates = [zero; BATCH];
-        each(
-            start,
-            end,
-            #[inline(always)]
-            |i| {
-                residues[i] = scalars(simd, n[i]);
-                estimates[i] = estimate(simd, n[i]);
-                even[i] = (zero, zero);
-                odd[i] = (zero, zero);
-            },
-        );
-        macro_rules! rows {
-            ($($row:literal)*) => {$(
-                let weights = constant(simd, &EXPAND.matrix[$row]);
-                each(start, end, #[inline(always)] |i| {
-                    let chain = if split && $row % 2 == 1 { &mut odd[i] } else { &mut even[i] };
-                    *chain = madd(simd, *chain, simd.u64_splat(residues[i][$row]), weights);
-                });
-            )*};
-        }
-        rows!(0 1 2 3 4 5 6 7);
-        let correction = constant(simd, &EXPAND.correction);
-        let mask = simd.u64_splat(MASK);
-        each(
-            start,
-            end,
-            #[inline(always)]
-            |i| {
-                let digit = simd.u64_and(estimates[i], mask);
-                even[i] = madd(simd, even[i], digit, correction);
-            },
-        );
-        let correction = constant(simd, &EXPAND.correction_shift);
-        each(
-            start,
-            end,
-            #[inline(always)]
-            |i| {
-                let chain = if split { &mut odd[i] } else { &mut even[i] };
-                *chain = madd(
-                    simd,
-                    *chain,
-                    simd.u64_shr::<WORD>(estimates[i]),
-                    correction,
+                let (modulus, inverse) = (constant(simd, &M.moduli), constant(simd, &M.inverse));
+                let complement = constant(simd, &M.complement);
+                unroll::<SUMS>(
+                    #[inline(always)]
+                    |i| {
+                        let sum = sums[i];
+                        sum.bound.assert_le(BUDGET);
+                        let mut bound = sum.bound;
+                        bound.div_ceil(M_OVER_P);
+                        bound.add(DebugCounter::new(LIFT));
+                        bound.assert_le(LIMIT);
+                        bounds[i] = bound;
+                        let reduced = reduce(simd, sum.m, modulus, inverse);
+                        quotients[i] = fold(simd, reduced, complement);
+                        even[i] = sum.n;
+                    },
                 );
-            },
-        );
 
-        let (modulus, inverse) = (constant(simd, &M.moduli), constant(simd, &M.inverse));
-        let complement = constant(simd, &M.complement);
-        each(
-            start,
-            end,
-            #[inline(always)]
-            |i| {
-                let reduced = reduce(simd, add_wide(simd, even[i], odd[i]), modulus, inverse);
-                m[i] = fold(simd, reduced, complement);
+                // Each diagonal is a separate inlined call with a constant rotation.
+                macro_rules! diagonals {
+                    ($($even:literal $odd:literal)*) => {$(
+                        unroll::<SUMS>(#[inline(always)] |i| {
+                            even[i] = Self::diagonal::<$even>(simd, quotients[i], even[i]);
+                        });
+                        unroll::<SUMS>(#[inline(always)] |i| {
+                            let chain = if split { &mut odd[i] } else { &mut even[i] };
+                            *chain = Self::diagonal::<$odd>(simd, quotients[i], *chain);
+                        });
+                    )*};
+                }
+                const { assert!(MODULI == 8) };
+                diagonals!(0 1 2 3 4 5 6 7);
+
+                let (modulus, inverse) = (constant(simd, &N.moduli), constant(simd, &N.inverse));
+                let complement = constant(simd, &N.complement);
+                unroll::<SUMS>(
+                    #[inline(always)]
+                    |i| {
+                        let reduced = reduce(simd, add_wide(simd, even[i], odd[i]), modulus, inverse);
+                        n[i] = fold(simd, reduced, complement);
+                    },
+                );
+
+                let mut residues = [[0; MODULI]; SUMS];
+                let mut estimates = [zero; SUMS];
+                unroll::<SUMS>(
+                    #[inline(always)]
+                    |i| {
+                        residues[i] = scalars(simd, n[i]);
+                        estimates[i] = estimate(simd, n[i]);
+                        even[i] = (zero, zero);
+                        odd[i] = (zero, zero);
+                    },
+                );
+                macro_rules! rows {
+                    ($($row:literal)*) => {$(
+                        let weights = constant(simd, &EXPAND.matrix[$row]);
+                        unroll::<SUMS>(#[inline(always)] |i| {
+                            let chain = if split && $row % 2 == 1 { &mut odd[i] } else { &mut even[i] };
+                            *chain = madd(simd, *chain, simd.u64_splat(residues[i][$row]), weights);
+                        });
+                    )*};
+                }
+                rows!(0 1 2 3 4 5 6 7);
+                let correction = constant(simd, &EXPAND.correction);
+                let mask = simd.u64_splat(MASK);
+                unroll::<SUMS>(
+                    #[inline(always)]
+                    |i| {
+                        let digit = simd.u64_and(estimates[i], mask);
+                        even[i] = madd(simd, even[i], digit, correction);
+                    },
+                );
+                let correction = constant(simd, &EXPAND.correction_shift);
+                unroll::<SUMS>(
+                    #[inline(always)]
+                    |i| {
+                        let chain = if split { &mut odd[i] } else { &mut even[i] };
+                        *chain = madd(
+                            simd,
+                            *chain,
+                            simd.u64_shr::<WORD>(estimates[i]),
+                            correction,
+                        );
+                    },
+                );
+
+                let (modulus, inverse) = (constant(simd, &M.moduli), constant(simd, &M.inverse));
+                let complement = constant(simd, &M.complement);
+                let mut reduced = [Self {
+                    m: zero,
+                    n: zero,
+                    bound: DebugCounter::new(0),
+                }; SUMS];
+                unroll::<SUMS>(
+                    #[inline(always)]
+                    |i| {
+                        let m = reduce(simd, add_wide(simd, even[i], odd[i]), modulus, inverse);
+                        reduced[i] = Self {
+                            m: fold(simd, m, complement),
+                            n: n[i],
+                            bound: bounds[i],
+                        };
+                    },
+                );
+                reduced
             },
-        );
+        )
     }
 }
 
