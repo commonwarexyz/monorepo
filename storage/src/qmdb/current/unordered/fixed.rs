@@ -132,19 +132,19 @@ pub mod test {
                 .merkleize_with(&db, &mut Proportional)
                 .await
                 .unwrap();
-            let (_, staged) = db
+            let (staged, _) = db
                 .new_batch()
                 .with_metadata(metadata)
                 .stage(&[&key], &db)
                 .await
                 .unwrap();
-            let (_, _, staged) = staged.expand(&[&other], &db).await.unwrap();
+            let (staged, _, _) = staged.expand(&[&other], &db).await.unwrap();
             let staged = staged
                 .merkleize(vec![Slot::Put(value), Slot::Keep], vec![], &db)
                 .await
                 .unwrap();
             assert_eq!(staged.root(), explicit.root());
-            let (_, overridden) = db
+            let (overridden, _) = db
                 .new_batch()
                 .with_metadata(Digest::from([5; 32]))
                 .stage(&[&key], &db)
@@ -163,13 +163,13 @@ pub mod test {
                 .with_metadata(None);
             let sibling = sibling.merkleize(&db).await.unwrap();
             assert_eq!(child.root(), sibling.root());
-            let (_, cleared) = staged
+            let (cleared, _) = staged
                 .new_batch::<Sha256>()
                 .with_metadata(metadata)
                 .stage(&[&key], &db)
                 .await
                 .unwrap();
-            let (_, _, cleared) = cleared.expand(&[&other], &db).await.unwrap();
+            let (cleared, _, _) = cleared.expand(&[&other], &db).await.unwrap();
             let cleared = cleared
                 .with_metadata(None)
                 .merkleize(vec![Slot::Keep, Slot::Keep], vec![], &db)
@@ -349,7 +349,7 @@ pub mod test {
                 .unwrap();
 
             let keys = [key(0), key(100)];
-            let (values, staged) = parent
+            let (staged, values) = parent
                 .new_batch::<Sha256>()
                 .stage(&keys, &db)
                 .await

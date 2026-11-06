@@ -225,19 +225,19 @@ pub(crate) mod test {
                 .merkleize_with(&db, &mut Proportional)
                 .await
                 .unwrap();
-            let (_, staged) = db
+            let (staged, _) = db
                 .new_batch()
                 .with_metadata(metadata)
                 .stage(&[&key], &db)
                 .await
                 .unwrap();
-            let (_, _, staged) = staged.expand(&[&other], &db).await.unwrap();
+            let (staged, _, _) = staged.expand(&[&other], &db).await.unwrap();
             let staged = staged
                 .merkleize(vec![Slot::Put(value), Slot::Keep], vec![], &db)
                 .await
                 .unwrap();
             assert_eq!(staged.root(), explicit.root());
-            let (_, overridden) = db
+            let (overridden, _) = db
                 .new_batch()
                 .with_metadata(Digest::from([5; 32]))
                 .stage(&[&key], &db)
@@ -256,13 +256,13 @@ pub(crate) mod test {
                 .with_metadata(None);
             let sibling = sibling.merkleize(&db).await.unwrap();
             assert_eq!(child.root(), sibling.root());
-            let (_, cleared) = staged
+            let (cleared, _) = staged
                 .new_batch::<Sha256>()
                 .with_metadata(metadata)
                 .stage(&[&key], &db)
                 .await
                 .unwrap();
-            let (_, _, cleared) = cleared.expand(&[&other], &db).await.unwrap();
+            let (cleared, _, _) = cleared.expand(&[&other], &db).await.unwrap();
             let cleared = cleared
                 .with_metadata(None)
                 .merkleize(vec![Slot::Keep, Slot::Keep], vec![], &db)
@@ -1934,11 +1934,11 @@ pub(crate) mod test {
         };
         is_send(db.new_batch().merkleize_with(db, &mut policy));
         is_send(async move {
-            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            let (staged, _) = db.new_batch().stage(&[&key], db).await?;
             staged.merkleize(Vec::new(), Vec::new(), db).await
         });
         is_send(async move {
-            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            let (staged, _) = db.new_batch().stage(&[&key], db).await?;
             staged
                 .merkleize_with(vec![Slot::Keep], Vec::new(), db, &mut policy)
                 .await

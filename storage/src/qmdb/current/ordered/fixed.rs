@@ -267,7 +267,7 @@ pub mod test {
             // Stage both keys through the parent. Each must resolve in the grandparent's diff.
             let read_keys = [key(0), key(100)];
             let keys: Vec<&Digest> = read_keys.iter().collect();
-            let (values, staged) = parent
+            let (staged, values) = parent
                 .new_batch::<Sha256>()
                 .stage(&keys, &db)
                 .await

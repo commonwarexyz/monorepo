@@ -129,19 +129,19 @@ where
         self.batch.get_many(keys, &db).await
     }
 
-    /// Reads multiple values and returns a staged batch for the same keys.
+    /// Reads multiple values and returns `(staged, values)` for the same keys.
     ///
     /// Returns results in the same order as `keys`.
     pub async fn stage(
         self,
         keys: &[impl Borrow<U::Key> + Sync],
-    ) -> Result<(Vec<Option<U::Value>>, CurrentStaged<F, E, C, I, H, U, N, S>), Error<F>> {
+    ) -> Result<(CurrentStaged<F, E, C, I, H, U, N, S>, Vec<Option<U::Value>>), Error<F>> {
         let Self { batch, db } = self;
-        let (values, staged) = {
+        let (staged, values) = {
             let guard = db.read().await;
             batch.stage(keys, &guard).await?
         };
-        Ok((values, CurrentStaged { staged, db }))
+        Ok((CurrentStaged { staged, db }, values))
     }
 
     /// Records an upsert (`Some`) or a delete (`None`) of `key`.
@@ -252,7 +252,7 @@ where
         self.staged.is_empty()
     }
 
-    /// Expands this staged batch with more reads.
+    /// Expands this staged batch with more reads, returning `(self, range, values)`.
     ///
     /// Existing slots keep their positions. Newly read keys are appended to the staged read set
     /// and assigned the returned range of slots. Expansion does not deduplicate against previously
@@ -261,13 +261,13 @@ where
     pub async fn expand(
         self,
         keys: &[impl Borrow<U::Key> + Sync],
-    ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>> {
+    ) -> Result<(Self, Range<usize>, Vec<Option<U::Value>>), Error<F>> {
         let Self { staged, db } = self;
-        let (range, values, staged) = {
+        let (staged, range, values) = {
             let guard = db.read().await;
             staged.expand(keys, &guard).await?
         };
-        Ok((range, values, Self { staged, db }))
+        Ok((Self { staged, db }, range, values))
     }
 }
 
@@ -1391,8 +1391,8 @@ mod tests {
             // Staged path, with metadata set on the staged handle.
             let staged_batch = db.new_batch_for_test::<_>().await;
             let split = 2;
-            let (mut staged_values, staged) = staged_batch.stage(&keys[..split]).await.unwrap();
-            let (range, suffix_values, staged) = staged.expand(&keys[split..]).await.unwrap();
+            let (staged, mut staged_values) = staged_batch.stage(&keys[..split]).await.unwrap();
+            let (staged, range, suffix_values) = staged.expand(&keys[split..]).await.unwrap();
             assert_eq!(range, split..keys.len());
             assert_eq!(staged.len(), keys.len());
             assert!(!staged.is_empty());
@@ -1409,7 +1409,7 @@ mod tests {
 
             // Metadata set before staging must be carried through to staged merkleize.
             let carried_batch = db.new_batch_for_test::<_>().await.with_metadata(metadata);
-            let (carried_values, staged) = carried_batch.stage(&keys.each_ref()).await.unwrap();
+            let (staged, carried_values) = carried_batch.stage(&keys.each_ref()).await.unwrap();
             let carried_root = staged
                 .merkleize(slots.clone(), unstaged.clone())
                 .await
