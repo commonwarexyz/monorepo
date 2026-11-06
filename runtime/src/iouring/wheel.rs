@@ -462,21 +462,21 @@ impl<const RES: u64> Wheel<RES> {
         tick * RES
     }
 
-    /// Remove every slot.
+    /// Remove every slot and free the storage of their links, which a later
+    /// insertion allocates again.
     pub fn clear(&mut self) {
-        for bucket in 0..BUCKETS {
-            let mut slot = self.buckets[bucket].head;
-            while slot != NIL {
-                let next = self.links[slot as usize].next;
-                self.links[slot as usize] = ABSENT;
-                slot = next;
-            }
-            self.buckets[bucket] = EMPTY;
-        }
+        self.links = Vec::new();
+        self.buckets.fill(EMPTY);
         self.occupied = [0; LEVELS];
         self.levels = 0;
         self.pending = NONE;
         self.len = 0;
+    }
+
+    /// Number of slots whose links the wheel has storage for.
+    #[cfg(test)]
+    pub const fn capacity(&self) -> usize {
+        self.links.capacity()
     }
 }
 
@@ -859,10 +859,11 @@ mod tests {
         let mut budget = 3;
         wheel.expire(5_000_000, &mut budget, &mut |_| {});
 
-        // Clearing leaves an empty wheel.
+        // Clearing leaves an empty wheel that holds no link storage.
         wheel.clear();
         assert_eq!(wheel.len(), 0);
         assert_eq!(wheel.bound(), u64::MAX);
+        assert_eq!(wheel.capacity(), 0);
 
         // A cleared wheel accepts a slot again and fires it.
         wheel.insert(3, 7);

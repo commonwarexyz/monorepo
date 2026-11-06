@@ -93,10 +93,11 @@
 //! that the future contract allows, and the removal then finds it fired. No
 //! sleep remains to poll a queued registration, so its removal ends nothing
 //! that the epoch guards. A callback that drops a sleep after the service pass
-//! makes the worker serve again before it parks. The queue keeps its
-//! capacity, and the service pass and cleanup lock once per [`BUDGET`] of the
-//! queued registrations they remove, so no critical section removes more than
-//! one budget.
+//! makes the worker serve again before it parks. A removal that empties the
+//! queue shrinks its capacity to [`DROPPED_CAPACITY`] if it had grown beyond,
+//! and the service pass and cleanup lock once per [`BUDGET`] of the queued
+//! registrations they remove, so no critical section removes more than one
+//! budget.
 //!
 //! Lock order and ownership: the timers' lock is a leaf, taken while a worker
 //! may be borrowed but never the other way around. Only the owner, while it
@@ -111,11 +112,18 @@
 //! A queued registration keeps both bounds until its removal.
 //!
 //! Worker cleanup removes the queued registrations and then closes the timers:
-//! later registration is rejected and every pending sleeper is woken, but no
-//! dropped one. The worker is closing by then, so no drop queues afterwards.
-//! A sleep then observes how its registration ended. A fired one completes. A
-//! closed one completes if its deadline has passed by then, and its poll
-//! panics otherwise, since a sleep has no error output.
+//! later registration is rejected, every waiting registration ends and its
+//! sleeper is woken, but no dropped one's, and the timers free the storage of
+//! every registration, fired ones included. A sleep that outlives its worker
+//! therefore keeps empty timers alive, not the worker's peak population of
+//! registrations. Closure ends waiting registrations as expiry does, advancing
+//! the epoch before their wakes, so a lock-free poll cannot miss it. The
+//! worker is closing by then, so no drop queues afterwards. Closed timers
+//! never look a registration up: a poll that takes the lock reports closure,
+//! and a drop, a cancellation, or a removal of queued identities finds
+//! nothing to remove. A sleep that observes closure completes if its deadline
+//! has passed by then, as every fired one's has, and its poll panics
+//! otherwise, since a sleep has no error output.
 
 use super::{
     runtime::{Deferred, Local, MAX_TIMEOUT},
@@ -170,6 +178,12 @@ pub const RESCUE_THRESHOLD: Duration = Duration::from_millis(1);
 /// nothing.
 pub const RESCUE_INTERVAL: Duration = Duration::from_micros(250);
 
+/// Capacity that [`Timers::drain`] leaves the owner's queue of dropped
+/// registrations after a drain that empties it, if it had grown beyond. It
+/// fits sixteen budgets of drops, which serve a busy worker without
+/// reallocation, while a larger burst gives its storage back.
+pub const DROPPED_CAPACITY: usize = 16 * BUDGET as usize;
+
 thread_local! {
     /// Time of this thread's latest worker service pass, `None` on a thread
     /// that never ran one.
@@ -201,27 +215,30 @@ fn reached(deadline: Instant) -> bool {
 enum Outcome {
     /// Its deadline passed.
     Fired,
-    /// Its worker closed first.
+    /// Its worker closed before its sleep observed it, which discarded the
+    /// registration whether or not it had fired.
     Closed,
 }
 
-/// A registration's state in its timers' slab.
+/// A registration's state in its timers' slab. Closure discards every entry,
+/// so a closed registration has none.
 enum Entry {
     /// Resident in the wheel, with the waker of its latest pending poll.
     Waiting(Waker),
-    /// Expired, until its sleep observes it.
+    /// Expired, until its sleep observes it or its timers close.
     Fired,
-    /// Ended by worker closure, until its sleep observes it.
-    Closed,
 }
 
 /// State behind the timers' lock.
 struct Registrations {
-    /// Every registration not yet observed or dropped by its sleep.
+    /// Every registration not yet observed or dropped by its sleep, until
+    /// closure, after which it is empty and holds no storage.
     entries: Slab<Entry>,
-    /// Deadlines of the waiting registrations, keyed by slab index.
+    /// Deadlines of the waiting registrations, keyed by slab index, empty and
+    /// holding no slot storage after closure.
     wheel: Wheel<RES>,
-    /// Set once by the owner's cleanup, after which nothing registers.
+    /// Set once by the owner's cleanup, after which nothing registers and no
+    /// party looks up a registration.
     closed: bool,
 }
 
@@ -233,11 +250,19 @@ impl Registrations {
         wheel.expire(now, &mut budget, &mut |index| {
             // A slot is resident exactly while its entry waits.
             let id = entries.id_at(index as usize).unwrap();
-            ending.end(entries.get_mut(id).unwrap(), Outcome::Fired);
+            let entry = entries.get_mut(id).unwrap();
+            let Entry::Waiting(waker) = mem::replace(entry, Entry::Fired) else {
+                unreachable!("only a waiting registration is resident");
+            };
+            ending.end(waker);
         });
     }
 
-    /// Reject later registrations and close every waiting one.
+    /// Reject later registrations, end every waiting one, and free the
+    /// storage of every registration, so that a sleep that outlives its
+    /// worker keeps no more than empty timers alive. The wakes are deferred,
+    /// and a fired registration holds no waker, so no waker is woken or
+    /// destroyed here.
     fn close(&mut self, ending: &mut Ending<'_>) {
         let Self {
             entries,
@@ -245,16 +270,16 @@ impl Registrations {
             closed,
         } = self;
         *closed = true;
-        wheel.clear();
         for index in 0..entries.slots() {
             let Some(id) = entries.id_at(index) else {
                 continue;
             };
-            let entry = entries.get_mut(id).unwrap();
-            if matches!(entry, Entry::Waiting(_)) {
-                ending.end(entry, Outcome::Closed);
+            if let Some(Entry::Waiting(waker)) = entries.remove(id) {
+                ending.end(waker);
             }
         }
+        *entries = Slab::default();
+        wheel.clear();
     }
 }
 
@@ -268,15 +293,9 @@ struct Ending<'a> {
 }
 
 impl Ending<'_> {
-    /// End the waiting `entry` with `outcome`, deferring its wake.
-    fn end(&mut self, entry: &mut Entry, outcome: Outcome) {
-        let ended = match outcome {
-            Outcome::Fired => Entry::Fired,
-            Outcome::Closed => Entry::Closed,
-        };
-        let Entry::Waiting(waker) = mem::replace(entry, ended) else {
-            unreachable!("only a waiting registration ends");
-        };
+    /// Record that a waiting registration ended, deferring the wake of
+    /// `waker`, the one it stored.
+    fn end(&mut self, waker: Waker) {
         self.wakes.push(waker);
         self.ended = true;
     }
@@ -429,8 +448,8 @@ impl Timers {
         );
         let Registrations { entries, wheel, .. } = &mut *registrations;
 
-        // A fired or closed registration holds no waker, and an identity that
-        // no longer resolves matches nothing.
+        // A fired registration holds no waker, and an identity that no longer
+        // resolves matches nothing.
         if let Some(recycled) = recycled
             && let Some(Entry::Waiting(released)) = entries.remove(recycled)
         {
@@ -488,9 +507,9 @@ impl Timers {
         true
     }
 
-    /// Close the timers at their owner's cleanup: reject later registrations
-    /// and wake every waiting sleeper, whose next poll observes the closure.
-    /// Repeated calls do nothing.
+    /// Close the timers at their owner's cleanup: reject later registrations,
+    /// wake every waiting sleeper, whose next poll observes the closure, and
+    /// free the storage of every registration. Repeated calls do nothing.
     pub fn close(&self, deferred: &mut Deferred) {
         let mut registrations = self.lock();
         if registrations.closed {
@@ -502,11 +521,19 @@ impl Timers {
 
     /// Remove the registration `id` at once, in whatever state, unlinking it
     /// from the wheel if it waits. Returns its waker if it waited, and whether
-    /// that emptied the wheel, which then publishes no bound.
+    /// that emptied the wheel, which then publishes no bound. Closed timers
+    /// hold no registration, so this finds nothing in them.
     #[inline]
     fn remove(&self, id: Id) -> (Option<Waker>, bool) {
         let mut registrations = self.lock();
-        let Registrations { entries, wheel, .. } = &mut *registrations;
+        let Registrations {
+            entries,
+            wheel,
+            closed,
+        } = &mut *registrations;
+        if *closed {
+            return (None, false);
+        }
         match entries.remove(id) {
             Some(Entry::Waiting(waker)) => {
                 wheel.remove(id.index);
@@ -528,22 +555,34 @@ impl Timers {
     /// most one budget of them. Each goes in whatever state, since no sleep
     /// remains to conclude it, and a waiting one leaves the wheel and moves its
     /// waker to `deferred`, to be destroyed after the lock. An identity that
-    /// no longer resolves matches nothing. Empties `dropped`, keeping its
-    /// capacity, and returns whether the wheel is empty, in which case it
-    /// publishes no bound.
+    /// no longer resolves matches nothing, and closed timers hold no
+    /// registration to match. Empties `dropped`, shrinking a capacity beyond
+    /// [`DROPPED_CAPACITY`] to it, so that one burst of drops does not keep
+    /// its storage for the worker's life, and returns whether the wheel is
+    /// empty, in which case it publishes no bound.
     pub fn drain(&self, dropped: &mut Vec<Id>, deferred: &mut Deferred) -> bool {
-        // Each identity releases at most one waker, so no push under the lock
-        // reallocates.
-        deferred.drops.reserve(dropped.len());
         loop {
             let rest = dropped.len().saturating_sub(BUDGET as usize);
+
+            // Each identity releases at most one waker, so no push under the
+            // lock reallocates, and the reservation never exceeds one budget.
+            deferred.drops.reserve(dropped.len() - rest);
             let mut registrations = self.lock();
-            let Registrations { entries, wheel, .. } = &mut *registrations;
-            for id in dropped.drain(rest..) {
-                // A fired or closed registration holds no waker.
-                if let Some(Entry::Waiting(waker)) = entries.remove(id) {
-                    wheel.remove(id.index);
-                    deferred.drops.push(waker);
+            let Registrations {
+                entries,
+                wheel,
+                closed,
+            } = &mut *registrations;
+            if *closed {
+                // Closed timers hold no registration to remove.
+                dropped.truncate(rest);
+            } else {
+                for id in dropped.drain(rest..) {
+                    // A fired registration holds no waker.
+                    if let Some(Entry::Waiting(waker)) = entries.remove(id) {
+                        wheel.remove(id.index);
+                        deferred.drops.push(waker);
+                    }
                 }
             }
             let empty = wheel.is_empty();
@@ -552,6 +591,11 @@ impl Timers {
             }
             drop(registrations);
             if dropped.is_empty() {
+                // Most passes queue far fewer, so this keeps the usual
+                // capacity and reallocates only after a burst.
+                if dropped.capacity() > DROPPED_CAPACITY {
+                    dropped.shrink_to(DROPPED_CAPACITY);
+                }
                 return empty;
             }
         }
@@ -714,6 +758,14 @@ impl Sleeper {
         // end the registration first.
         let clone = (!matched).then(|| waker.clone());
         let mut registrations = self.timers.lock();
+
+        // Closure discarded the registration, fired or not, and woke a
+        // waiting one.
+        if registrations.closed {
+            drop(registrations);
+            release_all(clone, self.fast.take_held(), None);
+            return Poll::Ready(Outcome::Closed);
+        }
         let epoch = self.timers.epoch.load(Ordering::Relaxed);
         match registrations.entries.get_mut(self.id) {
             Some(Entry::Waiting(current)) => {
@@ -739,11 +791,11 @@ impl Sleeper {
                 release_all(first, second, None);
                 Poll::Pending
             }
-            Some(_) => {
-                let outcome = conclude(&mut registrations.entries, self.id);
+            Some(Entry::Fired) => {
+                registrations.entries.remove(self.id);
                 drop(registrations);
                 release_all(clone, self.fast.take_held(), None);
-                Poll::Ready(outcome)
+                Poll::Ready(Outcome::Fired)
             }
             None => unreachable!("io_uring sleep registration missing"),
         }
@@ -813,15 +865,6 @@ impl Sleeper {
             local.deferred.drops.push(held);
         }
         None
-    }
-}
-
-/// Consume the ended registration `id`, returning how it ended.
-fn conclude(entries: &mut Slab<Entry>, id: Id) -> Outcome {
-    match entries.remove(id) {
-        Some(Entry::Fired) => Outcome::Fired,
-        Some(Entry::Closed) => Outcome::Closed,
-        _ => unreachable!("only an ended registration concludes"),
     }
 }
 
@@ -962,8 +1005,9 @@ impl Future for Sleep {
                 let deadline = sleeper.deadline;
                 this.state = State::Done;
 
-                // A closed worker ended the registration early. Only a
-                // deadline that has passed since may still complete.
+                // A closed worker discarded the registration, which may have
+                // fired or not. Only a deadline that has passed, as every
+                // fired one's has, may still complete.
                 assert!(
                     outcome == Outcome::Fired || deadline <= Instant::now(),
                     "io_uring sleep polled after its worker closed"
@@ -1044,9 +1088,19 @@ impl Timers {
         self.guard().wheel.len()
     }
 
-    /// Number of slab slots, taken or free, which never shrinks.
+    /// Number of slab slots, taken or free, which never shrinks before
+    /// closure.
     fn slots(&self) -> usize {
         self.guard().entries.slots()
+    }
+
+    /// Storage capacity of the slab and of the wheel's links, in slots.
+    fn capacity(&self) -> (usize, usize) {
+        let registrations = self.guard();
+        (
+            registrations.entries.capacity(),
+            registrations.wheel.capacity(),
+        )
     }
 
     /// Register `waker` at `deadline`, in nanoseconds since the origin, as
@@ -1423,8 +1477,10 @@ mod tests {
         assert_eq!(timers.published(), u64::MAX);
         assert!(timers.is_closed());
 
-        // A fired registration stays fired, a pending one reports closure.
-        assert_eq!(poll_with(&mut fired, &waker), Poll::Ready(Outcome::Fired));
+        // Closure discarded both registrations, fired or pending, and each
+        // reports closure.
+        assert_eq!(timers.live(), 0);
+        assert_eq!(poll_with(&mut fired, &waker), Poll::Ready(Outcome::Closed));
         assert_eq!(
             poll_with(&mut pending, &waker),
             Poll::Ready(Outcome::Closed)
@@ -1437,19 +1493,169 @@ mod tests {
 
     #[test]
     fn test_drop_after_close_is_harmless() {
-        // Closing the timers wakes the pending registration.
+        // Closing the timers wakes the pending registrations, one of whose
+        // sleepers holds a clone.
         let timers = Arc::new(Timers::new());
         let (count, waker) = counter();
-        let mut sleeper = register(&timers, later(), &waker);
+        let mut cancelled = register(&timers, later(), &waker);
+        let abandoned = register(&timers, later(), &waker);
+        let queued = register(&timers, later(), &waker);
+        let mut repolled = register(&timers, later(), &waker);
+        assert!(poll_with(&mut repolled, &waker).is_pending());
+        assert!(repolled.holds_clone());
         let mut deferred = Deferred::default();
         timers.close(&mut deferred);
         run(&mut deferred);
+        assert_eq!(count.get(), 4);
 
-        // Cancelling afterwards finds nothing to remove, and closure woke the
-        // waker once and released the timers' clone.
-        sleeper.cancel();
+        // A cancellation, a drop on a thread without a worker, and a removal
+        // of late or repeated queued identities find nothing to remove.
+        cancelled.cancel();
+        thread::spawn(move || {
+            let mut abandoned = abandoned;
+            abandoned.abandon();
+        })
+        .join()
+        .unwrap();
+        let mut dropped = vec![queued.id, queued.id];
+        drop(queued);
+        assert!(timers.drain(&mut dropped, &mut deferred));
+        assert!(dropped.is_empty());
+        assert!(deferred.is_empty());
+
+        // Repolls observe closure and release the held clone.
+        for _ in 0..2 {
+            assert_eq!(
+                poll_with(&mut repolled, &waker),
+                Poll::Ready(Outcome::Closed)
+            );
+            assert!(!repolled.holds_clone());
+        }
+
+        // Closure woke each waker once and released the timers' clones.
         assert_eq!(timers.live(), 0);
+        assert_eq!(timers.published(), u64::MAX);
+        assert_eq!(count.get(), 4);
+        assert_eq!(Arc::strong_count(&count), 2);
+    }
+
+    #[test]
+    fn test_closure_frees_the_storage_of_every_registration() {
+        // A large population grows the slab and the wheel's links, and one
+        // registration outlives the rest.
+        const COUNT: usize = 100_000;
+        let timers = Arc::new(Timers::new());
+        let (count, waker) = counter();
+        let mut sleepers: Vec<_> = (0..COUNT)
+            .map(|_| register(&timers, later(), &waker))
+            .collect();
+        let mut escaped = sleepers.pop().unwrap();
+        for mut sleeper in sleepers {
+            sleeper.cancel();
+        }
+        let (slots, links) = timers.capacity();
+        assert!(slots >= COUNT, "the slab holds {slots} slots");
+        assert!(links >= COUNT, "the wheel holds {links} links");
+
+        // Closure ends the escaped registration with a deferred wake, and
+        // frees the storage of both.
+        let mut deferred = Deferred::default();
+        timers.close(&mut deferred);
+        assert_eq!(deferred.wakes.len(), 1);
+        assert!(deferred.drops.is_empty());
+        assert_eq!(timers.capacity(), (0, 0), "closed timers kept storage");
+        run(&mut deferred);
         assert_eq!(count.get(), 1);
+
+        // The escaped sleeper observes closure, and its poll and drop
+        // allocate nothing.
+        assert_eq!(
+            poll_with(&mut escaped, &waker),
+            Poll::Ready(Outcome::Closed)
+        );
+        drop(escaped);
+        assert_eq!(timers.capacity(), (0, 0));
+        assert_eq!(Arc::strong_count(&count), 2);
+    }
+
+    /// A sleep registered on `timers` at `deadline` with `waker`, as a first
+    /// pending poll on their owner would leave it.
+    fn registered(timers: &Arc<Timers>, deadline: Instant, waker: &Waker) -> Sleep {
+        let mut deferred = Deferred::default();
+        let (sleeper, _) = timers.register(waker.clone(), deadline, &mut Vec::new(), &mut deferred);
+        Sleep {
+            state: State::Registered(sleeper),
+        }
+    }
+
+    #[test]
+    fn test_fired_sleep_completes_after_closure() {
+        // No service pass ran on this thread, so polls take the lock.
+        assert!(turn().is_none());
+
+        // A registration whose deadline has passed fires, and its timers
+        // close before its sleep observes the firing.
+        let timers = Arc::new(Timers::new());
+        let (count, waker) = counter();
+        let deadline = Instant::now();
+        let mut sleep = registered(&timers, deadline, &waker);
+        let epoch = timers.epoch();
+        let mut deferred = Deferred::default();
+        timers.expire(timers.nanos(deadline) + RES, &mut deferred);
+        assert_eq!(timers.epoch(), epoch + 1);
+        run(&mut deferred);
+        assert_eq!(count.get(), 1);
+
+        // Closure ends nothing more, so it keeps the epoch, and discards the
+        // fired registration.
+        timers.close(&mut deferred);
+        assert!(deferred.is_empty());
+        assert_eq!(timers.epoch(), epoch + 1);
+        assert_eq!(timers.live(), 0);
+
+        // The deadline has passed, so the sleep completes, and a repoll
+        // stays complete.
+        let mut cx = Context::from_waker(&waker);
+        assert!(sleep.poll_unpin(&mut cx).is_ready());
+        assert!(matches!(sleep.state, State::Done));
+        assert!(sleep.poll_unpin(&mut cx).is_ready());
+        drop(sleep);
+        assert_eq!(count.get(), 1);
+        assert_eq!(Arc::strong_count(&count), 2);
+    }
+
+    #[test]
+    fn test_closed_sleep_completes_only_past_its_deadline() {
+        // No service pass ran on this thread, so polls take the lock.
+        assert!(turn().is_none());
+
+        // Two pending registrations close, one whose deadline has passed and
+        // one whose deadline is ahead.
+        let timers = Arc::new(Timers::new());
+        let (count, waker) = counter();
+        let mut passed = registered(&timers, Instant::now(), &waker);
+        let mut ahead = registered(&timers, Instant::now() + Duration::from_secs(60), &waker);
+        let mut deferred = Deferred::default();
+        timers.close(&mut deferred);
+        run(&mut deferred);
+        assert_eq!(count.get(), 2);
+
+        // The first completes, and a repoll stays complete. The second has
+        // no error output, so its poll panics.
+        let mut cx = Context::from_waker(&waker);
+        assert!(passed.poll_unpin(&mut cx).is_ready());
+        assert!(passed.poll_unpin(&mut cx).is_ready());
+        let panic = catch_unwind(AssertUnwindSafe(|| ahead.poll_unpin(&mut cx)))
+            .expect_err("a closed sleep completed before its deadline");
+        assert!(
+            extract_panic_message(&*panic)
+                .starts_with("io_uring sleep polled after its worker closed")
+        );
+
+        // Neither drop finds anything left to release.
+        drop(passed);
+        drop(ahead);
+        assert_eq!(timers.live(), 0);
         assert_eq!(Arc::strong_count(&count), 2);
     }
 
@@ -3127,6 +3333,29 @@ mod tests {
         assert_eq!(deferred.drops.len(), count);
         assert_eq!(timers.live(), 0);
         assert_eq!(timers.published(), u64::MAX);
+    }
+
+    #[test]
+    fn test_drain_bounds_the_capacity_of_the_queue() {
+        let timers = Arc::new(Timers::new());
+        let mut deferred = Deferred::default();
+
+        // A queue within the bound keeps its capacity.
+        let mut dropped = Vec::with_capacity(DROPPED_CAPACITY);
+        dropped.push(register(&timers, later(), Waker::noop()).id);
+        assert!(timers.drain(&mut dropped, &mut deferred));
+        assert_eq!(dropped.capacity(), DROPPED_CAPACITY);
+
+        // A burst beyond it shrinks to it once drained.
+        let mut dropped: Vec<_> = (0..4 * DROPPED_CAPACITY)
+            .map(|_| register(&timers, later(), Waker::noop()).id)
+            .collect();
+        assert!(dropped.capacity() > DROPPED_CAPACITY);
+        assert!(timers.drain(&mut dropped, &mut deferred));
+        assert!(dropped.is_empty());
+        assert_eq!(dropped.capacity(), DROPPED_CAPACITY);
+        assert_eq!(deferred.drops.len(), 4 * DROPPED_CAPACITY + 1);
+        assert_eq!(timers.live(), 0);
     }
 
     /// A waker that drops its sleep when destroyed.
