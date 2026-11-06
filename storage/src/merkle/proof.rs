@@ -313,6 +313,32 @@ impl<F: Family, D: Digest> Proof<F, D> {
         Ok(collected_digests)
     }
 
+    /// Verify as [Self::verify_range_inclusion_and_extract_digests] does, and also return the
+    /// number of elements, which is the verified range length.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn verify_range_inclusion_and_count<H, E>(
+        &self,
+        hasher: &H,
+        start_loc: Location<F>,
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
+        root: &D,
+    ) -> Result<(Vec<(Position<F>, D)>, usize), Error<F>>
+    where
+        H: Hasher<F, Digest = D>,
+        E: AsRef<[u8]>,
+    {
+        // Reconstruction accepts only an iterator that yields exactly its reported length, so
+        // the number of elements it consumed is the verified range length.
+        let mut elements_len = 0usize;
+        let digests = self.verify_range_inclusion_and_extract_digests(
+            hasher,
+            start_loc,
+            elements.into_iter().inspect(|_| elements_len += 1),
+            root,
+        )?;
+        Ok((digests, elements_len))
+    }
+
     /// Verify this proof and the pinned nodes against `root`. `elements` must yield consecutive
     /// elements from `start_loc`, and a `len()` that differs from the number yielded is rejected.
     ///
@@ -389,17 +415,8 @@ impl<F: Family, D: Digest> Proof<F, D> {
         E: AsRef<[u8]>,
     {
         let bagging = hasher.root_bagging();
-
-        // Reconstruction accepts only an iterator that yields exactly its reported length, so
-        // the number of elements it consumed is the verified range length.
-        let mut elements_len = 0usize;
-        let collected = self
-            .verify_range_inclusion_and_extract_digests(
-                hasher,
-                start_loc,
-                elements.into_iter().inspect(|_| elements_len += 1),
-                root,
-            )
+        let (collected, elements_len) = self
+            .verify_range_inclusion_and_count(hasher, start_loc, elements, root)
             .ok()?;
 
         if elements_len == 0 {
