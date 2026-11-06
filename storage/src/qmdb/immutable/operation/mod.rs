@@ -20,9 +20,10 @@ use commonware_codec::Encode;
 use commonware_formatting::hex;
 use core::fmt::Display;
 
-// Context byte prefixes for identifying the operation type.
-pub(crate) const SET_CONTEXT: u8 = 0;
-pub(crate) const COMMIT_CONTEXT: u8 = 1;
+/// Wire tag for [Operation::Set].
+pub const SET_CONTEXT: u8 = 0;
+/// Wire tag for [Operation::Commit].
+pub const COMMIT_CONTEXT: u8 = 1;
 
 /// An operation applied to an immutable authenticated database.
 ///

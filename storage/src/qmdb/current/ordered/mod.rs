@@ -16,12 +16,6 @@ pub mod variable;
 
 pub use crate::qmdb::any::ordered::{Operation, Update};
 
-/// Wire tag for [proof::constant::ExclusionProof::KeyValue].
-pub const KEY_VALUE_CONTEXT: u8 = 0;
-
-/// Wire tag for [proof::constant::ExclusionProof::Commit].
-pub const COMMIT_CONTEXT: u8 = 1;
-
 #[cfg(test)]
 pub mod tests {
     //! Shared test utilities for ordered Current QMDB variants.

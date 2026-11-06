@@ -114,7 +114,7 @@ pub use compact::{
     Config as CompactConfig, Db as CompactDb, MerkleizedBatch as CompactMerkleizedBatch,
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
-pub use operation::Operation;
+pub use operation::{COMMIT_CONTEXT, Operation, SET_CONTEXT};
 
 /// Build the snapshot by replaying the log from `inactivity_floor_loc`, inserting the location of
 /// every retained [Operation::Set]. Assumes the log is not pruned beyond the inactivity floor.
