@@ -14,6 +14,8 @@ use crate::{
     qmdb::operation::{Floored, Operation},
     translator::Translator,
 };
+use commonware_codec::Encode;
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
@@ -292,21 +294,22 @@ const SNAPSHOT_DECODE_CHUNK: u64 = 1 << 17;
 const SNAPSHOT_DECODE_CHUNK: u64 = 64;
 
 /// How many times the plan's decoders a build runs when it also hashes the journal's leaves and
-/// their subtrees, which costs about as much as decoding. The extra decoders also keep more reads in
+/// their subtrees, which costs about as much as decoding. The extra decoders do the work the
+/// journal's own replay would otherwise do on tasks outside the plan, and also keep more reads in
 /// flight.
 const SHARED_DECODER_FACTOR: usize = 3;
 
 /// Send the leaf digest of every operation from `leaves`' start to the end of `log` to `leaves`, in
 /// chunks of [SNAPSHOT_DECODE_CHUNK] operations, for builds that do not hash on decode tasks.
-async fn hash_leaves<F, C, D>(
+async fn hash_leaves<F, C, H>(
     log: &C,
     init_buffer: NonZeroUsize,
-    leaves: LeafSink<F, C::Item, D>,
+    leaves: LeafSink<F, C::Item, H>,
 ) -> Result<(), Error<F>>
 where
     F: Family,
-    C: Contiguous<Item: Operation<F>>,
-    D: Copy + Send + 'static,
+    C: Contiguous<Item: Operation<F> + Encode>,
+    H: Hasher,
 {
     let hashers = leaves.hashers();
     let start = *leaves.start();
@@ -593,7 +596,7 @@ impl ParallelPlan {
 /// (see [Partitioned]). Returns the number of active keys and the activity bitmap (see
 /// [SnapshotBuild::build_snapshot]).
 #[allow(clippy::too_many_arguments)]
-async fn build_snapshot_parallel<F, E, C, I, D>(
+async fn build_snapshot_parallel<F, E, C, I, H>(
     snapshot: &mut I,
     context: E,
     inactivity_floor_loc: Location<F>,
@@ -601,14 +604,14 @@ async fn build_snapshot_parallel<F, E, C, I, D>(
     init_concurrency: NonZeroUsize,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
-    leaves: Option<LeafSink<F, C::Item, D>>,
+    leaves: Option<LeafSink<F, C::Item, H>>,
 ) -> Result<(usize, BitMap), Error<F>>
 where
     F: Family,
     E: Spawner,
-    C: Contiguous<Item: Operation<F>> + 'static,
+    C: Contiguous<Item: Operation<F> + Encode> + 'static,
     I: Partitioned + Index<Value = Location<F>>,
-    D: Copy + Send + 'static,
+    H: Hasher,
 {
     let Some(plan) = ParallelPlan::new(snapshot.partition_count(), init_concurrency, cache_size)
     else {
@@ -853,7 +856,7 @@ pub trait SnapshotBuild<F: Family>:
     ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
     where
         E: Spawner,
-        C: Contiguous<Item: Operation<F>> + 'static,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
     {
         async move {
             build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
@@ -870,7 +873,7 @@ pub trait SnapshotBuild<F: Family>:
     /// `leaves`' start, which is at or before `inactivity_floor_loc`, to `leaves` in position
     /// order.
     #[allow(clippy::too_many_arguments)]
-    fn build_snapshot_sharing<E, C, D>(
+    fn build_snapshot_sharing<E, C, H>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
@@ -878,12 +881,12 @@ pub trait SnapshotBuild<F: Family>:
         init_concurrency: Self::Concurrency,
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
-        leaves: LeafSink<F, C::Item, D>,
+        leaves: LeafSink<F, C::Item, H>,
     ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
     where
         E: Spawner,
-        C: Contiguous<Item: Operation<F>> + 'static,
-        D: Copy + Send + 'static,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: Hasher,
     {
         async move {
             let built = self
@@ -941,7 +944,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     ) -> Result<(usize, BitMap), Error<F>>
     where
         E: Spawner,
-        C: Contiguous<Item: Operation<F>> + 'static,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
     {
         build_snapshot_parallel(
             self,
@@ -951,7 +954,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             init_concurrency,
             init_buffer,
             cache_size,
-            None::<LeafSink<F, C::Item, ()>>,
+            None::<LeafSink<F, C::Item, Sha256>>,
         )
         .await
     }
@@ -960,7 +963,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         ParallelPlan::new(self.partition_count(), init_concurrency, None).is_some()
     }
 
-    async fn build_snapshot_sharing<E, C, D>(
+    async fn build_snapshot_sharing<E, C, H>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
@@ -968,12 +971,12 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         init_concurrency: NonZeroUsize,
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
-        leaves: LeafSink<F, C::Item, D>,
+        leaves: LeafSink<F, C::Item, H>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
         E: Spawner,
-        C: Contiguous<Item: Operation<F>> + 'static,
-        D: Copy + Send + 'static,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: Hasher,
     {
         build_snapshot_parallel(
             self,
@@ -1005,7 +1008,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     ) -> Result<(usize, BitMap), Error<F>>
     where
         E: Spawner,
-        C: Contiguous<Item: Operation<F>> + 'static,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
     {
         build_snapshot_parallel(
             self,
@@ -1015,7 +1018,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             init_concurrency,
             init_buffer,
             cache_size,
-            None::<LeafSink<F, C::Item, ()>>,
+            None::<LeafSink<F, C::Item, Sha256>>,
         )
         .await
     }
@@ -1024,7 +1027,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         ParallelPlan::new(self.partition_count(), init_concurrency, None).is_some()
     }
 
-    async fn build_snapshot_sharing<E, C, D>(
+    async fn build_snapshot_sharing<E, C, H>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
@@ -1032,12 +1035,12 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         init_concurrency: NonZeroUsize,
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
-        leaves: LeafSink<F, C::Item, D>,
+        leaves: LeafSink<F, C::Item, H>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
         E: Spawner,
-        C: Contiguous<Item: Operation<F>> + 'static,
-        D: Copy + Send + 'static,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: Hasher,
     {
         build_snapshot_parallel(
             self,

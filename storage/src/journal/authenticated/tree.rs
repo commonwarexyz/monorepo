@@ -59,19 +59,28 @@ const REGENERATE_SEGMENT: u64 = REPLAY_CHUNK << 6;
 const APPLY_BATCH: NonZeroU64 = NZU64!(1 << 16);
 
 /// The digests of a complete subtree over the [REPLAY_CHUNK] leaves from `first_leaf`, a multiple
-/// of [REPLAY_CHUNK]. `levels[h][i]` is the node of height `h` whose ordinal is
-/// `(first_leaf >> h) + i`.
+/// of [REPLAY_CHUNK], that the Merkle structure reads when it appends the subtree: every node at or
+/// above a height the structure keeps resident, and the peaks below it at the subtree's end.
+/// `levels[h][i]` is the node of height `h` whose ordinal is `(first_leaf >> h) + i`, and `levels[h]`
+/// is empty for a height below the kept ones.
 pub(crate) struct Subtree<D> {
     first_leaf: u64,
     levels: Vec<Vec<D>>,
+    /// The height, ordinal and digest of each end peak below the kept heights.
+    peaks: Vec<(u32, u64, D)>,
 }
 
 impl<D: Copy> Subtree<D> {
     /// The node of height `h` with `ordinal`, if this subtree holds it.
     fn get(&self, h: u32, ordinal: u64) -> Option<D> {
-        let level = self.levels.get(h as usize)?;
-        let index = ordinal.checked_sub(self.first_leaf >> h)?;
-        level.get(usize::try_from(index).ok()?).copied()
+        let index = usize::try_from(ordinal.checked_sub(self.first_leaf >> h)?).ok()?;
+        if let Some(digest) = self.levels.get(h as usize)?.get(index) {
+            return Some(*digest);
+        }
+        self.peaks
+            .iter()
+            .find(|&&(height, peak, _)| height == h && peak == ordinal)
+            .map(|&(_, _, digest)| digest)
     }
 }
 
@@ -79,34 +88,78 @@ impl<D: Copy> Subtree<D> {
 /// chunk at either end.
 pub(crate) enum Chunk<D> {
     Subtree(Subtree<D>),
-    Leaves(Vec<D>),
+    Leaves { first_leaf: u64, digests: Vec<D> },
 }
 
-/// The chunk of the leaf digests `leaves` from `first_leaf`: its whole subtree, hashed with `node`,
-/// if it is a complete [REPLAY_CHUNK]-aligned chunk, and otherwise just its leaves.
+impl<D> Chunk<D> {
+    /// The location of the chunk's first leaf.
+    const fn first_leaf(&self) -> u64 {
+        match self {
+            Self::Subtree(subtree) => subtree.first_leaf,
+            Self::Leaves { first_leaf, .. } => *first_leaf,
+        }
+    }
+}
+
+/// The chunk of the leaf digests `leaves` from `first_leaf`: its subtree, hashed with `node` and
+/// keeping the nodes from height `resident` up, if it is a complete [REPLAY_CHUNK]-aligned chunk,
+/// and otherwise just its leaves.
 pub(crate) fn chunk_of<F: Family, D: Copy>(
     node: impl Fn(Position<F>, &D, &D) -> D,
     first_leaf: u64,
     leaves: Vec<D>,
+    resident: u32,
 ) -> Chunk<D> {
-    if first_leaf % REPLAY_CHUNK == 0 && leaves.len() as u64 == REPLAY_CHUNK {
-        Chunk::Subtree(hash_subtree::<F, D>(node, first_leaf, leaves))
+    if first_leaf.is_multiple_of(REPLAY_CHUNK) && leaves.len() as u64 == REPLAY_CHUNK {
+        Chunk::Subtree(hash_subtree::<F, D>(node, first_leaf, leaves, resident))
     } else {
-        Chunk::Leaves(leaves)
+        Chunk::Leaves {
+            first_leaf,
+            digests: leaves,
+        }
     }
 }
 
 /// Hash every node of the subtree over `leaves`, the leaf digests from `first_leaf`, a multiple of
-/// [REPLAY_CHUNK], with `node`.
+/// [REPLAY_CHUNK], with `node`, keeping the nodes from height `resident` up and the end peaks below
+/// it.
 fn hash_subtree<F: Family, D: Copy>(
     node: impl Fn(Position<F>, &D, &D) -> D,
     first_leaf: u64,
     leaves: Vec<D>,
+    resident: u32,
 ) -> Subtree<D> {
+    let keep = resident.min(SUBTREE_HEIGHT);
+    let end = Location::<F>::new(first_leaf + REPLAY_CHUNK);
+    let low_peaks: Vec<(u32, u64)> = F::nodes_to_pin(end)
+        .map(|pos| {
+            let h = F::pos_to_height(pos);
+            (h, *F::leftmost_leaf(pos, h) >> h)
+        })
+        .filter(|&(h, ordinal)| h < keep && ordinal << h >= first_leaf)
+        .collect();
     let mut levels = Vec::with_capacity(SUBTREE_HEIGHT as usize + 1);
-    levels.push(leaves);
+    let mut peaks = Vec::new();
+
+    // Keep each hashed level, once the level above it is hashed, only if the structure reads it.
+    let mut retire = |height: u32, level: Vec<D>| {
+        if height >= keep {
+            levels.push(level);
+            return;
+        }
+        for &(peak_height, ordinal) in &low_peaks {
+            if peak_height == height {
+                peaks.push((
+                    height,
+                    ordinal,
+                    level[(ordinal - (first_leaf >> height)) as usize],
+                ));
+            }
+        }
+        levels.push(Vec::new());
+    };
+    let mut below = leaves;
     for h in 1..=SUBTREE_HEIGHT {
-        let below = &levels[h as usize - 1];
         let level = (0..below.len() / 2)
             .map(|i| {
                 let leaf = Location::new(first_leaf + ((i as u64) << h));
@@ -114,9 +167,14 @@ fn hash_subtree<F: Family, D: Copy>(
                 node(pos, &below[2 * i], &below[2 * i + 1])
             })
             .collect();
-        levels.push(level);
+        retire(h - 1, core::mem::replace(&mut below, level));
     }
-    Subtree { first_leaf, levels }
+    retire(SUBTREE_HEIGHT, below);
+    Subtree {
+        first_leaf,
+        levels,
+        peaks,
+    }
 }
 
 /// Regions filled concurrently by one request.
@@ -412,6 +470,11 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         Ok(tree.pinned_nodes_at(journal, hasher, target).await?)
     }
 
+    /// The lowest height of the nodes the structure keeps.
+    pub(crate) const fn resident_height(&self) -> u32 {
+        self.resident.height
+    }
+
     fn update_metrics(&self) {
         let bytes = self.resident.len().saturating_mul(size_of::<D>());
         let _ = self.metrics.resident_bytes.try_set(bytes);
@@ -548,6 +611,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         // a complete subtree that its task hashes up to the subtree's root.
         let mut next_start = *self.leaves();
         let end_leaf = *end;
+        let resident = self.resident.height;
         let mut chunks = core::iter::from_fn(move || {
             let start = next_start;
             if start >= end_leaf {
@@ -592,7 +656,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                         );
                     }
                     let node = |pos, left: &D, right: &D| hasher.node_digest(pos, left, right);
-                    Ok::<_, super::Error<F>>(chunk_of::<F, D>(node, start, digests))
+                    Ok::<_, super::Error<F>>(chunk_of::<F, D>(node, start, digests, resident))
                 });
             pending.push_back(task.abort_on_drop());
         };
@@ -622,12 +686,15 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     where
         H: Hasher<F, Digest = D> + 'static,
     {
+        if chunk.first_leaf() != *self.leaves() {
+            return Err(merkle::Error::DataCorrupted("replay chunk out of order").into());
+        }
         match chunk {
             Chunk::Subtree(subtree) => {
                 self.apply_subtree(hasher, &subtree)?;
                 Ok(self)
             }
-            Chunk::Leaves(digests) => self.apply_digests(hasher, digests).await,
+            Chunk::Leaves { digests, .. } => self.apply_digests(hasher, digests).await,
         }
     }
 
@@ -638,7 +705,6 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     where
         H: Hasher<F, Digest = D>,
     {
-        debug_assert_eq!(*self.leaves(), subtree.first_leaf);
         let leaves = Location::<F>::new(subtree.first_leaf + REPLAY_CHUNK);
         let initial = self.size();
         let end = F::location_to_position(leaves);
@@ -1241,6 +1307,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Appending a replay's chunks, each aligned one as the part of its subtree the tree reads,
+    /// matches an oracle at each resident height, and a chunk that does not start at the next leaf
+    /// is rejected.
+    async fn chunks_match_oracle<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
+        let ops = Operations::new(513);
+        let expected = oracle::<F>(&ops, &hasher);
+        let leaf = |loc: u64| {
+            let pos = F::location_to_position(Location::new(loc));
+            Hasher::<F>::leaf_digest(&hasher, pos, &ops.item(loc).encode())
+        };
+        let node = |pos, left: &D, right: &D| Hasher::<F>::node_digest(&hasher, pos, left, right);
+        for height in 0..=8 {
+            // Start mid-chunk, so the first chunk is partial.
+            let mut tree = replayed::<F>(&context, &ops, &hasher, height, 5).await;
+            let mut first = 5;
+            while first < 513 {
+                let end = ((first / REPLAY_CHUNK + 1) * REPLAY_CHUNK).min(513);
+                let chunk = chunk_of::<F, D>(node, first, (first..end).map(leaf).collect(), height);
+                tree = tree.apply_chunk(&hasher, chunk).await.unwrap();
+                first = end;
+            }
+            assert_eq!(
+                tree.root(&hasher, 0).unwrap(),
+                expected.root(&hasher, 0).unwrap()
+            );
+            let positions: Vec<_> = (0..*expected.size()).map(Position::new).collect();
+            let got = tree.get_nodes(&ops, &hasher, &positions).await.unwrap();
+            for (&pos, digest) in positions.iter().zip(got) {
+                assert_eq!(
+                    Some(digest),
+                    expected.get_node(pos),
+                    "height {height}, position {pos}"
+                );
+            }
+
+            let chunk = chunk_of::<F, D>(node, 0, vec![leaf(0)], height);
+            assert!(matches!(
+                tree.apply_chunk(&hasher, chunk).await,
+                Err(super::super::Error::Merkle(merkle::Error::DataCorrupted(_)))
+            ));
+        }
+    }
+
+    #[test]
+    fn chunks_match_oracle_mmr() {
+        deterministic::Runner::default().start(chunks_match_oracle::<mmr::Family>);
+    }
+    #[test]
+    fn chunks_match_oracle_mmb() {
+        deterministic::Runner::default().start(chunks_match_oracle::<mmb::Family>);
     }
 
     #[test]

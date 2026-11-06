@@ -161,9 +161,10 @@ where
     // Rebuild the grafted tree, graft roots, and canonical root from the synced `any` state.
     // The canonical root is deterministic because the engine authenticates the ops and the
     // bitmap is derived from them.
+    let base = (pruned_chunks, grafted_pinned_nodes);
     let (grafted_tree, graft_roots, root) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
-        &grafted_pinned_nodes,
+        &base.1,
         &any.log,
         any.inactivity_floor_loc,
         any.root(),
@@ -181,6 +182,7 @@ where
         any,
         grafted_tree: Arc::new(grafted_tree),
         graft_roots,
+        base,
         metadata,
         strategy,
         root,

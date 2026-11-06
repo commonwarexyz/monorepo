@@ -199,7 +199,9 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// for index types that build serially, and the number of build tasks for index types that
     /// build in parallel. A value of `1` builds the index entirely on the init task. Values of
     /// `2` and `3` decode on the init task and insert on one or two workers. Larger values split
-    /// between spawned decode and insert tasks while the init task merely forwards batches.
+    /// between spawned decode and insert tasks while the init task merely forwards batches. Such a
+    /// build also hashes the log's operations into the log's Merkle structure as it decodes them,
+    /// and runs more decode tasks for that hashing, in place of a separate replay of the log.
     pub init_concurrency: B,
 }
 

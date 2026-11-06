@@ -43,13 +43,14 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use commonware_codec::{Encode, EncodeShared, Write as _};
+use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, ReadOptions, Spawner};
 use commonware_utils::{NZU64, channel::mpsc};
 use core::{
+    marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
 };
@@ -1017,7 +1018,7 @@ where
     /// structure, so the operations are read once.
     pub(crate) async fn finish_sharing<T, X, Fut>(
         self,
-        read: impl FnOnce(Arc<C>, LeafSink<F, C::Item, H::Digest>) -> Fut,
+        read: impl FnOnce(Arc<C>, LeafSink<F, C::Item, H>) -> Fut,
     ) -> Result<(Journal<F, E, C, H, S>, T), X>
     where
         E: Spawner,
@@ -1028,16 +1029,10 @@ where
         let journal = Arc::new(Self::persist(self.journal, self.selected_end).await?);
         let end = Location::new(journal.bounds().end);
         let (tx, mut rx) = mpsc::channel(LEAF_CHUNKS_IN_FLIGHT);
-        let (leaf_hasher, node_hasher) = (self.hasher.clone(), self.hasher.clone());
         let hashers = LeafHashers {
-            leaf: Arc::new(move |pos, item: &C::Item, scratch: &mut Vec<u8>| {
-                scratch.clear();
-                item.write(scratch);
-                merkle::hasher::Hasher::<F>::leaf_digest(&leaf_hasher, pos, scratch)
-            }),
-            node: Arc::new(move |pos, left: &H::Digest, right: &H::Digest| {
-                merkle::hasher::Hasher::<F>::node_digest(&node_hasher, pos, left, right)
-            }),
+            hasher: self.hasher.clone(),
+            resident: self.merkle.resident_height(),
+            _scan: PhantomData,
         };
         let sink = LeafSink {
             start: self.merkle.leaves(),
@@ -1133,38 +1128,41 @@ const LEAF_CHUNKS_IN_FLIGHT: usize = 8;
 /// the first and last is a complete subtree that [LeafHashers::chunk] hashes whole.
 pub(crate) const LEAF_CHUNK: u64 = tree::REPLAY_CHUNK;
 
-/// Encodes an operation into the scratch buffer and returns its leaf digest at the position.
-type LeafHash<F, Item, D> = Arc<dyn Fn(Position<F>, &Item, &mut Vec<u8>) -> D + Send + Sync>;
-
-/// Returns the digest of the node at the position from its children's digests.
-type NodeHash<F, D> = Arc<dyn Fn(Position<F>, &D, &D) -> D + Send + Sync>;
-
 /// The journal's leaf and node hashing, for the tasks that scan its operations.
-pub(crate) struct LeafHashers<F: Family, Item, D> {
-    leaf: LeafHash<F, Item, D>,
-    node: NodeHash<F, D>,
+pub(crate) struct LeafHashers<F: Family, Item, H: Hasher> {
+    hasher: StandardHasher<H>,
+    /// The lowest height of the nodes the Merkle structure keeps.
+    resident: u32,
+    _scan: PhantomData<fn(Position<F>, &Item)>,
 }
 
-impl<F: Family, Item, D> Clone for LeafHashers<F, Item, D> {
+impl<F: Family, Item, H: Hasher> Clone for LeafHashers<F, Item, H> {
     fn clone(&self) -> Self {
         Self {
-            leaf: self.leaf.clone(),
-            node: self.node.clone(),
+            hasher: self.hasher.clone(),
+            resident: self.resident,
+            _scan: PhantomData,
         }
     }
 }
 
-impl<F: Family, Item, D: Copy> LeafHashers<F, Item, D> {
+impl<F: Family, Item: Encode, H: Hasher> LeafHashers<F, Item, H> {
     /// Encode `item` into `scratch` and return its leaf digest at `pos`.
-    pub(crate) fn leaf(&self, pos: Position<F>, item: &Item, scratch: &mut Vec<u8>) -> D {
-        (self.leaf)(pos, item, scratch)
+    pub(crate) fn leaf(&self, pos: Position<F>, item: &Item, scratch: &mut Vec<u8>) -> H::Digest {
+        scratch.clear();
+        item.write(scratch);
+        merkle::hasher::Hasher::<F>::leaf_digest(&self.hasher, pos, scratch)
     }
+}
 
-    /// The chunk to send for the leaf digests `leaves` from `first_leaf`, which hashes the whole
-    /// subtree of a complete aligned chunk here, on the caller's thread.
-    pub(crate) fn chunk(&self, first_leaf: u64, leaves: Vec<D>) -> tree::Chunk<D> {
-        let node = |pos, left: &D, right: &D| (self.node)(pos, left, right);
-        tree::chunk_of::<F, D>(node, first_leaf, leaves)
+impl<F: Family, Item, H: Hasher> LeafHashers<F, Item, H> {
+    /// The chunk to send for the leaf digests `leaves` from `first_leaf`, which hashes the subtree
+    /// of a complete aligned chunk here, on the caller's thread.
+    pub(crate) fn chunk(&self, first_leaf: u64, leaves: Vec<H::Digest>) -> tree::Chunk<H::Digest> {
+        let node = |pos, left: &H::Digest, right: &H::Digest| {
+            merkle::hasher::Hasher::<F>::node_digest(&self.hasher, pos, left, right)
+        };
+        tree::chunk_of::<F, H::Digest>(node, first_leaf, leaves, self.resident)
     }
 }
 
@@ -1172,26 +1170,26 @@ impl<F: Family, Item, D: Copy> LeafHashers<F, Item, D> {
 /// journal rebuilds its Merkle structure without reading them again. Only this crate creates and
 /// uses one.
 #[commonware_macros::stability(ALPHA)]
-pub struct LeafSink<F: Family, Item, D> {
+pub struct LeafSink<F: Family, Item, H: Hasher> {
     start: Location<F>,
-    hashers: LeafHashers<F, Item, D>,
-    tx: mpsc::Sender<tree::Chunk<D>>,
+    hashers: LeafHashers<F, Item, H>,
+    tx: mpsc::Sender<tree::Chunk<H::Digest>>,
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<F: Family, Item, D> LeafSink<F, Item, D> {
+impl<F: Family, Item, H: Hasher> LeafSink<F, Item, H> {
     /// The first operation whose leaf digest the sink expects, the journal's pruning boundary.
     pub(crate) const fn start(&self) -> Location<F> {
         self.start
     }
 
     /// The journal's leaf and node hashing.
-    pub(crate) fn hashers(&self) -> LeafHashers<F, Item, D> {
+    pub(crate) fn hashers(&self) -> LeafHashers<F, Item, H> {
         self.hashers.clone()
     }
 
     /// Send the next chunk, in position order. Returns false if the journal stopped receiving.
-    pub(crate) async fn send(&self, chunk: tree::Chunk<D>) -> bool {
+    pub(crate) async fn send(&self, chunk: tree::Chunk<H::Digest>) -> bool {
         self.tx.send(chunk).await.is_ok()
     }
 }

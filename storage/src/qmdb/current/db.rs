@@ -250,6 +250,11 @@ pub struct Db<
     /// Ops-tree roots at the grafting height, held whatever the ops tree's resident height.
     pub(super) graft_roots: GraftRoots<H::Digest>,
 
+    /// The pruning boundary the metadata records: the pruned bitmap chunk count and the grafted
+    /// tree's pinned nodes there. A bitmap and grafted tree rebuilt from a replay start are pruned
+    /// past it in memory.
+    pub(super) base: GraftedBoundary<H::Digest>,
+
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
     /// - The grafted tree pinned nodes at key [NODE_PREFIX]
@@ -620,7 +625,9 @@ where
     /// The log may retain operations below `prune_loc` for section or blob alignment, so bounded
     /// initialization can reject a commit the log still holds when the bitmap boundary lies
     /// above that commit's inactivity floor. Callers that must keep an older commit
-    /// initializable prune no further than the sync boundary observed at that commit.
+    /// initializable prune no further than the sync boundary observed at that commit. After a
+    /// reopen that rebuilt the bitmap from a recorded replay start, a `prune_loc` below that start
+    /// leaves the log and the recorded pruning boundary in place.
     ///
     /// # Errors
     ///
@@ -650,6 +657,22 @@ where
         self.any.prune_bitmap(prune_loc);
         self.prune_grafted_tree_to_bitmap()?;
 
+        // Advance the recorded pruning boundary with the bitmap. A bitmap rebuilt from a replay
+        // start is already pruned past `prune_loc` when it falls below that start, and the grafted
+        // tree no longer holds the pins there, so the boundary and the log stay where they are.
+        let chunks = usize::try_from(*prune_loc / bitmap::Prunable::<N>::CHUNK_SIZE_BITS)
+            .map_err(|_| Error::<F>::DataCorrupted("pruned chunks overflow"))?;
+        let mut log_prune_loc = prune_loc;
+        if chunks > self.base.0 {
+            if chunks == self.any.bitmap.pruned_chunks() {
+                let pins = self.grafted_pinned_nodes(Location::new(chunks as u64))?;
+                self.base = (chunks, pins.into_iter().map(|(_, digest)| digest).collect());
+            } else {
+                log_prune_loc =
+                    Location::new(self.base.0 as u64 * bitmap::Prunable::<N>::CHUNK_SIZE_BITS);
+            }
+        }
+
         // Persist grafted tree pruning state before pruning the ops log. If the subsequent
         // `any.prune_log` fails, the metadata is ahead of the log, which is safe: on recovery,
         // `build_grafted_tree` will recompute from the (un-pruned) log and the metadata
@@ -662,7 +685,7 @@ where
             std::future::pending::<()>().await;
         }
 
-        self.any = self.any.prune_log(prune_loc).await?;
+        self.any = self.any.prune_log(log_prune_loc).await?;
         self.any.update_metrics();
         self.update_metrics();
         Ok(self)
@@ -680,21 +703,14 @@ where
     fn stage_metadata(&mut self) -> Result<(), Error<F>> {
         self.metadata.clear();
 
-        // Snapshot the pruning boundary under the read lock; the guard drops before any await.
-        let pruned_chunks_u64 = self.any.bitmap.pruned_chunks() as u64;
-
         // Write the number of pruned chunks.
+        let pruned_chunks_u64 = self.base.0 as u64;
         let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
         self.metadata
             .put(key, pruned_chunks_u64.to_be_bytes().to_vec());
 
         // Write the pinned nodes of the grafted tree.
-        let pruned_chunks = Location::<F>::new(pruned_chunks_u64);
-        for (i, (_, digest)) in self
-            .grafted_pinned_nodes(pruned_chunks)?
-            .into_iter()
-            .enumerate()
-        {
+        for (i, digest) in self.base.1.iter().enumerate() {
             let key = U64::new(NODE_PREFIX, i as u64);
             self.metadata.put(key, digest.to_vec());
         }

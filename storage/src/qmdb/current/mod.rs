@@ -392,7 +392,9 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// for index types that build serially, and the number of build tasks for index types that
     /// build in parallel. A value of `1` builds the index entirely on the init task. Values of
     /// `2` and `3` decode on the init task and insert on one or two workers. Larger values split
-    /// between spawned decode and insert tasks while the init task merely forwards batches.
+    /// between spawned decode and insert tasks while the init task merely forwards batches. Such a
+    /// build also hashes the log's operations into the log's Merkle structure as it decodes them,
+    /// and runs more decode tasks for that hashing, in place of a separate replay of the log.
     pub init_concurrency: B,
 }
 
@@ -538,9 +540,9 @@ where
         Some((chunks, pins)) if chunks == pruned_chunks => (metadata, pins),
         Some(_) => (
             db::Db::<F, E, J, I, H, U, N, S>::clear_start_metadata(metadata).await?,
-            base.1,
+            base.1.clone(),
         ),
-        None => (metadata, base.1),
+        None => (metadata, base.1.clone()),
     };
 
     // Rebuild the grafted tree, graft roots, and canonical root from the persisted pins and
@@ -560,6 +562,7 @@ where
         any,
         grafted_tree: Arc::new(grafted_tree),
         graft_roots,
+        base,
         metadata,
         strategy,
         root,
@@ -2690,6 +2693,140 @@ pub mod tests {
             .unwrap();
             assert_eq!(db.root(), earlier.root);
             assert_eq!(db.pruned_bits(), 0);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A database reopened and synced again still restarts bounded at an earlier retained commit
+    /// whose floor precedes the last sync boundary.
+    #[test_traced("INFO")]
+    fn test_current_bounded_restart_after_reopen_and_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "current-bounded-after-sync";
+            let (db, history) = build_generations(&context, partition, 6).await;
+            let last = history.last().unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("reopen"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), last.root);
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            let earlier = history
+                .iter()
+                .find(|generation| generation.floor < last.sync_boundary)
+                .unwrap();
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("bounded"),
+                variable_config::<OneCap>(partition),
+                Some(earlier.size),
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), earlier.root);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// After a reopen from the replay start, pruning below that start keeps every commit whose sync
+    /// boundary is at or past the prune location initializable, and pruning to it advances the
+    /// recorded pruning boundary.
+    #[test_traced("INFO")]
+    fn test_current_prune_below_replay_start() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "current-prune-below-start";
+            let (db, history) = build_generations(&context, partition, 6).await;
+            let last = history.last().unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("reopen"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.pruned_bits(), *last.sync_boundary);
+            let earlier = history
+                .iter()
+                .find(|generation| {
+                    *generation.sync_boundary > 0
+                        && generation.sync_boundary < last.sync_boundary
+                        && generation.floor < last.sync_boundary
+                })
+                .unwrap();
+            let db = db.prune(earlier.sync_boundary).await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("bounded"),
+                variable_config::<OneCap>(partition),
+                Some(earlier.size),
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), earlier.root);
+            drop(db);
+
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("restart"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), earlier.root);
+            let db = commit_writes_with_metadata(
+                db,
+                (0..384).map(|i| (key(i), Some(val(9_000 + i)))),
+                None,
+            )
+            .await;
+            let db = db.sync().await.unwrap();
+            let boundary = db.sync_boundary();
+            let root = db.root();
+            drop(db);
+
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("advanced"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.pruned_bits(), *boundary);
+            let db = db.prune(boundary).await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            let pruned = UnorderedVariableDb::init(
+                context.child("pruned_bounded"),
+                variable_config::<OneCap>(partition),
+                Some(earlier.size),
+            )
+            .await;
+            assert!(pruned.is_err(), "expected the pruned commit to be rejected");
+
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("pruned"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.pruned_bits(), *boundary);
             db.destroy().await.unwrap();
         });
     }
