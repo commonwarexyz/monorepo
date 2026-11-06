@@ -58,22 +58,6 @@ pub struct Read<B: Blob> {
     buffer_size: usize,
 }
 
-/// Restores the logical cursor unless the read completes successfully.
-struct Rewind<'a, B: Blob> {
-    reader: &'a mut Read<B>,
-    start: u64,
-    armed: bool,
-}
-
-impl<B: Blob> Drop for Rewind<'_, B> {
-    fn drop(&mut self) {
-        if self.armed {
-            // The starting position remains within the reader's fixed blob size.
-            let _ = self.reader.seek_to(self.start);
-        }
-    }
-}
-
 impl<B: Blob> Read<B> {
     /// Creates a new `Read` that reads from the given blob with the specified buffer size.
     pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize) -> Self {
@@ -239,5 +223,21 @@ impl<B: Blob> Read<B> {
     pub async fn resize(self, len: u64) -> Result<(), Error> {
         self.blob.resize(len).await?;
         self.blob.sync().await
+    }
+}
+
+/// Restores the logical cursor unless the read completes successfully.
+struct Rewind<'a, B: Blob> {
+    reader: &'a mut Read<B>,
+    start: u64,
+    armed: bool,
+}
+
+impl<B: Blob> Drop for Rewind<'_, B> {
+    fn drop(&mut self) {
+        if self.armed {
+            // The starting position remains within the reader's fixed blob size.
+            let _ = self.reader.seek_to(self.start);
+        }
     }
 }
