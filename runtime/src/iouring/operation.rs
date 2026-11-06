@@ -2,27 +2,66 @@
 //!
 //! Adapters register requests inside their async bodies, then await an
 //! [`Operation`] containing its waiter ID and weak worker identity. The driver
-//! retains both pending requests and completed results in one slab. A poll on
-//! another thread forwards observation through a completion channel while the
+//! retains both pending requests and completed results in one slab, and the
 //! request stays on its original worker.
+//!
+//! A poll on that worker inspects the driver directly. The first poll on
+//! another thread installs a completion channel through the worker's mailbox,
+//! and every later poll, on any thread, uses that channel. The waiter ID stays
+//! with the operation for cancellation until observation ends.
 //!
 //! An operation may be polled or dropped on any thread after registration.
 //! Dropping it releases its observer. The driver decides whether to cancel the
 //! request or finish retained work such as writes and syncs.
 
 use super::{
-    mailbox::{Cancel, Forward},
-    registration::{Key, Observation, Registration},
+    mailbox::{Mailbox, Message},
     request::{Request, RequestOutput, SyncRequest},
     runtime::Local,
     waiter::{Observer, WaiterId},
 };
 use crate::Error;
 use commonware_utils::channel::oneshot;
-use std::{sync::Arc, task::Waker};
+use std::{
+    future::Future,
+    mem,
+    pin::Pin,
+    sync::{Arc, Weak},
+    task::{Context, Poll},
+};
+
+/// Inspection without cloning or invoking the observer's waker.
+pub enum Observation<T> {
+    /// The registration has completed and relinquished its output.
+    Ready(T),
+    /// The installed waker already matches the current task.
+    Pending,
+    /// A new waker must be cloned outside the worker borrow.
+    Refresh,
+}
+
+/// Ownership retained between polls.
+enum State {
+    /// Request awaiting observation, directly or through a forwarding channel.
+    Waiting {
+        /// Owning worker, without extending its lifetime.
+        mailbox: Weak<Mailbox>,
+        /// Identity retained until completion or cancellation.
+        id: WaiterId,
+        /// Permanent observation path once forwarding is requested.
+        receiver: Option<oneshot::Receiver<Result<RequestOutput, Error>>>,
+    },
+    /// Request rejected by a closing worker, with closure not yet observed.
+    Closed,
+    /// Observation completed or released, with no cancellation identity retained.
+    Done,
+}
 
 /// Handle to an I/O request registered on a worker.
-pub(crate) type Operation = Registration<WaiterId>;
+pub(crate) struct Operation {
+    /// Retains the cancellation identity until observation completes or is released.
+    state: State,
+}
 
 impl Operation {
     /// Register on the current worker and return a handle to its result.
@@ -37,7 +76,9 @@ impl Operation {
             // Request owners may run destructors that reenter the worker.
             drop(local);
             drop(request);
-            return Self::closed();
+            return Self {
+                state: State::Closed,
+            };
         }
         let mailbox = Arc::downgrade(&local.mailbox);
 
@@ -53,27 +94,126 @@ impl Operation {
             .as_mut()
             .unwrap()
             .admit(request, Observer::Local(None), *now, deferred);
-        Self::new(mailbox, id)
+        Self {
+            state: State::Waiting {
+                mailbox,
+                id,
+                receiver: None,
+            },
+        }
+    }
+
+    /// Return the waiter ID of a waiting operation.
+    #[cfg(test)]
+    pub fn key(&self) -> WaiterId {
+        let State::Waiting { id, .. } = self.state else {
+            panic!("operation already completed");
+        };
+        id
+    }
+
+    /// Release the operation before destroying a channel's observer waker.
+    fn release(&mut self) {
+        // Consume the identity before cleanup can unwind. Publish cancellation
+        // before dropping the receiver, whose waker destructor may run user code.
+        if let State::Waiting {
+            mailbox,
+            id,
+            receiver,
+        } = mem::replace(&mut self.state, State::Done)
+        {
+            Local::cancel(&mailbox, id);
+            drop(receiver);
+        }
     }
 }
 
-impl Key for WaiterId {
-    type Output = RequestOutput;
+impl Future for Operation {
+    type Output = Result<RequestOutput, Error>;
 
-    fn observe(self, local: &mut Local, waker: &Waker) -> Observation<RequestOutput> {
-        local.driver.as_mut().unwrap().observe(self, waker)
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Pending polls retain the owner and ID so Drop can still release the
+        // request if polling unwinds.
+        let this = self.get_mut();
+        let (mailbox, id, receiver) = match &mut this.state {
+            State::Waiting {
+                mailbox,
+                id,
+                receiver,
+            } => (mailbox, *id, receiver),
+            State::Closed => {
+                this.state = State::Done;
+                return Poll::Ready(Err(Error::Closed));
+            }
+            State::Done => panic!("io_uring operation polled after completion"),
+        };
+
+        // Direct access requires the owning worker and an unforwarded operation.
+        // Once installed, the channel remains the observation path even on that worker.
+        let owner = receiver.is_none().then(|| Local::owner(mailbox)).flatten();
+        let Some(owner) = owner else {
+            // A missing or closed worker drops the sender, allowing the receiver
+            // to report closure without retaining the worker.
+            let receiver = receiver.get_or_insert_with(|| {
+                let (sender, receiver) = oneshot::channel();
+                if let Some(mailbox) = mailbox.upgrade() {
+                    let _ = mailbox.send(Message::Forward(id, sender));
+                }
+                receiver
+            });
+
+            let result = std::task::ready!(Pin::new(receiver).poll(cx));
+            this.state = State::Done;
+            return Poll::Ready(result.unwrap_or(Err(Error::Closed)));
+        };
+
+        // A closing worker owns cleanup. Release observation after ending this
+        // borrow because cancellation reenters the worker.
+        let mut local = owner.borrow_mut();
+        if local.closing {
+            drop(local);
+            this.release();
+            return Poll::Ready(Err(Error::Closed));
+        }
+
+        // Only a changed pending waker needs a refresh. Ready results and matching
+        // wakers return without invoking observer callbacks.
+        match local.driver.as_mut().unwrap().observe(id, cx.waker()) {
+            Observation::Ready(output) => {
+                this.state = State::Done;
+                return Poll::Ready(Ok(output));
+            }
+            Observation::Pending => return Poll::Pending,
+            Observation::Refresh => {}
+        }
+
+        // Waker callbacks may reenter the runtime, so clone outside the borrow.
+        // A clone panic leaves the waiter ID available for cancellation. A
+        // clone can also admit a durability request, whose admission polls the
+        // notified permit waits and can complete this operation if its permit
+        // was granted since the last service, so observe again before
+        // installing the clone. Defer destruction of whichever waker is left
+        // over.
+        drop(local);
+        let waker = cx.waker().clone();
+        let mut local = owner.borrow_mut();
+        let driver = local.driver.as_mut().unwrap();
+        let (poll, unused) = match driver.observe(id, cx.waker()) {
+            Observation::Ready(output) => {
+                this.state = State::Done;
+                (Poll::Ready(Ok(output)), Some(waker))
+            }
+            Observation::Pending => (Poll::Pending, Some(waker)),
+            Observation::Refresh => (Poll::Pending, driver.set_waker(id, waker)),
+        };
+        local.deferred.drops.extend(unused);
+        poll
     }
+}
 
-    fn refresh(self, local: &mut Local, waker: Waker) -> Option<Waker> {
-        local.driver.as_mut().unwrap().set_waker(self, waker)
-    }
-
-    fn forward(self, sender: oneshot::Sender<Result<RequestOutput, Error>>) -> Forward {
-        Forward::Waiter(self, sender)
-    }
-
-    fn cancel(self) -> Cancel {
-        Cancel::Waiter(self)
+impl Drop for Operation {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -139,7 +279,7 @@ pub mod tests {
             atomic::{AtomicUsize, Ordering},
             mpsc,
         },
-        task::{Context, Poll, RawWaker, RawWakerVTable},
+        task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
         thread,
         time::{Duration, Instant},
     };

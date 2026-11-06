@@ -98,7 +98,6 @@ mod mailbox;
 pub(crate) mod operation;
 mod pool;
 mod queue;
-mod registration;
 pub(crate) mod request;
 mod runtime;
 mod slab;

@@ -14,7 +14,7 @@
 //! to [`Deferred`]. The worker invokes callbacks after releasing its local borrow.
 
 use super::{
-    registration::Observation,
+    operation::Observation,
     request::{Request, RequestOutput},
     runtime::Deferred,
     slab::{Id, Slab},

@@ -174,7 +174,7 @@
 use super::{
     driver::Driver,
     idle::Searcher,
-    mailbox::{Cancel, Forward, Mailbox, Message},
+    mailbox::{Mailbox, Message},
     pool::{MAX_WORKERS, Pool, Threads},
     request::{RequestOutput, RetiredResources},
     slab::Id,
@@ -182,6 +182,7 @@ use super::{
     spinner::{Config as SpinnerConfig, Spinner},
     task::{AfterPoll, Ready, RootWaker, Runnable},
     tasks::Tasks,
+    waiter::WaiterId,
     waker::SUBMISSION_SEQ_MASK,
 };
 #[cfg(feature = "external")]
@@ -1268,24 +1269,22 @@ impl Local {
     ///
     /// A worker whose mailbox is closed or gone has already taken responsibility
     /// for cleanup.
-    pub fn cancel(mailbox: &Weak<Mailbox>, cancel: Cancel) {
+    pub fn cancel(mailbox: &Weak<Mailbox>, id: WaiterId) {
         if let Some(local) = Self::owner(mailbox) {
             // Owner-local drops also reach this path after the mailbox has closed.
-            local.borrow_mut().release(cancel);
+            local.borrow_mut().release(id);
             return;
         }
 
         if let Some(mailbox) = mailbox.upgrade() {
-            // If closure wins the race, worker cleanup will release the registration.
-            let _ = mailbox.send(Message::Cancel(cancel));
+            // If closure wins the race, worker cleanup will release the operation.
+            let _ = mailbox.send(Message::Cancel(id));
         }
     }
 
     /// Detach observation without running callbacks under the local borrow.
-    fn release(&mut self, cancel: Cancel) {
-        match cancel {
-            Cancel::Waiter(id) => self.driver.as_mut().unwrap().orphan(id, &mut self.deferred),
-        }
+    fn release(&mut self, id: WaiterId) {
+        self.driver.as_mut().unwrap().orphan(id, &mut self.deferred);
     }
 
     /// Update aggregate pending-operation metrics using only this worker's delta.
@@ -1925,18 +1924,14 @@ impl Worker {
             };
             match message {
                 Message::WakeRoot => self.local.borrow_mut().root_ready = true,
-                Message::Forward(forward) => {
+                Message::Forward(id, sender) => {
                     let mut local = self.local.borrow_mut();
                     let Local {
                         driver, deferred, ..
                     } = &mut *local;
-                    match forward {
-                        Forward::Waiter(id, sender) => {
-                            driver.as_mut().unwrap().forward(id, sender, deferred);
-                        }
-                    }
+                    driver.as_mut().unwrap().forward(id, sender, deferred);
                 }
-                Message::Cancel(cancel) => self.local.borrow_mut().release(cancel),
+                Message::Cancel(id) => self.local.borrow_mut().release(id),
             }
         }
     }
