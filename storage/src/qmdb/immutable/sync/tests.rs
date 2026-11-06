@@ -79,7 +79,7 @@ where
         .await;
         let target_db = H::commit(target_db).await;
 
-        assert_eq!(H::inactivity_floor_loc(&target_db), first_commit_end);
+        assert_eq!(H::inactivity_floor(&target_db), first_commit_end);
 
         // Sync from the oldest retained operation, below the floor, so the client also receives
         // the inactive first batch.
@@ -106,7 +106,7 @@ where
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
         assert_eq!(H::db_root(&synced_db), target_root);
-        assert_eq!(H::inactivity_floor_loc(&synced_db), first_commit_end);
+        assert_eq!(H::inactivity_floor(&synced_db), first_commit_end);
 
         // Keys from the second batch (after the floor) should be findable.
         for op in &late_ops {
@@ -204,7 +204,7 @@ pub(crate) mod harnesses {
     where
         VariableDb<F>: qmdb::sync::Database,
     {
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         variable_apply_ops_with_floor::<F>(db, ops, metadata, floor).await
     }
 
@@ -304,8 +304,8 @@ pub(crate) mod harnesses {
             db.sync_boundary()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> Location<Self::Family> {
+            db.inactivity_floor()
         }
 
         fn db_root(db: &Self::Db) -> sha256::Digest {
@@ -661,8 +661,8 @@ pub(crate) mod harnesses {
             db.size()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<F> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> Location<F> {
+            db.inactivity_floor()
         }
 
         fn metadata(db: &Self::Db) -> Option<Self::Value> {
@@ -779,8 +779,8 @@ pub(crate) mod harnesses {
             db.size()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<F> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> Location<F> {
+            db.inactivity_floor()
         }
 
         fn metadata(db: &Self::Db) -> Option<Self::Value> {

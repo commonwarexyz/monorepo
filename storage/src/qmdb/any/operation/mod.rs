@@ -94,7 +94,7 @@ impl<F: Family, S: Update> crate::qmdb::operation::Operation<F> for Operation<F,
 }
 
 impl<F: Family, S: Update> crate::qmdb::operation::Floored<F> for Operation<F, S> {
-    fn has_floor(&self) -> Option<Location<F>> {
+    fn inactivity_floor(&self) -> Option<Location<F>> {
         match self {
             Self::CommitFloor(_, loc) => Some(*loc),
             _ => None,

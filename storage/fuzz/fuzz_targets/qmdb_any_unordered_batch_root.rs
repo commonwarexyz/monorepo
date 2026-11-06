@@ -9,7 +9,6 @@ use commonware_storage::{
     merkle::{Family as MerkleFamily, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::any::{
         batch::{MerkleizedBatch, UnmerkleizedBatch},
-        traits::DbAny as _,
         unordered::fixed::{Config, Db as AnyDb, Update},
     },
     translator::OneCap,
@@ -233,18 +232,14 @@ async fn assert_recovers<F: MerkleFamily>(
     let db = db.commit().await.unwrap();
     assert_matches_model(&db, model).await;
     let root = db.root();
-    let floor = db.inactivity_floor_loc();
+    let floor = db.inactivity_floor();
     drop(db);
 
     let db: Db<F> = Db::init(context.child("reopened"), test_config(name), None)
         .await
         .expect("reopen unordered any db");
     assert_eq!(db.root(), root, "root changed across reopen");
-    assert_eq!(
-        db.inactivity_floor_loc(),
-        floor,
-        "floor changed across reopen"
-    );
+    assert_eq!(db.inactivity_floor(), floor, "floor changed across reopen");
     assert_matches_model(&db, model).await;
     db.destroy().await.unwrap();
 }
@@ -269,7 +264,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             );
             model.insert(key_from_seed(write.key), value_from_bytes(write.value));
         }
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         let (initial, _) = merkleize(&db, batch, floor, &input.initial_plan, &mut model).await;
         let db = db.apply_batch(initial).await.unwrap();
         let db = db.commit().await.unwrap();
@@ -281,7 +276,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 // committed snapshot.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
-                let floor = db.inactivity_floor_loc();
+                let floor = db.inactivity_floor();
                 let (parent, _) =
                     merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
@@ -318,7 +313,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 // only B and position that suffix relative to the now-committed A.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
-                let floor = db.inactivity_floor_loc();
+                let floor = db.inactivity_floor();
                 let (a, _) = merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 let batch = apply_mutations(a.new_batch::<Sha256>(), &input.child);
                 apply_to_model(&mut model, &input.child);
@@ -361,7 +356,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 // checks a multi-diff ancestor walk against a committed-only reference.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
-                let floor = db.inactivity_floor_loc();
+                let floor = db.inactivity_floor();
                 let (parent, _) =
                     merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
@@ -407,7 +402,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 // re-creates the same colliding keys.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
-                let floor = db.inactivity_floor_loc();
+                let floor = db.inactivity_floor();
                 let (a, _) = merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 let batch = apply_mutations(a.new_batch::<Sha256>(), &input.child);
                 apply_to_model(&mut model, &input.child);

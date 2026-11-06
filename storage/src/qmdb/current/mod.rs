@@ -1280,8 +1280,8 @@ pub mod tests {
 
         // Also verify inactivity floors match
         assert_eq!(
-            db_no_pruning.inactivity_floor_loc(),
-            db_pruning.inactivity_floor_loc()
+            db_no_pruning.inactivity_floor(),
+            db_pruning.inactivity_floor()
         );
 
         db_no_pruning.destroy().await.unwrap();
@@ -1326,7 +1326,7 @@ pub mod tests {
         warn!(
             "pruned_bits_before={}, inactivity_floor={}, op_count={}",
             pruned_bits_before,
-            *db.inactivity_floor_loc(),
+            *db.inactivity_floor(),
             *db.bounds().end
         );
 
@@ -1530,7 +1530,7 @@ pub mod tests {
             let pruned = db.pruned_bits();
             Self {
                 root: db.root(),
-                floor: db.inactivity_floor_loc(),
+                floor: db.inactivity_floor(),
                 bits: (pruned..*bounds.end).map(|i| db.get_bit(i)).collect(),
                 pruned,
                 bounds,
@@ -2629,7 +2629,7 @@ pub mod tests {
             .await;
             history.push(Generation {
                 size: db.bounds().end,
-                floor: db.inactivity_floor_loc(),
+                floor: db.inactivity_floor(),
                 sync_boundary: db.sync_boundary(),
                 root: db.root(),
             });
@@ -2653,7 +2653,7 @@ pub mod tests {
             let initial_size = db.bounds().end;
             let initial_root = db.root();
             let initial_ops_root = db.ops_root();
-            let initial_floor = db.inactivity_floor_loc();
+            let initial_floor = db.inactivity_floor();
 
             let metadata_a = val(900);
             let db = commit_writes_with_metadata(
@@ -2665,7 +2665,7 @@ pub mod tests {
             let size_before = db.bounds().end;
             let root_before = db.root();
             let ops_root_before = db.ops_root();
-            let floor_before = db.inactivity_floor_loc();
+            let floor_before = db.inactivity_floor();
 
             let metadata_b = val(901);
             let db = commit_writes_with_metadata(
@@ -2697,7 +2697,7 @@ pub mod tests {
             assert_eq!(db.bounds().end, size_before);
             assert_eq!(db.root(), root_before);
             assert_eq!(db.ops_root(), ops_root_before);
-            assert_eq!(db.inactivity_floor_loc(), floor_before);
+            assert_eq!(db.inactivity_floor(), floor_before);
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
@@ -2716,7 +2716,7 @@ pub mod tests {
             assert_eq!(reopened.bounds().end, size_before);
             assert_eq!(reopened.root(), root_before);
             assert_eq!(reopened.ops_root(), ops_root_before);
-            assert_eq!(reopened.inactivity_floor_loc(), floor_before);
+            assert_eq!(reopened.inactivity_floor(), floor_before);
             assert_eq!(reopened.get_metadata().await.unwrap(), Some(val(900)));
             assert_eq!(reopened.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(reopened.get(&key(1)).await.unwrap(), Some(val(1)));
@@ -2735,7 +2735,7 @@ pub mod tests {
             assert_eq!(reopened.bounds().end, initial_size);
             assert_eq!(reopened.root(), initial_root);
             assert_eq!(reopened.ops_root(), initial_ops_root);
-            assert_eq!(reopened.inactivity_floor_loc(), initial_floor);
+            assert_eq!(reopened.inactivity_floor(), initial_floor);
             assert_eq!(reopened.get_metadata().await.unwrap(), None);
             assert_eq!(reopened.get(&key(0)).await.unwrap(), None);
             assert_eq!(reopened.get(&key(1)).await.unwrap(), None);
@@ -2754,7 +2754,7 @@ pub mod tests {
             assert_eq!(reopened_initial.bounds().end, initial_size);
             assert_eq!(reopened_initial.root(), initial_root);
             assert_eq!(reopened_initial.ops_root(), initial_ops_root);
-            assert_eq!(reopened_initial.inactivity_floor_loc(), initial_floor);
+            assert_eq!(reopened_initial.inactivity_floor(), initial_floor);
             assert_eq!(reopened_initial.get_metadata().await.unwrap(), None);
             assert_eq!(reopened_initial.get(&key(0)).await.unwrap(), None);
             assert_eq!(reopened_initial.get(&key(1)).await.unwrap(), None);
@@ -2787,7 +2787,7 @@ pub mod tests {
                     .await;
                 history.push((
                     db.bounds().end,
-                    db.inactivity_floor_loc(),
+                    db.inactivity_floor(),
                     db.root(),
                     db.ops_root(),
                     val(20_000 + round),
@@ -2825,7 +2825,7 @@ pub mod tests {
                         "expected recoverable pruned target with repeated updates. \
                          bounds={bounds:?}, pruned_bits={pruned_bits}, latest_floor={:?}, \
                          history={history:?}",
-                        db.inactivity_floor_loc()
+                        db.inactivity_floor()
                     )
                 });
 
@@ -2938,7 +2938,7 @@ pub mod tests {
 
             let root_before = db.root();
             assert!(
-                *db.inactivity_floor_loc() >= 256,
+                *db.inactivity_floor() >= 256,
                 "expected inactivity floor past chunk 0"
             );
             assert_eq!(
@@ -3002,7 +3002,7 @@ pub mod tests {
                 let merkleized = batch.merkleize(&db).await.unwrap();
                 db = db.apply_batch(merkleized).await.unwrap();
                 db = db.commit().await.unwrap();
-                history.push((db.bounds().end, db.inactivity_floor_loc()));
+                history.push((db.bounds().end, db.inactivity_floor()));
             }
 
             let boundary = db.sync_boundary();
@@ -3098,7 +3098,7 @@ pub mod tests {
             let db = db.prune(prune_boundary).await.unwrap();
 
             let boundary = db.sync_boundary();
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             assert!(
                 boundary < floor,
                 "delayed-merge lag must be strictly active: boundary={boundary}, floor={floor}"
@@ -3146,7 +3146,7 @@ pub mod tests {
             let db = db.prune(prune_boundary).await.unwrap();
 
             let boundary = db.sync_boundary();
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             let chunk_bits = commonware_utils::bitmap::BitMap::<N>::CHUNK_SIZE_BITS;
             assert!(
                 boundary <= floor && *floor - *boundary < chunk_bits,
@@ -3183,7 +3183,7 @@ pub mod tests {
                     .await;
             }
 
-            assert!(*db.inactivity_floor_loc() > 1);
+            assert!(*db.inactivity_floor() > 1);
             let small = Location::new(1);
             let db = db.prune(small).await.unwrap();
 
@@ -3385,7 +3385,7 @@ pub mod tests {
             let mut commit_idx = 0u64;
 
             // Grow until the inactivity floor reaches 4 chunks.
-            while *db.inactivity_floor_loc() < 1024 {
+            while *db.inactivity_floor() < 1024 {
                 let value = Some(val(80_000 + commit_idx));
                 db = mmb_commit(db, [(k, value)]).await;
                 ref_db = mmb_commit(ref_db, [(k, value)]).await;
@@ -3772,7 +3772,7 @@ pub mod tests {
             for round in 0..COMMITS {
                 db = commit_writes_with_metadata(db, [(key(0), Some(val(10_000 + round)))], None)
                     .await;
-                history.push((db.bounds().end, db.inactivity_floor_loc()));
+                history.push((db.bounds().end, db.inactivity_floor()));
             }
 
             // Prune to the first chunk boundary. The bitmap lands exactly there, while the log
@@ -4783,7 +4783,7 @@ pub mod tests {
             // Commit P, prune chunk 0, then apply C.
             let db = db.apply_batch(p_m).await.unwrap().commit().await.unwrap();
 
-            let floor = *db.inactivity_floor_loc();
+            let floor = *db.inactivity_floor();
             assert!(floor >= 256, "floor must be past chunk 0: floor={floor}",);
 
             let boundary = db.sync_boundary();
@@ -5299,7 +5299,7 @@ pub mod tests {
                 db = db.apply_batch(batch).await.unwrap();
             }
             let db = db.commit().await.unwrap();
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             let db = db
                 .prune(Location::new(*floor / CHUNK_BITS * CHUNK_BITS))
                 .await
@@ -5586,7 +5586,7 @@ pub mod tests {
                     // against the canonical root, and evicted keys are absent.
                     let db = db.apply_batch(child).await.unwrap();
                     assert_eq!(db.root(), root);
-                    assert_eq!(db.inactivity_floor_loc(), tip);
+                    assert_eq!(db.inactivity_floor(), tip);
                     assert_eq!(db.live().await, live);
                     assert_bits(db.bitmap(), &live);
                     db.assert_exact().await;
@@ -5828,7 +5828,7 @@ pub mod tests {
                     let db = db.apply_batch(child).await.unwrap();
                     drop(parent);
                     assert_eq!(db.root(), root);
-                    assert_eq!(db.inactivity_floor_loc(), stopped);
+                    assert_eq!(db.inactivity_floor(), stopped);
                     assert_eq!(db.bitmap().complete_chunks(), 3);
                     assert_eq!(ungrafted(&db), 0);
                     assert_eq!(db.live().await, live);
@@ -5858,7 +5858,7 @@ pub mod tests {
                             .unwrap();
                     assert_eq!(db.root(), root);
                     assert_eq!(db.bounds(), bounds);
-                    assert_eq!(db.inactivity_floor_loc(), stopped);
+                    assert_eq!(db.inactivity_floor(), stopped);
                     assert_eq!(db.pruned_bits(), *boundary);
                     assert_eq!(db.live().await, live);
                     assert_bits(db.bitmap(), &live);

@@ -181,7 +181,7 @@ fn fuzz(input: FuzzInput) {
                         };
                     }
                     let changeset = batch.with_metadata(metadata_bytes.clone()).finalize();
-                    let inherited = db.inactivity_floor_loc();
+                    let inherited = db.inactivity_floor();
                     let mut policy =
                         Recorder::new(plan, |seed| vec![seed; usize::from(seed % 16) + 1]);
                     let db = db
@@ -191,7 +191,7 @@ fn fuzz(input: FuzzInput) {
                     policy.check(
                         &mut model,
                         inherited,
-                        db.inactivity_floor_loc(),
+                        db.inactivity_floor(),
                         db.bounds().end - 1,
                     );
                     db.commit().await.expect("Commit should not fail")
@@ -216,7 +216,7 @@ fn fuzz(input: FuzzInput) {
                 Operation::Sync => db.sync().await.expect("Sync should not fail"),
 
                 Operation::Prune => {
-                    let floor = db.inactivity_floor_loc();
+                    let floor = db.inactivity_floor();
                     db.prune(floor).await.expect("Prune should not fail")
                 }
 
@@ -226,13 +226,13 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::InactivityFloorLoc => {
-                    let _ = db.inactivity_floor_loc();
+                    let _ = db.inactivity_floor();
                     db
                 }
 
                 Operation::SimulateFailure => {
                     pending.clear();
-                    let floor = db.inactivity_floor_loc();
+                    let floor = db.inactivity_floor();
                     drop(db);
 
                     let cfg = test_config("store-fuzz-test");
@@ -244,11 +244,7 @@ fn fuzz(input: FuzzInput) {
                     .await
                     .expect("Failed to init db");
                     restarts += 1;
-                    assert_eq!(
-                        db.inactivity_floor_loc(),
-                        floor,
-                        "floor changed across restart"
-                    );
+                    assert_eq!(db.inactivity_floor(), floor, "floor changed across restart");
                     assert_matches_model(&db, &model, &keys).await;
                     db
                 }

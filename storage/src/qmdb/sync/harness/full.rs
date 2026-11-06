@@ -95,7 +95,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     fn sync_boundary(db: &Self::Db) -> Location<Self::Family>;
 
     /// Returns the location before which every operation in `db` is inactive.
-    fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family>;
+    fn inactivity_floor(db: &Self::Db) -> Location<Self::Family>;
 
     /// Returns the root that sync verifies operations against.
     fn db_root(db: &Self::Db) -> sha256::Digest;
@@ -149,7 +149,7 @@ where
         let lower_bound = H::sync_boundary(&target_db);
         let target_db = H::prune(target_db, lower_bound).await;
         let target_op_count = H::bounds(&target_db).end;
-        let target_floor = H::inactivity_floor_loc(&target_db);
+        let target_floor = H::inactivity_floor(&target_db);
         let target_root = H::db_root(&target_db);
         let target_canonical_root = H::canonical_root(&target_db);
 
@@ -176,7 +176,7 @@ where
         let bounds = H::bounds(&got_db);
         assert_eq!(bounds.end, target_op_count);
         assert_eq!(bounds.start, lower_bound);
-        assert_eq!(H::inactivity_floor_loc(&got_db), target_floor);
+        assert_eq!(H::inactivity_floor(&got_db), target_floor);
         assert_eq!(H::db_root(&got_db), target_root);
         assert_eq!(H::canonical_root(&got_db), target_canonical_root);
 
@@ -201,8 +201,8 @@ where
         let got_db = H::init_db_with_config(client_context.child("reopened"), db_config).await;
         assert_eq!(H::bounds(&got_db).end, H::bounds(&target_db).end);
         assert_eq!(
-            H::inactivity_floor_loc(&got_db),
-            H::inactivity_floor_loc(&target_db)
+            H::inactivity_floor(&got_db),
+            H::inactivity_floor(&target_db)
         );
         assert_eq!(H::canonical_root(&got_db), H::canonical_root(&target_db));
         H::assert_ops_applied(&got_db, target_start, &target_ops).await;
@@ -516,8 +516,8 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
             assert_eq!(bounds.end, H::bounds(&target_db).end);
             assert_eq!(bounds.start, final_target.range.start());
             assert_eq!(
-                H::inactivity_floor_loc(&synced_db),
-                H::inactivity_floor_loc(&target_db)
+                H::inactivity_floor(&synced_db),
+                H::inactivity_floor(&target_db)
             );
             assert_eq!(H::db_root(&synced_db), H::db_root(&target_db));
             assert_eq!(H::canonical_root(&synced_db), H::canonical_root(&target_db));
@@ -615,7 +615,7 @@ where
         let target_db = H::apply_ops(target_db, last_op.clone(), None).await;
         let root = H::db_root(&target_db);
         let canonical_root = H::canonical_root(&target_db);
-        let floor = H::inactivity_floor_loc(&target_db);
+        let floor = H::inactivity_floor(&target_db);
         let lower_bound = H::sync_boundary(&target_db);
         let upper_bound = H::bounds(&target_db).end;
 
@@ -638,7 +638,7 @@ where
         let sync_db: DbOf<H> = sync::sync(config).await.unwrap();
 
         assert_eq!(H::bounds(&sync_db).end, upper_bound);
-        assert_eq!(H::inactivity_floor_loc(&sync_db), floor);
+        assert_eq!(H::inactivity_floor(&sync_db), floor);
         assert_eq!(H::db_root(&sync_db), root);
         assert_eq!(H::canonical_root(&sync_db), canonical_root);
         H::assert_ops_applied(&sync_db, original_start, &original_ops).await;
@@ -730,7 +730,7 @@ where
         // Start at the inactivity floor, which is positive on every database, so the updates
         // below can decrease it. The engine requires only that the lower bound never decreases,
         // not that it equals the sync boundary.
-        let initial_lower_bound = H::inactivity_floor_loc(&target_db);
+        let initial_lower_bound = H::inactivity_floor(&target_db);
         assert!(
             *initial_lower_bound > 0,
             "test setup requires non-zero inactivity floor"
@@ -850,7 +850,7 @@ where
 
         // The lower bounds are inactivity floors, which advance with the target on every
         // database.
-        let initial_lower_bound = H::inactivity_floor_loc(&target_db);
+        let initial_lower_bound = H::inactivity_floor(&target_db);
         let initial_upper_bound = H::bounds(&target_db).end;
         let initial_root = H::db_root(&target_db);
 
@@ -862,7 +862,7 @@ where
         let target_db = H::prune(target_db, Location::new(10)).await;
         let target_db = H::apply_ops(target_db, vec![], None).await;
 
-        let final_lower_bound = H::inactivity_floor_loc(&target_db);
+        let final_lower_bound = H::inactivity_floor(&target_db);
         let final_upper_bound = H::bounds(&target_db).end;
         let final_root = H::db_root(&target_db);
         let final_canonical_root = H::canonical_root(&target_db);
@@ -902,7 +902,7 @@ where
         let bounds = H::bounds(&synced_db);
         assert_eq!(bounds.end, final_upper_bound);
         assert_eq!(bounds.start, final_lower_bound);
-        assert_eq!(H::inactivity_floor_loc(&synced_db), final_lower_bound);
+        assert_eq!(H::inactivity_floor(&synced_db), final_lower_bound);
         assert_eq!(H::sync_boundary(&synced_db), final_boundary);
 
         H::destroy(synced_db).await;

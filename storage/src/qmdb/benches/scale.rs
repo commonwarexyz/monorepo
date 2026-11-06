@@ -573,7 +573,7 @@ fn time_init(
     ) -> (Duration, u64) {
         let elapsed = start.elapsed();
         let end: u64 = *db.bounds().end;
-        let floor: u64 = *db.inactivity_floor_loc();
+        let floor: u64 = *db.inactivity_floor();
         (elapsed, end.saturating_sub(floor))
     }
 

@@ -53,7 +53,7 @@ impl<F: Family, K: Key, V: ValueEncoding> Operation<F, K, V> {
     }
 
     /// Returns the inactivity floor location if this is a commit operation.
-    pub const fn has_floor(&self) -> Option<Location<F>> {
+    pub const fn inactivity_floor(&self) -> Option<Location<F>> {
         match self {
             Self::Commit(_, loc) => Some(*loc),
             Self::Set(_, _) => None,
@@ -86,8 +86,8 @@ impl<F: Family, K: Key, V: ValueEncoding> OperationTrait<F> for Operation<F, K, 
 }
 
 impl<F: Family, K: Key, V: ValueEncoding> Floored<F> for Operation<F, K, V> {
-    fn has_floor(&self) -> Option<Location<F>> {
-        self.has_floor()
+    fn inactivity_floor(&self) -> Option<Location<F>> {
+        self.inactivity_floor()
     }
 }
 
@@ -173,22 +173,25 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_has_floor() {
+    fn test_operation_inactivity_floor() {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
         let set_op = VarOp::Set(key, value.clone());
-        assert_eq!(<VarOp as Floored<mmr::Family>>::has_floor(&set_op), None);
+        assert_eq!(
+            <VarOp as Floored<mmr::Family>>::inactivity_floor(&set_op),
+            None
+        );
 
         let commit_op = VarOp::Commit(Some(value), Location::new(42));
         assert_eq!(
-            <VarOp as Floored<mmr::Family>>::has_floor(&commit_op),
+            <VarOp as Floored<mmr::Family>>::inactivity_floor(&commit_op),
             Some(Location::new(42))
         );
 
         let commit_op_none = VarOp::Commit(None, Location::new(0));
         assert_eq!(
-            <VarOp as Floored<mmr::Family>>::has_floor(&commit_op_none),
+            <VarOp as Floored<mmr::Family>>::inactivity_floor(&commit_op_none),
             Some(Location::new(0))
         );
     }

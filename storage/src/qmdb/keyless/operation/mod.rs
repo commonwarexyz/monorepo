@@ -55,7 +55,7 @@ impl<F: Family, V: ValueEncoding> Operation<F, V> {
     }
 
     /// Returns the inactivity floor location if this is a commit operation.
-    pub const fn has_floor(&self) -> Option<Location<F>> {
+    pub const fn inactivity_floor(&self) -> Option<Location<F>> {
         match self {
             Self::Commit(_, loc) => Some(*loc),
             Self::Append(_) => None,
@@ -76,8 +76,8 @@ impl<F: Family, V: Codec> Committable for Operation<F, V> {
 }
 
 impl<F: Family, V: ValueEncoding> Floored<F> for Operation<F, V> {
-    fn has_floor(&self) -> Option<Location<F>> {
-        self.has_floor()
+    fn inactivity_floor(&self) -> Option<Location<F>> {
+        self.inactivity_floor()
     }
 }
 

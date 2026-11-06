@@ -247,7 +247,7 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
             .field("bounds", &self.bounds())
-            .field("inactivity_floor_loc", &self.inactivity_floor_loc())
+            .field("inactivity_floor", &self.inactivity_floor())
             .finish_non_exhaustive()
     }
 }
@@ -305,7 +305,7 @@ where
             // Read the floor from the last commit operation.
             let last_op = journal.journal.read(*last_commit_loc).await?;
             let inactivity_floor_loc = last_op
-                .has_floor()
+                .inactivity_floor()
                 .expect("last operation should be a commit with floor");
 
             // Replay the log from the inactivity floor to build the snapshot.
@@ -336,7 +336,7 @@ where
     }
 
     /// Return the inactivity floor location declared by the last committed batch.
-    pub const fn inactivity_floor_loc(&self) -> Location<F> {
+    pub const fn inactivity_floor(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
 
@@ -1168,7 +1168,7 @@ pub(super) mod tests {
         // Apply the parent and prune to its floor.
         let db = db.apply_batch(Arc::clone(&parent)).await.unwrap();
         let db = db.commit().await.unwrap();
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         let db = db.prune(floor).await.unwrap();
         assert!(*db.bounds().start > 0, "the prune must remove history");
 
@@ -1297,7 +1297,7 @@ pub(super) mod tests {
         let bounds = db.bounds();
         assert_eq!(bounds.end, 1);
         assert_eq!(bounds.start, Location::new(0));
-        assert_eq!(db.inactivity_floor_loc(), Location::new(0));
+        assert_eq!(db.inactivity_floor(), Location::new(0));
         assert!(db.get_metadata().await.unwrap().is_none());
 
         // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
@@ -1536,7 +1536,7 @@ pub(super) mod tests {
         let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.sync().await.unwrap();
-        let durable_state = (db.root(), db.inactivity_floor_loc(), db.bounds().end);
+        let durable_state = (db.root(), db.inactivity_floor(), db.bounds().end);
 
         // Apply, but do not commit, a batch that advances the floor far enough for prune to
         // remove the oldest blob.
@@ -1551,7 +1551,7 @@ pub(super) mod tests {
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
-        let buffered_state = (db.root(), db.inactivity_floor_loc(), db.bounds().end);
+        let buffered_state = (db.root(), db.inactivity_floor(), db.bounds().end);
         assert_ne!(buffered_state, durable_state);
 
         let db = db.prune(buffered_floor).await.unwrap();
@@ -1561,8 +1561,8 @@ pub(super) mod tests {
         // Reopen must produce one coherent state. In particular, it must not recover the old
         // floor after the prune has removed operations that floor still needs.
         let db = open_db(context.child("second")).await;
-        assert!(db.bounds().start <= db.inactivity_floor_loc());
-        let recovered_state = (db.root(), db.inactivity_floor_loc(), db.bounds().end);
+        assert!(db.bounds().start <= db.inactivity_floor());
+        let recovered_state = (db.root(), db.inactivity_floor(), db.bounds().end);
         assert!(
             recovered_state == durable_state || recovered_state == buffered_state,
             "recovered state is neither the durable baseline nor the buffered state"
@@ -2076,7 +2076,7 @@ pub(super) mod tests {
         let db = db.prune(Location::new(3)).await.unwrap();
 
         // Test pruning beyond inactivity floor
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         let beyond = floor + 1;
         let result = db.prune(beyond).await;
         assert!(
@@ -2095,7 +2095,7 @@ pub(super) mod tests {
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         commit_sets_with_floor(db, sets, metadata, floor).await
     }
 
@@ -3517,14 +3517,14 @@ pub(super) mod tests {
         let db = open_db(context.child("test")).await;
 
         // Empty DB has floor=0.
-        assert_eq!(db.inactivity_floor_loc(), Location::new(0));
+        assert_eq!(db.inactivity_floor(), Location::new(0));
 
         // Apply batch with floor=0, floor stays 0.
         let k1 = Sha256::fill(1u8);
         let v1 = Sha256::fill(2u8);
         let merkleized = db.new_batch().set(k1, v1).merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(db.inactivity_floor_loc(), Location::new(0));
+        assert_eq!(db.inactivity_floor(), Location::new(0));
 
         // Apply batch with floor=3, floor advances.
         let k2 = Sha256::fill(3u8);
@@ -3537,13 +3537,13 @@ pub(super) mod tests {
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(db.inactivity_floor_loc(), Location::new(3));
+        assert_eq!(db.inactivity_floor(), Location::new(3));
 
         // Floor persists across restart.
         let db = db.commit().await.unwrap();
         db.sync().await.unwrap();
         let db = open_db(context.child("reopen")).await;
-        assert_eq!(db.inactivity_floor_loc(), Location::new(3));
+        assert_eq!(db.inactivity_floor(), Location::new(3));
 
         db.destroy().await.unwrap();
     }
@@ -3575,7 +3575,7 @@ pub(super) mod tests {
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(db.inactivity_floor_loc(), Location::new(2));
+        assert_eq!(db.inactivity_floor(), Location::new(2));
 
         // Same floor is OK. Second batch: 1 set + 1 commit = total_size 5. floor=2 < 5.
         let k2 = Sha256::fill(3u8);
@@ -3588,7 +3588,7 @@ pub(super) mod tests {
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(db.inactivity_floor_loc(), Location::new(2));
+        assert_eq!(db.inactivity_floor(), Location::new(2));
 
         // Higher floor also succeeds. Third batch: 1 set + 1 commit = total_size 7. floor=5 < 7.
         let k3 = Sha256::fill(5u8);
@@ -3601,7 +3601,7 @@ pub(super) mod tests {
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(db.inactivity_floor_loc(), Location::new(5));
+        assert_eq!(db.inactivity_floor(), Location::new(5));
 
         db.destroy().await.unwrap();
     }
@@ -3635,7 +3635,7 @@ pub(super) mod tests {
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         let first_size = db.bounds().end;
-        assert_eq!(db.inactivity_floor_loc(), Location::new(2));
+        assert_eq!(db.inactivity_floor(), Location::new(2));
 
         // Apply second batch with floor=4 (the new commit's location).
         let k2 = Sha256::fill(3u8);
@@ -3649,14 +3649,14 @@ pub(super) mod tests {
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        assert_eq!(db.inactivity_floor_loc(), Location::new(4));
+        assert_eq!(db.inactivity_floor(), Location::new(4));
 
         // Reopen at the first batch.
         _ = db.sync().await.unwrap();
         let db = open_db(context.child("cap"), Some(first_size))
             .await
             .unwrap();
-        assert_eq!(db.inactivity_floor_loc(), Location::new(2));
+        assert_eq!(db.inactivity_floor(), Location::new(2));
 
         db.destroy().await.unwrap();
     }
@@ -3906,7 +3906,7 @@ pub(super) mod tests {
         assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
         assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
         assert_eq!(db.root(), first_root);
-        assert_eq!(db.inactivity_floor_loc(), Location::new(0));
+        assert_eq!(db.inactivity_floor(), Location::new(0));
 
         // Batch B keys must NOT be accessible.
         assert!(db.get(&k4).await.unwrap().is_none());
@@ -3975,7 +3975,7 @@ pub(super) mod tests {
         assert_eq!(db.get(&k1).await.unwrap(), Some(v1));
         assert!(db.get(&k2).await.unwrap().is_none()); // above first_size, truncated
         assert_eq!(db.root(), first_root);
-        assert_eq!(db.inactivity_floor_loc(), Location::new(0));
+        assert_eq!(db.inactivity_floor(), Location::new(0));
 
         db.destroy().await.unwrap();
     }
@@ -4025,7 +4025,7 @@ pub(super) mod tests {
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.bounds().end - 1, commit_loc);
-        assert_eq!(db.inactivity_floor_loc(), commit_loc);
+        assert_eq!(db.inactivity_floor(), commit_loc);
         let root_after_commit = db.root();
 
         // All three keys are in the in-memory snapshot pre-prune.
@@ -4047,7 +4047,7 @@ pub(super) mod tests {
 
         // State preserved across the prune; root unchanged; commit metadata still readable.
         assert_eq!(db.bounds().end - 1, commit_loc);
-        assert_eq!(db.inactivity_floor_loc(), commit_loc);
+        assert_eq!(db.inactivity_floor(), commit_loc);
         assert_eq!(db.root(), root_after_commit);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
@@ -4064,7 +4064,7 @@ pub(super) mod tests {
         // remains at or above that floor, so the rebuilt snapshot contains no keys.
         let db = open_db(context.child("reopened")).await;
         assert_eq!(db.bounds().end - 1, commit_loc);
-        assert_eq!(db.inactivity_floor_loc(), commit_loc);
+        assert_eq!(db.inactivity_floor(), commit_loc);
         assert_eq!(db.root(), root_after_commit);
 
         // The commit op at `commit_loc` is the anchor that survived pruning. Its metadata
@@ -4092,7 +4092,7 @@ pub(super) mod tests {
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.bounds().end - 1, next_commit_loc);
-        assert_eq!(db.inactivity_floor_loc(), next_commit_loc);
+        assert_eq!(db.inactivity_floor(), next_commit_loc);
 
         // New key readable; keys from the pre-prune batch remain excluded.
         assert_eq!(db.get(&k4).await.unwrap(), Some(v4));

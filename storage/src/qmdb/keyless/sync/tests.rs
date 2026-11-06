@@ -234,7 +234,7 @@ where
         let source_db =
             H::apply_ops_raising_floor(source_db, ops.clone(), Some(H::sample_metadata())).await;
         let bounds = H::bounds(&source_db);
-        let floor = H::inactivity_floor_loc(&source_db);
+        let floor = H::inactivity_floor(&source_db);
         assert_eq!(floor, bounds.end.checked_sub(1).unwrap());
         let root = H::db_root(&source_db);
 
@@ -258,7 +258,7 @@ where
         let synced: DbOf<H> = sync::sync(config).await.unwrap();
 
         assert_eq!(H::bounds(&synced), bounds);
-        assert_eq!(H::inactivity_floor_loc(&synced), floor);
+        assert_eq!(H::inactivity_floor(&synced), floor);
         assert_eq!(H::db_root(&synced), root);
         H::assert_ops_applied(&synced, start, &ops).await;
 
@@ -767,14 +767,14 @@ pub(crate) mod harnesses {
             ops: Vec<OpOf<Self>>,
             metadata: Option<Self::Metadata>,
         ) -> Self::Db {
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             variable_apply_ops::<F>(db, ops, metadata, floor).await
         }
 
         async fn prune(db: Self::Db, loc: Location<Self::Family>) -> Self::Db {
             // Prune requires the floor to be at or beyond the prune target, so commit `loc` as
             // the floor unless the floor already exceeds it.
-            let db = if db.inactivity_floor_loc() > loc {
+            let db = if db.inactivity_floor() > loc {
                 db
             } else {
                 let batch = db.new_batch().with_inactivity_floor(loc);
@@ -793,8 +793,8 @@ pub(crate) mod harnesses {
             db.sync_boundary()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> Location<Self::Family> {
+            db.inactivity_floor()
         }
 
         fn db_root(db: &Self::Db) -> sha256::Digest {
@@ -1090,8 +1090,8 @@ pub(crate) mod harnesses {
             db.size()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<F> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> Location<F> {
+            db.inactivity_floor()
         }
 
         fn metadata(db: &Self::Db) -> Option<Self::Value> {
@@ -1217,8 +1217,8 @@ pub(crate) mod harnesses {
             db.size()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<F> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> Location<F> {
+            db.inactivity_floor()
         }
 
         fn metadata(db: &Self::Db) -> Option<Self::Value> {
