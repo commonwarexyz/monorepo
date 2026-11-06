@@ -40,6 +40,10 @@ impl Group for G2 {
 
     const IDENTITY: Coordinates = IDENTITY;
 
+    // Products in the quadratic extension take fewer multiplies in residues than in the lanes.
+    const SUM_BATCH: Option<usize> = None;
+    const MULTIPLY_BATCH: Option<usize> = None;
+
     fn coordinates(&self) -> &Coordinates {
         &self.0
     }

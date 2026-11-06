@@ -8,14 +8,14 @@ use crate::core::{
     curve::{g1, g2},
     field::{
         arithmetic::Field,
-        fp::{BYTES as FP_BYTES, rns::Rns, unsat49::Unsat49},
+        fp::BYTES as FP_BYTES,
         fp2::{BYTES as FP2_BYTES, Fp2},
         fp12::{self, BYTES, Fp12},
     },
     pairing::{G1Affine, G2Affine, Pair, final_exponentiation, miller_loop},
 };
 use commonware_math::algebra::{Multiplicative, Object};
-use commonware_simd::{Simd, X86V4C};
+use commonware_simd::Simd;
 use core::{
     array,
     fmt::{self, Debug, Formatter},
@@ -174,29 +174,11 @@ fn fill() -> (G1Affine, G2Affine) {
 impl Kernel for Pairings<'_> {
     type Output = GT;
 
-    fn batch(&self) -> bool {
-        self.0.len() > SHARED
-    }
-
     #[inline(always)]
     fn run<S: Simd, F: Field<S>>(self, simd: S) -> GT {
         self.miller_loops::<S, F>(simd).map_or(GT::ONE, |product| {
             Self::exponentiate::<S, F>(simd, &product)
         })
-    }
-
-    /// Many pairs fill the 64-bit lanes with Miller loops, whose product, a single element, is
-    /// exponentiated in residues.
-    #[inline(always)]
-    fn x86_v4c<S: X86V4C>(self, simd: S) -> GT {
-        if self.batch() {
-            self.miller_loops::<S, Unsat49<S>>(simd)
-                .map_or(GT::ONE, |product| {
-                    Self::exponentiate::<S, Rns<S>>(simd, &product)
-                })
-        } else {
-            self.run::<S, Rns<S>>(simd)
-        }
     }
 }
 
@@ -205,10 +187,6 @@ struct Each<'a>(&'a [(G1, G2)], &'a mut [GT]);
 
 impl Kernel for Each<'_> {
     type Output = ();
-
-    fn batch(&self) -> bool {
-        self.0.len() > 1
-    }
 
     // Debug builds keep this a call so that each representation's frame stays separate.
     #[cfg_attr(not(debug_assertions), inline(always))]

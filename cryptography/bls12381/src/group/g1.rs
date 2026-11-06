@@ -1,6 +1,6 @@
 //! The group G1.
 
-use super::kernel::Group;
+use super::kernel::{Group, MAX_LANES};
 use crate::core::{
     curve::g1::{Coordinates, IDENTITY, Point},
     field::{
@@ -35,6 +35,11 @@ impl Group for G1 {
     type Points<S: Simd, F: Field<S>> = Point<F>;
 
     const IDENTITY: Coordinates = IDENTITY;
+
+    // The lanes' sums cost additions of their own, and their pass over every lane costs as much
+    // whether the lanes are full or not, so a few elements finish sooner one at a time.
+    const SUM_BATCH: Option<usize> = Some(MAX_LANES);
+    const MULTIPLY_BATCH: Option<usize> = Some(8);
 
     fn coordinates(&self) -> &Coordinates {
         &self.0

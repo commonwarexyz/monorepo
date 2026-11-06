@@ -2,11 +2,10 @@
 //!
 //! Each public operation runs as one kernel through [`dispatch`], which selects the backend at the
 //! boundary. The backend's profile then selects the base field representation: on x86v4c,
-//! residues for a single item, whose latency they shorten, and 64-bit lanes for independent
-//! items, which an operation may switch between through canonical encodings, as the product of
-//! pairings does for its final exponentiation; 32-bit lanes elsewhere. Elements cross the
-//! boundary as canonical coordinates, so every kernel loads its inputs and stores its outputs,
-//! and loaded coordinates satisfy the bounds of the curve formulas.
+//! residues, except for the sums and multiples of many elements of G1, whose base field products
+//! the 64-bit lanes finish sooner; 32-bit lanes elsewhere. Elements cross the boundary as
+//! canonical coordinates, so every kernel loads its inputs and stores its outputs, and loaded
+//! coordinates satisfy the bounds of the curve formulas.
 //!
 //! Operations over slices of elements ([`Sum`], [`MultiplyEach`], and [`Msm`]) hold one element
 //! per lane, so they amortize the boundary and fill every lane; the single-element operations
@@ -53,22 +52,13 @@ const DOUBLE_COST: usize = 7;
 /// Estimated cost of a negation, which multiplies one coordinate.
 const NEGATE_COST: usize = 2;
 
-/// Fewest elements for which [`Sum`] favors the wide representations, whose lane sums cost
-/// additions of their own.
-const SUM_BATCH: usize = MAX_LANES;
-
-/// Fewest elements for which [`MultiplyEach`] and [`Msm`] favor the wide representations, whose
-/// pass over every lane costs as much whether the lanes are full or not: below the lane count of
-/// the widest 64-bit representation, a single-element representation finishes sooner.
-const MULTIPLY_BATCH: usize = 8;
-
 /// An operation written once over every base field representation.
 pub trait Kernel: Sized {
     /// The result of the operation.
     type Output;
 
-    /// Returns whether the operation holds independent items in every lane, which favors wide
-    /// representations over the latency of a single item.
+    /// Returns whether the operation holds independent items in every lane of a 64-bit
+    /// representation, which then finishes them sooner than residues.
     fn batch(&self) -> bool {
         false
     }
@@ -76,9 +66,9 @@ pub trait Kernel: Sized {
     /// Runs the operation in the representation `F`.
     fn run<S: Simd, F: Field<S>>(self, simd: S) -> Self::Output;
 
-    /// Runs the operation on x86v4c: in residues for a single item and in 64-bit lanes for
-    /// independent items. An operation whose independent items end in a single one may override
-    /// this to switch representations in between.
+    /// Runs the operation on x86v4c: in 64-bit lanes for a batch of independent items and in
+    /// residues otherwise. An operation whose independent items end in a single one may override
+    /// this to switch representations in between through canonical encodings.
     #[inline(always)]
     fn x86_v4c<S: X86V4C>(self, simd: S) -> Self::Output {
         if self.batch() {
@@ -211,6 +201,14 @@ pub trait Group: Copy + Send + Sync {
 
     /// The identity.
     const IDENTITY: Self::Coordinates;
+
+    /// Fewest elements for which [`Sum`] favors the 64-bit lanes over residues, or `None` when
+    /// residues finish every count sooner.
+    const SUM_BATCH: Option<usize>;
+
+    /// Fewest elements for which [`MultiplyEach`] favors the 64-bit lanes over residues, or
+    /// `None` when residues finish every count sooner.
+    const MULTIPLY_BATCH: Option<usize>;
 
     /// Returns the element's coordinates.
     fn coordinates(&self) -> &Self::Coordinates;
@@ -408,7 +406,7 @@ impl<G: Group> Kernel for Sum<'_, G> {
     type Output = G;
 
     fn batch(&self) -> bool {
-        self.0.len() > SUM_BATCH
+        G::SUM_BATCH.is_some_and(|batch| self.0.len() > batch)
     }
 
     // Debug builds keep this a call so that each representation's frame stays separate.
@@ -434,7 +432,7 @@ impl<G: Group> Kernel for MultiplyEach<'_, G> {
     type Output = ();
 
     fn batch(&self) -> bool {
-        self.elements.len().min(self.scalars.len()) > MULTIPLY_BATCH
+        G::MULTIPLY_BATCH.is_some_and(|batch| self.elements.len().min(self.scalars.len()) > batch)
     }
 
     // Debug builds keep this a call so that each representation's frame stays separate.
@@ -758,6 +756,9 @@ fn pippenger<S: Simd, F: Field<S>, G: Group>(
 /// Returns the sum of the elements times their scalars, in variable time.
 ///
 /// The scalars must be public: the operations and memory accesses depend on their digits.
+///
+/// Residues finish every count sooner than the 64-bit lanes, in both groups: the lanes' bucket
+/// sums move elements between lanes, which costs more than their wider products save.
 #[derive(Clone, Copy)]
 pub struct Msm<'a, G> {
     /// The elements.
@@ -770,10 +771,6 @@ pub struct Msm<'a, G> {
 
 impl<G: Group> Kernel for Msm<'_, G> {
     type Output = G;
-
-    fn batch(&self) -> bool {
-        self.elements.len().min(self.scalars.len()) > MULTIPLY_BATCH
-    }
 
     // Debug builds keep this a call so that each representation's frame stays separate.
     #[cfg_attr(not(debug_assertions), inline(always))]
