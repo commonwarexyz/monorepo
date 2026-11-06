@@ -50,7 +50,7 @@
 
 use super::{
     deadlines::Deadlines,
-    registration::Observation,
+    operation::Observation,
     request::{Request, RequestOutput},
     runtime::{Deferred, RingConfig},
     waiter::{CompletionOutcome, Observer, UserData, WaiterId, Waiters},
