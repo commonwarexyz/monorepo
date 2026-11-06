@@ -3,7 +3,7 @@
 //! Multimmit separates dissemination from ordering. An ordered subset of committee members owns
 //! producer chains and disseminates new application blocks without waiting for a consensus leader.
 //! Validators cast DA (data availability) votes for the blocks they hold and validated, and
-//! `n - 2f` DA votes (or `n - f`, for binding receipts) certify a chain position. One scheduled
+//! `n - 2f` DA votes, sent to the chain's producer, certify a chain position. One scheduled
 //! leader per view proposes a position on every producer chain. A V-QC (view quorum certificate)
 //! lets the view exit and selects safe tips; an
 //! L-QC (leader quorum certificate) finalizes the leader and one tip per chain. The resulting
@@ -64,8 +64,8 @@
 //! proofs. There is no certification hook: the protocol has no notion of certifiability, and
 //! [`crate::CertifiableAutomaton`] is deliberately incompatible with it. Each chain's
 //! [`types::PathLimits`] bound how far its producer pipelines above its DA-certified anchor and
-//! what proposals and votes carry for it. [`config::Parameters`] explains how chains with `d = 0`
-//! and `e = 0` and a raised DA quorum turn DA certificates into binding receipts.
+//! what proposals and votes carry for it. [`config::Parameters`] explains how an epoch with payments
+//! turns chains with `d = 0` and `e = 0` into payment chains, whose producers form `n - f` receipts.
 //!
 //! # Fault Model and Recovery
 //!
