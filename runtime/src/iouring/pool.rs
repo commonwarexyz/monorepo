@@ -812,11 +812,7 @@ pub mod tests {
 
     /// A pool of `workers` workers with no runner.
     pub fn pool(workers: usize) -> Pool {
-        Pool::new(
-            (0..workers)
-                .map(|_| Arc::new(Mailbox::new().unwrap()))
-                .collect(),
-        )
+        Pool::new((0..workers).map(|_| Arc::new(Mailbox::new())).collect())
     }
 
     /// The owner's end of worker `index`'s run queue.
@@ -1127,7 +1123,7 @@ pub mod tests {
         pool.stop();
         assert!(pool.is_stopped());
 
-        assert!(!pool.mailbox(0).waker.pending(0));
+        assert!(!pool.mailbox(0).waker.moved(0));
         for index in 1..3 {
             let mut messages = Vec::new();
             assert!(pool.mailbox(index).take(&mut messages));

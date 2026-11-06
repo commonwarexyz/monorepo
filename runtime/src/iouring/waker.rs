@@ -1,37 +1,50 @@
-//! One worker's futex/eventfd wake source and mailbox publication sequence.
+//! One worker's eventcount: a futex word that every notification advances.
 //!
-//! [`Waker`] delivers signals to one worker. [`Idle`](super::idle::Idle)
-//! selects which pool worker to signal. See [`super::idle`] for the parking
-//! sequence.
+//! [`Waker`] notifies one worker. [`Idle`](super::idle::Idle) selects which
+//! pool worker to notify. See [`super::idle`] for the parking sequence.
 //!
-//! Mailbox producers and the worker use this wake protocol:
-//! - Producers call [`Waker::publish`] when enqueueing a new batch.
-//! - The loop calls [`Waker::park_idle`] when it is fully idle.
-//! - The loop acquires an [`ArmGuard`] from [`Waker::arm`] before
-//!   blocking in the ring wait of `Driver::park`.
-//! - Producers wake only the currently armed wait target.
-//! - A dedicated "wake signalled" bit coalesces repeated wake attempts.
-//! - Producers complete requested signaling with [`Waker::wake`] after unlocking.
-//! - Wake CQEs are acknowledged with [`Waker::acknowledge`].
+//! The word holds a waiter bit and a sequence. A producer first makes its
+//! condition visible (a mailbox message, a pool claim, or a driver permit
+//! grant), then calls [`Waker::notify`], which advances the sequence and wakes
+//! the word only while the waiter bit is set. The worker never acknowledges a
+//! notification. Each turn it:
+//! - loads the sequence with [`Waker::observe`] after its task polls and before
+//!   checking any source of work,
+//! - runs again if it found work or the sequence moved since that load,
+//! - arms with [`Waker::arm`], setting the waiter bit, and blocks only while the
+//!   armed word still carries the observed sequence,
+//! - disarms when the wait returns.
 //!
-//! Driver-owned permit waits use [`Waker::wake`] directly. Their readiness stays
-//! in the driver's acquisition queue and remains available after mailbox closure.
+//! A notification that precedes the observation makes its condition visible to
+//! the checks that follow it. One that follows changes the sequence before the
+//! arm, which then refuses to block, or finds the waiter bit and wakes the
+//! word. A wait queued after the arm first compares the word with the armed
+//! snapshot under the kernel's futex lock, so a notification between the arm
+//! and that compare fails the wait instead of missing it.
 //!
-//! A successful pool claim calls [`Waker::wake`] without publishing a mailbox
-//! message. An idle spin therefore checks [`Waker::signalled`] as well as the
-//! sequence, then clears an observed signal with [`Waker::consume_signal`].
+//! These checks compare sequences, so they could miss a notification only if
+//! the 31-bit sequence wrapped all the way around between the observation and
+//! the moment the kernel queues the wait. Each source can notify again only
+//! after the worker acts. A mailbox notifies once per empty-to-nonempty
+//! transition and keeps its batch until the worker takes it, at most once per
+//! turn. A pool claim clears the idle bit that the worker publishes at most
+//! once per turn. Permit grants coalesce in the driver's set of permit
+//! futures, whose waker fires at most once between two of the driver's polls
+//! of that set. A notification can also lag behind its condition, but only
+//! while its producer thread is inside the call, one per thread. The interval
+//! therefore holds a few notifications per source and one per thread, far
+//! fewer than a wrap needs.
 //!
-//! The packed atomic state combines:
-//! - bit 0: waiting on futex
-//! - bit 1: waiting on eventfd
-//! - bit 2: wake already signalled
-//! - bits 3..: submitted sequence
-//!
-//! This keeps the arm-and-recheck handshake lock-free, enables futex sleep when
-//! the loop is truly idle, and avoids repeated wake writes while a wake is
-//! already pending.
+//! The worker waits on the word in two places: in the ring through a one-shot
+//! `IORING_OP_FUTEX_WAIT` ([`Waker::install`], Linux 6.7 or newer) while
+//! requests are in flight, and with a thread futex wait ([`Waker::park_idle`])
+//! when fully idle. A ring wait stays queued until its completion is reaped, so
+//! it can outlive the park that installed it and sit ahead of the thread's
+//! idle wait. The kernel wakes waiters in queue order, so a notification
+//! releases two.
 
 use super::waiter::UserData;
+use crossbeam_utils::CachePadded;
 use io_uring::squeue::SubmissionQueue;
 use std::time::{Duration, Instant};
 
@@ -39,521 +52,255 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
         use loom::sync::{
             Arc, Condvar, Mutex,
-            atomic::{AtomicU32, AtomicU64, Ordering},
+            atomic::{AtomicU32, Ordering},
         };
+        use std::collections::VecDeque;
     } else {
-        use io_uring::{opcode::PollAdd, types::Fd};
-        use std::{
-            mem::size_of,
-            os::fd::{AsRawFd, FromRawFd, OwnedFd},
-            sync::{
-                Arc,
-                atomic::{AtomicU32, Ordering},
-            },
+        use io_uring::opcode::FutexWait;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU32, Ordering},
         };
         use tracing::warn;
     }
 }
 
-/// Reserved `user_data` value for internal wake poll completions.
+/// Reserved `user_data` value for ring futex wait completions.
 pub const WAKE_USER_DATA: UserData = UserData::MAX;
 
-/// Number of low bits reserved for wake-state flags.
-const STATE_BITS: u32 = 3;
-/// Bit used when the loop is sleeping on a futex.
-const WAITING_ON_FUTEX_BIT: u32 = 1;
-/// Bit used when the loop is blocked in the ring wait and wakeable via eventfd.
-const WAITING_ON_EVENTFD_BIT: u32 = 1 << 1;
-/// Bit used once a wake has already been signalled for the current wait.
-const WAKE_SIGNALLED_BIT: u32 = 1 << 2;
-/// Mask covering all non-sequence wake-state flags.
-const STATE_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT | WAKE_SIGNALLED_BIT;
-/// Mask covering just the current wait target bits.
-const WAITING_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT;
-/// Packed-state increment for one published batch (low bits are reserved).
-const SUBMISSION_INCREMENT: u32 = 1 << STATE_BITS;
-/// Full sequence domain used by the packed submission counter (state >> 3).
-pub const SUBMISSION_SEQ_MASK: u32 = u32::MAX >> STATE_BITS;
+/// Bit set while the worker may block on the word.
+const WAITER: u32 = 1;
+/// Word increment of one notification, above the waiter bit.
+const INCREMENT: u32 = 2;
+/// Waiters one notification wakes: a ring wait an earlier park left queued,
+/// and the wait of the worker's current park behind it.
+const WAKE_COUNT: u32 = 2;
+/// futex2 flags of the ring wait: a private 32-bit word.
+#[cfg(not(feature = "loom"))]
+const FUTEX2_PRIVATE_U32: u32 = 0x02 | libc::FUTEX_PRIVATE_FLAG as u32;
 
-/// RAII guard returned by [`Waker::arm`] for a blocking ring wait.
-///
-/// While this guard is live, the loop is armed to receive an eventfd-based
-/// wake from a producer completing its publication signal.
+/// RAII guard returned by [`Waker::arm`], which disarms the word on drop.
 pub struct ArmGuard<'a> {
     /// Wake source to disarm when the guard is dropped.
     waker: &'a Waker,
-    /// Whether the post-arm snapshot permits blocking.
+    /// Whether the armed word still carries the observed sequence.
     still_idle: bool,
+    /// Word produced by the arming transition.
+    snapshot: u32,
 }
 
 impl ArmGuard<'_> {
-    /// Return whether the post-arm snapshot still looked idle, meaning no
-    /// wake was latched and the published sequence still matched the loop's
-    /// `processed_seq`.
+    /// Return whether the armed word still carried the sequence the worker
+    /// observed, so no notification arrived since and the worker may block.
     pub const fn still_idle(&self) -> bool {
         self.still_idle
+    }
+
+    /// Exact word after arming, which a new ring wait compares against.
+    pub const fn snapshot(&self) -> u32 {
+        self.snapshot
     }
 }
 
 impl Drop for ArmGuard<'_> {
     fn drop(&mut self) {
-        self.waker.clear_wait();
+        // The next observation acquires any notification, so disarming needs
+        // no ordering of its own.
+        self.waker.inner.state.fetch_and(!WAITER, Ordering::Relaxed);
     }
 }
 
-/// Shared wake state used by submitters and the io_uring loop.
-///
-/// `state` packs two values:
-/// - bits 0..2: wait target and wake state
-/// - bits 3..: submitted sequence (`submitted_seq`)
-///
-/// Producers increment `submitted_seq` after enqueueing work. A mailbox publishes
-/// exactly once on each empty-to-nonempty transition under its inbox mutex. The
-/// loop advances `processed_seq` once when transferring a nonempty batch into
-/// owner-local scratch, before applying its messages. After arming a wait target,
-/// the loop blocks only if the same snapshot still shows no latched wake and carries
-/// the exact `submitted_seq == processed_seq` snapshot the loop armed against.
-///
-/// Transferring a batch acquires the inbox mutex before acknowledging its
-/// publication. The owner's subsequent sequence reads cannot precede that
-/// publication. At each pending check, only the shared inbox can hold an
-/// unacknowledged batch, so unequal sequences mean work remains pending even
-/// across counter wrap. No bound on the number of messages in a batch is needed.
-///
-/// Blocking follows an arm-and-recheck protocol:
-/// - The loop first checks for pending publication, then arms a wait target.
-/// - The loop blocks only if the post-arm snapshot still looks idle after that
-///   same atomic state transition.
-/// - Submitters signal the currently armed wait target exactly once.
-/// - A delayed signal may latch a wake while unarmed, causing the next
-///   arm-and-recheck cycle to skip blocking once.
-///
-/// This makes submissions racing with the sleep transition observable either by
-/// sequence mismatch in the loop or by a futex/eventfd wakeup.
-#[cfg(not(feature = "loom"))]
-struct WakerInner {
-    /// Non-blocking eventfd monitored by the loop's multishot wake poll.
-    wake_fd: OwnedFd,
-    /// Packed wait-target, wake-latch, and submitted-sequence state.
-    state: AtomicU32,
-}
-
-/// Loom-only model of the waker state.
-///
-/// Loom cannot observe real futexes, eventfds, or io_uring CQEs, so this
-/// variant keeps the same packed atomic state as the production waker and
-/// replaces the kernel wake surfaces with userspace condvar models. The goal is
-/// to model the producer/loop atomic protocol closely enough for loom to
-/// explore memory orderings and wake races. It is not a model of kernel CQE
-/// ordering, `io_uring_enter`, or wake-poll rearm behavior.
+/// A wait queued on the word in the loom model of the kernel's futex queue.
 #[cfg(feature = "loom")]
-struct WakerInner {
-    /// Packed wait-target, wake-latch, and submitted-sequence state.
-    state: AtomicU32,
-    /// Mutex standing in for the kernel futex bucket lock.
-    futex_bucket: Mutex<()>,
-    /// Condvar standing in for the fully-idle futex wait queue.
-    futex_waiters: Condvar,
-    /// Durable eventfd readiness counter observed by the modeled eventfd wait.
-    eventfd_counter: AtomicU64,
-    /// Mutex pairing eventfd readiness checks with condvar parking.
-    eventfd_readiness: Mutex<()>,
-    /// Condvar standing in for the ring wait returning on a wake CQE.
-    eventfd_waiters: Condvar,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Waiter {
+    /// A ring wait, whose wake posts a completion that the driver reaps later.
+    Ring,
+    /// A wait that blocks its caller until a wake releases it, identified by
+    /// its ticket.
+    Thread(u64),
 }
 
-/// One worker's wake source, shared by its mailbox and driver.
+/// The loom model of the kernel's futex queue for the word.
+#[cfg(feature = "loom")]
+struct FutexQueue {
+    /// Queued waits, oldest first, the order in which a wake releases them.
+    waiters: VecDeque<Waiter>,
+    /// Ticket of the next blocking wait.
+    next_ticket: u64,
+    /// Whether a ring wait was released or refused and its completion waits
+    /// for the driver to reap it.
+    ring_completed: bool,
+    /// Waits one wake releases. A negative control lowers it.
+    wake_count: u32,
+    /// Whether every thread that could wake the word has finished, so a wait
+    /// still queued is never released. A model sets it to fail a stranded wait
+    /// directly, since loom cannot unwind a deadlocked model through the loom
+    /// objects its threads hold.
+    abandoned: bool,
+}
+
+/// The futex word shared by the worker and its producers.
 ///
-/// - Publish submissions from producers via [`Waker::publish`]
-/// - Signal the worker after mailbox publication, a pool claim, or a driver
-///   permit notification via [`Waker::wake`]
-/// - Test whether published work is still pending via [`Waker::pending`]
-/// - Park in the fully-idle path via [`Waker::park_idle`]
-/// - Arm a blocking ring wait via [`Waker::arm`]
-/// - Drain `eventfd` readiness on wake CQEs via [`Waker::acknowledge`]
-/// - Re-arm the multishot poll request when needed via [`Waker::reinstall`]
-/// - Check for a latched wake during an idle spin and clear it via
-///   [`Waker::signalled`] and [`Waker::consume_signal`]
-///
-/// This type intentionally separates:
-/// - sequence publication (`state` high bits)
-/// - wait gating (`state` low bits)
-/// - kernel readiness consumption (`eventfd` read path)
-///
-/// Keeping these concerns separate makes the wake protocol explicit and avoids
-/// coupling correctness to exact eventfd coalescing behavior.
+/// Loom cannot observe real futexes or io_uring CQEs, so its build replaces the
+/// futex with a modeled wait queue under a mutex standing in for the kernel's
+/// bucket lock, and a condvar on which modeled waits block. It models the
+/// producer and worker atomic protocol and the kernel's wake order, not CQE
+/// delivery or `io_uring_enter`.
+struct WakerInner {
+    /// Waiter bit and notification sequence, alone on its cache lines. Every
+    /// notification writes it and the worker loads it on every turn and spin
+    /// iteration, so a neighbouring allocation, such as another worker's word,
+    /// would turn those writes into misses for unrelated threads.
+    state: CachePadded<AtomicU32>,
+    /// Modeled futex queue, under a mutex standing in for the bucket lock.
+    #[cfg(feature = "loom")]
+    futex: Mutex<FutexQueue>,
+    /// Condvar on which modeled waits block until a wake releases them.
+    #[cfg(feature = "loom")]
+    futex_waiters: Condvar,
+}
+
+/// One worker's eventcount, shared by its mailbox, the pool, and its driver.
 #[derive(Clone)]
 pub struct Waker {
-    /// State shared by the owning loop and its producers.
+    /// State shared by the owning worker and its producers.
     inner: Arc<WakerInner>,
 }
 
 impl std::task::Wake for Waker {
     fn wake(self: std::sync::Arc<Self>) {
-        Self::wake(&self);
+        self.notify();
     }
 
     fn wake_by_ref(self: &std::sync::Arc<Self>) {
-        Self::wake(self);
+        self.notify();
     }
 }
 
 impl Waker {
-    /// Create a hybrid futex/eventfd wake source backed by a non-blocking
-    /// `eventfd`.
-    #[cfg(not(feature = "loom"))]
-    pub fn new() -> Result<Self, std::io::Error> {
-        // SAFETY: `eventfd` is called with valid flags and no aliasing pointers.
-        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // SAFETY: `eventfd` returned a new owned descriptor.
-        let wake_fd = unsafe { OwnedFd::from_raw_fd(fd) };
-
-        Ok(Self {
+    /// Create an eventcount with no notifications.
+    pub fn new() -> Self {
+        Self {
             inner: Arc::new(WakerInner {
-                wake_fd,
-                state: AtomicU32::new(0),
-            }),
-        })
-    }
-
-    /// Create the loom model of the hybrid wake source.
-    ///
-    /// This keeps the same packed atomic state as production, but replaces the
-    /// eventfd and futex kernel objects with loom-visible counters and
-    /// condition variables.
-    #[cfg(feature = "loom")]
-    pub fn new() -> Result<Self, std::io::Error> {
-        Ok(Self {
-            inner: Arc::new(WakerInner {
-                state: AtomicU32::new(0),
-                futex_bucket: Mutex::new(()),
+                state: CachePadded::new(AtomicU32::new(0)),
+                #[cfg(feature = "loom")]
+                futex: Mutex::new(FutexQueue {
+                    waiters: VecDeque::new(),
+                    next_ticket: 0,
+                    ring_completed: false,
+                    wake_count: WAKE_COUNT,
+                    abandoned: false,
+                }),
+                #[cfg(feature = "loom")]
                 futex_waiters: Condvar::new(),
-                eventfd_counter: AtomicU64::new(0),
-                eventfd_readiness: Mutex::new(()),
-                eventfd_waiters: Condvar::new(),
             }),
-        })
-    }
-
-    /// Signal the current wait target, or latch a wake until the loop next arms.
-    ///
-    /// The first caller to set `WAKE_SIGNALLED_BIT` in the current epoch performs
-    /// the wake. Later callers do nothing until the loop disarms and clears it,
-    /// or a spin consumes it. This coalesces delayed signals from previously
-    /// consumed batches.
-    pub fn wake(&self) {
-        // Claim one signal for the target observed by this atomic transition.
-        let prev = self
-            .inner
-            .state
-            .fetch_or(WAKE_SIGNALLED_BIT, Ordering::Release);
-
-        if (prev & WAKE_SIGNALLED_BIT) != 0 {
-            return;
-        }
-
-        let waiting = prev & WAITING_MASK;
-        assert_ne!(
-            waiting, WAITING_MASK,
-            "iouring wake state cannot wait on futex and eventfd simultaneously"
-        );
-
-        match waiting {
-            0 => {}
-            WAITING_ON_FUTEX_BIT => self.futex_wake(),
-            WAITING_ON_EVENTFD_BIT => self.eventfd_wake(),
-            _ => unreachable!("unexpected iouring wake target"),
         }
     }
 
-    /// Publish queued work and return whether signaling must follow.
+    /// Advance the sequence, waking the worker if it is armed.
     ///
-    /// Mailbox producers call this under the inbox mutex only when adding the
-    /// first message of a batch. If it returns `true`, call [`Self::wake`] after
-    /// unlocking while retaining ownership of this waker. The owner can consume
-    /// the batch before that call, so signaling rechecks the armed target and
-    /// claims the wake against its current epoch.
-    ///
-    /// Publication never invokes a syscall. An unarmed publication needs no
-    /// signal because the next arm-and-recheck observes the changed sequence.
-    #[inline]
-    pub fn publish(&self) -> bool {
-        // Pair publication with the owner's `pending()` acquire so queued work
-        // is visible before the owner attempts to transfer it.
-        let prev = self
-            .inner
-            .state
-            .fetch_add(SUBMISSION_INCREMENT, Ordering::Release);
-
-        let waiting = prev & WAITING_MASK;
-
-        // Fast path: the loop is not waiting, or another publisher already
-        // claimed the wake for the current armed epoch.
-        waiting != 0 && (prev & WAKE_SIGNALLED_BIT) == 0
+    /// The caller makes its condition visible first. The release pairs with
+    /// [`Self::observe`], so a worker that loads this notification's sequence
+    /// sees the condition.
+    pub fn notify(&self) {
+        let prev = self.inner.state.fetch_add(INCREMENT, Ordering::Release);
+        if prev & WAITER != 0 {
+            self.futex_wake();
+        }
     }
 
-    /// Whether a wake has been signalled and not yet cleared by the end of a
-    /// wait or by [`Self::consume_signal`].
+    /// Load the sequence before checking the sources of work.
     #[inline]
-    pub fn signalled(&self) -> bool {
-        self.inner.state.load(Ordering::Acquire) & WAKE_SIGNALLED_BIT != 0
+    pub fn observe(&self) -> u32 {
+        self.inner.state.load(Ordering::Acquire) & !WAITER
     }
 
-    /// Clear a signalled wake that a spin observed, so the next wait blocks
-    /// until a fresh one. A completed wait clears it with its wait state.
+    /// Whether a notification arrived since the worker observed `seen`.
     #[inline]
-    pub fn consume_signal(&self) {
-        self.inner
-            .state
-            .fetch_and(!WAKE_SIGNALLED_BIT, Ordering::Acquire);
+    pub fn moved(&self, seen: u32) -> bool {
+        self.observe() != seen
     }
 
-    /// Return whether any published submissions are still pending relative to
-    /// `processed_seq`, i.e. whether the published sequence is currently ahead
-    /// of that drained sequence.
-    #[inline]
-    pub fn pending(&self, processed_seq: u32) -> bool {
-        // Pair this `Acquire` with publication's `Release` before inbox transfer.
-        let published_seq =
-            (self.inner.state.load(Ordering::Acquire) >> STATE_BITS) & SUBMISSION_SEQ_MASK;
-
-        published_seq != (processed_seq & SUBMISSION_SEQ_MASK)
-    }
-
-    /// Park while idle until notification or the optional absolute deadline.
+    /// Park while idle until a notification or the optional absolute deadline.
     ///
     /// The futex timeout is computed immediately before sleeping. An elapsed
     /// deadline, interruption, or timeout returns `None`, so timer expiry does
     /// not count as a quick notification wake for adaptive spinning. Every
-    /// return clears the armed wait state, including skipped sleeps.
-    pub fn park_idle(&self, processed_seq: u32, deadline: Option<Instant>) -> Option<Duration> {
-        // Arming changes only wait state, the inbox mutex owns message
-        // visibility. The atomic snapshot alone decides whether to block.
-        let prev = self
-            .inner
-            .state
-            .fetch_or(WAITING_ON_FUTEX_BIT, Ordering::Relaxed);
-
-        assert_eq!(
-            prev & WAITING_MASK,
-            0,
-            "iouring wait target should be disarmed before re-arming"
-        );
-
-        let snapshot = prev | WAITING_ON_FUTEX_BIT;
-
-        // Only block if the post-arm snapshot still looks idle. When that is
-        // true, futex-wait on the same packed state word that was just armed.
-        if (snapshot & WAKE_SIGNALLED_BIT) == 0
-            && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq
-        {
-            let before = Instant::now();
-            let slept = self.futex_wait(snapshot, deadline);
-            self.clear_wait();
-            slept.then(|| before.elapsed())
-        } else {
-            self.clear_wait();
-            None
+    /// return disarms the word, including skipped sleeps.
+    pub fn park_idle(&self, seen: u32, deadline: Option<Instant>) -> Option<Duration> {
+        let arm = self.arm(seen);
+        if !arm.still_idle() {
+            return None;
         }
+
+        let before = Instant::now();
+        self.futex_wait(arm.snapshot(), deadline)
+            .then(|| before.elapsed())
     }
 
-    /// Arm the blocking wake path used around the ring wait.
+    /// Announce that the worker may block, comparing against `seen`.
     ///
-    /// The returned guard automatically clears the current wait state on drop.
-    /// Call [`ArmGuard::still_idle`] to decide whether the loop may block on
-    /// normal idle path. A latched wake or sequence mismatch rejects sleeping
-    /// and requires the owner to recheck its work.
-    pub fn arm(&self, processed_seq: u32) -> ArmGuard<'_> {
-        // Arming changes only wait state, the inbox mutex owns message
-        // visibility. The atomic snapshot alone decides whether to block.
-        let prev = self
-            .inner
-            .state
-            .fetch_or(WAITING_ON_EVENTFD_BIT, Ordering::Relaxed);
-
-        assert_eq!(
-            prev & WAITING_MASK,
-            0,
-            "iouring wait target should be disarmed before re-arming"
-        );
-
-        let snapshot = prev | WAITING_ON_EVENTFD_BIT;
-        let wake_latched = (snapshot & WAKE_SIGNALLED_BIT) != 0;
-        let still_idle =
-            !wake_latched && ((snapshot >> STATE_BITS) & SUBMISSION_SEQ_MASK) == processed_seq;
+    /// Call [`ArmGuard::still_idle`] to decide whether the worker may block. A
+    /// notification since `seen` rejects sleeping and requires the worker to
+    /// check its sources again.
+    pub fn arm(&self, seen: u32) -> ArmGuard<'_> {
+        // The word alone decides whether to block. Producers order their
+        // conditions through the sequence, so arming needs no ordering.
+        let prev = self.inner.state.fetch_or(WAITER, Ordering::Relaxed);
+        assert_eq!(prev & WAITER, 0, "iouring wait armed twice");
 
         ArmGuard {
             waker: self,
-            still_idle,
+            still_idle: prev == seen,
+            snapshot: prev | WAITER,
         }
     }
 
-    /// Drain readiness from the internal `eventfd` after a wake CQE.
+    /// Queue a one-shot ring futex wait that compares against `snapshot`.
     ///
-    /// This acknowledges kernel-visible `eventfd` readiness. Wait gating is
-    /// tracked separately in the packed `state` atomic and is managed by
-    /// [`Waker::park_idle`] and [`Waker::arm`].
-    ///
-    /// Retries on `EINTR`. Treats `EAGAIN` as "nothing to drain". Without
-    /// `EFD_SEMAPHORE`, one successful read drains the full counter to zero.
+    /// The caller passes the snapshot of a live [`ArmGuard`] that permits
+    /// blocking, reserves the SQ slot before arming, and installs again only
+    /// after reaping this wait's completion, so the ring holds at most one live
+    /// wait. A notification that changes the word before the kernel queues the
+    /// wait completes it at once with `EAGAIN`.
     #[cfg(not(feature = "loom"))]
-    pub fn acknowledge(&self) {
-        let mut value: u64 = 0;
-        loop {
-            // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
-            // to writable 8-byte storage for the duration of the call.
-            let ret = unsafe {
-                libc::read(
-                    self.inner.wake_fd.as_raw_fd(),
-                    &mut value as *mut u64 as *mut libc::c_void,
-                    size_of::<u64>(),
-                )
-            };
-            if ret == size_of::<u64>() as isize {
-                // eventfd (without EFD_SEMAPHORE) returns the full counter and
-                // resets it to zero in one read.
-                return;
-            }
-            assert_eq!(
-                ret, -1,
-                "eventfd read returned unexpected byte count: {ret}"
-            );
-            match std::io::Error::last_os_error().raw_os_error() {
-                // Retry if interrupted by a signal before completion.
-                Some(libc::EINTR) => continue,
-                // Non-blocking read would block because the counter is zero,
-                // there is nothing left to drain right now.
-                Some(libc::EAGAIN) => return,
-                _ => {
-                    warn!("eventfd read failed");
-                    return;
-                }
-            }
-        }
-    }
+    pub fn install(&self, submission_queue: &mut SubmissionQueue<'_>, snapshot: u32) {
+        let wait = FutexWait::new(
+            self.inner.state.as_ptr(),
+            snapshot.into(),
+            u32::MAX.into(),
+            FUTEX2_PRIVATE_U32,
+        )
+        .build()
+        .user_data(WAKE_USER_DATA);
 
-    /// Model an eventfd read that drains all pending readiness.
-    ///
-    /// Production eventfd reads without `EFD_SEMAPHORE` return the current
-    /// counter and reset it to zero atomically. The loom model uses one atomic
-    /// swap to preserve that contract for wake-coalescing tests.
-    #[cfg(feature = "loom")]
-    pub fn acknowledge(&self) {
-        self.inner.eventfd_counter.swap(0, Ordering::AcqRel);
-    }
-
-    /// Install the internal `eventfd` multishot poll request into the SQ.
-    ///
-    /// This uses multishot poll and is called on startup and whenever a wake
-    /// CQE indicates the previous multishot request is no longer active.
-    ///
-    /// Returns `false` if the local SQ is already full and the rearm must be
-    /// retried in a later staging pass.
-    #[cfg(not(feature = "loom"))]
-    pub fn reinstall(&self, submission_queue: &mut SubmissionQueue<'_>) -> bool {
-        if submission_queue.is_full() {
-            return false;
-        }
-
-        let wake_poll = PollAdd::new(Fd(self.inner.wake_fd.as_raw_fd()), libc::POLLIN as u32)
-            .multi(true)
-            .build()
-            .user_data(WAKE_USER_DATA);
-
-        // SAFETY: The poll SQE owns no user pointers and references a valid FD.
+        // SAFETY: The kernel reads the word only while the enter that submits
+        // this SQE queues the wait, and the caller's driver retains this waker
+        // past that enter. A queued wait never reads or writes the word again,
+        // since wakes and cancellations find it through its futex key and
+        // kernel-owned nodes.
         unsafe {
             submission_queue
-                .push(&wake_poll)
-                .expect("checked wake poll SQE capacity");
-        }
-
-        true
-    }
-
-    /// Model wake-poll reinstall as a successful no-op.
-    ///
-    /// The loom tests in this module do not model the `io_uring` submission
-    /// queue or wake-poll rearm state. Keeping this method present lets the
-    /// crate compile with `loom` while keeping that boundary explicit.
-    #[cfg(feature = "loom")]
-    pub const fn reinstall(&self, _submission_queue: &mut SubmissionQueue<'_>) -> bool {
-        true
-    }
-
-    /// Clear the current wait epoch after we resume running.
-    ///
-    /// Keeping wait bits clear while actively running avoids redundant futex
-    /// wakes and eventfd writes during bursts. This is done both after
-    /// `park_idle()` or the ring wait returns and after a post-arm recheck
-    /// decides not to block.
-    #[inline]
-    fn clear_wait(&self) {
-        // Pair with `wake()`'s `Release`. This is the first common point after
-        // resuming from a wake and before the next channel check, so acquiring
-        // here ensures the loop cannot observe the wake without also observing
-        // the sender-side state change that caused it.
-        self.inner.state.fetch_and(!STATE_MASK, Ordering::Acquire);
-    }
-
-    /// Wake the loop while it is blocked in the ring wait.
-    ///
-    /// This writes to the internal `eventfd` monitored by the ring's multishot
-    /// poll request. The resulting wake CQE causes the loop to leave its
-    /// eventfd-backed blocking section and resume in userspace.
-    #[cfg(not(feature = "loom"))]
-    fn eventfd_wake(&self) {
-        let value: u64 = 1;
-        loop {
-            // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
-            // to an initialized 8-byte integer for the duration of the call.
-            let ret = unsafe {
-                libc::write(
-                    self.inner.wake_fd.as_raw_fd(),
-                    &value as *const u64 as *const libc::c_void,
-                    size_of::<u64>(),
-                )
-            };
-            if ret == size_of::<u64>() as isize {
-                return;
-            }
-            assert_eq!(
-                ret, -1,
-                "eventfd write returned unexpected byte count: {ret}"
-            );
-            match std::io::Error::last_os_error().raw_os_error() {
-                // Retry if interrupted by a signal before completion.
-                Some(libc::EINTR) => continue,
-                // Non-blocking write would block because the eventfd
-                // counter is saturated. A wake is already queued, so no
-                // retry is needed.
-                Some(libc::EAGAIN) => return,
-                _ => {
-                    warn!("eventfd write failed");
-                    return;
-                }
-            }
+                .push(&wait)
+                .expect("reserved ring futex wait SQ slot");
         }
     }
 
-    /// Model an eventfd write plus wake-CQE delivery.
+    /// Model ring wait installation as a no-op.
     ///
-    /// Incrementing `eventfd_counter` preserves the durable readiness bit of a
-    /// real eventfd, while notifying `eventfd_waiters` stands in for
-    /// the ring wait returning after the wake CQE becomes available.
+    /// The loom tests in this module model a queued ring wait directly instead
+    /// of through the `io_uring` submission queue. Keeping this method present
+    /// lets the crate compile with `loom`.
     #[cfg(feature = "loom")]
-    fn eventfd_wake(&self) {
-        self.inner.eventfd_counter.fetch_add(1, Ordering::Release);
-        let _guard = self.inner.eventfd_readiness.lock().unwrap();
-        self.inner.eventfd_waiters.notify_one();
-    }
+    pub const fn install(&self, _submission_queue: &mut SubmissionQueue<'_>, _snapshot: u32) {}
 
-    /// Wake one thread sleeping on the fully-idle futex path.
+    /// Wake the waiters on the futex word.
     ///
-    /// This is used only when the loop has no active ring waiters and is
-    /// blocked in [`Waker::futex_wait`] on the packed wake-state word.
+    /// A ring wait that an earlier park left queued can sit ahead of the wait
+    /// of the worker's current park, and `FUTEX_WAKE` releases waiters in queue
+    /// order, so this releases two. Each worker owns one waker and one driver,
+    /// which keeps at most one ring wait live.
     #[cfg(not(feature = "loom"))]
     fn futex_wake(&self) {
         loop {
@@ -564,12 +311,13 @@ impl Waker {
                     libc::SYS_futex,
                     self.inner.state.as_ptr(),
                     libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
-                    1u32,
+                    WAKE_COUNT,
                 )
             };
             if ret >= 0 {
                 return;
             }
+
             let err = std::io::Error::last_os_error();
             match err.raw_os_error() {
                 Some(libc::EINTR) => continue,
@@ -580,9 +328,9 @@ impl Waker {
                     // unsupported op. For this private, aligned in-process futex,
                     // all of those indicate a broken invariant or environment.
                     // Unlike `futex_wait()`, there is no safe "just continue in
-                    // userspace" fallback here: because `WAKE_SIGNALLED_BIT` is
-                    // already latched for this epoch, logging and continuing would
-                    // risk a permanent lost wake.
+                    // userspace" fallback here: the armed worker already compared
+                    // against the old word, so logging and continuing would risk a
+                    // permanent lost wake.
                     //
                     // [https://www.man7.org/linux/man-pages/man2/FUTEX_WAKE.2const.html#ERRORS]
                     panic!("futex wake failed: {err}");
@@ -591,22 +339,30 @@ impl Waker {
         }
     }
 
-    /// Model `FUTEX_WAKE` for the fully-idle path.
+    /// Model `FUTEX_WAKE` for the futex word.
     ///
-    /// Taking `futex_bucket` before notifying mirrors the serialization the
-    /// kernel futex bucket provides between compare-and-park and wake.
+    /// Releasing the oldest queued waits under the modeled bucket lock mirrors
+    /// the kernel's serialization of compare-and-queue against wake, and its
+    /// wake order. A released ring wait posts its completion.
     #[cfg(feature = "loom")]
     fn futex_wake(&self) {
-        let _guard = self.inner.futex_bucket.lock().unwrap();
-        self.inner.futex_waiters.notify_one();
+        let mut queue = self.inner.futex.lock().unwrap();
+        for _ in 0..queue.wake_count {
+            match queue.waiters.pop_front() {
+                Some(Waiter::Ring) => queue.ring_completed = true,
+                Some(Waiter::Thread(_)) => {}
+                None => break,
+            }
+        }
+        self.inner.futex_waiters.notify_all();
     }
 
-    /// Sleep on the packed wake-state word for the fully-idle path.
+    /// Sleep on the word for the fully-idle path.
     ///
     /// The caller must pass the exact post-arm snapshot from the same atomic
-    /// transition that set `WAITING_ON_FUTEX_BIT`. `FUTEX_WAIT` only blocks
-    /// while the word still equals that value, which closes the race between
-    /// arming idle sleep and a concurrent publication or delayed signal.
+    /// transition that set the waiter bit. `FUTEX_WAIT` only blocks while the
+    /// word still equals that value, which closes the race between arming idle
+    /// sleep and a concurrent notification.
     ///
     /// Returns to the loop on `EINTR`, preserving the absolute deadline for the
     /// next parking attempt. Treats `EAGAIN` as "state already changed before
@@ -655,154 +411,401 @@ impl Waker {
         if ret == 0 {
             return true;
         }
+
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
             Some(libc::EINTR | libc::EAGAIN | libc::ETIMEDOUT) => false,
             _ => {
                 // An unexpected futex wait error means the kernel
                 // refused to block, so the safe fallback is to return to
-                // userspace and re-check the packed state rather than panic.
+                // userspace and re-check the word rather than panic.
                 warn!("futex wait failed: {err}");
                 false
             }
         }
     }
 
-    /// Model `FUTEX_WAIT` for the fully-idle path.
+    /// Model `FUTEX_WAIT` on the futex word.
     ///
-    /// The condition variable wait keeps the compare and park under
-    /// `futex_bucket`, so loom can explore the same lost-wake boundary that the
-    /// kernel's atomic futex wait protects in production.
+    /// The wait compares and queues under the modeled bucket lock, then blocks
+    /// until a wake releases it, so loom can explore the same lost-wake
+    /// boundary that the kernel's atomic futex wait protects in production.
     #[cfg(feature = "loom")]
     fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>) -> bool {
-        // Loom models publication races, not the kernel's timer queue. An
+        // Loom models notification races, not the kernel's timer queue. An
         // already-due deadline exercises the no-sleep transition. Future timed
         // waits use the same comparison protocol as untimed waits here.
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             return false;
         }
-        let mut guard = self.inner.futex_bucket.lock().unwrap();
-        let mut slept = false;
-        while self.inner.state.load(Ordering::Acquire) == snapshot {
-            slept = true;
-            guard = self.inner.futex_waiters.wait(guard).unwrap();
+
+        // The bucket lock orders this compare against every wake, as in the
+        // kernel, so the load needs no ordering of its own.
+        let mut queue = self.inner.futex.lock().unwrap();
+        if self.inner.state.load(Ordering::Relaxed) != snapshot {
+            return false;
         }
-        slept
+
+        let waiter = Waiter::Thread(queue.next_ticket);
+        queue.next_ticket += 1;
+        queue.waiters.push_back(waiter);
+        while queue.waiters.contains(&waiter) {
+            assert!(
+                !queue.abandoned,
+                "a futex wait was stranded with no waker left"
+            );
+            queue = self.inner.futex_waiters.wait(queue).unwrap();
+        }
+        true
     }
 }
 
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use io_uring::IoUring;
     use std::sync::atomic::AtomicBool;
     #[cfg(not(feature = "loom"))]
-    use std::{fs::File, mem::size_of, os::fd::AsRawFd};
+    use {
+        crate::iouring::{RingConfig, driver::Driver},
+        io_uring::IoUring,
+        std::path::{Path, PathBuf},
+    };
 
     /// Bound real-thread rendezvous and notification waits.
     const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-    /// Publish a test batch and immediately deliver any requested signal.
-    pub fn publish_and_wake(waker: &Waker) {
-        if waker.publish() {
-            waker.wake();
+    /// Wait until the owner arms, failing by the deadline if it never parks.
+    pub fn wait_until_armed(waker: &Waker, deadline: Instant) {
+        while !waiting(waker) {
+            assert!(Instant::now() < deadline, "wait was not armed");
+            std::thread::yield_now();
         }
     }
 
-    /// Wait until the owner arms its futex, failing if it never reaches parking.
+    /// Wait until the owner arms its idle wait, failing if it never parks.
     fn wait_until_futex_armed(waker: &Waker) {
+        wait_until_armed(waker, Instant::now() + TEST_TIMEOUT);
+    }
+
+    /// Whether the owner is armed to block on the word.
+    pub fn waiting(waker: &Waker) -> bool {
+        word(waker) & WAITER != 0
+    }
+
+    /// Read the word without acquiring producer memory.
+    fn word(waker: &Waker) -> u32 {
+        waker.inner.state.load(Ordering::Relaxed)
+    }
+
+    /// Number of notifications since creation or the last [`reset`], modulo the
+    /// sequence width.
+    pub fn notifications(waker: &Waker) -> u32 {
+        word(waker) / INCREMENT
+    }
+
+    /// Forget an unarmed word's notifications, so a test can count new ones.
+    pub fn reset(waker: &Waker) {
+        assert!(!waiting(waker));
+        waker.inner.state.store(0, Ordering::Relaxed);
+    }
+
+    /// Build a ring with the driver's flags. With deferred task work, a ring
+    /// wait's completion waits for the owner's next enter instead of
+    /// interrupting the owner's thread futex wait, as in production.
+    #[cfg(not(feature = "loom"))]
+    fn ring() -> IoUring {
+        IoUring::builder()
+            .setup_single_issuer()
+            .setup_defer_taskrun()
+            .build(8)
+            .unwrap()
+    }
+
+    /// Queue a ring wait against the armed snapshot of a fresh observation,
+    /// then disarm, leaving the wait queued as a park that ends without its
+    /// completion does.
+    #[cfg(not(feature = "loom"))]
+    fn queue_ring_wait(waker: &Waker, ring: &mut IoUring) {
+        let arm = waker.arm(waker.observe());
+        assert!(arm.still_idle());
+        waker.install(&mut ring.submission(), arm.snapshot());
+        ring.submit().unwrap();
+        drop(arm);
+
+        // A wait whose compare failed would have completed during the submit.
+        assert!(ring.completion().is_empty());
+    }
+
+    /// Wake up to `count` waiters on the word directly, returning how many woke.
+    #[cfg(not(feature = "loom"))]
+    fn wake(waker: &Waker, count: u32) -> libc::c_long {
+        // SAFETY: `waker` retains the aligned atomic word for the call.
+        unsafe {
+            libc::syscall(
+                libc::SYS_futex,
+                waker.inner.state.as_ptr(),
+                libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
+                count,
+            )
+        }
+    }
+
+    /// The procfs directory of the calling thread.
+    #[cfg(not(feature = "loom"))]
+    fn current_task() -> PathBuf {
+        Path::new("/proc").join(std::fs::read_link("/proc/thread-self").unwrap())
+    }
+
+    /// Whether the thread at `task` sleeps in a futex call on the word.
+    ///
+    /// The kernel reports another thread's syscall only once that thread is
+    /// descheduled in a sleep, which a futex wait reaches only after it queued
+    /// itself.
+    #[cfg(not(feature = "loom"))]
+    fn sleeps_on_word(waker: &Waker, task: &Path) -> bool {
+        let report = std::fs::read_to_string(task.join("syscall")).unwrap();
+        let mut fields = report.split_whitespace();
+        let number = fields.next().and_then(|field| field.parse().ok());
+        let address = fields
+            .next()
+            .and_then(|field| field.strip_prefix("0x"))
+            .and_then(|field| usize::from_str_radix(field, 16).ok());
+        number == Some(libc::SYS_futex) && address == Some(waker.inner.state.as_ptr() as usize)
+    }
+
+    /// Wait until the thread at `task` sleeps in a futex call on the word,
+    /// failing by the test timeout.
+    #[cfg(not(feature = "loom"))]
+    fn wait_until_sleeping_on_word(waker: &Waker, task: &Path) {
         let deadline = Instant::now() + TEST_TIMEOUT;
-        while waker.inner.state.load(Ordering::Relaxed) & WAITING_ON_FUTEX_BIT == 0 {
-            assert!(Instant::now() < deadline, "futex wake path was not armed");
+        while !sleeps_on_word(waker, task) {
+            assert!(
+                Instant::now() < deadline,
+                "the owner never slept on the word"
+            );
             std::thread::yield_now();
         }
     }
 
-    /// Wait for the eventfd arm, failing by the deadline if the owner never parks.
-    pub fn wait_until_eventfd_armed(waker: &Waker, deadline: Instant) {
-        while waker.inner.state.load(Ordering::Relaxed) & WAITING_ON_EVENTFD_BIT == 0 {
-            assert!(Instant::now() < deadline, "eventfd wake path was not armed");
-            std::thread::yield_now();
-        }
+    /// A notification between the arm and the kernel's compare fails the new
+    /// ring wait at once, so the enter that follows does not block.
+    #[cfg(not(feature = "loom"))]
+    #[test]
+    fn test_ring_wait_rejects_a_wake_before_enter() {
+        // Arm against a fresh observation.
+        let waker = Waker::new();
+        let mut ring = ring();
+        let seen = waker.observe();
+        let arm = waker.arm(seen);
+        assert!(arm.still_idle());
+
+        // Notify before the wait reaches the kernel, then submit it.
+        waker.notify();
+        waker.install(&mut ring.submission(), arm.snapshot());
+        ring.submit_and_wait(1).unwrap();
+
+        // The kernel's compare failed, so the wait completed with EAGAIN.
+        let cqe = ring.completion().next().unwrap();
+        assert_eq!(cqe.user_data(), WAKE_USER_DATA);
+        assert_eq!(cqe.result(), -libc::EAGAIN);
+        assert!(!io_uring::cqueue::more(cqe.flags()));
+        drop(arm);
+        assert!(waker.moved(seen));
     }
 
-    /// Read the wait target and wake latch without acquiring producer memory.
-    pub fn state_bits(waker: &Waker) -> u32 {
-        waker.inner.state.load(Ordering::Relaxed) & STATE_MASK
+    /// A notification before the arm refuses the wait without a syscall, and
+    /// one after the arm reaches a ring wait that an earlier park left queued,
+    /// which the next park reuses without installing another.
+    #[cfg(not(feature = "loom"))]
+    #[test]
+    fn test_reused_ring_wait_receives_a_later_wake() {
+        // A park installs its wait, and an unrelated completion ends the park
+        // with the wait still queued.
+        let waker = Waker::new();
+        let mut ring = ring();
+        let seen = waker.observe();
+        queue_ring_wait(&waker, &mut ring);
+
+        // A notification while running only advances the sequence, so the
+        // next arm against the older observation is refused.
+        waker.notify();
+        assert!(!waker.arm(seen).still_idle());
+
+        // A fresh observation arms, and a producer finds the waiter bit and
+        // wakes the queued wait while the owner waits in the ring.
+        let seen = waker.observe();
+        let arm = waker.arm(seen);
+        assert!(arm.still_idle());
+        let producer = std::thread::spawn({
+            let waker = waker.clone();
+            move || waker.notify()
+        });
+        ring.submit_and_wait(1).unwrap();
+        producer.join().unwrap();
+
+        // The queued wait's completion ended this park.
+        let cqe = ring.completion().next().unwrap();
+        assert_eq!(cqe.user_data(), WAKE_USER_DATA);
+        assert_eq!(cqe.result(), 0);
+        drop(arm);
+        assert!(waker.moved(seen));
     }
 
-    /// Read the published batch count without adding synchronization to a test.
-    pub fn submitted_seq(waker: &Waker) -> u32 {
-        (waker.inner.state.load(Ordering::Relaxed) >> STATE_BITS) & SUBMISSION_SEQ_MASK
-    }
+    /// A ring wait that an earlier park left queued sits ahead of the owner's
+    /// idle wait, and one notification releases both.
+    #[cfg(not(feature = "loom"))]
+    #[test]
+    fn test_stale_ring_wait_cannot_absorb_idle_wake() {
+        // Leave a ring wait queued, as a park that ended without its
+        // completion does.
+        let waker = Waker::new();
+        let mut ring = ring();
+        queue_ring_wait(&waker, &mut ring);
 
-    /// Read eventfd readiness, draining the real counter and inspecting the loom counter.
-    pub fn eventfd_count(waker: &Waker) -> u64 {
-        #[cfg(not(feature = "loom"))]
-        {
-            let mut value = 0u64;
-            // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
-            // to writable 8-byte storage for the duration of the call.
-            let ret = unsafe {
-                libc::read(
-                    waker.inner.wake_fd.as_raw_fd(),
-                    &mut value as *mut u64 as *mut libc::c_void,
-                    size_of::<u64>(),
-                )
-            };
-            if ret == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN) {
-                return 0;
+        // Park idle, and notify once the owner sleeps behind the ring wait.
+        let owner = current_task();
+        let producer = std::thread::spawn({
+            let waker = waker.clone();
+            move || {
+                wait_until_sleeping_on_word(&waker, &owner);
+                waker.notify();
             }
-            assert_eq!(ret, size_of::<u64>() as isize);
-            value
-        }
+        });
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        let woken = waker.park_idle(0, Some(deadline));
+        producer.join().unwrap();
 
-        #[cfg(feature = "loom")]
-        {
-            waker.inner.eventfd_counter.load(Ordering::Relaxed)
+        // The notification released the idle wait and the ring wait alike.
+        assert!(woken.is_some(), "stale ring wait absorbed the idle wake");
+        ring.submit_and_wait(1).unwrap();
+        let cqe = ring.completion().next().unwrap();
+        assert_eq!(cqe.user_data(), WAKE_USER_DATA);
+        assert_eq!(cqe.result(), 0);
+    }
+
+    /// Waking one waiter releases only the ring wait queued ahead of the
+    /// owner's idle wait, which stays asleep. This is why a notification wakes
+    /// two, and it shows the test above would catch a notification that woke
+    /// one.
+    #[cfg(not(feature = "loom"))]
+    #[test]
+    fn test_waking_one_strands_idle_wait_behind_stale_ring_wait() {
+        /// How long the idle wait must stay asleep after the single wake.
+        const STRANDED: Duration = Duration::from_millis(200);
+
+        // Leave a ring wait queued, as a park that ended without its
+        // completion does.
+        let waker = Waker::new();
+        let mut ring = ring();
+        queue_ring_wait(&waker, &mut ring);
+
+        // Park idle. Once the owner sleeps behind the ring wait, wake one
+        // waiter, check that the owner still sleeps, then release it with a
+        // notification.
+        let owner = current_task();
+        let returned = Arc::new(AtomicBool::new(false));
+        let producer = std::thread::spawn({
+            let waker = waker.clone();
+            let returned = returned.clone();
+            move || {
+                wait_until_sleeping_on_word(&waker, &owner);
+                let woken = wake(&waker, 1);
+                std::thread::sleep(STRANDED);
+                let stranded = !returned.load(Ordering::Acquire) && sleeps_on_word(&waker, &owner);
+                waker.notify();
+                (woken, stranded)
+            }
+        });
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        let released = waker.park_idle(0, Some(deadline));
+        returned.store(true, Ordering::Release);
+        let (woken, stranded) = producer.join().unwrap();
+
+        // The single wake took the ring wait and left the idle wait asleep
+        // until the notification.
+        assert_eq!(woken, 1);
+        assert!(stranded, "a single wake reached the idle wait");
+        assert!(released.is_some());
+        ring.submit_and_wait(1).unwrap();
+        let cqe = ring.completion().next().unwrap();
+        assert_eq!(cqe.user_data(), WAKE_USER_DATA);
+        assert_eq!(cqe.result(), 0);
+    }
+
+    /// Dropping a driver cancels its submitted ring wait, so no waiter remains
+    /// on a futex word whose address can be reused.
+    #[cfg(not(feature = "loom"))]
+    #[test]
+    fn test_driver_drop_cancels_ring_wait() {
+        let waker = Waker::new();
+        for cancel in [false, true] {
+            // A park with a short deadline leaves its ring wait queued.
+            let mut driver = Driver::new(
+                &RingConfig::default(),
+                Duration::from_secs(60),
+                waker.clone(),
+                Instant::now(),
+            )
+            .unwrap();
+            assert!(
+                driver
+                    .park(0, Some(Instant::now() + Duration::from_millis(2)))
+                    .unwrap()
+            );
+
+            // Either drop the driver first, or release the wait first to
+            // prove it was queued.
+            if cancel {
+                drop(driver);
+                assert_eq!(wake(&waker, 2), 0, "driver left its ring wait queued");
+            } else {
+                assert_eq!(wake(&waker, 2), 1, "park did not queue its ring wait");
+                drop(driver);
+            }
         }
     }
 
     #[test]
     fn test_timed_park_expiry_is_not_notification() {
-        let waker = Waker::new().unwrap();
+        // An elapsed deadline returns at once without a notification.
+        let waker = Waker::new();
         let elapsed = Instant::now();
         assert!(waker.park_idle(0, Some(elapsed)).is_none());
-        assert_eq!(state_bits(&waker), 0);
+        assert_eq!(word(&waker), 0);
 
+        // A short deadline expires in the kernel, which is not a notification
+        // either.
         let deadline = Instant::now() + Duration::from_millis(2);
         assert!(waker.park_idle(0, Some(deadline)).is_none());
         assert!(Instant::now() >= deadline);
-        assert_eq!(state_bits(&waker), 0);
-        assert_eq!(submitted_seq(&waker), 0);
-        assert_eq!(eventfd_count(&waker), 0);
+        assert_eq!(word(&waker), 0);
     }
 
     #[test]
-    fn test_timed_park_publication_race() {
-        let waker = Waker::new().unwrap();
-
-        // Publish after arming so the notification races the kernel's compare-and-wait.
+    fn test_timed_park_notification_race() {
+        // Notify after arming so the notification races the kernel's
+        // compare-and-wait.
+        let waker = Waker::new();
         let producer = std::thread::spawn({
             let waker = waker.clone();
             move || {
                 wait_until_futex_armed(&waker);
-                if waker.publish() {
-                    waker.wake();
-                }
+                waker.notify();
             }
         });
+
+        // The timed park returns well before its deadline.
         let deadline = Instant::now() + TEST_TIMEOUT;
         let _ = waker.park_idle(0, Some(deadline));
         assert!(
             Instant::now() < deadline,
-            "publication did not wake the idle worker"
+            "notification did not wake the idle worker"
         );
         producer.join().unwrap();
 
-        assert!(waker.pending(0));
-        assert_eq!(state_bits(&waker) & WAITING_MASK, 0);
-        assert_eq!(eventfd_count(&waker), 0);
+        // The notification advanced the sequence and the park disarmed.
+        assert!(waker.moved(0));
+        assert!(!waiting(&waker));
     }
 
     #[test]
@@ -824,6 +827,7 @@ pub mod tests {
         /// Interrupt a futex wait without changing any shared state.
         extern "C" fn interrupt_wait(_: libc::c_int) {}
 
+        // Install a handler that only interrupts the wait.
         // SAFETY: sigaction consists of integer fields, pointers, and a signal
         // mask. Zero initialization supplies valid storage before its handler
         // and mask are initialized below, and `previous` is filled by the OS.
@@ -838,16 +842,18 @@ pub mod tests {
             assert_eq!(libc::sigaction(libc::SIGUSR2, &action, &mut previous), 0);
         }
         let _restore = RestoreSignal(previous);
+
+        // Signal this thread repeatedly once it arms, until it returns.
         // SAFETY: pthread_self returns the live identifier of this test thread,
         // which remains running until the notifier is joined.
         let target = unsafe { libc::pthread_self() };
-        let waker = Waker::new().unwrap();
+        let waker = Waker::new();
         let done = Arc::new(AtomicBool::new(false));
         let notifier = std::thread::spawn({
             let waker = waker.clone();
             let done = done.clone();
             move || {
-                while state_bits(&waker) & WAITING_ON_FUTEX_BIT == 0 {
+                while !waiting(&waker) {
                     if done.load(Ordering::Acquire) {
                         return;
                     }
@@ -868,12 +874,14 @@ pub mod tests {
         let interrupted = Instant::now() < deadline;
         done.store(true, Ordering::Release);
         notifier.join().unwrap();
+
+        // The signal ended the wait early without counting as a notification.
         assert!(
             interrupted,
             "signal must interrupt the wait before its deadline"
         );
         assert!(first.is_none());
-        assert_eq!(state_bits(&waker), 0);
+        assert!(!waiting(&waker));
 
         // Reuse the same deadline after EINTR. The next wait consumes only its
         // remaining interval and timeout still produces no spinner feedback.
@@ -881,443 +889,170 @@ pub mod tests {
             assert!(waker.park_idle(0, Some(deadline)).is_none());
         }
         assert!(Instant::now() >= deadline);
-        assert_eq!(state_bits(&waker), 0);
-        assert_eq!(submitted_seq(&waker), 0);
+        assert_eq!(word(&waker), 0);
     }
 
     #[test]
-    fn test_deferred_signal_after_consumption_changes_wait_target() {
-        let waker = Waker::new().unwrap();
-        let arm = waker.arm(0);
+    fn test_notify_arm_guard_and_sequence() {
+        // The word tracks the sequence separately from the waiter bit across
+        // notifications and arming.
+        let waker = Waker::new();
+        assert_eq!(notifications(&waker), 0);
+
+        // A notification without an armed wait only advances the sequence.
+        waker.notify();
+        assert_eq!(notifications(&waker), 1);
+        assert!(!waiting(&waker));
+
+        // A notification while armed advances the sequence and keeps the bit.
+        let arm = waker.arm(waker.observe());
         assert!(arm.still_idle());
-        assert!(waker.publish());
-        assert!(waker.pending(0));
-        assert_eq!(eventfd_count(&waker), 0);
+        waker.notify();
+        assert_eq!(notifications(&waker), 2);
+        assert!(waiting(&waker));
+
+        // Guard drop disarms without changing the sequence.
         drop(arm);
+        assert_eq!(notifications(&waker), 2);
+        assert!(!waiting(&waker));
 
-        // The owner has transferred the batch and switched to futex parking
-        // before the producer signals. The signal must target that new epoch.
-        let producer = std::thread::spawn({
-            let waker = waker.clone();
-            move || {
-                wait_until_futex_armed(&waker);
-                waker.wake();
-            }
-        });
-        let deadline = Instant::now() + TEST_TIMEOUT;
-        let _ = waker.park_idle(1, Some(deadline));
-        assert!(
-            Instant::now() < deadline,
-            "deferred signal missed the new wait target"
-        );
-        producer.join().unwrap();
-
-        assert!(!waker.pending(1));
-        assert_eq!(state_bits(&waker), 0);
-        assert_eq!(eventfd_count(&waker), 0);
-    }
-
-    #[test]
-    fn test_publish_arm_guard_and_submitted() {
-        // Verify the packed wake state tracks submission sequence separately
-        // from the blocking wake state across the normal publish and
-        // acknowledge flow.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-        assert_eq!(submitted_seq(&waker), 0);
-
-        // Publish without an armed wait target only advances sequence.
-        publish_and_wake(&waker);
-        assert_eq!(submitted_seq(&waker), 1);
-
-        // Arm and publish should trigger an eventfd wake. Acknowledge drains it.
-        let arm = waker.arm(1);
-        assert!(arm.still_idle());
-        publish_and_wake(&waker);
-        assert_eq!(submitted_seq(&waker), 2);
-
-        // Acknowledge and guard drop are wake-gating operations and must not change
-        // the submitted sequence domain.
-        waker.acknowledge();
-        assert_eq!(submitted_seq(&waker), 2);
-        assert_eq!(eventfd_count(&waker), 0);
-        assert_eq!(
-            state_bits(&waker),
-            WAITING_ON_EVENTFD_BIT | WAKE_SIGNALLED_BIT
-        );
-        drop(arm);
-        assert_eq!(submitted_seq(&waker), 2);
-        assert_eq!(state_bits(&waker), 0);
-
-        // Re-arming should observe the same submitted snapshot while idle.
-        let arm = waker.arm(2);
+        // Re-arming against a fresh observation permits blocking.
+        let arm = waker.arm(waker.observe());
         assert!(arm.still_idle());
         drop(arm);
     }
 
     #[test]
-    fn test_pending_tracks_publication_across_wrap() {
-        for start in [0, SUBMISSION_SEQ_MASK] {
-            let waker = Waker::new().expect("eventfd creation should succeed");
-            waker
-                .inner
-                .state
-                .store(start << STATE_BITS, Ordering::Relaxed);
-            let mut processed = start;
-            assert!(!waker.pending(processed));
+    fn test_moved_tracks_notifications_across_wrap() {
+        for start in [0, u32::MAX - WAITER] {
+            // Start the sequence at zero or at its last value.
+            let waker = Waker::new();
+            waker.inner.state.store(start, Ordering::Relaxed);
+            let seen = waker.observe();
+            assert!(!waker.moved(seen));
 
-            assert!(!waker.publish());
-            assert!(waker.pending(processed));
-            processed = processed.wrapping_add(1);
-            assert!(!waker.pending(processed));
-            assert!(!waker.pending(processed & SUBMISSION_SEQ_MASK));
+            // A notification moves the word, even across the wrap.
+            waker.notify();
+
+            // The older observation sees the move and a fresh one does not.
+            assert!(waker.moved(seen));
+            assert!(!waker.moved(waker.observe()));
         }
     }
 
     #[test]
-    fn test_park_idle_handles_concurrent_publish_and_wake_races() {
-        /// Producer action racing the idle transition.
-        #[derive(Clone, Copy, Debug)]
-        enum Notifier {
-            /// Latch a notification without advancing the batch count.
-            Wake,
-            /// Publish a batch and deliver any requested signal.
-            Publish,
-        }
-
+    fn test_park_idle_handles_concurrent_notify_races() {
         // Stress the real concurrent idle-path races rather than only the
         // single-threaded stale-snapshot path. The notifier thread waits until
-        // `WAITING_ON_FUTEX_BIT` is visible and then races a `wake()` or
-        // `publish_and_wake()` against the parked thread's equality check, futex
-        // syscall, and eventual `clear_wait()`.
-        for notifier in [Notifier::Wake, Notifier::Publish] {
-            for _ in 0..64 {
-                let waker = Waker::new().expect("eventfd creation should succeed");
-                let before = submitted_seq(&waker);
-                let notifier_waker = waker.clone();
+        // the waiter bit is visible and then races a notification against the
+        // parked thread's equality check, futex syscall, and disarm.
+        for _ in 0..64 {
+            // Notify once the owner arms.
+            let waker = Waker::new();
+            let before = waker.observe();
+            let notifier = std::thread::spawn({
+                let waker = waker.clone();
+                move || {
+                    wait_until_futex_armed(&waker);
+                    waker.notify();
+                }
+            });
 
-                let handle = std::thread::spawn(move || {
-                    wait_until_futex_armed(&notifier_waker);
-                    match notifier {
-                        Notifier::Wake => notifier_waker.wake(),
-                        Notifier::Publish => publish_and_wake(&notifier_waker),
-                    }
-                });
+            // The park returns well before its deadline.
+            let deadline = Instant::now() + TEST_TIMEOUT;
+            let _ = waker.park_idle(before, Some(deadline));
+            assert!(
+                Instant::now() < deadline,
+                "notification did not wake the idle worker"
+            );
+            notifier.join().expect("idle notifier thread panicked");
 
-                let deadline = Instant::now() + TEST_TIMEOUT;
-                let _ = waker.park_idle(before, Some(deadline));
-                assert!(
-                    Instant::now() < deadline,
-                    "notification did not wake the idle worker"
-                );
-                handle.join().expect("idle notifier thread panicked");
-
-                let expected = match notifier {
-                    Notifier::Wake => before,
-                    Notifier::Publish => before.wrapping_add(1) & SUBMISSION_SEQ_MASK,
-                };
-
-                // Publish signals after it advances the sequence. The parker
-                // can see that change and clear its wait target first, and
-                // the late signal then latches, as publish documents.
-                let latched = match notifier {
-                    Notifier::Wake => 0,
-                    Notifier::Publish => state_bits(&waker) & WAKE_SIGNALLED_BIT,
-                };
-
-                assert_eq!(submitted_seq(&waker), expected, "{notifier:?}");
-                assert_eq!(state_bits(&waker), latched, "{notifier:?}");
-            }
+            // One notification arrived and the park disarmed.
+            assert_eq!(notifications(&waker), 1);
+            assert!(!waiting(&waker));
         }
     }
 
     #[test]
-    fn test_wake_before_park_idle_skips_sleep() {
-        // Verify an out-of-band wake latched before idle arming makes the next
-        // idle park return immediately instead of sleeping.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-        let before = submitted_seq(&waker);
+    fn test_notify_before_park_idle_skips_sleep() {
+        // Observe, then notify before the idle park arms.
+        let waker = Waker::new();
+        let seen = waker.observe();
+        waker.notify();
 
-        waker.wake();
-        let duration = waker.park_idle(before, None);
+        // The park against the older observation returns at once.
+        assert!(waker.park_idle(seen, None).is_none());
 
-        assert!(duration.is_none(), "should not have slept");
-        assert_eq!(submitted_seq(&waker), before);
-        assert_eq!(state_bits(&waker), 0);
+        // The notification was counted and the park disarmed.
+        assert_eq!(notifications(&waker), 1);
+        assert!(!waiting(&waker));
     }
 
     #[test]
-    fn test_publish_before_park_idle_skips_sleep() {
-        // Verify a sequence published before idle arming makes the next idle
-        // park return immediately without manufacturing a wake.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-
-        publish_and_wake(&waker);
-        assert!(waker.park_idle(0, None).is_none());
-
-        assert_eq!(submitted_seq(&waker), 1);
-        assert_eq!(state_bits(&waker), 0);
-        assert_eq!(eventfd_count(&waker), 0);
-    }
-
-    #[test]
-    fn test_publish_after_futex_arm_rejects_stale_snapshot() {
-        // Verify the futex idle path tolerates a publish that lands after
-        // WAITING_ON_FUTEX_BIT is armed but before the armed thread commits to
-        // a stable futex wait on that snapshot.
-        //
-        // This models the race that `park_idle()` closes:
-        // 1. idle path arms WAITING_ON_FUTEX_BIT and computes a snapshot
-        // 2. producer publishes, changing the packed state word
-        // 3. a futex wait on the stale snapshot must return immediately
-        let waker = Waker::new().expect("eventfd creation should succeed");
-        let before = submitted_seq(&waker);
-
-        // Manually split `park_idle()` into "arm" and "wait" so the publish
-        // can be injected exactly between those two steps.
-        let prev = waker
-            .inner
-            .state
-            .fetch_or(WAITING_ON_FUTEX_BIT, Ordering::Relaxed);
-        assert_eq!(prev & WAITING_MASK, 0);
-        let snapshot = prev | WAITING_ON_FUTEX_BIT;
-
-        // This publish changes the packed word after arming, so a futex wait
-        // on the stale snapshot must now return immediately.
-        publish_and_wake(&waker);
-        assert_eq!(
-            submitted_seq(&waker),
-            before.wrapping_add(1) & SUBMISSION_SEQ_MASK
-        );
-
-        // If the stale snapshot were incorrectly accepted, this call could
-        // block indefinitely. Returning here proves the userspace equality
-        // check / futex EAGAIN path rejected the outdated snapshot without
-        // ever committing to a real futex sleep.
-        assert!(!waker.futex_wait(snapshot, None));
-        waker.clear_wait();
-
-        // The publish should remain visible and the wait bits should be fully
-        // cleared on exit, matching `park_idle()`'s contract.
-        assert_eq!(
-            submitted_seq(&waker),
-            before.wrapping_add(1) & SUBMISSION_SEQ_MASK
-        );
-        assert_eq!(state_bits(&waker), 0);
-    }
-
-    #[test]
-    fn test_publish_deduplicates_eventfd_wakes() {
-        // Verify contended publishes while the same eventfd wait is armed only
-        // queue one wake write, while still advancing the sequence for every
-        // publisher that raced in this epoch.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-        let barrier = Arc::new(std::sync::Barrier::new(5));
-        let mut handles = Vec::new();
-
-        let arm = waker.arm(0);
+    fn test_notify_after_arm_rejects_stale_snapshot() {
+        // The idle path tolerates a notification that lands after the waiter
+        // bit is armed but before the armed thread commits to a futex wait on
+        // that snapshot. Split `park_idle()` into its arm and its wait, so the
+        // notification lands exactly between them.
+        let waker = Waker::new();
+        let arm = waker.arm(waker.observe());
         assert!(arm.still_idle());
-        for _ in 0..4 {
-            let publisher = waker.clone();
-            let barrier = barrier.clone();
-            handles.push(std::thread::spawn(move || {
-                barrier.wait();
-                publish_and_wake(&publisher);
-            }));
-        }
-        barrier.wait();
-        for handle in handles {
-            handle.join().expect("publish thread panicked");
-        }
+        waker.notify();
 
-        assert_eq!(submitted_seq(&waker), 4);
-        assert_eq!(eventfd_count(&waker), 1);
+        // A wait on the stale snapshot returns at once instead of blocking,
+        // through the userspace equality check or the futex EAGAIN path.
+        assert!(!waker.futex_wait(arm.snapshot(), None));
         drop(arm);
+
+        // The notification was counted and the guard disarmed.
+        assert_eq!(notifications(&waker), 1);
+        assert!(!waiting(&waker));
     }
 
     #[test]
-    fn test_unarmed_wakes_rearm_across_epochs() {
-        // Verify unarmed wake latches are consumed when the loop next arms,
-        // and that later unarmed wakes can be observed in later epochs.
-        let waker = Waker::new().expect("eventfd creation should succeed");
+    fn test_arm_after_notify_skips_blocking() {
+        // Notify before arming against the initial observation.
+        let waker = Waker::new();
+        waker.notify();
 
-        waker.wake();
+        // The arm notices the notification and refuses to block.
         let arm = waker.arm(0);
         assert!(!arm.still_idle());
         drop(arm);
 
-        assert_eq!(submitted_seq(&waker), 0);
-        assert_eq!(state_bits(&waker), 0);
-        assert_eq!(eventfd_count(&waker), 0);
-
-        waker.wake();
-        let arm = waker.arm(0);
-        assert!(!arm.still_idle());
-        drop(arm);
-
-        assert_eq!(submitted_seq(&waker), 0);
-        assert_eq!(state_bits(&waker), 0);
-        assert_eq!(eventfd_count(&waker), 0);
-
-        publish_and_wake(&waker);
-        waker.wake();
-        assert_eq!(submitted_seq(&waker), 1);
-        assert_eq!(eventfd_count(&waker), 0);
-        let arm = waker.arm(1);
-        assert!(!arm.still_idle());
-        drop(arm);
-
-        assert_eq!(state_bits(&waker), 0);
-        assert_eq!(eventfd_count(&waker), 0);
-    }
-
-    #[test]
-    fn test_arm_after_publish_skips_blocking() {
-        // Verify arming with a stale processed sequence notices the newly
-        // published submission and skips blocking.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-
-        publish_and_wake(&waker);
-        let arm = waker.arm(0);
-        assert!(!arm.still_idle());
-        drop(arm);
-
-        assert_eq!(submitted_seq(&waker), 1);
-        assert_eq!(state_bits(&waker), 0);
-    }
-
-    #[test]
-    fn test_wake_deduplicates_eventfd_wakes() {
-        // Verify contended out-of-band notifications while the same eventfd
-        // wait is armed only queue one wake write and do not perturb sequence.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-        let barrier = Arc::new(std::sync::Barrier::new(5));
-        let mut handles = Vec::new();
-
-        let arm = waker.arm(0);
-        assert!(arm.still_idle());
-        for _ in 0..4 {
-            let notifier = waker.clone();
-            let barrier = barrier.clone();
-            handles.push(std::thread::spawn(move || {
-                barrier.wait();
-                notifier.wake();
-            }));
-        }
-        barrier.wait();
-        for handle in handles {
-            handle.join().expect("wake thread panicked");
-        }
-
-        assert_eq!(submitted_seq(&waker), 0);
-        assert_eq!(eventfd_count(&waker), 1);
-        drop(arm);
-    }
-
-    #[test]
-    fn test_eventfd_wake_and_acknowledge_empty_paths_keep_sequence_stable() {
-        // Verify eventfd wake and drain do not perturb the
-        // logical submission sequence, even when the counter is already empty.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-        let before = submitted_seq(&waker);
-
-        // Drive one normal wake cycle, then immediately drain again to hit the
-        // non-blocking empty-read path.
-        waker.eventfd_wake();
-        waker.acknowledge();
-        // Second acknowledge should take the non-blocking empty path.
-        waker.acknowledge();
-
-        assert_eq!(submitted_seq(&waker), before);
-    }
-
-    #[test]
-    fn test_reinstall_pushes_wake_poll() {
-        // Verify `reinstall()` queues one multishot wake poll SQE when space
-        // is available and reports failure without mutating the SQ when it is
-        // full.
-        let waker = Waker::new().expect("eventfd creation should succeed");
-        let mut ring = IoUring::new(8).expect("io_uring creation should succeed");
-
-        // With SQ space available, `reinstall()` should enqueue exactly one
-        // wake poll request.
-        let mut sq = ring.submission();
-        let before = sq.len();
-        assert!(waker.reinstall(&mut sq));
-        assert_eq!(sq.len(), before + 1);
-
-        // Once the SQ is full, `reinstall()` must leave it unchanged and ask
-        // the caller to retry later.
-        while !sq.is_full() {
-            let nop = io_uring::opcode::Nop::new().build().user_data(0);
-            // SAFETY: Nop SQE owns no user pointers or external resources.
-            unsafe {
-                sq.push(&nop).expect("unable to fill submission queue");
-            }
-        }
-
-        let before = sq.len();
-        assert!(!waker.reinstall(&mut sq));
-        assert_eq!(sq.len(), before);
-    }
-
-    #[cfg(not(feature = "loom"))]
-    #[test]
-    fn test_eventfd_wake_and_acknowledge_error_branches() {
-        // Verify the explicit EAGAIN and generic error branches leave the
-        // logical submission sequence unchanged.
-        let mut waker = Waker::new().expect("eventfd creation should succeed");
-        let before = submitted_seq(&waker);
-
-        // Saturate the eventfd counter near its maximum so `eventfd_wake` takes the
-        // non-blocking EAGAIN path and `acknowledge` drains the queued wake.
-        let fd = waker.inner.wake_fd.as_raw_fd();
-        let value = u64::MAX - 1;
-        // SAFETY: `fd` is a valid eventfd and `value` points to initialized memory.
-        let wrote = unsafe {
-            libc::write(
-                fd,
-                &value as *const u64 as *const libc::c_void,
-                size_of::<u64>(),
-            )
-        };
-        assert_eq!(wrote, size_of::<u64>() as isize);
-        waker.eventfd_wake();
-        waker.acknowledge();
-
-        // An owned directory descriptor rejects both eventfd operations without
-        // violating descriptor ownership or risking reuse of a closed fd number.
-        let inner = Arc::get_mut(&mut waker.inner).expect("unique waker in test");
-        inner.wake_fd = File::open(".").unwrap().into();
-        waker.eventfd_wake();
-        waker.acknowledge();
-
-        // Direct eventfd read/write error paths should not perturb sequence tracking.
-        assert_eq!(submitted_seq(&waker), before);
+        // The notification was counted and the guard disarmed.
+        assert_eq!(notifications(&waker), 1);
+        assert!(!waiting(&waker));
     }
 }
 
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
-    //! This module uses loom to model the waker's producer/loop protocol over
-    //! the packed atomic state word. The model keeps the production sequence and
-    //! wait-bit state machine, but replaces kernel wake surfaces with
-    //! loom-visible userspace models: the futex path uses a mutex and condvar to
-    //! preserve the atomic compare-and-park property of `FUTEX_WAIT`, and the
-    //! eventfd path uses a durable readiness counter plus a condvar to model
-    //! both persistent wake readiness and a blocked ring wait returning after
-    //! a wake CQE.
-    //!
-    //! The tests keep schedules small while exercising the important races and
-    //! invariants: publish versus arm-and-recheck, futex idle parking, eventfd
-    //! wake coalescing, sticky out-of-band wakes, sequence wraparound, and the
-    //! Release/Acquire edges that make producer state visible after `pending()`
-    //! or `clear_wait()`. The model intentionally stops at this userspace
-    //! protocol boundary. It does not validate kernel CQE ordering,
-    //! `io_uring_enter`, wake-poll rearming, or syscall error handling.
+    // These models explore the eventcount protocol over the futex word. They
+    // keep the production waiter bit and sequence, and replace the kernel futex
+    // with a modeled queue that compares and queues a wait atomically and
+    // releases waits oldest first. Producers make a condition visible with a
+    // relaxed store, then notify. The modeled worker observes, checks the
+    // condition with a relaxed load, and parks against its observation, so
+    // only the eventcount's release and acquire edges can make the condition
+    // visible.
+    //
+    // Most models install a fresh ring wait on every ring park and block until
+    // it completes, which behaves as a blocking wait. The persistent ring
+    // models keep one ring wait queued across parks until a wake completes it,
+    // as the driver does, so they cover ring wait reuse and the wake-two rule
+    // beside an idle wait, with a single-wake negative control. The models stop
+    // at this userspace boundary. They do not model io_uring completion
+    // delivery, `io_uring_enter`, or syscall errors.
 
     use super::{
-        tests::{eventfd_count, publish_and_wake, state_bits, submitted_seq},
+        tests::{notifications, waiting},
         *,
+    };
+    use crate::iouring::{
+        mailbox::{Cancel, Mailbox, Message},
+        slab::Id,
+        waiter::WaiterId,
     };
     use commonware_utils::TestRng;
     use loom::{
@@ -1329,151 +1064,198 @@ mod loom_tests {
     };
     use rand::{Rng, RngExt as _};
     use rstest::rstest;
+    use std::mem;
 
-    /// Minimal model of the inbound request queue that feeds the ring.
+    /// Block in a modeled ring futex wait installed against `guard`'s snapshot.
     ///
-    /// The queue model deliberately uses only relaxed accesses. These tests rely
-    /// on the waker's Release/Acquire edges to make an enqueued request visible
-    /// to the loop after it observes progress or resumes from a wake.
-    struct QueuedRequest {
-        /// Payload whose visibility must come from the wake protocol.
-        value: AtomicU32,
+    /// The kernel compares the word with the snapshot and queues the wait under
+    /// the futex bucket lock, as for a thread wait, and the park blocks until a
+    /// wake of that wait posts its completion. A fresh ring wait therefore
+    /// behaves as a blocking wait.
+    fn ring_wait(waker: &Waker, guard: &ArmGuard<'_>) {
+        let _ = waker.futex_wait(guard.snapshot(), None);
     }
 
-    impl QueuedRequest {
-        /// Construct a queue with no published payload.
-        fn empty() -> Self {
-            Self {
-                value: AtomicU32::new(0),
+    /// Arm against `seen` and block in a new ring wait if that is still idle.
+    fn ring_park(waker: &Waker, seen: u32) {
+        let guard = waker.arm(seen);
+        if guard.still_idle() {
+            ring_wait(waker, &guard);
+        }
+    }
+
+    /// Park on the idle path against `seen`.
+    fn idle_park(waker: &Waker, seen: u32) {
+        let _ = waker.park_idle(seen, None);
+    }
+
+    /// The driver's record of its ring wait in the persistent ring models.
+    #[derive(Default)]
+    struct Ring {
+        /// Whether a ring wait was installed and its completion is not yet
+        /// reaped, as the driver's rearm flag records it.
+        live: bool,
+    }
+
+    /// Queue a modeled ring wait that compares against `snapshot`, as the
+    /// kernel does when the enter after [`Waker::install`] submits it.
+    fn install_ring_wait(waker: &Waker, snapshot: u32) {
+        let mut queue = waker.inner.futex.lock().unwrap();
+        assert!(
+            !queue.ring_completed && !queue.waiters.contains(&Waiter::Ring),
+            "a second ring wait installed while one is live"
+        );
+
+        // A changed word fails the compare, which completes the wait at once.
+        if waker.inner.state.load(Ordering::Relaxed) == snapshot {
+            queue.waiters.push_back(Waiter::Ring);
+        } else {
+            queue.ring_completed = true;
+        }
+    }
+
+    /// Park in the ring against `seen` as the driver does, with a ring wait
+    /// that stays queued across parks until a wake completes it.
+    ///
+    /// The park arms and installs a wait unless one is live. With `block`, its
+    /// enter returns once a ring wait completion is posted. Without it, the
+    /// enter returns at once, as a deadline or an unrelated completion ends a
+    /// park. The park then reaps a posted completion, so the next park
+    /// installs a new wait, and otherwise leaves the live wait for the next
+    /// park to reuse.
+    fn persistent_ring_park(waker: &Waker, ring: &mut Ring, seen: u32, block: bool) {
+        let guard = waker.arm(seen);
+        if guard.still_idle() {
+            if !ring.live {
+                install_ring_wait(waker, guard.snapshot());
+                ring.live = true;
+            }
+            if block {
+                let mut queue = waker.inner.futex.lock().unwrap();
+                while !queue.ring_completed {
+                    queue = waker.inner.futex_waiters.wait(queue).unwrap();
+                }
             }
         }
+        drop(guard);
 
-        /// Store a payload before publishing or waking.
-        fn enqueue(&self, value: u32) {
-            self.value.store(value, Ordering::Relaxed);
-        }
-
-        /// Inspect the payload after the wake protocol supplies synchronization.
-        fn read(&self) -> u32 {
-            self.value.load(Ordering::Relaxed)
+        // Service reaps the completion after the park, which ends the wait.
+        if mem::take(&mut waker.inner.futex.lock().unwrap().ring_completed) {
+            ring.live = false;
         }
     }
 
-    /// Wait until the modeled eventfd has durable readiness.
-    ///
-    /// In production, the ring wait returns after the wake poll produces a
-    /// CQE. In the loom model, `eventfd_wake()` increments `eventfd_counter` and
-    /// notifies this condvar, so this helper represents only that blocking
-    /// boundary.
-    fn wait_for_eventfd_readiness(waker: &Waker) {
-        let mut guard = waker.inner.eventfd_readiness.lock().unwrap();
-        while waker.inner.eventfd_counter.load(Ordering::Acquire) == 0 {
-            guard = waker.inner.eventfd_waiters.wait(guard).unwrap();
-        }
+    /// Leave a ring wait queued, as a park that ended without its completion
+    /// does, before any producer runs.
+    fn queued_ring_wait(waker: &Waker) -> Ring {
+        let mut ring = Ring::default();
+        persistent_ring_park(waker, &mut ring, waker.observe(), false);
+        assert!(ring.live);
+        ring
     }
 
-    /// Wait until a producer/notifier has latched a wake bit.
-    ///
-    /// This is deliberately a relaxed spin: the tests using it pair with the
-    /// producer's Release through the later `clear_wait()` Acquire.
-    fn wait_for_wake_signal(waker: &Waker) {
-        while state_bits(waker) & WAKE_SIGNALLED_BIT == 0 {
-            thread::yield_now();
-        }
-    }
-
-    /// Finish any wake epoch left over after a loop-simulator test has already
-    /// observed the sequence progress it cares about.
-    ///
-    /// A producer can claim `WAKE_SIGNALLED_BIT` and queue modeled eventfd
-    /// readiness while the simulated loop is also able to make progress by
-    /// observing `pending()`. At that point the leftover wake is cleanup noise,
-    /// not the property under test. Tests that care about exact wake coalescing
-    /// should assert the modeled eventfd counter before calling this helper.
-    fn finish_leftover_wake(waker: &Waker) {
-        assert_eq!(state_bits(waker) & WAITING_MASK, 0);
-        if (state_bits(waker) & WAKE_SIGNALLED_BIT) != 0 {
-            let guard = waker.arm(submitted_seq(waker));
-            assert!(!guard.still_idle());
-            drop(guard);
-        }
-        // A raced publisher can queue eventfd readiness after the loop has
-        // already observed its sequence bump. Finish that modeled wake CQE so
-        // cleanup assertions do not confuse it with the unarmed-wake cases.
-        waker.acknowledge();
-        assert_eq!(state_bits(waker), 0);
-        assert_eq!(eventfd_count(waker), 0);
-    }
-
-    /// Simulate the loop's eventfd-backed wait path until it has observed
-    /// `target` published submissions. This is not modeling the request queue
-    /// itself, only the waker-side control flow: check `pending()`, arm the
-    /// eventfd target, block only if the post-arm snapshot is still idle, then
-    /// drop the guard and acknowledge modeled eventfd readiness.
-    ///
-    /// The final `acknowledge()` is model cleanup for any wake CQE readiness
-    /// produced during the brief arm window. It may be a no-op when the loop did
-    /// not actually block, so tests that validate exact wake counts assert the
-    /// counter directly instead of relying on this helper.
-    fn simulate_eventfd_loop_until(waker: &Waker, mut processed: u32, target: u32) -> u32 {
-        while processed != target {
-            if waker.pending(processed) {
-                processed = processed.wrapping_add(1) & SUBMISSION_SEQ_MASK;
-                continue;
+    /// Simulate the worker until `source` reaches `target`: observe, check the
+    /// source with a relaxed load, and park through `park` against the
+    /// observation when the source is still below the target.
+    fn simulate_until(
+        waker: &Waker,
+        source: &AtomicU32,
+        target: u32,
+        mut park: impl FnMut(&Waker, u32),
+    ) {
+        loop {
+            let seen = waker.observe();
+            if source.load(Ordering::Relaxed) >= target {
+                assert!(!waiting(waker));
+                return;
             }
-
-            let guard = waker.arm(processed);
-            if guard.still_idle() {
-                wait_for_eventfd_readiness(waker);
-                assert!(
-                    eventfd_count(waker) > 0,
-                    "blocking eventfd wait must observe queued readiness before cleanup",
-                );
-            }
-            drop(guard);
-            waker.acknowledge();
+            park(waker, seen);
         }
-        processed
     }
 
-    /// Simulate the loop's fully-idle futex path until it has observed `target`
-    /// published submissions. Like the eventfd loop simulator, this models only
-    /// waker-side control flow: check `pending()`, otherwise call `park_idle()`
-    /// to arm the futex wait target and perform the stale-snapshot recheck.
-    fn simulate_futex_loop_until(waker: &Waker, mut processed: u32, target: u32) -> u32 {
-        while processed != target {
-            if waker.pending(processed) {
-                processed = processed.wrapping_add(1) & SUBMISSION_SEQ_MASK;
-                continue;
-            }
-            let _ = waker.park_idle(processed, None);
+    /// Make one condition visible, then notify.
+    fn publish(waker: &Waker, source: &AtomicU32) {
+        source.fetch_add(1, Ordering::Relaxed);
+        waker.notify();
+    }
+
+    /// A message identified by `index`, with no payload to release.
+    const fn message(index: u32) -> Message {
+        Message::Cancel(Cancel::Waiter(WaiterId(Id {
+            index,
+            generation: 0,
+        })))
+    }
+
+    /// The index of a message built by [`message`].
+    fn index(message: Message) -> u32 {
+        match message {
+            Message::Cancel(Cancel::Waiter(WaiterId(id))) => id.index,
+            _ => panic!("not a modeled message"),
         }
-        processed
+    }
+
+    /// Record that the calling producer, the last thread able to wake the
+    /// word, has finished, so a wait still queued fails the model.
+    fn abandon(waker: &Waker) {
+        let mut queue = waker.inner.futex.lock().unwrap();
+        queue.abandoned = true;
+        waker.inner.futex_waiters.notify_all();
+    }
+
+    /// Run a worker that parks idle behind a stale ring wait while a producer
+    /// publishes one condition, with wakes that release `wake_count` waits. An
+    /// idle wait that the producer's wake missed fails the model once the
+    /// producer finishes.
+    fn idle_wait_behind_stale_ring_wait(wake_count: u32) {
+        loom::model(move || {
+            // Leave a ring wait queued ahead of every idle wait.
+            let waker = Waker::new();
+            waker.inner.futex.lock().unwrap().wake_count = wake_count;
+            let _ring = queued_ring_wait(&waker);
+            let source = Arc::new(AtomicU32::new(0));
+
+            // The worker parks idle until it sees the producer's condition.
+            let producer = thread::spawn({
+                let waker = waker.clone();
+                let source = source.clone();
+                move || {
+                    publish(&waker, &source);
+                    abandon(&waker);
+                }
+            });
+            simulate_until(&waker, &source, 1, idle_park);
+            producer.join().unwrap();
+
+            // The worker saw the condition and disarmed.
+            assert_eq!(notifications(&waker), 1);
+            assert!(!waiting(&waker));
+        });
     }
 
     /// Producer operation used by the deterministic generated loom tests.
     ///
     /// Each generated program is built before entering `loom::model`, then run
-    /// by a producer thread. `Publish` models a producer making one request
-    /// visible to the loop, while `Wake` models an out-of-band notification that
-    /// must not affect submission sequence accounting.
+    /// by a producer thread. `Publish` makes a condition visible before
+    /// notifying, as a mailbox message does, while `Notify` carries no condition
+    /// the modeled worker counts, as a pool claim does.
     #[derive(Clone, Copy, Debug)]
     enum ProducerOp {
-        /// Publish one request to the waker.
+        /// Make one condition visible, then notify.
         Publish,
-        /// Notify the loop without publishing a request.
-        Wake,
+        /// Notify without a counted condition.
+        Notify,
     }
 
     impl ProducerOp {
-        /// Generate a deterministic publish/wake program for loom exploration.
+        /// Generate a deterministic program for loom exploration.
         fn generate_program(rng: &mut impl Rng, len: usize) -> Vec<Self> {
             (0..len)
                 .map(|_| {
                     if rng.random_bool(0.5) {
                         Self::Publish
                     } else {
-                        Self::Wake
+                        Self::Notify
                     }
                 })
                 .collect()
@@ -1493,23 +1275,20 @@ mod loom_tests {
         }
 
         /// Execute one generated producer operation.
-        fn execute(self, waker: &Waker, publishes: &AtomicU32) {
+        fn execute(self, waker: &Waker, source: &AtomicU32) {
             match self {
-                Self::Publish => {
-                    publish_and_wake(waker);
-                    publishes.fetch_add(1, Ordering::Relaxed);
-                }
-                Self::Wake => waker.wake(),
+                Self::Publish => publish(waker, source),
+                Self::Notify => waker.notify(),
             }
         }
     }
 
-    /// Explore one generated producer program alongside one modeled consumer.
+    /// Explore one generated producer program alongside one modeled worker.
     fn generated_loop_program(
         seed: u64,
         index: usize,
         ops_per_program: usize,
-        simulate_loop_until: fn(&Waker, u32, u32) -> u32,
+        park: fn(&Waker, u32),
     ) {
         let program = ProducerOp::generated_program(seed, index, ops_per_program);
         let publish_count = program
@@ -1518,749 +1297,603 @@ mod loom_tests {
             .count() as u32;
 
         loom::model(move || {
-            let waker = Waker::new().unwrap();
-            let publishes = Arc::new(AtomicU32::new(0));
-
+            // Run the program on a producer thread.
+            let waker = Waker::new();
+            let source = Arc::new(AtomicU32::new(0));
             let producer = thread::spawn({
                 let program = program.clone();
                 let waker = waker.clone();
-                let publishes = publishes.clone();
+                let source = source.clone();
                 move || {
                     for &op in program.iter() {
-                        op.execute(&waker, &publishes);
+                        op.execute(&waker, &source);
                     }
                 }
             });
 
-            let processed = simulate_loop_until(&waker, 0, publish_count);
+            // The worker parks until it sees every published condition.
+            simulate_until(&waker, &source, publish_count, park);
             producer.join().unwrap();
 
+            // Every operation notified once and the worker disarmed.
             assert_eq!(
-                processed, publish_count,
-                "loop progress failed: seed={seed} index={index} program={program:?}",
+                notifications(&waker),
+                program.len() as u32,
+                "notification conservation failed: seed={seed} index={index} program={program:?}",
             );
-            assert_eq!(
-                submitted_seq(&waker),
-                publish_count,
-                "publish conservation failed: seed={seed} index={index} program={program:?}",
+            assert!(
+                !waiting(&waker),
+                "wait remained armed: seed={seed} index={index} program={program:?}",
             );
-            assert_eq!(
-                publishes.load(Ordering::Relaxed),
-                publish_count,
-                "producer accounting failed: seed={seed} index={index} program={program:?}",
-            );
-            finish_leftover_wake(&waker);
         });
     }
 
     #[test]
-    fn test_batch_publication_and_delayed_signal() {
-        // The shared inbox publishes once for any number of appended messages.
-        // A producer can be delayed after unlocking while the owner transfers
-        // the batch, applies only part of its scratch, and observes a new batch.
-        // This models userspace ownership and waking, not kernel CQE delivery.
+    fn test_batch_notification_and_take_gate() {
+        // The mailbox notifies once per batch, after unlocking, and a pool
+        // claim moves the word without mail. A producer can be delayed between
+        // unlocking and notifying while the worker takes, applies part of its
+        // scratch, and parks. The worker observes, then takes only while the
+        // mailbox reports mail, as the run loop does, so the claim costs no
+        // take and no batch is missed. This models userspace ownership and
+        // waking, not kernel CQE delivery.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let inbox = Arc::new(Mutex::new(Vec::new()));
-            let arm = waker.arm(0);
+            // A producer sends two messages around a claim notification.
+            let mailbox = Arc::new(Mailbox::new());
             let producer = thread::spawn({
-                let waker = waker.clone();
-                let inbox = inbox.clone();
+                let mailbox = mailbox.clone();
                 move || {
-                    for message in [1, 2] {
-                        let signal = {
-                            let mut inbox = inbox.lock().unwrap();
-                            let first = inbox.is_empty();
-                            inbox.push(message);
-                            first && waker.publish()
-                        };
-                        thread::yield_now();
-                        if signal {
-                            waker.wake();
-                        }
-                    }
+                    assert!(mailbox.send(message(1)).is_ok());
+                    mailbox.waker.notify();
+                    assert!(mailbox.send(message(2)).is_ok());
                 }
             });
 
-            let mut processed = 0;
+            // The worker takes through the mail flag and parks in the ring
+            // until it has applied both. A set flag always finds a batch.
             let mut received = Vec::new();
             let mut scratch = Vec::new();
             while received.len() < 2 {
-                let published = submitted_seq(&waker);
-                assert!((published.wrapping_sub(processed) & SUBMISSION_SEQ_MASK) <= 1);
-                if scratch.is_empty() && waker.pending(processed) {
-                    {
-                        let mut inbox = inbox.lock().unwrap();
-                        std::mem::swap(&mut *inbox, &mut scratch);
-                    }
-                    if !scratch.is_empty() {
-                        processed = processed.wrapping_add(1) & SUBMISSION_SEQ_MASK;
-                    }
+                let seen = mailbox.waker.observe();
+                if scratch.is_empty() && mailbox.has_mail() {
+                    assert!(mailbox.take(&mut scratch));
                 }
-                if !scratch.is_empty() {
-                    received.push(scratch.remove(0));
+                if scratch.is_empty() {
+                    ring_park(&mailbox.waker, seen);
+                } else {
+                    received.push(index(scratch.remove(0)));
                 }
-                thread::yield_now();
             }
-            drop(arm);
             producer.join().unwrap();
+
+            // Both messages arrived in order, the claim and one or two batches
+            // notified, and the flag is clear.
             assert_eq!(received, [1, 2]);
-            assert_eq!(submitted_seq(&waker), processed);
-            assert!((1..=2).contains(&processed));
-            assert!(!waker.pending(processed));
-            waker.acknowledge();
+            assert!((2..=3).contains(&notifications(&mailbox.waker)));
+            assert!(!mailbox.has_mail());
+            assert!(!waiting(&mailbox.waker));
         });
     }
 
     #[test]
-    fn test_deferred_signal_follows_new_futex_epoch() {
+    fn test_batch_close_with_retained_scratch_and_delayed_notification() {
+        // Closure transfers shared ownership while one already taken batch
+        // still has local messages. A send and its delayed notification may
+        // race that transfer, but no accepted or rejected message is lost, and
+        // closing leaves the mail flag clear.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let arm = waker.arm(0);
-            assert!(waker.publish());
-            drop(arm);
-
-            let producer = thread::spawn({
-                let waker = waker.clone();
-                move || waker.wake()
-            });
-            let _ = waker.park_idle(1, None);
-            producer.join().unwrap();
-            assert_eq!(submitted_seq(&waker), 1);
-            assert_eq!(state_bits(&waker), 0);
-            assert_eq!(eventfd_count(&waker), 0);
-        });
-    }
-
-    #[test]
-    fn test_batch_close_with_retained_scratch_and_delayed_signal() {
-        // Closure transfers shared ownership while one already processed
-        // batch still has local messages. Publication and deferred signaling
-        // may race that transfer, but no accepted or rejected message is lost.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let inbox = Arc::new(Mutex::new((true, vec![0, 1])));
-            assert!(!waker.publish());
+            // The worker took a batch of two and applied one, then armed.
+            let mailbox = Arc::new(Mailbox::new());
+            assert!(mailbox.send(message(0)).is_ok());
+            assert!(mailbox.send(message(1)).is_ok());
             let mut scratch = Vec::new();
-            {
-                let mut inbox = inbox.lock().unwrap();
-                std::mem::swap(&mut inbox.1, &mut scratch);
-            }
-            let mut processed = 1;
-            assert!(!waker.pending(processed));
+            assert!(mailbox.has_mail());
+            assert!(mailbox.take(&mut scratch));
             let first = scratch.remove(0);
-            let arm = waker.arm(processed);
-            let producer = thread::spawn({
-                let waker = waker.clone();
-                let inbox = inbox.clone();
-                move || {
-                    let (rejected, signal) = {
-                        let mut inbox = inbox.lock().unwrap();
-                        if inbox.0 {
-                            let first = inbox.1.is_empty();
-                            inbox.1.push(2);
-                            (None, first && waker.publish())
-                        } else {
-                            (Some(2), false)
-                        }
-                    };
-                    thread::yield_now();
-                    if signal {
-                        waker.wake();
-                    }
-                    rejected
-                }
-            });
+            let arm = mailbox.waker.arm(mailbox.waker.observe());
 
-            let mut detached = {
-                let mut inbox = inbox.lock().unwrap();
-                inbox.0 = false;
-                std::mem::take(&mut inbox.1)
-            };
-            if !detached.is_empty() {
-                processed += 1;
-            }
-            assert!(!waker.pending(processed));
-            {
-                let mut inbox = inbox.lock().unwrap();
-                inbox.0 = false;
-                assert!(std::mem::take(&mut inbox.1).is_empty());
-            }
-            assert!(!waker.pending(processed));
+            // A producer sends while the worker closes the mailbox twice, as
+            // the worker's close and its cleanup do.
+            let producer = thread::spawn({
+                let mailbox = mailbox.clone();
+                move || mailbox.send(message(2)).err().map(index)
+            });
+            let mut detached = mailbox.close();
+            assert!(mailbox.close().is_empty());
             drop(arm);
             let rejected = producer.join().unwrap();
-            assert_eq!(processed, 1 + u32::from(rejected.is_none()));
-            assert_eq!(submitted_seq(&waker), processed);
+
+            // Every message is accounted for exactly once, and a send that
+            // closing rejected left no mail behind.
+            assert_eq!(
+                notifications(&mailbox.waker),
+                1 + u32::from(rejected.is_none())
+            );
+            assert!(!mailbox.has_mail());
             detached.push(first);
             detached.append(&mut scratch);
-            detached.extend(rejected);
-            detached.sort_unstable();
-            assert_eq!(detached, [0, 1, 2]);
-            assert_eq!(state_bits(&waker) & WAITING_MASK, 0);
-            waker.acknowledge();
+            let mut indices = detached.into_iter().map(index).collect::<Vec<_>>();
+            indices.extend(rejected);
+            indices.sort_unstable();
+            assert_eq!(indices, [0, 1, 2]);
+            assert!(!waiting(&mailbox.waker));
         });
     }
 
     #[test]
-    fn test_timed_futex_expiry_races_batch_publication() {
+    fn test_timed_futex_expiry_races_notification() {
         // The kernel's elapsed timeout is represented by an already-due
-        // absolute deadline. Loom explores publication and delayed signaling
-        // across the same arm/disarm transition. Real tests cover syscall
-        // timeout delivery, which this userspace model does not simulate.
+        // absolute deadline. Loom explores a notification across the same
+        // arm and disarm transition. Real tests cover syscall timeout delivery,
+        // which this userspace model does not simulate.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
+            // A producer notifies once.
+            let waker = Waker::new();
             let deadline = Instant::now();
             let producer = thread::spawn({
                 let waker = waker.clone();
-                move || {
-                    let signal = waker.publish();
-                    thread::yield_now();
-                    if signal {
-                        waker.wake();
-                    }
-                }
+                move || waker.notify()
             });
+
+            // The expired park returns without counting as a notification.
             assert!(waker.park_idle(0, Some(deadline)).is_none());
             producer.join().unwrap();
-            assert!(waker.pending(0));
-            assert_eq!(submitted_seq(&waker), 1);
-            assert_eq!(state_bits(&waker) & WAITING_MASK, 0);
-            assert_eq!(eventfd_count(&waker), 0);
+
+            // The notification still moved the word.
+            assert!(waker.moved(0));
+            assert_eq!(notifications(&waker), 1);
+            assert!(!waiting(&waker));
         });
     }
 
     #[test]
-    fn test_publish_pending_pairing() {
-        // `publish` must make the producer's earlier enqueue-side write visible
-        // to a loop that observes the published sequence through `pending()`.
-        // The loop deliberately spins on `pending()` before joining the producer
-        // so the only intended synchronization is publish Release to pending
-        // Acquire.
+    fn test_notify_observe_pairing() {
+        // `notify` must make the producer's earlier condition visible to a
+        // worker that observes the advanced sequence. The worker spins on
+        // `moved()` before joining the producer, so the only intended
+        // synchronization is the notification's release and the observation's
+        // acquire.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let queued = Arc::new(QueuedRequest::empty());
-
+            // A producer stores a condition and notifies.
+            let waker = Waker::new();
+            let source = Arc::new(AtomicU32::new(0));
             let producer = thread::spawn({
                 let waker = waker.clone();
-                let queued = queued.clone();
+                let source = source.clone();
                 move || {
-                    queued.enqueue(42);
-                    publish_and_wake(&waker);
+                    source.store(42, Ordering::Relaxed);
+                    waker.notify();
                 }
             });
 
-            while !waker.pending(0) {
+            // The worker waits for the word to move.
+            while !waker.moved(0) {
                 thread::yield_now();
             }
 
-            assert_eq!(queued.read(), 42);
+            // The condition is visible once the word moved.
+            assert_eq!(source.load(Ordering::Relaxed), 42);
             producer.join().unwrap();
-            assert_eq!(submitted_seq(&waker), 1);
+            assert_eq!(notifications(&waker), 1);
         });
     }
 
     #[test]
-    fn test_wake_clear_wait_pairing() {
-        // Exercise wake/clear ordering directly, without a mailbox prefix. It
-        // must publish the caller's earlier state change to the loop even though
-        // it does not advance the submitted sequence.
-        //
-        // The loop waits for the wake bit before joining the notifier, arms
-        // against the current sequence, and drops the guard so `clear_wait()`'s
-        // Acquire can pair with `wake()`'s Release.
+    fn test_notify_wakes_armed_ring_wait() {
+        // When a producer notifies an armed epoch, the worker resumes from its
+        // ring wait. Its next observation must acquire the producer's condition
+        // before it checks the source.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let queued = Arc::new(QueuedRequest::empty());
-
-            let notifier = thread::spawn({
-                let waker = waker.clone();
-                let queued = queued.clone();
-                move || {
-                    queued.enqueue(42);
-                    waker.wake();
-                }
-            });
-
-            wait_for_wake_signal(&waker);
-
-            assert_eq!(eventfd_count(&waker), 0);
-            let guard = waker.arm(0);
-            assert!(!guard.still_idle());
-            drop(guard);
-
-            assert_eq!(queued.read(), 42);
-            assert_eq!(eventfd_count(&waker), 0);
-            notifier.join().unwrap();
-        });
-    }
-
-    #[test]
-    fn test_concurrent_unarmed_wakes_coalesce() {
-        // Concurrent out-of-band wakes that arrive before the loop arms should
-        // coalesce to one sticky wake bit without queuing eventfd readiness.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-
-            let a = thread::spawn({
-                let waker = waker.clone();
-                move || waker.wake()
-            });
-            let b = thread::spawn({
-                let waker = waker.clone();
-                move || waker.wake()
-            });
-
-            a.join().unwrap();
-            b.join().unwrap();
-
-            assert_eq!(eventfd_count(&waker), 0);
-            let guard = waker.arm(0);
-            assert!(!guard.still_idle());
-            drop(guard);
-
-            assert_eq!(submitted_seq(&waker), 0);
-            assert_eq!(state_bits(&waker), 0);
-            assert_eq!(eventfd_count(&waker), 0);
-        });
-    }
-
-    #[test]
-    fn test_arm_and_recheck_eventfd_race() {
-        // A publish racing with the eventfd-backed arm path must be visible
-        // either in the post-arm sequence snapshot or through a modeled eventfd
-        // wake. After the blocking section exits, guard drop clears wait state
-        // and `acknowledge` drains the eventfd counter.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let producer = thread::spawn({
-                let waker = waker.clone();
-                move || publish_and_wake(&waker)
-            });
-
-            let guard = waker.arm(0);
-            if guard.still_idle() {
-                wait_for_eventfd_readiness(&waker);
-            }
-
-            drop(guard);
-            waker.acknowledge();
-            producer.join().unwrap();
-
-            assert_eq!(submitted_seq(&waker), 1);
-            assert_eq!(state_bits(&waker), 0);
-            assert_eq!(eventfd_count(&waker), 0);
-        });
-    }
-
-    #[test]
-    fn test_publish_clear_wait_pairing_when_armed() {
-        // When a producer publishes into an armed eventfd epoch, the loop can
-        // resume without first observing `pending()`. `clear_wait()` must still
-        // acquire the producer's enqueue-side writes before the loop checks the
-        // queue after waking.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let queued = Arc::new(QueuedRequest::empty());
-            let guard = waker.arm(0);
+            // The worker arms against a fresh observation.
+            let waker = Waker::new();
+            let source = Arc::new(AtomicU32::new(0));
+            let seen = waker.observe();
+            let guard = waker.arm(seen);
             assert!(guard.still_idle());
 
+            // A producer publishes while the worker waits in the ring.
             let producer = thread::spawn({
                 let waker = waker.clone();
-                let queued = queued.clone();
+                let source = source.clone();
                 move || {
-                    queued.enqueue(42);
-                    publish_and_wake(&waker);
+                    source.store(42, Ordering::Relaxed);
+                    waker.notify();
                 }
             });
-
-            wait_for_wake_signal(&waker);
-
+            ring_wait(&waker, &guard);
             drop(guard);
-            assert_eq!(queued.read(), 42);
-            producer.join().unwrap();
 
-            assert_eq!(submitted_seq(&waker), 1);
-            assert_eq!(state_bits(&waker), 0);
-            assert_eq!(eventfd_count(&waker), 1);
-            waker.acknowledge();
-            assert_eq!(eventfd_count(&waker), 0);
+            // The resumed worker sees the moved word and the condition.
+            assert!(waker.moved(seen));
+            assert_eq!(source.load(Ordering::Relaxed), 42);
+            producer.join().unwrap();
+            assert!(!waiting(&waker));
         });
     }
 
     #[test]
-    fn test_wake_clear_wait_pairing_when_armed() {
-        // When an out-of-band wake lands in an armed eventfd epoch, the loop
-        // resumes without any sequence progress. `clear_wait()` must still
-        // acquire the notifier's earlier state change before reading its payload.
+    fn test_arm_and_recheck_ring_race() {
+        // A notification racing with the ring arm path must be visible either
+        // in the post-arm snapshot or through a modeled futex wake of the new
+        // ring wait.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let queued = Arc::new(QueuedRequest::empty());
-            let guard = waker.arm(0);
-            assert!(guard.still_idle());
-
-            let notifier = thread::spawn({
+            // A producer publishes one condition.
+            let waker = Waker::new();
+            let source = Arc::new(AtomicU32::new(0));
+            let producer = thread::spawn({
                 let waker = waker.clone();
-                let queued = queued.clone();
-                move || {
-                    queued.enqueue(42);
-                    waker.wake();
-                }
+                let source = source.clone();
+                move || publish(&waker, &source)
             });
 
-            wait_for_wake_signal(&waker);
+            // The worker parks in the ring until it sees the condition.
+            simulate_until(&waker, &source, 1, ring_park);
+            producer.join().unwrap();
 
-            drop(guard);
-            assert_eq!(queued.read(), 42);
-            notifier.join().unwrap();
-
-            assert_eq!(submitted_seq(&waker), 0);
-            assert_eq!(state_bits(&waker), 0);
-            assert_eq!(eventfd_count(&waker), 1);
-            waker.acknowledge();
-            assert_eq!(eventfd_count(&waker), 0);
+            // One notification arrived.
+            assert_eq!(notifications(&waker), 1);
         });
     }
 
     #[test]
     fn test_arm_and_recheck_futex_race() {
-        // The fully-idle path arms a futex wait target on the same state word
-        // that producers update. A racing publish must either change the
-        // post-arm snapshot before sleep or wake the modeled futex waiter.
+        // The fully-idle path arms a futex wait on the same word that producers
+        // update. A racing notification must either change the post-arm
+        // snapshot before sleep or wake the modeled futex waiter.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
+            // A producer publishes one condition.
+            let waker = Waker::new();
+            let source = Arc::new(AtomicU32::new(0));
             let producer = thread::spawn({
                 let waker = waker.clone();
-                move || publish_and_wake(&waker)
+                let source = source.clone();
+                move || publish(&waker, &source)
             });
 
-            let _ = waker.park_idle(0, None);
+            // The worker parks idle until it sees the condition.
+            simulate_until(&waker, &source, 1, idle_park);
             producer.join().unwrap();
 
-            assert_eq!(submitted_seq(&waker), 1);
-            finish_leftover_wake(&waker);
+            // One notification arrived.
+            assert_eq!(notifications(&waker), 1);
         });
     }
 
     #[test]
-    fn test_publishers_dedup_eventfd_wake() {
-        // Two publishers in one armed eventfd epoch must both advance the
-        // submitted sequence, but only the first wake claimant should increment
-        // the modeled eventfd counter.
+    fn test_concurrent_notifications_reject_armed_snapshot() {
+        // Two notifications racing in the same armed epoch both advance the
+        // sequence and leave the waiter bit, so a futex wait on the armed
+        // snapshot returns at once.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let guard = waker.arm(0);
+            // The worker arms against a fresh observation.
+            let waker = Waker::new();
+            let guard = waker.arm(waker.observe());
             assert!(guard.still_idle());
 
+            // Two producers notify concurrently.
             let a = thread::spawn({
                 let waker = waker.clone();
-                move || publish_and_wake(&waker)
+                move || waker.notify()
             });
             let b = thread::spawn({
                 let waker = waker.clone();
-                move || publish_and_wake(&waker)
+                move || waker.notify()
             });
-
             a.join().unwrap();
             b.join().unwrap();
 
-            assert_eq!(submitted_seq(&waker), 2);
-            assert_eq!(eventfd_count(&waker), 1);
-
+            // Both counted, the bit stays armed, and the stale snapshot does
+            // not block.
+            assert_eq!(notifications(&waker), 2);
+            assert!(waiting(&waker));
+            assert!(!waker.futex_wait(guard.snapshot(), None));
             drop(guard);
-            waker.acknowledge();
-            assert_eq!(state_bits(&waker), 0);
-            assert_eq!(eventfd_count(&waker), 0);
+            assert!(!waiting(&waker));
         });
     }
 
     #[test]
-    fn test_mixed_publish_and_wake_dedup() {
-        // A publish and an out-of-band wake racing in the same armed eventfd
-        // epoch should coalesce to one eventfd signal while still preserving the
-        // publish's sequence increment.
+    fn test_condition_free_notify_races_ring_arm() {
+        // A notification without a counted condition racing with the ring arm
+        // path must end the park. If it arrives before arming, the changed
+        // sequence skips the wait, otherwise the modeled futex wake releases
+        // the ring wait.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let guard = waker.arm(0);
-            assert!(guard.still_idle());
-
-            let publisher = thread::spawn({
-                let waker = waker.clone();
-                move || publish_and_wake(&waker)
-            });
+            // A producer notifies without a condition.
+            let waker = Waker::new();
             let notifier = thread::spawn({
                 let waker = waker.clone();
-                move || waker.wake()
+                move || waker.notify()
             });
 
-            publisher.join().unwrap();
+            // The worker parks in the ring against the initial observation.
+            ring_park(&waker, 0);
             notifier.join().unwrap();
 
-            assert_eq!(submitted_seq(&waker), 1);
-            assert_eq!(eventfd_count(&waker), 1);
-
-            drop(guard);
-            waker.acknowledge();
-            assert_eq!(state_bits(&waker), 0);
-            assert_eq!(eventfd_count(&waker), 0);
-        });
-    }
-
-    #[test]
-    fn test_mixed_publish_and_wake_futex_arm() {
-        // A publish and an out-of-band wake racing in the same futex-armed epoch
-        // should coalesce through the shared wake latch while preserving the
-        // publish's sequence increment. Unlike the eventfd path, there is no
-        // durable counter to inspect, so this splits `park_idle()` at the arm
-        // point and verifies the stale futex snapshot is rejected after the
-        // state changes.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let prev = waker
-                .inner
-                .state
-                .fetch_or(WAITING_ON_FUTEX_BIT, Ordering::Relaxed);
-            assert_eq!(prev & WAITING_MASK, 0);
-            let snapshot = prev | WAITING_ON_FUTEX_BIT;
-
-            let publisher = thread::spawn({
-                let waker = waker.clone();
-                move || publish_and_wake(&waker)
-            });
-            let notifier = thread::spawn({
-                let waker = waker.clone();
-                move || waker.wake()
-            });
-
-            publisher.join().unwrap();
-            notifier.join().unwrap();
-
-            assert_eq!(submitted_seq(&waker), 1);
-            assert_eq!(eventfd_count(&waker), 0);
-            assert_eq!(
-                state_bits(&waker),
-                WAITING_ON_FUTEX_BIT | WAKE_SIGNALLED_BIT
-            );
-            assert!(!waker.futex_wait(snapshot, None));
-            waker.clear_wait();
-            assert_eq!(state_bits(&waker), 0);
-        });
-    }
-
-    #[test]
-    fn test_out_of_band_wake_races_eventfd_arm() {
-        // An out-of-band wake racing with the eventfd arm path must wake the
-        // loop without advancing the submitted sequence. If it arrives before
-        // arming, the latched wake skips the wait, otherwise the modeled eventfd
-        // signal releases the loop.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let notifier = thread::spawn({
-                let waker = waker.clone();
-                move || waker.wake()
-            });
-
-            let guard = waker.arm(0);
-            if guard.still_idle() {
-                wait_for_eventfd_readiness(&waker);
-            }
-
-            drop(guard);
-            waker.acknowledge();
-            notifier.join().unwrap();
-
-            assert_eq!(submitted_seq(&waker), 0);
-            assert_eq!(state_bits(&waker), 0);
-            assert_eq!(eventfd_count(&waker), 0);
+            // The park ended and disarmed.
+            assert_eq!(notifications(&waker), 1);
+            assert!(!waiting(&waker));
         });
     }
 
     #[test]
     fn test_sequence_wraparound() {
-        // Preload the sequence to the last representable value, then publish
-        // twice so the visible sequence wraps through zero to one. Pending
-        // publication must remain observable across that boundary.
+        // Notifications must remain observable across the sequence's wrap
+        // through zero.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
+            // Start the sequence at its last value.
+            let waker = Waker::new();
             waker
                 .inner
                 .state
-                .store(SUBMISSION_SEQ_MASK << STATE_BITS, Ordering::Relaxed);
+                .store(u32::MAX - WAITER, Ordering::Relaxed);
+            let source = Arc::new(AtomicU32::new(0));
 
+            // A producer publishes twice, wrapping the sequence.
             let producer = thread::spawn({
                 let waker = waker.clone();
+                let source = source.clone();
                 move || {
-                    publish_and_wake(&waker);
-                    publish_and_wake(&waker);
+                    publish(&waker, &source);
+                    publish(&waker, &source);
                 }
             });
-
-            assert_eq!(
-                simulate_eventfd_loop_until(&waker, SUBMISSION_SEQ_MASK, 1),
-                1
-            );
+            simulate_until(&waker, &source, 2, ring_park);
             producer.join().unwrap();
-            assert_eq!(submitted_seq(&waker), 1);
-            finish_leftover_wake(&waker);
+
+            // The worker saw both and the sequence wrapped.
+            assert_eq!(waker.observe(), INCREMENT);
         });
     }
 
     #[test]
-    fn test_two_producers_mixed_ops() {
-        // Producer-only mixed publish/wake programs should preserve submitted
-        // sequence conservation and must not queue eventfd readiness while the
-        // loop is unarmed. A sticky wake bit may remain for the next arm cycle.
+    fn test_two_producers_conservation() {
+        // Concurrent producers without a worker must count every notification
+        // and must not leave the waiter bit set.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
-            let publishes = Arc::new(AtomicU32::new(0));
-
+            // Two producers mix conditions and condition-free notifications.
+            let waker = Waker::new();
+            let source = Arc::new(AtomicU32::new(0));
             let a = thread::spawn({
                 let waker = waker.clone();
-                let publishes = publishes.clone();
+                let source = source.clone();
                 move || {
-                    publish_and_wake(&waker);
-                    publishes.fetch_add(1, Ordering::Relaxed);
-                    waker.wake();
-                    publish_and_wake(&waker);
-                    publishes.fetch_add(1, Ordering::Relaxed);
+                    publish(&waker, &source);
+                    waker.notify();
+                    publish(&waker, &source);
                 }
             });
-
             let b = thread::spawn({
                 let waker = waker.clone();
-                let publishes = publishes.clone();
+                let source = source.clone();
                 move || {
-                    waker.wake();
-                    publish_and_wake(&waker);
-                    publishes.fetch_add(1, Ordering::Relaxed);
+                    waker.notify();
+                    publish(&waker, &source);
                 }
             });
-
             a.join().unwrap();
             b.join().unwrap();
 
-            assert_eq!(submitted_seq(&waker), publishes.load(Ordering::Relaxed));
-            assert_eq!(state_bits(&waker) & WAITING_MASK, 0);
-            assert_eq!(eventfd_count(&waker), 0);
+            // Every notification and condition is counted.
+            assert_eq!(notifications(&waker), 5);
+            assert_eq!(source.load(Ordering::Relaxed), 3);
+            assert!(!waiting(&waker));
         });
     }
 
     #[test]
     fn test_producer_with_draining_loop() {
-        // A minimal loop simulator must drain both publishes from one producer
-        // using the eventfd arm-and-recheck path whenever no sequence progress
-        // is currently visible.
+        // A minimal worker must see both conditions from one producer using
+        // the ring arm-and-recheck path whenever its observation is current.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
+            // A producer publishes twice.
+            let waker = Waker::new();
+            let source = Arc::new(AtomicU32::new(0));
             let producer = thread::spawn({
                 let waker = waker.clone();
+                let source = source.clone();
                 move || {
-                    publish_and_wake(&waker);
-                    publish_and_wake(&waker);
+                    publish(&waker, &source);
+                    publish(&waker, &source);
                 }
             });
 
-            let processed = simulate_eventfd_loop_until(&waker, 0, 2);
+            // The worker parks in the ring until it sees both.
+            simulate_until(&waker, &source, 2, ring_park);
             producer.join().unwrap();
 
-            assert_eq!(processed, 2);
-            assert_eq!(submitted_seq(&waker), 2);
-            finish_leftover_wake(&waker);
+            // Both notifications arrived.
+            assert_eq!(notifications(&waker), 2);
         });
     }
 
     #[test]
-    fn test_park_idle_with_concurrent_wake() {
-        // The fully-idle futex path must also handle pure out-of-band wakes.
-        // The loop either sees the wake bit before sleeping or is resumed by the
-        // modeled futex wake. No submission sequence bump is involved.
+    fn test_park_idle_with_concurrent_notify() {
+        // The fully-idle futex path must also handle a notification without a
+        // counted condition. The worker either sees the changed sequence
+        // before sleeping or is resumed by the modeled futex wake.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
+            // A producer notifies without a condition.
+            let waker = Waker::new();
             let notifier = thread::spawn({
                 let waker = waker.clone();
-                move || waker.wake()
+                move || waker.notify()
             });
 
-            let _ = waker.park_idle(0, None);
+            // The worker parks idle against the initial observation.
+            idle_park(&waker, 0);
             notifier.join().unwrap();
 
-            assert_eq!(submitted_seq(&waker), 0);
-            assert_eq!(state_bits(&waker), 0);
-            assert_eq!(eventfd_count(&waker), 0);
+            // The park ended and disarmed.
+            assert_eq!(notifications(&waker), 1);
+            assert!(!waiting(&waker));
         });
     }
 
     #[test]
-    fn test_two_cycle_drain_with_interleaved_wake() {
-        // A drain loop must survive an explicit wake between two publishes. The
-        // wake may be consumed as a sticky bit or as eventfd readiness, but both
-        // publishes must still be processed exactly once.
+    fn test_two_cycle_drain_with_interleaved_notify() {
+        // A worker must survive a notification without a counted condition
+        // between two conditions. Both conditions must still be seen.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
+            // A producer publishes, notifies, and publishes again.
+            let waker = Waker::new();
+            let source = Arc::new(AtomicU32::new(0));
             let producer = thread::spawn({
                 let waker = waker.clone();
+                let source = source.clone();
                 move || {
-                    publish_and_wake(&waker);
-                    waker.wake();
-                    publish_and_wake(&waker);
+                    publish(&waker, &source);
+                    waker.notify();
+                    publish(&waker, &source);
                 }
             });
 
-            let processed = simulate_eventfd_loop_until(&waker, 0, 2);
+            // The worker parks in the ring until it sees both conditions.
+            simulate_until(&waker, &source, 2, ring_park);
             producer.join().unwrap();
 
-            assert_eq!(processed, 2);
-            assert_eq!(submitted_seq(&waker), 2);
-            finish_leftover_wake(&waker);
+            // All three notifications arrived.
+            assert_eq!(notifications(&waker), 3);
         });
     }
 
     #[test]
     fn test_multiple_park_idle_cycles() {
-        // Repeated fully-idle futex park cycles must continue to observe
-        // publishes. This uses `park_idle()` instead of the eventfd arm path
-        // whenever no sequence progress is currently visible.
+        // Repeated fully-idle futex park cycles must continue to see
+        // conditions.
         loom::model(|| {
-            let waker = Waker::new().unwrap();
+            // A producer publishes twice.
+            let waker = Waker::new();
+            let source = Arc::new(AtomicU32::new(0));
             let producer = thread::spawn({
                 let waker = waker.clone();
+                let source = source.clone();
                 move || {
-                    publish_and_wake(&waker);
-                    publish_and_wake(&waker);
+                    publish(&waker, &source);
+                    publish(&waker, &source);
                 }
             });
 
-            let processed = simulate_futex_loop_until(&waker, 0, 2);
+            // The worker parks idle until it sees both.
+            simulate_until(&waker, &source, 2, idle_park);
             producer.join().unwrap();
 
-            assert_eq!(processed, 2);
-            assert_eq!(submitted_seq(&waker), 2);
-            finish_leftover_wake(&waker);
+            // Both notifications arrived.
+            assert_eq!(notifications(&waker), 2);
         });
     }
 
     #[test]
     fn test_three_thread_stress() {
-        // Two producers publishing concurrently with one loop simulator should
-        // still preserve conservation and progress. This adds one more producer
-        // thread to the eventfd drain shape.
-        loom::model(|| {
-            let waker = Waker::new().unwrap();
+        // Two producers notifying concurrently with one worker should still
+        // preserve conservation and progress. Exploring every interleaving of
+        // three threads outlasts the per-model time budget, so preemptions are
+        // bounded at five, which finishes in seconds.
+        let mut builder = loom::model::Builder::new();
+        builder.preemption_bound = Some(5);
+        builder.check(|| {
+            // Two producers publish once each.
+            let waker = Waker::new();
+            let source = Arc::new(AtomicU32::new(0));
             let a = thread::spawn({
                 let waker = waker.clone();
-                move || publish_and_wake(&waker)
+                let source = source.clone();
+                move || publish(&waker, &source)
             });
             let b = thread::spawn({
                 let waker = waker.clone();
-                move || publish_and_wake(&waker)
+                let source = source.clone();
+                move || publish(&waker, &source)
             });
 
-            let processed = simulate_eventfd_loop_until(&waker, 0, 2);
+            // The worker parks in the ring until it sees both.
+            simulate_until(&waker, &source, 2, ring_park);
             a.join().unwrap();
             b.join().unwrap();
 
-            assert_eq!(processed, 2);
-            assert_eq!(submitted_seq(&waker), 2);
-            finish_leftover_wake(&waker);
+            // Both notifications arrived.
+            assert_eq!(notifications(&waker), 2);
+        });
+    }
+
+    #[test]
+    fn test_reused_ring_wait_receives_a_later_notification() {
+        // A ring wait that an earlier park left queued stays live across parks.
+        // A later park reuses it instead of installing another, so only the
+        // arm's recheck guards notifications since the worker observed, and a
+        // notification while armed must still reach the reused wait.
+        loom::model(|| {
+            // Leave a ring wait queued before the producer starts.
+            let waker = Waker::new();
+            let mut ring = queued_ring_wait(&waker);
+            let source = Arc::new(AtomicU32::new(0));
+
+            // A producer publishes twice while the worker parks in the ring.
+            let producer = thread::spawn({
+                let waker = waker.clone();
+                let source = source.clone();
+                move || {
+                    publish(&waker, &source);
+                    publish(&waker, &source);
+                }
+            });
+            simulate_until(&waker, &source, 2, |waker, seen| {
+                persistent_ring_park(waker, &mut ring, seen, true);
+            });
+            producer.join().unwrap();
+
+            // The worker saw both conditions and disarmed.
+            assert_eq!(notifications(&waker), 2);
+            assert!(!waiting(&waker));
+        });
+    }
+
+    #[test]
+    fn test_idle_wait_behind_stale_ring_wait_is_woken() {
+        // A stale ring wait sits ahead of the worker's idle wait. The
+        // notification releases two waits, so it reaches the idle wait.
+        idle_wait_behind_stale_ring_wait(WAKE_COUNT);
+    }
+
+    #[test]
+    #[should_panic(expected = "a futex wait was stranded with no waker left")]
+    fn test_waking_one_strands_idle_wait_behind_stale_ring_wait() {
+        // Negative control: a wake that releases one wait spends it on the
+        // stale ring wait, so loom finds the idle wait stranded.
+        idle_wait_behind_stale_ring_wait(1);
+    }
+
+    #[test]
+    fn test_stale_ring_wait_across_idle_and_ring_parks() {
+        // A ring wait left queued sits ahead of idle waits, and a wake that
+        // releases an idle wait completes the ring wait as well. A ring park
+        // that follows finds that completion still unreaped, returns at once,
+        // and the park after it installs a new wait.
+        loom::model(|| {
+            // Leave a ring wait queued before the producer starts.
+            let waker = Waker::new();
+            let mut ring = queued_ring_wait(&waker);
+            let source = Arc::new(AtomicU32::new(0));
+
+            // A producer publishes twice. The worker parks idle until the
+            // first condition, then in the ring until the second.
+            let producer = thread::spawn({
+                let waker = waker.clone();
+                let source = source.clone();
+                move || {
+                    publish(&waker, &source);
+                    publish(&waker, &source);
+                }
+            });
+            simulate_until(&waker, &source, 1, idle_park);
+            simulate_until(&waker, &source, 2, |waker, seen| {
+                persistent_ring_park(waker, &mut ring, seen, true);
+            });
+            producer.join().unwrap();
+
+            // The worker saw both conditions and disarmed.
+            assert_eq!(notifications(&waker), 2);
+            assert!(!waiting(&waker));
         });
     }
 
@@ -2270,17 +1903,14 @@ mod loom_tests {
         #[values(0, 1, 2, 3, 4, 5, 6, 7)] index: usize,
     ) {
         // Generate a deterministic pair of producer-only programs before
-        // entering loom, then model the pair with two concurrent producers. Each
-        // producer runs a short sequence of `publish_and_wake()` and out-of-band
-        // `wake()` calls without any loop thread consuming them. Each case
-        // models one pair, so nextest can run the pairs in parallel.
+        // entering loom, then model the pair with two concurrent producers and
+        // no worker. Each case models one pair, so nextest can run the pairs in
+        // parallel.
         //
-        // The invariant is producer-side conservation: every generated `Publish`
-        // must be reflected in the submitted sequence exactly once, while
-        // generated `Wake`s must not affect the sequence. Since the waker is
-        // never armed in this test, producers must also leave no wait target
-        // armed and must not queue modeled eventfd readiness. A sticky wake bit
-        // may remain because there is intentionally no loop to consume it.
+        // The invariant is producer-side conservation: every generated
+        // operation advances the sequence exactly once, every `Publish` makes
+        // exactly one condition visible, and producers never leave the waiter
+        // bit set.
         const OPS_PER_PROGRAM: usize = 5;
 
         let programs = [
@@ -2289,48 +1919,51 @@ mod loom_tests {
         ];
 
         loom::model(move || {
-            let waker = Waker::new().unwrap();
-            let publishes = Arc::new(AtomicU32::new(0));
-
+            // Run each program on its own producer thread.
+            let waker = Waker::new();
+            let source = Arc::new(AtomicU32::new(0));
             let handles = programs
                 .iter()
                 .map(|program| {
                     let program = program.clone();
                     let waker = waker.clone();
-                    let publishes = publishes.clone();
+                    let source = source.clone();
                     thread::spawn(move || {
                         for &op in program.iter() {
-                            op.execute(&waker, &publishes);
+                            op.execute(&waker, &source);
                         }
                     })
                 })
                 .collect::<Vec<_>>();
-
             for handle in handles {
                 handle.join().unwrap();
             }
 
-            let expected = publishes.load(Ordering::Relaxed);
-            let got = submitted_seq(&waker);
+            // Every operation and condition is counted once.
+            let publishes = programs
+                .iter()
+                .flatten()
+                .filter(|op| matches!(op, ProducerOp::Publish))
+                .count() as u32;
             assert_eq!(
-                got, expected,
-                "publish conservation failed: seed={seed} index={index} programs={programs:?}",
+                notifications(&waker),
+                (2 * OPS_PER_PROGRAM) as u32,
+                "notification conservation failed: seed={seed} index={index} programs={programs:?}",
             );
             assert_eq!(
-                state_bits(&waker) & WAITING_MASK,
-                0,
-                "wait target remained armed: seed={seed} index={index} programs={programs:?}",
+                source.load(Ordering::Relaxed),
+                publishes,
+                "condition conservation failed: seed={seed} index={index} programs={programs:?}",
             );
-            assert_eq!(
-                eventfd_count(&waker),
-                0,
-                "eventfd readiness queued while unarmed: seed={seed} index={index} programs={programs:?}",
+            assert!(
+                !waiting(&waker),
+                "wait remained armed: seed={seed} index={index} programs={programs:?}",
             );
         });
     }
 
     #[rstest]
-    fn test_generated_eventfd_loop_programs(
+    fn test_generated_ring_loop_programs(
         #[values(10, 11, 12)] seed: u64,
         #[values(
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
@@ -2339,18 +1972,16 @@ mod loom_tests {
         index: usize,
     ) {
         // Generate a deterministic single-producer program before entering
-        // loom, then model it with one producer and the eventfd loop simulator.
-        // The producer may interleave out-of-band `wake()` calls before,
-        // between, or after its generated `publish_and_wake()` calls.
+        // loom, then model it with one producer and the ring worker simulator.
+        // The producer may interleave notifications without a counted
+        // condition before, between, or after its conditions.
         //
-        // The loop simulator must eventually observe exactly the generated
-        // publish count, regardless of whether progress arrives through
-        // `pending()` or through the arm, eventfd readiness, and `clear_wait()`
-        // path. Pure wakes are allowed to resume the loop, but they must not
-        // create sequence progress or disturb producer accounting.
+        // The worker must eventually see exactly the generated condition
+        // count, whether it arrives before an observation or through the arm,
+        // the ring wait, and the next observation.
         const OPS_PER_PROGRAM: usize = 3;
 
-        generated_loop_program(seed, index, OPS_PER_PROGRAM, simulate_eventfd_loop_until);
+        generated_loop_program(seed, index, OPS_PER_PROGRAM, ring_park);
     }
 
     #[rstest]
@@ -2371,17 +2002,11 @@ mod loom_tests {
     #[case(22, 3)]
     #[case(22, 4)]
     fn test_generated_futex_loop_programs(#[case] seed: u64, #[case] index: usize) {
-        // Generate a deterministic single-producer program before entering
-        // loom, then model it with one producer and the futex idle loop
-        // simulator. The producer may interleave out-of-band `wake()` calls
-        // before, between, or after its generated `publish_and_wake()` calls.
-        //
-        // This is the futex-path counterpart to `test_generated_eventfd_loop_programs`.
-        // The loop simulator must drain exactly the generated publish count
-        // through `pending()` or `park_idle()`, while pure wakes may resume the
-        // futex wait without creating sequence progress.
+        // This is the idle path counterpart to
+        // `test_generated_ring_loop_programs`. The worker must see exactly the
+        // generated condition count through observations or `park_idle()`.
         const OPS_PER_PROGRAM: usize = 3;
 
-        generated_loop_program(seed, index, OPS_PER_PROGRAM, simulate_futex_loop_until);
+        generated_loop_program(seed, index, OPS_PER_PROGRAM, idle_park);
     }
 }
