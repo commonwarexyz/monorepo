@@ -297,6 +297,21 @@ const DIAGONALS: [[u64; MODULI]; MODULI] = {
     diagonals
 };
 
+/// Diagonals of the extension matrix of [`EXPAND`], as [`DIAGONALS`] are of [`REDUCE`].
+const EXPAND_DIAGONALS: [[u64; MODULI]; MODULI] = {
+    let mut diagonals = [[0; MODULI]; MODULI];
+    let mut d = 0;
+    while d < MODULI {
+        let mut j = 0;
+        while j < MODULI {
+            diagonals[d][j] = EXPAND.matrix[(j + d) % MODULI][j];
+            j += 1;
+        }
+        d += 1;
+    }
+    diagonals
+};
+
 /// Largest output of [`reduce`] for an accumulated value at most `total`.
 const fn reduce_bound(total: u128, modulus: u64) -> u128 {
     (total >> WORD) + modulus as u128
@@ -727,6 +742,9 @@ impl<S: X86V4C> Rns<S> {
 
     /// Extends second-basis residues at most `2q`, with an integer below `N / 2`, to the first
     /// basis, estimating the quotient across the lanes.
+    ///
+    /// A single extension broadcasts its residues from memory, which costs loads rather than
+    /// rotations on the vector pipes that its own conversion fills.
     #[inline(always)]
     fn expand(simd: S, n: S::U64) -> S::U64 {
         let k = estimate(simd, n);
@@ -745,6 +763,20 @@ impl<S: X86V4C> Rns<S> {
     ) -> (S::U64, S::U64) {
         let rotated = simd.u64_rotate_lanes::<D>(quotient);
         madd(simd, wide, rotated, constant(simd, &DIAGONALS[D]))
+    }
+
+    /// Accumulates the second-basis residues rotated by `D` times diagonal `D` of the
+    /// extension matrix of [`EXPAND`].
+    ///
+    /// Lane `j` receives residue `(j + D) mod MODULI`.
+    #[inline(always)]
+    fn expand_diagonal<const D: usize>(
+        simd: S,
+        residues: S::U64,
+        wide: (S::U64, S::U64),
+    ) -> (S::U64, S::U64) {
+        let rotated = simd.u64_rotate_lanes::<D>(residues);
+        madd(simd, wide, rotated, constant(simd, &EXPAND_DIAGONALS[D]))
     }
 
     /// Returns `self + rhs`.
@@ -948,7 +980,7 @@ impl<S: X86V4C> Rns<S> {
     ///
     /// The steps are those of `Field::reduce`: the first-basis reduction and fold of every sum,
     /// the eight diagonals of every quotient's conversion, the second-basis reduction and fold,
-    /// the quotient estimates of extension across the lanes, its eight broadcast rows and two
+    /// the quotient estimates of extension across the lanes, its eight diagonals and two
     /// corrections, and the final first-basis reduction and fold. A pass of fewer than [`CHAINS`]
     /// sums accumulates odd diagonals and rows separately, as [`Rns::mul`] does.
     ///
@@ -1011,27 +1043,29 @@ impl<S: X86V4C> Rns<S> {
                     },
                 );
 
-                let mut residues = [[0; MODULI]; SUMS];
                 let mut estimates = [zero; SUMS];
                 unroll::<SUMS>(
                     #[inline(always)]
                     |i| {
-                        residues[i] = scalars(simd, n[i]);
                         estimates[i] = estimate(simd, n[i]);
                         even[i] = (zero, zero);
                         odd[i] = (zero, zero);
                     },
                 );
-                macro_rules! rows {
-                    ($($row:literal)*) => {$(
-                        let weights = constant(simd, &EXPAND.matrix[$row]);
+                // Each diagonal is a separate inlined call with a constant rotation, which keeps
+                // the residues in registers rather than broadcasting them from memory.
+                macro_rules! expand_diagonals {
+                    ($($even:literal $odd:literal)*) => {$(
                         unroll::<SUMS>(#[inline(always)] |i| {
-                            let chain = if split && $row % 2 == 1 { &mut odd[i] } else { &mut even[i] };
-                            *chain = madd(simd, *chain, simd.u64_splat(residues[i][$row]), weights);
+                            even[i] = Self::expand_diagonal::<$even>(simd, n[i], even[i]);
+                        });
+                        unroll::<SUMS>(#[inline(always)] |i| {
+                            let chain = if split { &mut odd[i] } else { &mut even[i] };
+                            *chain = Self::expand_diagonal::<$odd>(simd, n[i], *chain);
                         });
                     )*};
                 }
-                rows!(0 1 2 3 4 5 6 7);
+                expand_diagonals!(0 1 2 3 4 5 6 7);
                 let correction = constant(simd, &EXPAND.correction);
                 let mask = simd.u64_splat(MASK);
                 unroll::<SUMS>(
