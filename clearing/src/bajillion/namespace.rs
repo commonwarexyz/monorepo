@@ -22,7 +22,7 @@ const SUMMARY: &[u8] = b"_COMMONWARE_CLEARING_SUMMARY";
 ///
 /// Each kind of signed message has its own namespace, so a signature on one kind never verifies
 /// as another. All namespaces derive from the deployment's namespace. Deployments must use
-/// different namespaces so that signatures from one cannot be replayed in another.
+/// different namespaces so signatures from one cannot be replayed in another.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Namespace {
     pub(crate) state: Vec<u8>,

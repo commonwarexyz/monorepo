@@ -1763,7 +1763,6 @@ dependencies = [
  "commonware-conformance",
  "commonware-cryptography",
  "commonware-macros",
- "commonware-math",
  "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",

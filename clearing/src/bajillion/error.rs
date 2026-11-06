@@ -28,7 +28,7 @@ pub enum Error {
     /// An epoch is zero.
     #[error("epoch is zero")]
     ZeroEpoch,
-    /// A message is for another epoch.
+    /// A message is for another epoch, or a store holds another epoch than expected.
     #[error("wrong epoch: expected {expected}, found {found}")]
     WrongEpoch {
         /// The epoch expected.
@@ -54,9 +54,40 @@ pub enum Error {
     /// A request exceeds the sender's live balance.
     #[error("insufficient balance")]
     InsufficientBalance,
+    /// Admitting the request or soft withdrawal would take the operator's close past its
+    /// [Limits](super::Limits).
+    #[error("close full")]
+    Full,
     /// A close processes fewer queued requests than required or more than are queued.
     #[error("invalid number of queued requests")]
     InvalidCount,
+    /// Cuts of one epoch disagree on the queued requests its close processes.
+    #[error("cuts disagree on the queued requests")]
+    InvalidCut,
+    /// The operator's last cut is not settled yet.
+    #[error("last cut not settled")]
+    Unsettled,
+    /// An account the operator holds a floor deduction for has no flow to settle.
+    #[error("flow missing for a deducted account")]
+    MissingFlow,
+    /// A write to the operator's store failed or was abandoned, so the operator must restart from
+    /// its store.
+    #[error("operator failed")]
+    Failed,
+    /// A settle is for an epoch older than the last one the operator's store includes.
+    #[error("settling epoch {epoch}, but the store includes epoch {found}")]
+    Late {
+        /// The epoch being settled.
+        epoch: Epoch,
+        /// The epoch the store records.
+        found: Epoch,
+    },
+    /// The operator admitted requests or soft withdrawals in its current epoch.
+    #[error("operator active in its current epoch")]
+    Active,
+    /// A flow takes from its account, but the operator has no cut of the flow's epoch.
+    #[error("flow takes from an account without a cut")]
+    MissingCut,
     /// A receipt is for another receiver.
     #[error("receipt is for another receiver")]
     WrongReceiver,
@@ -84,6 +115,9 @@ pub enum Error {
     /// The balances database failed.
     #[error("storage: {0}")]
     Storage(#[from] qmdb::Error<mmb::Family>),
+    /// The operator's balance store failed.
+    #[error("balance store: {0}")]
+    Store(Box<dyn std::error::Error + Send + Sync>),
     /// A summary does not follow the last posted one.
     #[error("summary does not follow the last posted one")]
     WrongParent,
@@ -93,7 +127,7 @@ pub enum Error {
     /// Payouts do not match their summary.
     #[error("payouts do not match the summary")]
     InvalidPayouts,
-    /// The funds held cannot cover a payout or would exceed `u64::MAX`.
+    /// The funds held cannot cover a payout or would exceed the largest amount.
     #[error("custody exceeded")]
     Custody,
     /// No close has posted for the epoch.
@@ -108,9 +142,9 @@ pub enum Error {
     /// The ledger has not halted.
     #[error("ledger not halted")]
     NotHalted,
-    /// An account has nothing left to refund.
-    #[error("nothing to refund")]
-    NothingToRefund,
+    /// An account has nothing left to claim.
+    #[error("nothing to claim")]
+    NothingToClaim,
     /// A balance proof does not verify.
     #[error("invalid balance proof")]
     InvalidBalanceProof,

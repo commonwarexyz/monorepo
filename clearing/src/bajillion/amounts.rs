@@ -1,34 +1,100 @@
-//! Nonzero amounts per account, committed with a binary Merkle tree.
+//! Amounts of funds, and nonzero amounts per account committed with a binary Merkle tree.
 
 use super::{Error, Lookup};
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use commonware_codec::{
+    Buf, CodecFixedShared, EncodeSize, Error as CodecError, RangeCfg, Read, Write,
+};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_storage::bmt::{Builder, Tree};
+use core::{fmt::Debug, hash::Hash};
+
+/// An unsigned integer amount of funds.
+///
+/// An implementation must be an unsigned integer type whose order is numeric order. Its codec
+/// encoding must have a fixed width of at most 32 bytes and exactly one encoding per value, and
+/// `From<u64>` must convert every `u64` to the equal amount.
+pub trait Amount: Copy + Ord + Hash + Debug + From<u64> + CodecFixedShared + 'static {
+    /// The amount zero.
+    const ZERO: Self;
+
+    /// Returns `self + other` wrapped to the type's width, and whether the sum overflowed.
+    fn overflowing_add(self, other: Self) -> (Self, bool);
+
+    /// Returns `self - other` wrapped to the type's width, and whether the difference is negative.
+    fn overflowing_sub(self, other: Self) -> (Self, bool);
+
+    /// Returns `self + other`, or `None` if the sum overflows.
+    fn checked_add(self, other: Self) -> Option<Self> {
+        match self.overflowing_add(other) {
+            (sum, false) => Some(sum),
+            (_, true) => None,
+        }
+    }
+
+    /// Returns `self - other`, or `None` if the difference is negative.
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        match self.overflowing_sub(other) {
+            (difference, false) => Some(difference),
+            (_, true) => None,
+        }
+    }
+}
+
+macro_rules! impl_amount {
+    ($($type:ty),*) => {
+        $(
+            impl Amount for $type {
+                const ZERO: Self = 0;
+
+                fn overflowing_add(self, other: Self) -> (Self, bool) {
+                    <$type>::overflowing_add(self, other)
+                }
+
+                fn overflowing_sub(self, other: Self) -> (Self, bool) {
+                    <$type>::overflowing_sub(self, other)
+                }
+            }
+        )*
+    };
+}
+
+impl_amount!(u64, u128);
+
+/// The most bytes an [Amount] may encode to.
+const MAX_AMOUNT_SIZE: usize = 32;
 
 /// Computes the leaf committing to `amount` for `account`.
-pub(crate) fn leaf<H: Hasher, P: PublicKey>(account: &P, amount: u64) -> H::Digest {
-    H::hash(&[account.as_ref(), &amount.to_be_bytes()])
+pub(crate) fn leaf<H: Hasher, P: PublicKey, A: Amount>(account: &P, amount: A) -> H::Digest {
+    const {
+        assert!(
+            A::SIZE <= MAX_AMOUNT_SIZE,
+            "amounts must encode in at most 32 bytes"
+        )
+    };
+    let mut encoded = [0u8; MAX_AMOUNT_SIZE];
+    amount.write(&mut &mut encoded[..A::SIZE]);
+    H::hash(&[account.as_ref(), &encoded[..A::SIZE]])
 }
 
 /// Nonzero amounts per account, sorted by account.
 ///
 /// Payment maps, request batches, and the payouts of a close are all [Amounts]. They are
 /// committed by the root of a binary Merkle tree whose leaves are the `(account, amount)` entries
-/// in account order. The root also binds the number of entries, so two adjacent openings prove
-/// that an account between them has no amount (see [Lookup]).
+/// in account order. The root also binds the number of entries, so a [Lookup] of two adjacent
+/// entries proves that an account between them has no amount.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Amounts<P: PublicKey> {
-    entries: Vec<(P, u64)>,
+pub struct Amounts<P: PublicKey, A: Amount> {
+    entries: Vec<(P, A)>,
 }
 
-impl<P: PublicKey> Default for Amounts<P> {
+impl<P: PublicKey, A: Amount> Default for Amounts<P, A> {
     fn default() -> Self {
         Self::empty()
     }
 }
 
-impl<P: PublicKey> Amounts<P> {
+impl<P: PublicKey, A: Amount> Amounts<P, A> {
     /// Returns amounts with no entries.
     pub const fn empty() -> Self {
         Self {
@@ -40,18 +106,18 @@ impl<P: PublicKey> Amounts<P> {
     ///
     /// Returns an error if an amount is zero, an account appears more than once, or there are
     /// more than `u32::MAX` entries.
-    pub fn new(entries: impl IntoIterator<Item = (P, u64)>) -> Result<Self, Error> {
+    pub fn new(entries: impl IntoIterator<Item = (P, A)>) -> Result<Self, Error> {
         let mut entries: Vec<_> = entries.into_iter().collect();
         entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
         Self::from_sorted(entries)
     }
 
     /// Wraps entries that must be strictly increasing by account with nonzero amounts.
-    pub(crate) fn from_sorted(entries: Vec<(P, u64)>) -> Result<Self, Error> {
+    pub(crate) fn from_sorted(entries: Vec<(P, A)>) -> Result<Self, Error> {
         if entries.len() > u32::MAX as usize {
             return Err(Error::TooManyEntries);
         }
-        if entries.iter().any(|(_, amount)| *amount == 0) {
+        if entries.iter().any(|(_, amount)| *amount == A::ZERO) {
             return Err(Error::ZeroAmount);
         }
         if entries.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
@@ -71,29 +137,28 @@ impl<P: PublicKey> Amounts<P> {
     }
 
     /// Returns the amount of `account`, or zero if it has none.
-    pub fn get(&self, account: &P) -> u64 {
+    pub fn get(&self, account: &P) -> A {
         self.position(account)
-            .map_or(0, |position| self.entries[position].1)
+            .map_or(A::ZERO, |position| self.entries[position].1)
     }
 
     /// Iterates over the entries in account order.
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&P, u64)> {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&P, A)> {
         self.entries
             .iter()
             .map(|(account, amount)| (account, *amount))
     }
 
-    /// Returns the sum of all amounts.
-    pub fn total(&self) -> u128 {
+    /// Returns the sum of all amounts, or `None` if it overflows.
+    pub fn total(&self) -> Option<A> {
         self.entries
             .iter()
-            .map(|(_, amount)| u128::from(*amount))
-            .sum()
+            .try_fold(A::ZERO, |total, (_, amount)| total.checked_add(*amount))
     }
 
     /// Returns the amounts with `other` added entry by entry.
     ///
-    /// Returns an error if a sum exceeds `u64::MAX`.
+    /// Returns an error if a sum overflows.
     pub fn combine(&self, other: &Self) -> Result<Self, Error> {
         let mut entries = Vec::with_capacity(self.entries.len() + other.entries.len());
         let mut left = self.entries.iter().peekable();
@@ -131,7 +196,7 @@ impl<P: PublicKey> Amounts<P> {
     pub(crate) fn tree<H: Hasher>(&self) -> Tree<H::Digest> {
         let mut builder = Builder::<H>::new(self.entries.len());
         for (account, amount) in &self.entries {
-            builder.add(&leaf::<H, P>(account, *amount));
+            builder.add(&leaf::<H, P, A>(account, *amount));
         }
         builder.build()
     }
@@ -142,29 +207,29 @@ impl<P: PublicKey> Amounts<P> {
     }
 
     /// Opens the amount of `account` under `tree`. The tree must come from [Self::tree].
-    pub(crate) fn lookup<D: Digest>(&self, tree: &Tree<D>, account: &P) -> Lookup<P, u64, D> {
+    pub(crate) fn lookup<D: Digest>(&self, tree: &Tree<D>, account: &P) -> Lookup<P, A, D> {
         Lookup::new(&self.entries, tree, account)
     }
 }
 
-impl<P: PublicKey> Write for Amounts<P> {
+impl<P: PublicKey, A: Amount> Write for Amounts<P, A> {
     fn write(&self, buf: &mut impl BufMut) {
         self.entries.write(buf);
     }
 }
 
-impl<P: PublicKey> EncodeSize for Amounts<P> {
+impl<P: PublicKey, A: Amount> EncodeSize for Amounts<P, A> {
     fn encode_size(&self) -> usize {
         self.entries.encode_size()
     }
 }
 
-impl<P: PublicKey> Read for Amounts<P> {
+impl<P: PublicKey, A: Amount> Read for Amounts<P, A> {
     /// The accepted number of entries.
     type Cfg = RangeCfg<usize>;
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
-        let entries = Vec::<(P, u64)>::read_cfg(buf, &(*range, ((), ())))?;
+        let entries = Vec::<(P, A)>::read_cfg(buf, &(*range, ((), ())))?;
         Self::from_sorted(entries).map_err(|_| {
             CodecError::Invalid(
                 "clearing::bajillion::Amounts",
@@ -175,17 +240,32 @@ impl<P: PublicKey> Read for Amounts<P> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P: PublicKey> arbitrary::Arbitrary<'_> for Amounts<P>
+impl<P: PublicKey, A: Amount> arbitrary::Arbitrary<'_> for Amounts<P, A>
 where
     P: for<'a> arbitrary::Arbitrary<'a>,
+    A: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let mut entries: Vec<(P, u64)> = u.arbitrary()?;
-        entries.retain(|(_, amount)| *amount != 0);
+        let mut entries: Vec<(P, A)> = u.arbitrary()?;
+        entries.retain(|(_, amount)| *amount != A::ZERO);
         entries.sort_by(|(a, _), (b, _)| a.cmp(b));
         entries.dedup_by(|(a, _), (b, _)| a == b);
         Ok(Self { entries })
     }
+}
+
+/// Draws an arbitrary nonzero amount.
+#[cfg(feature = "arbitrary")]
+pub(crate) fn arbitrary_nonzero<A>(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<A>
+where
+    A: Amount + for<'a> arbitrary::Arbitrary<'a>,
+{
+    let amount: A = u.arbitrary()?;
+    Ok(if amount == A::ZERO {
+        A::from(1)
+    } else {
+        amount
+    })
 }
 
 #[cfg(test)]
@@ -196,6 +276,8 @@ mod tests {
         Sha256, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
+
+    type TestAmounts = Amounts<PublicKey, u64>;
 
     /// Returns `count` public keys in increasing order.
     fn keys(count: u64) -> Vec<PublicKey> {
@@ -209,7 +291,7 @@ mod tests {
     #[test]
     fn test_new_sorts_entries() {
         let keys = keys(4);
-        let amounts = Amounts::new([
+        let amounts = TestAmounts::new([
             (keys[2].clone(), 3),
             (keys[0].clone(), 1),
             (keys[1].clone(), 2),
@@ -228,7 +310,7 @@ mod tests {
             ]
         );
         assert_eq!(amounts.len(), 3);
-        assert_eq!(amounts.total(), 6);
+        assert_eq!(amounts.total(), Some(6));
         assert_eq!(amounts.get(&keys[1]), 2);
         assert_eq!(amounts.get(&keys[3]), 0);
     }
@@ -237,60 +319,75 @@ mod tests {
     fn test_new_rejects_invalid_entries() {
         let keys = keys(2);
         assert!(matches!(
-            Amounts::new([(keys[0].clone(), 0)]),
+            TestAmounts::new([(keys[0].clone(), 0)]),
             Err(Error::ZeroAmount)
         ));
         assert!(matches!(
-            Amounts::new([(keys[0].clone(), 1), (keys[0].clone(), 2)]),
+            TestAmounts::new([(keys[0].clone(), 1), (keys[0].clone(), 2)]),
             Err(Error::DuplicateAccount)
         ));
-        assert!(Amounts::<PublicKey>::new([]).unwrap().is_empty());
+        assert!(TestAmounts::new([]).unwrap().is_empty());
     }
 
     #[test]
     fn test_combine() {
         let keys = keys(3);
-        let left = Amounts::new([(keys[0].clone(), 1), (keys[1].clone(), 2)]).unwrap();
-        let right = Amounts::new([(keys[1].clone(), 3), (keys[2].clone(), 4)]).unwrap();
+        let left = TestAmounts::new([(keys[0].clone(), 1), (keys[1].clone(), 2)]).unwrap();
+        let right = TestAmounts::new([(keys[1].clone(), 3), (keys[2].clone(), 4)]).unwrap();
         let combined = left.combine(&right).unwrap();
         assert_eq!(combined, right.combine(&left).unwrap());
         assert_eq!(
             combined,
-            Amounts::new([
+            TestAmounts::new([
                 (keys[0].clone(), 1),
                 (keys[1].clone(), 5),
                 (keys[2].clone(), 4)
             ])
             .unwrap()
         );
-        assert_eq!(left.combine(&Amounts::empty()).unwrap(), left);
+        assert_eq!(left.combine(&TestAmounts::empty()).unwrap(), left);
 
-        let full = Amounts::new([(keys[0].clone(), u64::MAX)]).unwrap();
-        let one = Amounts::new([(keys[0].clone(), 1)]).unwrap();
+        let full = TestAmounts::new([(keys[0].clone(), u64::MAX)]).unwrap();
+        let one = TestAmounts::new([(keys[0].clone(), 1)]).unwrap();
         assert!(matches!(full.combine(&one), Err(Error::Overflow)));
+        let overflowing = TestAmounts::new([(keys[0].clone(), u64::MAX), (keys[1].clone(), 1)]);
+        assert_eq!(overflowing.unwrap().total(), None);
+    }
+
+    #[test]
+    fn test_leaf_hashes_account_and_big_endian_amount() {
+        let key = &keys(1)[0];
+        assert_eq!(
+            leaf::<Sha256, _, u64>(key, 5),
+            Sha256::hash(&[key.as_ref(), &5u64.to_be_bytes()])
+        );
+        assert_eq!(
+            leaf::<Sha256, _, u128>(key, 5),
+            Sha256::hash(&[key.as_ref(), &5u128.to_be_bytes()])
+        );
     }
 
     #[test]
     fn test_root_commits_to_entries() {
         let keys = keys(2);
-        let empty = Amounts::<PublicKey>::empty();
+        let empty = TestAmounts::empty();
         assert_eq!(
             empty.root::<Sha256>(),
             Builder::<Sha256>::new(0).build().root()
         );
 
         // Every account and amount, and the number of entries, changes the root.
-        let one = Amounts::new([(keys[0].clone(), 1)]).unwrap();
+        let one = TestAmounts::new([(keys[0].clone(), 1)]).unwrap();
         let roots = [
             empty.root::<Sha256>(),
             one.root::<Sha256>(),
-            Amounts::new([(keys[0].clone(), 2)])
+            TestAmounts::new([(keys[0].clone(), 2)])
                 .unwrap()
                 .root::<Sha256>(),
-            Amounts::new([(keys[1].clone(), 1)])
+            TestAmounts::new([(keys[1].clone(), 1)])
                 .unwrap()
                 .root::<Sha256>(),
-            one.combine(&Amounts::new([(keys[1].clone(), 1)]).unwrap())
+            one.combine(&TestAmounts::new([(keys[1].clone(), 1)]).unwrap())
                 .unwrap()
                 .root::<Sha256>(),
         ];
@@ -304,13 +401,13 @@ mod tests {
     #[test]
     fn test_lookup() {
         let keys = keys(5);
-        let amounts = Amounts::new([(keys[1].clone(), 10), (keys[3].clone(), 30)]).unwrap();
+        let amounts = TestAmounts::new([(keys[1].clone(), 10), (keys[3].clone(), 30)]).unwrap();
         let root = amounts.root::<Sha256>();
         let tree = amounts.tree::<Sha256>();
         for key in &keys {
             let lookup = amounts.lookup(&tree, key);
             let value = lookup
-                .verify::<Sha256>(key, &root, |key, amount| leaf::<Sha256, _>(key, *amount))
+                .verify::<Sha256>(key, &root, |key, amount| leaf::<Sha256, _, _>(key, *amount))
                 .unwrap()
                 .copied();
             assert_eq!(value.unwrap_or(0), amounts.get(key));
@@ -326,16 +423,16 @@ mod tests {
             vec![(keys[0].clone(), 1), (keys[0].clone(), 2)],
             vec![(keys[0].clone(), 0)],
         ] {
-            assert!(Amounts::<PublicKey>::decode_cfg(entries.encode(), &range).is_err());
+            assert!(TestAmounts::decode_cfg(entries.encode(), &range).is_err());
         }
 
-        let amounts = Amounts::new([(keys[0].clone(), 1), (keys[1].clone(), 2)]).unwrap();
+        let amounts = TestAmounts::new([(keys[0].clone(), 1), (keys[1].clone(), 2)]).unwrap();
         let encoded = amounts.encode();
         assert_eq!(
-            Amounts::<PublicKey>::decode_cfg(encoded.clone(), &range).unwrap(),
+            TestAmounts::decode_cfg(encoded.clone(), &range).unwrap(),
             amounts
         );
-        assert!(Amounts::<PublicKey>::decode_cfg(encoded, &RangeCfg::new(..=1)).is_err());
+        assert!(TestAmounts::decode_cfg(encoded, &RangeCfg::new(..=1)).is_err());
     }
 
     #[cfg(feature = "arbitrary")]
@@ -344,7 +441,7 @@ mod tests {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Amounts<PublicKey>>,
+            CodecConformance<Amounts<PublicKey, u64>>,
         }
     }
 }

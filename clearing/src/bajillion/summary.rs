@@ -29,7 +29,7 @@ impl<D: Digest> Summary<D> {
     /// Returns the summary of the state before the first close, with balances committed by
     /// `balances`.
     pub fn genesis<H: Hasher<Digest = D>>(balances: D) -> Self {
-        // No payment matrix and no payouts both commit to a tree without leaves.
+        // An empty payment matrix and empty payouts both commit to a tree without leaves.
         let empty = Builder::<H>::new(0).build().root();
         Self {
             epoch: 0,
@@ -147,11 +147,11 @@ mod tests {
         assert_eq!(genesis.balances, balances);
         assert_eq!(
             genesis.matrix,
-            Matrix::<PublicKey, Digest>::empty::<Sha256>().root()
+            Matrix::<PublicKey, Digest, u64>::empty::<Sha256>().root()
         );
         assert_eq!(
             genesis.payouts,
-            Amounts::<PublicKey>::empty().root::<Sha256>()
+            Amounts::<PublicKey, u64>::empty().root::<Sha256>()
         );
         assert_eq!(Summary::decode(genesis.encode()).unwrap(), genesis);
 

@@ -1,6 +1,6 @@
 //! The payment matrix a close settles.
 
-use super::{Amounts, Error, Lookup, amounts};
+use super::{Amount, Amounts, Error, Lookup, amounts};
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
@@ -35,30 +35,30 @@ pub(crate) fn root<'a, H: Hasher, P: PublicKey>(
 /// The matrix is committed row by row. Its root is the root of a binary Merkle tree over
 /// `(sender, root of the sender's payment map)` leaves in sender order, and each payment map is
 /// itself committed as [Amounts]. An [Opening] of a sender and receiver therefore authenticates
-/// the amount paid between them, or that there is none, without revealing other payments. Every
-/// row pays at least one receiver, so a sender without a row paid nothing.
+/// the amount paid between them, or that there is none. Every row pays at least one receiver, so a
+/// sender without a row paid nothing.
 ///
 /// Cloning is cheap because clones share the rows.
 #[derive(Clone, Debug)]
-pub struct Matrix<P: PublicKey, D: Digest> {
-    inner: Arc<Inner<P, D>>,
+pub struct Matrix<P: PublicKey, D: Digest, A: Amount> {
+    inner: Arc<Inner<P, D, A>>,
 }
 
 #[derive(Debug)]
-struct Inner<P: PublicKey, D: Digest> {
+struct Inner<P: PublicKey, D: Digest, A: Amount> {
     /// Senders and the roots of their payment maps, in sender order.
     rows: Vec<(P, D)>,
     /// Payment maps aligned with `rows`.
-    payments: Vec<Amounts<P>>,
+    payments: Vec<Amounts<P, A>>,
     /// Trees over the payment maps, built the first time a row is opened.
     trees: Vec<OnceLock<Tree<D>>>,
     /// Builds a payment map's tree with the hasher that committed the matrix.
-    build: fn(&Amounts<P>) -> Tree<D>,
+    build: fn(&Amounts<P, A>) -> Tree<D>,
     /// Tree over the leaves of `rows`.
     tree: Tree<D>,
 }
 
-impl<P: PublicKey, D: Digest> Matrix<P, D> {
+impl<P: PublicKey, D: Digest, A: Amount> Matrix<P, D, A> {
     /// Returns the matrix with no rows.
     pub fn empty<H: Hasher<Digest = D>>() -> Self {
         Self::from_sorted::<H>(Vec::new())
@@ -69,7 +69,7 @@ impl<P: PublicKey, D: Digest> Matrix<P, D> {
     /// Returns an error if a sender appears more than once, a payment map is empty, or there are
     /// more than `u32::MAX` senders.
     pub fn new<H: Hasher<Digest = D>>(
-        rows: impl IntoIterator<Item = (P, Amounts<P>)>,
+        rows: impl IntoIterator<Item = (P, Amounts<P, A>)>,
     ) -> Result<Self, Error> {
         let mut rows: Vec<_> = rows.into_iter().collect();
         rows.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
@@ -94,7 +94,7 @@ impl<P: PublicKey, D: Digest> Matrix<P, D> {
 
     /// Builds a matrix from rows that are strictly increasing by sender, each with a nonempty
     /// payment map and that map's root.
-    pub(crate) fn from_sorted<H: Hasher<Digest = D>>(rows: Vec<(P, Amounts<P>, D)>) -> Self {
+    pub(crate) fn from_sorted<H: Hasher<Digest = D>>(rows: Vec<(P, Amounts<P, A>, D)>) -> Self {
         let (rows, payments): (Vec<_>, Vec<_>) = rows
             .into_iter()
             .map(|(sender, payments, root)| ((sender, root), payments))
@@ -128,7 +128,7 @@ impl<P: PublicKey, D: Digest> Matrix<P, D> {
     }
 
     /// Iterates over every sender's payment map, in sender order.
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&P, &Amounts<P>)> {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&P, &Amounts<P, A>)> {
         self.inner
             .rows
             .iter()
@@ -150,7 +150,7 @@ impl<P: PublicKey, D: Digest> Matrix<P, D> {
     }
 
     /// Returns `sender`'s payment map, if it has a row.
-    pub fn payments(&self, sender: &P) -> Option<&Amounts<P>> {
+    pub fn payments(&self, sender: &P) -> Option<&Amounts<P, A>> {
         self.position(sender)
             .map(|position| &self.inner.payments[position])
     }
@@ -162,7 +162,7 @@ impl<P: PublicKey, D: Digest> Matrix<P, D> {
     }
 
     /// Opens the amount `sender` paid `receiver`, proving that it paid nothing if it did not.
-    pub fn open(&self, sender: &P, receiver: &P) -> Opening<P, D> {
+    pub fn open(&self, sender: &P, receiver: &P) -> Opening<P, D, A> {
         let row = Lookup::new(&self.inner.rows, &self.inner.tree, sender);
         let entry = match &row {
             Lookup::Member { position, .. } => {
@@ -179,15 +179,15 @@ impl<P: PublicKey, D: Digest> Matrix<P, D> {
 
 /// Opening of the amount one sender paid one receiver under a [Matrix] root.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Opening<P: PublicKey, D: Digest> {
+pub struct Opening<P: PublicKey, D: Digest, A: Amount> {
     /// Opening of the sender's row, binding the root of its payment map if it has one.
     pub row: Lookup<P, D, D>,
     /// Opening of the receiver's entry under the root of the sender's payment map, present if and
     /// only if the sender has a row.
-    pub entry: Option<Lookup<P, u64, D>>,
+    pub entry: Option<Lookup<P, A, D>>,
 }
 
-impl<P: PublicKey, D: Digest> Opening<P, D> {
+impl<P: PublicKey, D: Digest, A: Amount> Opening<P, D, A> {
     /// Verifies the opening of `sender`'s row under the matrix root `root`.
     ///
     /// Returns the root of `sender`'s payment map, or `None` if it has no row.
@@ -216,51 +216,52 @@ impl<P: PublicKey, D: Digest> Opening<P, D> {
         root: &D,
         sender: &P,
         receiver: &P,
-    ) -> Result<u64, Error> {
+    ) -> Result<A, Error> {
         let (Some(payments), Some(entry)) = (self.verify_row::<H>(root, sender)?, &self.entry)
         else {
-            return Ok(0);
+            return Ok(A::ZERO);
         };
         let amount = entry.verify::<H>(receiver, &payments, |receiver, amount| {
-            amounts::leaf::<H, P>(receiver, *amount)
+            amounts::leaf::<H, P, A>(receiver, *amount)
         })?;
         match amount {
-            Some(0) => Err(Error::InvalidOpening),
+            Some(amount) if *amount == A::ZERO => Err(Error::InvalidOpening),
             Some(amount) => Ok(*amount),
-            None => Ok(0),
+            None => Ok(A::ZERO),
         }
     }
 }
 
-impl<P: PublicKey, D: Digest> Write for Opening<P, D> {
+impl<P: PublicKey, D: Digest, A: Amount> Write for Opening<P, D, A> {
     fn write(&self, buf: &mut impl BufMut) {
         self.row.write(buf);
         self.entry.write(buf);
     }
 }
 
-impl<P: PublicKey, D: Digest> EncodeSize for Opening<P, D> {
+impl<P: PublicKey, D: Digest, A: Amount> EncodeSize for Opening<P, D, A> {
     fn encode_size(&self) -> usize {
         self.row.encode_size() + self.entry.encode_size()
     }
 }
 
-impl<P: PublicKey, D: Digest> Read for Opening<P, D> {
+impl<P: PublicKey, D: Digest, A: Amount> Read for Opening<P, D, A> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self {
             row: Lookup::read(buf)?,
-            entry: Option::<Lookup<P, u64, D>>::read(buf)?,
+            entry: Option::<Lookup<P, A, D>>::read(buf)?,
         })
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P: PublicKey, D: Digest> arbitrary::Arbitrary<'_> for Opening<P, D>
+impl<P: PublicKey, D: Digest, A: Amount> arbitrary::Arbitrary<'_> for Opening<P, D, A>
 where
     P: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
+    A: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -289,7 +290,7 @@ mod tests {
         keys
     }
 
-    fn amounts(entries: &[(&PublicKey, u64)]) -> Amounts<PublicKey> {
+    fn amounts(entries: &[(&PublicKey, u64)]) -> Amounts<PublicKey, u64> {
         Amounts::new(
             entries
                 .iter()
@@ -306,7 +307,7 @@ mod tests {
             (keys[3].clone(), amounts(&[(&keys[1], 1)])),
             (keys[4].clone(), amounts(&[(&keys[4], 2), (&keys[5], 3)])),
         ];
-        let matrix = Matrix::<_, Digest>::new::<Sha256>(rows.clone()).unwrap();
+        let matrix = Matrix::<_, Digest, u64>::new::<Sha256>(rows.clone()).unwrap();
         let root = matrix.root();
         assert_eq!(matrix.len(), 3);
 
@@ -331,7 +332,7 @@ mod tests {
             }
         }
 
-        let empty = Matrix::<PublicKey, Digest>::empty::<Sha256>();
+        let empty = Matrix::<PublicKey, Digest, u64>::empty::<Sha256>();
         let opening = empty.open(&keys[0], &keys[1]);
         assert_eq!(
             opening
@@ -344,7 +345,7 @@ mod tests {
     #[test]
     fn test_rejects_inconsistent_openings() {
         let keys = keys(4);
-        let matrix = Matrix::<_, Digest>::new::<Sha256>([
+        let matrix = Matrix::<_, Digest, u64>::new::<Sha256>([
             (keys[1].clone(), amounts(&[(&keys[0], 5)])),
             (keys[3].clone(), amounts(&[(&keys[0], 1)])),
         ])
@@ -388,7 +389,7 @@ mod tests {
         ));
 
         // Openings verify only under their own root and for their own pair.
-        let other_root = Matrix::<PublicKey, Digest>::empty::<Sha256>().root();
+        let other_root = Matrix::<PublicKey, Digest, u64>::empty::<Sha256>().root();
         assert!(
             present
                 .verify::<Sha256>(&other_root, &keys[1], &keys[0])
@@ -403,14 +404,14 @@ mod tests {
         let keys = keys(2);
         let row = amounts(&[(&keys[0], 1)]);
         assert!(matches!(
-            Matrix::<_, Digest>::new::<Sha256>([
+            Matrix::<_, Digest, u64>::new::<Sha256>([
                 (keys[1].clone(), row.clone()),
                 (keys[1].clone(), row)
             ]),
             Err(Error::DuplicateAccount)
         ));
         assert!(matches!(
-            Matrix::<_, Digest>::new::<Sha256>([(keys[1].clone(), Amounts::empty())]),
+            Matrix::<_, Digest, u64>::new::<Sha256>([(keys[1].clone(), Amounts::empty())]),
             Err(Error::NoReceivers)
         ));
     }
@@ -421,7 +422,7 @@ mod tests {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Opening<PublicKey, Digest>>,
+            CodecConformance<Opening<PublicKey, Digest, u64>>,
         }
     }
 }

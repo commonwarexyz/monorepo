@@ -9,7 +9,7 @@ use commonware_runtime::Runner as _;
 async fn check_balances(deployment: &Deployment, users: u64) {
     let mut total = 0;
     for index in 0..users {
-        let expected = deployment.operator.balance(&account(index));
+        let expected = deployment.operator.balance(&account(index)).await.unwrap();
         for validator in &deployment.validators {
             assert_eq!(validator.balance(&account(index)).await.unwrap(), expected);
         }
@@ -50,7 +50,7 @@ fn test_epochs_settle_payments_and_withdrawals() {
                     let request = sender
                         .send(epoch, amounts(&[(to, epoch * 10 + offset)]), false)
                         .unwrap();
-                    let acknowledgement = deployment.operator.accept(&request).unwrap();
+                    let acknowledgement = deployment.operator.accept(&request).await.unwrap();
                     for receipt in sender.acknowledged(&acknowledgement).unwrap() {
                         receivers[to as usize].receive(receipt).unwrap();
                     }
@@ -115,7 +115,7 @@ fn test_omitted_payment_halts_ledger() {
         let mut bob = receiver(1, 2);
         let request = alice.send(2, amounts(&[(1, 30)]), false).unwrap();
         let receipt = alice
-            .acknowledged(&deployment.operator.accept(&request).unwrap())
+            .acknowledged(&deployment.operator.accept(&request).await.unwrap())
             .unwrap()
             .pop()
             .unwrap();
@@ -144,22 +144,22 @@ fn test_omitted_payment_halts_ledger() {
             Err(Error::Halted)
         ));
 
-        // Everyone recovers the balances the posted closes finalized.
+        // Everyone claims the balances the posted closes finalized.
         let custody = deployment.ledger.custody();
-        let mut refunded = 0;
+        let mut claimed = 0;
         for index in 0..2 {
             let proof = deployment.validators[0]
                 .prove(&account(index))
                 .await
                 .unwrap()
                 .unwrap();
-            refunded += deployment
+            claimed += deployment
                 .ledger
-                .refund(&account(index), Some(&proof))
+                .claim(&account(index), Some(&proof))
                 .unwrap();
         }
-        assert_eq!(refunded, 200);
-        assert_eq!(refunded, custody);
+        assert_eq!(claimed, 200);
+        assert_eq!(claimed, custody);
     });
 }
 
@@ -173,7 +173,7 @@ fn test_late_challenge_halts_after_later_closes() {
         let mut bob = receiver(1, 2);
         let request = alice.send(2, amounts(&[(1, 30)]), false).unwrap();
         let receipt = alice
-            .acknowledged(&deployment.operator.accept(&request).unwrap())
+            .acknowledged(&deployment.operator.accept(&request).await.unwrap())
             .unwrap()
             .pop()
             .unwrap();
@@ -189,7 +189,7 @@ fn test_late_challenge_halts_after_later_closes() {
         let proposals = deployment.verify(&next).await;
         let latest = deployment.post(&mut context, proposals).await;
 
-        // The challenge still halts the ledger. Refunds follow the balances of the latest close.
+        // The challenge still halts the ledger. Claims follow the balances of the latest close.
         let opening = omitting.matrix::<Sha256>().open(&account(0), &account(1));
         let challenge = bob
             .audit(2, &omitted.matrix, &account(0), &opening)
@@ -203,7 +203,7 @@ fn test_late_challenge_halts_after_later_closes() {
             .unwrap()
             .unwrap();
         assert_eq!(
-            deployment.ledger.refund(&account(2), Some(&proof)).unwrap(),
+            deployment.ledger.claim(&account(2), Some(&proof)).unwrap(),
             50
         );
     });
@@ -221,11 +221,11 @@ fn test_partial_credit_halts_ledger() {
         let mut bob = receiver(1, 2);
         let first = alice.send(2, amounts(&[(1, 5)]), false).unwrap();
         alice
-            .acknowledged(&deployment.operator.accept(&first).unwrap())
+            .acknowledged(&deployment.operator.accept(&first).await.unwrap())
             .unwrap();
         let second = alice.send(2, amounts(&[(1, 5)]), false).unwrap();
         let receipt = alice
-            .acknowledged(&deployment.operator.accept(&second).unwrap())
+            .acknowledged(&deployment.operator.accept(&second).await.unwrap())
             .unwrap()
             .pop()
             .unwrap();
@@ -264,10 +264,14 @@ fn test_partial_credit_halts_ledger() {
 }
 
 mod schemes {
-    //! A deployment whose users, operator, and validators sign with three different schemes.
+    //! A deployment whose users, operator, and validators sign with three different schemes, and
+    //! whose amounts exceed `u64::MAX`.
 
     use super::*;
-    use crate::bajillion::{Ledger, Operator, Receiver, Sender, Validator};
+    use crate::bajillion::{
+        BalanceProof, Ledger, MemoryBalances, Operator, Receiver, Sender, Validator,
+    };
+    use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::{bls12381, secp256r1::standard};
 
     /// The macro gates its fixture on a `mocks` feature that this crate does not define.
@@ -283,9 +287,14 @@ mod schemes {
     type Scheme = certificate::Scheme<PublicKey>;
     type User = standard::PublicKey;
     type OperatorKey = bls12381::PublicKey;
+    type SchemesOperator =
+        Operator<User, OperatorKey, bls12381::PrivateKey, Sha256, u128, MemoryBalances<User, u128>>;
+
+    /// One more than `u64::MAX`.
+    const UNIT: u128 = 1 << 64;
 
     #[test]
-    fn test_schemes_are_independent() {
+    fn test_schemes_and_amounts_are_independent() {
         deterministic::Runner::default().start(|mut context| async move {
             let users: Vec<_> = (0..3).map(standard::PrivateKey::from_seed).collect();
             let key = bls12381::PrivateKey::from_seed(0);
@@ -299,7 +308,7 @@ mod schemes {
             let mut validators = Vec::new();
             for index in 0..4 {
                 let validator =
-                    Validator::<_, User, OperatorKey, Sha256, EightCap, Sequential>::init(
+                    Validator::<_, User, OperatorKey, Sha256, EightCap, Sequential, u128>::init(
                         context.child("validator").with_attribute("index", index),
                         config_for(&format!("schemes-{index}"), key.public_key()),
                         Vec::new(),
@@ -308,18 +317,21 @@ mod schemes {
                     .unwrap();
                 validators.push(validator);
             }
-            let mut ledger = Ledger::<User, OperatorKey, Scheme, Sha256>::new(
+            let mut ledger = Ledger::<User, OperatorKey, Scheme, Sha256, u128>::new(
                 namespace(),
                 key.public_key(),
                 fixture.verifier.clone(),
                 validators[0].summary().balances,
             );
-            let mut operator = Operator::<User, OperatorKey, _, Sha256>::new(key, namespace());
+            let mut operator =
+                SchemesOperator::init(key, namespace(), LIMITS, MemoryBalances::new(), [], None)
+                    .await
+                    .unwrap();
 
             // Closes the operator's epoch, processing every queued request, and posts it.
             async fn close(
                 context: &mut deterministic::Context,
-                operator: &mut Operator<User, OperatorKey, bls12381::PrivateKey, Sha256>,
+                operator: &mut SchemesOperator,
                 validators: &mut Vec<
                     Validator<
                         deterministic::Context,
@@ -328,10 +340,11 @@ mod schemes {
                         Sha256,
                         EightCap,
                         Sequential,
+                        u128,
                     >,
                 >,
                 schemes: &[Scheme],
-                ledger: &mut Ledger<User, OperatorKey, Scheme, Sha256>,
+                ledger: &mut Ledger<User, OperatorKey, Scheme, Sha256, u128>,
             ) -> Summary<Digest> {
                 let queue = ledger.queue();
                 let close = operator
@@ -340,6 +353,7 @@ mod schemes {
                         queue.deposits.len() as u64,
                         queue.forced_withdrawals.len() as u64,
                     )
+                    .await
                     .unwrap();
                 let mut proposals = Vec::new();
                 for validator in validators.iter() {
@@ -363,7 +377,7 @@ mod schemes {
                 summary
             }
 
-            ledger.deposit(users[0].public_key(), 100).unwrap();
+            ledger.deposit(users[0].public_key(), 5 * UNIT).unwrap();
             close(
                 &mut context,
                 &mut operator,
@@ -373,28 +387,34 @@ mod schemes {
             )
             .await;
 
-            // A user pays another and withdraws part of its balance.
-            let mut alice = Sender::<User, _, OperatorKey, Sha256>::new(
+            // A user pays another and withdraws part of its balance through the operator, and the
+            // receiver withdraws part of the payment through the ledger in the same epoch.
+            let mut alice = Sender::<User, _, OperatorKey, Sha256, u128>::new(
                 users[0].clone(),
                 operator.public_key(),
                 namespace(),
             );
-            let mut bob = Receiver::<User, OperatorKey, Sha256>::new(
+            let mut bob = Receiver::<User, OperatorKey, Sha256, u128>::new(
                 users[1].public_key(),
                 operator.public_key(),
                 namespace(),
                 2,
             );
-            let batch = Amounts::new([(users[1].public_key(), 40)]).unwrap();
+            let batch = Amounts::new([(users[1].public_key(), 2 * UNIT + 1)]).unwrap();
             let request = alice.send(2, batch, false).unwrap();
-            let acknowledgement = operator.accept(&request).unwrap();
+            let acknowledgement = operator.accept(&request).await.unwrap();
             for receipt in alice.acknowledged(&acknowledgement).unwrap() {
-                assert_eq!(bob.receive(receipt).unwrap(), 40);
+                assert_eq!(bob.receive(receipt).unwrap(), 2 * UNIT + 1);
             }
+            assert_eq!(
+                operator.live(&users[0].public_key()).await.unwrap(),
+                3 * UNIT - 1
+            );
             operator
-                .withdraw(Withdrawal::sign(&users[0], &namespace(), 2, 10, 0))
+                .withdraw(Withdrawal::sign(&users[0], &namespace(), 2, UNIT, 0))
                 .unwrap();
-            close(
+            ledger.withdraw(users[1].public_key(), UNIT).unwrap();
+            let summary = close(
                 &mut context,
                 &mut operator,
                 &mut validators,
@@ -403,11 +423,34 @@ mod schemes {
             )
             .await;
 
+            // The receiver finds the payment in the posted matrix.
+            let opening = validators[0]
+                .matrix()
+                .open(&users[0].public_key(), &users[1].public_key());
+            assert!(
+                bob.audit(2, &summary.matrix, &users[0].public_key(), &opening)
+                    .unwrap()
+                    .is_none()
+            );
+            let balances = [(0, 2 * UNIT - 1), (1, UNIT + 1)];
             for validator in &validators {
-                assert_eq!(validator.balance(&users[0].public_key()).await.unwrap(), 50);
-                assert_eq!(validator.balance(&users[1].public_key()).await.unwrap(), 40);
+                for (index, expected) in balances {
+                    let account = users[index].public_key();
+                    assert_eq!(validator.balance(&account).await.unwrap(), expected);
+                    assert_eq!(operator.balance(&account).await.unwrap(), expected);
+                }
             }
-            assert_eq!(ledger.custody(), 90);
+            assert_eq!(ledger.custody(), 3 * UNIT);
+
+            // After a halt, each user claims its balance with a proof against the last close.
+            ledger.halt();
+            for (index, expected) in balances {
+                let account = users[index].public_key();
+                let proof = validators[0].prove(&account).await.unwrap().unwrap();
+                assert_eq!(BalanceProof::decode(proof.encode()).unwrap(), proof);
+                assert_eq!(ledger.claim(&account, Some(&proof)).unwrap(), expected);
+            }
+            assert_eq!(ledger.custody(), 0);
         });
     }
 }

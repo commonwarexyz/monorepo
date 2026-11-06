@@ -1,4 +1,4 @@
-//! Posting closes, challenging them, and refunding after a halt.
+//! Posting closes, challenging them, and claiming funds after a halt.
 
 use super::*;
 use crate::bajillion::{Challenge, Error, Halt};
@@ -58,7 +58,7 @@ fn test_close_processes_requests_queued_before_its_epoch() {
 
         // The close of epoch 1 may defer requests queued while epoch 1 is open.
         let queue = deployment.ledger.queue();
-        let close = deployment.operator.close(&queue, 1, 0).unwrap();
+        let close = close_epoch(&mut deployment.operator, &queue, 1, 0).await;
         let proposals = deployment.verify(&close).await;
         deployment.post(&mut context, proposals).await;
 
@@ -69,16 +69,16 @@ fn test_close_processes_requests_queued_before_its_epoch() {
             (1, 1)
         );
         assert!(matches!(
-            deployment.operator.close(&queue, 0, 1),
+            deployment.operator.close(&queue, 0, 1).await,
             Err(Error::InvalidCount)
         ));
         assert!(matches!(
-            deployment.operator.close(&queue, 1, 0),
+            deployment.operator.close(&queue, 1, 0).await,
             Err(Error::InvalidCount)
         ));
         let (_, summary) = deployment.close(&mut context).await;
         assert_eq!((summary.deposits, summary.forced_withdrawals), (1, 1));
-        assert_eq!(deployment.operator.balance(&account(0)), 9);
+        assert_eq!(deployment.operator.balance(&account(0)).await.unwrap(), 9);
         assert_eq!(deployment.ledger.custody(), 29);
     });
 }
@@ -91,7 +91,7 @@ fn test_ledger_rejects_closes_deferring_required_requests() {
         deployment.close(&mut context).await;
         deployment.ledger.deposit(account(1), 20).unwrap();
         let queue = deployment.ledger.queue();
-        let close = deployment.operator.close(&queue, 0, 0).unwrap();
+        let close = close_epoch(&mut deployment.operator, &queue, 0, 0).await;
         let proposals = deployment.verify(&close).await;
         deployment.post(&mut context, proposals).await;
 
@@ -100,9 +100,9 @@ fn test_ledger_rejects_closes_deferring_required_requests() {
         let deferring = Summary {
             epoch: 3,
             parent: *deployment.ledger.parent(),
-            matrix: Matrix::<PublicKey, Digest>::empty::<Sha256>().root(),
+            matrix: Matrix::<PublicKey, Digest, u64>::empty::<Sha256>().root(),
             balances: *deployment.ledger.balances(),
-            payouts: Amounts::<PublicKey>::empty().root::<Sha256>(),
+            payouts: Amounts::<PublicKey, u64>::empty().root::<Sha256>(),
             deposits: 0,
             forced_withdrawals: 0,
         };
@@ -122,7 +122,7 @@ fn test_ledger_posts_only_certified_successors() {
         let mut deployment = Deployment::new(&context, "post", 4).await;
         deployment.ledger.deposit(account(0), 10).unwrap();
         let queue = deployment.ledger.queue();
-        let close = deployment.operator.close(&queue, 1, 0).unwrap();
+        let close = close_epoch(&mut deployment.operator, &queue, 1, 0).await;
         let proposals = deployment.verify(&close).await;
         let summary = *proposals[0].summary();
         let payouts = proposals[0].payouts().clone();
@@ -227,6 +227,29 @@ fn test_ledger_posts_only_certified_successors() {
     });
 }
 
+/// A halted ledger posts no close, even one its validators certified.
+#[test]
+fn test_halted_ledger_posts_nothing() {
+    deterministic::Runner::default().start(|mut context| async move {
+        let mut deployment = Deployment::new(&context, "halted", 1).await;
+        let queue = deployment.ledger.queue();
+        let close = close_epoch(&mut deployment.operator, &queue, 0, 0).await;
+        let proposals = deployment.verify(&close).await;
+        let certificate = deployment.certify(&proposals);
+        deployment.ledger.halt();
+        assert!(matches!(
+            deployment.ledger.post(
+                &mut context,
+                proposals[0].summary(),
+                proposals[0].payouts(),
+                &certificate
+            ),
+            Err(Error::Halted)
+        ));
+        assert_eq!(deployment.ledger.epoch(), 1);
+    });
+}
+
 #[test]
 fn test_challenges_need_a_contradicted_receipt() {
     deterministic::Runner::default().start(|mut context| async move {
@@ -236,14 +259,14 @@ fn test_challenges_need_a_contradicted_receipt() {
         let mut alice = sender(0);
         let request = alice.send(2, amounts(&[(1, 10)]), false).unwrap();
         let receipt = alice
-            .acknowledged(&deployment.operator.accept(&request).unwrap())
+            .acknowledged(&deployment.operator.accept(&request).await.unwrap())
             .unwrap()
             .pop()
             .unwrap();
 
         // The receipt's epoch has not closed.
         let queue = deployment.ledger.queue();
-        let close = deployment.operator.close(&queue, 0, 0).unwrap();
+        let close = close_epoch(&mut deployment.operator, &queue, 0, 0).await;
         let matrix = close.matrix::<Sha256>();
         let challenge = Challenge {
             receipt: receipt.clone(),
@@ -280,15 +303,15 @@ fn test_challenges_need_a_contradicted_receipt() {
 }
 
 #[test]
-fn test_halted_ledger_refunds_balances_and_deposits() {
+fn test_halted_ledger_pays_balance_and_deposit_claims() {
     deterministic::Runner::default().start(|mut context| async move {
-        let mut deployment = Deployment::new(&context, "refunds", 1).await;
+        let mut deployment = Deployment::new(&context, "claims", 1).await;
         deployment.ledger.deposit(account(0), 10).unwrap();
         deployment.ledger.deposit(account(1), 20).unwrap();
         deployment.close(&mut context).await;
         let mut alice = sender(0);
         let request = alice.send(2, amounts(&[(2, 3)]), false).unwrap();
-        deployment.operator.accept(&request).unwrap();
+        deployment.operator.accept(&request).await.unwrap();
         deployment.close(&mut context).await;
         deployment.ledger.deposit(account(0), 4).unwrap();
         deployment.ledger.deposit(account(3), 7).unwrap();
@@ -305,7 +328,7 @@ fn test_halted_ledger_refunds_balances_and_deposits() {
 
         let ledger = &mut deployment.ledger;
         assert!(matches!(
-            ledger.refund(&account(0), Some(&alice_proof)),
+            ledger.claim(&account(0), Some(&alice_proof)),
             Err(Error::NotHalted)
         ));
         ledger.halt();
@@ -315,35 +338,41 @@ fn test_halted_ledger_refunds_balances_and_deposits() {
         assert!(matches!(ledger.deposit(account(0), 1), Err(Error::Halted)));
         assert!(matches!(ledger.withdraw(account(0), 1), Err(Error::Halted)));
 
-        // Each account recovers its balance at the last posted close once, proven against that
+        // Each account claims its balance at the last posted close once, proven against that
         // close's balances root, and its unprocessed deposits once.
         assert!(matches!(
-            ledger.refund(&account(1), Some(&alice_proof)),
+            ledger.claim(&account(1), Some(&alice_proof)),
             Err(Error::InvalidBalanceProof)
         ));
         let mut inflated = bob_proof.clone();
         inflated.balance = inflated.balance.checked_add(1).unwrap();
         assert!(matches!(
-            ledger.refund(&account(1), Some(&inflated)),
+            ledger.claim(&account(1), Some(&inflated)),
             Err(Error::InvalidBalanceProof)
         ));
-        let mut refunded = 0;
-        refunded += ledger.refund(&account(0), None).unwrap();
-        assert_eq!(refunded, 4);
-        refunded += ledger.refund(&account(0), Some(&alice_proof)).unwrap();
-        assert_eq!(refunded, 11);
+        let mut claimed = 0;
+        claimed += ledger.claim(&account(0), None).unwrap();
+        assert_eq!(claimed, 4);
+        claimed += ledger.claim(&account(0), Some(&alice_proof)).unwrap();
+        assert_eq!(claimed, 11);
         assert!(matches!(
-            ledger.refund(&account(0), Some(&alice_proof)),
-            Err(Error::NothingToRefund)
+            ledger.claim(&account(0), Some(&alice_proof)),
+            Err(Error::NothingToClaim)
         ));
-        refunded += ledger.refund(&account(1), Some(&bob_proof)).unwrap();
-        refunded += ledger.refund(&account(2), Some(&carol_proof)).unwrap();
-        refunded += ledger.refund(&account(3), None).unwrap();
+        let mut forged = alice_proof.clone();
+        forged.balance = forged.balance.checked_add(1).unwrap();
         assert!(matches!(
-            ledger.refund(&account(3), None),
-            Err(Error::NothingToRefund)
+            ledger.claim(&account(0), Some(&forged)),
+            Err(Error::InvalidBalanceProof)
         ));
-        assert_eq!(refunded, custody);
+        claimed += ledger.claim(&account(1), Some(&bob_proof)).unwrap();
+        claimed += ledger.claim(&account(2), Some(&carol_proof)).unwrap();
+        claimed += ledger.claim(&account(3), None).unwrap();
+        assert!(matches!(
+            ledger.claim(&account(3), None),
+            Err(Error::NothingToClaim)
+        ));
+        assert_eq!(claimed, custody);
         assert_eq!(ledger.custody(), 0);
     });
 }

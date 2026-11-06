@@ -1,6 +1,6 @@
 //! Receiving payments and holding the operator to its preconfirmations.
 
-use super::{Challenge, Epoch, Error, Namespace, Opening, Receipt};
+use super::{Amount, Challenge, Epoch, Error, Namespace, Opening, Receipt};
 use commonware_cryptography::{Hasher, PublicKey};
 use std::collections::BTreeMap;
 
@@ -9,19 +9,23 @@ use std::collections::BTreeMap;
 /// A receiver keeps, for each epoch and sender, the receipt preconfirming the largest amount. It
 /// accepts receipts only for epochs whose close has not posted and while the ledger has not
 /// halted, so every receipt it relies on can still be checked against the close of its epoch.
-pub struct Receiver<P: PublicKey, O: PublicKey, H: Hasher> {
+pub struct Receiver<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> {
+    /// Account receiving.
     account: P,
+    /// Key of the operator whose countersignatures receipts must carry.
     operator: O,
+    /// Namespaces of the signatures receipts carry.
     namespace: Namespace,
     /// Epoch whose close the ledger expects next.
     next: Epoch,
+    /// Whether the ledger halted.
     halted: bool,
     /// The receipt promising the largest amount, by epoch and sender.
     #[allow(clippy::type_complexity)]
-    receipts: BTreeMap<Epoch, BTreeMap<P, Receipt<P, O, H::Digest>>>,
+    receipts: BTreeMap<Epoch, BTreeMap<P, Receipt<P, O, H::Digest, A>>>,
 }
 
-impl<P: PublicKey, O: PublicKey, H: Hasher> Receiver<P, O, H> {
+impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
     /// Creates a receiver for `account` while the ledger expects the close of `next`.
     pub const fn new(account: P, operator: O, namespace: Namespace, next: Epoch) -> Self {
         Self {
@@ -44,7 +48,7 @@ impl<P: PublicKey, O: PublicKey, H: Hasher> Receiver<P, O, H> {
         namespace: Namespace,
         next: Epoch,
         halted: bool,
-        receipts: impl IntoIterator<Item = Receipt<P, O, H::Digest>>,
+        receipts: impl IntoIterator<Item = Receipt<P, O, H::Digest, A>>,
     ) -> Result<Self, Error> {
         let mut receiver = Self::new(account, operator, namespace, next);
         receiver.halted = halted;
@@ -64,15 +68,15 @@ impl<P: PublicKey, O: PublicKey, H: Hasher> Receiver<P, O, H> {
     }
 
     /// Returns the amount preconfirmed from `sender` in `epoch`.
-    pub fn amount(&self, epoch: Epoch, sender: &P) -> u64 {
+    pub fn amount(&self, epoch: Epoch, sender: &P) -> A {
         self.receipts
             .get(&epoch)
             .and_then(|receipts| receipts.get(sender))
-            .map_or(0, |receipt| receipt.amount)
+            .map_or(A::ZERO, |receipt| receipt.amount)
     }
 
     /// Returns the receipts held for `epoch`, one per sender, in sender order.
-    pub fn receipts(&self, epoch: Epoch) -> impl Iterator<Item = &Receipt<P, O, H::Digest>> {
+    pub fn receipts(&self, epoch: Epoch) -> impl Iterator<Item = &Receipt<P, O, H::Digest, A>> {
         self.receipts
             .get(&epoch)
             .into_iter()
@@ -80,7 +84,7 @@ impl<P: PublicKey, O: PublicKey, H: Hasher> Receiver<P, O, H> {
     }
 
     /// Returns an error unless `receipt` pays this account and verifies.
-    fn verify(&self, receipt: &Receipt<P, O, H::Digest>) -> Result<(), Error> {
+    fn verify(&self, receipt: &Receipt<P, O, H::Digest, A>) -> Result<(), Error> {
         if receipt.receiver != self.account {
             return Err(Error::WrongReceiver);
         }
@@ -88,7 +92,7 @@ impl<P: PublicKey, O: PublicKey, H: Hasher> Receiver<P, O, H> {
     }
 
     /// Holds `receipt` as the largest preconfirmation from its sender in its epoch.
-    fn insert(&mut self, receipt: Receipt<P, O, H::Digest>) {
+    fn insert(&mut self, receipt: Receipt<P, O, H::Digest, A>) {
         self.receipts
             .entry(receipt.state.epoch)
             .or_default()
@@ -100,7 +104,7 @@ impl<P: PublicKey, O: PublicKey, H: Hasher> Receiver<P, O, H> {
     /// Returns an error if the ledger halted or posted the close of the receipt's epoch, the
     /// receipt is for another account, it does not increase the amount preconfirmed, or it does
     /// not verify.
-    pub fn receive(&mut self, receipt: Receipt<P, O, H::Digest>) -> Result<u64, Error> {
+    pub fn receive(&mut self, receipt: Receipt<P, O, H::Digest, A>) -> Result<A, Error> {
         if self.halted {
             return Err(Error::Halted);
         }
@@ -137,8 +141,8 @@ impl<P: PublicKey, O: PublicKey, H: Hasher> Receiver<P, O, H> {
         epoch: Epoch,
         root: &H::Digest,
         sender: &P,
-        opening: &Opening<P, H::Digest>,
-    ) -> Result<Option<Challenge<P, O, H::Digest>>, Error> {
+        opening: &Opening<P, H::Digest, A>,
+    ) -> Result<Option<Challenge<P, O, H::Digest, A>>, Error> {
         let Some(receipt) = self
             .receipts
             .get(&epoch)

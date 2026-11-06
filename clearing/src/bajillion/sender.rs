@@ -1,21 +1,24 @@
 //! Paying through the operator.
 
-use super::{Acknowledgement, Amounts, Epoch, Error, Namespace, Opening, Receipt, Request, State};
+use super::{
+    Acknowledgement, Amount, Amounts, Epoch, Error, Namespace, Opening, Receipt, Request, State,
+};
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
 use std::{collections::BTreeMap, marker::PhantomData};
 
 /// One state of the pending request, with the payment map it commits to.
-struct Proposed<P: PublicKey, D: Digest> {
+struct Proposed<P: PublicKey, D: Digest, A: Amount> {
     state: State<P, D>,
-    payments: Amounts<P>,
+    payments: Amounts<P, A>,
     signature: P::Signature,
 }
 
 /// The request awaiting the operator's answer.
-struct Pending<P: PublicKey, D: Digest> {
-    request: Request<P>,
+struct Pending<P: PublicKey, D: Digest, A: Amount> {
+    /// The request as sent.
+    request: Request<P, A>,
     /// The request's states, in epoch order. A pipelined request has two.
-    states: Vec<Proposed<P, D>>,
+    states: Vec<Proposed<P, D, A>>,
 }
 
 /// What a posted close means for the pending request.
@@ -31,26 +34,32 @@ pub enum Outcome {
 
 /// An account paying other accounts through the operator.
 ///
-/// For every epoch, a sender keeps the payment map the operator has countersigned, and at most one
+/// A sender keeps the payment map the operator has countersigned in each epoch, and at most one
 /// request awaiting the operator's answer. It never signs for an epoch before one it has paid in,
 /// so every state it signs for an epoch extends its countersigned map of that epoch.
-pub struct Sender<P: PublicKey, S: Signer, O: PublicKey, H: Hasher> {
+pub struct Sender<P: PublicKey, S: Signer, O: PublicKey, H: Hasher, A: Amount> {
+    /// Key that signs the sender's states.
     signer: S,
+    /// Account paying.
     account: P,
+    /// Key of the operator whose countersignatures the sender accepts.
     operator: O,
+    /// Namespaces of the signatures the sender makes and checks.
     namespace: Namespace,
     /// Countersigned payment maps by epoch. Epochs without payments are absent.
-    payments: BTreeMap<Epoch, Amounts<P>>,
-    pending: Option<Pending<P, H::Digest>>,
+    payments: BTreeMap<Epoch, Amounts<P, A>>,
+    /// The request awaiting the operator's answer, if any.
+    pending: Option<Pending<P, H::Digest, A>>,
     _hasher: PhantomData<H>,
 }
 
-impl<P, S, O, H> Sender<P, S, O, H>
+impl<P, S, O, H, A> Sender<P, S, O, H, A>
 where
     P: PublicKey,
     S: Signer<PublicKey = P, Signature = P::Signature>,
     O: PublicKey,
     H: Hasher,
+    A: Amount,
 {
     /// Creates a sender that signs with `signer` and accepts countersignatures from `operator`.
     pub fn new(signer: S, operator: O, namespace: Namespace) -> Self {
@@ -78,8 +87,8 @@ where
         signer: S,
         operator: O,
         namespace: Namespace,
-        payments: impl IntoIterator<Item = (Epoch, Amounts<P>)>,
-        pending: Option<Request<P>>,
+        payments: impl IntoIterator<Item = (Epoch, Amounts<P, A>)>,
+        pending: Option<Request<P, A>>,
     ) -> Result<Self, Error> {
         let mut sender = Self::new(signer, operator, namespace);
         for (epoch, payments) in payments {
@@ -89,6 +98,9 @@ where
             sender.payments.insert(epoch, payments);
         }
         if let Some(request) = pending {
+            if request.account != sender.account {
+                return Err(Error::InvalidSignature);
+            }
             let states =
                 sender.states(request.epoch, &request.batch, request.pipelined.is_some())?;
             let signatures = core::iter::once(&request.signature).chain(request.pipelined.as_ref());
@@ -117,12 +129,12 @@ where
     }
 
     /// Returns the payment map countersigned in `epoch`, if the sender paid in it.
-    pub fn payments(&self, epoch: Epoch) -> Option<&Amounts<P>> {
+    pub fn payments(&self, epoch: Epoch) -> Option<&Amounts<P, A>> {
         self.payments.get(&epoch)
     }
 
     /// Returns the request awaiting the operator's answer, to send again if it was lost.
-    pub fn pending(&self) -> Option<&Request<P>> {
+    pub fn pending(&self) -> Option<&Request<P, A>> {
         self.pending.as_ref().map(|pending| &pending.request)
     }
 
@@ -136,9 +148,9 @@ where
     fn states(
         &self,
         epoch: Epoch,
-        batch: &Amounts<P>,
+        batch: &Amounts<P, A>,
         pipelined: bool,
-    ) -> Result<Vec<(State<P, H::Digest>, Amounts<P>)>, Error> {
+    ) -> Result<Vec<(State<P, H::Digest>, Amounts<P, A>)>, Error> {
         if epoch == 0 {
             return Err(Error::ZeroEpoch);
         }
@@ -163,9 +175,9 @@ where
     fn state(
         &self,
         epoch: Epoch,
-        payments: Amounts<P>,
-        previous: &Amounts<P>,
-    ) -> (State<P, H::Digest>, Amounts<P>) {
+        payments: Amounts<P, A>,
+        previous: &Amounts<P, A>,
+    ) -> (State<P, H::Digest>, Amounts<P, A>) {
         let state = State {
             epoch,
             account: self.account.clone(),
@@ -185,9 +197,9 @@ where
     pub fn send(
         &mut self,
         epoch: Epoch,
-        batch: Amounts<P>,
+        batch: Amounts<P, A>,
         pipelined: bool,
-    ) -> Result<Request<P>, Error> {
+    ) -> Result<Request<P, A>, Error> {
         if self.pending.is_some() {
             return Err(Error::Pending);
         }
@@ -223,7 +235,7 @@ where
     pub fn acknowledged(
         &mut self,
         acknowledgement: &Acknowledgement<O>,
-    ) -> Result<Vec<Receipt<P, O, H::Digest>>, Error> {
+    ) -> Result<Vec<Receipt<P, O, H::Digest, A>>, Error> {
         let pending = self.pending.as_ref().ok_or(Error::NotPending)?;
         let index = pending
             .states
@@ -289,14 +301,16 @@ where
     ///
     /// `opening` opens this sender's row in the close's matrix, for any receiver. The request
     /// settled if it has a state in `epoch` and the close settled exactly that state's payment
-    /// map. Otherwise it is dropped once no epoch it may settle in remains open.
+    /// map. Otherwise it is dropped once no epoch it may settle in remains open. The application
+    /// reports each posted close in epoch order from the request's epoch, since reporting a later
+    /// close first drops a request the skipped one settled.
     ///
     /// Returns an error if no request is pending or the opening does not verify.
     pub fn posted(
         &mut self,
         epoch: Epoch,
         root: &H::Digest,
-        opening: &Opening<P, H::Digest>,
+        opening: &Opening<P, H::Digest, A>,
     ) -> Result<Outcome, Error> {
         let pending = self.pending.as_ref().ok_or(Error::NotPending)?;
         let settled = opening.verify_row::<H>(root, &self.account)?;

@@ -1,6 +1,6 @@
 //! Payment states, requests, acknowledgements, receipts, and challenges.
 
-use super::{Amounts, Epoch, Error, Namespace, Opening, amounts::leaf};
+use super::{Amount, Amounts, Epoch, Error, Namespace, Opening, amounts::leaf};
 use bytes::BufMut;
 use commonware_codec::{
     Buf, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
@@ -10,7 +10,7 @@ use commonware_storage::bmt::Proof;
 
 /// A sender's payment state in one epoch.
 ///
-/// The sender signs a state to authorize being debited its payment map in that epoch, and the
+/// The sender signs a state to authorize the debit of its payment map in that epoch, and the
 /// operator countersigns the same state to preconfirm the payments in it. Committing to the map of
 /// the previous epoch lets a close settle the state only on top of the map the previous close
 /// settled for the sender.
@@ -105,13 +105,13 @@ where
 /// The operator recomputes the state the request settles from its own record of the sender's
 /// payments, so the request carries only signatures over it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Request<P: PublicKey> {
+pub struct Request<P: PublicKey, A: Amount> {
     /// Account paying.
     pub account: P,
     /// Epoch the request is for.
     pub epoch: Epoch,
     /// Amount paid to each receiver.
-    pub batch: Amounts<P>,
+    pub batch: Amounts<P, A>,
     /// Sender's signature over its state in `epoch`.
     pub signature: P::Signature,
     /// Sender's signature over its state in the epoch after `epoch`, if the request is
@@ -119,7 +119,7 @@ pub struct Request<P: PublicKey> {
     pub pipelined: Option<P::Signature>,
 }
 
-impl<P: PublicKey> Write for Request<P> {
+impl<P: PublicKey, A: Amount> Write for Request<P, A> {
     fn write(&self, buf: &mut impl BufMut) {
         self.account.write(buf);
         self.epoch.write(buf);
@@ -129,7 +129,7 @@ impl<P: PublicKey> Write for Request<P> {
     }
 }
 
-impl<P: PublicKey> EncodeSize for Request<P> {
+impl<P: PublicKey, A: Amount> EncodeSize for Request<P, A> {
     fn encode_size(&self) -> usize {
         self.account.encode_size()
             + self.epoch.encode_size()
@@ -139,7 +139,7 @@ impl<P: PublicKey> EncodeSize for Request<P> {
     }
 }
 
-impl<P: PublicKey> Read for Request<P> {
+impl<P: PublicKey, A: Amount> Read for Request<P, A> {
     /// The maximum number of receivers in a batch.
     type Cfg = usize;
 
@@ -155,15 +155,16 @@ impl<P: PublicKey> Read for Request<P> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P: PublicKey> arbitrary::Arbitrary<'_> for Request<P>
+impl<P: PublicKey, A: Amount> arbitrary::Arbitrary<'_> for Request<P, A>
 where
     P: for<'a> arbitrary::Arbitrary<'a>,
     P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    A: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let receiver = u.arbitrary()?;
-        let amount = u.int_in_range(1..=u64::MAX)?;
-        let batch = Amounts::<P>::arbitrary(u)?
+        let amount = super::amounts::arbitrary_nonzero(u)?;
+        let batch = Amounts::<P, A>::arbitrary(u)?
             .combine(&Amounts::new([(receiver, amount)]).expect("amount must be nonzero"))
             .map_err(|_| arbitrary::Error::IncorrectFormat)?;
         Ok(Self {
@@ -226,7 +227,7 @@ where
 /// The close of that epoch must credit the receiver at least `amount` from the sender, or the
 /// receiver can halt the ledger with a [Challenge].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Receipt<P: PublicKey, O: PublicKey, D: Digest> {
+pub struct Receipt<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
     /// The sender's state.
     pub state: State<P, D>,
     /// The sender's signature over `state`.
@@ -236,14 +237,14 @@ pub struct Receipt<P: PublicKey, O: PublicKey, D: Digest> {
     /// Account paid.
     pub receiver: P,
     /// Cumulative amount paid to `receiver` in the state's payment map.
-    pub amount: u64,
+    pub amount: A,
     /// Position of `receiver` in the state's payment map.
     pub position: u32,
     /// Opening of `receiver`'s entry under the state's payment map root.
     pub proof: Proof<D>,
 }
 
-impl<P: PublicKey, O: PublicKey, D: Digest> Receipt<P, O, D> {
+impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Receipt<P, O, D, A> {
     /// Verifies that both signatures cover the state and that its payment map holds the receipt's
     /// entry.
     pub fn verify<H: Hasher<Digest = D>>(
@@ -251,7 +252,7 @@ impl<P: PublicKey, O: PublicKey, D: Digest> Receipt<P, O, D> {
         namespace: &Namespace,
         operator: &O,
     ) -> Result<(), Error> {
-        if self.amount == 0
+        if self.amount == A::ZERO
             || !self.state.verify(namespace, &self.signature)
             || !self
                 .state
@@ -262,14 +263,14 @@ impl<P: PublicKey, O: PublicKey, D: Digest> Receipt<P, O, D> {
         self.proof
             .verify_element_inclusion::<H>(
                 self.position,
-                &leaf::<H, P>(&self.receiver, self.amount),
+                &leaf::<H, P, A>(&self.receiver, self.amount),
                 &self.state.payments,
             )
             .map_err(|_| Error::InvalidReceipt)
     }
 }
 
-impl<P: PublicKey, O: PublicKey, D: Digest> Write for Receipt<P, O, D> {
+impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Write for Receipt<P, O, D, A> {
     fn write(&self, buf: &mut impl BufMut) {
         self.state.write(buf);
         self.signature.write(buf);
@@ -281,19 +282,19 @@ impl<P: PublicKey, O: PublicKey, D: Digest> Write for Receipt<P, O, D> {
     }
 }
 
-impl<P: PublicKey, O: PublicKey, D: Digest> EncodeSize for Receipt<P, O, D> {
+impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> EncodeSize for Receipt<P, O, D, A> {
     fn encode_size(&self) -> usize {
         State::<P, D>::SIZE
             + P::Signature::SIZE
             + O::Signature::SIZE
             + P::SIZE
-            + u64::SIZE
+            + A::SIZE
             + u32::SIZE
             + self.proof.encode_size()
     }
 }
 
-impl<P: PublicKey, O: PublicKey, D: Digest> Read for Receipt<P, O, D> {
+impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Read for Receipt<P, O, D, A> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -302,7 +303,7 @@ impl<P: PublicKey, O: PublicKey, D: Digest> Read for Receipt<P, O, D> {
             signature: P::Signature::read(buf)?,
             acknowledgement: O::Signature::read(buf)?,
             receiver: P::read(buf)?,
-            amount: u64::read(buf)?,
+            amount: A::read(buf)?,
             position: u32::read(buf)?,
             proof: Proof::read_cfg(buf, &1)?,
         })
@@ -310,12 +311,14 @@ impl<P: PublicKey, O: PublicKey, D: Digest> Read for Receipt<P, O, D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P: PublicKey, O: PublicKey, D: Digest> arbitrary::Arbitrary<'_> for Receipt<P, O, D>
+impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> arbitrary::Arbitrary<'_>
+    for Receipt<P, O, D, A>
 where
     P: for<'a> arbitrary::Arbitrary<'a>,
     P::Signature: for<'a> arbitrary::Arbitrary<'a>,
     O::Signature: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
+    A: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let siblings = u.int_in_range(0..=4)?;
@@ -338,27 +341,27 @@ where
 
 /// Evidence that a posted close credits a receiver less than a receipt promised.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Challenge<P: PublicKey, O: PublicKey, D: Digest> {
+pub struct Challenge<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
     /// The receipt the close contradicts.
-    pub receipt: Receipt<P, O, D>,
+    pub receipt: Receipt<P, O, D, A>,
     /// Opening of the receipt's entry in the matrix of the posted close of its epoch.
-    pub opening: Opening<P, D>,
+    pub opening: Opening<P, D, A>,
 }
 
-impl<P: PublicKey, O: PublicKey, D: Digest> Write for Challenge<P, O, D> {
+impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Write for Challenge<P, O, D, A> {
     fn write(&self, buf: &mut impl BufMut) {
         self.receipt.write(buf);
         self.opening.write(buf);
     }
 }
 
-impl<P: PublicKey, O: PublicKey, D: Digest> EncodeSize for Challenge<P, O, D> {
+impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> EncodeSize for Challenge<P, O, D, A> {
     fn encode_size(&self) -> usize {
         self.receipt.encode_size() + self.opening.encode_size()
     }
 }
 
-impl<P: PublicKey, O: PublicKey, D: Digest> Read for Challenge<P, O, D> {
+impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Read for Challenge<P, O, D, A> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -370,12 +373,14 @@ impl<P: PublicKey, O: PublicKey, D: Digest> Read for Challenge<P, O, D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P: PublicKey, O: PublicKey, D: Digest> arbitrary::Arbitrary<'_> for Challenge<P, O, D>
+impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> arbitrary::Arbitrary<'_>
+    for Challenge<P, O, D, A>
 where
     P: for<'a> arbitrary::Arbitrary<'a>,
     P::Signature: for<'a> arbitrary::Arbitrary<'a>,
     O::Signature: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
+    A: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -398,7 +403,7 @@ mod tests {
     const NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_PAYMENT_TEST";
 
     /// Returns a receipt from a payment map paying two receivers.
-    fn receipt() -> (Receipt<PublicKey, PublicKey, Digest>, PublicKey) {
+    fn receipt() -> (Receipt<PublicKey, PublicKey, Digest, u64>, PublicKey) {
         let namespace = Namespace::new(NAMESPACE);
         let sender = PrivateKey::from_seed(0);
         let operator = PrivateKey::from_seed(1);
@@ -414,7 +419,7 @@ mod tests {
             epoch: 2,
             account: sender.public_key(),
             payments: payments.root::<Sha256>(),
-            previous: Amounts::<PublicKey>::empty().root::<Sha256>(),
+            previous: Amounts::<PublicKey, u64>::empty().root::<Sha256>(),
         };
         let receiver = receivers[1].public_key();
         let position = payments.position(&receiver).unwrap() as u32;
@@ -436,7 +441,7 @@ mod tests {
         let (receipt, operator) = receipt();
         receipt.verify::<Sha256>(&namespace, &operator).unwrap();
         assert_eq!(
-            Receipt::<PublicKey, PublicKey, Digest>::decode(receipt.encode()).unwrap(),
+            Receipt::<PublicKey, PublicKey, Digest, u64>::decode(receipt.encode()).unwrap(),
             receipt
         );
     }
@@ -526,10 +531,10 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<State<PublicKey, Digest>>,
-            CodecConformance<Request<PublicKey>>,
+            CodecConformance<Request<PublicKey, u64>>,
             CodecConformance<Acknowledgement<PublicKey>>,
-            CodecConformance<Receipt<PublicKey, PublicKey, Digest>>,
-            CodecConformance<Challenge<PublicKey, PublicKey, Digest>>,
+            CodecConformance<Receipt<PublicKey, PublicKey, Digest, u64>>,
+            CodecConformance<Challenge<PublicKey, PublicKey, Digest, u64>>,
         }
     }
 }

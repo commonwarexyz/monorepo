@@ -1,8 +1,8 @@
 //! Holding funds and posting closes.
 
 use super::{
-    Amounts, BalanceProof, Challenge, Deposit, Epoch, Error, ForcedWithdrawal, Namespace, Queue,
-    Summary, close::processed,
+    Amount, Amounts, BalanceProof, Challenge, Deposit, Epoch, Error, ForcedWithdrawal, Namespace,
+    Queue, Summary, close::processed,
 };
 use commonware_cryptography::{Hasher, PublicKey, certificate::Verifier};
 use commonware_parallel::Sequential;
@@ -31,16 +31,19 @@ pub enum Halt {
 /// close has processed.
 ///
 /// Until it halts, the ledger posts each epoch's close once a certificate verifies over its
-/// summary. After it halts, it rejects everything but refunds. Every account then recovers its
-/// balance as of the last posted close, proven against that close's balances root, and the
-/// deposits no close processed.
+/// summary. After it halts, it accepts only claims, and the operator plays no further part. Every
+/// account then claims its balance as of the last posted close with a proof against that close's
+/// balances root, and claims the deposits no close processed without one.
 ///
 /// The application must apply each state change together with the transfers it implies. A posted
-/// close pays its payouts, and a refund pays the amount it returns. The ledger is deterministic,
-/// so replaying its operations in order rebuilds it.
-pub struct Ledger<P: PublicKey, O: PublicKey, V: Verifier, H: Hasher> {
+/// close pays its payouts, and a claim pays the amount it returns. The ledger is deterministic, so
+/// replaying its operations in order rebuilds it.
+pub struct Ledger<P: PublicKey, O: PublicKey, V: Verifier, H: Hasher, A: Amount> {
+    /// Namespaces of the signatures challenges carry.
     namespace: Namespace,
+    /// Key of the operator whose countersignatures receipts carry.
     operator: O,
+    /// Checks the validators' certificates.
     verifier: V,
     /// Epoch whose close the ledger expects next.
     epoch: Epoch,
@@ -51,26 +54,32 @@ pub struct Ledger<P: PublicKey, O: PublicKey, V: Verifier, H: Hasher> {
     /// Payment matrix roots of the posted closes, in epoch order from the first.
     matrices: Vec<H::Digest>,
     /// Sum of the balances as of the last posted close.
-    liability: u64,
+    liability: A,
     /// Sum of the deposits no close has processed.
-    unprocessed: u64,
-    deposits: VecDeque<Deposit<P>>,
+    unprocessed: A,
+    /// Deposits no close has processed, oldest first.
+    deposits: VecDeque<Deposit<P, A>>,
+    /// Number of deposits the next close must process.
     required_deposits: usize,
-    forced_withdrawals: VecDeque<ForcedWithdrawal<P>>,
+    /// Forced withdrawals no close has processed, oldest first.
+    forced_withdrawals: VecDeque<ForcedWithdrawal<P, A>>,
+    /// Number of forced withdrawals the next close must process.
     required_forced_withdrawals: usize,
+    /// Why the ledger halted, if it has.
     halt: Option<Halt>,
-    /// Accounts whose balance has been refunded since the halt.
-    refunded: HashSet<P>,
-    /// Unprocessed deposits per account not yet refunded since the halt.
-    refundable: HashMap<P, u64>,
+    /// Accounts that have claimed their balance since the halt.
+    claimed: HashSet<P>,
+    /// Unprocessed deposits per account not yet claimed since the halt.
+    claimable: HashMap<P, A>,
 }
 
-impl<P, O, V, H> Ledger<P, O, V, H>
+impl<P, O, V, H, A> Ledger<P, O, V, H, A>
 where
     P: PublicKey,
     O: PublicKey,
     V: for<'a> Verifier<Subject<'a, H::Digest> = &'a Summary<H::Digest>>,
     H: Hasher,
+    A: Amount,
 {
     /// Creates a ledger before the first close, holding no funds.
     ///
@@ -86,15 +95,15 @@ where
             parent: genesis.digest::<H>(),
             balances,
             matrices: Vec::new(),
-            liability: 0,
-            unprocessed: 0,
+            liability: A::ZERO,
+            unprocessed: A::ZERO,
             deposits: VecDeque::new(),
             required_deposits: 0,
             forced_withdrawals: VecDeque::new(),
             required_forced_withdrawals: 0,
             halt: None,
-            refunded: HashSet::new(),
-            refundable: HashMap::new(),
+            claimed: HashSet::new(),
+            claimable: HashMap::new(),
         }
     }
 
@@ -120,8 +129,10 @@ where
     }
 
     /// Returns the funds the ledger holds.
-    pub const fn custody(&self) -> u64 {
-        self.liability + self.unprocessed
+    pub fn custody(&self) -> A {
+        self.liability
+            .checked_add(self.unprocessed)
+            .expect("custody must fit an amount")
     }
 
     /// Returns why the ledger halted, if it has.
@@ -130,7 +141,7 @@ where
     }
 
     /// Returns the queues as the close of the expected epoch sees them.
-    pub fn queue(&self) -> Queue<P> {
+    pub fn queue(&self) -> Queue<P, A> {
         Queue {
             epoch: self.epoch,
             deposits: self.deposits.iter().cloned().collect(),
@@ -144,16 +155,19 @@ where
     /// it.
     ///
     /// Returns an error if the ledger halted, the amount is zero, or the funds held would exceed
-    /// `u64::MAX`.
-    pub fn deposit(&mut self, account: P, amount: u64) -> Result<(), Error> {
+    /// the largest amount.
+    pub fn deposit(&mut self, account: P, amount: A) -> Result<(), Error> {
         if self.halt.is_some() {
             return Err(Error::Halted);
         }
-        if amount == 0 {
+        if amount == A::ZERO {
             return Err(Error::ZeroAmount);
         }
         self.custody().checked_add(amount).ok_or(Error::Custody)?;
-        self.unprocessed += amount;
+        self.unprocessed = self
+            .unprocessed
+            .checked_add(amount)
+            .expect("unprocessed deposits must not exceed custody");
         self.deposits.push_back(Deposit { account, amount });
         Ok(())
     }
@@ -161,11 +175,11 @@ where
     /// Queues a forced withdrawal of up to `amount` from `account`.
     ///
     /// Returns an error if the ledger halted or the amount is zero.
-    pub fn withdraw(&mut self, account: P, amount: u64) -> Result<(), Error> {
+    pub fn withdraw(&mut self, account: P, amount: A) -> Result<(), Error> {
         if self.halt.is_some() {
             return Err(Error::Halted);
         }
-        if amount == 0 {
+        if amount == A::ZERO {
             return Err(Error::ZeroAmount);
         }
         self.forced_withdrawals
@@ -176,8 +190,8 @@ where
     /// Posts the close of the expected epoch, finalizing it.
     ///
     /// `payouts` must be the close's payouts, and the application transfers them together with
-    /// this state change. Every request queued before the next epoch opens must be processed by
-    /// the next close.
+    /// this state change. The next close must process every request still queued when this one
+    /// posts.
     ///
     /// Returns an error if the ledger halted, the summary is not for the expected epoch or does not
     /// follow the last posted one, its counts are out of bounds, the payouts do not match it or
@@ -186,7 +200,7 @@ where
         &mut self,
         rng: &mut R,
         summary: &Summary<H::Digest>,
-        payouts: &Amounts<P>,
+        payouts: &Amounts<P, A>,
         certificate: &V::Certificate,
     ) -> Result<(), Error> {
         if self.halt.is_some() {
@@ -216,14 +230,17 @@ where
         }
 
         // Processed deposits move into the balances, and payouts leave them.
-        let deposited: u64 = self
+        let deposited = self
             .deposits
             .iter()
             .take(deposits)
-            .map(|deposit| deposit.amount)
-            .sum();
-        let paid = u64::try_from(payouts.total()).map_err(|_| Error::Custody)?;
-        let liability = (self.liability + deposited)
+            .try_fold(A::ZERO, |total, deposit| total.checked_add(deposit.amount))
+            .expect("processed deposits must not exceed custody");
+        let paid = payouts.total().ok_or(Error::Custody)?;
+        let liability = self
+            .liability
+            .checked_add(deposited)
+            .expect("processed deposits must not exceed custody")
             .checked_sub(paid)
             .ok_or(Error::Custody)?;
         if !self
@@ -238,7 +255,10 @@ where
         self.required_deposits = self.deposits.len();
         self.required_forced_withdrawals = self.forced_withdrawals.len();
         self.liability = liability;
-        self.unprocessed -= deposited;
+        self.unprocessed = self
+            .unprocessed
+            .checked_sub(deposited)
+            .expect("processed deposits must not exceed the unprocessed deposits");
         self.matrices.push(summary.matrix);
         self.balances = summary.balances;
         self.parent = summary.digest::<H>();
@@ -251,7 +271,7 @@ where
     ///
     /// Returns an error if the ledger halted, the receipt's epoch has no posted close, the receipt
     /// or opening does not verify, or the close credits at least the receipt's amount.
-    pub fn challenge(&mut self, challenge: &Challenge<P, O, H::Digest>) -> Result<(), Error> {
+    pub fn challenge(&mut self, challenge: &Challenge<P, O, H::Digest, A>) -> Result<(), Error> {
         if self.halt.is_some() {
             return Err(Error::Halted);
         }
@@ -279,55 +299,65 @@ where
         }
     }
 
-    /// Halts the ledger and makes the unprocessed deposits refundable.
+    /// Halts the ledger and makes the unprocessed deposits claimable.
     fn stop(&mut self, halt: Halt) {
         self.halt = Some(halt);
         for deposit in self.deposits.drain(..) {
-            *self.refundable.entry(deposit.account).or_default() += deposit.amount;
+            let claimable = self.claimable.entry(deposit.account).or_insert(A::ZERO);
+            *claimable = claimable
+                .checked_add(deposit.amount)
+                .expect("claimable deposits must not exceed custody");
         }
         self.forced_withdrawals.clear();
         self.required_deposits = 0;
         self.required_forced_withdrawals = 0;
     }
 
-    /// Refunds `account` after a halt and returns the amount to transfer to it.
+    /// Accepts `account`'s claim after a halt and returns the amount to transfer to it.
     ///
-    /// The refund includes the account's balance as of the last posted close, if `balance` proves
-    /// it and it was not refunded yet, and every unprocessed deposit of the account not refunded
-    /// yet.
+    /// The claim pays the account's balance as of the last posted close, if `balance` proves it and
+    /// it was not claimed yet, and every unprocessed deposit of the account not claimed yet.
     ///
     /// Returns an error if the ledger has not halted, the balance proof does not verify, or nothing
-    /// remains to refund.
-    pub fn refund(
+    /// remains to claim.
+    pub fn claim(
         &mut self,
         account: &P,
-        balance: Option<&BalanceProof<H::Digest>>,
-    ) -> Result<u64, Error> {
+        balance: Option<&BalanceProof<H::Digest, A>>,
+    ) -> Result<A, Error> {
         if self.halt.is_none() {
             return Err(Error::NotHalted);
         }
         let balance = match balance {
-            Some(_) if self.refunded.contains(account) => 0,
             Some(proof) => {
                 if !proof.verify::<H, P>(&self.balances, account) {
                     return Err(Error::InvalidBalanceProof);
                 }
-                proof.balance.get()
+                if self.claimed.contains(account) {
+                    A::ZERO
+                } else {
+                    proof.balance
+                }
             }
-            None => 0,
+            None => A::ZERO,
         };
-        let deposits = self.refundable.get(account).copied().unwrap_or(0);
-        if balance == 0 && deposits == 0 {
-            return Err(Error::NothingToRefund);
+        let deposits = self.claimable.get(account).copied().unwrap_or(A::ZERO);
+        if balance == A::ZERO && deposits == A::ZERO {
+            return Err(Error::NothingToClaim);
         }
         let liability = self.liability.checked_sub(balance).ok_or(Error::Custody)?;
 
-        if balance > 0 {
-            self.refunded.insert(account.clone());
+        if balance != A::ZERO {
+            self.claimed.insert(account.clone());
         }
-        self.refundable.remove(account);
+        self.claimable.remove(account);
         self.liability = liability;
-        self.unprocessed -= deposits;
-        Ok(balance + deposits)
+        self.unprocessed = self
+            .unprocessed
+            .checked_sub(deposits)
+            .expect("claimable deposits must not exceed the unprocessed deposits");
+        Ok(balance
+            .checked_add(deposits)
+            .expect("a claim must not exceed custody"))
     }
 }

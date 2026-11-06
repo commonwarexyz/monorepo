@@ -1,8 +1,9 @@
 //! Checking closes and applying them.
 
 use super::*;
-use crate::bajillion::{BalanceProof, Checkpoint, Error, State};
+use crate::bajillion::{BalanceProof, Checkpoint, Error, ForcedWithdrawal, State};
 use commonware_codec::{DecodeExt as _, Encode as _};
+use commonware_cryptography::Digest as _;
 use commonware_runtime::{Runner as _, deterministic::FaultConfig};
 use commonware_utils::Probability;
 
@@ -10,9 +11,9 @@ use commonware_utils::Probability;
 fn row(
     sender: u64,
     epoch: Epoch,
-    payments: Amounts<PublicKey>,
-    previous: &Amounts<PublicKey>,
-) -> Row<PublicKey> {
+    payments: Amounts<PublicKey, u64>,
+    previous: &Amounts<PublicKey, u64>,
+) -> Row<PublicKey, u64> {
     let state = State {
         epoch,
         account: account(sender),
@@ -39,7 +40,7 @@ fn test_validators_agree_on_closes() {
         let mut alice = sender(0);
         let request = alice.send(2, amounts(&[(1, 30), (2, 20)]), false).unwrap();
         alice
-            .acknowledged(&deployment.operator.accept(&request).unwrap())
+            .acknowledged(&deployment.operator.accept(&request).await.unwrap())
             .unwrap();
         let (close, second) = deployment.close(&mut context).await;
         assert_eq!(second.parent, first.digest::<Sha256>());
@@ -51,12 +52,15 @@ fn test_validators_agree_on_closes() {
             assert_eq!(validator.summary(), &second);
             for (index, expected) in [(0, 50), (1, 80), (2, 20), (3, 0)] {
                 assert_eq!(validator.balance(&account(index)).await.unwrap(), expected);
-                assert_eq!(deployment.operator.balance(&account(index)), expected);
+                assert_eq!(
+                    deployment.operator.balance(&account(index)).await.unwrap(),
+                    expected
+                );
                 let proof = validator.prove(&account(index)).await.unwrap();
                 match proof {
                     Some(proof) => {
                         assert_eq!(BalanceProof::decode(proof.encode()).unwrap(), proof);
-                        assert_eq!(proof.balance.get(), expected);
+                        assert_eq!(proof.balance, expected);
                         assert!(proof.verify::<Sha256, _>(&second.balances, &account(index)));
                         assert!(!proof.verify::<Sha256, _>(&second.balances, &account(3)));
                         assert!(!proof.verify::<Sha256, _>(&first.balances, &account(index)));
@@ -125,6 +129,33 @@ fn test_validators_reject_invalid_closes() {
             Err(Error::InvalidOperatorSignature)
         ));
 
+        // The signature also covers every row and soft withdrawal, so adding one its account
+        // signed breaks it.
+        let mut rows = vec![valid.clone(), row(1, 2, amounts(&[(0, 1)]), &empty)];
+        rows.sort_by(|a, b| a.account.cmp(&b.account));
+        let withdrawals = vec![Withdrawal::sign(&user(0), &namespace(), 2, 1, 0)];
+        for (rows, withdrawals) in [(rows, Vec::new()), (vec![valid.clone()], withdrawals)] {
+            let altered = Close::new(2, rows, withdrawals, 1, 1, signed.signature().clone());
+            assert!(matches!(
+                validator.verify(altered, &queue).await,
+                Err(Error::InvalidOperatorSignature)
+            ));
+        }
+
+        // The queue must be the ledger's while it expects this close.
+        let stale = Queue {
+            epoch: 3,
+            ..queue.clone()
+        };
+        let close = sign_close(&operator, 2, vec![valid.clone()], Vec::new(), 1, 1);
+        assert!(matches!(
+            validator.verify(close, &stale).await,
+            Err(Error::WrongEpoch {
+                expected: 2,
+                found: 3
+            })
+        ));
+
         // Every sender must sign its row for this epoch on top of its row in the last close.
         let mut altered = valid.clone();
         altered.payments = amounts(&[(1, 9)]);
@@ -164,8 +195,21 @@ fn test_validators_reject_invalid_closes() {
             Err(Error::Overdraft)
         ));
 
-        // Checking changes nothing, so the honest close still verifies.
+        // Checking changes nothing, so the honest close still verifies, here settling a payment of
+        // alice's.
+        let mut alice = sender(0);
+        let request = alice.send(2, amounts(&[(1, 5)]), false).unwrap();
+        deployment.operator.accept(&request).await.unwrap();
         deployment.close(&mut context).await;
+
+        // Her next row must build on the map that close settled, not on the empty map.
+        let queue = deployment.ledger.queue();
+        let unanchored = row(0, 3, amounts(&[(1, 1)]), &empty);
+        let close = sign_close(&operator, 3, vec![unanchored], Vec::new(), 0, 0);
+        assert!(matches!(
+            deployment.validators[0].verify(close, &queue).await,
+            Err(Error::InvalidSignature)
+        ));
     });
 }
 
@@ -179,7 +223,7 @@ fn test_pipelined_request_settles_at_most_once() {
         // The operator settles the request's state for epoch 2.
         let mut alice = sender(0);
         let request = alice.send(2, amounts(&[(1, 10)]), true).unwrap();
-        deployment.operator.accept(&request).unwrap();
+        deployment.operator.accept(&request).await.unwrap();
         deployment.close(&mut context).await;
 
         // A close of epoch 3 that also settles the pipelined state is invalid, because that state
@@ -268,18 +312,18 @@ fn test_validator_resumes_from_checkpoint() {
         let later = sign_close(&operator_key(), 2, Vec::new(), Vec::new(), 0, 0);
         for close in [other, later] {
             assert!(matches!(
-                Checkpoint::<PublicKey, Digest>::new::<Sha256, _>(summary, &close),
+                Checkpoint::<PublicKey, Digest, u64>::new::<Sha256, _>(summary, &close),
                 Err(Error::InvalidCheckpoint)
             ));
         }
         let mut alice = sender(0);
         let request = alice.send(2, amounts(&[(1, 4)]), false).unwrap();
-        deployment.operator.accept(&request).unwrap();
+        deployment.operator.accept(&request).await.unwrap();
 
         // The application persisted the next posted close, but the validator stopped before
         // applying it.
         let queue = deployment.ledger.queue();
-        let next = deployment.operator.close(&queue, 0, 0).unwrap();
+        let next = close_epoch(&mut deployment.operator, &queue, 0, 0).await;
         let proposal = deployment.validators[0]
             .verify(next.clone(), &queue)
             .await
@@ -300,6 +344,18 @@ fn test_validator_resumes_from_checkpoint() {
             open("ahead", vec![pending.clone()]).await,
             Err(Error::InvalidCheckpoint)
         ));
+        let competing = Checkpoint {
+            summary: Summary {
+                balances: Digest::EMPTY,
+                ..applied.summary
+            },
+            ..applied.clone()
+        };
+        let validator = open("competing", vec![competing, applied.clone()])
+            .await
+            .unwrap();
+        assert_eq!(validator.summary(), &applied.summary);
+        drop(validator);
         let validator = open("resumed", vec![pending.clone(), applied.clone()])
             .await
             .unwrap();
@@ -340,11 +396,11 @@ fn test_withdrawals_pay_up_to_the_balance() {
         // Payments settle before withdrawals.
         let mut carol = sender(2);
         let request = carol.send(2, amounts(&[(1, 5)]), false).unwrap();
-        deployment.operator.accept(&request).unwrap();
+        deployment.operator.accept(&request).await.unwrap();
 
         let custody = deployment.ledger.custody();
         let queue = deployment.ledger.queue();
-        let close = deployment.operator.close(&queue, 0, 2).unwrap();
+        let close = close_epoch(&mut deployment.operator, &queue, 0, 2).await;
         assert_eq!(close.withdrawals().len(), 3);
         let proposals = deployment.verify(&close).await;
         let payouts = proposals[0].payouts().clone();
@@ -359,8 +415,60 @@ fn test_withdrawals_pay_up_to_the_balance() {
                     .unwrap(),
                 0
             );
-            assert_eq!(deployment.operator.balance(&account(index)), 0);
+            assert_eq!(
+                deployment.operator.balance(&account(index)).await.unwrap(),
+                0
+            );
         }
+    });
+}
+
+#[test]
+fn test_close_settles_gross_flows_beyond_the_largest_amount() {
+    deterministic::Runner::default().start(|mut context| async move {
+        let mut deployment = Deployment::new(&context, "gross", 1).await;
+        deployment.ledger.deposit(account(0), u64::MAX).unwrap();
+        deployment.close(&mut context).await;
+
+        // Alice pays herself and bob her whole balance each, and bob pays her back from the same
+        // epoch's receipt. Her credits and debits each exceed `u64::MAX`, but no balance does.
+        let empty = Amounts::empty();
+        let mut rows = vec![
+            row(0, 2, amounts(&[(0, u64::MAX), (1, u64::MAX)]), &empty),
+            row(1, 2, amounts(&[(0, u64::MAX)]), &empty),
+        ];
+        rows.sort_by(|a, b| a.account.cmp(&b.account));
+        let close = sign_close(&operator_key(), 2, rows, Vec::new(), 0, 0);
+        let proposals = deployment.verify(&close).await;
+        assert!(proposals[0].payouts().is_empty());
+        deployment.post(&mut context, proposals).await;
+        let validator = &deployment.validators[0];
+        assert_eq!(validator.balance(&account(0)).await.unwrap(), u64::MAX);
+        assert_eq!(validator.balance(&account(1)).await.unwrap(), 0);
+
+        // Withdrawal requests adding up to more than `u64::MAX` pay out the whole balance.
+        let withdrawal = ForcedWithdrawal {
+            account: account(0),
+            amount: u64::MAX,
+        };
+        let queue = Queue {
+            epoch: 3,
+            deposits: Vec::new(),
+            required_deposits: 0,
+            forced_withdrawals: vec![withdrawal.clone(), withdrawal],
+            required_forced_withdrawals: 0,
+        };
+        let close = sign_close(&operator_key(), 3, Vec::new(), Vec::new(), 0, 2);
+        let proposal = validator.verify(close, &queue).await.unwrap();
+        assert_eq!(proposal.payouts(), &amounts(&[(0, u64::MAX)]));
+
+        // A balance above `u64::MAX` does not settle.
+        let queue = deposits(3, &[(0, 1)]);
+        let close = sign_close(&operator_key(), 3, Vec::new(), Vec::new(), 1, 0);
+        assert!(matches!(
+            validator.verify(close, &queue).await,
+            Err(Error::Overflow)
+        ));
     });
 }
 
@@ -376,9 +484,9 @@ fn test_validator_recovers_from_interrupted_apply() {
                 let applied = Checkpoint::new::<Sha256, _>(summary, &close).unwrap();
                 let mut alice = sender(0);
                 let request = alice.send(2, amounts(&[(1, 4)]), false).unwrap();
-                deployment.operator.accept(&request).unwrap();
+                deployment.operator.accept(&request).await.unwrap();
                 let queue = deployment.ledger.queue();
-                let next = deployment.operator.close(&queue, 0, 0).unwrap();
+                let next = close_epoch(&mut deployment.operator, &queue, 0, 0).await;
                 let validator = deployment.validators.pop().unwrap();
                 let proposal = validator.verify(next.clone(), &queue).await.unwrap();
                 let pending = proposal.checkpoint();
@@ -435,9 +543,9 @@ fn test_applied_close_is_durable() {
             let applied = Checkpoint::new::<Sha256, _>(summary, &close).unwrap();
             let mut alice = sender(0);
             let request = alice.send(2, amounts(&[(1, 4)]), false).unwrap();
-            deployment.operator.accept(&request).unwrap();
+            deployment.operator.accept(&request).await.unwrap();
             let queue = deployment.ledger.queue();
-            let next = deployment.operator.close(&queue, 0, 0).unwrap();
+            let next = close_epoch(&mut deployment.operator, &queue, 0, 0).await;
             let validator = deployment.validators.pop().unwrap();
             let proposal = validator.verify(next, &queue).await.unwrap();
             let pending = proposal.checkpoint();

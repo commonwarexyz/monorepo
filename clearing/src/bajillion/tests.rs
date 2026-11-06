@@ -3,11 +3,12 @@
 mod ledger;
 mod lifecycle;
 mod payments;
+mod shards;
 mod validator;
 
 use super::{
-    Amounts, Close, Config, Deposit, Epoch, Ledger, Matrix, Namespace, Operator, Proposal, Queue,
-    Receiver, Row, Sender, Summary, Validator, Withdrawal,
+    Amounts, Close, Config, Deposit, Epoch, Ledger, Limits, Matrix, MemoryBalances, Namespace,
+    Operator, Proposal, Queue, Receiver, Row, Sender, Summary, Validator, Withdrawal,
 };
 use commonware_cryptography::{
     Sha256, Signer as _,
@@ -26,6 +27,13 @@ use commonware_utils::{NZU16, NZU64, NZUsize, TryCollect as _, non_empty, ordere
 /// Namespace of the deployment under test.
 const NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_TEST";
 
+/// Limits of the closes operators build, beyond any test's activity unless it sets its own.
+const LIMITS: Limits = Limits {
+    rows: 1_024,
+    receivers: 1_024,
+    withdrawals: 1_024,
+};
+
 /// Validators certify summaries with Ed25519 signatures from at least `2f + 1` of `3f + 1`.
 ///
 /// The macro gates its fixture on a `mocks` feature that this crate does not define.
@@ -38,14 +46,15 @@ mod scheme {
     impl_certificate_ed25519!(&'a Summary<D>, Namespace, N3f1);
 }
 
-type TestSender = Sender<PublicKey, PrivateKey, PublicKey, Sha256>;
-type TestReceiver = Receiver<PublicKey, PublicKey, Sha256>;
-type TestOperator = Operator<PublicKey, PublicKey, PrivateKey, Sha256>;
+type TestSender = Sender<PublicKey, PrivateKey, PublicKey, Sha256, u64>;
+type TestReceiver = Receiver<PublicKey, PublicKey, Sha256, u64>;
+type TestOperator =
+    Operator<PublicKey, PublicKey, PrivateKey, Sha256, u64, MemoryBalances<PublicKey, u64>>;
 type TestValidator =
-    Validator<deterministic::Context, PublicKey, PublicKey, Sha256, EightCap, Sequential>;
-type TestProposal = Proposal<PublicKey, Sha256, Sequential>;
-type TestLedger = Ledger<PublicKey, PublicKey, scheme::Scheme, Sha256>;
-type TestClose = Close<PublicKey, PublicKey>;
+    Validator<deterministic::Context, PublicKey, PublicKey, Sha256, EightCap, Sequential, u64>;
+type TestProposal = Proposal<PublicKey, Sha256, Sequential, u64>;
+type TestLedger = Ledger<PublicKey, PublicKey, scheme::Scheme, Sha256, u64>;
+type TestClose = Close<PublicKey, PublicKey, u64>;
 type TestCertificate = <scheme::Scheme as certificate::Verifier>::Certificate;
 
 fn namespace() -> Namespace {
@@ -71,6 +80,34 @@ fn sender(index: u64) -> TestSender {
     Sender::new(user(index), operator_key().public_key(), namespace())
 }
 
+/// Returns an operator for the first epoch, keeping its balances in memory.
+async fn operator() -> TestOperator {
+    Operator::init(
+        operator_key(),
+        namespace(),
+        LIMITS,
+        MemoryBalances::new(),
+        [],
+        None,
+    )
+    .await
+    .unwrap()
+}
+
+/// Closes `operator`'s epoch, processing the oldest `deposits` deposits and `forced_withdrawals`
+/// forced withdrawals in `queue`.
+async fn close_epoch(
+    operator: &mut TestOperator,
+    queue: &Queue<PublicKey, u64>,
+    deposits: u64,
+    forced_withdrawals: u64,
+) -> TestClose {
+    operator
+        .close(queue, deposits, forced_withdrawals)
+        .await
+        .unwrap()
+}
+
 /// Returns user `index` receiving while the ledger expects the close of `next`.
 fn receiver(index: u64, next: Epoch) -> TestReceiver {
     Receiver::new(
@@ -82,7 +119,7 @@ fn receiver(index: u64, next: Epoch) -> TestReceiver {
 }
 
 /// Returns amounts paying user `index` its `amount` for each `(index, amount)`.
-fn amounts(entries: &[(u64, u64)]) -> Amounts<PublicKey> {
+fn amounts(entries: &[(u64, u64)]) -> Amounts<PublicKey, u64> {
     Amounts::new(
         entries
             .iter()
@@ -93,7 +130,7 @@ fn amounts(entries: &[(u64, u64)]) -> Amounts<PublicKey> {
 
 /// Returns a queue for the close of `epoch` holding a deposit for each `(index, amount)`, none of
 /// which the close must process.
-fn deposits(epoch: Epoch, entries: &[(u64, u64)]) -> Queue<PublicKey> {
+fn deposits(epoch: Epoch, entries: &[(u64, u64)]) -> Queue<PublicKey, u64> {
     Queue {
         epoch,
         deposits: entries
@@ -113,8 +150,8 @@ fn deposits(epoch: Epoch, entries: &[(u64, u64)]) -> Queue<PublicKey> {
 fn sign_close(
     operator: &PrivateKey,
     epoch: Epoch,
-    rows: Vec<Row<PublicKey>>,
-    withdrawals: Vec<Withdrawal<PublicKey>>,
+    rows: Vec<Row<PublicKey, u64>>,
+    withdrawals: Vec<Withdrawal<PublicKey, u64>>,
     deposits: u64,
     forced_withdrawals: u64,
 ) -> TestClose {
@@ -234,7 +271,7 @@ impl Deployment {
             handles[0].summary().balances,
         );
         Self {
-            operator: Operator::new(operator_key(), namespace()),
+            operator: operator().await,
             validators: handles,
             schemes,
             ledger,
@@ -259,14 +296,7 @@ impl Deployment {
                 .iter()
                 .all(|proposal| proposal.summary() == summary)
         );
-        let attestations: Vec<_> = proposals
-            .iter()
-            .zip(&self.schemes)
-            .map(|(proposal, scheme)| proposal.sign(scheme).unwrap())
-            .collect();
-        self.schemes[0]
-            .assemble(non_empty![@attestations], &Sequential)
-            .unwrap()
+        certify(&self.schemes, summary)
     }
 
     /// Posts the summary the proposals share and applies it at every validator.
@@ -294,14 +324,13 @@ impl Deployment {
         context: &mut deterministic::Context,
     ) -> (TestClose, Summary<Digest>) {
         let queue = self.ledger.queue();
-        let close = self
-            .operator
-            .close(
-                &queue,
-                queue.deposits.len() as u64,
-                queue.forced_withdrawals.len() as u64,
-            )
-            .unwrap();
+        let close = close_epoch(
+            &mut self.operator,
+            &queue,
+            queue.deposits.len() as u64,
+            queue.forced_withdrawals.len() as u64,
+        )
+        .await;
         let proposals = self.verify(&close).await;
         let summary = self.post(context, proposals).await;
         (close, summary)

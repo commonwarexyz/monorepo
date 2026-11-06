@@ -1,10 +1,11 @@
 //! Checking closes and certifying their effects.
 
 use super::{
-    Amounts, Close, Error, Matrix, Namespace, Queue, Scheme, State, Summary, settlement::Flows,
+    Amount, Amounts, Close, Error, Matrix, Namespace, Queue, Scheme, State, Summary,
+    settlement::Flows,
 };
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher, PublicKey, certificate::Attestation};
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
@@ -22,67 +23,74 @@ use commonware_storage::{
     translator::Translator,
 };
 use commonware_utils::iter::zip_eq;
-use std::{num::NonZeroU64, sync::Arc};
+use std::sync::Arc;
 
 /// Bytes per chunk of the balances database's activity bitmap.
 const CHUNK: usize = 32;
 
 /// The balances database. It maps each account with a positive balance to that balance.
-type Balances<E, P, H, T, S> = fixed::Db<mmb::Family, E, P, NonZeroU64, H, T, CHUNK, S>;
+type Balances<E, P, H, T, S, A> = fixed::Db<mmb::Family, E, P, A, H, T, CHUNK, S>;
 
 /// A batch of balance writes with its resulting root.
-type Batch<P, D, S> =
-    MerkleizedBatch<mmb::Family, D, Update<P, FixedEncoding<NonZeroU64>>, CHUNK, S>;
+type Batch<P, D, S, A> = MerkleizedBatch<mmb::Family, D, Update<P, FixedEncoding<A>>, CHUNK, S>;
 
 /// Proof of an account's balance under a balances root.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BalanceProof<D: Digest> {
-    /// The account's balance.
-    pub balance: NonZeroU64,
+pub struct BalanceProof<D: Digest, A: Amount> {
+    /// The account's positive balance.
+    pub balance: A,
     /// Opening of the balance under the balances root.
     pub proof: KeyValueProof<mmb::Family, D, CHUNK>,
 }
 
-impl<D: Digest> BalanceProof<D> {
+impl<D: Digest, A: Amount> BalanceProof<D, A> {
     /// Returns whether `account` has `self.balance` under the balances root `root`.
     pub fn verify<H: Hasher<Digest = D>, P: PublicKey>(&self, root: &D, account: &P) -> bool {
         self.proof
-            .verify::<H, FixedEncoding<NonZeroU64>, P>(account.clone(), self.balance, root)
+            .verify::<H, FixedEncoding<A>, P>(account.clone(), self.balance, root)
     }
 }
 
-impl<D: Digest> Write for BalanceProof<D> {
+impl<D: Digest, A: Amount> Write for BalanceProof<D, A> {
     fn write(&self, buf: &mut impl BufMut) {
         self.balance.write(buf);
         self.proof.write(buf);
     }
 }
 
-impl<D: Digest> EncodeSize for BalanceProof<D> {
+impl<D: Digest, A: Amount> EncodeSize for BalanceProof<D, A> {
     fn encode_size(&self) -> usize {
-        NonZeroU64::SIZE + self.proof.encode_size()
+        A::SIZE + self.proof.encode_size()
     }
 }
 
-impl<D: Digest> Read for BalanceProof<D> {
+impl<D: Digest, A: Amount> Read for BalanceProof<D, A> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let balance = A::read(buf)?;
+        if balance == A::ZERO {
+            return Err(CodecError::Invalid(
+                "clearing::bajillion::BalanceProof",
+                "balance must be nonzero",
+            ));
+        }
         Ok(Self {
-            balance: NonZeroU64::read(buf)?,
+            balance,
             proof: KeyValueProof::read_cfg(buf, &MAX_PROOF_DIGESTS_PER_ELEMENT)?,
         })
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for BalanceProof<D>
+impl<D: Digest, A: Amount> arbitrary::Arbitrary<'_> for BalanceProof<D, A>
 where
     KeyValueProof<mmb::Family, D, CHUNK>: for<'a> arbitrary::Arbitrary<'a>,
+    A: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            balance: u.arbitrary()?,
+            balance: super::amounts::arbitrary_nonzero(u)?,
             proof: u.arbitrary()?,
         })
     }
@@ -95,26 +103,26 @@ pub struct Config<O: PublicKey, T: Translator, S: Strategy> {
     pub namespace: Namespace,
     /// The operator's public key.
     pub operator: O,
-    /// The balances database. Its strategy also parallelizes signature checks.
+    /// Configuration of the balances database. Its strategy also parallelizes signature checks.
     pub balances: fixed::Config<T, S>,
 }
 
 /// A posted close as a validator needs it to resume after a restart.
 #[derive(Clone, Debug)]
-pub struct Checkpoint<P: PublicKey, D: Digest> {
+pub struct Checkpoint<P: PublicKey, D: Digest, A: Amount> {
     /// The close's summary.
     pub summary: Summary<D>,
     /// The close's payment matrix.
-    pub matrix: Matrix<P, D>,
+    pub matrix: Matrix<P, D, A>,
 }
 
-impl<P: PublicKey, D: Digest> Checkpoint<P, D> {
+impl<P: PublicKey, D: Digest, A: Amount> Checkpoint<P, D, A> {
     /// Rebuilds the checkpoint of the posted close `close` with summary `summary`.
     ///
     /// Returns an error if the close does not settle the matrix the summary commits to.
     pub fn new<H: Hasher<Digest = D>, O: PublicKey>(
         summary: Summary<D>,
-        close: &Close<P, O>,
+        close: &Close<P, O, A>,
     ) -> Result<Self, Error> {
         let matrix = close.matrix::<H>();
         if close.epoch() != summary.epoch || matrix.root() != summary.matrix {
@@ -125,31 +133,31 @@ impl<P: PublicKey, D: Digest> Checkpoint<P, D> {
 }
 
 /// A checked close with its summary, payment matrix, payouts, and balance writes.
-pub struct Proposal<P: PublicKey, H: Hasher, S: Strategy> {
+pub struct Proposal<P: PublicKey, H: Hasher, S: Strategy, A: Amount> {
     summary: Summary<H::Digest>,
-    matrix: Matrix<P, H::Digest>,
-    payouts: Amounts<P>,
-    batch: Arc<Batch<P, H::Digest, S>>,
+    matrix: Matrix<P, H::Digest, A>,
+    payouts: Amounts<P, A>,
+    batch: Arc<Batch<P, H::Digest, S, A>>,
 }
 
-impl<P: PublicKey, H: Hasher, S: Strategy> Proposal<P, H, S> {
+impl<P: PublicKey, H: Hasher, S: Strategy, A: Amount> Proposal<P, H, S, A> {
     /// Returns the summary to certify.
     pub const fn summary(&self) -> &Summary<H::Digest> {
         &self.summary
     }
 
     /// Returns the payment matrix the close settles.
-    pub const fn matrix(&self) -> &Matrix<P, H::Digest> {
+    pub const fn matrix(&self) -> &Matrix<P, H::Digest, A> {
         &self.matrix
     }
 
     /// Returns the payouts the ledger makes when it posts the close.
-    pub const fn payouts(&self) -> &Amounts<P> {
+    pub const fn payouts(&self) -> &Amounts<P, A> {
         &self.payouts
     }
 
     /// Returns the checkpoint a validator resumes from after applying the close.
-    pub fn checkpoint(&self) -> Checkpoint<P, H::Digest> {
+    pub fn checkpoint(&self) -> Checkpoint<P, H::Digest, A> {
         Checkpoint {
             summary: self.summary,
             matrix: self.matrix.clone(),
@@ -177,7 +185,7 @@ impl<P: PublicKey, H: Hasher, S: Strategy> Proposal<P, H, S> {
 /// A validator that certifies a close must keep it available. Receivers open the matrix of every
 /// posted close to check their receipts, and validators that did not check the posted close need
 /// it to apply it.
-pub struct Validator<E, P, O, H, T, S>
+pub struct Validator<E, P, O, H, T, S, A>
 where
     E: Context + Spawner,
     P: PublicKey,
@@ -185,16 +193,17 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
+    A: Amount,
 {
-    balances: Balances<E, P, H, T, S>,
+    balances: Balances<E, P, H, T, S, A>,
     namespace: Namespace,
     operator: O,
     strategy: S,
     summary: Summary<H::Digest>,
-    matrix: Matrix<P, H::Digest>,
+    matrix: Matrix<P, H::Digest, A>,
 }
 
-impl<E, P, O, H, T, S> Validator<E, P, O, H, T, S>
+impl<E, P, O, H, T, S, A> Validator<E, P, O, H, T, S, A>
 where
     E: Context + Spawner,
     P: PublicKey,
@@ -202,6 +211,7 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
+    A: Amount,
 {
     /// Opens the validator's balances.
     ///
@@ -214,24 +224,28 @@ where
     pub async fn init(
         context: E,
         config: Config<O, T, S>,
-        checkpoints: Vec<Checkpoint<P, H::Digest>>,
+        checkpoints: Vec<Checkpoint<P, H::Digest, A>>,
     ) -> Result<Self, Error> {
         let strategy = config.balances.merkle.strategy.clone();
         let balances = Balances::init(context, config.balances, None).await?;
-        let applied = balances.get_metadata().await?.map_or(0, NonZeroU64::get);
+
+        // Commit metadata has the database's value type, so each commit stores the epoch of the
+        // close it applies as an amount. Every epoch converts exactly, and no close has epoch
+        // zero, so a database without metadata has applied no close.
+        let applied = balances.get_metadata().await?.unwrap_or(A::ZERO);
         let root = balances.root();
         let checkpoint = checkpoints
             .into_iter()
-            .find(|checkpoint| checkpoint.summary.epoch == applied)
+            .find(|checkpoint| {
+                A::from(checkpoint.summary.epoch) == applied
+                    && checkpoint.summary.balances == root
+                    && checkpoint.summary.matrix == checkpoint.matrix.root()
+            })
             .or_else(|| {
-                (applied == 0).then(|| Checkpoint {
+                (applied == A::ZERO).then(|| Checkpoint {
                     summary: Summary::genesis::<H>(root),
                     matrix: Matrix::empty::<H>(),
                 })
-            })
-            .filter(|checkpoint| {
-                checkpoint.summary.balances == root
-                    && checkpoint.summary.matrix == checkpoint.matrix.root()
             })
             .ok_or(Error::InvalidCheckpoint)?;
         Ok(Self {
@@ -250,17 +264,17 @@ where
     }
 
     /// Returns the payment matrix of the last close applied.
-    pub const fn matrix(&self) -> &Matrix<P, H::Digest> {
+    pub const fn matrix(&self) -> &Matrix<P, H::Digest, A> {
         &self.matrix
     }
 
     /// Returns `account`'s balance as of the last close applied.
-    pub async fn balance(&self, account: &P) -> Result<u64, Error> {
-        Ok(self.balances.get(account).await?.map_or(0, NonZeroU64::get))
+    pub async fn balance(&self, account: &P) -> Result<A, Error> {
+        Ok(self.balances.get(account).await?.unwrap_or(A::ZERO))
     }
 
     /// Proves `account`'s balance as of the last close applied, or returns `None` if it is zero.
-    pub async fn prove(&self, account: &P) -> Result<Option<BalanceProof<H::Digest>>, Error> {
+    pub async fn prove(&self, account: &P) -> Result<Option<BalanceProof<H::Digest, A>>, Error> {
         match self.balances.key_value_proof(account).await {
             Ok((proof, balance)) => Ok(Some(BalanceProof { balance, proof })),
             Err(qmdb::Error::KeyNotFound) => Ok(None),
@@ -284,9 +298,9 @@ where
     /// Returns the proposal to certify.
     pub async fn verify(
         &self,
-        close: Close<P, O>,
-        queue: &Queue<P>,
-    ) -> Result<Proposal<P, H, S>, Error> {
+        close: Close<P, O, A>,
+        queue: &Queue<P, A>,
+    ) -> Result<Proposal<P, H, S, A>, Error> {
         let epoch = self.summary.epoch.checked_add(1).ok_or(Error::Overflow)?;
         let Close {
             epoch: closed,
@@ -320,7 +334,7 @@ where
             .into_iter()
             .unzip();
         let matrix = Matrix::from_sorted::<H>(rows);
-        let message = Close::<P, O>::message(
+        let message = Close::<P, O, A>::message(
             epoch,
             &matrix.root(),
             &withdrawals,
@@ -336,7 +350,7 @@ where
 
         // Each sender must have signed exactly its row's payment map on top of the map the last
         // close settled for it, and each account its soft withdrawal.
-        let empty = Amounts::<P>::empty().root::<H>();
+        let empty = Amounts::<P, A>::empty().root::<H>();
         self.strategy.try_map_collect_vec(
             zip_eq(matrix.rows(), &signatures),
             |((account, payments), signature)| {
@@ -362,28 +376,28 @@ where
 
         // Settle on top of the balances of every account the close touches.
         let flows = Flows::new(
-            matrix.iter(),
+            epoch,
+            matrix
+                .iter()
+                .zip(matrix.rows())
+                .map(|((sender, payments), (_, root))| (sender, payments, root)),
             &withdrawals,
             queued_deposits,
             queued_forced_withdrawals,
         )?;
         let accounts: Vec<&P> = flows.accounts().collect();
         let balances = self.balances.get_many(&accounts).await?;
-        drop(accounts);
         let settlement = flows.settle(
             balances
                 .into_iter()
-                .map(|balance| balance.map_or(0, NonZeroU64::get)),
+                .map(|balance| balance.unwrap_or(A::ZERO)),
         )?;
 
         // Every validator writes the same balances with the same metadata, so they all derive the
         // same root.
-        let mut batch = self
-            .balances
-            .new_batch()
-            .with_metadata(NonZeroU64::new(epoch));
+        let mut batch = self.balances.new_batch().with_metadata(A::from(epoch));
         for (account, balance) in settlement.balances {
-            batch = batch.write(account, NonZeroU64::new(balance));
+            batch = batch.write(account, (balance != A::ZERO).then_some(balance));
         }
         let batch = batch.merkleize(&self.balances).await?;
         let summary = Summary {
@@ -403,11 +417,11 @@ where
         })
     }
 
-    /// Commits the effects of the posted close `proposal` checked.
+    /// Commits the effects of the posted close that `proposal` checked.
     ///
     /// The application must persist the posted close before applying it, and must apply only the
     /// proposal whose summary the ledger posted. Any error destroys the validator.
-    pub async fn apply(self, proposal: Proposal<P, H, S>) -> Result<Self, Error> {
+    pub async fn apply(self, proposal: Proposal<P, H, S, A>) -> Result<Self, Error> {
         if proposal.summary.parent != self.summary.digest::<H>() {
             return Err(Error::StaleProposal);
         }
@@ -442,7 +456,7 @@ mod tests {
         use commonware_cryptography::sha256::Digest;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<BalanceProof<Digest>>,
+            CodecConformance<BalanceProof<Digest, u64>>,
         }
     }
 }
