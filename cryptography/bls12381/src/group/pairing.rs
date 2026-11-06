@@ -250,6 +250,8 @@ impl Kernel for Each<'_> {
 
 /// Returns the affine coordinates of each lane's pair of points, none of which may be the
 /// identity.
+///
+/// Runs as its own kernel, so that the conversions have the backend's instructions.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn to_affine<S: Simd, F: Field<S>>(
     simd: S,
@@ -261,21 +263,27 @@ fn to_affine<S: Simd, F: Field<S>>(
         g1[lane] = *p;
         g2[lane] = *q;
     }
-    let p = g1::Point::<F>::load(simd, &g1[..points.len()], &g1::IDENTITY);
-    let q = g2::Point::<F>::load(simd, &g2[..points.len()], &g2::IDENTITY);
-    // Loaded coordinates are tight with limb bound one, as inversion requires, and multiplying
-    // them by tight inverses stays within every product bound.
-    let p_inverse = p.z.invert(simd);
-    let q_inverse = q.z.invert(simd);
-    let mut px = [[0; FP_BYTES]; MAX_LANES];
-    let mut py = [[0; FP_BYTES]; MAX_LANES];
-    let mut qx = [[0; FP2_BYTES]; MAX_LANES];
-    let mut qy = [[0; FP2_BYTES]; MAX_LANES];
-    p.x.mul(simd, p_inverse).store(simd, &mut px);
-    p.y.mul(simd, p_inverse).store(simd, &mut py);
-    Fp2::mul::<64, S>(q.x, simd, q_inverse).store(simd, &mut qx);
-    Fp2::mul::<64, S>(q.y, simd, q_inverse).store(simd, &mut qy);
-    array::from_fn(|lane| ([px[lane], py[lane]], [qx[lane], qy[lane]]))
+    let lanes = points.len();
+    simd.execute(
+        #[inline(always)]
+        move |simd: S| {
+            let p = g1::Point::<F>::load(simd, &g1[..lanes], &g1::IDENTITY);
+            let q = g2::Point::<F>::load(simd, &g2[..lanes], &g2::IDENTITY);
+            // Loaded coordinates are tight with limb bound one, as inversion requires, and
+            // multiplying them by tight inverses stays within every product bound.
+            let p_inverse = p.z.invert(simd);
+            let q_inverse = q.z.invert(simd);
+            let mut px = [[0; FP_BYTES]; MAX_LANES];
+            let mut py = [[0; FP_BYTES]; MAX_LANES];
+            let mut qx = [[0; FP2_BYTES]; MAX_LANES];
+            let mut qy = [[0; FP2_BYTES]; MAX_LANES];
+            p.x.mul(simd, p_inverse).store(simd, &mut px);
+            p.y.mul(simd, p_inverse).store(simd, &mut py);
+            Fp2::mul::<64, S>(q.x, simd, q_inverse).store(simd, &mut qx);
+            Fp2::mul::<64, S>(q.y, simd, q_inverse).store(simd, &mut qy);
+            array::from_fn(|lane| ([px[lane], py[lane]], [qx[lane], qy[lane]]))
+        },
+    )
 }
 
 #[cfg(test)]

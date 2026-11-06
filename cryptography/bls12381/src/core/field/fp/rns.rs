@@ -1399,15 +1399,22 @@ impl<S: X86V4C> Field<S> for Rns<S> {
 
     /// Inverts the canonical integer in scalar arithmetic with [`montgomery::invert`], then loads
     /// the inverse: a single element has nothing to overlap the chain of an exponentiation
-    /// with, and the constant-time division steps cost a small fraction of it.
+    /// with, and the constant-time division steps cost a small fraction of it. Runs as its own
+    /// kernel, so that the conversions have their instruction set wherever a formula inverts.
     #[inline(always)]
     fn invert(self, simd: S) -> Self {
-        let mut element = [[0; BYTES]];
-        self.store(simd, &mut element);
-        let words = words_from_bytes(&element[0]);
-        let inverse = montgomery::invert::<WORDS, INVERSE_LIMBS>(&words, &MODULUS, INVERSE_LIMB);
-        let element = bytes_from_words(&inverse);
-        Self::load(simd, &[element], &element)
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| {
+                let mut element = [[0; BYTES]];
+                self.store(simd, &mut element);
+                let words = words_from_bytes(&element[0]);
+                let inverse =
+                    montgomery::invert::<WORDS, INVERSE_LIMBS>(&words, &MODULUS, INVERSE_LIMB);
+                let element = bytes_from_words(&inverse);
+                Self::load(simd, &[element], &element)
+            },
+        )
     }
 
     /// Multiply-adds each of the four products into the sum it belongs to: the real component
