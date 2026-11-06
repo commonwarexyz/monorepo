@@ -12,6 +12,8 @@ pub mod fixed;
 pub mod proof;
 pub mod variable;
 
+pub use crate::qmdb::any::unordered::{Operation, Update};
+
 #[cfg(test)]
 pub mod tests {
     //! Shared test utilities for unordered Current QMDB variants.

@@ -14,6 +14,8 @@ pub mod fixed;
 pub mod proof;
 pub mod variable;
 
+pub use crate::qmdb::any::ordered::{Operation, Update};
+
 /// Wire tag for [proof::constant::ExclusionProof::KeyValue].
 pub const KEY_VALUE_CONTEXT: u8 = 0;
 
