@@ -1157,7 +1157,10 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
         self.inner.root()
     }
 
-    /// Return the [`Bounds`] of the batch.
+    /// Return the ops-level [`Bounds`] of the batch.
+    ///
+    /// All commitments (`base`, `db`, `tip`, and `ancestors`) contain ops roots. In particular,
+    /// `bounds().tip.root` equals [`Self::ops_root`], not [`Self::root`].
     pub fn bounds(&self) -> &Bounds<F, D> {
         self.inner.bounds()
     }

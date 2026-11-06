@@ -150,7 +150,7 @@ where
         .await
     }
 
-    fn root(&self) -> Self::Digest {
+    fn ops_root(&self) -> Self::Digest {
         self.root()
     }
 }
@@ -206,7 +206,7 @@ where
         Ok(None)
     }
 
-    fn root(&self) -> Self::Digest {
+    fn ops_root(&self) -> Self::Digest {
         self.root()
     }
 }
