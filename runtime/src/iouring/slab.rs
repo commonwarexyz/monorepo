@@ -128,6 +128,12 @@ impl<T> Slab<T> {
         self.slots.len()
     }
 
+    /// Number of slots the slab has storage for.
+    #[cfg(test)]
+    pub const fn capacity(&self) -> usize {
+        self.slots.capacity()
+    }
+
     /// Identity of the live entry at `index`, if any.
     pub fn id_at(&self, index: usize) -> Option<Id> {
         let slot = self.slots.get(index)?;

@@ -1102,9 +1102,10 @@ pub struct Local {
     /// before closing `timers`, removes, at most one
     /// [`BUDGET`](super::wheel::BUDGET) per critical section. Each
     /// registration here first removes the latest one and takes its slot (see
-    /// [`super::sleep`]). Only this worker pushes and drains it, and it keeps
-    /// its capacity. While any remain, the worker serves again rather than
-    /// park.
+    /// [`super::sleep`]). Only this worker pushes and drains it, and a drain
+    /// that empties it shrinks its capacity to
+    /// [`DROPPED_CAPACITY`](super::sleep::DROPPED_CAPACITY) if a burst grew it
+    /// beyond. While any remain, the worker serves again rather than park.
     pub timers_dropped: Vec<Id>,
     /// Reject new registration and send wakes to the global queue, while
     /// allowing idempotent cancellation.
