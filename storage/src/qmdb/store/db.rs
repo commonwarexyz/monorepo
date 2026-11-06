@@ -198,6 +198,26 @@ where
         self.db.get(key).await
     }
 
+    /// Batch read multiple keys, taking each from the batch if it modified the key and from the
+    /// store otherwise.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V>>, Error> {
+        let unmodified: Vec<&K> = keys
+            .iter()
+            .copied()
+            .filter(|key| !self.diff.contains_key(*key))
+            .collect();
+        let mut stored = self.db.get_many(&unmodified).await?.into_iter();
+        Ok(keys
+            .iter()
+            .map(|key| match self.diff.get(*key) {
+                Some(value) => value.clone(),
+                None => stored.next().expect("one stored value per unmodified key"),
+            })
+            .collect())
+    }
+
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
     ///
     /// If the same key is written multiple times within a batch, the last value wins.
@@ -283,6 +303,39 @@ where
         }
 
         Ok(None)
+    }
+
+    /// Batch read multiple keys.
+    ///
+    /// Returns results in the same order as the input keys.
+    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V>>, Error> {
+        // Read every location the index reports for any key in one batched read.
+        let mut candidates: Vec<(Location, usize)> = keys
+            .iter()
+            .enumerate()
+            .flat_map(|(index, key)| self.snapshot.get(key).map(move |&loc| (loc, index)))
+            .collect();
+        candidates.sort();
+        let mut locs: Vec<u64> = candidates.iter().map(|&(loc, _)| *loc).collect();
+        locs.dedup();
+        let ops = self.log.read_many(&locs).await.map_err(|e| match e {
+            crate::journal::Error::ItemPruned(pos) => Error::OperationPruned(Location::new(pos)),
+            e => Error::Journal(e),
+        })?;
+
+        let mut values = vec![None; keys.len()];
+        for (loc, index) in candidates {
+            let read = locs
+                .binary_search(&*loc)
+                .expect("every candidate location was read");
+            let Operation::Update(Update(k, v)) = &ops[read] else {
+                unreachable!("location ({loc}) does not reference update operation");
+            };
+            if k == keys[index] {
+                values[index] = Some(v.clone());
+            }
+        }
+        Ok(values)
     }
 
     /// Returns a new empty batch of changes.
@@ -1547,6 +1600,52 @@ mod test {
 
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// `get_many` matches `get` for each key, in input order, across keys that share an index
+    /// bucket, deleted and absent keys, and repeated keys. A batch's `get_many` reads its own
+    /// writes first.
+    #[test_traced("DEBUG")]
+    fn test_store_get_many() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut ctx| async move {
+            let db = create_test_store(ctx.child("store")).await;
+            let (k1, v1) = (Digest::random(&mut ctx), vec![1]);
+            let (mut k2, v2) = (Digest::random(&mut ctx), vec![2]);
+            k2.0[0..2].copy_from_slice(&k1.0[0..2]);
+            let (k3, v3) = (Digest::random(&mut ctx), vec![3]);
+            let (k4, v4) = (Digest::random(&mut ctx), vec![4]);
+
+            let (db, _) = apply_entries(
+                db,
+                [
+                    (k1, Some(v1.clone())),
+                    (k2, Some(v2.clone())),
+                    (k3, Some(v3)),
+                ],
+            )
+            .await;
+            let (db, _) = apply_entries(db, [(k3, None)]).await;
+
+            assert!(db.get_many(&[]).await.unwrap().is_empty());
+            let keys = [&k2, &k4, &k1, &k3, &k2];
+            let values = db.get_many(&keys).await.unwrap();
+            assert_eq!(
+                values,
+                [Some(v2.clone()), None, Some(v1), None, Some(v2.clone())]
+            );
+            for (key, value) in keys.iter().zip(&values) {
+                assert_eq!(&db.get(key).await.unwrap(), value);
+            }
+
+            let batch = db.new_batch().write(k1, None).write(k4, Some(v4.clone()));
+            assert_eq!(
+                batch.get_many(&[&k1, &k2, &k4]).await.unwrap(),
+                [None, Some(v2), Some(v4)]
+            );
 
             db.destroy().await.unwrap();
         });
