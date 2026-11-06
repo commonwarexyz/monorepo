@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::roles::ledger::{Halt, Refusal};
-use commonware_clearing::bajillion::{Challenge, Error, Matrix};
+use commonware_clearing::bajillion::{Challenge, Error, Matrix, Processed};
 use commonware_cryptography::Digest as _;
 use commonware_runtime::Runner as _;
 
@@ -87,7 +87,10 @@ fn test_close_processes_requests_queued_before_its_epoch() {
         }
         assert_eq!(deployment.operator.epoch(), 2);
         let (_, summary) = deployment.close(&mut context).await;
-        assert_eq!((summary.deposits, summary.forced_withdrawals), (1, 1));
+        assert_eq!(
+            (summary.deposits.count, summary.forced_withdrawals.count),
+            (1, 1)
+        );
         assert_eq!(deployment.operator.balance(&account(0)), 9);
         assert_eq!(deployment.ledger.custody(), 29);
     });
@@ -116,8 +119,14 @@ fn test_ledger_rejects_closes_deferring_required_requests() {
                 matrix: Matrix::<PublicKey, Digest, u64>::empty::<Sha256>().root(),
                 balances: *deployment.ledger.balances(),
                 payouts: Amounts::<PublicKey, u64>::empty().root::<Sha256>(),
-                deposits,
-                forced_withdrawals,
+                deposits: Processed {
+                    count: deposits,
+                    hash: Digest::EMPTY,
+                },
+                forced_withdrawals: Processed {
+                    count: forced_withdrawals,
+                    hash: Digest::EMPTY,
+                },
             };
             let certificate = certify(&deployment.schemes, &deferring);
             assert!(matches!(
@@ -170,11 +179,17 @@ fn test_ledger_posts_only_certified_successors() {
         // It must process the queue within its bounds.
         for wrong in [
             Summary {
-                deposits: 2,
+                deposits: Processed {
+                    count: 2,
+                    ..summary.deposits
+                },
                 ..summary
             },
             Summary {
-                forced_withdrawals: 1,
+                forced_withdrawals: Processed {
+                    count: 1,
+                    ..summary.forced_withdrawals
+                },
                 ..summary
             },
         ] {
@@ -452,9 +467,9 @@ fn test_owed_payouts_count_toward_the_custody_bound() {
 }
 
 mod reorg {
-    //! What the finality precondition prevents. A summary commits to how many queued requests a
-    //! close processes, not to which, so a ledger holding other requests at those queue positions
-    //! posts it anyway.
+    //! What the finality precondition prevents. The ledger checks a summary's counts but not its
+    //! running hashes, so a ledger holding other requests at the positions the counts select posts
+    //! it anyway. An auditor holding the ledger's requests sees the mismatch in the running hashes.
 
     use super::*;
 
@@ -479,7 +494,9 @@ mod reorg {
             // The operator and validators read the queue the deployment's ledger holds, and the
             // canonical ledger posts the summary they certify with the same epoch, parent, counts,
             // payouts, and certificate.
+            let parent = *deployment.validators[0].summary();
             let queue = deployment.ledger.queue();
+            let drained = canonical.queue();
             let close = close_epoch(&mut deployment.operator, &queue, 1, 0);
             let proposals = deployment.verify(&close).await;
             let certificate = deployment.certify(&proposals);
@@ -496,6 +513,14 @@ mod reorg {
             assert_eq!(validator.balance(&account(0)).await.unwrap(), 100);
             assert_eq!(validator.balance(&account(1)).await.unwrap(), 0);
             assert_eq!(canonical.custody(), 5);
+
+            // The summary's running hash names the deposit validators read, not the one the
+            // canonical ledger drained.
+            assert_chained(&parent, &summary, &queue);
+            assert_ne!(
+                summary.deposits.hash,
+                chain(parent.deposits.hash, &drained.deposits)
+            );
 
             canonical.halt();
             let proof = validator.prove(&account(0)).await.unwrap().unwrap();

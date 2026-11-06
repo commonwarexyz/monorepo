@@ -22,9 +22,9 @@ use commonware_clearing::bajillion::{
     Amount, Amounts, Close, Deposit, Epoch, Limits, Namespace, Proposal, Queue, Row, State,
     Summary, Withdrawal,
 };
-use commonware_codec::Encode as _;
+use commonware_codec::Encode;
 use commonware_cryptography::{
-    Sha256, Signer, certificate,
+    Hasher as _, Sha256, Signer, certificate,
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
 };
@@ -209,6 +209,31 @@ fn forge(
     )
     .unwrap()
     .0
+}
+
+/// Returns `hash` extended by `H(hash || request)` for each of `requests`. An auditor holding the
+/// requests recomputes a running hash this way.
+fn chain<R: Encode>(hash: Digest, requests: &[R]) -> Digest {
+    requests.iter().fold(hash, |hash, request| {
+        Sha256::hash(&[hash.as_ref(), request.encode().as_ref()])
+    })
+}
+
+/// Checks that each running hash in `summary` extends the one in `parent` over the requests its
+/// close processed from `queue`.
+fn assert_chained(
+    parent: &Summary<Digest>,
+    summary: &Summary<Digest>,
+    queue: &Queue<PublicKey, u64>,
+) {
+    let count = |count: u64| usize::try_from(count).expect("a count within the queue must fit");
+    let deposits = &queue.deposits[..count(summary.deposits.count)];
+    let forced = &queue.forced_withdrawals[..count(summary.forced_withdrawals.count)];
+    assert_eq!(summary.deposits.hash, chain(parent.deposits.hash, deposits));
+    assert_eq!(
+        summary.forced_withdrawals.hash,
+        chain(parent.forced_withdrawals.hash, forced)
+    );
 }
 
 /// Returns the configuration of a validator keeping its balances in partitions named after

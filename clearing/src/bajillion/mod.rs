@@ -111,10 +111,15 @@
 //! obligations protect the funds themselves.
 //!
 //! Every role reads the ledger's queues, posts, and halts only from ledger state that cannot be
-//! reverted, and "posted" always means final on the ledger's chain. A summary binds how many queued
-//! requests its close processes, not which ones. If the chain reorders a queue after validators
-//! read it, a certified summary posts against other requests, and the balances root credits funds
-//! the ledger does not hold.
+//! reverted, and "posted" always means final on the ledger's chain. If the chain reorders a queue
+//! after validators read it, a certified summary posts against other requests, and the balances
+//! root credits funds the ledger does not hold.
+//!
+//! For each queue, a summary holds a running hash over every request the queue has processed from
+//! genesis up to and including the summary's close. Anyone holding the ledger's requests can
+//! recompute the hashes and detect a summary posted against other requests. The hashes cannot
+//! prevent that post, because the ledger checks each count against its queue but never recomputes
+//! a hash.
 //!
 //! # Senders
 //!
@@ -348,17 +353,24 @@
 //! Each balance gains its incoming payments and deposits, loses its outgoing payments, and must end
 //! between zero and the largest amount. An account withdrawing is then paid the lesser of what it
 //! asked for and its balance. The summary chains to the one before it and commits to the payments,
-//! the new balances, the payouts, and how many queued requests the close processes. The post
-//! carries the proposal's summary, its certificate, and its payouts ([Proposal::payouts]).
+//! the new balances, and the payouts. For each queue it holds a [Processed] record of how many
+//! requests the close processes and the queue's running hash after them. The post carries the
+//! proposal's summary, its certificate, and its payouts ([Proposal::payouts]).
 //!
 //! ```text
 //!   Summary(e)
-//!   +-------+--------+--------+----------+---------+----------+--------------------+
-//!   | epoch | parent | matrix | balances | payouts | deposits | forced withdrawals |
-//!   +-------+--------+--------+----------+---------+----------+--------------------+
-//!               |        |          |          |        '--- how many ---'
-//!               v        |          |          '--> tree of H(account || payout)
-//!        H(Summary(e-1)) |          '--> root of Balances, keyed by account
+//!   +-------+--------+--------+----------+---------+--------------+--------------------+
+//!   | epoch | parent | matrix | balances | payouts |   deposits   | forced withdrawals |
+//!   |       |        |        |          |         | count | hash |  count   |  hash   |
+//!   +-------+--------+--------+----------+---------+-------+------+----------+---------+
+//!               |        |          |          |              |                   |
+//!               v        |          |          |              '---------+---------'
+//!        H(Summary(e-1)) |          |          |                        v
+//!                        |          |          |       hash in Summary(e-1), extended by
+//!                        |          |          |       H(hash || request) for each request
+//!                        |          |          |       the close processes, in queue order
+//!                        |          |          '--> tree of H(account || payout)
+//!                        |          '--> root of Balances, keyed by account
 //!                        v
 //!                   matrix root
 //!                  /           \
@@ -556,8 +568,8 @@
 //! challenge, or a claim, so a port checks its results against the crate's before it holds funds.
 //!
 //! 1. **Integers.** Fixed-width integers (every epoch, count, and built-in amount) encode
-//!    big-endian, and lengths encode as varints. Public keys and digests encode as their raw bytes,
-//!    and the genesis summary's parent is all zeros.
+//!    big-endian, and lengths encode as varints. Public keys and digests encode as their raw bytes.
+//!    The genesis summary's parent and both of its running hashes are all zeros.
 //!
 //! 2. **Trees.** Payment maps, the matrix, and payouts commit with the binary Merkle tree of
 //!    [commonware_storage::bmt]. A leaf is hashed with its big-endian `u32` position, each level
@@ -582,9 +594,12 @@
 //!    sender signs it in [Namespace::state] and the operator in [Namespace::acknowledgement], and
 //!    the receipt's entry proves under the state's payments root at its position.
 //!
-//! 7. **Summaries.** A [Summary] encodes as epoch, parent, matrix, balances, payouts, deposits, and
-//!    forced withdrawals. Its digest is the hash of that encoding, and the certificate covers the
-//!    encoding in [Namespace::summary].
+//! 7. **Summaries.** A [Summary] encodes as epoch, parent, matrix, balances, and payouts, then the
+//!    count and running hash of the deposits and of the forced withdrawals. Its digest is the hash
+//!    of that encoding, and the certificate covers the encoding in [Namespace::summary]. A running
+//!    hash extends its parent's by `H(hash || request)` for each request the close processes in
+//!    queue order. A request encodes as its account then its amount. The ledger takes the running
+//!    hashes as certified and does not recompute them.
 //!
 //! 8. **Counts.** Each count lies between its queue's required count and its length.
 //!
@@ -619,7 +634,7 @@ pub use payment::{
     Acknowledgement, Admission, Challenge, Receipt, Request, State, States, Verified,
 };
 pub use settlement::Flow;
-pub use summary::Summary;
+pub use summary::{Processed, Summary};
 pub use validator::{BalanceProof, Balances, Checked, Checkpoint, Proposal};
 
 /// An epoch number. Epochs start at one, and epoch zero names the state before the first close.

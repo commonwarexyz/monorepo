@@ -54,9 +54,13 @@ hash = "beb7c5c112c5d9b51bb111679490c98d52ec3051578c3d858144e91f4609c86e"
 n_cases = 65536
 hash = "81f805fcd77afd8271f8e03c5fc0563713108a87bb46ecdc194a4933e226de77"
 
+["commonware_clearing::bajillion::summary::tests::conformance::CodecConformance<Processed<Digest>>"]
+n_cases = 65536
+hash = "fcda6805c83838ea1ab6cfce7b83d873807fed26614f19a0efd9d8ef3ee32483"
+
 ["commonware_clearing::bajillion::summary::tests::conformance::CodecConformance<Summary<Digest>>"]
 n_cases = 65536
-hash = "62a1015487c4c91f273a78befac92c6d53394178a14be5f4028cfc23dfb0486e"
+hash = "3733e39e11828b0f246090592f58707b464585dd4ee7df72cff4bd1ea32db0f2"
 
 ["commonware_clearing::bajillion::validator::tests::conformance::CodecConformance<BalanceProof<Digest,u64>>"]
 n_cases = 65536

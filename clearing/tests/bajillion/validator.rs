@@ -16,7 +16,7 @@ fn test_validators_agree_on_closes() {
         deployment.ledger.deposit(account(1), 50).unwrap();
         let (_, first) = deployment.close(&mut context).await;
         assert_eq!(first.epoch, 1);
-        assert_eq!(first.deposits, 2);
+        assert_eq!(first.deposits.count, 2);
 
         let mut alice = sender(0);
         let request = alice.send(2, amounts(&[(1, 30), (2, 20)]), false).unwrap();

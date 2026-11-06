@@ -229,9 +229,9 @@ where
             payouts,
         )?;
         let deposits =
-            usize::try_from(summary.deposits).expect("a count within the queue must fit");
-        let forced_withdrawals =
-            usize::try_from(summary.forced_withdrawals).expect("a count within the queue must fit");
+            usize::try_from(summary.deposits.count).expect("a count within the queue must fit");
+        let forced_withdrawals = usize::try_from(summary.forced_withdrawals.count)
+            .expect("a count within the queue must fit");
         let deposited = self
             .deposits
             .iter()

@@ -5,9 +5,9 @@ use super::{
     ForcedWithdrawal, Matrix, Namespace, Proposal, Queue, Receipt, Request, Row, State, Summary,
     Withdrawal,
 };
-use commonware_codec::Encode as _;
+use commonware_codec::Encode;
 use commonware_cryptography::{
-    Sha256, Signer as _,
+    Hasher as _, Sha256, Signer as _,
     certificate::{self, Scheme as _},
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
@@ -256,6 +256,14 @@ pub(crate) fn certify(schemes: &[scheme::Scheme], summary: &Summary<Digest>) -> 
         .unwrap()
 }
 
+/// Returns `hash` extended by `H(hash || request)` for each of `requests`. Tests check
+/// `Processed::next` against this independent fold.
+pub(crate) fn chain<R: Encode>(hash: Digest, requests: &[R]) -> Digest {
+    requests.iter().fold(hash, |hash, request| {
+        Sha256::hash(&[hash.as_ref(), request.encode().as_ref()])
+    })
+}
+
 /// Returns `bytes` in lowercase hex.
 fn hex(bytes: impl AsRef<[u8]>) -> String {
     bytes
@@ -266,8 +274,9 @@ fn hex(bytes: impl AsRef<[u8]>) -> String {
 }
 
 /// Pins what a port of the ledger must reproduce bit for bit, for SHA-256, Ed25519 keys, and `u64`
-/// amounts. Alice pays bob 5 and carol 7 in epoch 1, and the close of epoch 1 settles her map. The
-/// payouts root commits to payouts of 3 to bob and 4 to carol.
+/// amounts. It also pins a deposit running hash that a port of the validators must reproduce. Alice
+/// pays bob 5 and carol 7 in epoch 1, and the close of epoch 1 settles her map and processes bob's
+/// deposit of 5. The payouts root commits to payouts of 3 to bob and 4 to carol.
 #[test]
 fn test_port_vector() {
     deterministic::Runner::default().start(|context| async move {
@@ -280,7 +289,18 @@ fn test_port_vector() {
         );
         assert_eq!(
             hex(genesis.digest::<Sha256>()),
-            "399bd7b8e561ebfdd87b97ac0e4716a3b397f9d7b21f2f322f70c91741c23eba"
+            "2b36d082705b9f8f212818c6832e86b2a4a31f584dcafa0a13b3a4115fff57a1"
+        );
+
+        // The deposit queue's running hash after bob's deposit, chained from genesis.
+        let deposit = Deposit {
+            account: account(1),
+            amount: 5u64,
+        };
+        let deposits = genesis.deposits.next::<Sha256, _>(&[deposit]);
+        assert_eq!(
+            hex(deposits.hash),
+            "e3a81ed35a6c131dc7ea391436b14bc6bc9882a0cf7d815fbd936179601427b4"
         );
 
         // Bob's receipt, with alice's signature and the operator's countersignature.
@@ -332,7 +352,7 @@ fn test_port_vector() {
             1,
             vec![row(0, 1, states.payments, empty_root())],
             Vec::new(),
-            0,
+            1,
             0,
         );
         let matrix = close.matrix::<Sha256>();

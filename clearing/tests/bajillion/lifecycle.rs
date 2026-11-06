@@ -17,7 +17,11 @@ fn test_epochs_settle_payments_and_withdrawals() {
         for index in 0..USERS {
             deployment.ledger.deposit(account(index), 1_000).unwrap();
         }
-        deployment.close(&mut context).await;
+        let mut parent = *deployment.validators[0].summary();
+        let queue = deployment.ledger.queue();
+        let (_, summary) = deployment.close(&mut context).await;
+        assert_chained(&parent, &summary, &queue);
+        parent = summary;
         for receiver in &mut receivers {
             receiver.posted(1);
         }
@@ -59,13 +63,21 @@ fn test_epochs_settle_payments_and_withdrawals() {
             expected[forced as usize] -= 15;
             expected[deposited as usize] += 40;
 
+            let queue = deployment.ledger.queue();
             let (close, summary) = deployment.close(&mut context).await;
             assert_eq!(summary.epoch, epoch);
-            assert_eq!((summary.deposits, summary.forced_withdrawals), (1, 1));
+            assert_eq!(
+                (summary.deposits.count, summary.forced_withdrawals.count),
+                (1, 1)
+            );
             assert_eq!(
                 summary.payouts,
                 amounts(&[(soft, 25), (forced, 15)]).root::<Sha256>()
             );
+
+            // The running hashes extend the parent's over the requests the close processed.
+            assert_chained(&parent, &summary, &queue);
+            parent = summary;
 
             // Every receiver records the post and finds each payment it was promised.
             let matrix = close.matrix::<Sha256>();

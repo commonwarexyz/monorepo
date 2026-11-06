@@ -1,7 +1,7 @@
 //! Checking closes, settling them on the validators' balances, and applying posted closes.
 
 use super::{
-    Amount, Amounts, Close, Epoch, Error, Matrix, Namespace, Queue, State, Summary,
+    Amount, Amounts, Close, Epoch, Error, Matrix, Namespace, Processed, Queue, State, Summary,
     settlement::Flows,
 };
 use bytes::BufMut;
@@ -123,7 +123,8 @@ pub struct Checkpoint<P: PublicKey, D: Digest, A: Amount> {
 impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
     /// Checks the close as the successor of the posted close `parent` against the ledger's `queue`.
     /// It reads no storage, checks the operator's signature before any user's, and parallelizes the
-    /// checks with `strategy`.
+    /// checks with `strategy`. It chains each queue's running hash from `parent`'s summary over the
+    /// prefix of `queue` that the close's counts select.
     ///
     /// Returns InvalidCheckpoint if `parent`'s matrix is not its summary's, WrongEpoch unless the
     /// close, `queue`, and every soft withdrawal are for the next epoch, InvalidCount unless each
@@ -222,8 +223,11 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
             base: parent.summary.balances,
             matrix,
             flows,
-            deposits,
-            forced_withdrawals,
+            deposits: parent.summary.deposits.next::<H, _>(queued_deposits),
+            forced_withdrawals: parent
+                .summary
+                .forced_withdrawals
+                .next::<H, _>(queued_forced_withdrawals),
         })
     }
 }
@@ -240,10 +244,10 @@ pub struct Checked<P: PublicKey, D: Digest, A: Amount> {
     matrix: Matrix<P, D, A>,
     /// Flow of every account the close touches.
     flows: Flows<P, A>,
-    /// Number of queued deposits the close processes.
-    deposits: u64,
-    /// Number of queued forced withdrawals the close processes.
-    forced_withdrawals: u64,
+    /// The queued deposits the close processes.
+    deposits: Processed<D>,
+    /// The queued forced withdrawals the close processes.
+    forced_withdrawals: Processed<D>,
 }
 
 impl<P: PublicKey, D: Digest, A: Amount> Checked<P, D, A> {
@@ -362,12 +366,14 @@ mod tests {
     use crate::bajillion::{
         Withdrawal,
         tests::{
-            TestBalances, TestCheckpoint, TestClose, TestDb, TestProposal, account, amounts, check,
-            config, empty_root, genesis, namespace, open, operator_key, post, queue, row,
+            TestBalances, TestCheckpoint, TestClose, TestDb, TestProposal, account, amounts, chain,
+            check, config, empty_root, genesis, namespace, open, operator_key, post, queue, row,
             sign_close, user,
         },
     };
-    use commonware_cryptography::{Sha256, Signer as _, ed25519::PublicKey, sha256::Digest};
+    use commonware_cryptography::{
+        Digest as _, Sha256, Signer as _, ed25519::PublicKey, sha256::Digest,
+    };
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_storage::{
         index::partitioned::unordered::Index as Partitioned,
@@ -725,6 +731,54 @@ mod tests {
                 assert_eq!(retried.summary(), fresh.summary());
                 assert_eq!(retried.payouts(), fresh.payouts());
             }
+        });
+    }
+
+    /// Checking a close chains each queue's running hash from the parent summary over the prefix
+    /// the close processes. A close that processes none of a queue carries its parent's hash, and
+    /// two closes chain to one fold over everything they processed.
+    #[test]
+    fn test_check_chains_the_running_hashes() {
+        deterministic::Runner::default().start(|context| async move {
+            let operator = operator_key();
+            let balances = open(context.child("opened"), "chained").await;
+            let parent = genesis(balances.root());
+
+            // The close of epoch 1 processes two of three deposits and the forced withdrawal.
+            let queued = queue(1, &[(0, 10), (1, 20), (2, 30)], &[(0, 3)]);
+            let all = queued.deposits.clone();
+            let close = sign_close(&operator, 1, Vec::new(), Vec::new(), 2, 1);
+            let (balances, first) = post(balances, &parent, close, &queued).await;
+            let expected = Processed {
+                count: 2,
+                hash: chain(Digest::EMPTY, &all[..2]),
+            };
+            assert_eq!(first.summary.deposits, expected);
+            let expected = Processed {
+                count: 1,
+                hash: chain(Digest::EMPTY, &queued.forced_withdrawals),
+            };
+            assert_eq!(first.summary.forced_withdrawals, expected);
+
+            // The close of epoch 2 processes the remaining deposit and no forced withdrawal.
+            let queued = Queue {
+                required_deposits: 1,
+                ..queue(2, &[(2, 30)], &[])
+            };
+            let close = sign_close(&operator, 2, Vec::new(), Vec::new(), 1, 0);
+            let (_, second) = post(balances, &first, close, &queued).await;
+            let deposits = second.summary.deposits;
+            assert_eq!(deposits.count, 1);
+            assert_eq!(
+                deposits.hash,
+                chain(first.summary.deposits.hash, &queued.deposits)
+            );
+            assert_eq!(deposits.hash, chain(Digest::EMPTY, &all));
+            let expected = Processed {
+                count: 0,
+                hash: first.summary.forced_withdrawals.hash,
+            };
+            assert_eq!(second.summary.forced_withdrawals, expected);
         });
     }
 
