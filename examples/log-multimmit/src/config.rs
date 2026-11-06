@@ -5,7 +5,7 @@ use crate::{
     deploy::NodeConfig,
 };
 use clap::Args;
-use commonware_consensus::multimmit::types::PathLimits;
+use commonware_consensus::multimmit::types::{CodecConfigError, PathLimits};
 use commonware_deployer::aws::{Hosts, METRICS_PORT, TRACES_PORT};
 use commonware_utils::{NZUsize, Probability, probability};
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use std::{
     collections::BTreeSet,
     fs,
     net::{AddrParseError, IpAddr, Ipv4Addr, SocketAddr},
-    num::{NonZeroU64, NonZeroUsize, ParseIntError},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize, ParseIntError},
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
@@ -91,6 +91,9 @@ pub enum ConfigError {
     /// A bootstrapper key is not a participant.
     #[error("bootstrapper {0} is not a participant")]
     UnknownBootstrapper(u64),
+    /// The pipeline window is narrower than the pipeline depth.
+    #[error("invalid pipeline window: {0}")]
+    PipelineWindow(CodecConfigError),
     /// The body size does not fit the canonical bytes codec.
     #[error("body size {0} does not fit the canonical bytes codec")]
     BodyTooLarge(usize),
@@ -225,6 +228,14 @@ pub struct NodeTuning {
     #[serde(default = "default_extension_bound")]
     pub extension_bound: u32,
 
+    /// Blocks a producer builds, and a validator DA-votes, above the certified anchor.
+    ///
+    /// Defaults to the pipeline depth, or one with zero depth, and may only widen it. With zero
+    /// depth it must cover the DA-certificate lag at the configured block rate.
+    #[arg(long)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_window: Option<NonZeroU32>,
+
     /// Minimum milliseconds between two blocks built by one producer.
     ///
     /// Zero builds as fast as block custody admits.
@@ -246,8 +257,16 @@ pub struct NodeTuning {
 
 impl NodeTuning {
     /// Returns the configured pipeline limits.
-    pub const fn limits(&self) -> PathLimits {
-        PathLimits::new(self.pipeline_depth, self.extension_bound)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the pipeline window is narrower than the depth allows.
+    pub const fn limits(&self) -> Result<PathLimits, CodecConfigError> {
+        let limits = PathLimits::new(self.pipeline_depth, self.extension_bound);
+        match self.pipeline_window {
+            Some(window) => limits.with_pipeline_window(window.get()),
+            None => Ok(limits),
+        }
     }
 
     /// Returns the minimum time between two blocks built by one producer.
@@ -260,6 +279,7 @@ impl NodeTuning {
         if u32::try_from(self.body_size).is_err() {
             return Err(ConfigError::BodyTooLarge(self.body_size));
         }
+        self.limits().map_err(ConfigError::PipelineWindow)?;
         if self.offered_bytes_per_second.is_some() {
             self.require_body()?;
         }
