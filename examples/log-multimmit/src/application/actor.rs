@@ -217,6 +217,7 @@ impl<E: Clock + Spawner + Metrics> Actor<E> {
             Message::Placed { placed, view, at } => self.latency.place(placed, view, at),
             Message::Ordered { block, at } => self.latency.order(block, at),
             Message::Certified { block, at } => self.latency.certify(block, at),
+            Message::Receipt { block, at } => self.latency.receipt(block, at),
         }
     }
 

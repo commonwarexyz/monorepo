@@ -103,6 +103,8 @@ enum Sample {
     Placement { view: View },
     /// A durable DA certificate covers the block.
     Certified,
+    /// The producer formed a receipt for the block on its payment chain.
+    Receipt,
     /// Consensus finalized the block for the first time.
     FirstFinality {
         class: Class,
@@ -119,6 +121,7 @@ impl Sample {
             Self::Ordered => "ordered",
             Self::Placement { .. } => "placement",
             Self::Certified => "certified",
+            Self::Receipt => "receipt",
             Self::FirstFinality { .. } => "first_finalization",
         }
     }
@@ -130,6 +133,7 @@ impl Sample {
             Self::Ordered => "delivery",
             Self::Placement { .. } => "placed",
             Self::Certified => "certified",
+            Self::Receipt => "receipt",
             Self::FirstFinality { class, .. } => class.label(),
         }
     }
@@ -148,6 +152,9 @@ struct ProposalStart {
     /// Whether a durable DA certificate covers the block. Certification is measured while the
     /// block is tracked, and does not keep it tracked.
     certified: bool,
+    /// Whether the producer formed a receipt for the block. Like certification, it is measured
+    /// while the block is tracked.
+    receipted: bool,
 }
 
 impl ProposalStart {
@@ -179,6 +186,7 @@ pub struct ProposalLatency {
 struct LatencyMetrics {
     benchmark_quorum: Option<usize>,
     certification: Histogram,
+    receipt: Histogram,
     finality: Histogram,
     placement: Histogram,
     ordering: Histogram,
@@ -235,6 +243,11 @@ impl LatencyMetrics {
             certification: context.histogram(
                 "proposal_certification_latency",
                 "time from batch submission to a durable local DA certificate covering the block",
+                WAN_LATENCY,
+            ),
+            receipt: context.histogram(
+                "proposal_receipt_latency",
+                "time from batch submission to this producer forming the block's n - f receipt",
                 WAN_LATENCY,
             ),
             finality: context.histogram(
@@ -300,7 +313,11 @@ impl LatencyMetrics {
         let (view, votes) = match sample {
             Sample::FirstFinality { view, votes, .. } => (Some(view), Some(votes)),
             Sample::Placement { view } => (Some(view), None),
-            Sample::Start | Sample::Evicted | Sample::Ordered | Sample::Certified => (None, None),
+            Sample::Start
+            | Sample::Evicted
+            | Sample::Ordered
+            | Sample::Certified
+            | Sample::Receipt => (None, None),
         };
         info!(
             target: BENCHMARK_TARGET,
@@ -318,6 +335,7 @@ impl LatencyMetrics {
             finalized = start.finalized,
             placed = start.placed,
             certified = start.certified,
+            receipted = start.receipted,
             view = view.map(View::get),
             votes = votes.map(|votes| votes as u64),
             quorum = self.benchmark_quorum.map(|quorum| quorum as u64),
@@ -425,6 +443,7 @@ impl ProposalLatency {
             placed: false,
             ordered: false,
             certified: false,
+            receipted: false,
         };
         self.metrics.sample(&start, Sample::Start, started_at);
         self.started.push_back(start);
@@ -600,6 +619,23 @@ impl ProposalLatency {
             metrics.certification.observe_between(start.started_at, now);
             metrics.sample(start, Sample::Certified, now);
         }
+    }
+
+    /// Records that this producer formed the receipt of `block` on its payment chain.
+    ///
+    /// A receipt covers only its own block, so only that block, while tracked, records its receipt
+    /// latency, once.
+    pub fn receipt(&mut self, block: Reference, now: SystemTime) {
+        let Some(start) = self
+            .started
+            .iter_mut()
+            .find(|start| start.block == block && !start.receipted)
+        else {
+            return;
+        };
+        start.receipted = true;
+        self.metrics.receipt.observe_between(start.started_at, now);
+        self.metrics.sample(start, Sample::Receipt, now);
     }
 
     /// Records ordered delivery once, retaining the start until finality and placement are also
@@ -1262,6 +1298,37 @@ mod tests {
                     .encode()
                     .contains("proposal_certification_latency_count 4\n")
             );
+        });
+    }
+
+    #[test]
+    fn a_receipt_records_only_its_own_tracked_block_once() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut latency = ProposalLatency::new(&context, NZUsize!(8), None);
+            let now = context.current();
+            let blocks = chain(3);
+            for block in &blocks {
+                latency.start(*block, parent(*block), now, None, now);
+            }
+            let receipted = |latency: &ProposalLatency| {
+                latency
+                    .started
+                    .iter()
+                    .filter(|start| start.receipted)
+                    .map(|start| start.block)
+                    .collect::<Vec<_>>()
+            };
+
+            // A receipt covers its own block and none of its ancestors, and repeats change nothing.
+            latency.receipt(blocks[1], now);
+            latency.receipt(blocks[1], now);
+            assert_eq!(receipted(&latency), [blocks[1]]);
+            // An untracked block's receipt is ignored.
+            latency.receipt(reference(1, 9), now);
+            assert!(context.encode().contains(
+                "proposal_receipt_latency_count 1
+"
+            ));
         });
     }
 

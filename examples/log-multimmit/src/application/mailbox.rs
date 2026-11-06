@@ -13,7 +13,7 @@ use commonware_consensus::{
     },
     types::View,
 };
-use commonware_cryptography::sha256::Digest as Sha256Digest;
+use commonware_cryptography::{Sha256, sha256::Digest as Sha256Digest};
 use commonware_runtime::Clock;
 use commonware_utils::channel::oneshot;
 use std::{
@@ -58,6 +58,11 @@ pub(super) enum Message {
         block: BlockRef<Sha256Digest>,
         at: SystemTime,
     },
+    /// This producer formed the receipt of `block` on its payment chain at `at`.
+    Receipt {
+        block: BlockRef<Sha256Digest>,
+        at: SystemTime,
+    },
 }
 
 impl Message {
@@ -69,7 +74,8 @@ impl Message {
             Self::Finalized { .. }
             | Self::Placed { .. }
             | Self::Ordered { .. }
-            | Self::Certified { .. } => false,
+            | Self::Certified { .. }
+            | Self::Receipt { .. } => false,
         }
     }
 }
@@ -220,11 +226,14 @@ impl<C: Clock> Reporter for Mailbox<C> {
                 block: certified,
                 at: self.clock.current(),
             },
+            Activity::Receipt { receipt } => Message::Receipt {
+                block: receipt.header().block_ref::<Sha256>(),
+                at: self.clock.current(),
+            },
             Activity::ProtocolAccepted { .. }
             | Activity::TransactionProposed { .. }
             | Activity::HistoryAccepted { .. }
-            | Activity::Proven { .. }
-            | Activity::Receipt { .. } => return Feedback::Ok,
+            | Activity::Proven { .. } => return Feedback::Ok,
         };
         self.sender.enqueue(message)
     }
