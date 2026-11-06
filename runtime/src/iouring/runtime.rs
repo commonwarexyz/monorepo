@@ -239,13 +239,20 @@ use std::{
 /// Maximum task polls or mailbox messages processed before yielding to other work.
 const BATCH_SIZE: usize = 64;
 
-/// Polling time after which a pool worker ends its batch while the latest
-/// service pass left due sleeps or request deadlines behind (see
-/// [`Worker::backlog`]). A pass spends at most one
-/// [`BUDGET`](super::wheel::BUDGET), so a backlog drains one budget per turn,
-/// and a full batch of long polls would hold each later pass back by
-/// [`BATCH_SIZE`] of them. A budget's pass is short next to this slice, so
-/// tasks keep most of the worker while a backlog drains.
+/// Polling time after which a pool worker with an expiry backlog ends its
+/// batch of task polls.
+///
+/// A service pass fires at most one [`BUDGET`](super::wheel::BUDGET) of due
+/// sleeps, and one of due request deadlines, so a larger burst leaves due
+/// timers for later passes, one per turn. Between two passes the worker polls
+/// a batch of up to [`BATCH_SIZE`] tasks, so with long polls a full batch
+/// would hold each further budget back by that many polls. While the latest
+/// pass left due timers behind (see [`Worker::backlog`]), the worker also
+/// checks the time after each poll and ends the batch once this slice has
+/// passed, so the next pass follows after about one slice and one poll, plus
+/// the root poll and callbacks of the turn. A budget's pass is short next to
+/// the slice, so tasks keep most of the worker while a backlog drains. A
+/// batch still ends earlier at [`BATCH_SIZE`] polls or an empty queue.
 const BACKLOG_SLICE: Duration = Duration::from_micros(50);
 
 /// Largest network timeout and sleep, 30 years of 365 days, which keeps every
@@ -1084,21 +1091,29 @@ pub struct Local {
     /// The io_uring ring's owner, taken only after kernel retirement so it can
     /// be dropped unborrowed.
     pub driver: Option<Driver>,
-    /// Sleep registrations, in the pool's timers for this worker on a pool
-    /// worker, so that peers can expire them while this worker is stalled.
+    /// Sleep registrations of this worker. They are shared rather than owned:
+    /// a sleep that registered here may be polled or dropped on any thread,
+    /// and may outlive this worker, so each registration holds a reference
+    /// to these timers. On a pool worker the pool holds them too, so that
+    /// peers can expire them while this worker is stalled in a long poll.
     pub timers: Arc<Timers>,
     /// Cached bound on the earliest firing time in `timers`, in nanoseconds
-    /// since the timers' origin, `u64::MAX` for none. Never later than that
-    /// time, since only this worker registers, so service and parking can
-    /// skip the timers' lock.
+    /// since the timers' origin, `u64::MAX` for none. Service passes skip
+    /// the timers' lock until it is reached, and parking takes its timed wake
+    /// from it, so neither locks the timers just to learn that nothing is due.
+    /// Only this worker registers, and it lowers the cache with every
+    /// registration, so the cache is never later than the earliest firing
+    /// time. Removals and peer expiry can leave it early, which costs
+    /// spurious expiry passes, never a late timer.
     pub timers_next: u64,
-    /// Registrations in `timers` whose sleeps were dropped, or completed early
-    /// by a poll, on this worker while it was not closing. Only this worker
-    /// pushes and drains it: each registration here removes the latest one
-    /// and takes its slot, the next service pass, or cleanup before closing
-    /// `timers`, removes the rest, and each service pass caps its capacity at
-    /// [`DROPPED_CAPACITY`] (see [`super::sleep`]). While any remain, the
-    /// worker serves again rather than park.
+    /// Pending removals from `timers`: the registrations whose sleeps were
+    /// dropped, or completed early by a poll, on this worker while it was not
+    /// closing. Queuing their identities lets those drops skip the timers'
+    /// lock. Only this worker pushes and drains it: each registration here
+    /// removes the latest one and takes its slot, the next service pass, or
+    /// cleanup before closing `timers`, removes the rest, and each service
+    /// pass caps its capacity at [`DROPPED_CAPACITY`] (see [`super::sleep`]).
+    /// While any remain, the worker serves again rather than park.
     pub timers_dropped: Vec<Id>,
     /// Reject new registration and send wakes to the global queue, while
     /// allowing idempotent cancellation.
@@ -1530,13 +1545,20 @@ pub struct Worker {
     /// can trigger an earlier check.
     global_queue_interval: u32,
     /// Earliest time of this pool worker's next check of its peers' timers.
+    /// A check reads every peer's published bound, so spacing checks by
+    /// [`RESCUE_INTERVAL`] keeps that cost off most service passes. That
+    /// constant's documentation describes how late a stalled peer's timers
+    /// can fire as a result.
     rescue_at: Instant,
     /// Whether the latest service pass left due sleeps or request deadlines
-    /// behind, which ends the next polling batch after [`BACKLOG_SLICE`].
-    /// Cleared by a pass that reaches every due deadline. A pass that runs out
-    /// of budget while draining a detached wheel bucket can leave its bound at
-    /// or below its time with only later deadlines left to refile (see
-    /// [`Wheel::bound`]), which sets this for a few more passes.
+    /// behind because its expiry ran out of budget. While set, the next
+    /// polling batch also ends once it has polled for [`BACKLOG_SLICE`], so
+    /// the remaining due timers get their next budgeted pass without waiting
+    /// for a full batch of long polls. Cleared by a pass that reaches every
+    /// due deadline. A pass that runs out of budget while draining a detached
+    /// wheel bucket can leave its bound at or below its time with only later
+    /// deadlines left to refile (see [`Wheel::bound`]), which sets this for a
+    /// few more passes.
     ///
     /// [`Wheel::bound`]: super::wheel::Wheel::bound
     backlog: bool,

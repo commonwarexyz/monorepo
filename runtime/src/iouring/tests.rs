@@ -4406,7 +4406,7 @@ fn test_expiry_backlog_keeps_pace_with_long_polls() {
                     }
                     polls.fetch_add(1, Ordering::Relaxed);
                     if drained.load(Ordering::Relaxed) {
-                        let current = sleep::turn();
+                        let current = sleep::tests::turn();
                         run = if current == turn { run + 1 } else { 1 };
                         turn = current;
                         longest = longest.max(run);

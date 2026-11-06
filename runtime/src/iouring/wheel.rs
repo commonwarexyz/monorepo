@@ -1,14 +1,14 @@
 //! Hierarchical timing wheel keyed by stable slot indices.
 //!
-//! Deadlines are `u64` nanoseconds rounded up to ticks of `RES` nanoseconds,
-//! so a slot never fires before its deadline and its firing time is less than
-//! one tick after it (deadlines beyond [`Wheel::MAX`] are treated as it).
-//! Nine levels of 64 buckets cover 54 tick bits, which span every `u64`
-//! deadline because `RES` is at least 1024. A tick is filed on the level of
-//! its highest bit that differs from the wheel's base, and a due list holds
-//! ticks below the base. Every bucket is an intrusive doubly linked list
-//! threaded through a dense array indexed by slot, so a slot keeps its
-//! identity while it cascades and removal unlinks it in O(1). Occupancy
+//! Deadlines are `u64` nanoseconds rounded up to ticks of `RESOLUTION`
+//! nanoseconds, so a slot never fires before its deadline and its firing time
+//! is less than one tick after it (deadlines beyond [`Wheel::MAX`] are treated
+//! as it). Nine levels of 64 buckets cover 54 tick bits, which span every
+//! `u64` deadline because `RESOLUTION` is at least 1024. A tick is filed on
+//! the level of its highest bit that differs from the wheel's base, and a due
+//! list holds ticks below the base. Every bucket is an intrusive doubly
+//! linked list threaded through a dense array indexed by slot, so a slot keeps
+//! its identity while it cascades and removal unlinks it in O(1). Occupancy
 //! bitmaps let expiry and bounds visit only occupied buckets.
 //!
 //! Expiry is budgeted: one pass spends one budget unit per slot it fires and
@@ -52,33 +52,6 @@ pub const BUDGET: u32 = 256;
 /// registered long before them cascade in large buckets, whose refiles would
 /// otherwise hold back the due slots behind them for many passes.
 pub const REFILES_PER_UNIT: u32 = 16;
-
-/// Conversions between instants and a wheel's nanoseconds since an epoch.
-pub trait InstantExt {
-    /// Nanoseconds from `epoch` to this instant: zero for an instant before
-    /// `epoch`, and `u64::MAX` for one more than about 584 years after it.
-    fn nanos_since(self, epoch: Instant) -> u64;
-
-    /// The instant `nanos` after this one, or `None` for `u64::MAX`, the
-    /// bound of an empty wheel, and past the end of [`Instant`]'s range.
-    fn after_nanos(self, nanos: u64) -> Option<Instant>;
-}
-
-impl InstantExt for Instant {
-    #[inline]
-    fn nanos_since(self, epoch: Instant) -> u64 {
-        let since = self.saturating_duration_since(epoch);
-        u64::try_from(since.as_nanos()).unwrap_or(u64::MAX)
-    }
-
-    #[inline]
-    fn after_nanos(self, nanos: u64) -> Option<Instant> {
-        if nanos == u64::MAX {
-            return None;
-        }
-        self.checked_add(Duration::from_nanos(nanos))
-    }
-}
 
 /// Number of wheel levels.
 const LEVELS: usize = 9;
@@ -144,13 +117,41 @@ const EMPTY: Bucket = Bucket {
     tail: NIL,
 };
 
-/// Hierarchical timing wheel with ticks of `RES` nanoseconds.
+/// Conversions between instants and a wheel's nanoseconds since an epoch.
+pub trait InstantExt {
+    /// Nanoseconds from `epoch` to this instant: zero for an instant before
+    /// `epoch`, and `u64::MAX` for one more than about 584 years after it.
+    fn nanos_since(self, epoch: Instant) -> u64;
+
+    /// The instant `nanos` after this one, or `None` for `u64::MAX`, the
+    /// bound of an empty wheel, and past the end of [`Instant`]'s range.
+    fn after_nanos(self, nanos: u64) -> Option<Instant>;
+}
+
+impl InstantExt for Instant {
+    #[inline]
+    fn nanos_since(self, epoch: Instant) -> u64 {
+        let since = self.saturating_duration_since(epoch);
+        u64::try_from(since.as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    #[inline]
+    fn after_nanos(self, nanos: u64) -> Option<Instant> {
+        // The bound of an empty wheel is no time at all.
+        if nanos == u64::MAX {
+            return None;
+        }
+        self.checked_add(Duration::from_nanos(nanos))
+    }
+}
+
+/// Hierarchical timing wheel with ticks of `RESOLUTION` nanoseconds.
 ///
 /// [`Self::expire`] may receive a time older than an earlier call's, such as
 /// a peer's stale sample. Expiry never moves the base past a time some caller
 /// passed and treats an older time as the base, so no slot fires before its
 /// firing time has passed.
-pub struct Wheel<const RES: u64> {
+pub struct Wheel<const RESOLUTION: u64> {
     /// Membership of every slot, indexed by slot.
     links: Vec<Link>,
     /// Resident slots, including a detached bucket's.
@@ -169,34 +170,33 @@ pub struct Wheel<const RES: u64> {
     buckets: Box<[Bucket]>,
 }
 
-impl<const RES: u64> Wheel<RES> {
+impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
     /// Rejects resolutions whose 54 tick bits would not span every deadline.
-    const SPANS_U64: () = assert!(RES >= 1024, "wheel resolution must be at least 1024 ns");
+    const SPANS_U64: () = assert!(
+        RESOLUTION >= 1024,
+        "wheel resolution must be at least 1024 ns"
+    );
 
     /// Latest deadline with a representable firing time. Later deadlines are
     /// treated as this one.
-    pub const MAX: u64 = u64::MAX / RES * RES;
+    pub const MAX: u64 = u64::MAX / RESOLUTION * RESOLUTION;
 
     /// An empty wheel whose base is the tick of `now`. `now` must not be later
     /// than the current time, since ticks below the base are due at once, and
     /// should be recent, so near deadlines land on low levels.
     pub fn new(now: u64) -> Self {
+        // Evaluating the assertion rejects a too fine resolution at compile
+        // time, for every instantiation.
         let () = Self::SPANS_U64;
         Self {
             links: Vec::new(),
             len: 0,
-            base: now / RES,
+            base: now / RESOLUTION,
             occupied: [0; LEVELS],
             levels: 0,
             pending: NONE,
             buckets: vec![EMPTY; BUCKETS].into_boxed_slice(),
         }
-    }
-
-    /// Number of resident slots.
-    #[cfg(test)]
-    pub const fn len(&self) -> usize {
-        self.len
     }
 
     /// Whether no slot is resident.
@@ -206,6 +206,7 @@ impl<const RES: u64> Wheel<RES> {
 
     /// Whether `slot` is resident.
     pub fn contains(&self, slot: u32) -> bool {
+        // A slot beyond the link array was never inserted.
         self.links
             .get(slot as usize)
             .is_some_and(|link| link.bucket != NONE)
@@ -214,19 +215,21 @@ impl<const RES: u64> Wheel<RES> {
     /// Tick of `deadline`, rounded up, below `2^54`.
     #[inline]
     const fn tick_of(deadline: u64) -> u64 {
+        // Clamping before rounding keeps every firing time, a tick times the
+        // resolution, within `u64`.
         let deadline = if deadline > Self::MAX {
             Self::MAX
         } else {
             deadline
         };
-        deadline.div_ceil(RES)
+        deadline.div_ceil(RESOLUTION)
     }
 
     /// The time at which a slot inserted at `deadline` fires, at most
     /// [`Self::MAX`].
     #[inline]
     pub const fn rounded(deadline: u64) -> u64 {
-        Self::tick_of(deadline) * RES
+        Self::tick_of(deadline) * RESOLUTION
     }
 
     /// Bucket for a tick that is at least `base`. Both are below `2^54`, so
@@ -234,9 +237,18 @@ impl<const RES: u64> Wheel<RES> {
     #[inline]
     fn bucket_for(tick: u64, base: u64) -> usize {
         assert!(tick >= base);
+
+        // The level is the group of `SLOT_BITS` bits holding the highest bit
+        // in which the tick differs from the base. Setting every bit of the
+        // lowest group keeps the difference nonzero, so a tick equal to the
+        // base lands on level zero.
         let diff = (tick ^ base) | (SLOTS as u64 - 1);
         let level = (63 - diff.leading_zeros() as usize) / SLOT_BITS;
         assert!(level < LEVELS);
+
+        // Above that group the tick matches the base, so within the level the
+        // tick's own bits in the group pick the bucket. They exceed the base's
+        // on every level but zero, so the bucket starts after the base.
         level * SLOTS + ((tick >> (level * SLOT_BITS)) as usize & (SLOTS - 1))
     }
 
@@ -263,6 +275,10 @@ impl<const RES: u64> Wheel<RES> {
     /// Append `slot`, whose tick is set, to `bucket`.
     fn link(&mut self, slot: u32, bucket: usize) {
         let tick = self.links[slot as usize].tick;
+
+        // Append at the tail, so a bucket drains in insertion order. The
+        // minimum only falls here, and removals leave it alone, so it stays
+        // a lower bound of the bucket's ticks without a walk.
         let entry = &mut self.buckets[bucket];
         let tail = entry.tail;
         if tail == NIL {
@@ -279,7 +295,10 @@ impl<const RES: u64> Wheel<RES> {
         link.next = NIL;
         link.bucket = bucket as u16;
 
-        // A detached bucket stays out of the bitmaps while it is not empty.
+        // Only a level bucket's first slot marks it occupied. A nonempty level
+        // bucket is marked already, or is the detached one, which expiry
+        // reaches through `pending` and which stays out of the bitmaps until
+        // it drains. The due list never enters the bitmaps.
         if tail == NIL {
             self.set_occupied(bucket);
         }
@@ -291,6 +310,9 @@ impl<const RES: u64> Wheel<RES> {
             prev, next, bucket, ..
         } = self.links[slot as usize];
         let bucket = bucket as usize;
+
+        // Join the neighbors, or move the bucket's head or tail past the slot
+        // where it has none on that side.
         if prev != NIL {
             self.links[prev as usize].next = next;
         }
@@ -328,8 +350,17 @@ impl<const RES: u64> Wheel<RES> {
         if self.levels == 0 {
             return None;
         }
+
+        // Every tick on a level is later than every tick on the levels below,
+        // and within a level the buckets after the base's position run in
+        // time order, so the earliest residents sit in the lowest occupied
+        // bucket of the lowest occupied level.
         let level = self.levels.trailing_zeros() as usize;
         let slot = self.occupied[level].trailing_zeros() as usize;
+
+        // The bucket's ticks share the base's bits above this level, so its
+        // first tick is the base with this level's group set to the bucket's
+        // position and every lower bit cleared.
         let block = self.base & !((1u64 << ((level + 1) * SLOT_BITS)) - 1);
         let start = block | ((slot as u64) << (level * SLOT_BITS));
         assert!(start >= self.base);
@@ -338,6 +369,8 @@ impl<const RES: u64> Wheel<RES> {
 
     /// Insert `slot`, which must not be resident, at `deadline`.
     pub fn insert(&mut self, slot: u32, deadline: u64) {
+        // The owner picks the slot indices, so the links grow to the highest
+        // one inserted and keep that storage until [`Self::clear`].
         let index = slot as usize;
         if index >= self.links.len() {
             self.links.resize(index + 1, ABSENT);
@@ -373,7 +406,7 @@ impl<const RES: u64> Wheel<RES> {
     pub fn expire(&mut self, now: u64, budget: &mut u32, fire: &mut impl FnMut(u32)) {
         // An older time is treated as the base, which never exceeds a time an
         // earlier caller passed.
-        let target = (now / RES).max(self.base);
+        let target = (now / RESOLUTION).max(self.base);
 
         // Slots inserted below the base fire first.
         while *budget > 0 {
@@ -388,12 +421,16 @@ impl<const RES: u64> Wheel<RES> {
 
         // Drain the detached bucket, then detach the next bucket in time
         // order, until the budget runs out or no bucket starts by the target.
+        // Partial refile units carry across buckets but not across passes.
         let mut refiles = 0;
         loop {
             while self.pending != NONE {
                 if *budget == 0 {
                     return;
                 }
+
+                // Every slot taken from the head leaves the bucket, fired or
+                // refiled elsewhere, so the drain always progresses.
                 let slot = self.buckets[self.pending as usize].head;
                 let tick = self.links[slot as usize].tick;
                 if tick <= target {
@@ -412,7 +449,10 @@ impl<const RES: u64> Wheel<RES> {
                     }
                 }
             }
-            if *budget == 0 || self.buckets[DUE].head != NIL {
+
+            // An exhausted budget leaves the remaining due slots, in the due
+            // list or in later buckets, to the next pass.
+            if *budget == 0 {
                 return;
             }
             let Some((bucket, start)) = self.next_event() else {
@@ -423,7 +463,9 @@ impl<const RES: u64> Wheel<RES> {
             }
 
             // No resident is earlier than start, so the base can move there
-            // and every other resident stays correctly filed.
+            // and every other resident stays correctly filed. Clearing the
+            // bucket's bit detaches it in O(1): it keeps its list, so removals
+            // still find its slots, and the next iteration drains it.
             self.base = start;
             self.clear_occupied(bucket);
             self.pending = bucket as u16;
@@ -446,6 +488,8 @@ impl<const RES: u64> Wheel<RES> {
     /// A bound at or below the time of the latest pass therefore does not
     /// strictly mean that a slot is due.
     pub fn bound(&self) -> u64 {
+        // The due list, the detached bucket, and the earliest level bucket
+        // together hold the earliest resident, whichever it is.
         let mut tick = u64::MAX;
         if self.buckets[DUE].head != NIL {
             tick = tick.min(self.buckets[DUE].min);
@@ -466,12 +510,13 @@ impl<const RES: u64> Wheel<RES> {
         }
 
         // Ticks stay below 2^54, and their firing times at most MAX.
-        tick * RES
+        tick * RESOLUTION
     }
 
     /// Remove every slot and free the storage of their links, which a later
     /// insertion allocates again.
     pub fn clear(&mut self) {
+        // Replacing the vector, unlike clearing it, frees its storage.
         self.links = Vec::new();
         self.buckets.fill(EMPTY);
         self.occupied = [0; LEVELS];
@@ -479,20 +524,26 @@ impl<const RES: u64> Wheel<RES> {
         self.pending = NONE;
         self.len = 0;
     }
-
-    /// Number of slots whose links the wheel has storage for.
-    #[cfg(test)]
-    pub const fn capacity(&self) -> usize {
-        self.links.capacity()
-    }
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use commonware_utils::TestRng;
     use rand::RngExt as _;
     use std::collections::{BTreeMap, BTreeSet};
+
+    impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
+        /// Number of resident slots.
+        pub(crate) const fn len(&self) -> usize {
+            self.len
+        }
+
+        /// Number of slots whose links the wheel has storage for.
+        pub(crate) const fn capacity(&self) -> usize {
+            self.links.capacity()
+        }
+    }
 
     /// Resolution of the sleep timers.
     const FINE: u64 = 1024;
@@ -543,12 +594,12 @@ mod tests {
     /// time had passed at the latest time any caller passed, an unbudgeted
     /// pass leaves nothing due, firing times are less than one tick after
     /// their deadlines, and the bound never exceeds the earliest firing time.
-    fn model<const RES: u64>(seed: u64, steps: usize, max_bits: u32) {
+    fn model<const RESOLUTION: u64>(seed: u64, steps: usize, max_bits: u32) {
         // A wheel and its model: live slots with their firing times, the
         // same ordered by firing time, and free slots for reuse.
         let mut rng = TestRng::new(seed);
         let start = scaled(&mut rng, 50);
-        let mut wheel = Wheel::<RES>::new(start);
+        let mut wheel = Wheel::<RESOLUTION>::new(start);
         let mut latest = start;
         let mut live: BTreeMap<u32, u64> = BTreeMap::new();
         let mut order: BTreeSet<(u64, u32)> = BTreeSet::new();
@@ -571,9 +622,9 @@ mod tests {
                         slots - 1
                     });
                     wheel.insert(slot, deadline);
-                    let firing = Wheel::<RES>::rounded(deadline);
-                    assert!(firing >= deadline.min(Wheel::<RES>::MAX));
-                    assert!(firing - deadline.min(Wheel::<RES>::MAX) < RES);
+                    let firing = Wheel::<RESOLUTION>::rounded(deadline);
+                    assert!(firing >= deadline.min(Wheel::<RESOLUTION>::MAX));
+                    assert!(firing - deadline.min(Wheel::<RESOLUTION>::MAX) < RESOLUTION);
                     assert!(live.insert(slot, firing).is_none());
                     order.insert((firing, slot));
                 }

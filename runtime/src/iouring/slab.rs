@@ -117,21 +117,9 @@ impl<T> Slab<T> {
         Some(value)
     }
 
-    /// Number of live values.
-    #[cfg(test)]
-    pub const fn len(&self) -> usize {
-        self.len
-    }
-
     /// Number of slots, including vacant and retired ones.
     pub const fn slots(&self) -> usize {
         self.slots.len()
-    }
-
-    /// Number of slots the slab has storage for.
-    #[cfg(test)]
-    pub const fn capacity(&self) -> usize {
-        self.slots.capacity()
     }
 
     /// Identity of the live entry at `index`, if any.
@@ -148,6 +136,18 @@ impl<T> Slab<T> {
 pub mod tests {
     use super::*;
     use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    impl<T> Slab<T> {
+        /// Number of live values.
+        pub(crate) const fn len(&self) -> usize {
+            self.len
+        }
+
+        /// Number of slots the slab has storage for.
+        pub(crate) const fn capacity(&self) -> usize {
+            self.slots.capacity()
+        }
+    }
 
     /// Force a live slot's generation so tests can reach exhaustion.
     pub fn set_generation<T>(slab: &mut Slab<T>, id: Id, generation: u64) -> Id {

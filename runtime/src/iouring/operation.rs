@@ -103,15 +103,6 @@ impl Operation {
         }
     }
 
-    /// Return the waiter ID of a waiting operation.
-    #[cfg(test)]
-    pub fn key(&self) -> WaiterId {
-        let State::Waiting { id, .. } = self.state else {
-            panic!("operation already completed");
-        };
-        id
-    }
-
     /// Release the operation before destroying a channel's observer waker.
     fn release(&mut self) {
         // Consume the identity before cleanup can unwind. Publish cancellation
@@ -283,6 +274,16 @@ pub mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    impl Operation {
+        /// Return the waiter ID of a waiting operation.
+        fn key(&self) -> WaiterId {
+            let State::Waiting { id, .. } = self.state else {
+                panic!("operation already completed");
+            };
+            id
+        }
+    }
 
     /// Return the number of unfinished logical requests admitted to the current worker.
     pub fn admitted() -> usize {

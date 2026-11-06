@@ -12,9 +12,9 @@
 //! expires it, since expiry must cancel kernel work on the owner's ring.
 //! Times are nanoseconds since the driver's creation, its epoch. Network
 //! timeouts are at most [`MAX_TIMEOUT`], so a deadline never reaches the end
-//! of that range. A slot fires at its deadline rounded up to [`RES`], never
-//! before it, and one expiry pass spends at most one [`BUDGET`] on firing and
-//! refiling slots.
+//! of that range. A slot fires at its deadline rounded up to [`RESOLUTION`],
+//! never before it, and one expiry pass spends at most one [`BUDGET`] on
+//! firing and refiling slots.
 //!
 //! [`MAX_TIMEOUT`]: super::runtime::MAX_TIMEOUT
 
@@ -27,14 +27,18 @@ use std::time::Instant;
 /// Resolution of request deadlines in nanoseconds, about a millisecond.
 /// Requests usually complete long before their deadlines, so coarse ticks
 /// cost little precision, and the expiries of a burst share a few passes.
-pub const RES: u64 = 1 << 20;
+pub const RESOLUTION: u64 = 1 << 20;
 
 /// Request deadlines of one driver, keyed by waiter slot.
 pub struct Deadlines {
     /// One resident slot per active request with an installed deadline.
-    wheel: Wheel<RES>,
+    wheel: Wheel<RESOLUTION>,
     /// Generation of the waiter whose deadline each slot holds, meaningful
-    /// while the slot is resident.
+    /// while the slot is resident. The wheel keys slots by waiter index alone,
+    /// which the waiter slab reuses for later waiters, so the generation
+    /// tells the waiter that installed a deadline from an identity whose
+    /// waiter already left: removal unlinks a deadline only for the identity
+    /// that installed it, and expiry returns that full identity.
     generations: Vec<u64>,
     /// Origin of the wheel's nanosecond time domain.
     epoch: Instant,
@@ -59,17 +63,24 @@ impl Deadlines {
 
     /// Install the deadline of the waiter `id`, whose slot must not be resident.
     pub fn insert(&mut self, id: WaiterId, deadline: Instant) {
+        // The wheel asserts that the slot is not resident, so one waiter
+        // installs at most one deadline.
         let slot = id.0.index;
         let nanos = deadline.nanos_since(self.epoch);
         self.wheel.insert(slot, nanos);
 
         // The bound is the firing time rather than the deadline, so a worker
         // parked on it wakes when the deadline fires, not up to a tick early.
-        let fires = self.epoch.after_nanos(Wheel::<RES>::rounded(nanos));
+        // The firing time is less than a tick after the deadline, so only a
+        // deadline at the end of `Instant`'s range lacks one, and that
+        // deadline bounds itself.
+        let fires = self.epoch.after_nanos(Wheel::<RESOLUTION>::rounded(nanos));
         let fires = fires.unwrap_or(deadline);
         self.next = Some(self.next.map_or(fires, |next| next.min(fires)));
 
-        // Record the generation that a later removal must match.
+        // Record the generation that a later removal must match. The vector
+        // grows to the highest waiter index and is never shrunk, like the
+        // wheel's links.
         let index = slot as usize;
         if index >= self.generations.len() {
             self.generations.resize(index + 1, 0);
@@ -83,6 +94,8 @@ impl Deadlines {
     /// was never installed or that expiry already detached, and a stale
     /// identity cannot unlink another request's deadline.
     pub fn remove(&mut self, id: WaiterId) -> bool {
+        // Residency alone is not enough: a later waiter in the same slot may
+        // hold its own deadline there.
         let slot = id.0.index;
         let held = self.wheel.contains(slot)
             && self.generations.get(slot as usize) == Some(&id.0.generation);
@@ -106,10 +119,16 @@ impl Deadlines {
     /// [`Self::recycle`].
     pub fn expire(&mut self, now: Instant) -> Vec<WaiterId> {
         let mut fired = std::mem::take(&mut self.fired);
+
+        // A bound later than now skips the wheel with one comparison. An
+        // early bound left by removals can still cost a pass that fires
+        // nothing.
         if self.next.is_none_or(|next| next > now) {
             return fired;
         }
 
+        // Each fired slot leaves the wheel, and its recorded generation
+        // rebuilds the identity that installed it.
         let now = now.nanos_since(self.epoch);
         let mut budget = BUDGET;
         let generations = &self.generations;
@@ -120,7 +139,8 @@ impl Deadlines {
             }));
         });
 
-        // An empty wheel's bound has no instant.
+        // Take the wheel's bound, which can be later than one that removals
+        // left early. An empty wheel's bound has no instant.
         self.next = self.epoch.after_nanos(self.wheel.bound());
         fired
     }
@@ -137,34 +157,10 @@ impl Deadlines {
     pub const fn next_deadline(&self) -> Option<Instant> {
         self.next
     }
-
-    /// Number of installed deadlines.
-    #[cfg(test)]
-    pub const fn len(&self) -> usize {
-        self.wheel.len()
-    }
-
-    /// The identity whose deadline `slot` holds, if any.
-    #[cfg(test)]
-    pub fn holder(&self, slot: u32) -> Option<WaiterId> {
-        self.wheel.contains(slot).then(|| {
-            WaiterId(super::slab::Id {
-                index: slot,
-                generation: self.generations[slot as usize],
-            })
-        })
-    }
-
-    /// The instant at which a deadline installed for `deadline` fires.
-    #[cfg(test)]
-    pub fn fires_at(&self, deadline: Instant) -> Instant {
-        let nanos = Wheel::<RES>::rounded(deadline.nanos_since(self.epoch));
-        self.epoch.after_nanos(nanos).unwrap()
-    }
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::iouring::slab::Id;
     use commonware_utils::TestRng;
@@ -174,6 +170,29 @@ mod tests {
         panic::{AssertUnwindSafe, catch_unwind},
         time::Duration,
     };
+
+    impl Deadlines {
+        /// Number of installed deadlines.
+        pub(crate) const fn len(&self) -> usize {
+            self.wheel.len()
+        }
+
+        /// The identity whose deadline `slot` holds, if any.
+        pub(crate) fn holder(&self, slot: u32) -> Option<WaiterId> {
+            self.wheel.contains(slot).then(|| {
+                WaiterId(Id {
+                    index: slot,
+                    generation: self.generations[slot as usize],
+                })
+            })
+        }
+
+        /// The instant at which a deadline installed for `deadline` fires.
+        pub(crate) fn fires_at(&self, deadline: Instant) -> Instant {
+            let nanos = Wheel::<RESOLUTION>::rounded(deadline.nanos_since(self.epoch));
+            self.epoch.after_nanos(nanos).unwrap()
+        }
+    }
 
     /// The identity of `generation` at `index`.
     const fn id(index: u32, generation: u64) -> WaiterId {
@@ -212,7 +231,7 @@ mod tests {
         let earlier = first + Duration::from_nanos(1);
         deadlines.insert(id(0, 1), earlier);
         let fires = deadlines.fires_at(earlier);
-        assert_eq!(fires, first + Duration::from_nanos(RES));
+        assert_eq!(fires, first + Duration::from_nanos(RESOLUTION));
         assert_eq!(deadlines.next_deadline(), Some(fires));
         assert!(expire(&mut deadlines, fires - Duration::from_nanos(1)).is_empty());
         assert_eq!(expire(&mut deadlines, fires), [id(0, 1)]);
@@ -236,16 +255,16 @@ mod tests {
 
         // A deadline just past a tick fires at the next one, which the bound
         // caches, so a worker parked on the bound wakes once, when it fires.
-        let deadline = epoch + Duration::from_nanos(RES + 1);
+        let deadline = epoch + Duration::from_nanos(RESOLUTION + 1);
         deadlines.insert(id(0, 0), deadline);
-        let fires = epoch + Duration::from_nanos(2 * RES);
+        let fires = epoch + Duration::from_nanos(2 * RESOLUTION);
         assert_eq!(deadlines.fires_at(deadline), fires);
         assert_eq!(deadlines.next_deadline(), Some(fires));
 
         // A later deadline leaves the bound, and one on a tick caches itself.
         deadlines.insert(id(1, 0), fires + Duration::from_nanos(1));
         assert_eq!(deadlines.next_deadline(), Some(fires));
-        let aligned = epoch + Duration::from_nanos(RES);
+        let aligned = epoch + Duration::from_nanos(RESOLUTION);
         deadlines.insert(id(2, 0), aligned);
         assert_eq!(deadlines.next_deadline(), Some(aligned));
 
@@ -256,7 +275,7 @@ mod tests {
         assert_eq!(expire(&mut deadlines, fires), [id(0, 0)]);
         assert_eq!(
             deadlines.next_deadline(),
-            Some(epoch + Duration::from_nanos(3 * RES))
+            Some(epoch + Duration::from_nanos(3 * RESOLUTION))
         );
     }
 
@@ -266,15 +285,21 @@ mod tests {
         // them, and the bound covers the earliest.
         let epoch = Instant::now();
         let mut deadlines = Deadlines::new(epoch);
-        let offsets = [1, RES - 1, RES, RES + 1, 59_999_999_999];
+        let offsets = [
+            1,
+            RESOLUTION - 1,
+            RESOLUTION,
+            RESOLUTION + 1,
+            59_999_999_999,
+        ];
         for (slot, offset) in offsets.iter().enumerate() {
             let deadline = epoch + Duration::from_nanos(*offset);
             deadlines.insert(id(slot as u32, 0), deadline);
             let fires = deadlines.fires_at(deadline);
             assert!(fires >= deadline);
-            assert!(fires < deadline + Duration::from_nanos(RES));
+            assert!(fires < deadline + Duration::from_nanos(RESOLUTION));
         }
-        assert!(deadlines.next_deadline().unwrap() <= epoch + Duration::from_nanos(RES));
+        assert!(deadlines.next_deadline().unwrap() <= epoch + Duration::from_nanos(RESOLUTION));
 
         // Each fires at its firing time, not one nanosecond earlier.
         let mut fired = Vec::new();
@@ -372,7 +397,7 @@ mod tests {
         let far = epoch + Duration::from_secs(30 * 365 * 24 * 60 * 60);
         deadlines.insert(id(1, 0), far);
         let fires = deadlines.fires_at(far);
-        assert!(fires >= far && fires < far + Duration::from_nanos(RES));
+        assert!(fires >= far && fires < far + Duration::from_nanos(RESOLUTION));
         assert!(deadlines.next_deadline().unwrap() <= fires);
         assert!(expire(&mut deadlines, far - Duration::from_secs(1)).is_empty());
         assert_eq!(expire(&mut deadlines, fires), [id(1, 0)]);
@@ -406,15 +431,15 @@ mod tests {
                         generations[slot as usize] += 1;
                         let generation = generations[slot as usize];
                         let offset = match rng.random_range(0..5) {
-                            0 => now.saturating_sub(rng.random_range(0..=10 * RES)),
+                            0 => now.saturating_sub(rng.random_range(0..=10 * RESOLUTION)),
                             1 => now,
-                            2 => now + rng.random_range(0..=1_000 * RES),
+                            2 => now + rng.random_range(0..=1_000 * RESOLUTION),
                             _ => {
                                 now + rng.random_range(0..=30 * 365 * 24 * 3600 * 1_000_000_000u64)
                             }
                         };
                         // Independent rounding, without calling the wheel.
-                        let firing = offset.div_ceil(RES) * RES;
+                        let firing = offset.div_ceil(RESOLUTION) * RESOLUTION;
                         deadlines
                             .insert(id(slot, generation), epoch + Duration::from_nanos(offset));
                         live.insert(slot, (generation, firing));
@@ -439,7 +464,7 @@ mod tests {
                         now += if rng.random_range(0..10) == 0 {
                             rng.random_range(0..=24 * 3600 * 1_000_000_000u64)
                         } else {
-                            rng.random_range(0..=10_000 * RES)
+                            rng.random_range(0..=10_000 * RESOLUTION)
                         };
                         let at = epoch + Duration::from_nanos(now);
                         let mut passes = 0;
