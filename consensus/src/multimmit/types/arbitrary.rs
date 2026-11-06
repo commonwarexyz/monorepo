@@ -71,12 +71,11 @@ where
 
 macro_rules! impl_arbitrary_bls12381 {
     ($suite:ident) => {
-        impl<P, V, Q> ArbitraryScheme for $suite::Scheme<P, V, Q>
+        impl<P, V> ArbitraryScheme for $suite::Scheme<P, V, $suite::Threshold>
         where
             P: PublicKey,
             V: Variant,
             V::Signature: for<'a> Arbitrary<'a>,
-            Q: bls12381::Quorum,
         {
             fn attestation(u: &mut Unstructured<'_>) -> ArbitraryResult<Attestation<Self>> {
                 arbitrary_attestation(u)
@@ -134,7 +133,7 @@ fn arbitrary_listed_certificate(
     })
 }
 
-impl<Q: ed25519_suite::Quorum> ArbitraryScheme for ed25519_suite::Scheme<Q> {
+impl ArbitraryScheme for ed25519_suite::Scheme {
     fn attestation(u: &mut Unstructured<'_>) -> ArbitraryResult<Attestation<Self>> {
         arbitrary_attestation(u)
     }
