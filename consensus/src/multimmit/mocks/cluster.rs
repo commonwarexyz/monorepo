@@ -188,6 +188,8 @@ pub struct ClusterOptions {
     pub limits: PathLimits,
     /// Each chain's own path limits, in chain order, replacing [`Self::limits`].
     pub chain_limits: Option<Vec<PathLimits>>,
+    /// Whether chains with `d = 0` and `e = 0` are payment chains.
+    pub payments: bool,
 }
 
 impl Default for ClusterOptions {
@@ -207,6 +209,7 @@ impl Default for ClusterOptions {
             view_retention: ViewDelta::new(16),
             limits: PathLimits::new(2, 1),
             chain_limits: None,
+            payments: false,
         }
     }
 }
@@ -522,6 +525,7 @@ impl<S: Fixture> Cluster<S> {
         let mut committee = Committee::builder(options.seed, options.n)
             .producers(producers.to_vec())
             .limits(options.limits);
+        committee = committee.payments(options.payments);
         if let Some(limits) = &options.chain_limits {
             committee = committee.chain_limits(limits.clone());
         }

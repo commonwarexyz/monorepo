@@ -4,7 +4,7 @@ use crate::config::RunConfig;
 use commonware_consensus::{
     multimmit::{
         config::{Parameters, Protocol, Tuning},
-        scheme::{DaFaults, Generic, bls12381_sas},
+        scheme::{Generic, bls12381_sas},
         types::{BlockRef, CertificateId, ChainId, CodecConfig, EpochGenesis, PathLimits},
     },
     types::{Epoch, Height, Participant, ViewDelta},
@@ -16,18 +16,22 @@ use commonware_cryptography::{
 use commonware_utils::{TestRng, ordered::Set};
 use std::{sync::Arc, time::Duration};
 
-/// The quorum DA certificates are formed at: `n - f` with the `receipts` feature, so that chains
-/// with zero pipeline depth and extension bound are receipt chains, and `n - 2f` otherwise.
-#[cfg(feature = "receipts")]
-pub type DaQuorum = commonware_consensus::multimmit::scheme::Binding;
-/// The quorum DA certificates are formed at: `n - f` with the `receipts` feature, so that chains
-/// with zero pipeline depth and extension bound are receipt chains, and `n - 2f` otherwise.
-#[cfg(not(feature = "receipts"))]
-pub type DaQuorum = commonware_consensus::multimmit::scheme::Available;
+/// The DA role: aggregate DA certificates that count their signers with the `payments` feature, so
+/// payment chains' producers can form receipts, and threshold certificates otherwise.
+#[cfg(feature = "payments")]
+pub type DaRole = bls12381_sas::Aggregate;
+/// The DA role: aggregate DA certificates that count their signers with the `payments` feature, so
+/// payment chains' producers can form receipts, and threshold certificates otherwise.
+#[cfg(not(feature = "payments"))]
+pub type DaRole = bls12381_sas::Threshold;
+
+/// Whether chains with zero pipeline depth and extension bound are payment chains.
+pub const PAYMENTS: bool = cfg!(feature = "payments");
 
 /// The signing suite this example runs: the synchronized aggregate suite over Ed25519 identities,
-/// with Pointcheval-Sanders votes and threshold DA and nullification certificates at [`DaQuorum`].
-pub type Suite = bls12381_sas::Scheme<ed25519::PublicKey, MinSig, DaQuorum>;
+/// with Pointcheval-Sanders votes, a threshold nullification certificate, and DA certificates of
+/// the [`DaRole`].
+pub type Suite = bls12381_sas::Scheme<ed25519::PublicKey, MinSig, DaRole>;
 
 /// Signature namespace for this example's consensus deployment.
 const CONSENSUS_NAMESPACE: &[u8] = b"_COMMONWARE_LOG_MULTIMMIT_CONSENSUS";
@@ -65,7 +69,7 @@ pub struct Committee {
 
 impl Committee {
     /// Builds a committee of `participants` from `seed`, with one producer chain per entry of
-    /// `producers`, whose DA certificates are formed at [`DaQuorum`].
+    /// `producers`, running payment chains when [`PAYMENTS`] is set.
     fn new(seed: u64, participants: u32, producers: Vec<Participant>, limits: PathLimits) -> Self {
         let mut network_keys = (0..participants)
             .map(|index| ed25519::PrivateKey::from_seed(seed ^ (u64::from(index) + 1)))
@@ -85,7 +89,7 @@ impl Committee {
             limits,
         )
         .expect("validated committee configuration")
-        .with_da_quorum(<DaQuorum as DaFaults>::QUORUM);
+        .with_payments(PAYMENTS);
         let config = Protocol::from_parameters(Arc::new(parameters), genesis)
             .expect("validated committee configuration");
         // A deterministic generator is what lets every node derive the same keys from the seed.
@@ -195,10 +199,10 @@ mod tests {
     fn tuning_is_valid_for_the_shipped_committee() {
         // The engine cross-checks the tuning against the committee, so an over-tight bound only
         // shows up at startup. Check it here so the example cannot ship a manifest it rejects,
-        // for the default pipelined chains and for receipt chains with a widened window.
-        let receipts = PathLimits::new(0, 0).with_pipeline_window(16).unwrap();
+        // for the default pipelined chains and for certified-only chains with a widened window.
+        let certified = PathLimits::new(0, 0).with_pipeline_window(16).unwrap();
         for participants in [6u32, 7, 11, 50] {
-            for limits in [PathLimits::new(PIPELINE_DEPTH, EXTENSION_BOUND), receipts] {
+            for limits in [PathLimits::new(PIPELINE_DEPTH, EXTENSION_BOUND), certified] {
                 let committee = Committee::new(
                     COMMITTEE_SEED,
                     participants,
@@ -220,9 +224,8 @@ mod tests {
         let producers = vec![Participant::new(0), Participant::new(3)];
         let first = Committee::new(COMMITTEE_SEED, 7, producers.clone(), limits);
         let second = Committee::new(COMMITTEE_SEED, 7, producers, limits);
-        // The epoch's DA quorum is the suite's: binding needs n - f shares, here 6 of 7.
-        let expected = if cfg!(feature = "receipts") { 6 } else { 5 };
-        assert_eq!(first.codec().da_quorum(), expected);
+        // A DA certificate needs n - 2f shares, here 5 of 7, with or without payment chains.
+        assert_eq!(first.codec().da_quorum(), 5);
         assert_eq!(first.identities, second.identities);
         assert_eq!(first.config.genesis().tips().len(), 2);
         for (index, signer) in first.signers.iter().enumerate() {

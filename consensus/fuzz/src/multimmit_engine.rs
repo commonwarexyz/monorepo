@@ -8,9 +8,9 @@ use commonware_consensus::{
             Fixture, RecordingReporter,
             cluster::{Cluster, ClusterOptions, Launch, LaunchSpec},
         },
-        scheme::{DaFaults as _, Scheme},
+        scheme::Scheme,
         test_utils::{ResourceLimits, inspection_cursor, inspection_generation, resource_limits},
-        types::{Activity, BlockRef, ChainId, CodecConfig, DaQuorum, PathLimits},
+        types::{Activity, BlockRef, ChainId, CodecConfig, PathLimits},
     },
     types::{Attributable as _, Epoch, ViewDelta},
 };
@@ -178,7 +178,7 @@ impl<S: Fixture> Harness<S> {
         let committee = cluster.fixture();
         let resources = resource_limits::<Sha256, S>(committee.config.clone(), cluster.tuning())
             .expect("fuzz tuning is valid");
-        let state = Invariants::new::<S>(committee.config.epoch(), committee.codec());
+        let state = Invariants::new(committee.config.epoch(), committee.codec());
 
         Self {
             context,
@@ -515,12 +515,9 @@ struct Invariants {
 }
 
 impl Invariants {
-    fn new<S: Scheme>(epoch: Epoch, codec: CodecConfig) -> Self {
+    fn new(epoch: Epoch, codec: CodecConfig) -> Self {
         let faults = (NODES - 1) / 5;
-        let da_quorum = match S::DaFaults::QUORUM {
-            DaQuorum::Available => NODES - 2 * faults,
-            DaQuorum::Binding => NODES - faults,
-        };
+        let da_quorum = NODES - 2 * faults;
         let nullification_quorum = 2 * faults + 1;
         let view_quorum = NODES - faults;
         let designation_quorum = 2 * faults + 1;

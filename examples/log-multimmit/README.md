@@ -164,12 +164,13 @@ DA-certificate lag at the configured block rate, so smaller bodies at the same b
 need proportionally larger values. With zero depth and extension bound the pipeline window plays
 that role.
 
-Building with `--features receipts` forms DA certificates at the binding `n - f` quorum instead of
-`n - 2f`. Every chain with zero pipeline depth and extension bound is then a receipt chain: every
-validator sends its DA vote to every other validator and recovers the chain's certificates
-itself, so a certificate is a receipt that its block will be ordered. For example, run every
-node above with `cargo run --release --features receipts --` and these flags to make every chain
-a receipt chain with room for eight uncertified blocks per producer:
+Building with `--features payments` turns on payment chains. Every chain with zero pipeline depth
+and extension bound is then a payment chain: validators still send its DA votes to its producer,
+which assembles and broadcasts the `n - 2f` certificate that places the block, then keeps collecting
+votes and forms an `n - f` receipt. Payment chains go first in the order. DA votes are signed with
+the ordinary keys and aggregated with a signer bitmap, so their signers can be counted. For
+example, run every node above with `cargo run --release --features payments --` and these flags to
+make every chain a payment chain with room for eight uncertified blocks per producer:
 
 ```bash
 --pipeline-depth 0 --extension-bound 0 --pipeline-window 8

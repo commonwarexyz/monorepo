@@ -12,6 +12,8 @@ macro_rules! for_each_suite {
         $test::<Bls<MinSig>>();
         $test::<Sas<MinPk>>();
         $test::<Sas<MinSig>>();
+        $test::<Bls<MinPk, bls12381::Aggregate>>();
+        $test::<Sas<MinSig, bls12381::Aggregate>>();
         $test::<Ed25519>();
         $test::<Mock>();
     }};
@@ -33,9 +35,9 @@ mod subjects;
 mod threshold;
 
 use super::{
-    Available, Binding, DaCertificateOf, DaFaults, DaRecoveryError, Error, Generic, Namespace,
-    NullifyFaults, OrdinarySignature, OrdinarySubject, Period, Scheme, SignatureVerification,
-    Verified, bls12381, bls12381_sas, ed25519 as ed25519_suite,
+    Available, DaCertificateOf, DaRecoveryError, Error, Generic, Namespace, NullifyFaults,
+    OrdinarySignature, OrdinarySubject, Period, Scheme, SignatureVerification, Verified, bls12381,
+    bls12381_sas, ed25519 as ed25519_suite,
 };
 use crate::{
     Epochable as _, Viewable as _,
@@ -51,8 +53,8 @@ use crate::{
         },
         types::{
             Anchor, Artifact, Attestation, BlockRef, CertificateId, ChainId, ChainProposal,
-            CodecConfig, DaCertificate, DaQuorum, DaVote, DigestedLeader, Error as TypesError,
-            Extension, LeaderBlock, Lqc, NoVote, Nullification, Nullify, PathLimits, Position,
+            CodecConfig, DaCertificate, DaVote, DigestedLeader, Error as TypesError, Extension,
+            LeaderBlock, Lqc, NoVote, Nullification, Nullify, PathLimits, Position,
             SignedLeaderBlock, SignedTransactionBlock, Tally, TipRecord, TransactionBlockHeader,
             ViewMessage, Vote, VoteBody, Vqc, genesis_tip_commitment,
         },

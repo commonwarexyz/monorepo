@@ -432,6 +432,21 @@ impl<S: Scheme> Generic<S> {
         self.verify_one(rng, self.da_certificate_checks(certificate), strategy)
     }
 
+    /// Verifies a payment chain's receipt: a data-availability certificate that also counts at
+    /// least [`Self::receipt_quorum`] signers.
+    ///
+    /// A receipt verifies as an ordinary certificate too. The signer count is checked first, so a
+    /// certificate below the receipt quorum costs no signature check.
+    pub fn verify_receipt<R: CryptoRng, D: Digest>(
+        &self,
+        rng: &mut R,
+        certificate: &DaCertificate<S, D>,
+        strategy: &impl Strategy,
+    ) -> bool {
+        self.is_receipt(certificate.certificate())
+            && self.verify_da_certificate(rng, certificate, strategy)
+    }
+
     /// Verifies a nullification.
     pub fn verify_nullification<R: CryptoRng>(
         &self,
