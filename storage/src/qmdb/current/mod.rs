@@ -315,9 +315,8 @@
 //! Pending and partial slots are independent. When both are present, pending hashes in before
 //! partial.
 //!
-//! The canonical root is returned by [`db::Db::root`]. State sync uses the ops root returned
-//! by [`db::Db::ops_root`] and the
-//! [`sync::Database::ops_root`](crate::qmdb::sync::Database::ops_root) trait method.
+//! The canonical root is returned by [`db::Db::root`]. State sync uses [`db::Db::ops_root`],
+//! also exposed by [`sync::Database::ops_root`](crate::qmdb::sync::Database::ops_root).
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
 //! verifying ops proofs directly should use [`crate::qmdb::ProofExt::verify`]. After sync, the
