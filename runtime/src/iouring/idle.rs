@@ -5,35 +5,35 @@
 //! parks through its [`Searcher`]. [`Searcher::prepare_park`] returns a
 //! [`Park`] that says what the worker does after its last look.
 //!
-//! # Idle state and waker
+//! # Idle state and parker
 //!
 //! On a kick, through [`Idle::notify`], or a push into the global queue,
 //! through [`Idle::notify_global`], [`Idle`] decides whether to wake a pool
 //! worker and which one. A successful claim clears that worker's idle bit and
-//! transfers a reserved search count, then calls [`Waker::notify`] on the
-//! worker's mailbox waker. The notification advances the [`Waker`]'s sequence,
-//! which the worker's next wait compares against, and wakes it if it is armed.
-//! Mailbox messages and driver permit grants notify the same waker without
+//! transfers a reserved search count, then calls [`Unparker::unpark`] on the
+//! worker's mailbox. The unpark advances the sequence of the worker's word,
+//! which its next wait compares against, and wakes it if it is armed.
+//! Mailbox messages and driver permit grants unpark the same word without
 //! going through [`Idle`].
 //!
 //! A pool worker publishes its idle bit, returns any held search count, and
 //! fences before its last look for work. If it proceeds to wait, the
 //! publication stays live until withdrawal, even if a claim clears the bit.
 //!
-//! The worker observes the waker's sequence before its last look for work.
-//! With unfinished I/O requests, [`Driver::park`] arms the waker before waiting
-//! in the io_uring ring on its futex word. Otherwise, [`Waker::park_idle`] arms
-//! it after any unsuccessful spin and waits on the same word. Both paths block
-//! only while the armed word still carries the observed sequence, so an early
-//! notification prevents blocking. After spinning or waiting, even if it did
-//! not block, the worker ends its publication through
-//! [`Searcher::finish_park`] before user code and keeps the count a claim
-//! brought.
+//! The worker observes its word's sequence through its [`Parker`] before
+//! its last look for work. With unfinished I/O requests, [`Driver::park`]
+//! arms the word before waiting on it in the io_uring ring. Otherwise,
+//! [`Parker::park`] arms it after any unsuccessful spin and waits on it with
+//! a thread futex wait. Both paths block only while the armed word still
+//! carries the observed sequence, so an early unpark prevents blocking. After
+//! spinning or waiting, even if it did not block, the worker ends its
+//! publication through [`Searcher::finish_park`] before user code and keeps
+//! the count a claim brought.
 //!
 //! [`Driver::park`]: super::driver::Driver::park
-//! [`Waker`]: super::waker::Waker
-//! [`Waker::park_idle`]: super::waker::Waker::park_idle
-//! [`Waker::notify`]: super::waker::Waker::notify
+//! [`Parker`]: super::park::Parker
+//! [`Parker::park`]: super::park::Parker::park
+//! [`Unparker::unpark`]: super::park::Unparker::unpark
 //!
 //! # Waking a parked worker
 //!
@@ -91,7 +91,7 @@
 //!   reserve a count                          run
 //!     kick: only if still zero             a count held: wait
 //!   claim lowest bit                       stealable backlog: take the count
-//!     success: notify its worker             if zero, withdraw, search
+//!     success: unpark its worker             if zero, withdraw, search
 //!     failure: return the reserved count   otherwise: wait
 //!       last return: fence and retry       wait: spin, or arm and attempt a wait,
 //!                                            then withdraw, keeping a claim's count
@@ -305,7 +305,7 @@ impl Idle {
         // The exchange releases the reserved count to the claimed worker,
         // whose withdrawal acquires it, so the worker's later return of that
         // count follows the reservation in the count's modification order,
-        // even when its wait returns before this wake notifies it. A failed
+        // even when its wait returns before this wake unparks it. A failed
         // exchange only yields the set to retry with, so it is relaxed.
         while idle != 0 {
             // Claim the lowest published worker.
@@ -320,10 +320,10 @@ impl Idle {
                     #[cfg(test)]
                     tests::at_wake_point(tests::WakePoint::AfterClaim);
 
-                    // A notification before the worker blocks moves the
-                    // sequence its wait compares against, so the claimed
-                    // worker wakes either way.
-                    mailboxes[index as usize].waker.notify();
+                    // An unpark before the worker blocks moves the sequence
+                    // its wait compares against, so the claimed worker wakes
+                    // either way.
+                    mailboxes[index as usize].unparker.unpark();
                     return true;
                 }
                 Err(actual) => idle = actual,
@@ -674,6 +674,10 @@ impl Drop for Searcher<'_> {
 pub mod tests {
     use super::*;
     use crate::iouring::{
+        park::{
+            Parker,
+            tests::{notifications, reset},
+        },
         pool::{
             HALF,
             tests::{pool, push, ready, task},
@@ -681,7 +685,6 @@ pub mod tests {
         queue::{CAPACITY, STEALABLE},
         task::{Task, tests::queue},
         tasks::Tasks,
-        waker::tests::{notifications, reset},
     };
     use std::{cell::RefCell, rc::Rc};
 
@@ -765,27 +768,26 @@ pub mod tests {
             .collect()
     }
 
-    /// Whether worker `index`'s waker was notified since its last reset.
+    /// Whether worker `index` was unparked since its word's last reset.
     fn notified(pool: &Pool, index: u32) -> bool {
-        notifications(&pool.mailbox(index).waker) != 0
+        notifications(&pool.mailbox(index).unparker) != 0
     }
 
-    /// See worker one's notification through a futex wait, an arm, or a spin,
-    /// then reset its waker.
-    fn observe_notification(pool: &Pool, mode: usize) {
-        let waker = &pool.mailbox(1).waker;
+    /// See worker one's notification through a futex wait, an arm, or a spin
+    /// on its `parker`, then reset its word.
+    fn observe_notification(pool: &Pool, parker: &Parker, mode: usize) {
         assert!(notified(pool, 1));
 
         // A notification since the worker's observation ends the wait at once,
         // and turns the arm back.
         match mode {
-            0 => assert!(waker.park_idle(0, None).is_none()),
-            1 => assert!(!waker.arm(0).still_idle()),
-            _ => assert!(waker.moved(0)),
+            0 => assert!(parker.park(0, None).is_none()),
+            1 => assert!(!parker.arm(0).still_idle()),
+            _ => assert!(parker.moved(0)),
         }
 
         // The worker observes again before its next wait, which then blocks.
-        reset(waker);
+        reset(parker);
         assert!(!notified(pool, 1));
     }
 
@@ -805,11 +807,12 @@ pub mod tests {
         }
     }
 
-    /// A worker's part and the owner's end of its run queue, shared with hooks.
-    type Part = Rc<RefCell<(Searcher<'static>, Ready)>>;
+    /// A worker's part, the owner's end of its run queue, and its parker,
+    /// shared with hooks.
+    type Part = Rc<RefCell<(Searcher<'static>, Ready, Parker)>>;
 
     /// A pool that lives as long as the test thread, for hooks that act on
-    /// its workers, with every worker's part and run queue owner.
+    /// its workers, with every worker's part, run queue owner, and parker.
     fn leaked(workers: usize) -> (&'static Pool, Vec<Part>) {
         let pool: &'static Pool = Box::leak(Box::new(pool(workers)));
 
@@ -818,6 +821,7 @@ pub mod tests {
                 Rc::new(RefCell::new((
                     Searcher::new(pool, index),
                     ready(pool, index),
+                    pool.mailbox(index).parker(),
                 )))
             })
             .collect();
@@ -1013,13 +1017,13 @@ pub mod tests {
             let pool = pool(3);
             let set = Tasks::new(1);
             let (mut zero, mut one, mut two) = (ready(&pool, 0), ready(&pool, 1), ready(&pool, 2));
-            let mut searcher = Searcher::new(&pool, 0);
-            let mut parker = Searcher::new(&pool, 1);
+            let mut holder = Searcher::new(&pool, 0);
+            let mut searcher = Searcher::new(&pool, 1);
 
             // In the first round, worker zero keeps the count of a search that
             // found nothing.
             if held {
-                assert!(!searcher.search(&mut zero));
+                assert!(!holder.search(&mut zero));
             }
 
             // A backlog queued without a kick, as a take leaves it.
@@ -1031,7 +1035,7 @@ pub mod tests {
             }
 
             // Worker one sees worker two's backlog in its last look.
-            let park = parker.prepare_park(&one);
+            let park = searcher.prepare_park(&one);
 
             if held {
                 // The held count covers the backlog, so worker one waits unclaimed.
@@ -1039,9 +1043,9 @@ pub mod tests {
                 assert!(pool.idle().is_idle(1));
 
                 // Worker zero's return is the last, so it claims worker one.
-                searcher.leave_search();
+                holder.leave_search();
                 assert!(!pool.idle().is_idle(1) && notified(&pool, 1));
-                parker.finish_park();
+                searcher.finish_park();
             } else {
                 // With no count held, worker one takes one and withdraws to search.
                 assert_eq!(park, Park::Search);
@@ -1049,12 +1053,12 @@ pub mod tests {
             }
 
             // Either way, worker one holds a count and steals the backlog.
-            assert!(parker.searching);
-            assert!(parker.search(&mut one));
-            parker.leave_search();
+            assert!(searcher.searching);
+            assert!(searcher.search(&mut one));
+            searcher.leave_search();
             assert_eq!(pool.idle().search_count(), 0);
 
-            drop((searcher, parker));
+            drop((holder, searcher));
             release(&pool, &mut [&mut zero, &mut one, &mut two], tasks);
         }
     }
@@ -1129,7 +1133,7 @@ pub mod tests {
         let pool = pool(3);
         let set = Tasks::new(1);
         let (mut zero, mut one, mut two) = (ready(&pool, 0), ready(&pool, 1), ready(&pool, 2));
-        let mut parker = Searcher::new(&pool, 0);
+        let mut searcher = Searcher::new(&pool, 0);
         let mut thief = Searcher::new(&pool, 1);
 
         // Fill worker zero's run queue without kicks.
@@ -1155,7 +1159,7 @@ pub mod tests {
         // The thief's held count makes worker zero wait rather than search,
         // although a backlog is stealable.
         assert_eq!(zero.room(), 0);
-        assert_eq!(parker.prepare_park(&zero), Park::Wait);
+        assert_eq!(searcher.prepare_park(&zero), Park::Wait);
         assert!(pool.idle().is_idle(0) && !notified(&pool, 0));
         assert_eq!(pool.idle().search_count(), 1);
 
@@ -1169,9 +1173,9 @@ pub mod tests {
         assert!(!pool.idle().is_idle(0) && notified(&pool, 0));
 
         // Worker zero resumes with the count its wake took and steals the backlog.
-        parker.finish_park();
-        assert!(parker.search(&mut zero));
-        parker.leave_search();
+        searcher.finish_park();
+        assert!(searcher.search(&mut zero));
+        searcher.leave_search();
         assert_eq!(pool.idle().search_count(), 0);
 
         release(&pool, &mut [&mut zero, &mut one, &mut two], tasks);
@@ -1191,16 +1195,16 @@ pub mod tests {
         assert_eq!(pool.idle().search_count(), 0);
 
         // Published, unclaimed.
-        let mut parker = Searcher::new(&pool, 1);
-        assert_eq!(parker.prepare_park(&one), Park::Wait);
+        let mut searcher = Searcher::new(&pool, 1);
+        assert_eq!(searcher.prepare_park(&one), Park::Wait);
 
         // The drop withdraws the live publication.
-        drop(parker);
+        drop(searcher);
         assert!(!pool.idle().is_idle(1));
 
         // Published, then claimed by a push.
-        let mut parker = Searcher::new(&pool, 1);
-        assert_eq!(parker.prepare_park(&one), Park::Wait);
+        let mut searcher = Searcher::new(&pool, 1);
+        assert_eq!(searcher.prepare_park(&one), Park::Wait);
 
         // The push clears the worker's bit and reserves a count for it.
         let task = push(&pool, &set);
@@ -1208,7 +1212,7 @@ pub mod tests {
         assert_eq!(pool.idle().search_count(), 1);
 
         // The drop withdraws, taking the count the claim brought, and returns it.
-        drop(parker);
+        drop(searcher);
         assert_eq!(pool.idle().search_count(), 0);
 
         // Holding the count of a search that found nothing.
@@ -1235,7 +1239,7 @@ pub mod tests {
 
         // Worker one parks, the only worker the kick can claim.
         {
-            let (candidate, ready) = &mut *parts[1].borrow_mut();
+            let (candidate, ready, _) = &mut *parts[1].borrow_mut();
             assert_eq!(candidate.prepare_park(ready), Park::Wait);
         }
 
@@ -1250,7 +1254,7 @@ pub mod tests {
         on_wake_point(WakePoint::AfterFailedClaim, {
             let part = parts[2].clone();
             move || {
-                let (later, ready) = &mut *part.borrow_mut();
+                let (later, ready, _) = &mut *part.borrow_mut();
                 assert_eq!(later.prepare_park(ready), Park::Wait);
             }
         });
@@ -1261,7 +1265,7 @@ pub mod tests {
         assert!(!pool.idle().is_idle(2) && notified(pool, 2));
 
         // Worker two resumes with the count and steals, leaving a clean idle state.
-        let (later, ready) = &mut *parts[2].borrow_mut();
+        let (later, ready, _) = &mut *parts[2].borrow_mut();
         later.finish_park();
         assert!(later.search(ready));
         later.leave_search();
@@ -1284,7 +1288,7 @@ pub mod tests {
 
         // Worker one parks, the only worker the push can claim.
         {
-            let (candidate, ready) = &mut *parts[1].borrow_mut();
+            let (candidate, ready, _) = &mut *parts[1].borrow_mut();
             assert_eq!(candidate.prepare_park(ready), Park::Wait);
         }
 
@@ -1314,7 +1318,7 @@ pub mod tests {
                 ));
 
                 // Then worker two parks, leaving the backlog to the held count.
-                let (later, ready) = &mut *later.borrow_mut();
+                let (later, ready, _) = &mut *later.borrow_mut();
                 assert_eq!(later.prepare_park(ready), Park::Wait);
             }
         });
@@ -1325,7 +1329,7 @@ pub mod tests {
         assert!(!pool.idle().is_idle(2) && notified(pool, 2));
 
         // Worker two resumes with the count and steals the kicked backlog.
-        let (later, ready) = &mut *parts[2].borrow_mut();
+        let (later, ready, _) = &mut *parts[2].borrow_mut();
         later.finish_park();
         assert!(later.search(ready));
         later.leave_search();
@@ -1361,7 +1365,7 @@ pub mod tests {
         });
 
         // Worker zero searches and returns the claim's count, keeping its own.
-        let (searcher, ready) = &mut *parts[0].borrow_mut();
+        let (searcher, ready, _) = &mut *parts[0].borrow_mut();
         assert_eq!(searcher.prepare_park(ready), Park::Search);
         assert!(notified(pool, 0));
         assert_eq!(pool.idle().search_count(), 1);
@@ -1390,8 +1394,8 @@ pub mod tests {
 
             // Worker one finds no work and publishes itself parked.
             {
-                let (parker, ready) = &mut *parts[1].borrow_mut();
-                assert_eq!(parker.prepare_park(ready), Park::Wait);
+                let (searcher, ready, _) = &mut *parts[1].borrow_mut();
+                assert_eq!(searcher.prepare_park(ready), Park::Wait);
             }
 
             // Pause the wake after its claim, so the worker runs before the
@@ -1405,17 +1409,17 @@ pub mod tests {
 
                     // An independent wake resumes the claimed worker, which
                     // runs its loop and parks again.
-                    pool.mailbox(1).waker.notify();
-                    observe_notification(pool, mode);
+                    pool.mailbox(1).unparker.unpark();
+                    observe_notification(pool, &part.borrow().2, mode);
 
                     // Its withdrawal keeps the claim's count, and it returns
                     // that count before it publishes again.
-                    let (parker, ready) = &mut *part.borrow_mut();
-                    parker.finish_park();
-                    assert!(parker.searching);
-                    parker.leave_search();
+                    let (searcher, ready, _) = &mut *part.borrow_mut();
+                    searcher.finish_park();
+                    assert!(searcher.searching);
+                    searcher.leave_search();
                     assert_eq!(pool.idle().search_count(), 0);
-                    assert_eq!(parker.prepare_park(ready), Park::Wait);
+                    assert_eq!(searcher.prepare_park(ready), Park::Wait);
                 }
             });
 
@@ -1425,26 +1429,26 @@ pub mod tests {
             // The push's notification reaches the new publication, which no wake
             // claimed.
             assert!(pool.idle().is_idle(1));
-            observe_notification(pool, mode);
+            observe_notification(pool, &parts[1].borrow().2, mode);
 
             // Its withdrawal finds no claim, so it holds no count, and it parks again.
             {
-                let (parker, ready) = &mut *parts[1].borrow_mut();
-                parker.finish_park();
-                assert!(!parker.searching);
+                let (searcher, ready, _) = &mut *parts[1].borrow_mut();
+                searcher.finish_park();
+                assert!(!searcher.searching);
                 assert_eq!(pool.idle().search_count(), 0);
-                assert_eq!(parker.prepare_park(ready), Park::Wait);
+                assert_eq!(searcher.prepare_park(ready), Park::Wait);
             }
 
             // A fresh claim brings one count.
             pool.idle().notify_global(pool.mailboxes());
-            observe_notification(pool, mode);
-            let (parker, _) = &mut *parts[1].borrow_mut();
-            parker.finish_park();
-            assert!(parker.searching);
+            let (searcher, _, parker) = &mut *parts[1].borrow_mut();
+            observe_notification(pool, parker, mode);
+            searcher.finish_park();
+            assert!(searcher.searching);
 
             // Returning that count leaves a clean idle state.
-            parker.leave_search();
+            searcher.leave_search();
             assert_eq!(pool.idle().search_count(), 0);
             assert!((0..2).all(|index| !pool.idle().is_idle(index)));
         }

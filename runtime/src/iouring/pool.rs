@@ -10,7 +10,7 @@
 //! own, and joins them at shutdown.
 //!
 //! [`Idle`] tracks idle publications and search responsibility, and selects
-//! pool workers to wake. Their mailbox wakers deliver the signals.
+//! pool workers to wake. The unparkers in their mailboxes deliver the signals.
 //! [`super::idle`] describes the parking sequence and wake policy.
 //!
 //! # Placement
@@ -765,6 +765,7 @@ pub mod tests {
     use super::*;
     use crate::iouring::{
         idle::Searcher,
+        park::tests::notifications,
         task::{
             Task,
             tests::{queue, refs, task_of},
@@ -1123,7 +1124,7 @@ pub mod tests {
         pool.stop();
         assert!(pool.is_stopped());
 
-        assert!(!pool.mailbox(0).waker.moved(0));
+        assert_eq!(notifications(&pool.mailbox(0).unparker), 0);
         for index in 1..3 {
             let mut messages = Vec::new();
             assert!(pool.mailbox(index).take(&mut messages));
