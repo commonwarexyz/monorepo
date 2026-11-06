@@ -226,7 +226,7 @@ pub struct Db<
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value. Owns the activity-status bitmap (`any.bitmap`) that this layer reads to
     /// install grafted-tree updates and serve proofs.
-    pub(super) any: any::db::Db<F, E, C, I, H, U, N, S>,
+    pub(super) any: any::Db<F, E, C, I, H, U, N, S>,
 
     /// Each leaf corresponds to a complete bitmap chunk at the grafting height.
     /// See the [grafted leaf formula](super) in the module documentation.

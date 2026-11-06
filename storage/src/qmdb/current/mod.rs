@@ -354,7 +354,7 @@ use core::num::NonZeroUsize;
 use std::sync::Arc;
 
 pub mod batch;
-pub(crate) mod db;
+mod db;
 pub use db::Db;
 pub mod grafting;
 

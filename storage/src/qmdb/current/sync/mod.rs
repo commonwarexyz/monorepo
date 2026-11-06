@@ -36,7 +36,7 @@ use crate::{
     qmdb::{
         self,
         any::{
-            db::Db as AnyDb,
+            Db as AnyDb,
             operation::{Operation, update::Update},
         },
         bitmap::Shared,

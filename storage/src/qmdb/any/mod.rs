@@ -147,7 +147,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 pub mod batch;
-pub(crate) mod db;
+mod db;
 pub use db::Db;
 pub mod operation;
 pub mod ordered;
@@ -5070,7 +5070,7 @@ pub(crate) mod test {
     }
 
     impl<F, C, I, U, const N: usize, S> Changes<F>
-        for crate::qmdb::current::db::Db<F, Context, C, I, Sha256, U, N, S>
+        for crate::qmdb::current::Db<F, Context, C, I, Sha256, U, N, S>
     where
         F: crate::merkle::Graftable,
         C: Mutable<Item = Operation<F, U>>,
