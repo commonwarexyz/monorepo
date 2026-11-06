@@ -478,22 +478,27 @@ impl State {
 
     /// Store the terminal result and defer resource destruction and callbacks.
     fn complete(&mut self, id: WaiterId, result: Result<(), Error>, deferred: &mut Deferred) {
-        // Finish splits the request into its result and deferred resources.
-        // A previously cancelled request has already removed its deadline.
-        if self.waiters.finish(id, result, deferred) {
+        // A deadline still installed leaves with its request. Only a request
+        // with a timeout can have one, so others, such as storage requests,
+        // skip the wheel. One that cancellation or expiry already removed, or
+        // that was never installed, is not there to remove.
+        if self.waiters.deadline(id).is_some() {
             self.deadlines.remove(id);
         }
+
+        // Finish splits the request into its result and deferred resources.
+        self.waiters.finish(id, result, deferred);
     }
 
     /// Request cancellation once, finishing locally if no SQE is in flight.
     fn cancel(&mut self, id: WaiterId, deferred: &mut Deferred) {
-        // Cancellation ends the waiter's scheduled state. Read it before the
-        // transition so the deadline is removed exactly once.
-        let scheduled = self.waiters.is_scheduled(id);
         if !self.waiters.cancel(id) {
             return;
         }
-        if scheduled {
+
+        // An in-flight request completes only at its CQE, so remove its
+        // deadline now, before expiry could cancel it a second time.
+        if self.waiters.deadline(id).is_some() {
             self.deadlines.remove(id);
         }
         self.retire_cancelled(id, deferred);
@@ -520,8 +525,7 @@ impl State {
         let expired = self.deadlines.expire(now);
         for &id in &expired {
             // Completion and cancellation remove a deadline, so the request
-            // whose deadline expiry detached is still active and scheduled.
-            assert!(self.waiters.is_scheduled(id));
+            // whose deadline expiry detached is still active.
             assert!(self.waiters.cancel(id), "expired request already cancelled");
             self.retire_cancelled(id, deferred);
         }
@@ -544,9 +548,7 @@ impl State {
                 continue;
             }
 
-            // Mark the waiter so completion or cancellation removes the
-            // deadline exactly once.
-            self.waiters.set_deadline(id);
+            // Completion, cancellation or expiry later removes it exactly once.
             self.deadlines.insert(id, deadline);
         }
     }
@@ -903,7 +905,6 @@ pub mod tests {
                 .waiters
                 .insert(request, Observer::Local(Some(waker.clone())));
             if let Some(deadline) = deadline {
-                self.driver.state.waiters.set_deadline(id);
                 self.driver.state.deadlines.insert(id, deadline);
             }
 
@@ -3070,7 +3071,7 @@ pub mod tests {
                 .driver
                 .state
                 .advance_timeouts(fires - Duration::from_nanos(1), &mut harness.deferred);
-            assert!(harness.driver.state.waiters.is_scheduled(id));
+            assert_eq!(harness.driver.state.deadlines.holder(id.0.index), Some(id));
             assert!(harness.driver.state.pending_cancels.is_empty());
 
             // At its firing time, expiry unlinks the deadline and cancels the
@@ -3086,7 +3087,6 @@ pub mod tests {
                 // request at its CQE.
                 assert_eq!(harness.driver.state.pending_cancels.len(), 1);
                 assert!(harness.driver.state.waiters.is_in_flight(id));
-                assert!(!harness.driver.state.waiters.is_scheduled(id));
                 harness.until(1);
             } else {
                 // A queued request finishes locally without an async cancel.
@@ -3125,13 +3125,8 @@ pub mod tests {
             Some(sibling)
         );
 
-        // A second removal of the same deadline is rejected before any change.
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| {
-                harness.driver.state.deadlines.remove(id);
-            }))
-            .is_err()
-        );
+        // A second removal of the same deadline removes nothing.
+        assert!(!harness.driver.state.deadlines.remove(id));
         assert_eq!(harness.driver.state.deadlines.len(), 1);
 
         // Expiry reaches only the sibling. The orphan is not cancelled again.
@@ -3202,7 +3197,6 @@ pub mod tests {
 
         // Every path that unlinks resolves the full identity first, so the
         // stale one reaches neither the waiter nor the deadline.
-        assert!(!harness.driver.state.waiters.is_scheduled(old));
         harness.orphan(old);
         harness.driver.state.cancel(old, &mut harness.deferred);
         assert_eq!(
@@ -3211,13 +3205,8 @@ pub mod tests {
         );
 
         // The deadline records the full identity, so even a direct removal by
-        // the stale identity is rejected before any change.
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| {
-                harness.driver.state.deadlines.remove(old);
-            }))
-            .is_err()
-        );
+        // the stale identity removes nothing.
+        assert!(!harness.driver.state.deadlines.remove(old));
         assert_eq!(
             harness.driver.state.deadlines.holder(old.0.index),
             Some(current)

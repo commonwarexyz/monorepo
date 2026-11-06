@@ -77,14 +77,18 @@ impl Deadlines {
         self.generations[index] = id.0.generation;
     }
 
-    /// Unlink the deadline of the waiter `id`. Panics before any change if its
-    /// slot is not resident or holds another generation's deadline.
-    pub fn remove(&mut self, id: WaiterId) {
+    /// Unlink the deadline of the waiter `id` if its slot holds it, and return
+    /// whether it did. A slot holding no deadline, or another generation's, is
+    /// left alone, so completion and cancellation can remove a deadline that
+    /// was never installed or that expiry already detached, and a stale
+    /// identity cannot unlink another request's deadline.
+    pub fn remove(&mut self, id: WaiterId) -> bool {
         let slot = id.0.index;
-        assert!(
-            self.generations[slot as usize] == id.0.generation,
-            "request deadline not resident"
-        );
+        let held = self.wheel.contains(slot)
+            && self.generations.get(slot as usize) == Some(&id.0.generation);
+        if !held {
+            return false;
+        }
         self.wheel.remove(slot);
 
         // An empty wheel has no firing time, and a nonempty one keeps the
@@ -92,6 +96,7 @@ impl Deadlines {
         if self.wheel.is_empty() {
             self.next = None;
         }
+        true
     }
 
     /// Detach the deadlines due at `now`, spending at most one [`BUDGET`] on
@@ -297,13 +302,15 @@ mod tests {
         deadlines.insert(id(0, 0), deadline);
         deadlines.insert(id(1, 0), deadline);
 
-        // A second insertion, a stale generation, and a second removal panic
-        // before changing anything.
+        // A second insertion panics before changing anything, while a stale
+        // generation, a second removal, and a slot that never held a deadline
+        // remove nothing.
         assert!(catch_unwind(AssertUnwindSafe(|| deadlines.insert(id(0, 1), deadline))).is_err());
-        assert!(catch_unwind(AssertUnwindSafe(|| deadlines.remove(id(0, 1)))).is_err());
+        assert!(!deadlines.remove(id(0, 1)));
+        assert!(!deadlines.remove(id(7, 0)));
         assert_eq!(deadlines.len(), 2);
-        deadlines.remove(id(0, 0));
-        assert!(catch_unwind(AssertUnwindSafe(|| deadlines.remove(id(0, 0)))).is_err());
+        assert!(deadlines.remove(id(0, 0)));
+        assert!(!deadlines.remove(id(0, 0)));
         assert_eq!(deadlines.len(), 1);
 
         // The reused slot reports its new generation, and the removed deadline
