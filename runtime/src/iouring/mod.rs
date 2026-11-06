@@ -31,14 +31,14 @@
 //! # Ownership
 //!
 //! Workers own request and result progress. Each worker's sleep registrations
-//! live in a timer shard that any thread locks briefly to poll or drop a
-//! sleep, and that a busy peer may expire while the owner is stalled. Each
+//! live in its timers, which any thread locks briefly to poll or drop a
+//! sleep, and which a busy peer may expire while the owner is stalled. Each
 //! ordinary task has at most one runnable, which a queue or poller owns, and
 //! at most one poll of that task runs at a time. A queued task can move
 //! through overflow or stealing, and each run queue synchronizes its owner
 //! with the workers that steal from it. Each open serializes its syncs and
 //! durable writes across workers until their results are recorded. Forwarded
-//! results, mailboxes, timer shards, the global queue, the task set, task
+//! results, mailboxes, timers, the global queue, the task set, task
 //! handles, supervision, and metrics are also synchronized across threads.
 //!
 //! # Storage

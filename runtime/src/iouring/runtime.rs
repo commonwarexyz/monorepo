@@ -13,7 +13,7 @@
 //!   +-- Shared (Arc) <-------------------------- Local.shared
 //!   |     +-- Config, metrics, stop/panic signals
 //!   |     +-- Network, Storage
-//!   |     +-- Pool (each pool worker's mailbox, run queue, and timer shard,
+//!   |     +-- Pool (each pool worker's mailbox, run queue, and timers,
 //!   |     |       global queue, idle state, shutdown barrier)
 //!   |     |       ^-- task headers (Weak)
 //!   |     +-- Tasks (every live ordinary task, for teardown)
@@ -26,7 +26,7 @@
 //!   +-- Rc<RefCell<Local>> <------------------------+
 //!   |     +-- Shared (Arc)
 //!   |     +-- Ready (owner's end of a pool worker's run queue)
-//!   |     +-- TimerShard (Arc, the pool's on a pool worker: sleep
+//!   |     +-- Timers (Arc, the pool's on a pool worker: sleep
 //!   |     |       registrations and deadlines, with a cached bound and
 //!   |     |       the IDs of sleeps dropped here, removed in batches)
 //!   |     +-- Driver
@@ -96,7 +96,7 @@
 //! I/O and sleeps register directly with the worker that first polls them.
 //! Polled later on another worker, I/O has the registering worker forward its
 //! result through a channel, while a sleep is polled and dropped directly in
-//! the registering worker's timer shard, and a drop on the registering worker
+//! the registering worker's timers, and a drop on the registering worker
 //! leaves the removal to its next service pass, or to its next registration
 //! (see [`super::sleep`]).
 //! Mailboxes carry root wakes and the observation transfers and cancellations
@@ -149,7 +149,7 @@
 //! every pool worker waits for the others to finish polling and draining
 //!   |
 //!   v
-//! pool workers close mailbox, timer shard,      --> join the pool workers
+//! pool workers close mailbox, timers,           --> join the pool workers
 //!   and io_uring ring                                |
 //!                                                    v
 //!                                  collect a pool worker failure the root missed
@@ -178,7 +178,7 @@ use super::{
     pool::{MAX_WORKERS, Pool, Threads},
     request::{RequestOutput, RetiredResources},
     slab::Id,
-    sleep::{self, RESCUE_INTERVAL, Sleep, TimerShard},
+    sleep::{self, RESCUE_INTERVAL, Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
     task::{AfterPoll, Ready, RootWaker, Runnable},
     tasks::Tasks,
@@ -1089,13 +1089,13 @@ pub struct Local {
     /// The io_uring ring's owner, taken only after kernel retirement so it can
     /// be dropped unborrowed.
     pub driver: Option<Driver>,
-    /// Sleep registrations, in the pool's shard for this worker on a pool
+    /// Sleep registrations, in the pool's timers for this worker on a pool
     /// worker, so that peers can expire them while this worker is stalled.
-    pub timers: Arc<TimerShard>,
+    pub timers: Arc<Timers>,
     /// Cached bound on the earliest firing time in `timers`, in nanoseconds
-    /// since the shard's origin, `u64::MAX` for none. Never later than that
+    /// since the timers' origin, `u64::MAX` for none. Never later than that
     /// time, since only this worker registers, so service and parking can
-    /// skip the shard's lock.
+    /// skip the timers' lock.
     pub timers_next: u64,
     /// Registrations in `timers` whose sleeps were dropped on this worker
     /// while it was not closing, which its next service pass, or its cleanup
@@ -1127,9 +1127,9 @@ pub struct Local {
 impl Local {
     /// Construct an io_uring ring on the thread that will own all its
     /// submissions. A pool worker takes the mailbox the pool created for it and
-    /// its timer shard and the owner's end of its run queue, and panics if its
+    /// its timers and the owner's end of its run queue, and panics if its
     /// index is out of range or that end was already taken. A dedicated worker
-    /// creates its own mailbox and timer shard and has no run queue. An I/O
+    /// creates its own mailbox and timers and has no run queue. An I/O
     /// error at startup returns before the run queue's owner is taken.
     fn new(shared: Arc<Shared>, role: Role) -> std::io::Result<Self> {
         #[cfg(test)]
@@ -1140,7 +1140,7 @@ impl Local {
                 shared.pool.mailbox(index).clone(),
                 shared.pool.timers()[index as usize].clone(),
             ),
-            Role::Dedicated => (Arc::new(Mailbox::new()?), Arc::new(TimerShard::new())),
+            Role::Dedicated => (Arc::new(Mailbox::new()?), Arc::new(Timers::new())),
         };
         let now = Instant::now();
         let driver = Driver::new(&shared.cfg.ring_config, mailbox.waker.clone(), now)?;
@@ -1830,7 +1830,7 @@ impl Worker {
         // Admission is closed, so later I/O handle drops find no registration
         // to detach and sleeps registered here release no waker. Driver service
         // can still produce deferred work, and so can callbacks that drop
-        // sleeps registered on other workers' open shards.
+        // sleeps registered on other workers' open timers.
         {
             let mut local = self.local.borrow_mut();
             let Local {
@@ -1862,7 +1862,7 @@ impl Worker {
             let mut local = self.local.borrow_mut();
 
             // A callback can still drop a sleep registered on another worker's
-            // open shard, releasing its waker into this batch. Run it before
+            // open timers, releasing its waker into this batch. Run it before
             // finishing or waiting, since it may be what retained work awaits.
             if !local.deferred.is_empty() {
                 continue;
@@ -1964,7 +1964,7 @@ impl Worker {
         let outcome = result.expect("io_uring driver service failed");
 
         // Polls on this thread may complete sleeps due by this time, which
-        // the shard counts from its origin.
+        // the timers count from their origin.
         sleep::set_turn(*now);
         let nanos = timers.nanos(*now);
 
@@ -1977,7 +1977,7 @@ impl Worker {
         }
 
         // Expiry defers observer notifications until after this borrow ends.
-        // The cached bound skips the shard until a registration may be due,
+        // The cached bound skips the timers until a registration may be due,
         // and a pass that leaves due ones behind keeps it at or below now.
         if *timers_next <= nanos {
             *timers_next = timers.expire(nanos, deferred);

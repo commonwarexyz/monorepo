@@ -2718,7 +2718,7 @@ fn test_teardown_drops_every_future_before_clearing_timers() {
     impl Drop for TimerCheck {
         fn drop(&mut self) {
             // The future's own sleep drops after this guard, so its timer is
-            // still registered unless teardown has already closed the shard.
+            // still registered unless teardown has already closed its timers.
             let local = Local::current().expect("future dropped off its worker");
             if !local.borrow().timers.is_closed() {
                 self.early.fetch_add(1, Ordering::Relaxed);
@@ -3256,7 +3256,7 @@ fn test_callback_generated_work_prevents_parking() {
 }
 
 /// A callback in cleanup's drain can drop a sleep registered on another
-/// worker's open shard, which releases that sleep's waker into the same
+/// worker's open timers, which releases that sleep's waker into the same
 /// callback batch. Cleanup must run such a batch before waiting for retained
 /// I/O, which here is a sync waiting for a durability permit that only the
 /// last waker in a chain of such releases frees.
@@ -3309,7 +3309,7 @@ fn test_cleanup_runs_released_wakers_before_waiting_for_retained_io() {
     )));
     let released = Arc::new(AtomicBool::new(false));
     let waited = Runner::new(config().with_worker_threads(1)).start(|_| async {
-        // Two sleeps on worker zero's shard: dropping the first releases a
+        // Two sleeps on worker zero's timers: dropping the first releases a
         // waker that drops the second, whose waker releases the permit.
         let last = Waker::from(Arc::new(ReleasePermit {
             permit: permit.clone(),
