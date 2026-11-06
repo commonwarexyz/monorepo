@@ -16,7 +16,7 @@ fn bench_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     for variant in [Variant::Prunable, Variant::Immutable] {
         for compression in [None, Some(3)] {
-            for items in ITEMS {
+            for &items in if crate::smoke() { &[1_000][..] } else { &ITEMS } {
                 let label = format!(
                     "{}/variant={} items={} comp={}",
                     module_path!(),
