@@ -14,7 +14,6 @@ use commonware_storage::{
                 Update,
                 fixed::{Config, Db as AnyDb},
             },
-            traits::DbAny as _,
         },
         value::FixedEncoding as FixedEncodingGeneric,
     },
