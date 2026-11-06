@@ -502,7 +502,7 @@ where
     /// # Errors
     ///
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
-    /// [`Error::LocationOutOfBounds`] if `loc` is at or past [`Self::size`], and
+    /// [`Error::LocationOutOfBounds`] if `loc` is at or past the tip size in [`Self::bounds`], and
     /// [`Error::BelowInactivityFloor`] if `loc` is below this batch's inactivity floor.
     ///
     /// Returns [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) for a location
@@ -547,7 +547,8 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, including
     /// for an empty input. Otherwise returns [`Error::LocationOutOfOrder`] if the locations are
     /// not strictly increasing, [`Error::LocationOutOfBounds`] if any location is at or past
-    /// [`Self::size`], or the error [`Self::get`] returns for a requested location.
+    /// the tip size in [`Self::bounds`], or the error [`Self::get`] returns for a requested
+    /// location.
     pub async fn get_many<E, C, H>(
         &self,
         locs: &[Location<F>],
