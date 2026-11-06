@@ -300,7 +300,7 @@ mod tests {
     };
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, SystemTimeExt, bitmap::BitMap, ordered::Set};
-    use futures::{FutureExt, StreamExt, future::Either};
+    use futures::{StreamExt, future::Either};
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -629,10 +629,7 @@ mod tests {
 
             // Peer1 should be killed after losing tracked-set membership
             assert!(
-                matches!(
-                    peer_receiver.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                matches!(peer_receiver.try_recv(), Ok(peer::Message::Kill)),
                 "connected peer should be killed after losing tracked-set membership"
             );
             assert_eq!(reservation.metadata().public_key(), &peer1_pk);
@@ -680,8 +677,8 @@ mod tests {
             );
             assert!(
                 !matches!(
-                    peer_receiver.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
+                    peer_receiver.try_recv(),
+                    Ok(peer::Message::Kill)
                 ),
                 "discovery connect rejection is signaled by a missing greeting"
             );
@@ -729,8 +726,8 @@ mod tests {
 
             assert!(
                 !matches!(
-                    peer_receiver.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
+                    peer_receiver.try_recv(),
+                    Ok(peer::Message::Kill)
                 ),
                 "connected peer present in the new set should not be killed when the old set rolls off"
             );
@@ -774,20 +771,14 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(
-                matches!(
-                    peer_receiver.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                matches!(peer_receiver.try_recv(), Ok(peer::Message::Kill)),
                 "connected peer should be killed when blocked"
             );
 
             crate::block_peer(&mut oracle, peer_pk.clone());
             context.sleep(Duration::from_millis(10)).await;
             assert!(
-                !matches!(
-                    peer_receiver.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                !matches!(peer_receiver.try_recv(), Ok(peer::Message::Kill)),
                 "no kill after handle has been cleared"
             );
             assert_eq!(reservation.metadata().public_key(), &peer_pk);
@@ -882,10 +873,7 @@ mod tests {
                 "blocked peer should not receive a greeting"
             );
             assert!(
-                !matches!(
-                    peer_receiver_pk1.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                !matches!(peer_receiver_pk1.try_recv(), Ok(peer::Message::Kill)),
                 "connect rejection is signaled by a missing greeting"
             );
         });
@@ -1333,10 +1321,7 @@ mod tests {
                 "unauthorized peer should not receive a greeting"
             );
             assert!(
-                !matches!(
-                    peer_receiver1.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                !matches!(peer_receiver1.try_recv(), Ok(peer::Message::Kill)),
                 "connect rejection is signaled by a missing greeting"
             );
 

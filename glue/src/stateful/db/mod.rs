@@ -3860,8 +3860,8 @@ mod tests {
     #[test]
     fn tuple_apply_runs_databases_in_parallel() {
         deterministic::Runner::default().start(|_context| async move {
-            let (started1_tx, started1_rx) = oneshot::channel();
-            let (started2_tx, started2_rx) = oneshot::channel();
+            let (started1_tx, mut started1_rx) = oneshot::channel();
+            let (started2_tx, mut started2_rx) = oneshot::channel();
             let (release1_tx, release1_rx) = oneshot::channel();
             let (release2_tx, release2_rx) = oneshot::channel();
 
@@ -3876,13 +3876,9 @@ mod tests {
             pin_mut!(apply);
             assert!(apply.as_mut().now_or_never().is_none());
 
-            let started1 = started1_rx;
-            let started2 = started2_rx;
-            pin_mut!(started1);
-            pin_mut!(started2);
-            assert!(matches!(started1.as_mut().now_or_never(), Some(Ok(()))));
+            assert!(matches!(started1_rx.try_recv(), Ok(())));
             assert!(
-                matches!(started2.as_mut().now_or_never(), Some(Ok(()))),
+                matches!(started2_rx.try_recv(), Ok(())),
                 "tuple apply should start on all databases concurrently"
             );
 
@@ -4073,7 +4069,10 @@ mod tests {
             let mut recorded = None;
 
             update.record(|new_anchor, new_target| {
-                assert!((&mut observed).now_or_never().is_none());
+                assert!(matches!(
+                    observed.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
                 recorded = Some((new_anchor, new_target));
             });
 
@@ -4277,8 +4276,8 @@ mod tests {
             assert!(tip_tx.send_lossy(update));
             assert!(sync.as_mut().now_or_never().is_none());
             assert_eq!(
-                (&mut observed).now_or_never(),
-                Some(Ok(())),
+                observed.try_recv(),
+                Ok(()),
                 "the coordinator records a tip that repeats the target"
             );
 
@@ -4958,7 +4957,7 @@ mod tests {
                 let (update, mut observed) = TipUpdate::with_observation(anchor(target), target);
                 tips.send(update).await.unwrap();
                 assert!(sync.as_mut().now_or_never().is_none());
-                assert_eq!((&mut observed).now_or_never(), Some(Ok(())));
+                assert_eq!(observed.try_recv(), Ok(()));
             }
 
             // Once released, the database takes the newest target and the sync converges there.

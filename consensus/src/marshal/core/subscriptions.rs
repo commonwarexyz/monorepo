@@ -136,7 +136,6 @@ mod tests {
     use commonware_p2p::Recipients;
     use commonware_runtime::{Clock, Runner as _, deterministic};
     use commonware_utils::sync::Mutex;
-    use futures::FutureExt;
     use std::sync::Arc;
 
     type TestBlock = EmptyBlock<Sha256>;
@@ -206,13 +205,12 @@ mod tests {
     }
 
     fn assert_receives(
-        receiver: oneshot::Receiver<Digested<TestBlock>>,
+        mut receiver: oneshot::Receiver<Digested<TestBlock>>,
         expected: &Digested<TestBlock>,
     ) {
         let received = receiver
-            .now_or_never()
-            .expect("receiver should be ready")
-            .expect("sender should deliver block");
+            .try_recv()
+            .expect("receiver should hold a delivered block");
         assert_eq!(received.digest(), expected.digest());
     }
 

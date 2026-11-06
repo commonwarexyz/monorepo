@@ -2510,6 +2510,20 @@ mod tests {
 
     #[test]
     fn ready_scan_yields_to_admitted_finalization() {
+        ready_scan_yields_to_finalization_queued_behind(0);
+    }
+
+    /// A finalization queued behind more requests than one poll's
+    /// cooperative budget still wins over a ready scan.
+    #[test]
+    fn test_ready_scan_yields_to_finalization_behind_a_spent_budget() {
+        ready_scan_yields_to_finalization_queued_behind(2 * commonware_utils::coop::BUDGET);
+    }
+
+    /// Make a canonical finalization, queued behind `flood` requests the
+    /// actor answers without waiting, and a stale scan ready in the same
+    /// scheduler turn, and check that the finalization invalidates the scan.
+    fn ready_scan_yields_to_finalization_queued_behind(flood: u32) {
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             let InclusionHarness {
@@ -2630,19 +2644,35 @@ mod tests {
             scan_started.await.expect("scan should start");
             assert!(raced.as_mut().now_or_never().is_none());
 
+            // Requests answered at once, enough to spend a poll's cooperative
+            // budget before the actor reaches the finalization behind them.
+            let mut flooding = Vec::new();
+            for _ in 0..flood {
+                let mut flood_mailbox = mailbox.clone();
+                let mut request =
+                    Box::pin(async move { flood_mailbox.next_log(Height::new(5)).await });
+                assert!(request.as_mut().now_or_never().is_none());
+                flooding.push(request);
+            }
+
             // Make the canonical finalization and the stale scan ready in the
             // same scheduler turn. Finalization must invalidate the unmaterialized
             // scan before its cached losing-view result can escape.
             let (five_ack, five_waiter) = Exact::handle();
-            assert_eq!(
-                mailbox.report(marshal::Update::Block(canonical_five, five_ack)),
-                Feedback::Ok
-            );
+            let feedback = mailbox.report(marshal::Update::Block(canonical_five, five_ack));
+            if flood == 0 {
+                assert_eq!(feedback, Feedback::Ok);
+            } else {
+                assert!(feedback.accepted());
+            }
             release.send(()).expect("scan should still be active");
             five_waiter
                 .await
                 .expect("canonical inclusion block should be acknowledged");
             assert!(matches!(raced.await, EpochInfoResponse::Unavailable));
+            for request in flooding {
+                assert!(request.await.is_none());
+            }
 
             let (six_ack, six_waiter) = Exact::handle();
             assert_eq!(
@@ -2988,8 +3018,8 @@ mod tests {
 
     #[test]
     fn requests_are_selected_in_arrival_order() {
-        let (earlier_tx, earlier_rx) = oneshot::channel();
-        let (later_tx, later_rx) = oneshot::channel();
+        let (earlier_tx, mut earlier_rx) = oneshot::channel();
+        let (later_tx, mut later_rx) = oneshot::channel();
         let mut requests = TestRequests::default();
         requests.push(Span::none(), empty_ancestry(), earlier_tx);
         requests.push(Span::none(), empty_ancestry(), later_tx);
@@ -3000,10 +3030,13 @@ mod tests {
             .response
             .send_lossy(EpochInfoResponse::Unavailable);
         assert!(matches!(
-            earlier_rx.now_or_never(),
-            Some(Ok(EpochInfoResponse::Unavailable))
+            earlier_rx.try_recv(),
+            Ok(EpochInfoResponse::Unavailable)
         ));
-        assert!(later_rx.now_or_never().is_none());
+        assert!(matches!(
+            later_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
     }
 
     struct FinalizationFixture {

@@ -1,0 +1,71 @@
+error: blocking inside an async poll holds the worker, and under a cooperative budget a blocked receive can spin or deadlock
+  --> $DIR/main.rs:31:13
+   |
+LL |     let _ = block_on(ready(1));
+   |             ^^^^^^^^^^^^^^^^^^
+   |
+   = help: await the future instead
+   = note: `#[deny(block_on_in_async)]` on by default
+
+error: blocking inside an async poll holds the worker, and under a cooperative budget a blocked receive can spin or deadlock
+  --> $DIR/main.rs:32:13
+   |
+LL |     let _ = futures_executor::block_on(ready(2));
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: await the future instead
+
+error: blocking inside an async poll holds the worker, and under a cooperative budget a blocked receive can spin or deadlock
+  --> $DIR/main.rs:25:9
+   |
+LL |         block_on($future)
+   |         ^^^^^^^^^^^^^^^^^
+...
+LL |     let _ = run!(ready(3));
+   |             -------------- in this macro invocation
+   |
+   = help: await the future instead
+   = note: this error originates in the macro `run` (in Nightly b$DIRlds, run with -Z macro-backtrace for more info)
+
+error: blocking inside an async poll holds the worker, and under a cooperative budget a blocked receive can spin or deadlock
+  --> $DIR/main.rs:43:21
+   |
+LL |         Poll::Ready(block_on(ready(4)))
+   |                     ^^^^^^^^^^^^^^^^^^
+   |
+   = help: poll the future with this poll's context instead
+
+error: blocking inside an async poll holds the worker, and under a cooperative budget a blocked receive can spin or deadlock
+  --> $DIR/main.rs:52:26
+   |
+LL |         Poll::Ready(Some(block_on(ready(5))))
+   |                          ^^^^^^^^^^^^^^^^^^
+   |
+   = help: poll the future with this poll's context instead
+
+error: blocking inside an async poll holds the worker, and under a cooperative budget a blocked receive can spin or deadlock
+  --> $DIR/main.rs:87:17
+   |
+LL |         let _ = block_on(ready(9));
+   |                 ^^^^^^^^^^^^^^^^^^
+   |
+   = help: await the future instead
+
+error: blocking inside an async poll holds the worker, and under a cooperative budget a blocked receive can spin or deadlock
+  --> $DIR/main.rs:90:17
+   |
+LL |         let _ = block_on(ready(10));
+   |                 ^^^^^^^^^^^^^^^^^^^
+   |
+   = help: await the future instead
+
+error: blocking inside an async poll holds the worker, and under a cooperative budget a blocked receive can spin or deadlock
+  --> $DIR/main.rs:95:17
+   |
+LL |         let _ = block_on(ready(11));
+   |                 ^^^^^^^^^^^^^^^^^^^
+   |
+   = help: await the future instead
+
+error: aborting due to 8 previous errors
+

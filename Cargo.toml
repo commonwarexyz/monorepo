@@ -55,10 +55,13 @@ members = [
 ]
 exclude = [
     ".github/dylints/benchmark_allocator",
+    ".github/dylints/block_on_in_async",
     ".github/dylints/borrowed_child_context",
     ".github/dylints/child_attribute_name_conflict",
+    ".github/dylints/direct_tokio_select",
     ".github/dylints/implied_bounds",
     ".github/dylints/owned_span_parent",
+    ".github/dylints/receive_probe",
     ".github/dylints/span_name_style",
     ".github/dylints/tracing_int_fields",
 ]

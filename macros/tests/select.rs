@@ -1,4 +1,9 @@
 #[cfg(all(test, feature = "std"))]
+#[allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "commonware_utils depends on this crate, so its channels are not available here"
+)]
 mod tests {
     use commonware_macros::{select, select_loop};
     use futures::executor::block_on;
@@ -532,5 +537,189 @@ mod tests {
             }
             assert_eq!(received, vec![1, 2]);
         });
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod coop_tests {
+    use commonware_macros::{__coop, select, select_loop};
+    use std::{
+        future::{Future, pending, ready},
+        pin::{Pin, pin},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::{Context, Poll, Wake, Waker},
+    };
+
+    /// Counts the wakes it receives.
+    #[derive(Default)]
+    struct Wakes(
+        /// Wakes received so far.
+        AtomicUsize,
+    );
+
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Poll `future` once with `waker`.
+    fn poll_once<F: Future>(future: Pin<&mut F>, waker: &Waker) -> Poll<F::Output> {
+        future.poll(&mut Context::from_waker(waker))
+    }
+
+    /// Install a budget of `units` on this thread.
+    fn set_budget(units: u32) {
+        __coop::REMAINING.set(units);
+    }
+
+    /// Spend one unit of the budget, if one is installed.
+    fn charge() {
+        let left = __coop::REMAINING.get();
+        if left != __coop::UNCONSTRAINED {
+            __coop::REMAINING.set(left.saturating_sub(1));
+        }
+    }
+
+    /// A receive with a value queued that takes part in the budget: it
+    /// defers while the budget is spent and spends one unit when it delivers.
+    struct Queued(
+        /// The queued value.
+        u32,
+    );
+
+    impl Future for Queued {
+        type Output = u32;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<u32> {
+            if __coop::exhausted() {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            charge();
+            Poll::Ready(self.0)
+        }
+    }
+
+    /// A future that spends one unit of the budget on every poll and never
+    /// completes, like a composite branch that consumes the last unit.
+    struct Spender;
+
+    impl Future for Spender {
+        type Output = u32;
+
+        fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<u32> {
+            charge();
+            Poll::Pending
+        }
+    }
+
+    /// Signals shutdown never.
+    struct NeverStopped;
+
+    impl NeverStopped {
+        fn stopped(&self) -> impl Future<Output = ()> + use<> {
+            pending()
+        }
+    }
+
+    #[test]
+    fn test_spent_budget_defers_the_whole_select() {
+        let wakes = Arc::new(Wakes::default());
+        let waker = Waker::from(wakes.clone());
+
+        // A poll that has spent its budget, with a value queued on the first
+        // branch and the second branch ready without the budget.
+        set_budget(0);
+        let mut chosen = pin!(async {
+            select! {
+                value = Queued(7) => value,
+                _ = ready(()) => 0,
+            }
+        });
+
+        // The ready second branch does not overtake the first: the whole
+        // select defers and wakes the task.
+        assert!(poll_once(chosen.as_mut(), &waker).is_pending());
+        assert!(wakes.0.load(Ordering::SeqCst) > 0);
+
+        // The next poll's fresh budget tries the branches in order.
+        set_budget(32);
+        assert_eq!(poll_once(chosen.as_mut(), &waker), Poll::Ready(7));
+        set_budget(__coop::UNCONSTRAINED);
+    }
+
+    #[test]
+    fn test_branch_spending_the_last_unit_defers_later_branches() {
+        let waker = Waker::from(Arc::new(Wakes::default()));
+
+        // The first branch spends the last unit of the budget while pending.
+        set_budget(1);
+        let mut chosen = pin!(async {
+            select! {
+                value = Spender => value,
+                _ = ready(()) => 0,
+            }
+        });
+
+        // The ready second branch must not complete in the same poll.
+        assert!(poll_once(chosen.as_mut(), &waker).is_pending());
+
+        // With budget to spare, the second branch completes behind the first.
+        set_budget(32);
+        assert_eq!(poll_once(chosen.as_mut(), &waker), Poll::Ready(0));
+        set_budget(__coop::UNCONSTRAINED);
+    }
+
+    #[test]
+    fn test_select_is_unchanged_without_a_budget() {
+        let waker = Waker::from(Arc::new(Wakes::default()));
+
+        // No budget is installed, so nothing defers.
+        set_budget(__coop::UNCONSTRAINED);
+        let mut chosen = pin!(async {
+            select! {
+                value = pending::<u32>() => value,
+                _ = ready(()) => 9,
+            }
+        });
+        assert_eq!(poll_once(chosen.as_mut(), &waker), Poll::Ready(9));
+    }
+
+    #[test]
+    fn test_select_loop_keeps_order_under_a_spent_budget() {
+        let waker = Waker::from(Arc::new(Wakes::default()));
+
+        // A loop whose first arm has a value queued and whose second arm is
+        // always ready, in a poll that has spent its budget.
+        set_budget(0);
+        let context = NeverStopped;
+        let mut chosen = pin!(async move {
+            let mut first = None;
+            select_loop! {
+                context,
+                on_stopped => {},
+                value = Queued(5) => {
+                    first = Some(value);
+                    break;
+                },
+                _ = ready(()) => {
+                    first = Some(0);
+                    break;
+                },
+            }
+            first
+        });
+
+        // The loop defers instead of taking the second arm.
+        assert!(poll_once(chosen.as_mut(), &waker).is_pending());
+
+        // A fresh budget takes the first arm.
+        set_budget(32);
+        assert_eq!(poll_once(chosen.as_mut(), &waker), Poll::Ready(Some(5)));
+        set_budget(__coop::UNCONSTRAINED);
     }
 }
