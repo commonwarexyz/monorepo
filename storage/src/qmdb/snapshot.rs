@@ -243,8 +243,10 @@ where
 }
 
 /// Bounded depth (in batches) of each per-worker channel during a parallel build. Backpressure keeps
-/// the replay from running arbitrarily far ahead of a slow worker.
-const SNAPSHOT_CHANNEL_DEPTH: usize = 4;
+/// the replay from running arbitrarily far ahead of a slow worker. Batches are forwarded in log
+/// order, so a full channel stalls forwarding to every worker, and a deeper one keeps a worker
+/// briefly slowed by a read from idling the rest.
+const SNAPSHOT_CHANNEL_DEPTH: usize = 64;
 
 /// A batch of keyed operations routed to a snapshot-build worker: each entry is the op's key, its
 /// location, and whether it is a delete.
@@ -290,8 +292,9 @@ const SNAPSHOT_DECODE_CHUNK: u64 = 1 << 17;
 const SNAPSHOT_DECODE_CHUNK: u64 = 64;
 
 /// How many times the plan's decoders a build runs when it also hashes the journal's leaves and
-/// their subtrees, which costs about as much as decoding.
-const SHARED_DECODER_FACTOR: usize = 2;
+/// their subtrees, which costs about as much as decoding. The extra decoders also keep more reads in
+/// flight.
+const SHARED_DECODER_FACTOR: usize = 3;
 
 /// Send the leaf digest of every operation from `leaves`' start to the end of `log` to `leaves`, in
 /// chunks of [SNAPSHOT_DECODE_CHUNK] operations, for builds that do not hash on decode tasks.
@@ -631,7 +634,7 @@ where
     let scan_start = leaves.as_ref().map_or(floor, |leaves| *leaves.start());
     let hashers = leaves.as_ref().map(LeafSink::hashers);
     let decoders = if leaves.is_some() {
-        (plan.decoders * SHARED_DECODER_FACTOR).max(1)
+        plan.decoders.saturating_mul(SHARED_DECODER_FACTOR).max(1)
     } else {
         plan.decoders
     };
