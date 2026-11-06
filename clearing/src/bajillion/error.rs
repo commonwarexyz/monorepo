@@ -1,7 +1,10 @@
 //! Errors returned by Bajillion.
 
 use super::Epoch;
-use commonware_storage::{merkle::mmb, qmdb};
+use commonware_storage::{
+    merkle::{mmb, mmr},
+    qmdb,
+};
 use thiserror::Error;
 
 /// Errors returned by Bajillion.
@@ -55,15 +58,15 @@ pub enum Error {
     /// The balances database failed.
     #[error("storage: {0}")]
     Storage(#[from] qmdb::Error<mmb::Family>),
+    /// The payout log failed.
+    #[error("payout log: {0}")]
+    Log(#[from] qmdb::Error<mmr::Family>),
     /// A summary does not follow the last posted one.
     #[error("summary does not follow the last posted one")]
     WrongParent,
     /// A certificate does not verify.
     #[error("invalid certificate")]
     InvalidCertificate,
-    /// Payouts do not match their summary.
-    #[error("payouts do not match the summary")]
-    InvalidPayouts,
     /// A challenge does not contradict the posted close.
     #[error("challenge does not contradict the close")]
     NoContradiction,

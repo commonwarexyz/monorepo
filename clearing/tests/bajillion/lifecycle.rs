@@ -70,10 +70,8 @@ fn test_epochs_settle_payments_and_withdrawals() {
                 (summary.deposits.count, summary.forced_withdrawals.count),
                 (1, 1)
             );
-            assert_eq!(
-                summary.payouts,
-                amounts(&[(soft, 25), (forced, 15)]).root::<Sha256>()
-            );
+            assert_eq!(summary.payouts.total, 40);
+            assert_eq!(summary.payouts.size, parent.payouts.size + 3);
 
             // The running hashes extend the parent's over the requests the close processed.
             assert_chained(&parent, &summary, &queue);
@@ -332,7 +330,7 @@ mod schemes {
         use commonware_cryptography::impl_certificate_secp256r1;
         use commonware_utils::N3f1;
 
-        impl_certificate_secp256r1!(&'a Summary<D>, Namespace, N3f1);
+        impl_certificate_secp256r1!(&'a Summary<D, u128>, Namespace, N3f1);
     }
 
     type User = standard::PublicKey;

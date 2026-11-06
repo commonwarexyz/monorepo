@@ -78,10 +78,11 @@ pub(crate) fn leaf<H: Hasher, P: PublicKey, A: Amount>(account: &P, amount: A) -
 
 /// Nonzero amounts per account, sorted by account.
 ///
-/// Payment maps, request batches, and the payouts of a close are all [Amounts]. They are committed
-/// by the root of a binary Merkle tree whose leaves are the `(account, amount)` entries in account
-/// order. The root also binds the number of entries, so a [Lookup] of two adjacent entries proves
-/// that an account between them has no amount.
+/// Payment maps, request batches, and the payouts of a close are all [Amounts]. A payment map or
+/// request batch is committed by the root of a binary Merkle tree whose leaves are the `(account,
+/// amount)` entries in account order. The root also binds the number of entries, so a [Lookup] of
+/// two adjacent entries proves that an account between them has no amount. A close's payouts are
+/// appended to the payout log ([Payout::stage](super::Payout::stage)).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Amounts<P: PublicKey, A: Amount> {
     entries: Vec<(P, A)>,

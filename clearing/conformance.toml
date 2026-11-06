@@ -54,14 +54,26 @@ hash = "beb7c5c112c5d9b51bb111679490c98d52ec3051578c3d858144e91f4609c86e"
 n_cases = 65536
 hash = "81f805fcd77afd8271f8e03c5fc0563713108a87bb46ecdc194a4933e226de77"
 
+["commonware_clearing::bajillion::summary::tests::conformance::CodecConformance<Payouts<Digest,u64>>"]
+n_cases = 65536
+hash = "3641edafc346a38bcb2783c9b7613448fd56d5d0116b026335d550015b0f079d"
+
 ["commonware_clearing::bajillion::summary::tests::conformance::CodecConformance<Processed<Digest>>"]
 n_cases = 65536
 hash = "fcda6805c83838ea1ab6cfce7b83d873807fed26614f19a0efd9d8ef3ee32483"
 
-["commonware_clearing::bajillion::summary::tests::conformance::CodecConformance<Summary<Digest>>"]
+["commonware_clearing::bajillion::summary::tests::conformance::CodecConformance<Summary<Digest,u64>>"]
 n_cases = 65536
-hash = "3733e39e11828b0f246090592f58707b464585dd4ee7df72cff4bd1ea32db0f2"
+hash = "95e30ac5eb8152a744f785cb3948c1aa2e8e172467490b561e301ad859d2e8ba"
 
 ["commonware_clearing::bajillion::validator::tests::conformance::CodecConformance<BalanceProof<Digest,u64>>"]
 n_cases = 65536
 hash = "240bf79b0a1738427d63f1652e1e2c0e1a73023d6819824c44ba1a27f1ef01af"
+
+["commonware_clearing::bajillion::validator::tests::conformance::CodecConformance<Payout<PublicKey,u64>>"]
+n_cases = 65536
+hash = "cbe1b1f8a2196482589b54359cfbdbac386e6fcaedd286739d7ac9daa5de150b"
+
+["commonware_clearing::bajillion::validator::tests::conformance::CodecConformance<PayoutProof<PublicKey,Digest,u64>>"]
+n_cases = 65536
+hash = "55c247e3e31d127d9475a61667d17d67c29d6c01cb0040e494db7c42571620f8"

@@ -39,7 +39,7 @@
 //!      |                 |                 |                 |                 | owe payouts
 //!      |                 |                 |                 |                 x final
 //!      |<----------------|<----------------|<----------------|<-- posted(e) ---|
-//!      |                 | apply flows     |                 | apply batch     |
+//!      |                 | apply flows     |                 | apply batches   |
 //!      |<----------------------------------|<-- Opening -----|                 |
 //!      | resolve         |                 | compare         |                 |
 //!      |                 |                 |                 |                 |
@@ -72,16 +72,17 @@
 //! # Helpers, not roles
 //!
 //! The crate prescribes what independent parties must compute identically. These are the wire
-//! formats and signature [Namespace]s, the commitments (payment maps, the payment [Matrix],
-//! payouts, the summary chain, and the balances root), the rules for checking and settling a close,
-//! the challenge, post, and claim checks, and the ledger's queue rule. Each is a function on a
-//! protocol type that reads no storage.
+//! formats and signature [Namespace]s, the commitments (payment maps, the payment [Matrix], the
+//! summary chain, the balances root, and the payouts root), the rules for checking and settling a
+//! close, the challenge, post, payout, and claim checks, and the ledger's queue rule. Each is a
+//! function on a protocol type that reads no storage.
 //!
-//! The one exception is the validators' [Balances] database, a [QMDB](commonware_storage::qmdb).
-//! Its root commits to every write ever made to it, not only to the balances it holds, so applying
-//! a posted close to it is prescribed as well. Everything else belongs to the deployment. That
-//! covers what each role stores and where, and how it caches, batches, schedules, persists, and
-//! recovers.
+//! The exceptions are the validators' two [QMDB](commonware_storage::qmdb) databases. The root of
+//! the [Balances] database commits to every write ever made to it, not only to the balances it
+//! holds, so applying a posted close to it is prescribed as well. The root of the [PayoutLog]
+//! commits to every payout and commit in the order appended, so each posted close appends exactly
+//! the batch [Payout::stage] builds. Everything else belongs to the deployment. That covers what
+//! each role stores and where, and how it caches, batches, schedules, persists, and recovers.
 //!
 //! Each deployment also chooses the unsigned integer type of its amounts ([Amount]). This crate
 //! implements it for `u64` and `u128`, and a deployment that settles EVM tokens can implement it
@@ -96,11 +97,13 @@
 //!   operator    any store             Request::verify, Verified::admit, State::acknowledge,
 //!                                     Withdrawal::verify, Close::assemble, Flow::settle
 //!   receiver    any store             Receipt::verify, Opening::verify, Challenge::verify
-//!   validators  Balances, any store   Close::check, Checked::settle, Proposal::apply,
-//!                                     Proposal::payouts, Matrix::open, Queue::prefix
-//!   ledger      any store             Summary::verify, Challenge::verify, BalanceProof::verify
+//!   validators  Balances, PayoutLog,  Close::check, Checked::settle, Proposal::apply,
+//!               any store             Proposal::payouts, Matrix::open, Queue::prefix
+//!   ledger      any store             Summary::verify, Challenge::verify, PayoutProof::verify,
+//!                                     BalanceProof::verify
 //!   ---------------------------------------------------------------------------------------------
-//!   prescribed  wire formats, namespaces, commitments, close rules, the balances step
+//!   prescribed  wire formats, namespaces, commitments, close rules, the balances and payout log
+//!               steps
 //! ```
 //!
 //! Each role's section below names its helpers and states its obligations. An obligation is a
@@ -353,24 +356,34 @@
 //! Each balance gains its incoming payments and deposits, loses its outgoing payments, and must end
 //! between zero and the largest amount. An account withdrawing is then paid the lesser of what it
 //! asked for and its balance. The summary chains to the one before it and commits to the payments,
-//! the new balances, and the payouts. For each queue it holds a [Processed] record of how many
+//! the new balances, and the payout log. For each queue it holds a [Processed] record of how many
 //! requests the close processes and the queue's running hash after them. The post carries the
-//! proposal's summary, its certificate, and its payouts ([Proposal::payouts]).
+//! proposal's summary and its certificate.
+//!
+//! Every payout joins one [PayoutLog] and keeps its index there for good. [Checked::settle] stages
+//! the close's batch with [Payout::stage], and the summary records the payouts total and the log's
+//! root and size after the batch. With p the parent's payouts size and s the close's, the payouts
+//! take the indices [p, s - 1) in account order and the commit takes s - 1 ([Proposal::payouts]). A
+//! validator can find an account's payout of a close by binary search over [p, s - 1) and prove it
+//! with the log's proof of that one operation ([PayoutProof]).
 //!
 //! ```text
 //!   Summary(e)
-//!   +-------+--------+--------+----------+---------+--------------+--------------------+
-//!   | epoch | parent | matrix | balances | payouts |   deposits   | forced withdrawals |
-//!   |       |        |        |          |         | count | hash |  count   |  hash   |
-//!   +-------+--------+--------+----------+---------+-------+------+----------+---------+
-//!               |        |          |          |              |                   |
-//!               v        |          |          |              '---------+---------'
-//!        H(Summary(e-1)) |          |          |                        v
-//!                        |          |          |       hash in Summary(e-1), extended by
-//!                        |          |          |       H(hash || request) for each request
-//!                        |          |          |       the close processes, in queue order
-//!                        |          |          '--> tree of H(account || payout)
-//!                        |          '--> root of Balances, keyed by account
+//!   +-------+--------+--------+----------+---------------------+--------------+--------------+
+//!   | epoch | parent | matrix | balances |       payouts       |   deposits   |    forced    |
+//!   |       |        |        |          |                     |              | withdrawals  |
+//!   |       |        |        |          | root | size | total | count | hash | count | hash |
+//!   +-------+--------+--------+----------+------+------+-------+-------+------+-------+------+
+//!               |        |         |         |      |      |              |               |
+//!               v        |         |         |      |      |              '-------+-------'
+//!        H(Summary(e-1)) |         |         |      |      |                      v
+//!                        |         |         |      |      |   hash in Summary(e-1), extended by
+//!                        |         |         |      |      |   H(hash || request) for each request
+//!                        |         |         |      |      |   the close processes, in queue order
+//!                        |         |         |      |      '--> sum of the close's payouts
+//!                        |         |         '------+--> root and size of PayoutLog after the
+//!                        |         |                     close's payouts and commit
+//!                        |         '--> root of Balances, keyed by account
 //!                        v
 //!                   matrix root
 //!                  /           \
@@ -382,28 +395,38 @@
 //!   H(bob || 5)  H(carol || 2)                     alice's payment map, one leaf per receiver
 //! ```
 //!
-//! Once the close posts, [Proposal::apply] applies its batch and returns the database with the
-//! close's [Checkpoint]. Before touching the database, it refuses a proposal whose summary did not
-//! post or a database not at the parent's root. It does not make the writes durable, and committing
-//! and pruning leave the root unchanged.
+//! Once the close posts, [Proposal::apply] applies both batches and returns both databases with the
+//! close's [Checkpoint]. Before touching either database, it refuses a proposal whose summary did
+//! not post, balances not at the parent's balances root, or a payout log not at the parent's
+//! payouts root. It commits the log's batch before it applies the balance writes. It does not make
+//! the balance writes durable, and committing and pruning the balances leave their root unchanged.
 //!
-//! Because the root commits to every write, an empty batch changes it and the same balances reached
-//! through other batches give another root. Validators therefore apply one batch per posted close,
-//! in epoch order, each the batch [Checked::settle] staged at its parent's root.
+//! Applied balance writes can survive a crash before the balances commit, so after a crash the
+//! balances may hold either close. Because the log is durable first, it is then at or past the
+//! close the balances hold. A restart rewinds it by reopening it at that close's payouts size (V2).
+//!
+//! Because each root commits to every write, an empty batch changes it and the same balances
+//! reached through other batches give another root. Validators therefore apply one batch to each
+//! database per posted close, in epoch order, each the batch [Checked::settle] staged at its
+//! parent's roots.
 //!
 //! ```text
 //!                       apply after              apply after            apply after
 //!                     post(e-1) final           post(e) final         post(e+1) final
 //!                            v                        v                      v
+//!   PayoutLog L(e-2) -- batch(e-1) --> L(e-1) --- batch(e) ---> L(e) -- batch(e+1) --> L(e+1)
+//!                            |                        |                      |
+//!                       once durable             once durable           once durable
+//!                            v                        v                      v
 //!   Balances  R(e-2) -- batch(e-1) --> R(e-1) --- batch(e) ---> R(e) -- batch(e+1) --> R(e+1)
 //!                                                                ^
 //!                                                                |
-//!                                                 settle of close(e+1) reads here
-//!                                                      and stages batch(e+1)
+//!                                               settle of close(e+1) reads R(e) and L(e)
+//!                                                 and stages both of its batches
 //! ```
 //!
-//! Settling close(e+1) reads R(e), so it waits for close(e) to apply. Checking close(e+1) needs
-//! only the checkpoint of close(e).
+//! Settling close(e+1) reads R(e) and L(e), so it waits for close(e) to apply. Checking close(e+1)
+//! needs only the checkpoint of close(e).
 //!
 //! The validators' obligations follow. V4 and V6 put funds at risk if every honest validator in a
 //! certificate breaks them.
@@ -413,9 +436,11 @@
 //!
 //! - **V2.** Pass [Close::check] the checkpoint of the last post, the one [Proposal::apply]
 //!   returned. After a restart, take the persisted summary on the chain ending at the ledger's last
-//!   posted digest whose balances root is the database's, with that close's matrix
-//!   ([Close::matrix]). Use [Summary::genesis] with [Matrix::empty] only for a database that never
-//!   committed a batch. Otherwise the validator's attestation matches no honest validator's.
+//!   posted digest whose balances root is the balances database's, with that close's matrix
+//!   ([Close::matrix]). Use [Summary::genesis] with [Matrix::empty] only for a balances database
+//!   that never committed a batch. Reopen the payout log at that summary's payouts size and require
+//!   its payouts root. Otherwise the validator's attestation matches no honest validator's, or
+//!   [Checked::settle] refuses every close.
 //!
 //! - **V3.** Pass [Close::check] the ledger's queues as final ledger state holds them while the
 //!   ledger expects the close. Queues grow only at their tail, so read them again at a later final
@@ -428,16 +453,18 @@
 //!   required count equal to its length. Otherwise, once the close posts and the ledger drops those
 //!   requests, a crash leaves the validator unable to apply or serve it.
 //!
-//! - **V5.** Apply exactly the posted closes, once each, in epoch order, each to a database at its
-//!   parent's root, and no other batch. Otherwise its root diverges, and [Checked::settle] and
+//! - **V5.** Apply exactly the posted closes, once each, in epoch order, each to databases at its
+//!   parent's roots, and no other batch. Otherwise a root diverges, and [Checked::settle] and
 //!   [Proposal::apply] refuse with [Error::InvalidCheckpoint] until it recovers by reopening at a
 //!   retained posted commit, by replaying persisted posted closes, or by state sync to a posted
 //!   root.
 //!
 //! - **V6.** Keep each posted matrix while receivers may still audit it, and serve openings
 //!   ([Matrix::open]). Serve each close and the requests it processes to validators that did not
-//!   check it, and after a halt serve balance proofs under the last posted root. Otherwise
-//!   receivers cannot challenge, peers cannot apply the close, and accounts cannot claim.
+//!   check it. Keep the whole payout log, and serve payout proofs ([PayoutProof]) under the last
+//!   posted payouts root, before and after a halt. After a halt, also serve balance proofs under
+//!   the last posted balances root. Otherwise receivers cannot challenge, peers cannot apply the
+//!   close, and accounts cannot withdraw their payouts or claim.
 //!
 //! - **V7.** Decode closes with the deployment's [Limits]. Otherwise the validator rejects valid
 //!   closes or attests closes beyond the agreed limits.
@@ -446,8 +473,9 @@
 //!
 //! The production ledger is a contract on the chain that holds the funds, with its own storage. The
 //! crate supplies the checks that protect funds and specifies the rest. [Summary::verify] checks
-//! posts, [Challenge::verify] checks challenges, and [BalanceProof::verify] checks claims. The
-//! ledger keeps three stores, and the requests and payouts below move through them.
+//! posts, [Challenge::verify] checks challenges, [PayoutProof::verify] checks payout withdrawals
+//! and claims, and [BalanceProof::verify] checks balance claims. The ledger keeps three stores, and
+//! the requests and payouts below move through them.
 //!
 //! ```text
 //!                           +------------------------------+
@@ -462,14 +490,15 @@
 //!                           | halted or not                |
 //!                           +------------------------------+
 //!                           +------------------------------+
-//!   post(e) payouts ------->| owed payouts                 |-- withdraw --> account
-//!                           | alice 5, bob 7               |
+//!   Summary payouts ------->| payouts root and size        |
+//!   PayoutProof ----------->| owed payouts                 |-- withdraw --> account
+//!                           | claimed ranges [0,2) [3,5)   |
 //!                           +------------------------------+
 //! ```
 //!
 //! The funds the ledger holds have three parts. The liability is the sum of balances as of the last
-//! post, the unprocessed deposits are the sum of those queued, and the owed payouts are those not
-//! yet withdrawn.
+//! post, the unprocessed deposits are the sum of those queued, and the owed payouts are the posted
+//! payouts not yet withdrawn.
 //!
 //! ```text
 //!                0                                                               largest amount
@@ -509,18 +538,21 @@
 //!
 //! - **L5.** Post only before a halt, and only a summary [Summary::verify] accepts for the expected
 //!   epoch, the last post's digest, and each queue's range from its required count to its length.
-//!   The payouts' total must fit and be at most the liability plus the deposits processed.
+//!   The summary's payouts total must be at most the liability plus the deposits processed.
 //!   Otherwise a summary honest validators did not certify can post.
 //!
 //!   In one state change, a post drops the processed requests and sets each required count to what
 //!   remains queued. It moves the deposits processed from the unprocessed deposits into the
-//!   liability, moves the payouts from the liability into the owed payouts, and records the
-//!   summary's matrix root, balances root, and digest. It transfers nothing. A lower required count
-//!   lets closes defer a forced withdrawal forever, and a transfer that can fail inside a post
-//!   blocks every later post.
+//!   liability, and the payouts total from the liability into the owed payouts. It adds the commit
+//!   position, the payouts size less one, to the claimed ranges. It records the summary's matrix
+//!   root, balances root, payouts root and size, and digest, and transfers nothing. A lower
+//!   required count lets closes defer a forced withdrawal forever, and a transfer that can fail
+//!   inside a post blocks every later post.
 //!
-//! - **L6.** An account withdraws what it is owed, to its destination (L10), at most once per
-//!   payout, before or after a halt. Otherwise a payout is paid twice or never.
+//! - **L6.** Pay a payout, before or after a halt, only if [PayoutProof::verify] accepts its proof
+//!   under the last posted payouts root and no claimed range covers its index. In one state change,
+//!   add the index to the claimed ranges, take its amount from the owed payouts, and pay it to its
+//!   account's destination (L10). Otherwise a payout is paid twice or never.
 //!
 //! - **L7.** Before a halt, halt on a challenge that [Challenge::verify] accepts against a posted
 //!   epoch and its matrix root, and keep every posted matrix root. Otherwise receivers lose their
@@ -528,8 +560,9 @@
 //!
 //! - **L8.** Once halted, by a valid challenge or the deployment's own policy, post nothing and
 //!   take no deposit or forced withdrawal. Make each queued deposit claimable by its account, and
-//!   drop the queued forced withdrawals and the required counts. Owed payouts stay withdrawable.
-//!   Otherwise a post after the halt changes the balances accounts claim against.
+//!   drop the queued forced withdrawals and the required counts. Owed payouts stay claimable under
+//!   the last posted payouts root. Otherwise a post after the halt changes the balances accounts
+//!   claim against.
 //!
 //! - **L9.** After a halt, pay each account its balance at most once, only if
 //!   [BalanceProof::verify] accepts its proof under the last posted balances root and the balance
@@ -544,23 +577,41 @@
 //! - **L11.** Make every check depend only on the ledger's state and the call's inputs. Otherwise
 //!   two replicas of the ledger diverge.
 //!
-//! After a halt, each account claims its balance and its unprocessed deposits, and withdraws its
-//! owed payouts. Only the balance claim needs a proof, and a validator supplies it.
+//! After a halt, each account claims its balance, its unprocessed deposits, and its payouts. The
+//! balance and payout claims need proofs, and a validator supplies them.
 //!
 //! ```text
 //!   validator --balance proof--> account --claim(proof)--> ledger --> balance as of the last post
 //!                                account --claim---------> ledger --> deposits no close processed
-//!                                account --withdraw------> ledger --> payouts owed to it
+//!   validator --payout proof---> account --claim(proof)--> ledger --> one payout, once per index
 //! ```
 //!
-//! Owed payouts take one of two forms. With per-account credits, a post adds each payout to its
-//! account's credit at one write per payout, and L6 pays and zeroes the credit. With payouts roots,
-//! a post records the summary's payouts root. An account then withdraws with an opening of its
-//! entry (port item 4), and the ledger marks that epoch and account withdrawn. The crate has no
-//! helper for that opening.
+//! The ledger tracks paid payouts by their indices in the payout log. Its claimed ranges map each
+//! range's start to its exclusive end, begin as [0, 1) over the initial commit, and cover every
+//! commit and every paid payout. A withdrawal before a halt, or a claim after one, adds [i, i + 1)
+//! for the payout at index i and merges it with the ranges it touches. A post adds its commit
+//! position the same way.
 //!
-//! A post in the second form makes a constant number of writes. It still receives the payouts,
-//! because L3, L5, and L9 need their total.
+//! Ranges never overlap or touch. Every commit is covered, so once every payout is paid the ranges
+//! collapse to the one range [0, s) for the last posted payouts size s. Each gap between two ranges
+//! holds at least one unpaid payout, so with U payouts unpaid at most U + 1 ranges remain in any
+//! order of payment.
+//!
+//! ```text
+//!   log index     0   1   2   3   4   5   6
+//!               +---+---+---+---+---+---+---+
+//!   operation   | C | C | a | b | C | c | C |     C  commit
+//!               +---+---+---+---+---+---+---+     a, b, c  payouts
+//!   posted      [=======)       [===)   [===)     [0,2) [4,5) [6,7)
+//!   withdraw b  [=======)   [=======)   [===)     [0,2) [3,5) [6,7)
+//!   withdraw a  [===================)   [===)     [0,5) [6,7)
+//!   withdraw b  refused, a range covers 3
+//!   withdraw c  [===========================)     [0,7)
+//! ```
+//!
+//! The proof shows that a payout exists, and the claimed ranges keep it from being paid twice. A
+//! replayed proof is refused even though it still verifies. A proof verifies only under the root it
+//! was built for, so after a later post the account fetches a fresh proof of the same index.
 //!
 //! ## What a port reproduces
 //!
@@ -571,13 +622,13 @@
 //!    big-endian, and lengths encode as varints. Public keys and digests encode as their raw bytes.
 //!    The genesis summary's parent and both of its running hashes are all zeros.
 //!
-//! 2. **Trees.** Payment maps, the matrix, and payouts commit with the binary Merkle tree of
+//! 2. **Trees.** Payment maps and the matrix commit with the binary Merkle tree of
 //!    [commonware_storage::bmt]. A leaf is hashed with its big-endian `u32` position, each level
 //!    hashes pairs and duplicates an unpaired last node, and the root is
 //!    `H(leaf_count || tree_root)`. An empty tree holds the single node `H()`, so its root is
 //!    `H(0u32 || H())`.
 //!
-//! 3. **Leaves.** A map or payouts entry is `H(account || amount)`, and a matrix row is
+//! 3. **Leaves.** A map entry is `H(account || amount)`, and a matrix row is
 //!    `H(sender || payments root)`. Entries are strictly increasing by account.
 //!
 //! 4. **Openings.** A member [Lookup] proves one leaf. A non-member lookup proves the neighbors at
@@ -594,22 +645,37 @@
 //!    sender signs it in [Namespace::state] and the operator in [Namespace::acknowledgement], and
 //!    the receipt's entry proves under the state's payments root at its position.
 //!
-//! 7. **Summaries.** A [Summary] encodes as epoch, parent, matrix, balances, and payouts, then the
-//!    count and running hash of the deposits and of the forced withdrawals. Its digest is the hash
-//!    of that encoding, and the certificate covers the encoding in [Namespace::summary]. A running
-//!    hash extends its parent's by `H(hash || request)` for each request the close processes in
-//!    queue order. A request encodes as its account then its amount. The ledger takes the running
-//!    hashes as certified and does not recompute them.
+//! 7. **Summaries.** A [Summary] encodes as epoch, parent, matrix, balances, and its [Payouts] as
+//!    root, size, and total, then the count and running hash of the deposits and of the forced
+//!    withdrawals. Its digest is the hash of that encoding, and the certificate covers the encoding
+//!    in [Namespace::summary]. A running hash extends its parent's by `H(hash || request)` for each
+//!    request the close processes in queue order. A request encodes as its account then its amount.
+//!    The ledger takes the running hashes as certified and does not recompute them.
 //!
 //! 8. **Counts.** Each count lies between its queue's required count and its length.
 //!
-//! 9. **The empty balances root.** A deployment reads it from an empty [Balances] database. It
-//!    depends on the hasher, account type, and amount type, because the database pads its
-//!    fixed-size operations to the key and value widths.
+//! 9. **The empty roots.** A deployment reads the empty balances root from an empty [Balances]
+//!    database. It depends on the hasher, account type, and amount type, because the database pads
+//!    its fixed-size operations to the key and value widths. An empty [PayoutLog] holds one commit
+//!    with no metadata and an inactivity floor of zero, so its size is 1. [Summary::genesis]
+//!    records its root.
 //!
 //! 10. **Balance proofs.** [BalanceProof::verify] is the key-value proof of QMDB's current
 //!     database, an operation proof under the canonical root together with its bitmap chunk. It is
 //!     the largest part of a port.
+//!
+//! 11. **Payout proofs.** [PayoutProof::verify] is the range proof of QMDB's keyless database for
+//!     one operation, over the Merkle Mountain Range of [commonware_storage::merkle::mmr]. A leaf
+//!     is `H(position || operation)`, with the operation's node position in the range as a
+//!     big-endian `u64`. That position differs from the operation's index. The proof rebuilds the
+//!     root from that leaf and the log's size. The floor stays zero, so the root has no inactive
+//!     peaks.
+//!
+//!     Every operation encodes to the payout's width plus 10 bytes. An appended payout encodes as
+//!     tag 1, its account, its amount, and zeros to that size. A commit encodes as tag 0, a zero
+//!     byte for its absent metadata, zeros of the payout's width, and its inactivity floor as a
+//!     big-endian `u64`. A port reproduces the storage crate's node and root hashing for that
+//!     family.
 
 mod amounts;
 mod close;
@@ -634,8 +700,10 @@ pub use payment::{
     Acknowledgement, Admission, Challenge, Receipt, Request, State, States, Verified,
 };
 pub use settlement::Flow;
-pub use summary::{Processed, Summary};
-pub use validator::{BalanceProof, Balances, Checked, Checkpoint, Proposal};
+pub use summary::{Payouts, Processed, Summary};
+pub use validator::{
+    BalanceProof, Balances, Checked, Checkpoint, Payout, PayoutLog, PayoutProof, Proposal,
+};
 
 /// An epoch number. Epochs start at one, and epoch zero names the state before the first close.
 pub type Epoch = u64;

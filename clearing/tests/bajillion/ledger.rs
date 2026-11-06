@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::roles::ledger::{Halt, Refusal};
-use commonware_clearing::bajillion::{Challenge, Error, Matrix, Processed};
+use commonware_clearing::bajillion::{Challenge, Error, Matrix, Payouts, Processed};
 use commonware_cryptography::Digest as _;
 use commonware_runtime::Runner as _;
 
@@ -118,7 +118,7 @@ fn test_ledger_rejects_closes_deferring_required_requests() {
                 parent: *deployment.ledger.parent(),
                 matrix: Matrix::<PublicKey, Digest, u64>::empty::<Sha256>().root(),
                 balances: *deployment.ledger.balances(),
-                payouts: Amounts::<PublicKey, u64>::empty().root::<Sha256>(),
+                payouts: deployment.validators[0].summary().payouts,
                 deposits: Processed {
                     count: deposits,
                     hash: Digest::EMPTY,
@@ -132,7 +132,7 @@ fn test_ledger_rejects_closes_deferring_required_requests() {
             assert!(matches!(
                 deployment
                     .ledger
-                    .post(&mut context, &deferring, &Amounts::empty(), &certificate),
+                    .post(&mut context, &deferring, &certificate),
                 Err(Refusal::Error(Error::InvalidCount))
             ));
         }
@@ -150,7 +150,6 @@ fn test_ledger_posts_only_certified_successors() {
         let close = close_epoch(&mut deployment.operator, &queue, 1, 0);
         let proposals = deployment.verify(&close).await;
         let summary = *proposals[0].summary();
-        let payouts = proposals[0].payouts().clone();
         let certificate = deployment.certify(&proposals);
         let schemes = &deployment.schemes;
         let ledger = &mut deployment.ledger;
@@ -161,7 +160,7 @@ fn test_ledger_posts_only_certified_successors() {
             ..summary
         };
         assert!(matches!(
-            ledger.post(&mut context, &wrong, &payouts, &certify(schemes, &wrong)),
+            ledger.post(&mut context, &wrong, &certify(schemes, &wrong)),
             Err(Refusal::Error(Error::WrongEpoch {
                 expected: 1,
                 found: 2
@@ -172,7 +171,7 @@ fn test_ledger_posts_only_certified_successors() {
             ..summary
         };
         assert!(matches!(
-            ledger.post(&mut context, &wrong, &payouts, &certify(schemes, &wrong)),
+            ledger.post(&mut context, &wrong, &certify(schemes, &wrong)),
             Err(Refusal::Error(Error::WrongParent))
         ));
 
@@ -194,24 +193,34 @@ fn test_ledger_posts_only_certified_successors() {
             },
         ] {
             assert!(matches!(
-                ledger.post(&mut context, &wrong, &payouts, &certify(schemes, &wrong)),
+                ledger.post(&mut context, &wrong, &certify(schemes, &wrong)),
                 Err(Refusal::Error(Error::InvalidCount))
             ));
         }
 
-        // The payouts must match the summary and stay within the funds held.
-        assert!(matches!(
-            ledger.post(&mut context, &summary, &amounts(&[(0, 1)]), &certificate),
-            Err(Refusal::Error(Error::InvalidPayouts))
-        ));
-        let excessive = amounts(&[(0, 11)]);
+        // The payouts total must stay within the funds held, and the payouts size must count the
+        // close's commit.
         let wrong = Summary {
-            payouts: excessive.root::<Sha256>(),
+            payouts: Payouts {
+                total: 11,
+                ..summary.payouts
+            },
             ..summary
         };
         assert!(matches!(
-            ledger.post(&mut context, &wrong, &excessive, &certify(schemes, &wrong)),
+            ledger.post(&mut context, &wrong, &certify(schemes, &wrong)),
             Err(Refusal::Custody)
+        ));
+        let wrong = Summary {
+            payouts: Payouts {
+                size: 0,
+                ..summary.payouts
+            },
+            ..summary
+        };
+        assert!(matches!(
+            ledger.post(&mut context, &wrong, &certify(schemes, &wrong)),
+            Err(Refusal::Error(Error::InvalidCheckpoint))
         ));
 
         // The certificate must cover this summary.
@@ -220,18 +229,17 @@ fn test_ledger_posts_only_certified_successors() {
             ..summary
         };
         assert!(matches!(
-            ledger.post(&mut context, &summary, &payouts, &certify(schemes, &other)),
+            ledger.post(&mut context, &summary, &certify(schemes, &other)),
             Err(Refusal::Error(Error::InvalidCertificate))
         ));
 
-        ledger
-            .post(&mut context, &summary, &payouts, &certificate)
-            .unwrap();
+        ledger.post(&mut context, &summary, &certificate).unwrap();
         assert_eq!(ledger.epoch(), 2);
         assert_eq!(ledger.balances(), &summary.balances);
         assert_eq!(ledger.matrix(1), Some(&summary.matrix));
+        assert_eq!(ledger.ranges(), vec![(0, summary.payouts.size)]);
         assert!(matches!(
-            ledger.post(&mut context, &summary, &payouts, &certificate),
+            ledger.post(&mut context, &summary, &certificate),
             Err(Refusal::Error(Error::WrongEpoch {
                 expected: 2,
                 found: 1
@@ -251,12 +259,9 @@ fn test_halted_ledger_posts_nothing() {
         let certificate = deployment.certify(&proposals);
         deployment.ledger.halt();
         assert!(matches!(
-            deployment.ledger.post(
-                &mut context,
-                proposals[0].summary(),
-                proposals[0].payouts(),
-                &certificate
-            ),
+            deployment
+                .ledger
+                .post(&mut context, proposals[0].summary(), &certificate),
             Err(Refusal::Halted)
         ));
         assert_eq!(deployment.ledger.epoch(), 1);
@@ -398,8 +403,8 @@ fn test_halted_ledger_pays_balance_and_deposit_claims() {
     });
 }
 
-/// A post transfers nothing. Each payout stays in custody until its account withdraws it, once,
-/// and a halt does not stop the withdrawal.
+/// A post transfers nothing. Each payout stays in custody until its account withdraws it with a
+/// proof, or claims it after a halt, and it is paid once.
 #[test]
 fn test_payouts_are_withdrawn_once_before_or_after_a_halt() {
     deterministic::Runner::default().start(|mut context| async move {
@@ -414,23 +419,166 @@ fn test_payouts_are_withdrawn_once_before_or_after_a_halt() {
         let proposals = deployment.verify(&close).await;
         deployment.post(&mut context, proposals).await;
         assert_eq!(deployment.ledger.custody(), 20);
-        assert_eq!(deployment.ledger.owed(&account(0)), 4);
-        assert_eq!(deployment.ledger.owed(&account(1)), 6);
+        assert_eq!(deployment.ledger.payable(), 10);
 
+        // The close owes nothing to an account it did not pay out.
+        let validator = &deployment.validators[0];
+        assert!(
+            validator
+                .prove_payout(2, &account(2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let alice = validator
+            .prove_payout(2, &account(0))
+            .await
+            .unwrap()
+            .unwrap();
+        let bob = validator
+            .prove_payout(2, &account(1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // A proof of a raised amount fails, and the payout is withdrawn once.
         let ledger = &mut deployment.ledger;
+        let mut forged = alice.clone();
+        forged.payout.amount += 1;
         assert!(matches!(
-            ledger.withdraw_payout(&account(2)),
-            Err(Refusal::NothingOwed)
+            ledger.withdraw_payout(&forged),
+            Err(Refusal::InvalidProof)
         ));
-        assert_eq!(ledger.withdraw_payout(&account(0)).unwrap(), 4);
+        assert_eq!(ledger.withdraw_payout(&alice).unwrap(), (account(0), 4));
         assert!(matches!(
-            ledger.withdraw_payout(&account(0)),
-            Err(Refusal::NothingOwed)
+            ledger.withdraw_payout(&alice),
+            Err(Refusal::Withdrawn)
         ));
+
+        // After a halt, the payouts root freezes and the remaining payout is claimed against it.
         ledger.halt();
-        assert_eq!(ledger.withdraw_payout(&account(1)).unwrap(), 6);
+        assert_eq!(ledger.withdraw_payout(&bob).unwrap(), (account(1), 6));
+        assert!(matches!(
+            ledger.withdraw_payout(&bob),
+            Err(Refusal::Withdrawn)
+        ));
         assert_eq!(ledger.custody(), 10);
+        assert_eq!(ledger.payable(), 0);
     });
+}
+
+/// A payout proof verifies only under the last posted payouts root. After a later post, the account
+/// fetches a fresh proof of the same index.
+#[test]
+fn test_payout_proofs_follow_the_last_post() {
+    deterministic::Runner::default().start(|mut context| async move {
+        let mut deployment = TestDeployment::new(&context, "stale", 1).await;
+        deployment.ledger.deposit(account(0), 10).unwrap();
+        deployment.close(&mut context).await;
+        deployment.ledger.withdraw(account(0), 4).unwrap();
+        let queue = deployment.ledger.queue();
+        let withdrawing = close_epoch(&mut deployment.operator, &queue, 0, 1);
+        let proposals = deployment.verify(&withdrawing).await;
+        deployment.post(&mut context, proposals).await;
+        let stale = deployment.validators[0]
+            .prove_payout(2, &account(0))
+            .await
+            .unwrap()
+            .unwrap();
+        let idle = close(&mut deployment.operator);
+        let proposals = deployment.verify(&idle).await;
+        deployment.post(&mut context, proposals).await;
+
+        assert!(matches!(
+            deployment.ledger.withdraw_payout(&stale),
+            Err(Refusal::InvalidProof)
+        ));
+        let fresh = deployment.validators[0]
+            .prove_payout(2, &account(0))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh.index, stale.index);
+        assert_eq!(
+            deployment.ledger.withdraw_payout(&fresh).unwrap(),
+            (account(0), 4)
+        );
+    });
+}
+
+/// Ranges of withdrawn payouts and commits never overlap or touch. With U payouts outstanding,
+/// there are at most U + 1 ranges in any withdrawal order, and once every payout is withdrawn
+/// the ranges collapse to one range over the whole log.
+#[test]
+fn test_withdrawn_ranges_stay_compact() {
+    for order in ["alternating", "reversed", "strided"] {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut deployment = TestDeployment::new(&context, "ranges", 1).await;
+            let funded: Vec<_> = (0..9).map(|index| (index, 10 + index)).collect();
+            for (index, amount) in &funded {
+                deployment.ledger.deposit(account(*index), *amount).unwrap();
+            }
+            deployment.close(&mut context).await;
+
+            // Two closes pay out every account, the first five and then the other four.
+            let mut owed = Vec::new();
+            for accounts in [0..5, 5..9] {
+                for index in accounts.clone() {
+                    deployment.ledger.withdraw(account(index), 3).unwrap();
+                }
+                let queue = deployment.ledger.queue();
+                let count = queue.forced_withdrawals.len() as u64;
+                let close = close_epoch(&mut deployment.operator, &queue, 0, count);
+                let proposals = deployment.verify(&close).await;
+                let summary = deployment.post(&mut context, proposals).await;
+                owed.extend(accounts.map(|index| (summary.epoch, account(index))));
+            }
+            let size = deployment.validators[0].summary().payouts.size;
+
+            // Prove every payout, then order the proofs for this run.
+            let mut proofs = Vec::new();
+            for (epoch, account) in &owed {
+                let validator = &deployment.validators[0];
+                proofs.push(
+                    validator
+                        .prove_payout(*epoch, account)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                );
+            }
+            proofs.sort_by_key(|proof| proof.index);
+            match order {
+                "alternating" => proofs.sort_by_key(|proof| (proof.index % 2 == 0, proof.index)),
+                "reversed" => proofs.reverse(),
+                _ => {
+                    // A stride coprime with the 9 payouts visits each once.
+                    let sorted = proofs.clone();
+                    for (position, proof) in proofs.iter_mut().enumerate() {
+                        *proof = sorted[position * 4 % sorted.len()].clone();
+                    }
+                }
+            }
+
+            // After each withdrawal the ranges stay apart and number at most one more than the
+            // payouts outstanding. The last leaves one range over the whole log.
+            let mut outstanding = proofs.len();
+            let check = |ranges: Vec<(u64, u64)>, outstanding: usize| {
+                assert!(ranges.len() <= outstanding + 1, "{order}: {ranges:?}");
+                for pair in ranges.windows(2) {
+                    assert!(pair[0].1 < pair[1].0, "{order}: {ranges:?}");
+                }
+            };
+            check(deployment.ledger.ranges(), outstanding);
+            for proof in &proofs {
+                deployment.ledger.withdraw_payout(proof).unwrap();
+                outstanding -= 1;
+                check(deployment.ledger.ranges(), outstanding);
+            }
+            assert_eq!(deployment.ledger.ranges(), vec![(0, size)], "{order}");
+            assert_eq!(deployment.ledger.payable(), 0);
+        });
+    }
 }
 
 /// Owed payouts stay in custody, so they count toward the largest amount the ledger may hold. A
@@ -446,8 +594,13 @@ fn test_owed_payouts_count_toward_the_custody_bound() {
         let close = close_epoch(&mut deployment.operator, &queue, 0, 1);
         let proposals = deployment.verify(&close).await;
         deployment.post(&mut context, proposals).await;
-        assert_eq!(deployment.ledger.owed(&account(0)), 10);
+        assert_eq!(deployment.ledger.payable(), 10);
         assert_eq!(deployment.ledger.custody(), u64::MAX - 1);
+        let proof = deployment.validators[0]
+            .prove_payout(2, &account(0))
+            .await
+            .unwrap()
+            .unwrap();
 
         // The liability and the unprocessed deposits leave room for 11 more, but the owed payout
         // takes 10 of it.
@@ -460,7 +613,7 @@ fn test_owed_payouts_count_toward_the_custody_bound() {
         assert_eq!(ledger.custody(), u64::MAX);
 
         // Withdrawing the payout frees its room.
-        assert_eq!(ledger.withdraw_payout(&account(0)).unwrap(), 10);
+        assert_eq!(ledger.withdraw_payout(&proof).unwrap(), (account(0), 10));
         ledger.deposit(account(1), 10).unwrap();
         assert_eq!(ledger.custody(), u64::MAX);
     });
@@ -502,7 +655,7 @@ mod reorg {
             let certificate = deployment.certify(&proposals);
             let summary = *proposals[0].summary();
             canonical
-                .post(&mut context, &summary, proposals[0].payouts(), &certificate)
+                .post(&mut context, &summary, &certificate)
                 .unwrap();
             let validator = &mut deployment.validators[0];
             let proposal = proposals.into_iter().next().unwrap();

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::roles::validator::Persisted;
-use commonware_clearing::bajillion::{BalanceProof, Error, ForcedWithdrawal};
+use commonware_clearing::bajillion::{BalanceProof, Error, ForcedWithdrawal, Payout, PayoutLog};
 use commonware_codec::{DecodeExt as _, Encode as _};
 use commonware_runtime::{Runner as _, deterministic::FaultConfig};
 use commonware_utils::Probability;
@@ -134,7 +134,7 @@ fn test_validator_resumes_from_its_records() {
         let second = *proposals[0].summary();
         deployment
             .ledger
-            .post(&mut context, &second, proposals[0].payouts(), &certificate)
+            .post(&mut context, &second, &certificate)
             .unwrap();
         let posted = *deployment.ledger.parent();
         let persisted = deployment.validators[0].persisted().clone();
@@ -213,9 +213,7 @@ fn test_withdrawals_pay_up_to_the_balance() {
         assert_eq!(payouts, amounts(&[(0, 10), (1, 15), (2, 5)]));
         deployment.post(&mut context, proposals).await;
         assert_eq!(deployment.ledger.custody(), custody);
-        for (account, amount) in payouts.iter() {
-            assert_eq!(deployment.ledger.withdraw_payout(account).unwrap(), amount);
-        }
+        deployment.withdraw_payouts(2, &payouts).await;
         assert_eq!(deployment.ledger.custody(), custody - 30);
 
         // The withdrawals empty every balance, and validators keep no record of an empty one.
@@ -276,10 +274,10 @@ fn test_close_settles_gross_flows_beyond_the_largest_amount() {
     });
 }
 
-/// Starts a deployment named `name` with one validator, posts a funding close, queues a deposit,
-/// and posts the close of epoch 2. That close pays bob and processes the deposit. Returns the
-/// deployment with its validator taken out, the validator, and its proposal for epoch 2. The
-/// ledger posted it, but the validator has not applied it.
+/// Starts a deployment named `name` with one validator, posts a funding close, queues a deposit
+/// and a forced withdrawal of 1 by alice, and posts the close of epoch 2. That close pays bob and
+/// processes both requests. Returns the deployment with its validator taken out, the validator,
+/// and its proposal for epoch 2. The ledger posted it, but the validator has not applied it.
 async fn interrupted(
     context: &mut deterministic::Context,
     name: &str,
@@ -291,14 +289,15 @@ async fn interrupted(
     let request = alice.send(2, amounts(&[(1, 4)]), false).unwrap();
     deployment.operator.accept(&request).unwrap();
     deployment.ledger.deposit(account(2), 5).unwrap();
+    deployment.ledger.withdraw(account(0), 1).unwrap();
     let queue = deployment.ledger.queue();
-    let close = close_epoch(&mut deployment.operator, &queue, 1, 0);
+    let close = close_epoch(&mut deployment.operator, &queue, 1, 1);
     let mut proposals = deployment.verify(&close).await;
     let certificate = deployment.certify(&proposals);
     let summary = *proposals[0].summary();
     deployment
         .ledger
-        .post(context, &summary, proposals[0].payouts(), &certificate)
+        .post(context, &summary, &certificate)
         .unwrap();
     assert!(deployment.ledger.queue().deposits.is_empty());
     let validator = deployment.validators.pop().unwrap();
@@ -307,7 +306,7 @@ async fn interrupted(
 
 /// Checks that `validator` holds the balances after the close of epoch 2 of [interrupted].
 async fn check_epoch_2(validator: &TestValidator) {
-    for (index, expected) in [(0, 6), (1, 4), (2, 5)] {
+    for (index, expected) in [(0, 5), (1, 4), (2, 5)] {
         assert_eq!(validator.balance(&account(index)).await.unwrap(), expected);
     }
 }
@@ -416,5 +415,60 @@ fn test_applied_close_is_durable() {
         assert_eq!(validator.summary().digest::<Sha256>(), posted);
         assert_eq!(validator.catch_up(&posted).await.unwrap(), 0);
         check_epoch_2(&validator).await;
+    });
+}
+
+/// A validator that crashes after its payout log commits a posted close, but before its balances
+/// apply it, restarts with the log one close ahead. It reopens the log at the size its balances'
+/// close certifies, replays the close, and proves the payout the close owes.
+#[test]
+fn test_validator_realigns_its_payout_log_after_a_crash() {
+    deterministic::Runner::default().start(|mut context| async move {
+        let (mut deployment, validator, proposal) = interrupted(&mut context, "realign").await;
+        let persisted = validator.persisted().clone();
+        let first = *validator.summary();
+        let second = *proposal.summary();
+        drop(validator);
+
+        // The crash leaves the log at the close of epoch 2 and the balances at the close of
+        // epoch 1.
+        let config = config("realign-0");
+        let log = PayoutLog::<_, PublicKey, Sha256, Sequential, u64>::init(
+            context.child("crashed"),
+            config.payouts.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let batch = Payout::stage(&log, proposal.payouts()).await.unwrap();
+        let log = log
+            .apply_batch(batch)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
+        assert_eq!(log.root(), second.payouts.root);
+        drop(log);
+
+        // The restart resumes from epoch 1, replays epoch 2, and proves alice's payout of 1.
+        let posted = *deployment.ledger.parent();
+        let mut validator =
+            TestValidator::init(context.child("restarted"), config, persisted, Some(&posted))
+                .await
+                .unwrap();
+        assert_eq!(validator.summary(), &first);
+        assert_eq!(validator.catch_up(&posted).await.unwrap(), 1);
+        assert_eq!(validator.summary(), &second);
+        check_epoch_2(&validator).await;
+        let proof = validator
+            .prove_payout(2, &account(0))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            deployment.ledger.withdraw_payout(&proof).unwrap(),
+            (account(0), 1)
+        );
     });
 }

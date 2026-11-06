@@ -31,8 +31,10 @@ use commonware_cryptography::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::fixed::Config as JournalConfig, merkle::full::Config as MerkleConfig,
-    qmdb::current::unordered::fixed, translator::EightCap,
+    journal::contiguous::fixed::Config as JournalConfig,
+    merkle::full::Config as MerkleConfig,
+    qmdb::{current::unordered::fixed, keyless},
+    translator::EightCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, non_empty};
 use roles::{
@@ -61,7 +63,7 @@ mod scheme {
     use commonware_cryptography::impl_certificate_ed25519;
     use commonware_utils::N3f1;
 
-    impl_certificate_ed25519!(&'a Summary<D>, Namespace, N3f1);
+    impl_certificate_ed25519!(&'a Summary<D, u64>, Namespace, N3f1);
 }
 
 type TestOperator = Operator<PublicKey, PrivateKey, Sha256, u64>;
@@ -222,8 +224,8 @@ fn chain<R: Encode>(hash: Digest, requests: &[R]) -> Digest {
 /// Checks that each running hash in `summary` extends the one in `parent` over the requests its
 /// close processed from `queue`.
 fn assert_chained(
-    parent: &Summary<Digest>,
-    summary: &Summary<Digest>,
+    parent: &Summary<Digest, u64>,
+    summary: &Summary<Digest, u64>,
     queue: &Queue<PublicKey, u64>,
 ) {
     let count = |count: u64| usize::try_from(count).expect("a count within the queue must fit");
@@ -236,8 +238,8 @@ fn assert_chained(
     );
 }
 
-/// Returns the configuration of a validator keeping its balances in partitions named after
-/// `name`.
+/// Returns the configuration of a validator keeping its balances and payout log in partitions
+/// named after `name`.
 fn config(name: &str) -> Config<PublicKey, EightCap, Sequential> {
     config_for(name, operator_key().public_key())
 }
@@ -248,41 +250,49 @@ fn config_for<O: commonware_cryptography::PublicKey>(
     operator: O,
 ) -> Config<O, EightCap, Sequential> {
     let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
+    let merkle = |name: String| MerkleConfig {
+        journal_partition: format!("{name}-merkle-journal"),
+        metadata_partition: format!("{name}-merkle-metadata"),
+        items_per_blob: NZU64!(16),
+        write_buffer: NZUsize!(1024),
+        replay_buffer: NZUsize!(1024),
+        strategy: Sequential,
+        page_cache: page_cache.clone(),
+    };
+    let log = |name: String| JournalConfig {
+        partition: format!("{name}-log"),
+        items_per_blob: NZU64!(16),
+        page_cache: page_cache.clone(),
+        write_buffer: NZUsize!(1024),
+        replay_buffer: NZUsize!(1024),
+    };
+    let payouts = format!("{name}-payouts");
     Config {
         namespace: namespace(),
         operator,
         limits: LIMITS,
         balances: fixed::Config {
-            merkle: MerkleConfig {
-                journal_partition: format!("{name}-merkle-journal"),
-                metadata_partition: format!("{name}-merkle-metadata"),
-                items_per_blob: NZU64!(16),
-                write_buffer: NZUsize!(1024),
-                replay_buffer: NZUsize!(1024),
-                strategy: Sequential,
-                page_cache: page_cache.clone(),
-            },
-            log: JournalConfig {
-                partition: format!("{name}-log"),
-                items_per_blob: NZU64!(16),
-                page_cache,
-                write_buffer: NZUsize!(1024),
-                replay_buffer: NZUsize!(1024),
-            },
+            merkle: merkle(name.to_string()),
+            log: log(name.to_string()),
             grafted_metadata_partition: format!("{name}-grafted-metadata"),
             translator: EightCap,
             init_cache: None,
             init_buffer: NZUsize!(1024),
             init_concurrency: (),
         },
+        payouts: keyless::fixed::Config {
+            merkle: merkle(payouts.clone()),
+            log: log(payouts),
+        },
     }
 }
 
 /// Certifies `summary` with every scheme's signature, as validators that did not check it would.
-fn certify<C>(schemes: &[C], summary: &Summary<Digest>) -> C::Certificate
+fn certify<C, A>(schemes: &[C], summary: &Summary<Digest, A>) -> C::Certificate
 where
     C: certificate::Scheme
-        + for<'a> certificate::Verifier<Subject<'a, Digest> = &'a Summary<Digest>>,
+        + for<'a> certificate::Verifier<Subject<'a, Digest> = &'a Summary<Digest, A>>,
+    A: Amount,
 {
     let attestations: Vec<_> = schemes
         .iter()
@@ -334,7 +344,7 @@ where
     P: commonware_cryptography::PublicKey,
     K: Signer,
     C: certificate::Scheme
-        + for<'a> certificate::Verifier<Subject<'a, Digest> = &'a Summary<Digest>>,
+        + for<'a> certificate::Verifier<Subject<'a, Digest> = &'a Summary<Digest, A>>,
     A: Amount,
 {
     /// Starts a deployment whose operator signs with `operator` and whose validators sign with
@@ -427,12 +437,10 @@ where
         &mut self,
         context: &mut deterministic::Context,
         proposals: Vec<Proposal<P, Sha256, Sequential, A>>,
-    ) -> Summary<Digest> {
+    ) -> Summary<Digest, A> {
         let certificate = self.certify(&proposals);
         let summary = *proposals[0].summary();
-        self.ledger
-            .post(context, &summary, proposals[0].payouts(), &certificate)
-            .unwrap();
+        self.ledger.post(context, &summary, &certificate).unwrap();
         let posted = summary.digest::<Sha256>();
         for (validator, proposal) in self.validators.iter_mut().zip(proposals) {
             validator.apply(proposal, &posted).await.unwrap();
@@ -441,11 +449,11 @@ where
     }
 
     /// Closes the operator's epoch, processing every queued request, posts the close, and
-    /// withdraws each of its payouts.
+    /// withdraws each of its payouts with a proof from a validator.
     async fn close(
         &mut self,
         context: &mut deterministic::Context,
-    ) -> (Close<P, K::PublicKey, A>, Summary<Digest>) {
+    ) -> (Close<P, K::PublicKey, A>, Summary<Digest, A>) {
         let queue = self.ledger.queue();
         let (close, _) = self
             .operator
@@ -458,9 +466,21 @@ where
         let proposals = self.verify(&close).await;
         let payouts = proposals[0].payouts().clone();
         let summary = self.post(context, proposals).await;
-        for (account, amount) in payouts.iter() {
-            assert_eq!(self.ledger.withdraw_payout(account).unwrap(), amount);
-        }
+        self.withdraw_payouts(summary.epoch, &payouts).await;
         (close, summary)
+    }
+
+    /// Withdraws the `payouts` the posted close of `epoch` owes, each with a proof from a
+    /// validator.
+    async fn withdraw_payouts(&mut self, epoch: Epoch, payouts: &Amounts<P, A>) {
+        for (account, amount) in payouts.iter() {
+            let proof = self.validators[0]
+                .prove_payout(epoch, account)
+                .await
+                .unwrap()
+                .expect("the close must owe the account a payout");
+            let withdrawn = self.ledger.withdraw_payout(&proof).unwrap();
+            assert_eq!(withdrawn, (account.clone(), amount));
+        }
     }
 }

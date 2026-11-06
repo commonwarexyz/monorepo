@@ -1,13 +1,13 @@
-//! A reference ledger that holds deposited funds, posts certified summaries, and pays out after a
-//! halt.
+//! A reference ledger that holds deposited funds, posts certified summaries, pays out posted
+//! payouts, and pays claims after a halt.
 
 use commonware_clearing::bajillion::{
-    Amount, Amounts, BalanceProof, Challenge, Deposit, Epoch, Error, ForcedWithdrawal, Namespace,
-    Queue, Summary,
+    Amount, BalanceProof, Challenge, Deposit, Epoch, Error, ForcedWithdrawal, Namespace,
+    PayoutProof, Queue, Summary,
 };
 use commonware_cryptography::{Hasher, PublicKey, certificate::Verifier};
 use rand_core::CryptoRng;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// Why the ledger halted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,9 +31,9 @@ pub enum Refusal {
     Custody,
     /// No close of the challenged epoch has posted.
     NotPosted,
-    /// The account is owed no payout.
-    NothingOwed,
-    /// The balance proof does not verify under the last posted balances root.
+    /// The payout at the proven index was already paid.
+    Withdrawn,
+    /// The balance or payout proof does not verify under the last posted root.
     InvalidProof,
     /// A helper refused it.
     Error(Error),
@@ -45,7 +45,7 @@ impl From<Error> for Refusal {
     }
 }
 
-/// A ledger following L1-L11, with owed payouts held as per-account credits.
+/// A ledger following L1-L11 that tracks paid payouts by ranges of payout log indices.
 ///
 /// Every transfer goes to the account it pays (L10). The amount returned by a payout withdrawal
 /// or a claim stands for that transfer.
@@ -60,6 +60,10 @@ pub struct Ledger<P: PublicKey, O: PublicKey, V: Verifier, H: Hasher, A: Amount>
     parent: H::Digest,
     /// Balances root of the last posted summary.
     balances: H::Digest,
+    /// Payouts root of the last posted summary.
+    log: H::Digest,
+    /// Payouts size of the last posted summary.
+    size: u64,
     /// Matrix root of each posted close, in epoch order.
     matrices: Vec<H::Digest>,
     /// Sum of the balances as of the last post.
@@ -74,8 +78,9 @@ pub struct Ledger<P: PublicKey, O: PublicKey, V: Verifier, H: Hasher, A: Amount>
     forced_withdrawals: VecDeque<ForcedWithdrawal<P, A>>,
     /// Number of queued forced withdrawals the next close must process.
     required_forced_withdrawals: usize,
-    /// Payout each account can withdraw.
-    owed: HashMap<P, A>,
+    /// Payout log indices that hold a commit or a paid payout, as ranges from start to exclusive
+    /// end. No two ranges overlap or touch.
+    ranges: BTreeMap<u64, u64>,
     /// Sum of the owed payouts not yet withdrawn.
     payable: A,
     /// Why the ledger halted, if it has.
@@ -90,19 +95,22 @@ impl<P, O, V, H, A> Ledger<P, O, V, H, A>
 where
     P: PublicKey,
     O: PublicKey,
-    V: for<'a> Verifier<Subject<'a, H::Digest> = &'a Summary<H::Digest>>,
+    V: for<'a> Verifier<Subject<'a, H::Digest> = &'a Summary<H::Digest, A>>,
     H: Hasher,
     A: Amount,
 {
     /// Returns a ledger whose validators start from the empty balances database with root
     /// `balances` (L1).
     pub fn new(namespace: Namespace, operator: O, verifier: V, balances: H::Digest) -> Self {
+        let genesis = Summary::<H::Digest, A>::genesis::<H, P>(balances);
         Self {
             namespace,
             operator,
             verifier,
-            parent: Summary::genesis::<H>(balances).digest::<H>(),
+            parent: genesis.digest::<H>(),
             balances,
+            log: genesis.payouts.root,
+            size: genesis.payouts.size,
             matrices: Vec::new(),
             liability: A::ZERO,
             unprocessed: A::ZERO,
@@ -110,7 +118,7 @@ where
             required_deposits: 0,
             forced_withdrawals: VecDeque::new(),
             required_forced_withdrawals: 0,
-            owed: HashMap::new(),
+            ranges: BTreeMap::from([(0, genesis.payouts.size)]),
             payable: A::ZERO,
             halt: None,
             claimed: HashSet::new(),
@@ -139,9 +147,18 @@ where
         self.matrices.get(index)
     }
 
-    /// Returns the payout `account` can withdraw.
-    pub fn owed(&self, account: &P) -> A {
-        self.owed.get(account).copied().unwrap_or(A::ZERO)
+    /// Returns the ranges of payout log indices that hold a commit or a paid payout, in order, each
+    /// from start to exclusive end.
+    pub fn ranges(&self) -> Vec<(u64, u64)> {
+        self.ranges
+            .iter()
+            .map(|(start, end)| (*start, *end))
+            .collect()
+    }
+
+    /// Returns the sum of the owed payouts not yet withdrawn.
+    pub const fn payable(&self) -> A {
+        self.payable
     }
 
     /// Returns the funds held. They are the liability, the unprocessed deposits, and the owed
@@ -207,18 +224,17 @@ where
         Ok(())
     }
 
-    /// Posts a certified summary of the close it expects, and owes each of its payouts (L5).
+    /// Posts a certified summary of the close it expects, and owes its payouts (L5).
     pub fn post<R: CryptoRng>(
         &mut self,
         rng: &mut R,
-        summary: &Summary<H::Digest>,
-        payouts: &Amounts<P, A>,
+        summary: &Summary<H::Digest, A>,
         certificate: &V::Certificate,
     ) -> Result<(), Refusal> {
         if self.halt.is_some() {
             return Err(Refusal::Halted);
         }
-        summary.verify::<H, P, A, V, R>(
+        summary.verify(
             rng,
             &self.verifier,
             certificate,
@@ -226,7 +242,6 @@ where
             &self.parent,
             self.required_deposits as u64..=self.deposits.len() as u64,
             self.required_forced_withdrawals as u64..=self.forced_withdrawals.len() as u64,
-            payouts,
         )?;
         let deposits =
             usize::try_from(summary.deposits.count).expect("a count within the queue must fit");
@@ -238,13 +253,18 @@ where
             .take(deposits)
             .try_fold(A::ZERO, |total, deposit| total.checked_add(deposit.amount))
             .expect("processed deposits must not exceed the unprocessed deposits");
-        let paid = payouts.total().ok_or(Refusal::Custody)?;
+        let paid = summary.payouts.total;
         let liability = self
             .liability
             .checked_add(deposited)
             .expect("processed deposits must fit next to the liability")
             .checked_sub(paid)
             .ok_or(Refusal::Custody)?;
+        let commit = summary
+            .payouts
+            .size
+            .checked_sub(1)
+            .ok_or(Error::InvalidCheckpoint)?;
 
         self.deposits.drain(..deposits);
         self.forced_withdrawals.drain(..forced_withdrawals);
@@ -255,30 +275,63 @@ where
             .unprocessed
             .checked_sub(deposited)
             .expect("processed deposits must not exceed the unprocessed deposits");
-        for (account, amount) in payouts.iter() {
-            let owed = self.owed.entry(account.clone()).or_insert(A::ZERO);
-            *owed = owed
-                .checked_add(amount)
-                .expect("owed payouts must not exceed the funds held");
-        }
         self.payable = self
             .payable
             .checked_add(paid)
             .expect("owed payouts must not exceed the funds held");
+        self.fold(commit);
+        self.log = summary.payouts.root;
+        self.size = summary.payouts.size;
         self.matrices.push(summary.matrix);
         self.balances = summary.balances;
         self.parent = summary.digest::<H>();
         Ok(())
     }
 
-    /// Pays `account` everything it is owed, before or after a halt (L6).
-    pub fn withdraw_payout(&mut self, account: &P) -> Result<A, Refusal> {
-        let owed = self.owed.remove(account).ok_or(Refusal::NothingOwed)?;
-        self.payable = self
+    /// Pays the payout `proof` proves under the last posted payouts root, once per index, before or
+    /// after a halt (L6). Returns the account paid and the amount.
+    pub fn withdraw_payout(
+        &mut self,
+        proof: &PayoutProof<P, H::Digest, A>,
+    ) -> Result<(P, A), Refusal> {
+        if !proof.verify::<H>(&self.log) {
+            return Err(Refusal::InvalidProof);
+        }
+        if self.covers(proof.index) {
+            return Err(Refusal::Withdrawn);
+        }
+        let payable = self
             .payable
-            .checked_sub(owed)
-            .expect("an account's payout must not exceed the owed payouts");
-        Ok(owed)
+            .checked_sub(proof.payout.amount)
+            .ok_or(Refusal::Custody)?;
+
+        self.fold(proof.index);
+        self.payable = payable;
+        Ok((proof.payout.account.clone(), proof.payout.amount))
+    }
+
+    /// Returns whether a range covers `index`.
+    fn covers(&self, index: u64) -> bool {
+        self.ranges
+            .range(..=index)
+            .next_back()
+            .is_some_and(|(_, end)| index < *end)
+    }
+
+    /// Adds `index` to the ranges, merging it with each range it touches.
+    fn fold(&mut self, index: u64) {
+        let (mut start, mut end) = (index, index + 1);
+        if let Some((&before, &until)) = self.ranges.range(..=index).next_back()
+            && until >= index
+        {
+            self.ranges.remove(&before);
+            start = before;
+            end = end.max(until);
+        }
+        if let Some(after) = self.ranges.remove(&end) {
+            end = after;
+        }
+        self.ranges.insert(start, end);
     }
 
     /// Halts on a challenge to a posted close (L7).
