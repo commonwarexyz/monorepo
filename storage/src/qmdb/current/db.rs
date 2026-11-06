@@ -2105,7 +2105,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let witness = db.ops_root_witness().clone();
+            let witness = db.ops_root_witness();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 

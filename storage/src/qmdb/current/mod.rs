@@ -2016,7 +2016,7 @@ pub mod tests {
             assert!(partial.iter().any(|byte| *byte != 0));
 
             // Tie the extracted bytes to the digests authenticated by the existing root witness.
-            let witness = db.ops_root_witness().clone();
+            let witness = db.ops_root_witness();
             assert_eq!(
                 witness.pending_chunk_digest,
                 Some(Sha256::hash(&[pending.as_slice()]))
