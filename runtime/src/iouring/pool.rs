@@ -1,8 +1,8 @@
 //! The pool of workers that poll ordinary tasks.
 //!
-//! [`Pool`] is the state the workers share: every worker's mailbox, the
-//! shared end of its run queue, and its timers, the pool-wide global
-//! queue, the pool's idle state, and the shutdown barrier. The runner creates
+//! [`Pool`] is the state the workers share: each worker's mailbox, timers,
+//! and the shared end of its run queue, plus the pool-wide global queue, the
+//! pool's idle state, and the shutdown barrier. The runner creates
 //! it before any worker starts, every worker reaches it through the runner's
 //! shared services, and every task's header holds a weak reference to it, so
 //! a wake from any thread can find the task's pool without keeping the pool

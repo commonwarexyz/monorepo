@@ -1,20 +1,22 @@
 //! One driver's request deadlines on the hierarchical timing wheel.
 //!
-//! The driver keys each request's node by its waiter's slab index, which stays
-//! fixed from admission until the waiter leaves the slab, and records the
-//! waiter's generation beside it. A node is resident exactly while that
+//! The driver keys each request's wheel slot by its waiter's slab index, which
+//! stays fixed from admission until the waiter leaves the slab, and records
+//! the waiter's generation beside it. A slot is resident exactly while that
 //! waiter is unfinished, active, and has its deadline installed. Completion
 //! and cancellation unlink it at once by full identity, and expiry detaches it
-//! and returns that identity, so the driver cancels the one request holding
-//! it. Nothing stale stays behind for later filtering.
+//! and returns that identity, so every identity that expiry returns belongs to
+//! an active request, which the driver cancels.
 //!
 //! The driver alone owns its instance, so it needs no lock, and no peer
 //! expires it, since expiry must cancel kernel work on the owner's ring.
-//! Times are nanoseconds since the driver's creation, its epoch. Configured
-//! timeouts are at most 30 years, so a deadline never reaches the end of that
-//! range. A node fires at its deadline rounded up to [`RES`], never before it,
-//! and one expiry pass fires at most [`BUDGET`] nodes and refiles a bounded
-//! multiple of that.
+//! Times are nanoseconds since the driver's creation, its epoch. Network
+//! timeouts are at most [`MAX_TIMEOUT`], so a deadline never reaches the end
+//! of that range. A slot fires at its deadline rounded up to [`RES`], never
+//! before it, and one expiry pass spends at most one [`BUDGET`] on firing and
+//! refiling slots.
+//!
+//! [`MAX_TIMEOUT`]: super::runtime::MAX_TIMEOUT
 
 use super::{
     waiter::WaiterId,
@@ -23,22 +25,23 @@ use super::{
 use std::time::Instant;
 
 /// Resolution of request deadlines in nanoseconds, about a millisecond.
-/// Requests usually complete long before their deadline, so this resolution
-/// lets the expiries of a burst share a few passes.
+/// Requests usually complete long before their deadlines, so coarse ticks
+/// cost little precision, and the expiries of a burst share a few passes.
 pub const RES: u64 = 1 << 20;
 
 /// Request deadlines of one driver, keyed by waiter slot.
 pub struct Deadlines {
-    /// One resident node per active request with an installed deadline.
+    /// One resident slot per active request with an installed deadline.
     wheel: Wheel<RES>,
-    /// Generation of the waiter whose node each slot holds, meaningful while
-    /// the slot is resident.
+    /// Generation of the waiter whose deadline each slot holds, meaningful
+    /// while the slot is resident.
     generations: Vec<u64>,
     /// Origin of the wheel's nanosecond time domain.
     epoch: Instant,
     /// Identities fired by the latest pass, kept for their allocation.
     fired: Vec<WaiterId>,
-    /// Conservative firing bound, refreshed only when it is reached.
+    /// A firing time never later than the earliest resident's, lowered by
+    /// insertion and refreshed by an expiry pass that reaches it.
     next: Option<Instant>,
 }
 
@@ -65,6 +68,8 @@ impl Deadlines {
         let fires = self.epoch.after_nanos(Wheel::<RES>::rounded(nanos));
         let fires = fires.unwrap_or(deadline);
         self.next = Some(self.next.map_or(fires, |next| next.min(fires)));
+
+        // Record the generation that a later removal must match.
         let index = slot as usize;
         if index >= self.generations.len() {
             self.generations.resize(index + 1, 0);
@@ -81,20 +86,25 @@ impl Deadlines {
             "request deadline not resident"
         );
         self.wheel.remove(slot);
+
+        // An empty wheel has no firing time, and a nonempty one keeps the
+        // bound, possibly early, until the next pass that reaches it.
         if self.wheel.is_empty() {
             self.next = None;
         }
     }
 
-    /// Detach the deadlines due at `now`, at most one budget of them fired or
-    /// refiled, and return the identities that installed them. Deadlines left
-    /// due keep [`Self::next_deadline`] at or before `now`. Hand the vector
-    /// back with [`Self::recycle`].
+    /// Detach the deadlines due at `now`, spending at most one [`BUDGET`] on
+    /// firing and refiling them (see [`Wheel::expire`]), and return the
+    /// identities that installed them. Deadlines left due keep
+    /// [`Self::next_deadline`] at or before `now`. Hand the vector back with
+    /// [`Self::recycle`].
     pub fn expire(&mut self, now: Instant) -> Vec<WaiterId> {
         let mut fired = std::mem::take(&mut self.fired);
         if self.next.is_none_or(|next| next > now) {
             return fired;
         }
+
         let now = now.nanos_since(self.epoch);
         let mut budget = BUDGET;
         let generations = &self.generations;
@@ -104,6 +114,7 @@ impl Deadlines {
                 generation: generations[index as usize],
             }));
         });
+
         // An empty wheel's bound has no instant.
         self.next = self.epoch.after_nanos(self.wheel.bound());
         fired
@@ -174,6 +185,7 @@ mod tests {
 
     #[test]
     fn test_cached_bound_survives_removal_and_earlier_insertion() {
+        // Two deadlines, the earlier of which is removed.
         let epoch = Instant::now();
         let mut deadlines = Deadlines::new(epoch);
         let first = epoch + Duration::from_secs(10);
@@ -245,6 +257,8 @@ mod tests {
 
     #[test]
     fn test_deadlines_fire_rounded_up_and_never_early() {
+        // Deadlines on and around tick boundaries fire less than a tick after
+        // them, and the bound covers the earliest.
         let epoch = Instant::now();
         let mut deadlines = Deadlines::new(epoch);
         let offsets = [1, RES - 1, RES, RES + 1, 59_999_999_999];
@@ -256,6 +270,8 @@ mod tests {
             assert!(fires < deadline + Duration::from_nanos(RES));
         }
         assert!(deadlines.next_deadline().unwrap() <= epoch + Duration::from_nanos(RES));
+
+        // Each fires at its firing time, not one nanosecond earlier.
         let mut fired = Vec::new();
         for (slot, offset) in offsets.iter().enumerate() {
             let fires = deadlines.fires_at(epoch + Duration::from_nanos(*offset));
@@ -265,6 +281,8 @@ mod tests {
             fired.extend(expire(&mut deadlines, fires));
             assert!(fired.contains(&id(slot as u32, 0)), "fired late");
         }
+
+        // Each fired once, leaving nothing installed.
         assert_eq!(fired.len(), offsets.len());
         assert_eq!(deadlines.len(), 0);
         assert_eq!(deadlines.next_deadline(), None);
@@ -272,6 +290,7 @@ mod tests {
 
     #[test]
     fn test_removal_is_exact_and_once() {
+        // Two requests share one deadline.
         let epoch = Instant::now();
         let mut deadlines = Deadlines::new(epoch);
         let deadline = epoch + Duration::from_secs(10);
@@ -303,6 +322,7 @@ mod tests {
 
     #[test]
     fn test_budget_leaves_a_due_backlog_that_drains() {
+        // More than three budgets of requests share one deadline.
         let epoch = Instant::now();
         let mut deadlines = Deadlines::new(epoch);
         let deadline = epoch + Duration::from_millis(100);
@@ -310,6 +330,9 @@ mod tests {
         for slot in 0..count {
             deadlines.insert(id(slot, 0), deadline);
         }
+
+        // Passes at one time fire at most one budget each, and the bound
+        // stays at or before that time while some remain.
         let now = deadlines.fires_at(deadline);
         let mut passes = 0;
         let mut total = 0;
@@ -322,6 +345,8 @@ mod tests {
                 assert!(deadlines.next_deadline().unwrap() <= now);
             }
         }
+
+        // All of them fired within a few passes.
         assert_eq!(total, count as usize);
         assert!((4..=5).contains(&passes), "{passes} passes");
     }
@@ -350,8 +375,11 @@ mod tests {
     /// including early completion, cancellation, reuse and long idle jumps.
     #[test]
     fn test_randomized_deadlines_match_an_ordered_model() {
+        /// Waiter slots the model reuses.
         const SLOTS: u32 = 128;
         for seed in 0..8 {
+            // The model: each live slot's generation and firing time, and the
+            // same ordered by firing time.
             let mut rng = TestRng::new(seed);
             let epoch = Instant::now();
             let mut deadlines = Deadlines::new(epoch);
@@ -361,6 +389,8 @@ mod tests {
             let mut now = 0u64;
             for step in 0..20_000 {
                 match rng.random_range(0..8) {
+                    // Install a past, current, near, or far deadline in a free
+                    // slot under a new generation.
                     0..=2 => {
                         let slot = rng.random_range(0..SLOTS);
                         if live.contains_key(&slot) {
@@ -383,6 +413,7 @@ mod tests {
                         live.insert(slot, (generation, firing));
                         ordered.insert((firing, slot, generation));
                     }
+                    // Remove a random live deadline.
                     3 | 4 => {
                         if live.is_empty() {
                             continue;
@@ -395,6 +426,8 @@ mod tests {
                         live.remove(&slot);
                         ordered.remove(&(firing, slot, generation));
                     }
+                    // Advance time, sometimes by a long idle period, and
+                    // expire until the bound is later, as the driver would.
                     _ => {
                         now += if rng.random_range(0..10) == 0 {
                             rng.random_range(0..=24 * 3600 * 1_000_000_000u64)
@@ -429,6 +462,9 @@ mod tests {
                         );
                     }
                 }
+
+                // After every step, the same identities are installed and the
+                // bound is never after the earliest firing time.
                 assert_eq!(deadlines.len(), live.len(), "seed {seed}, step {step}");
                 for slot in 0..SLOTS {
                     assert_eq!(

@@ -31,8 +31,8 @@
 //! # Ownership
 //!
 //! Workers own request and result progress. Each worker's sleep registrations
-//! live in its timers, which any thread locks briefly to poll or drop a
-//! sleep, and which a busy peer may expire while the owner is stalled. Each
+//! live in its timers, which any thread can reach to poll or drop a sleep,
+//! and which a busy peer may expire while the owner is stalled. Each
 //! ordinary task has at most one runnable, which a queue or poller owns, and
 //! at most one poll of that task runs at a time. A queued task can move
 //! through overflow or stealing, and each run queue synchronizes its owner

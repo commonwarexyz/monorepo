@@ -27,8 +27,8 @@
 //!   |     +-- Shared (Arc)
 //!   |     +-- Ready (owner's end of a pool worker's run queue)
 //!   |     +-- Timers (Arc, the pool's on a pool worker: sleep
-//!   |     |       registrations and deadlines, with a cached bound and
-//!   |     |       the IDs of sleeps dropped here, removed in batches)
+//!   |     |       registrations and their deadlines)
+//!   |     +-- cached timers bound, IDs of sleeps dropped here
 //!   |     +-- Driver
 //!   |     |     +-- io_uring ring (SQ/CQ)
 //!   |     |     +-- Waiters (requests and unconsumed results)
@@ -94,21 +94,21 @@
 //! [`Workers`] barrier, allowing that worker's [`Shared`] owners to be released first.
 //!
 //! I/O and sleeps register directly with the worker that first polls them.
-//! Polled later on another worker, I/O has the registering worker forward its
-//! result through a channel, while a sleep is polled and dropped directly in
-//! the registering worker's timers, and a drop on the registering worker
-//! leaves the removal to its next service pass, or to its next registration
-//! (see [`super::sleep`]).
-//! Mailboxes carry root wakes and the observation transfers and cancellations
-//! of I/O.
+//! When I/O is polled later on another worker, the registering worker
+//! forwards its result through a channel. A sleep is instead polled and
+//! dropped directly in the registering worker's timers, from any thread (see
+//! [`super::sleep`]). Mailboxes carry root wakes and the observation
+//! transfers and cancellations of I/O.
 //!
 //! Each turn polls a bounded batch of tasks and checks the root's wake flag,
 //! services I/O and timers, and applies a bounded batch of mailbox messages.
-//! While the latest service pass left due sleeps or request deadlines behind,
-//! a pool worker ends its batch once it has polled for [`BACKLOG_SLICE`].
-//! Deferred callbacks run between these phases. A pool worker's service also
+//! Deferred callbacks run between these phases. While the latest service pass
+//! left due sleeps or request deadlines behind, a pool worker ends its batch
+//! once it has polled for [`BACKLOG_SLICE`]. A pool worker's service also
 //! expires the due timers of a peer stalled in a long poll (see
-//! [`super::sleep`]). A pool worker takes a share of the global queue every
+//! [`super::sleep`]).
+//!
+//! A pool worker takes a share of the global queue every
 //! [`Config::with_global_queue_interval`] takes and whenever its own run
 //! queue is empty. A take returns one runnable to poll next and queues the
 //! rest of its share in the run queue, no more than it has room for and no
@@ -240,17 +240,12 @@ use std::{
 const BATCH_SIZE: usize = 64;
 
 /// Polling time after which a pool worker ends its batch while the latest
-/// service pass left due sleeps or request deadlines behind. A pass fires at
-/// most [`BUDGET`](super::wheel::BUDGET) deadlines, so a backlog drains one
-/// budget per turn, and a full batch of long polls would hold each later pass
-/// back by [`BATCH_SIZE`] of them. A budget's pass is short next to this
-/// slice, so tasks keep most of the worker while a backlog drains.
-/// The backlog is conservative: a pass that runs out of budget while expiry
-/// drains a detached wheel bucket can leave a bound at or below its time with
-/// only later deadlines left to refile (see [`Wheel::bound`]), so for a few
-/// passes a backlog may hold no due deadline.
-///
-/// [`Wheel::bound`]: super::wheel::Wheel::bound
+/// service pass left due sleeps or request deadlines behind (see
+/// [`Worker::backlog`]). A pass spends at most one
+/// [`BUDGET`](super::wheel::BUDGET), so a backlog drains one budget per turn,
+/// and a full batch of long polls would hold each later pass back by
+/// [`BATCH_SIZE`] of them. A budget's pass is short next to this slice, so
+/// tasks keep most of the worker while a backlog drains.
 const BACKLOG_SLICE: Duration = Duration::from_micros(50);
 
 /// Largest network timeout and sleep, 30 years of 365 days, which keeps every
@@ -1098,15 +1093,12 @@ pub struct Local {
     /// skip the timers' lock.
     pub timers_next: u64,
     /// Registrations in `timers` whose sleeps were dropped, or completed early
-    /// by a poll, on this worker while it was not closing, which its next
-    /// service pass, or its cleanup before closing `timers`, removes, at most
-    /// one [`BUDGET`](super::wheel::BUDGET) per critical section. Each
-    /// registration here first removes the latest one and takes its slot (see
-    /// [`super::sleep`]). Only this worker pushes and drains it. Each service
-    /// pass leaves it empty and shrinks its capacity to [`DROPPED_CAPACITY`]
-    /// if a burst grew it beyond, whether the pass removed the burst's
-    /// registrations or later registrations took their slots. While any
-    /// remain, the worker serves again rather than park.
+    /// by a poll, on this worker while it was not closing. Only this worker
+    /// pushes and drains it: each registration here removes the latest one
+    /// and takes its slot, the next service pass, or cleanup before closing
+    /// `timers`, removes the rest, and each service pass caps its capacity at
+    /// [`DROPPED_CAPACITY`] (see [`super::sleep`]). While any remain, the
+    /// worker serves again rather than park.
     pub timers_dropped: Vec<Id>,
     /// Reject new registration and send wakes to the global queue, while
     /// allowing idempotent cancellation.
@@ -1319,8 +1311,8 @@ impl Local {
             || (seat.is_some() && self.shared.pool.has_global())
     }
 
-    /// Earliest absolute deadline across driver requests and sleepers, or a
-    /// time never later than it.
+    /// Earliest firing time across request deadlines and sleeps, or a time
+    /// never later than it.
     fn next_deadline(&self) -> Option<Instant> {
         [
             self.driver.as_ref().unwrap().next_deadline(),
@@ -1541,8 +1533,12 @@ pub struct Worker {
     rescue_at: Instant,
     /// Whether the latest service pass left due sleeps or request deadlines
     /// behind, which ends the next polling batch after [`BACKLOG_SLICE`].
-    /// Cleared by a pass that reaches every due deadline. A pass that runs
-    /// out of budget sets it even if only deadlines to refile remain.
+    /// Cleared by a pass that reaches every due deadline. A pass that runs out
+    /// of budget while draining a detached wheel bucket can leave its bound at
+    /// or below its time with only later deadlines left to refile (see
+    /// [`Wheel::bound`]), which sets this for a few more passes.
+    ///
+    /// [`Wheel::bound`]: super::wheel::Wheel::bound
     backlog: bool,
     /// False until kernel retirement and callback cleanup have finished.
     finished: bool,
@@ -1939,11 +1935,11 @@ impl Worker {
     }
 
     /// Service the io_uring ring and timers using one time sample, collecting
-    /// callbacks. Timer service first removes the registrations of sleeps
-    /// dropped or completed early on this worker since the last pass, then
-    /// expires due ones. A running pool worker also expires its peers' overdue
+    /// callbacks, and return whether kernel service was deferred to an idle
+    /// wait. Timer service first removes the registrations of sleeps dropped
+    /// or completed early on this worker since the last pass, then expires due
+    /// ones. A pool worker that is not closing also expires its peers' overdue
     /// timers, at most once per [`RESCUE_INTERVAL`].
-    /// Returns whether kernel service was deferred to an idle wait.
     fn service(&mut self, defer_kernel_service: bool) -> bool {
         let mut local = self.local.borrow_mut();
         local.now = Instant::now();
@@ -1965,8 +1961,8 @@ impl Worker {
             .service(*now, defer_kernel_service, deferred);
         let outcome = result.expect("io_uring driver service failed");
 
-        // Polls on this thread may complete sleeps due by this time, which
-        // the timers count from their origin.
+        // Sleeps polled on this thread complete at once if this time has
+        // reached their deadlines. The timers count it from their origin.
         sleep::set_turn(*now);
         let nanos = timers.nanos(*now);
 

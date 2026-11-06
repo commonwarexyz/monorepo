@@ -19,8 +19,8 @@
 //! bucket's start, so a new insertion lands in that bucket only at its own
 //! tick, which is due. A detached bucket drains before any other level
 //! bucket, including the lower buckets its refiles land in, so a detached
-//! bucket of N later slots holds back due slots elsewhere for about N divided
-//! by [`REFILES_PER_UNIT`] times the budget passes.
+//! bucket of N later slots holds back due slots in other level buckets for
+//! about N / ([`REFILES_PER_UNIT`] * budget) passes.
 //!
 //! [`Wheel::bound`] never walks a bucket. Each bucket keeps a lower bound of
 //! its ticks, exact until a slot holding the minimum is removed. A removed
@@ -40,14 +40,10 @@
 use std::time::{Duration, Instant};
 
 /// Budget units per expiry pass, by every owner: one per slot fired, one per
-/// [`REFILES_PER_UNIT`] slots refiled. Bounds the work between two task
-/// polls, so a storm of simultaneous deadlines delays other tasks by about
-/// one budget of wakes or cancellations.
-/// Refiles count at [`REFILES_PER_UNIT`] per unit, so when expiry reaches a
-/// bucket of N later slots, other due slots can wait about
-/// N / (REFILES_PER_UNIT * BUDGET) passes.
-/// A pool worker whose pass leaves due slots behind serves again after a
-/// short slice of task polls, so a backlog drains one budget per slice.
+/// [`REFILES_PER_UNIT`] slots refiled. It bounds the expiry work between two
+/// task polls, so a storm of simultaneous deadlines delays other tasks by
+/// about one budget of wakes or cancellations, and a backlog drains one
+/// budget per pass.
 pub const BUDGET: u32 = 256;
 
 /// Refiles that cost one unit of an expiry budget. A refile only moves a slot
@@ -161,7 +157,7 @@ pub struct Wheel<const RES: u64> {
     len: usize,
     /// Reference tick for placement, never later than a time passed to
     /// [`Self::expire`] or [`Self::new`]. Every slot in a level bucket has a
-    /// tick of at least `base`, every due slot's is below it.
+    /// tick of at least `base`, and every due slot's is below it.
     base: u64,
     /// Occupied bucket bitmap per level.
     occupied: [u64; LEVELS],
@@ -278,6 +274,7 @@ impl<const RES: u64> Wheel<RES> {
             self.links[tail as usize].next = slot;
         }
         self.buckets[bucket].tail = slot;
+
         let link = &mut self.links[slot as usize];
         link.prev = tail;
         link.next = NIL;
@@ -308,6 +305,9 @@ impl<const RES: u64> Wheel<RES> {
         if next == NIL {
             entry.tail = prev;
         }
+
+        // An emptied bucket leaves the bitmaps, and an emptied detached
+        // bucket is drained.
         if entry.head == NIL {
             *entry = EMPTY;
             self.clear_occupied(bucket);
@@ -344,6 +344,8 @@ impl<const RES: u64> Wheel<RES> {
             self.links.resize(index + 1, ABSENT);
         }
         assert_eq!(self.links[index].bucket, NONE, "slot already resident");
+
+        // A tick below the base is already due.
         let tick = Self::tick_of(deadline);
         self.links[index].tick = tick;
         let bucket = if tick < self.base {
@@ -365,13 +367,16 @@ impl<const RES: u64> Wheel<RES> {
     /// one unit of `budget` per slot fired and one per [`REFILES_PER_UNIT`]
     /// slots refiled. Due slots go first, then the detached bucket, then
     /// buckets in time order. A pass that runs out of budget leaves the rest
-    /// for the next one, and [`Self::bound`] then stays at or below `now`
-    /// while any reached slot is due, and possibly while only reached slots
-    /// to refile remain (see [`Self::bound`]).
+    /// for the next one, and [`Self::bound`] then stays at or below `now`,
+    /// or at or below the base's time when `now` is older than it, while any
+    /// reached slot is due, and possibly while only reached slots to refile
+    /// remain (see [`Self::bound`]).
     pub fn expire(&mut self, now: u64, budget: &mut u32, fire: &mut impl FnMut(u32)) {
         // An older time is treated as the base, which never exceeds a time an
         // earlier caller passed.
         let target = (now / RES).max(self.base);
+
+        // Slots inserted below the base fire first.
         while *budget > 0 {
             let slot = self.buckets[DUE].head;
             if slot == NIL {
@@ -381,6 +386,9 @@ impl<const RES: u64> Wheel<RES> {
             fire(slot);
             *budget -= 1;
         }
+
+        // Drain the detached bucket, then detach the next bucket in time
+        // order, until the budget runs out or no bucket starts by the target.
         let mut refiles = 0;
         loop {
             while self.pending != NONE {
@@ -531,12 +539,14 @@ mod tests {
 
     /// Random insertions (past, current and future, up to the end of time),
     /// removals with slot reuse, and expiries with random budgets and
-    /// occasionally stale times, checked against a `BTreeMap` of exact
-    /// deadlines after every step: a fired slot was resident and its firing
+    /// occasionally stale times, checked against a `BTreeMap` of firing
+    /// times after every step: a fired slot was resident and its firing
     /// time had passed at the latest time any caller passed, an unbudgeted
     /// pass leaves nothing due, firing times are less than one tick after
     /// their deadlines, and the bound never exceeds the earliest firing time.
     fn model<const RES: u64>(seed: u64, steps: usize, max_bits: u32) {
+        // A wheel and its model: live slots with their firing times, the
+        // same ordered by firing time, and free slots for reuse.
         let mut rng = TestRng::new(seed);
         let start = scaled(&mut rng, 50);
         let mut wheel = Wheel::<RES>::new(start);
@@ -548,6 +558,8 @@ mod tests {
         let mut fired = Vec::new();
         for step in 0..steps {
             match rng.random_range(0..12) {
+                // Insert a past, current, future, or end of time deadline,
+                // whose firing time is less than one tick after it.
                 0..=4 => {
                     let deadline = match rng.random_range(0..10) {
                         0 => latest.saturating_sub(scaled(&mut rng, 20)),
@@ -566,6 +578,7 @@ mod tests {
                     assert!(live.insert(slot, firing).is_none());
                     order.insert((firing, slot));
                 }
+                // Remove a random live slot.
                 5..=7 => {
                     if live.is_empty() {
                         continue;
@@ -577,8 +590,9 @@ mod tests {
                     wheel.remove(slot);
                     free.push(slot);
                 }
+                // Expire at a stale time from a peer, or an advancing one,
+                // with a small or unlimited budget.
                 _ => {
-                    // A stale time from a peer, or an advancing one.
                     let now = if rng.random_range(0..5) == 0 {
                         latest.saturating_sub(scaled(&mut rng, max_bits))
                     } else {
@@ -596,6 +610,8 @@ mod tests {
                     } else {
                         u32::MAX
                     };
+
+                    // Every fired slot was live and due by the latest time.
                     fired.clear();
                     wheel.expire(now, &mut budget, &mut |slot| fired.push(slot));
                     for slot in &fired {
@@ -604,6 +620,8 @@ mod tests {
                         order.remove(&(firing, *slot));
                         free.push(*slot);
                     }
+
+                    // An unbudgeted pass at the latest time leaves nothing due.
                     if !limited && now == latest {
                         assert!(
                             order.first().is_none_or(|(firing, _)| *firing > now),
@@ -612,6 +630,9 @@ mod tests {
                     }
                 }
             }
+
+            // After every step, the wheel holds the live slots and its bound
+            // is never after the earliest firing time.
             assert_eq!(wheel.len(), live.len());
             let bound = wheel.bound();
             match order.first() {
