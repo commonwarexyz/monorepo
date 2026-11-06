@@ -12,7 +12,7 @@ use crate::core::{
         fp2::{BYTES as FP2_BYTES, Fp2},
         fp12::{self, BYTES, Fp12},
     },
-    pairing::{G1Affine, G2Affine, Pair, final_exponentiation, miller_loop},
+    pairing::{G1Affine, G2Affine, Pair, SHARED, final_exponentiation, miller_loop},
 };
 use commonware_math::algebra::{Multiplicative, Object};
 use alloc::{vec, vec::Vec};
@@ -21,9 +21,6 @@ use core::{
     fmt::{self, Debug, Formatter},
     ops::{Mul, MulAssign},
 };
-
-/// Most prepared pairs, one per lane, whose Miller loops share squarings.
-const SHARED: usize = 4;
 
 /// An element of GT, the subgroup of prime order `r` of the multiplicative group of the degree-12
 /// extension, which the pairing maps into.
