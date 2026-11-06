@@ -466,8 +466,14 @@ pub(crate) mod test {
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
-            assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (1, key2.clone()));
-            assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (2, key1.clone()));
+            assert_eq!(
+                db.get_with_next_key(&key1).await.unwrap().unwrap(),
+                (1, key2.clone())
+            );
+            assert_eq!(
+                db.get_with_next_key(&key2).await.unwrap().unwrap(),
+                (2, key1.clone())
+            );
             assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key1.clone());
             assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key1.clone());
@@ -509,8 +515,14 @@ pub(crate) mod test {
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
-            assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (1, key2.clone()));
-            assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (2, key1.clone()));
+            assert_eq!(
+                db.get_with_next_key(&key1).await.unwrap().unwrap(),
+                (1, key2.clone())
+            );
+            assert_eq!(
+                db.get_with_next_key(&key2).await.unwrap().unwrap(),
+                (2, key1.clone())
+            );
             assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key1.clone());
             assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key1.clone());
@@ -1451,9 +1463,9 @@ pub(crate) mod test {
                 // Make sure the db and ordered map agree on contents & key order.
                 let mut iter = keys.iter();
                 let first_key = iter.next().unwrap().0;
-                let mut next_key = db.get_all(first_key).await.unwrap().unwrap().1;
+                let mut next_key = db.get_with_next_key(first_key).await.unwrap().unwrap().1;
                 for (key, value) in iter {
-                    let (v, next) = db.get_all(key).await.unwrap().unwrap();
+                    let (v, next) = db.get_with_next_key(key).await.unwrap().unwrap();
                     assert_eq!(*value, v);
                     assert_eq!(*key, next_key);
                     assert_eq!(db.get_span(key).await.unwrap().unwrap().1.next_key, next);
@@ -1474,9 +1486,9 @@ pub(crate) mod test {
 
                 let mut iter = keys.iter();
                 let first_key = iter.next().unwrap().0;
-                let mut next_key = db.get_all(first_key).await.unwrap().unwrap().1;
+                let mut next_key = db.get_with_next_key(first_key).await.unwrap().unwrap().1;
                 for (key, value) in iter {
-                    let (v, next) = db.get_all(key).await.unwrap().unwrap();
+                    let (v, next) = db.get_with_next_key(key).await.unwrap().unwrap();
                     assert_eq!(*value, v);
                     assert_eq!(*key, next_key);
                     assert_eq!(db.get_span(key).await.unwrap().unwrap().1.next_key, next);
@@ -1964,7 +1976,7 @@ pub(crate) mod test {
             }
 
             // Sanity: B.next_key == K before the speculative batches.
-            let (_, next_b) = db.get_all(&key_b).await.unwrap().unwrap();
+            let (_, next_b) = db.get_with_next_key(&key_b).await.unwrap().unwrap();
             assert_eq!(next_b, key_k, "B.next_key should be K before delete");
 
             // Parent batch: update K's value (K enters base_diff).
@@ -1985,7 +1997,7 @@ pub(crate) mod test {
             assert!(db.get(&key_k).await.unwrap().is_none());
 
             // B.next_key must not point to deleted K.
-            let (_, b_next) = db.get_all(&key_b).await.unwrap().unwrap();
+            let (_, b_next) = db.get_with_next_key(&key_b).await.unwrap().unwrap();
             assert_ne!(
                 b_next, key_k,
                 "B.next_key still points to deleted K (corrupted next_key ring)"
@@ -2108,7 +2120,7 @@ pub(crate) mod test {
 
     #[allow(dead_code)]
     fn assert_non_trait_futures_are_send(db: &mut AnyTest, key: Digest) {
-        is_send(db.get_all(&key));
+        is_send(db.get_with_next_key(&key));
         is_send(db.get_with_loc(&key));
         is_send(db.get_span(&key));
         let mut policy = Bounded {

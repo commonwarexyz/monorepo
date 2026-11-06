@@ -742,7 +742,7 @@ pub(crate) mod test {
 
     #[allow(dead_code)]
     fn assert_non_trait_futures_are_send(db: &mut AnyTest, key: Digest) {
-        is_send(db.get_all(&key));
+        is_send(db.get_with_next_key(&key));
         is_send(db.get_with_loc(&key));
         is_send(db.get_span(&key));
         let mut policy = Bounded {

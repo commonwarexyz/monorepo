@@ -185,7 +185,10 @@ where
 
     /// Returns the value of `key` and the next active key, wrapping from the last key to the first,
     /// or `None` if `key` is not active.
-    pub async fn get_all(&self, key: &K) -> Result<Option<(V::Value, K)>, crate::qmdb::Error<F>> {
+    pub async fn get_with_next_key(
+        &self,
+        key: &K,
+    ) -> Result<Option<(V::Value, K)>, crate::qmdb::Error<F>> {
         self.get_with_loc(key)
             .await
             .map(|res| res.map(|(data, _)| (data.value, data.next_key)))

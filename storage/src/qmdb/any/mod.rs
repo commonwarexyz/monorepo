@@ -4116,14 +4116,18 @@ pub(crate) mod test {
     {
         async fn assert_link(&self, key: Digest, value: Digest, next: Digest) {
             assert_eq!(
-                self.get_all(&key).await.unwrap(),
+                self.get_with_next_key(&key).await.unwrap(),
                 Some((value, next)),
                 "{key} diverged from its value and link",
             );
         }
 
         async fn assert_absent(&self, key: Digest) {
-            assert_eq!(self.get_all(&key).await.unwrap(), None, "{key} is live");
+            assert_eq!(
+                self.get_with_next_key(&key).await.unwrap(),
+                None,
+                "{key} is live"
+            );
         }
     }
 
