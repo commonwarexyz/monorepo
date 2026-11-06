@@ -180,6 +180,8 @@ impl<F> Fp12<F> {
     /// Loads up to one element per lane, filling the remaining lanes with `fill`.
     ///
     /// Interprets each component modulo `p` and returns the base field's initial bounds.
+    /// Runs as its own kernel, so that callers outside kernels convert with the backend's
+    /// instructions.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn load<S: Simd>(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self
     where
@@ -194,10 +196,13 @@ impl<F> Fp12<F> {
             coefficients[1][lane] = *c1;
         }
         let (fill1, fill0) = split(fill);
-        Self {
-            c0: Fp6::load(simd, &coefficients[0][..lanes], fill0),
-            c1: Fp6::load(simd, &coefficients[1][..lanes], fill1),
-        }
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| Self {
+                c0: Fp6::load(simd, &coefficients[0][..lanes], fill0),
+                c1: Fp6::load(simd, &coefficients[1][..lanes], fill1),
+            },
+        )
     }
 
     /// Returns one in every lane.
@@ -236,16 +241,23 @@ impl<F> Fp12<F> {
     /// Stores the canonical value of each lane, dropping lanes beyond `elements`.
     ///
     /// Requires valid value bounds. Entries beyond [`Field::LANES`] are unchanged.
+    /// Runs as its own kernel, as [`Self::load`] does.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn store<S: Simd>(self, simd: S, elements: &mut [[u8; BYTES]])
     where
         F: Field<S>,
     {
         const { assert!(F::LANES <= MAX_LANES) };
-        let mut coefficients = [[[0; FP6_BYTES]; MAX_LANES]; 2];
         let lanes = elements.len().min(F::LANES);
-        self.c0.store(simd, &mut coefficients[0][..lanes]);
-        self.c1.store(simd, &mut coefficients[1][..lanes]);
+        let coefficients = simd.execute(
+            #[inline(always)]
+            move |simd: S| {
+                let mut coefficients = [[[0; FP6_BYTES]; MAX_LANES]; 2];
+                self.c0.store(simd, &mut coefficients[0][..lanes]);
+                self.c1.store(simd, &mut coefficients[1][..lanes]);
+                coefficients
+            },
+        );
         for (lane, element) in elements[..lanes].iter_mut().enumerate() {
             let (c1, c0) = element.split_at_mut(FP6_BYTES);
             c0.copy_from_slice(&coefficients[0][lane]);
@@ -541,7 +553,14 @@ impl<F> Fp12<F> {
     {
         simd.execute(
             #[inline(always)]
-            move |simd: S| core::array::from_fn(|j| Fp2::load(simd, &[], &FROBENIUS[j])),
+            move |simd: S| {
+                let mut coefficients = [Fp2::load(simd, &[], &FROBENIUS[0]); 5];
+                unroll::<5>(
+                    #[inline(always)]
+                    |j| coefficients[j] = Fp2::load(simd, &[], &FROBENIUS[j]),
+                );
+                coefficients
+            },
         )
     }
 
