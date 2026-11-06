@@ -826,8 +826,11 @@ impl<D: Digest> Proof<D> {
         });
         self.verify_multi_inclusion::<H>(elements, root)?;
         if yielded != reported {
-            // Verified positions stay below `leaf_count`, so this cannot overflow.
-            return Err(Error::InvalidPosition(position + yielded as u32));
+            // Name the first missing or extra leaf. It is at most one past the checked range,
+            // which ends below `leaf_count`, so this cannot overflow.
+            return Err(Error::InvalidPosition(
+                position + yielded.min(reported) as u32,
+            ));
         }
         Ok(())
     }
@@ -1203,18 +1206,28 @@ mod tests {
                 .is_ok()
         );
 
-        // Reject missing leaves and valid leaves with incorrect length metadata. The four-leaf
-        // cases isolate the check against the number actually consumed.
-        for (yielded, reported) in [(3, 4), (4, 3), (4, 5)] {
+        // Reject missing leaves.
+        let leaves = Misreported {
+            inner: digests[2..5].iter().copied(),
+            len: 4,
+        };
+        assert!(
+            range_proof
+                .verify_range_inclusion::<Sha256>(2, leaves, &root)
+                .is_err()
+        );
+
+        // Reject valid leaves with incorrect length metadata. These cases isolate the check
+        // against the number actually consumed, which names the first extra or missing leaf.
+        for (reported, position) in [(3, 5), (5, 6)] {
             let leaves = Misreported {
-                inner: digests[2..2 + yielded].iter().copied(),
+                inner: digests[2..6].iter().copied(),
                 len: reported,
             };
-            assert!(
-                range_proof
-                    .verify_range_inclusion::<Sha256>(2, leaves, &root)
-                    .is_err()
-            );
+            assert!(matches!(
+                range_proof.verify_range_inclusion::<Sha256>(2, leaves, &root),
+                Err(Error::InvalidPosition(p)) if p == position
+            ));
         }
     }
 

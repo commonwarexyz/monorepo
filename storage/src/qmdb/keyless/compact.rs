@@ -1274,7 +1274,7 @@ mod tests {
             };
             assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
                 start,
-                std::slice::from_ref(&op),
+                [&op],
                 &pinned_nodes,
                 &first.root
             ));
