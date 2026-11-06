@@ -18,9 +18,9 @@
 //! SQE and must await their operation CQE. Writes and syncs continue through all
 //! follow-up SQEs after their observers are dropped.
 //!
-//! Cancellations stage first, followed by operations in FIFO order and wake-poll
-//! rearming. The operation limit excludes cancellation and wake SQEs. A full SQ
-//! needs a flush, but reaching the operation limit requires a CQE to free capacity.
+//! Cancellations stage first, followed by operations in FIFO order. The
+//! operation limit excludes cancellation and wake SQEs. A full SQ needs a flush,
+//! but reaching the operation limit requires a CQE to free capacity.
 //!
 //! # Service and Parking
 //!
@@ -29,22 +29,28 @@
 //! win a race with expiry. Partial progress after expiry cannot issue another SQE.
 //! Queued requests expire even while all operation slots are occupied.
 //!
-//! The ring uses SINGLE_ISSUER and DEFER_TASKRUN, requiring Linux 6.1 or newer.
+//! The ring uses SINGLE_ISSUER and DEFER_TASKRUN, requiring Linux 6.1 or newer,
+//! and parks on IORING_OP_FUTEX_WAIT, which requires Linux 6.7 or newer.
 //! Unfinished requests need a GETEVENTS enter even when tasks keep the worker
 //! busy. An idle turn may defer that enter to [`Driver::park`]. Control SQEs carry
 //! no request resources and may remain until later I/O service or ring teardown.
 //!
-//! Parking installs the wake poll if needed, then arms the mailbox waker and
-//! checks for pending publication or a latched signal before blocking. A wake
-//! CQE without MORE requires rearm before the next blocking wait. See
-//! [`super::idle`] for how pool worker selection fits with this wait.
+//! Parking arms the mailbox waker and blocks only while its word still carries
+//! the sequence the worker observed before checking its sources. Without a live
+//! ring futex wait, it reserves an SQ slot before arming and queues one against
+//! the exact post-arm state, so a wake that lands before the kernel queues the
+//! wait fails its compare. A wait stays live across parks until its CQE is
+//! reaped. See [`super::idle`] for how pool worker selection fits with this
+//! wait.
 //!
 //! # Cleanup
 //!
 //! Observer callbacks and request-resource destruction go through [`Deferred`],
 //! outside the worker borrow. Closure detaches local and forwarded observers and
 //! cancels eligible requests. The worker continues servicing until all requests
-//! retire, keeping the driver in place throughout the drain.
+//! retire, keeping the driver in place throughout the drain. Dropping the
+//! driver on its owner thread synchronously cancels a live ring futex wait, so
+//! no stale wait stays queued at the word's address once the word can be freed.
 
 use super::{
     registration::Observation,
@@ -61,11 +67,11 @@ use io_uring::{
     EnterFlags, IoUring,
     opcode::AsyncCancel,
     squeue::SubmissionQueue,
-    types::{SubmitArgs, Timespec},
+    types::{CancelBuilder, SubmitArgs, Timespec},
 };
 use std::{
     collections::VecDeque,
-    io,
+    io, mem,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll, Waker as TaskWaker},
@@ -79,8 +85,13 @@ use tracing::warn;
 const CANCEL_USER_DATA: UserData = u32::MAX as UserData;
 
 /// Ring and request state accessed exclusively by the owning worker.
+///
+/// Drop it on the owner thread, the only thread that can cancel its ring futex
+/// wait.
 pub struct Driver {
-    /// Declared first so ring destruction precedes descriptor and buffer release.
+    /// The worker's ring. Closing it only queues its teardown in the kernel, so
+    /// cleanup retires every operation that can access request memory before
+    /// the driver drops.
     ring: IoUring,
     /// Kept separately to allow batching SQ access while updating request state.
     state: State,
@@ -106,8 +117,10 @@ struct State {
     timeout_wheel: TimeoutWheel,
     /// Shared mailbox wake source retained through ring destruction.
     waker: Waker,
-    /// Whether the multishot wake poll needs to be installed again.
+    /// Whether no ring futex wait is live, so the next blocking park queues one.
     wake_rearm_needed: bool,
+    /// Ring futex waits that failed because the kernel could not allocate them.
+    wake_allocation_failures: u64,
 }
 
 /// What [`Driver::enter`] asks of the kernel after submitting queued SQEs.
@@ -161,6 +174,7 @@ impl Driver {
                 timeout_wheel: TimeoutWheel::new(max_timeout, cfg.timeout_wheel_tick, now),
                 waker,
                 wake_rearm_needed: true,
+                wake_allocation_failures: 0,
             },
         })
     }
@@ -315,8 +329,8 @@ impl Driver {
             Self::enter(&mut self.ring, Enter::TaskWork)?;
         }
 
-        // New CQEs can complete requests or terminate the multishot wake poll.
-        // Park rechecks rearm before its next blocking enter.
+        // New CQEs can complete requests or end the ring futex wait, which the
+        // next blocking park then queues again.
         self.state.reap(&mut self.ring, deferred);
 
         #[cfg(test)]
@@ -327,32 +341,38 @@ impl Driver {
 
     /// Wait for ring activity or the deadline while retaining worker ownership.
     ///
-    /// Returns `false` when rearm needs another service turn or the publication
-    /// handshake rejects sleeping. A skipped wait does not satisfy a deferred
-    /// GETEVENTS requirement, so the worker must service nonblocking before its
-    /// next task-polling turn when kernel work remains.
-    pub fn park(&mut self, processed_seq: u32, deadline: Option<Instant>) -> io::Result<bool> {
+    /// Returns `false` when the SQ has no room for the ring wait or a
+    /// notification since the worker observed `seen` rejects sleeping. A
+    /// skipped wait does not satisfy a deferred GETEVENTS requirement, so the
+    /// worker must service nonblocking before its next task-polling turn when
+    /// kernel work remains.
+    pub fn park(&mut self, seen: u32, deadline: Option<Instant>) -> io::Result<bool> {
         if self.has_pending_submissions() {
             return Ok(false);
         }
 
-        // Rearm before publishing the intention to sleep. A transient flush can
-        // leave the SQ full, in which case service must run before trying again.
-        if self.state.wake_rearm_needed {
-            if !self.state.waker.reinstall(&mut self.ring.submission()) {
-                Self::enter(&mut self.ring, Enter::Flush)?;
-                if !self.state.waker.reinstall(&mut self.ring.submission()) {
-                    return Ok(false);
-                }
+        // Reserve the wait's SQ slot before arming, since only the exact
+        // post-arm state rejects a wake that lands before the kernel queues the
+        // wait. A transient flush can leave the SQ full, in which case service
+        // must run before trying again.
+        if self.state.wake_rearm_needed && self.ring.submission().is_full() {
+            Self::enter(&mut self.ring, Enter::Flush)?;
+            if self.ring.submission().is_full() {
+                return Ok(false);
             }
-            self.state.wake_rearm_needed = false;
         }
 
-        // Keep the arm guard alive through the wait. A publication racing this
-        // check either prevents sleeping or signals the installed wake poll.
-        let arm = self.state.waker.arm(processed_seq);
+        // Keep the arm guard alive through the wait. A notification racing this
+        // check either prevents sleeping or wakes the ring wait.
+        let arm = self.state.waker.arm(seen);
         if !arm.still_idle() {
             return Ok(false);
+        }
+        if self.state.wake_rearm_needed {
+            self.state
+                .waker
+                .install(&mut self.ring.submission(), arm.snapshot());
+            self.state.wake_rearm_needed = false;
         }
         Self::enter(&mut self.ring, Enter::Wait { deadline })?;
         Ok(true)
@@ -453,6 +473,45 @@ impl Driver {
             return Err(io::Error::from_raw_os_error(libc::EBADR));
         }
         Ok(())
+    }
+}
+
+impl Drop for Driver {
+    fn drop(&mut self) {
+        // A queued ring wait never reads or writes the word again, since wakes
+        // and cancellations find it through its futex key (the address space
+        // and the word's address) and kernel-owned nodes. Freeing the word
+        // under a queued wait is still a hazard: a later futex at the same
+        // address could have a wake absorbed by the stale wait. So cancel a
+        // live wait synchronously, and keep the word allocated if that fails.
+        //
+        // SINGLE_ISSUER rejects the cancel from any thread but the owner with
+        // EEXIST, which would leak the word, so the driver must drop on its
+        // owner thread, as worker cleanup does.
+        //
+        // No wait is live once its completion was reaped. Without SQPOLL, an
+        // unsubmitted wait SQE stays inert through ring destruction.
+        if self.state.wake_rearm_needed {
+            return;
+        }
+
+        loop {
+            let cancel = CancelBuilder::user_data(WAKE_USER_DATA);
+            match self.ring.submitter().register_sync_cancel(None, cancel) {
+                Ok(()) => return,
+                Err(error) => match error.raw_os_error() {
+                    Some(libc::ENOENT) => return,
+                    Some(libc::EINTR) => continue,
+                    _ => {
+                        // The wait may still be queued at the word's address,
+                        // so keep the word allocated.
+                        warn!(%error, "failed to cancel the ring futex wait");
+                        mem::forget(self.state.waker.clone());
+                        return;
+                    }
+                },
+            }
+        }
     }
 }
 
@@ -598,7 +657,7 @@ impl State {
         }
 
         // Only a completion can release this limit. A flush cannot, and
-        // cancellation and mailbox wake SQEs must still be allowed to stage.
+        // cancellation SQEs must still be allowed to stage.
         false
     }
 
@@ -640,19 +699,7 @@ impl State {
         if self.stage_cancellations(&mut submission_queue) {
             return true;
         }
-        if self.stage_ready_requests(&mut submission_queue) {
-            return true;
-        }
-
-        // Reaching the operation limit still leaves wake polling eligible.
-        // If the SQ itself is full, retain the rearm flag across the flush.
-        if self.wake_rearm_needed {
-            if !self.waker.reinstall(&mut submission_queue) {
-                return true;
-            }
-            self.wake_rearm_needed = false;
-        }
-        false
+        self.stage_ready_requests(&mut submission_queue)
     }
 
     /// Reap every posted CQE without invoking observer callbacks.
@@ -660,32 +707,39 @@ impl State {
         // Dropping this CQ view returns the consumed slots to the kernel.
         // Observer callbacks remain deferred until the worker borrow ends.
         for cqe in ring.completion() {
-            self.handle_cqe(cqe.user_data(), cqe.result(), cqe.flags(), deferred);
+            self.handle_cqe(cqe.user_data(), cqe.result(), deferred);
         }
     }
 
     /// Apply a CQE without invoking observer callbacks.
-    fn handle_cqe(
-        &mut self,
-        user_data: UserData,
-        result: i32,
-        flags: u32,
-        deferred: &mut Deferred,
-    ) {
-        // The reserved mailbox token is outside the waiter's ID space.
+    fn handle_cqe(&mut self, user_data: UserData, result: i32, deferred: &mut Deferred) {
+        // The reserved wake token is outside the waiter's ID space. A wake, a
+        // changed word, or cancellation ends the one-shot ring futex wait, and
+        // the next blocking park queues another, even after service's final reap.
         if user_data == WAKE_USER_DATA {
-            assert!(
-                result >= 0,
-                "wake poll CQE failed: requires Linux 6.1+ multishot polling"
-            );
-            // Clear eventfd readiness. The worker drains the actual messages
-            // after this CQ batch and the local borrow have ended.
-            self.waker.acknowledge();
-            if !io_uring::cqueue::more(flags) {
-                // The kernel removed the multishot poll. Reinstall it before
-                // the next blocking wait, even if this was service's final reap.
-                self.wake_rearm_needed = true;
+            if result == -libc::ENOMEM {
+                // The kernel allocates the wait without blocking and fails it
+                // when memory is short. The enter that submitted the wait
+                // posts this completion itself, so that park returned instead
+                // of sleeping without a wake source, and the next blocking
+                // park installs the wait again. Warn at powers of two to
+                // report persistent pressure without flooding the log.
+                self.wake_allocation_failures += 1;
+                if self.wake_allocation_failures.is_power_of_two() {
+                    warn!(
+                        failures = self.wake_allocation_failures,
+                        "ring futex wait allocation failed, retrying at the next park"
+                    );
+                }
+            } else {
+                // Anything else breaks an invariant, such as EINVAL from a
+                // kernel without IORING_OP_FUTEX_WAIT.
+                assert!(
+                    matches!(-result, 0 | libc::EAGAIN | libc::ECANCELED),
+                    "ring futex wait failed: {result}"
+                );
             }
+            self.wake_rearm_needed = true;
             return;
         }
 
@@ -727,11 +781,12 @@ pub mod tests {
                 Cache, DIRECT_ALIGN, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput,
                 SyncRequest, WriteAtRequest, WriteAtState,
             },
-            waker::tests::wait_until_eventfd_armed,
+            waker::tests::wait_until_armed,
         },
         storage::{hold::Hold, iouring::Shared},
     };
     use commonware_utils::channel::oneshot;
+    use io_uring::opcode::Nop;
     use std::{
         cell::Cell,
         fs::{self, OpenOptions},
@@ -873,7 +928,7 @@ pub mod tests {
                         timeout_wheel_tick: Duration::from_millis(5),
                     },
                     Duration::from_secs(60),
-                    Waker::new().unwrap(),
+                    Waker::new(),
                     start,
                 )
                 .unwrap(),
@@ -983,6 +1038,15 @@ pub mod tests {
             self.service_at(Instant::now(), false);
         }
 
+        /// Fill the one-slot SQ with a control SQE that uses no operation slot.
+        fn fill_with_control(&mut self) {
+            let nop = Nop::new().build().user_data(CANCEL_USER_DATA);
+            // SAFETY: Nop references no memory that the kernel could access.
+            unsafe {
+                self.driver.ring.submission().push(&nop).unwrap();
+            }
+        }
+
         /// Require a real wake CQE before any further submission can mask its absence.
         fn reap_wake(&mut self) {
             let cqe = self
@@ -992,12 +1056,9 @@ pub mod tests {
                 .next()
                 .expect("missing wake CQE");
             assert_eq!(cqe.user_data(), WAKE_USER_DATA);
-            self.driver.state.handle_cqe(
-                cqe.user_data(),
-                cqe.result(),
-                cqe.flags(),
-                &mut self.deferred,
-            );
+            self.driver
+                .state
+                .handle_cqe(cqe.user_data(), cqe.result(), &mut self.deferred);
         }
 
         /// Drive until `count` results have been collected, failing if progress stalls.
@@ -1368,8 +1429,8 @@ pub mod tests {
         assert!(harness.driver.is_empty());
         assert!(harness.driver.next_deadline().is_none());
 
-        // Only the mailbox poll reached the SQ. The expired receive did not.
-        assert_eq!(harness.driver.ring.submission().len(), 1);
+        // The expired receive never reached the SQ.
+        assert!(harness.driver.ring.submission().is_empty());
 
         harness.drain();
     }
@@ -1379,8 +1440,8 @@ pub mod tests {
         for with_pending in [false, true] {
             let mut harness = Harness::new(1);
 
-            // The mailbox poll fills the SQ without using an operation slot.
-            harness.service();
+            // A control SQE fills the SQ without using an operation slot.
+            harness.fill_with_control();
 
             assert!(harness.driver.ring.submission().is_full());
 
@@ -1528,7 +1589,9 @@ pub mod tests {
             RequestOutput::Recv(Err((_, Error::Io(_))))
         ));
         assert!(harness.driver.is_empty());
-        assert_eq!(harness.driver.ring.submission().len(), 1);
+
+        // The rejected receive never reached the SQ.
+        assert!(harness.driver.ring.submission().is_empty());
 
         harness.drain();
     }
@@ -1560,7 +1623,7 @@ pub mod tests {
             harness
                 .driver
                 .state
-                .handle_cqe(CANCEL_USER_DATA, result, 0, &mut harness.deferred);
+                .handle_cqe(CANCEL_USER_DATA, result, &mut harness.deferred);
 
             assert_eq!(harness.driver.state.waiters.in_flight(), 1);
             assert!(harness.driver.state.waiters.is_pending(id));
@@ -1585,7 +1648,7 @@ pub mod tests {
             harness
                 .driver
                 .state
-                .handle_cqe(CANCEL_USER_DATA, result, 0, &mut harness.deferred);
+                .handle_cqe(CANCEL_USER_DATA, result, &mut harness.deferred);
 
             assert_eq!(harness.driver.state.waiters.in_flight(), 0);
         }
@@ -1612,7 +1675,6 @@ pub mod tests {
                 harness.driver.state.handle_cqe(
                     CANCEL_USER_DATA,
                     -libc::EINVAL,
-                    0,
                     &mut harness.deferred,
                 );
             }))
@@ -1880,12 +1942,10 @@ pub mod tests {
                         harness.orphan(id);
                     }
                     if acknowledged {
-                        harness.driver.state.handle_cqe(
-                            CANCEL_USER_DATA,
-                            0,
-                            0,
-                            &mut harness.deferred,
-                        );
+                        harness
+                            .driver
+                            .state
+                            .handle_cqe(CANCEL_USER_DATA, 0, &mut harness.deferred);
                         harness.collect();
                     }
                     assert_eq!(Arc::strong_count(&file), 2);
@@ -2191,7 +2251,7 @@ pub mod tests {
 
     #[test]
     fn test_deferred_taskrun_is_serviced_during_busy_turn() {
-        // Both SQEs fit, so staging does not itself force a submission syscall.
+        // The SQE fits, so staging does not itself force a submission syscall.
         let mut harness = Harness::new(2);
         let (left, mut right) = UnixStream::pair().unwrap();
         harness.admit(recv(left, 1, None), 0);
@@ -2199,7 +2259,7 @@ pub mod tests {
 
         assert!(harness.completed.is_empty());
         assert!(!harness.driver.is_empty());
-        assert_eq!(harness.driver.ring.submission().len(), 2);
+        assert_eq!(harness.driver.ring.submission().len(), 1);
 
         // The next busy turn submits the receive, which then waits for data.
         harness.service();
@@ -2217,15 +2277,16 @@ pub mod tests {
     }
 
     #[test]
-    fn test_wake_poll_alone_does_not_require_kernel_service() {
+    fn test_ring_wait_alone_does_not_require_kernel_service() {
         let mut harness = Harness::new(1);
 
-        // Staging the mailbox poll must not make a CPU-only turn enter the kernel.
+        // A live ring wait must not make a CPU-only turn enter the kernel.
+        assert!(harness.driver.park(0, Some(Instant::now())).unwrap());
         harness.service();
 
         assert!(harness.driver.is_empty());
         assert!(!harness.driver.has_pending_submissions());
-        assert_eq!(harness.driver.ring.submission().len(), 1);
+        assert!(!harness.driver.state.wake_rearm_needed);
 
         harness.drain();
     }
@@ -2238,11 +2299,9 @@ pub mod tests {
         harness.admit(recv(left, 1, None), 0);
         harness.service_at(harness.start, true);
 
-        // Publication prevents parking, so the deferred GETEVENTS enter must
-        // still happen through service before the next busy turn.
-        if harness.driver.state.waker.publish() {
-            harness.driver.state.waker.wake();
-        }
+        // A notification prevents parking, so the deferred GETEVENTS enter
+        // must still happen through service before the next busy turn.
+        harness.driver.state.waker.notify();
         assert!(!harness.driver.park(0, None).unwrap());
         assert!(!harness.driver.is_empty());
         harness.until(1);
@@ -2251,43 +2310,96 @@ pub mod tests {
     }
 
     #[test]
-    fn test_publish_wakes_eventfd_blocked_loop() {
+    fn test_notify_wakes_ring_blocked_loop() {
         let mut harness = Harness::new(2);
         let (left, _right) = UnixStream::pair().unwrap();
         harness.admit(recv(left, 1, None), 0);
         harness.service();
 
-        // Publish after arming so the eventfd path must carry the notification.
+        // Notify after arming so the ring wait must carry the notification.
         let deadline = Instant::now() + Duration::from_secs(10);
         let waker = harness.driver.state.waker.clone();
         let producer = thread::spawn(move || {
-            wait_until_eventfd_armed(&waker, deadline);
-            if waker.publish() {
-                waker.wake();
-            }
+            wait_until_armed(&waker, deadline);
+            waker.notify();
         });
         assert!(harness.driver.park(0, Some(deadline)).unwrap());
         producer.join().unwrap();
 
-        assert!(harness.driver.state.waker.pending(0));
+        assert!(harness.driver.state.waker.moved(0));
 
-        // A published sequence alone does not prove eventfd reached the ring.
+        // A moved sequence alone does not prove the wake reached the ring.
         harness.reap_wake();
 
         harness.drain();
     }
 
+    /// A ring futex wait that the kernel fails to allocate ends like any other
+    /// wait, so the next park installs another, which a notification wakes.
     #[test]
-    fn test_park_rearms_wake_poll_with_full_sq() {
+    fn test_ring_wait_allocation_failure_installs_again() {
+        // A receive keeps the driver busy, and a park with an elapsed deadline
+        // leaves its ring wait queued.
+        let mut harness = Harness::new(2);
+        let (left, _right) = UnixStream::pair().unwrap();
+        harness.admit(recv(left, 1, None), 0);
+        harness.service();
+        assert!(harness.driver.park(0, Some(Instant::now())).unwrap());
+        assert!(!harness.driver.state.wake_rearm_needed);
+
+        // Cancel that wait, so none is queued, and hand its completion to the
+        // driver as the allocation failure of a wait that never queued.
+        harness
+            .driver
+            .ring
+            .submitter()
+            .register_sync_cancel(None, CancelBuilder::user_data(WAKE_USER_DATA))
+            .unwrap();
+        Driver::enter(&mut harness.driver.ring, Enter::TaskWork).unwrap();
+        let cqe = harness.driver.ring.completion().next().unwrap();
+        assert_eq!(cqe.user_data(), WAKE_USER_DATA);
+        assert_eq!(cqe.result(), -libc::ECANCELED);
+        for failures in 1..=2 {
+            harness
+                .driver
+                .state
+                .handle_cqe(WAKE_USER_DATA, -libc::ENOMEM, &mut harness.deferred);
+            assert!(harness.driver.state.wake_rearm_needed);
+            assert_eq!(harness.driver.state.wake_allocation_failures, failures);
+        }
+
+        // The next park installs a new wait, and a notification after arming
+        // ends it.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let waker = harness.driver.state.waker.clone();
+        let producer = thread::spawn(move || {
+            wait_until_armed(&waker, deadline);
+            waker.notify();
+        });
+        assert!(harness.driver.park(0, Some(deadline)).unwrap());
+        producer.join().unwrap();
+
+        // The new wait's own completion carried the notification well before
+        // the deadline.
+        assert!(Instant::now() < deadline);
+        assert!(!harness.driver.state.wake_rearm_needed);
+        harness.reap_wake();
+        assert!(harness.driver.state.wake_rearm_needed);
+
+        harness.drain();
+    }
+
+    #[test]
+    fn test_park_reserves_ring_wait_slot_with_full_sq() {
         for stalled in [false, true] {
             let mut harness = Harness::new(1);
             let (socket, mut peer) = UnixStream::pair().unwrap();
             let id = harness.admit(recv(socket, 1, None), 0);
 
-            // The receive fills the SQ before wake polling can be installed.
-            // Keep the SQE unsubmitted so park must flush before rearming.
+            // The receive fills the SQ before the ring wait has a slot. Keep
+            // the SQE unsubmitted so park must flush before arming.
             assert!(
-                harness
+                !harness
                     .driver
                     .state
                     .fill_submission_queue(&mut harness.driver.ring)
@@ -2298,39 +2410,38 @@ pub mod tests {
 
             let _fault = stalled.then(|| inject(&harness.driver, Fault::StallFlush));
             if stalled {
-                // An unchanged SQ cannot accept the wake poll. Park must return
-                // to service with the request and rearm still pending.
+                // An unchanged SQ has no slot for the ring wait. Park must
+                // return to service with the request and the wait still needed.
                 assert!(!harness.driver.park(0, Some(Instant::now())).unwrap());
                 assert!(harness.driver.state.wake_rearm_needed);
                 assert!(!harness.driver.is_empty());
                 assert!(harness.driver.ring.submission().is_full());
                 harness.service();
 
-                assert!(!harness.driver.state.wake_rearm_needed);
+                // Service submits the receive but leaves the wait to park.
+                assert!(harness.driver.state.wake_rearm_needed);
             }
 
-            // Keep the receive blocked. Only a wake published after arming can
+            // Keep the receive blocked. Only a notification after arming can
             // produce a CQE during this bounded wait.
             let deadline = Instant::now() + Duration::from_secs(10);
             let waker = harness.driver.state.waker.clone();
             let producer = thread::spawn(move || {
-                wait_until_eventfd_armed(&waker, deadline);
-                if waker.publish() {
-                    waker.wake();
-                }
+                wait_until_armed(&waker, deadline);
+                waker.notify();
             });
             assert!(harness.driver.park(0, Some(deadline)).unwrap());
             producer.join().unwrap();
 
-            assert!(harness.driver.state.waker.pending(0));
+            assert!(harness.driver.state.waker.moved(0));
             assert!(!harness.driver.state.wake_rearm_needed);
 
-            // Reap directly so service cannot hide a missing poll by installing
-            // one after park returns. The receive must still be in flight.
+            // Reap directly so the wait's own CQE carries the wake. The receive
+            // must still be in flight.
             harness.reap_wake();
             assert!(harness.driver.state.waiters.is_in_flight(id));
 
-            // Rearming must preserve the receive that occupied the SQ.
+            // Reserving the slot must preserve the receive that occupied the SQ.
             peer.write_all(b"x").unwrap();
             harness.until(1);
 
@@ -2343,11 +2454,11 @@ pub mod tests {
     #[test]
     fn test_transient_flush_without_sq_progress_returns_through_service() {
         let mut harness = Harness::new(1);
-        harness.service();
+        harness.fill_with_control();
 
         assert_eq!(harness.driver.ring.submission().len(), 1);
 
-        // Stall the flush needed to get past the already staged mailbox poll.
+        // Stall the flush needed to get past the already staged control SQE.
         let _fault = inject(&harness.driver, Fault::StallFlush);
         let (left, mut right) = UnixStream::pair().unwrap();
         right.write_all(b"x").unwrap();
@@ -2449,12 +2560,10 @@ pub mod tests {
             harness.driver.state.waiters.stage(first);
             assert_eq!(harness.driver.state.waiters.in_flight(), 1);
             assert!(!harness.driver.has_pending_submissions());
-            harness.driver.state.handle_cqe(
-                first.user_data(),
-                -libc::EIO,
-                0,
-                &mut harness.deferred,
-            );
+            harness
+                .driver
+                .state
+                .handle_cqe(first.user_data(), -libc::EIO, &mut harness.deferred);
             assert!(matches!(
                 held.tracker.failure(),
                 Some(Error::BlobSyncFailed(_, _, error))
@@ -2539,12 +2648,10 @@ pub mod tests {
                 assert_eq!(harness.driver.state.ready_queue.pop_front(), Some(first));
                 assert!(harness.driver.state.ready_queue.is_empty());
                 harness.driver.state.waiters.stage(first);
-                harness.driver.state.handle_cqe(
-                    first.user_data(),
-                    *result,
-                    0,
-                    &mut harness.deferred,
-                );
+                harness
+                    .driver
+                    .state
+                    .handle_cqe(first.user_data(), *result, &mut harness.deferred);
                 harness
                     .driver
                     .state
@@ -2667,7 +2774,7 @@ pub mod tests {
     fn test_foreign_durability_release_wakes_closed_worker_park() {
         let (directory, file) = make_file("closed_permit_wake");
         let permit = file.durability.clone().try_lock_owned().unwrap();
-        let mailbox = Arc::new(Mailbox::new().unwrap());
+        let mailbox = Arc::new(Mailbox::new());
         let mut driver = Driver::new(
             &RingConfig {
                 size: 2,
@@ -2691,9 +2798,10 @@ pub mod tests {
         driver.close(&mut deferred);
         driver.service(Instant::now(), true, &mut deferred).unwrap();
 
-        // Consume a latched acquisition-poll wake before the measured park, then service
-        // again as cleanup does after every wait. No operation SQE can produce a CQE.
-        driver.park(0, Some(Instant::now())).unwrap();
+        // Observe before service, as cleanup does on every pass, so the measured
+        // park compares against every earlier notification. No operation SQE can
+        // produce a CQE.
+        let seen = driver.state.waker.observe();
         driver.service(Instant::now(), true, &mut deferred).unwrap();
         assert_eq!(driver.len(), 1);
         assert_eq!(driver.state.waiters.in_flight(), 0);
@@ -2701,11 +2809,11 @@ pub mod tests {
         assert!(driver.ring.completion().is_empty());
         let deadline = Instant::now() + Duration::from_secs(10);
         let producer = thread::spawn(move || {
-            wait_until_eventfd_armed(&mailbox.waker, deadline);
+            wait_until_armed(&mailbox.waker, deadline);
             assert!(!mailbox.is_open());
             drop(permit);
         });
-        assert!(driver.park(0, Some(deadline)).unwrap());
+        assert!(driver.park(seen, Some(deadline)).unwrap());
         producer.join().unwrap();
         let cqe = driver
             .ring
@@ -2713,13 +2821,10 @@ pub mod tests {
             .next()
             .expect("permit release did not wake the ring");
         assert_eq!(cqe.user_data(), WAKE_USER_DATA);
-        assert!(
-            !driver.state.waker.pending(0),
-            "permit release published an unmatched mailbox batch"
-        );
+        assert!(driver.state.waker.moved(seen));
         driver
             .state
-            .handle_cqe(cqe.user_data(), cqe.result(), cqe.flags(), &mut deferred);
+            .handle_cqe(cqe.user_data(), cqe.result(), &mut deferred);
         driver.service(Instant::now(), true, &mut deferred).unwrap();
         assert!(driver.is_empty());
         assert_eq!(deferred.completions.len(), 1);
@@ -2862,22 +2967,24 @@ pub mod tests {
     /// the counter read itself.
     #[test]
     fn test_every_enter_reports_a_dropped_completion() {
-        // A flush fails, here the one park needs before it can rearm wake
-        // polling behind a receive that fills the SQ.
+        // A flush fails, here the one park needs to reserve its ring wait's
+        // SQ slot behind a receive that fills the SQ.
         let mut harness = Harness::new(1);
         let (socket, _peer) = UnixStream::pair().unwrap();
         harness.admit(recv(socket, 1, None), 0);
         assert!(
-            harness
+            !harness
                 .driver
                 .state
                 .fill_submission_queue(&mut harness.driver.ring)
         );
+        assert!(harness.driver.ring.submission().is_full());
         assert!(harness.driver.state.wake_rearm_needed);
         let fault = inject(&harness.driver, Fault::DropCompletion);
         let error = harness.driver.park(0, Some(Instant::now())).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::EBADR));
-        // The flush failed before rearming, not a later enter in this park.
+        // The flush failed before installing the ring wait, not a later enter
+        // in this park.
         assert!(harness.driver.state.wake_rearm_needed);
         drop(fault);
         harness.drain();
@@ -2960,7 +3067,7 @@ pub mod tests {
             },
         ]
         .map(|enter| Driver::enter(&mut harness.driver.ring, enter));
-        std::mem::forget(harness.driver.ring);
+        std::mem::forget(harness.driver);
 
         // Every enter path must preserve a permanent error. Forget the closed
         // ring before asserting so a failure cannot try to close its FD again.

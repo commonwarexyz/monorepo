@@ -1244,7 +1244,7 @@ pub mod tests {
     /// A pool of one worker that never runs, so every wake takes the global
     /// queue path.
     pub fn pool() -> Arc<Pool> {
-        Arc::new(Pool::new(vec![Arc::new(Mailbox::new().unwrap())]))
+        Arc::new(Pool::new(vec![Arc::new(Mailbox::new())]))
     }
 
     impl Ready {
@@ -2030,7 +2030,7 @@ mod loom_tests {
     /// standard `Weak` to it, and every wake takes the global queue path.
     fn pool(workers: usize) -> std::sync::Arc<Pool> {
         let mailboxes = (0..workers)
-            .map(|_| std::sync::Arc::new(Mailbox::new().unwrap()))
+            .map(|_| std::sync::Arc::new(Mailbox::new()))
             .collect();
         std::sync::Arc::new(Pool::new(mailboxes))
     }
@@ -2109,7 +2109,7 @@ mod loom_tests {
     ) {
         if run(set, runnable) && completed.fetch_add(1, Ordering::AcqRel) + 1 == tasks {
             for worker in 0..pool.workers() as u32 {
-                pool.mailbox(worker).waker.wake();
+                pool.mailbox(worker).waker.notify();
             }
         }
     }
@@ -2120,8 +2120,11 @@ mod loom_tests {
     /// The worker takes from its run queue, then from the global queue, and
     /// when both are empty searches and parks through the drive loop's
     /// `Searcher` methods. The model omits I/O, the root, and the global queue
-    /// interval. With `spin`, a worker that finds a wake signal latched
-    /// consumes it instead of blocking, as an idle spin that sees it does.
+    /// interval. A worker observes its waker before it looks, and waits only
+    /// while no notification moved it since. With `spin`, a worker that sees
+    /// it moved runs again without arming, as an idle spin that sees it does.
+    /// The worker that completes the last task wakes every worker, so none
+    /// waits forever.
     fn work(
         pool: &Pool,
         set: &Tasks,
@@ -2140,6 +2143,8 @@ mod loom_tests {
                 ready.discard();
                 return;
             }
+            let waker = &pool.mailbox(index).waker;
+            let seen = waker.observe();
             let next = ready.pop().or_else(|| pool.take(ready));
             if let Some(runnable) = next {
                 searcher.leave_search();
@@ -2155,11 +2160,8 @@ mod loom_tests {
                 searcher.finish_park();
                 continue;
             }
-            let waker = &pool.mailbox(index).waker;
-            if spin && waker.signalled() {
-                waker.consume_signal();
-            } else {
-                waker.park_idle(0, None);
+            if !spin || !waker.moved(seen) {
+                waker.park_idle(seen, None);
             }
             searcher.finish_park();
         }
@@ -2438,10 +2440,11 @@ mod loom_tests {
                     let mut ready = pool.queue(1).owner();
                     {
                         let mut searcher = Searcher::new(&pool, 1);
+                        let seen = pool.mailbox(1).waker.observe();
                         assert_eq!(searcher.prepare_park(&ready), Park::Wait);
                         reach(&gate, 1);
 
-                        pool.mailbox(1).waker.park_idle(0, None);
+                        pool.mailbox(1).waker.park_idle(seen, None);
                         await_stage(&gate, 2);
                         searcher.finish_park();
                         searcher.leave_search();
@@ -2470,7 +2473,6 @@ mod loom_tests {
             // Worker zero resumes with the claim's count, takes one runnable,
             // and returns the count. Worker two still holds one, so it is not
             // the last.
-            pool.mailbox(0).waker.consume_signal();
             zero.finish_park();
             let first_zero = pool.take(&mut r0).unwrap();
             zero.leave_search();

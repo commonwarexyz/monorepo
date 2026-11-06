@@ -2,13 +2,28 @@
 //!
 //! A mailbox holds no pointer into the worker's local state. Producers hand
 //! over owned messages, and the worker applies them on its own thread.
-//! Producers append under the inbox mutex, publish to the waker once per
-//! empty-to-nonempty transition, and signal after unlocking if needed. The
-//! worker swaps the whole batch into its scratch buffer and applies it outside
-//! the lock. A closed mailbox returns messages to the sender, so no payload is
-//! ever destroyed under the lock.
+//! Producers append under the inbox mutex and, after unlocking, notify the
+//! waker once per empty-to-nonempty transition. The worker swaps the whole
+//! batch into its scratch buffer and applies it outside the lock. A closed
+//! mailbox returns messages to the sender, so no payload is ever destroyed
+//! under the lock.
 //!
-//! The pool's idle state also signals a selected worker through its mailbox's
+//! The waker's sequence also moves for pool claims and permit grants, which
+//! carry no message. So the inbox keeps a mail flag, set by the send that
+//! starts a batch and cleared by the take or close that empties the inbox,
+//! both under the lock. The worker checks the flag without locking and takes
+//! only when it is set, so a notification without mail costs no lock.
+//!
+//! A relaxed load of the flag suffices once the worker has observed the waker.
+//! The send stores the flag before it unlocks and notifies with release
+//! ordering, and the worker observes with acquire ordering before it checks the
+//! flag. If that observation includes the notification, the flag store happens
+//! before the check, and only the worker's own take or close clears it later.
+//! Otherwise the notification moves the sequence after the observation, so the
+//! worker's recheck before blocking, or the wake of its wait, sends it round
+//! again, and its next observation includes the notification.
+//!
+//! The pool's idle state also notifies a selected worker through its mailbox's
 //! [`Waker`], without a message. See [`super::idle`] for parking order.
 
 use super::{request::RequestOutput, sleep::TimerId, waiter::WaiterId, waker::Waker};
@@ -18,9 +33,13 @@ use std::mem;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
-        use loom::sync::{Mutex, MutexGuard};
+        use loom::sync::{
+            Mutex, MutexGuard,
+            atomic::{AtomicBool, Ordering},
+        };
     } else {
         use commonware_utils::sync::{Mutex, MutexGuard};
+        use std::sync::atomic::{AtomicBool, Ordering};
     }
 }
 
@@ -63,24 +82,28 @@ struct Inbox {
 
 /// A worker's shared entry point: its inbox and its waker.
 pub struct Mailbox {
-    /// Wake source used after publication when signaling is needed. Owned here
-    /// so producers can signal after unlocking. The pool also wakes a parked
-    /// worker through it, without a message.
+    /// Eventcount notified after a send that starts a batch. Owned here so
+    /// producers can notify after unlocking. The pool and the driver also
+    /// notify the worker through it, without a message.
     pub waker: Waker,
+    /// Whether the inbox holds a batch. Written only under the inbox lock and
+    /// read without it.
+    mail: AtomicBool,
     /// Pending messages. No user code runs under this mutex.
     inbox: Mutex<Inbox>,
 }
 
 impl Mailbox {
     /// Create an open mailbox with a fresh waker.
-    pub fn new() -> std::io::Result<Self> {
-        Ok(Self {
-            waker: Waker::new()?,
+    pub fn new() -> Self {
+        Self {
+            waker: Waker::new(),
+            mail: AtomicBool::new(false),
             inbox: Mutex::new(Inbox {
                 open: true,
                 messages: Vec::new(),
             }),
-        })
+        }
     }
 
     /// Lock the inbox.
@@ -97,7 +120,7 @@ impl Mailbox {
 
     /// Deliver a message, or return it if the mailbox is closed.
     pub fn send(&self, message: Message) -> Result<(), Message> {
-        let signal = {
+        let first = {
             let mut inbox = self.lock();
             if !inbox.open {
                 return Err(message);
@@ -106,12 +129,18 @@ impl Mailbox {
             let first = inbox.messages.is_empty();
             inbox.messages.push(message);
 
-            // Publish once per batch to match the worker's transfer count.
-            first && self.waker.publish()
+            // The lock orders this store with the take that clears it, and the
+            // notification below publishes it to the worker's observation.
+            if first {
+                self.mail.store(true, Ordering::Relaxed);
+            }
+            first
         };
 
-        if signal {
-            self.waker.wake();
+        // A later message of the batch needs no notification: the worker takes
+        // the whole batch once the first one's notification moves the word.
+        if first {
+            self.waker.notify();
         }
 
         Ok(())
@@ -119,9 +148,6 @@ impl Mailbox {
 
     /// Swap the pending batch into `scratch`, returning whether anything was
     /// transferred. `scratch` must be empty.
-    ///
-    /// Each `true` is one published batch, so the caller advances its processed
-    /// sequence once per transfer.
     pub fn take(&self, scratch: &mut Vec<Message>) -> bool {
         assert!(
             scratch.is_empty(),
@@ -133,8 +159,18 @@ impl Mailbox {
             return false;
         }
         mem::swap(&mut inbox.messages, scratch);
+        self.mail.store(false, Ordering::Relaxed);
 
         true
+    }
+
+    /// Whether a batch may be waiting, without locking the inbox.
+    ///
+    /// A batch whose notification the caller's last [`Waker::observe`] included
+    /// is reported, unless the caller took it since. See the module docs.
+    #[inline]
+    pub fn has_mail(&self) -> bool {
+        self.mail.load(Ordering::Relaxed)
     }
 
     /// Close the mailbox and return the pending messages for cleanup outside
@@ -142,6 +178,7 @@ impl Mailbox {
     pub fn close(&self) -> Vec<Message> {
         let mut inbox = self.lock();
         inbox.open = false;
+        self.mail.store(false, Ordering::Relaxed);
         mem::take(&mut inbox.messages)
     }
 
@@ -155,7 +192,10 @@ impl Mailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iouring::{slab::Id, waker::tests::eventfd_count};
+    use crate::iouring::{
+        slab::Id,
+        waker::tests::{notifications, wait_until_armed},
+    };
     use futures::task::{ArcWake, waker};
     use std::{
         future::Future,
@@ -166,6 +206,7 @@ mod tests {
         },
         task::Context,
         thread,
+        time::{Duration, Instant},
     };
 
     /// Waker state that records a wake and fails if the wake runs under the
@@ -229,54 +270,79 @@ mod tests {
     }
 
     #[test]
-    fn test_messages_publish_once_per_batch() {
-        let mailbox = Mailbox::new().unwrap();
+    fn test_messages_notify_once_per_batch() {
+        let mailbox = Mailbox::new();
         let mut scratch = Vec::new();
         assert!(mailbox.is_open());
         assert!(!mailbox.take(&mut scratch));
-        assert!(!mailbox.waker.pending(0));
+        assert_eq!(notifications(&mailbox.waker), 0);
+        assert!(!mailbox.has_mail());
 
-        // Multiple messages share one publication and retain their send order.
+        // Multiple messages share one notification and retain their send order.
         assert!(mailbox.send(Message::WakeRoot).is_ok());
         assert!(mailbox.send(cancel_message()).is_ok());
-        assert!(mailbox.waker.pending(0));
+        assert_eq!(notifications(&mailbox.waker), 1);
+        assert!(mailbox.has_mail());
         assert!(mailbox.take(&mut scratch));
-        assert!(!mailbox.waker.pending(1));
+        assert!(!mailbox.has_mail());
         assert!(matches!(
             scratch.as_slice(),
             [Message::WakeRoot, Message::Cancel(_)]
         ));
 
-        // A new batch remains pending while the worker drains its scratch.
+        // A new batch notifies again while the worker drains its scratch.
         assert!(mailbox.send(Message::WakeRoot).is_ok());
-        assert!(mailbox.waker.pending(1));
+        assert_eq!(notifications(&mailbox.waker), 2);
+        assert!(mailbox.has_mail());
 
         scratch.clear();
         assert!(mailbox.take(&mut scratch));
-        assert!(!mailbox.waker.pending(2));
         assert!(matches!(scratch.as_slice(), [Message::WakeRoot]));
 
         scratch.clear();
         assert!(!mailbox.take(&mut scratch));
-        assert!(!mailbox.waker.pending(2));
+        assert_eq!(notifications(&mailbox.waker), 2);
+        assert!(!mailbox.has_mail());
     }
 
     #[test]
-    fn test_send_signals_armed_worker() {
-        let mailbox = Mailbox::new().unwrap();
-        let arm = mailbox.waker.arm(0);
-        assert!(arm.still_idle());
+    fn test_notification_without_message_is_not_mail() {
+        // A pool claim or a permit grant notifies the waker without a message.
+        let mailbox = Mailbox::new();
+        mailbox.waker.notify();
 
-        // Sending to an armed worker must also signal its eventfd.
+        // The word moved, but the mailbox reports no mail, so the worker skips
+        // the take.
+        assert!(mailbox.waker.moved(0));
+        assert!(!mailbox.has_mail());
+
+        // A message sent after the notification still reports mail.
         assert!(mailbox.send(Message::WakeRoot).is_ok());
-        assert!(mailbox.waker.pending(0));
-        assert_eq!(eventfd_count(&mailbox.waker), 1);
+        assert!(mailbox.has_mail());
+        assert_eq!(notifications(&mailbox.waker), 2);
+    }
+
+    #[test]
+    fn test_send_wakes_armed_worker() {
+        let mailbox = Arc::new(Mailbox::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let parked = thread::spawn({
+            let mailbox = mailbox.clone();
+            move || mailbox.waker.park_idle(0, Some(deadline))
+        });
+
+        // Sending to an armed worker must also wake its wait.
+        wait_until_armed(&mailbox.waker, deadline);
+        assert!(mailbox.send(Message::WakeRoot).is_ok());
+        parked.join().unwrap();
+        assert!(Instant::now() < deadline, "send did not wake the worker");
+        assert_eq!(notifications(&mailbox.waker), 1);
     }
 
     #[test]
     #[should_panic(expected = "mailbox scratch must be drained before transfer")]
     fn test_take_requires_empty_scratch() {
-        let mailbox = Mailbox::new().unwrap();
+        let mailbox = Mailbox::new();
         let mut scratch = vec![Message::WakeRoot];
 
         mailbox.take(&mut scratch);
@@ -284,26 +350,28 @@ mod tests {
 
     #[test]
     fn test_close_returns_messages_and_rejects_new_ones() {
-        let mailbox = Arc::new(Mailbox::new().unwrap());
+        let mailbox = Arc::new(Mailbox::new());
         let (message, _receiver, reentrant) = forward_message(&mailbox);
         assert!(mailbox.send(message).is_ok());
 
         // Closing transfers queued messages to the caller for disposal.
+        assert!(mailbox.has_mail());
         let queued = mailbox.close();
         assert!(!mailbox.is_open());
+        assert!(!mailbox.has_mail());
         assert!(matches!(queued.as_slice(), [Message::Forward(_)]));
         assert!(!reentrant.woken.load(Ordering::Relaxed));
 
         drop(queued);
         assert!(reentrant.woken.load(Ordering::Relaxed));
 
-        // Rejected messages also reach the caller, without another publication.
+        // Rejected messages also reach the caller, without another notification.
         let (message, _receiver, reentrant) = forward_message(&mailbox);
         let rejected = mailbox.send(message);
         assert!(matches!(rejected, Err(Message::Forward(_))));
         assert!(!reentrant.woken.load(Ordering::Relaxed));
-        assert!(mailbox.waker.pending(0));
-        assert!(!mailbox.waker.pending(1));
+        assert_eq!(notifications(&mailbox.waker), 1);
+        assert!(!mailbox.has_mail());
 
         drop(rejected);
         assert!(reentrant.woken.load(Ordering::Relaxed));
@@ -315,7 +383,7 @@ mod tests {
 
     #[test]
     fn test_send_racing_close_preserves_payload_ownership() {
-        let mailbox = Arc::new(Mailbox::new().unwrap());
+        let mailbox = Arc::new(Mailbox::new());
         let gate = Arc::new(Barrier::new(2));
         let (message, _receiver, reentrant) = forward_message(&mailbox);
 
