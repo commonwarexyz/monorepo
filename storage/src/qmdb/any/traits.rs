@@ -114,11 +114,6 @@ pub trait DbAny<F: Family>:
     /// Proof generation also requires the necessary Merkle nodes to be retained.
     fn bounds(&self) -> Range<Location<F>>;
 
-    /// Return the Location of the next operation appended to this db.
-    fn size(&self) -> Location<F> {
-        self.bounds().end
-    }
-
     /// Get the metadata associated with the last commit.
     fn get_metadata(
         &self,

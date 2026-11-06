@@ -7,7 +7,7 @@ use crate::{
     },
     qmdb::{
         self,
-        keyless::{CompactDb, Db, Metrics, Operation, operation::Codec},
+        keyless::{CompactDb, Db, Metrics, Operation, operation::OperationCodec},
         sync,
     },
 };
@@ -21,7 +21,7 @@ impl<F, E, V, C, H, S> sync::Database for Db<F, E, V, C, H, S>
 where
     F: Family,
     E: Context,
-    V: Codec,
+    V: OperationCodec,
     C: Mutable<Item = Operation<F, V>> + sync::Journal<F, Context = E, Op = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
@@ -137,7 +137,7 @@ impl<F, E, V, H, S> sync::Database for CompactDb<F, E, V, H, S>
 where
     F: Family,
     E: Context,
-    V: Codec,
+    V: OperationCodec,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
