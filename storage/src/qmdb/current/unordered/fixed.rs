@@ -6,14 +6,12 @@
 //!
 //! See [Db] for the main database type.
 
+pub use crate::qmdb::any::unordered::fixed::{Operation, Update};
 use crate::{
     index::unordered::Index,
     journal::contiguous::fixed::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::{
-        any::{unordered::fixed::Operation, value::FixedEncoding},
-        current,
-    },
+    qmdb::{any::value::FixedEncoding, current},
 };
 
 /// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
@@ -43,6 +41,7 @@ pub mod partitioned {
     //! [Any's counterpart]: crate::qmdb::any::unordered::fixed::partitioned
 
     use super::*;
+    pub use super::{Operation, Update};
     use crate::index::partitioned::unordered::Index;
     use core::num::NonZeroUsize;
 

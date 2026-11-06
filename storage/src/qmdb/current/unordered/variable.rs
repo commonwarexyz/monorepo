@@ -6,14 +6,12 @@
 //!
 //! See [Db] for the main database type.
 
+pub use crate::qmdb::any::unordered::variable::{Operation, Update};
 use crate::{
     index::unordered::Index,
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::{
-        any::{unordered::variable::Operation, value::VariableEncoding},
-        current,
-    },
+    qmdb::{any::value::VariableEncoding, current},
 };
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
@@ -42,6 +40,7 @@ pub mod partitioned {
     //! [Any's counterpart]: crate::qmdb::any::unordered::variable::partitioned
 
     use super::*;
+    pub use super::{Operation, Update};
     use crate::index::partitioned::unordered::Index;
     use core::num::NonZeroUsize;
 

@@ -7,14 +7,12 @@
 //! See [Db] for the main database type and
 //! [ExclusionProof](super::proof::constant::ExclusionProof) for proving key inactivity.
 
+pub use crate::qmdb::any::ordered::variable::{Operation, Update};
 use crate::{
     index::ordered::Index,
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::{
-        any::{ordered::variable::Operation, value::VariableEncoding},
-        current,
-    },
+    qmdb::{any::value::VariableEncoding, current},
 };
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
@@ -47,6 +45,7 @@ pub mod partitioned {
     //! [Any's counterpart]: crate::qmdb::any::ordered::variable::partitioned
 
     use super::*;
+    pub use super::{Operation, Update};
     use crate::index::partitioned::ordered::Index;
     use core::num::NonZeroUsize;
 
