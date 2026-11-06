@@ -37,7 +37,7 @@ use crate::{
             VerificationTicket, VerifyJob,
         },
         mocks::{Bls, Committee, Fixture, MockApplication, RecordingRelay, RecordingReporter},
-        scheme::{Binding, Error as SchemeError},
+        scheme::{Error as SchemeError, bls12381::Aggregate},
         storage::{Recovered, RecoveryConfig, recover},
         types::{Artifact, ChainId, PathLimits, TransactionBlockHeader},
         wire::Plane,
@@ -954,24 +954,26 @@ fn ready_runtime_source_between_actions(scenario: RuntimeSourceScenario) {
 }
 
 #[test]
-fn every_validator_recovers_receipt_chain_certificates() {
+fn a_validator_recovers_only_its_own_chain_with_payment_chains() {
     deterministic::Runner::default().start(|context| async move {
         let mut limits = vec![PathLimits::new(2, 1); 6];
         limits[3] = PathLimits::new(0, 0);
-        let committee = Committee::<Bls<MinPk, Binding>>::builder(88, 6)
+        let committee = Committee::<Bls<MinPk, Aggregate>>::builder(88, 6)
             .chain_limits(limits)
+            .payments(true)
             .build();
+        assert!(committee.config.payment_chain(ChainId::new(3)));
         let metrics_context = context.child("metrics");
         let metrics = Metrics::new(&metrics_context, committee.identities.len());
         let scheme = Arc::new(committee.signers[0].clone());
-        let profile = Profile::new::<Bls<MinPk, Binding>>(
+        let profile = Profile::new::<Bls<MinPk, Aggregate>>(
             committee.config.clone(),
             Role::Validator(Participant::new(0)),
             Tuning::default(),
         )
         .unwrap();
         let validator_context = context.child("validator");
-        let mut validator = ChainTasks::<TestTypes<Bls<MinPk, Binding>>>::new(
+        let mut validator = ChainTasks::<TestTypes<Bls<MinPk, Aggregate>>>::new(
             &validator_context,
             &profile,
             &scheme,
@@ -988,8 +990,8 @@ fn every_validator_recovers_receipt_chain_certificates() {
             let chain = ChainId::new(index);
             assert_eq!(
                 validator.da(chain).is_some(),
-                chain == own_chain || index == 3,
-                "a validator recovers its own chain and every receipt chain"
+                chain == own_chain,
+                "a validator recovers only its own chain, payment chains included"
             );
         }
     });
@@ -1165,18 +1167,19 @@ async fn transmitting_driver<S: Fixture>(
 }
 
 #[test]
-fn a_mixed_da_vote_publication_broadcasts_only_receipt_chain_votes() {
+fn every_da_vote_goes_to_its_producer_alone() {
     deterministic::Runner::default().start(|context| async move {
-        // Chain 3 is a receipt chain; chain 2 pipelines and keeps the producer-only route.
-        let (pipelined, receipt) = (ChainId::new(2), ChainId::new(3));
+        // Chain 3 is a payment chain and chain 2 pipelines; both route DA votes to the producer.
+        let (pipelined, payment) = (ChainId::new(2), ChainId::new(3));
         let mut limits = vec![PathLimits::new(2, 1); 6];
-        limits[receipt.get() as usize] = PathLimits::new(0, 0);
-        let committee = Committee::<Bls<MinPk, Binding>>::builder(89, 6)
+        limits[payment.get() as usize] = PathLimits::new(0, 0);
+        let committee = Committee::<Bls<MinPk, Aggregate>>::builder(89, 6)
             .chain_limits(limits)
+            .payments(true)
             .build();
-        assert!(!committee.config.receipt_chain(pipelined));
-        assert!(committee.config.receipt_chain(receipt));
-        let requests: Arc<[_]> = [pipelined, receipt]
+        assert!(!committee.config.payment_chain(pipelined));
+        assert!(committee.config.payment_chain(payment));
+        let requests: Arc<[_]> = [pipelined, payment]
             .into_iter()
             .map(|chain| {
                 let header = TransactionBlockHeader::new(
@@ -1192,14 +1195,13 @@ fn a_mixed_da_vote_publication_broadcasts_only_receipt_chain_votes() {
                 SendRequest::new(producer, Arc::new(Artifact::DaVote(vote)))
             })
             .collect();
-        let producer = committee.identities
-            [committee.config.producer(pipelined).unwrap().get() as usize]
-            .clone();
+        let producer = |chain: ChainId| {
+            committee.identities[committee.config.producer(chain).unwrap().get() as usize].clone()
+        };
         let id = EffectId::from_cursor(Cursor::new(7));
 
-        // The pipelined chain's vote goes to its producer alone; the receipt chain's vote to every
-        // validator. A restarted process re-releases the same publication in a new generation
-        // and frames it the same way.
+        // Each vote goes to its chain's producer alone. A restarted process re-releases the same
+        // publication in a new generation and frames it the same way.
         for (generation, partition) in [(1, "mixed_first"), (2, "mixed_restarted")] {
             let sender = RecordingSender::default();
             let mut driver =
@@ -1213,77 +1215,11 @@ fn a_mixed_da_vote_publication_broadcasts_only_receipt_chain_votes() {
                 .unwrap();
             assert_eq!(
                 *sender.sent.lock(),
-                vec![Some(producer.clone()), None],
+                vec![Some(producer(pipelined)), Some(producer(payment))],
                 "generation {generation}"
             );
             assert_eq!(driver.egress.len(), 1);
         }
-    });
-}
-
-#[test]
-fn only_receipt_chain_recovery_tasks_are_labelled_by_chain() {
-    /// Starts validator 0's chain tasks for `committee` under `label` and checks which recovery
-    /// tasks are labelled by chain.
-    fn assert_recovery_labels<S: Fixture>(
-        context: &deterministic::Context,
-        label: &'static str,
-        committee: Committee<S>,
-    ) {
-        let metrics_context = context.child("metrics");
-        let metrics = Metrics::new(&metrics_context, committee.identities.len());
-        let profile = Profile::new::<S>(
-            committee.config.clone(),
-            Role::Validator(Participant::new(0)),
-            Tuning::default(),
-        )
-        .unwrap();
-        let tasks_context = context.child(label);
-        let _tasks = ChainTasks::<TestTypes<S>>::new(
-            &tasks_context,
-            &profile,
-            &Arc::new(committee.signers[0].clone()),
-            Sequential,
-            &MockApplication::default(),
-            &metrics,
-            NonZeroUsize::new(4).unwrap(),
-        );
-
-        // The own chain's task keeps the default route's labels, and each receipt chain's
-        // task is told apart by its chain.
-        let encoded = context.encode();
-        let series = encoded
-            .lines()
-            .filter(|line| line.starts_with(&format!("{label}_da_commands_backoff_total")))
-            .collect::<Vec<_>>();
-        let labelled = series
-            .iter()
-            .filter(|line| line.contains("chain="))
-            .collect::<Vec<_>>();
-        assert_eq!(series.len() - labelled.len(), 1, "{label}: {series:?}");
-        if label == "uniform" {
-            assert!(labelled.is_empty(), "{series:?}");
-        } else {
-            assert_eq!(labelled.len(), 1, "{series:?}");
-            assert!(labelled[0].contains("chain=\"3\""), "{series:?}");
-        }
-    }
-
-    deterministic::Runner::default().start(|context| async move {
-        let mut receipts = vec![PathLimits::new(2, 1); 6];
-        receipts[3] = PathLimits::new(0, 0);
-        assert_recovery_labels(
-            &context,
-            "uniform",
-            Committee::<Bls<MinPk>>::builder(89, 6).build(),
-        );
-        assert_recovery_labels(
-            &context,
-            "receipts",
-            Committee::<Bls<MinPk, Binding>>::builder(89, 6)
-                .chain_limits(receipts)
-                .build(),
-        );
     });
 }
 
@@ -1332,7 +1268,7 @@ fn chain_tasks_follow_the_role() {
             assert_eq!(
                 validator.da(chain).is_some(),
                 chain == own_chain,
-                "without receipt chains, a producer recovers only its own chain's certificates"
+                "a producer recovers only its own chain's certificates"
             );
         }
         assert!(validator.updates().is_some());
@@ -1367,6 +1303,7 @@ fn chain_tasks_follow_the_role() {
                 ChainUpdate::DaVoteReady(update) => {
                     assert_eq!(update.generation, Generation::new(2))
                 }
+                ChainUpdate::Receipt(_) => panic!("chain tasks without payments form no receipts"),
             }
         }
 

@@ -12,7 +12,8 @@
 //!   signatures fail.
 //! - Deterministic signing: re-signing a subject returns the same signature.
 //! - Quorums: a certificate assembles only from the role's quorum of distinct signers whose
-//!   recorded attestations share one subject.
+//!   recorded attestations share one subject, and the ledger reports a DA certificate's signers,
+//!   so payment-chain receipts can count them.
 //! - Aggregates: as with [`ed25519`](crate::multimmit::scheme::ed25519), V-QC and L-QC aggregates
 //!   list one signature per term, and a term's known attestation stands in only for a listed
 //!   signature equal to it byte for byte, so a forged or mismatched known attestation fails its
@@ -32,11 +33,11 @@
 
 use crate::multimmit::{
     config::Parameters,
-    scheme::{Available, Binding, DaFaults, DaSubject, Error, Generic, RoleDigest},
+    scheme::{DaCertificateOf, Error, Generic},
 };
 use commonware_cryptography::{Hasher as _, Sha256, certificate, ed25519, sha256};
-use commonware_utils::{Participant, TestRng, ordered::Set, sequence::U64, union};
-use core::{fmt, hash::Hash, marker::PhantomData};
+use commonware_utils::{Participant, TestRng, ordered::Set, union};
+use core::fmt;
 use rand_core::Rng as _;
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 
@@ -49,22 +50,12 @@ pub mod ordinary {
     impl_certificate_mock!(OrdinarySubject, Namespace, N5f1);
 }
 
-/// Mock data-availability certificates at the `n-2f` quorum of
-/// [`DaQuorum::Available`](crate::multimmit::types::DaQuorum::Available).
+/// Mock data-availability certificates at `n-2f` or more.
 pub mod da {
     use crate::multimmit::scheme::{Available, DaSubject, Namespace};
     use commonware_cryptography::impl_certificate_mock;
 
     impl_certificate_mock!(DaSubject, Namespace, Available);
-}
-
-/// Mock data-availability certificates at the `n-f` quorum of
-/// [`DaQuorum::Binding`](crate::multimmit::types::DaQuorum::Binding).
-pub mod da_binding {
-    use crate::multimmit::scheme::{Binding, DaSubject, Namespace};
-    use commonware_cryptography::impl_certificate_mock;
-
-    impl_certificate_mock!(DaSubject, Namespace, Binding);
 }
 
 /// Mock nullifications at `2f+1`.
@@ -137,113 +128,36 @@ impl Ledger {
     }
 }
 
-/// A data-availability fault model with a mock DA role.
-///
-/// Implemented by [`Available`] ([`da`]) and [`Binding`] ([`da_binding`]).
-pub trait Quorum: DaFaults {
-    /// The mock DA role at this quorum.
-    type Da: for<'a> certificate::Scheme<
-            PublicKey = ed25519::PublicKey,
-            Faults = Self,
-            Certificate = U64,
-            Signature = U64,
-            Subject<'a, RoleDigest> = DaSubject,
-        >;
+/// The mock suite over Ed25519 identities.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Scheme;
 
-    /// Builds a DA signer, or `None` when `me` is not a participant.
-    #[doc(hidden)]
-    fn signer(
-        namespace: &[u8],
-        participants: Set<ed25519::PublicKey>,
-        me: Participant,
-        shared: certificate::mocks::Shared,
-    ) -> Option<Self::Da>;
-
-    /// Builds a DA verifier.
-    #[doc(hidden)]
-    fn verifier(
-        namespace: &[u8],
-        participants: Set<ed25519::PublicKey>,
-        shared: certificate::mocks::Shared,
-    ) -> Self::Da;
-}
-
-macro_rules! impl_quorum {
-    ($faults:ty, $module:ident) => {
-        impl Quorum for $faults {
-            type Da = $module::Scheme<ed25519::PublicKey>;
-
-            fn signer(
-                namespace: &[u8],
-                participants: Set<ed25519::PublicKey>,
-                me: Participant,
-                shared: certificate::mocks::Shared,
-            ) -> Option<Self::Da> {
-                $module::Scheme::signer(namespace, participants, me, shared)
-            }
-
-            fn verifier(
-                namespace: &[u8],
-                participants: Set<ed25519::PublicKey>,
-                shared: certificate::mocks::Shared,
-            ) -> Self::Da {
-                $module::Scheme::verifier(namespace, participants, shared)
-            }
-        }
-    };
-}
-
-impl_quorum!(Available, da);
-impl_quorum!(Binding, da_binding);
-
-/// The mock suite over Ed25519 identities, with DA certificates at the quorum `Q`.
-pub struct Scheme<Q = Available>(PhantomData<fn() -> Q>);
-
-impl<Q> Clone for Scheme<Q> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<Q> Copy for Scheme<Q> {}
-
-impl<Q> Default for Scheme<Q> {
-    fn default() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<Q> PartialEq for Scheme<Q> {
-    fn eq(&self, _: &Self) -> bool {
-        true
-    }
-}
-
-impl<Q> Eq for Scheme<Q> {}
-
-impl<Q> Hash for Scheme<Q> {
-    fn hash<H: core::hash::Hasher>(&self, _: &mut H) {}
-}
-
-impl<Q> fmt::Debug for Scheme<Q> {
+impl fmt::Debug for Scheme {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("mocks::suite::Scheme")
     }
 }
 
-impl<Q: Quorum> crate::multimmit::scheme::Scheme for Scheme<Q> {
+impl crate::multimmit::scheme::Scheme for Scheme {
     type PublicKey = ed25519::PublicKey;
-    type DaFaults = Q;
     type Ordinary = ordinary::Scheme<ed25519::PublicKey>;
-    type Da = Q::Da;
+    type Da = da::Scheme<ed25519::PublicKey>;
     type Nullify = nullify::Scheme<ed25519::PublicKey>;
 
     fn da_certificate_config(_: usize) {}
 
     fn nullification_config(_: usize) {}
+
+    fn da_signers(
+        da: &da::Scheme<ed25519::PublicKey>,
+        certificate: &DaCertificateOf<Self>,
+    ) -> Option<usize> {
+        da.certificate_signers(certificate)
+            .map(|signers| signers.count())
+    }
 }
 
-impl<Q: Quorum> Scheme<Q> {
+impl Scheme {
     /// Creates a signer for participant `me` that records into `ledger`.
     ///
     /// Fails when `me` is not one of `participants` or the participants do not match the epoch
@@ -259,7 +173,7 @@ impl<Q: Quorum> Scheme<Q> {
         let ordinary =
             ordinary::Scheme::signer(&namespace, participants.clone(), me, shared.clone())
                 .ok_or(Error::UnknownKey)?;
-        let da = Q::signer(&namespace, participants.clone(), me, shared.clone())
+        let da = da::Scheme::signer(&namespace, participants.clone(), me, shared.clone())
             .ok_or(Error::UnknownKey)?;
         let nullify = nullify::Scheme::signer(&namespace, participants, me, shared.clone())
             .ok_or(Error::UnknownKey)?;
@@ -275,7 +189,7 @@ impl<Q: Quorum> Scheme<Q> {
         let namespace = ledger.namespace(parameters.namespace());
         let shared = &ledger.shared;
         let ordinary = ordinary::Scheme::verifier(&namespace, participants.clone(), shared.clone());
-        let da = Q::verifier(&namespace, participants.clone(), shared.clone());
+        let da = da::Scheme::verifier(&namespace, participants.clone(), shared.clone());
         let nullify = nullify::Scheme::verifier(&namespace, participants, shared.clone());
         Generic::new(parameters, ordinary, da, nullify)
     }

@@ -20,7 +20,7 @@ use crate::{
             DurableJob, EffectId, Generation, Publication, ResolverCommand, SendRequest,
             SignRequest, StepError, TimerCommand, VerifyJob,
         },
-        types::{Artifact, ChainId, DaCertificate, ViewProof},
+        types::{Artifact, DaCertificate, ViewProof},
     },
     types::{Participant, Round},
 };
@@ -234,11 +234,6 @@ where
     }
 
     /// Frames each request's artifact for its recipient and installs them as one publication.
-    ///
-    /// A DA vote on a receipt chain is addressed to its producer but framed for every peer, so every
-    /// correct validator recovers a correct producer's certificates without the producer. An
-    /// equivocating producer can still withhold one (see the binding receipts section of
-    /// [`Parameters`](crate::multimmit::config::Parameters)).
     fn send(
         &mut self,
         id: EffectId,
@@ -247,18 +242,10 @@ where
     ) -> Result<(), Fatal> {
         let mut transmissions = Vec::with_capacity(requests.len());
         for request in requests {
-            let recipient = match request.artifact().as_ref() {
-                Artifact::DaVote(vote) if self.receipt_chain(vote.header().chain()) => None,
-                _ => Some(self.recipient(request.recipient())?),
-            };
-            transmissions.push(self.frame(request.artifact(), recipient)?);
+            let recipient = self.recipient(request.recipient())?;
+            transmissions.push(self.frame(request.artifact(), Some(recipient))?);
         }
         self.install(id, generation, transmissions)
-    }
-
-    /// Returns whether `chain` is a receipt chain, whose DA votes go to every validator.
-    fn receipt_chain(&self, chain: ChainId) -> bool {
-        self.crypto.scheme().parameters().receipt_chain(chain)
     }
 
     /// Sends each request's artifact once to its recipient, outside the durable outbox.

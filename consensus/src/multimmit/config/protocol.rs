@@ -4,7 +4,7 @@ use super::Error;
 use crate::{
     Epochable,
     multimmit::types::{
-        ChainId, ChainLimits, CodecConfig, CodecConfigError, DaQuorum, EpochGenesis, PathLimits,
+        ChainId, ChainLimits, CodecConfig, CodecConfigError, EpochGenesis, PathLimits,
     },
     types::{Epoch, Participant, Round, View},
 };
@@ -132,41 +132,37 @@ fn participant_count(participants: usize) -> Result<u32, Error> {
 /// A signing [`Scheme`](crate::multimmit::scheme::Generic) holds these, and an
 /// engine builds its [`Protocol`] from the scheme's copy, so the two cannot disagree.
 ///
-/// # Binding receipts
+/// # Payment chains
 ///
-/// By default every chain shares one [`PathLimits`] and a DA certificate needs `n - 2f` shares.
-/// A deployment that needs DA certificates to act as binding receipts gives the receipt chains
-/// `d = 0` and `e = 0` with [`Self::with_chain_limits`] and raises the DA quorum to `n - f` with
-/// [`Self::with_da_quorum`]. The quorum is the threshold of the epoch's one DA key sharing, so
-/// every chain's certificates then need `n - f` shares, pipelined chains included.
+/// By default every chain shares one [`PathLimits`]. A deployment that runs payment chains gives
+/// them `d = 0` and `e = 0` with [`Self::with_chain_limits`] and turns payments on with
+/// [`Self::with_payments`] (see [`Self::payment_chain`]). The signing suite's DA certificates must
+/// then reveal their signers, so the producer can count `n - f` of them into a receipt.
 ///
-/// Nothing uncertified is placed on a receipt chain (see [`Self::receipt_chain`]), so a block is
-/// placed only through its certificate, and a height has at most one: two `n - f` quorums share
-/// at least `2f + 1` correct validators. A certificate binds once any correct validator holds
-/// it, since validators forward an unplaced certificate to upcoming leaders until a proposal
-/// places it. Every validator sends its DA vote on a receipt chain to every other validator and
-/// assembles the certificate itself, so a correct producer's certificate reaches every correct
-/// validator without the producer. An equivocating producer can complete a quorum with its own
-/// share and withhold the certificate, leaving correct validators a share short, so a client
-/// holding a receipt must deliver it to a correct validator. Other chains keep their own path
-/// limits and send DA votes only to their producer.
+/// Every chain sends its DA votes to its producer, which assembles the `n - 2f` certificate that
+/// placement, the DA window, and DA-vote eligibility use, and broadcasts it. A payment chain's
+/// producer keeps collecting votes after its certificate and forms an `n - f` receipt for a
+/// client. Nothing uncertified is placed on a payment chain, and the ordering sweep visits its
+/// positions before the ordinary chains'.
 ///
-/// A receipt chain's `d` only stops proposals from placing uncertified blocks. Its pipeline
+/// A payment chain's `d` only stops proposals from placing uncertified blocks. Its pipeline
 /// window (`d_DA`, [`PathLimits::with_pipeline_window`]) can stay wide, so its producer keeps
 /// sending blocks without waiting for each certificate.
 ///
 /// ```
 /// # use commonware_consensus::{
-/// #     multimmit::{config::Parameters, types::{DaQuorum, PathLimits}},
+/// #     multimmit::{config::Parameters, types::{ChainId, PathLimits}},
 /// #     types::{Epoch, Participant},
 /// # };
 /// let producers = (0..3).map(Participant::new).collect();
 /// let pipelined = PathLimits::new(8, 4);
-/// let receipts = PathLimits::new(0, 0).with_pipeline_window(8)?;
+/// let payments = PathLimits::new(0, 0).with_pipeline_window(8)?;
 /// let parameters = Parameters::new(Epoch::new(1), b"_EXAMPLE", 6, producers, pipelined)?
-///     .with_chain_limits(vec![receipts, pipelined, pipelined])?
-///     .with_da_quorum(DaQuorum::Binding);
+///     .with_chain_limits(vec![payments, pipelined, pipelined])?
+///     .with_payments(true);
 /// assert_eq!(parameters.limits(), pipelined);
+/// assert!(parameters.payment_chain(ChainId::new(0)));
+/// assert!(!parameters.payment_chain(ChainId::new(1)));
 /// # Ok::<_, commonware_consensus::multimmit::config::Error>(())
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -231,16 +227,6 @@ impl Parameters {
         self.chain_limits = ChainLimits::new(limits)?;
         self.codec_config = self.codec_config.with_limits(self.chain_limits.max());
         Ok(self)
-    }
-
-    /// Sets how many DA shares recover a data-availability certificate.
-    ///
-    /// The quorum is the threshold of the epoch's DA key sharing, so the keys must be dealt for it,
-    /// and it applies to every chain: [`DaQuorum::Binding`] raises pipelined chains to `n - f`
-    /// shares too.
-    pub const fn with_da_quorum(mut self, quorum: DaQuorum) -> Self {
-        self.codec_config = self.codec_config.with_da_quorum(quorum);
-        self
     }
 
     /// Enables or disables payment chains for the epoch (off by default).
@@ -310,11 +296,6 @@ impl Parameters {
         &self.chain_limits
     }
 
-    /// Returns which quorum recovers DA certificates.
-    pub const fn da_quorum(&self) -> DaQuorum {
-        self.codec_config.da_quorum_kind()
-    }
-
     /// Returns whether the epoch runs payment chains (see [`Self::with_payments`]).
     pub const fn payments(&self) -> bool {
         self.payments
@@ -328,21 +309,6 @@ impl Parameters {
     /// ordinary passes.
     pub fn payment_chain(&self, chain: ChainId) -> bool {
         self.payments
-            && self
-                .chain_limits
-                .get(chain)
-                .is_some_and(|limits| limits.certified_only() && limits.extension_bound() == 0)
-    }
-
-    /// Returns whether `chain` issues binding receipts: certificates bind under
-    /// [`DaQuorum::Binding`], and the chain has `d = 0` and `e = 0`.
-    ///
-    /// Every validator sends its DA vote on a receipt chain to every other validator and
-    /// assembles the chain's certificates itself, so a correct producer's certificates reach every
-    /// correct validator without the producer. An equivocating producer can still withhold one
-    /// (see [`Parameters`]).
-    pub fn receipt_chain(&self, chain: ChainId) -> bool {
-        self.da_quorum() == DaQuorum::Binding
             && self
                 .chain_limits
                 .get(chain)
@@ -475,11 +441,6 @@ impl<D: Digest> Protocol<D> {
     /// Returns the path limits of every producer chain.
     pub fn chain_limits(&self) -> &ChainLimits {
         self.parameters.chain_limits()
-    }
-
-    /// Returns whether `chain` issues binding receipts (see [`Parameters::receipt_chain`]).
-    pub fn receipt_chain(&self, chain: ChainId) -> bool {
-        self.parameters.receipt_chain(chain)
     }
 
     /// Returns whether `chain` is a payment chain (see [`Parameters::payment_chain`]).
@@ -702,7 +663,6 @@ mod tests {
         let shared = PathLimits::new(2, 1);
         let parameters = Parameters::new(epoch, namespace, 6, producers(3), shared).unwrap();
         assert_eq!(parameters.chain_limits(), &ChainLimits::uniform(shared, 3));
-        assert_eq!(parameters.da_quorum(), DaQuorum::Available);
 
         assert_eq!(
             parameters
@@ -717,18 +677,12 @@ mod tests {
         let receipts = PathLimits::new(0, 0);
         let parameters = parameters
             .with_chain_limits(vec![receipts, PathLimits::new(4, 0), shared])
-            .unwrap()
-            .with_da_quorum(DaQuorum::Binding);
+            .unwrap();
         assert_eq!(parameters.limits(), PathLimits::new(4, 1));
         assert_eq!(parameters.codec_config().limits(), PathLimits::new(4, 1));
         assert_eq!(
             parameters.chain_limits().get(ChainId::new(0)),
             Some(receipts)
-        );
-        assert_eq!(parameters.da_quorum(), DaQuorum::Binding);
-        assert_eq!(
-            parameters.codec_config().da_quorum(),
-            parameters.codec_config().view_quorum()
         );
     }
 
