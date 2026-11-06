@@ -242,8 +242,13 @@ where
         }
         // The boundary must be exactly where the certificate's own sweep ends above its record.
         let record = install.floor.history();
-        let placed =
-            FinalSweep::placed(record.tips(), fact.tips(), fact.proposed(), fact.settled());
+        let placed = FinalSweep::placed(
+            record.tips(),
+            fact.tips(),
+            fact.proposed(),
+            fact.settled(),
+            self.order.lanes(),
+        );
         let matches = placed.is_ok_and(|placed| {
             placed
                 .iter()
@@ -441,7 +446,7 @@ where
                     .cut()
                     .ok_or_else(|| failed(Cause::Safety("the installed floor is malformed")))?;
                 let capacity = 4 * self.codec.chains() * self.codec.pipeline_depth().max(1);
-                self.order = Order::new(cut, ordinal, capacity);
+                self.order = Order::new(cut, ordinal, capacity, self.order.lanes().clone());
                 self.ends.reset(ordinal);
                 self.target = None;
                 self.delivered = durable.ack.emitted.clone();

@@ -201,7 +201,11 @@ Three stores hold everything durable:
   retention floor.
 
 The order is derived only from durable proofs: the openings of the connected records from the
-acknowledged cut to the target L-QC's leader history, then that L-QC's final sweep. The target is a
+acknowledged cut to the target L-QC's leader history, then that L-QC's final sweep. Every opening
+and sweep first visits the payment chains' positions in horizontal order (the payment pass), then
+the proposal and extension passes of the ordinary chains; a payment chain is settled in every
+view, so only an ordinary chain halts a sweep. Marshal takes the payment chains from the epoch
+parameters (`Config::with_payments`), as consensus does. The target is a
 durable L-QC whose leader history is the connected record with the highest ordinal, the strongest
 sweep above that record winning and the newest view breaking ties. A later or stronger L-QC
 abandons the sweep in progress; the openings that follow skip the heights it already emitted. The

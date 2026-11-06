@@ -496,7 +496,8 @@ mod tests {
                 CacheRef::new(NZU16!(1024), NZUsize!(8)),
                 committee.codec(),
                 Body::codec_config(BODY_SIZE),
-            );
+            )
+            .with_payments(committee.config.parameters());
             let (mut service, bridge) =
                 marshal::open::<_, Sha256, Suite, Body, ed25519::PublicKey>(
                     context.child("marshal"),

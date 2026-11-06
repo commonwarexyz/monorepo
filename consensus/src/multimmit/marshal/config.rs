@@ -1,6 +1,10 @@
 //! Marshal configuration.
 
-use crate::multimmit::types::{CodecConfig, EpochGenesis};
+use crate::multimmit::{
+    config::Parameters,
+    order::Lanes,
+    types::{CodecConfig, EpochGenesis},
+};
 use commonware_cryptography::Digest;
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::{NZU64, NZUsize};
@@ -183,6 +187,11 @@ pub struct Config<D: Digest, C> {
     pub body_codec_config: C,
     /// Resource bounds.
     pub limits: Limits,
+    /// Whether each chain is a payment chain, in chain order, or empty when none is.
+    ///
+    /// Every opening and sweep of the order visits the payment chains first, so this must match
+    /// the epoch's consensus parameters on every node: set it with [`Self::with_payments`].
+    pub payment_chains: Vec<bool>,
 }
 
 /// A configuration that cannot run.
@@ -195,6 +204,9 @@ pub enum ConfigError {
     /// The genesis names another number of chains than the codec configuration.
     #[error("genesis and codec configuration disagree on the chain count")]
     ChainCount,
+    /// The payment chains name another number of chains than the codec configuration.
+    #[error("payment chains and codec configuration disagree on the chain count")]
+    PaymentChains,
     /// A response cannot carry one maximum-size block.
     #[error("responses cannot carry one maximum-size block")]
     ResponseTooSmall,
@@ -204,7 +216,7 @@ pub enum ConfigError {
 }
 
 impl<D: Digest, C> Config<D, C> {
-    /// Creates a configuration with default [`Limits`].
+    /// Creates a configuration with default [`Limits`] and no payment chains.
     pub fn new(
         genesis: EpochGenesis<D>,
         partition_prefix: String,
@@ -219,7 +231,15 @@ impl<D: Digest, C> Config<D, C> {
             codec_config,
             body_codec_config,
             limits: Limits::default(),
+            payment_chains: Vec::new(),
         }
+    }
+
+    /// Orders the payment chains of the epoch `parameters` configure first, as consensus does
+    /// (see [`Parameters::payment_chain`]). Without payments in `parameters`, no chain is one.
+    pub fn with_payments(mut self, parameters: &Parameters) -> Self {
+        self.payment_chains = Lanes::from_parameters(parameters).to_mask();
+        self
     }
 
     /// Replaces the resource bounds.
@@ -241,6 +261,11 @@ impl<D: Digest, C> Config<D, C> {
         if self.genesis.tips().len() != self.codec_config.chains() {
             return Err(ConfigError::ChainCount);
         }
+        if !self.payment_chains.is_empty()
+            && self.payment_chains.len() != self.codec_config.chains()
+        {
+            return Err(ConfigError::PaymentChains);
+        }
         let limits = &self.limits;
         // A count prefix of at most nine bytes precedes the blocks of a response.
         if limits.max_response_bytes.get() < limits.max_block_bytes.get().saturating_add(9) {
@@ -256,6 +281,50 @@ impl<D: Digest, C> Config<D, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::multimmit::{
+        mocks::{Bls, Committee},
+        types::PathLimits,
+    };
+    use commonware_cryptography::bls12381::primitives::variant::MinPk;
+    use commonware_utils::NZU16;
+    use std::sync::Arc;
+
+    #[test]
+    fn payment_chains_follow_the_parameters_and_name_every_chain() {
+        let committee = Committee::<Bls<MinPk>>::builder(1, 6)
+            .producers((0..3).map(crate::types::Participant::new).collect())
+            .chain_limits(vec![
+                PathLimits::new(2, 1),
+                PathLimits::new(0, 0),
+                PathLimits::new(0, 1),
+            ])
+            .build();
+        let config = || {
+            Config::new(
+                committee.config.genesis().clone(),
+                "marshal".into(),
+                CacheRef::new(NZU16!(1024), NZUsize!(8)),
+                committee.codec(),
+                (),
+            )
+        };
+        // Off by default, and off while the parameters run no payments.
+        assert!(config().payment_chains.is_empty());
+        let parameters = Arc::unwrap_or_clone(Arc::clone(committee.config.parameters()));
+        assert!(
+            config()
+                .with_payments(&parameters)
+                .payment_chains
+                .is_empty()
+        );
+
+        let paying = config().with_payments(&parameters.with_payments(true));
+        assert_eq!(paying.payment_chains, vec![false, true, false]);
+        assert_eq!(paying.validate(), Ok(()));
+        let mut short = paying;
+        short.payment_chains = vec![true];
+        assert_eq!(short.validate(), Err(ConfigError::PaymentChains));
+    }
 
     #[test]
     fn budgets_fit_the_memory_they_are_sized_within() {

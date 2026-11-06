@@ -1,7 +1,7 @@
 //! Differential ordering: slot streams and symbolic expansion, resumed from random cuts, against
 //! an explicitly sorted order.
 
-use super::{Cut, Expansion, FinalSweep, Slot, SlotStream, SweepFact};
+use super::{Cut, Expansion, FinalSweep, Lanes, Slot, SlotStream, SweepFact};
 use crate::{
     multimmit::{
         fuzz::ByteSchedule,
@@ -52,30 +52,38 @@ pub(super) fn remaining_maxima(remaining: &[Coordinate], chains: usize) -> Vec<O
     maxima
 }
 
-// Actual slots and virtual stopping holes share the pass/offset/chain ordering key.
+// Actual slots and virtual stopping holes share the pass/offset/chain ordering key: the payment
+// pass, then pass A and pass B of the ordinary chains. Payment chains have no holes.
 fn explicit_order(
     base: &[u64],
     target: &[u64],
     proposed: &[u64],
     settled: Option<&[bool]>,
+    payment: &[bool],
 ) -> Vec<Coordinate> {
     let mut events = Vec::new();
     for chain in 0..base.len() {
+        if payment[chain] {
+            for height in base[chain] + 1..=target[chain] {
+                events.push(((0, height - base[chain], chain), Some((chain, height))));
+            }
+            continue;
+        }
         let boundary = target[chain].min(proposed[chain]);
         for height in base[chain] + 1..=target[chain] {
             let (pass, offset) = if height <= boundary {
-                (0, height - base[chain])
+                (1, height - base[chain])
             } else {
-                (1, height - boundary)
+                (2, height - boundary)
             };
             events.push(((pass, offset, chain), Some((chain, height))));
         }
         if let Some(settled) = settled {
             if target[chain] < proposed[chain] {
-                events.push(((0, boundary - base[chain] + 1, chain), None));
+                events.push(((1, boundary - base[chain] + 1, chain), None));
             }
             if !settled[chain] {
-                events.push(((1, target[chain] - boundary + 1, chain), None));
+                events.push(((2, target[chain] - boundary + 1, chain), None));
             }
         }
     }
@@ -112,6 +120,13 @@ pub(crate) fn exercise(input: &[u8]) {
     let mut next = || schedule.index();
     let chains = 2 + next() % 7;
     let mut base = (0..chains).map(|_| next() as u64).collect::<Vec<_>>();
+    // Half the epochs run without payment chains.
+    let payment = if next() % 2 == 0 {
+        vec![false; chains]
+    } else {
+        (0..chains).map(|_| next() % 3 == 0).collect::<Vec<_>>()
+    };
+    let lanes = Lanes::new(payment.iter().copied());
     let mut emitted = base.clone();
     let mut history = Sha256::hash(&[b"initial history"]);
     let mut expected_delivery = Vec::new();
@@ -137,13 +152,14 @@ pub(crate) fn exercise(input: &[u8]) {
             .iter()
             .map(|height| Height::new(*height))
             .collect::<Vec<_>>();
-        let sweep_order = explicit_order(&base, &target, &proposed, Some(&settled));
-        let horizontal_order = explicit_order(&base, &target, &proposed, None);
+        let sweep_order = explicit_order(&base, &target, &proposed, Some(&settled), &payment);
+        let horizontal_order = explicit_order(&base, &target, &proposed, None, &payment);
         let sweep = FinalSweep::new(
             &frontier(&base),
             frontier(&target),
             &proposed_heights,
             settled.clone(),
+            &lanes,
         )
         .unwrap();
         assert_eq!(sweep.planned(), sweep_order.len() as u64);
@@ -151,7 +167,13 @@ pub(crate) fn exercise(input: &[u8]) {
         assert_eq!(sweep.halted(), sweep_order.len() < horizontal_order.len());
         check_stream(sweep.into_stream(), &sweep_order, chains);
         check_stream(
-            SlotStream::new(&frontier(&base), &frontier(&target), &proposed_heights).unwrap(),
+            SlotStream::new(
+                &frontier(&base),
+                &frontier(&target),
+                &proposed_heights,
+                &lanes,
+            )
+            .unwrap(),
             &horizontal_order,
             chains,
         );
@@ -175,13 +197,13 @@ pub(crate) fn exercise(input: &[u8]) {
         );
         let record = Arc::new(record);
         let end = order_cut
-            .sweep(&fact)
+            .sweep(&fact, &lanes)
             .unwrap()
             .open(commitment, &record)
             .unwrap();
         let round = expected_delivery.len() - round_start;
         let stop = next() % (round + 1);
-        let mut expansion = Expansion::new(order_cut.clone());
+        let mut expansion = Expansion::new(order_cut.clone(), lanes.clone());
         expansion.sweep(Arc::clone(&fact));
         expansion.open(commitment, Arc::clone(&record));
         for _ in 0..stop {
@@ -189,7 +211,7 @@ pub(crate) fn exercise(input: &[u8]) {
             assert_eq!(position.index, expansion.cut().index());
             expanded.push((position.chain().get() as usize, position.height.get()));
         }
-        let mut resumed = Expansion::new(expansion.cut().clone());
+        let mut resumed = Expansion::new(expansion.cut().clone(), lanes.clone());
         // A cut part way through a round still names the previous record; re-queueing the
         // sweep is harmless because the cut already covers whatever of it was emitted.
         if expansion.cut().history() != commitment {

@@ -192,10 +192,15 @@ where
                     }
                     continue;
                 };
-                let strength =
-                    FinalSweep::placed(tips, fact.tips(), fact.proposed(), fact.settled())
-                        .map(|placed| placed.iter().map(|height| height.get()).sum())
-                        .unwrap_or(0);
+                let strength = FinalSweep::placed(
+                    tips,
+                    fact.tips(),
+                    fact.proposed(),
+                    fact.settled(),
+                    self.order.lanes(),
+                )
+                .map(|placed| placed.iter().map(|height| height.get()).sum())
+                .unwrap_or(0);
                 let candidate = Target {
                     id,
                     history,
