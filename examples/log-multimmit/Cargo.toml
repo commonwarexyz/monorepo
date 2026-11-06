@@ -13,6 +13,11 @@ documentation = "https://docs.rs/commonware-log-multimmit"
 [lints]
 workspace = true
 
+[features]
+# Form DA certificates at the binding n - f quorum, so chains with zero pipeline depth and
+# extension bound are receipt chains.
+receipts = []
+
 [dependencies]
 bytes.workspace = true
 clap = { workspace = true, features = ["derive"] }

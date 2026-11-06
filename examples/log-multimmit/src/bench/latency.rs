@@ -1,5 +1,5 @@
-//! Latency of locally produced blocks from input submission to finality, placement in the total
-//! order, and ordered delivery.
+//! Latency of locally produced blocks from input submission to DA certification, finality,
+//! placement in the total order, and ordered delivery.
 
 use commonware_consensus::{
     multimmit::{
@@ -25,6 +25,11 @@ const BENCHMARK_TARGET: &str = "commonware_log_multimmit::application::actor";
 
 /// Exact identity of one producer block.
 type Reference = BlockRef<Sha256Digest>;
+
+/// Every this many heights of each chain, a benchmark event records when this node's durable DA
+/// certificate first covers the height, so certification can be compared across validators
+/// without logging every certificate.
+pub const CERTIFICATE_SAMPLE_INTERVAL: u64 = 8;
 
 /// The parts of a finality fact the tracker reads.
 #[derive(Clone, Copy)]
@@ -96,6 +101,8 @@ enum Sample {
     Ordered,
     /// Local finality fixed the block's position in the total order.
     Placement { view: View },
+    /// A durable DA certificate covers the block.
+    Certified,
     /// Consensus finalized the block for the first time.
     FirstFinality {
         class: Class,
@@ -111,6 +118,7 @@ impl Sample {
             Self::Evicted => "eviction",
             Self::Ordered => "ordered",
             Self::Placement { .. } => "placement",
+            Self::Certified => "certified",
             Self::FirstFinality { .. } => "first_finalization",
         }
     }
@@ -121,6 +129,7 @@ impl Sample {
             Self::Evicted => "capacity",
             Self::Ordered => "delivery",
             Self::Placement { .. } => "placed",
+            Self::Certified => "certified",
             Self::FirstFinality { class, .. } => class.label(),
         }
     }
@@ -136,6 +145,9 @@ struct ProposalStart {
     finalized: bool,
     placed: bool,
     ordered: bool,
+    /// Whether a durable DA certificate covers the block. Certification is measured while the
+    /// block is tracked, and does not keep it tracked.
+    certified: bool,
 }
 
 impl ProposalStart {
@@ -145,8 +157,8 @@ impl ProposalStart {
     }
 }
 
-/// Tracks local blocks from input submission to consensus finality, to placement in the total
-/// order, and to ordered delivery.
+/// Tracks local blocks from input submission to DA certification, to consensus finality, to
+/// placement in the total order, and to ordered delivery.
 ///
 /// A block is final once a finalized leader's chain tip is the block or one of its descendants.
 /// It is placed once consensus reports that local finality fixed its position in the total order
@@ -157,12 +169,16 @@ impl ProposalStart {
 pub struct ProposalLatency {
     started: VecDeque<ProposalStart>,
     capacity: usize,
+    /// The highest durably certified height seen per chain, which bounds the sampled heights a
+    /// new certificate covers.
+    certified: BTreeMap<ChainId, Height>,
     metrics: LatencyMetrics,
 }
 
 /// Latency metrics, and the quorum that enables benchmark events.
 struct LatencyMetrics {
     benchmark_quorum: Option<usize>,
+    certification: Histogram,
     finality: Histogram,
     placement: Histogram,
     ordering: Histogram,
@@ -215,6 +231,11 @@ impl LatencyMetrics {
             extension_late: context.counter(
                 "proposal_first_finality_extension_late",
                 "first finality above proposed height with more than quorum votes",
+            ),
+            certification: context.histogram(
+                "proposal_certification_latency",
+                "time from batch submission to a durable local DA certificate covering the block",
+                WAN_LATENCY,
             ),
             finality: context.histogram(
                 "proposal_finalization_latency",
@@ -279,7 +300,7 @@ impl LatencyMetrics {
         let (view, votes) = match sample {
             Sample::FirstFinality { view, votes, .. } => (Some(view), Some(votes)),
             Sample::Placement { view } => (Some(view), None),
-            Sample::Start | Sample::Evicted | Sample::Ordered => (None, None),
+            Sample::Start | Sample::Evicted | Sample::Ordered | Sample::Certified => (None, None),
         };
         info!(
             target: BENCHMARK_TARGET,
@@ -296,6 +317,7 @@ impl LatencyMetrics {
             input_elapsed_us = start.input_ready_at.map(elapsed),
             finalized = start.finalized,
             placed = start.placed,
+            certified = start.certified,
             view = view.map(View::get),
             votes = votes.map(|votes| votes as u64),
             quorum = self.benchmark_quorum.map(|quorum| quorum as u64),
@@ -313,6 +335,27 @@ impl LatencyMetrics {
             "proposal benchmark sample"
         );
     }
+
+    /// Logs that this node's durable DA certificate first covers `height` of `chain`.
+    fn certificate_covers(&self, chain: ChainId, height: Height, now: SystemTime) {
+        if self.benchmark_quorum.is_none() {
+            return;
+        }
+        let timestamp_us = u64::try_from(
+            now.duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros(),
+        )
+        .unwrap_or(u64::MAX);
+        info!(
+            target: BENCHMARK_TARGET,
+            benchmark_event = "certificate_covers",
+            chain = chain.get(),
+            height = height.get(),
+            timestamp_us,
+            "certificate benchmark sample"
+        );
+    }
 }
 
 impl ProposalLatency {
@@ -328,6 +371,7 @@ impl ProposalLatency {
         Self {
             started: VecDeque::new(),
             capacity: capacity.get(),
+            certified: BTreeMap::new(),
             metrics: LatencyMetrics::new(context, benchmark),
         }
     }
@@ -380,6 +424,7 @@ impl ProposalLatency {
             finalized: false,
             placed: false,
             ordered: false,
+            certified: false,
         };
         self.metrics.sample(&start, Sample::Start, started_at);
         self.started.push_back(start);
@@ -516,6 +561,45 @@ impl ProposalLatency {
             }
         }
         covered
+    }
+
+    /// Records that this node durably recorded the DA certificate of `block`, which covers it and
+    /// its ancestors.
+    ///
+    /// Tracked blocks it covers record their certification latency. With benchmark events, every
+    /// multiple of [`CERTIFICATE_SAMPLE_INTERVAL`] the certificate newly covers on its chain is
+    /// logged, for every chain: comparing those times with the producer's start events gives
+    /// certification at every validator. The first certificate seen for a chain only sets the
+    /// baseline, since what it newly covers is unknown.
+    pub fn certify(&mut self, block: Reference, now: SystemTime) {
+        let chain = block.chain();
+        let height = block.height();
+        if let Some(previous) = self.certified.get(&chain).copied() {
+            if height <= previous {
+                return;
+            }
+            let interval = CERTIFICATE_SAMPLE_INTERVAL;
+            let mut sample = (previous.get() / interval + 1) * interval;
+            while sample <= height.get() {
+                self.metrics
+                    .certificate_covers(chain, Height::new(sample), now);
+                sample += interval;
+            }
+        }
+        self.certified.insert(chain, height);
+
+        let covered = self.covered(core::iter::once((block, Height::zero(), height)), |start| {
+            start.certified
+        });
+        let metrics = &self.metrics;
+        for start in self.started.iter_mut() {
+            if start.certified || !covered.contains(&start.block) {
+                continue;
+            }
+            start.certified = true;
+            metrics.certification.observe_between(start.started_at, now);
+            metrics.sample(start, Sample::Certified, now);
+        }
     }
 
     /// Records ordered delivery once, retaining the start until finality and placement are also
@@ -1138,6 +1222,102 @@ mod tests {
                 now,
             );
             assert!(latency.started.is_empty());
+        });
+    }
+
+    #[test]
+    fn a_certificate_certifies_its_tracked_ancestors_once() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut latency = ProposalLatency::new(&context, NZUsize!(8), None);
+            let now = context.current();
+            let blocks = chain(4);
+            for block in &blocks {
+                latency.start(*block, parent(*block), now, None, now);
+            }
+            let certified = |latency: &ProposalLatency| {
+                latency
+                    .started
+                    .iter()
+                    .filter(|start| start.certified)
+                    .map(|start| start.block)
+                    .collect::<Vec<_>>()
+            };
+
+            // A certificate covers its block and every tracked ancestor.
+            latency.certify(blocks[1], now);
+            assert_eq!(certified(&latency), blocks[..2]);
+            // A lower certificate changes nothing; a higher one adds only what it newly covers.
+            latency.certify(blocks[0], now);
+            latency.certify(blocks[3], now);
+            assert_eq!(certified(&latency), blocks);
+            assert!(
+                context
+                    .encode()
+                    .contains("proposal_certification_latency_count 4\n")
+            );
+            // Another chain's certificate covers none of this node's blocks.
+            latency.certify(reference(1, 9), now);
+            assert!(
+                context
+                    .encode()
+                    .contains("proposal_certification_latency_count 4\n")
+            );
+        });
+    }
+
+    #[test]
+    fn certificate_samples_log_each_newly_covered_interval_height_once() {
+        #[derive(Clone, Default)]
+        struct Output(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Output {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        deterministic::Runner::default().start(|context| async move {
+            let output = Output::default();
+            let writer = output.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .json()
+                .without_time()
+                .with_writer(move || writer.clone())
+                .finish();
+            let now = context.current();
+            tracing::subscriber::with_default(subscriber, || {
+                let mut latency = ProposalLatency::new(&context, NZUsize!(4), Some(NZUsize!(3)));
+                // The first certificate of a chain sets the baseline.
+                latency.certify(reference(5, 3), now);
+                // From 3 to 20 the certificate newly covers heights 8 and 16.
+                latency.certify(reference(5, 20), now);
+                // Repeated or lower certificates log nothing.
+                latency.certify(reference(5, 20), now);
+                latency.certify(reference(5, 12), now);
+                latency.certify(reference(5, 24), now);
+                // Chains are sampled independently.
+                latency.certify(reference(6, 30), now);
+                latency.certify(reference(6, 33), now);
+            });
+            let output = String::from_utf8(output.0.lock().clone()).unwrap();
+            let samples = output
+                .lines()
+                .map(|line| serde_yaml::from_str::<serde_yaml::Value>(line).unwrap())
+                .map(|event| {
+                    let fields = &event["fields"];
+                    assert_eq!(
+                        fields["benchmark_event"].as_str(),
+                        Some("certificate_covers")
+                    );
+                    (
+                        fields["chain"].as_u64().unwrap(),
+                        fields["height"].as_u64().unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(samples, vec![(5, 8), (5, 16), (5, 24), (6, 32)]);
         });
     }
 
