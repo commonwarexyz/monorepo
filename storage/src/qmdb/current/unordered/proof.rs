@@ -47,7 +47,7 @@ impl<F: Graftable, D: Digest, C: AsRef<[u8]>> KeyValueProof<F, D, C> {
     /// use commonware_cryptography::{Sha256, sha256::Digest};
     /// use commonware_storage::{
     ///     merkle::mmr,
-    ///     qmdb::{value::FixedEncoding, current::unordered::proof::dynamic::KeyValueProof},
+    ///     qmdb::{current::unordered::proof::dynamic::KeyValueProof, value::FixedEncoding},
     /// };
     ///
     /// fn verify(
