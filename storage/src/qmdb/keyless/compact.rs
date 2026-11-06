@@ -278,6 +278,12 @@ where
             .map_or(self.base, |parent| parent.bounds.db)
     }
 
+    /// The location that the next appended value will be placed at.
+    pub fn size(&self) -> Location<F> {
+        self.base.size + self.appends.len() as u64
+    }
+
+    /// Append a value.
     pub fn append(mut self, value: V::Value) -> Self {
         self.appends.push(value);
         self
@@ -1912,6 +1918,31 @@ mod tests {
                 "to_batch().root() must match the live db.root() even before sync"
             );
 
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A batch's `size` is the location of its next append, from the database's size or its
+    /// parent's tip.
+    #[test_traced("INFO")]
+    fn test_compact_batch_size() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("db"), "keyless-batch-size").await;
+            let start = db.size();
+
+            let batch = db.new_batch();
+            assert_eq!(batch.size(), start);
+            let batch = batch.append(U64::new(1)).append(U64::new(2));
+            assert_eq!(batch.size(), start + 2);
+
+            // The commit follows the appends, and a child appends after it.
+            let merkleized = batch.merkleize(&db).await.unwrap();
+            assert_eq!(merkleized.bounds().tip.size, start + 3);
+            let child = merkleized.new_batch::<Sha256>().append(U64::new(3));
+            assert_eq!(child.size(), start + 4);
+
+            let db = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(db.size(), start + 3);
             db.destroy().await.unwrap();
         });
     }
