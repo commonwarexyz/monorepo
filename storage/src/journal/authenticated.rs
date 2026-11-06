@@ -277,6 +277,11 @@ where
     /// Durable pruning boundary and the digests pinned there.
     pub(crate) frontier: Frontier<F, E, H::Digest>,
 
+    /// First readable item: the pruning boundary the frontier records, or the start of the synced
+    /// operations until [Self::persist_boundary] records it. The Merkle structure starts at or
+    /// after it.
+    pub(crate) boundary: Location<F>,
+
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the Merkle structure.
     pub(crate) journal: C,
@@ -474,7 +479,8 @@ where
     ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
         let bounds = self.bounds();
 
-        if *start_loc < bounds.start {
+        // Items before the Merkle structure's start stay readable but cannot be proven.
+        if *start_loc < bounds.start || start_loc < self.merkle.bounds().start {
             return Err(JournalError::ItemPruned(*start_loc).into());
         }
 
@@ -662,6 +668,7 @@ where
         Ok(Self {
             merkle,
             frontier,
+            boundary: start,
             journal,
             hasher,
         })
@@ -670,7 +677,7 @@ where
     /// Record the boundary of a journal built by [Self::from_components] in its frontier, then
     /// prune the operations before it.
     pub async fn persist_boundary(mut self) -> Result<Self, Error<F>> {
-        let boundary = self.merkle.bounds().start;
+        let boundary = self.boundary;
         let pins = self.pinned_nodes_at(boundary).await?;
         self.frontier = self.frontier.set(boundary, pins).await?;
         (self.journal, _) = self.journal.prune(*boundary).await?;
@@ -767,21 +774,25 @@ where
         mut self,
         prune_loc: Location<F>,
     ) -> Result<(Self, Location<F>, bool), Error<F>> {
-        let old = self.merkle.bounds().start;
+        let old = self.boundary;
         let boundary = Location::new(self.prune_target(*prune_loc));
-        if boundary > old {
+        // The Merkle structure holds no digests before its start, so a boundary there keeps the
+        // frontier where it is.
+        if boundary > old && boundary >= self.merkle.bounds().start {
             let pins = self.pinned_nodes_at(boundary).await?;
             // The frontier must never get ahead of durable operations, and the new boundary may be
             // justified by a buffered append (e.g. a commit operation), so commit first.
             self.journal = self.journal.commit().await?;
             self.frontier = self.frontier.set(boundary, pins.clone()).await?;
             self.merkle.prune(boundary, pins);
+            self.boundary = boundary;
             debug!(size = ?self.journal.bounds().end, ?prune_loc, ?boundary, "pruned inactive ops");
         }
         let pruned;
-        (self.journal, pruned) = self.journal.prune(*boundary).await?;
+        (self.journal, pruned) = self.journal.prune(*self.boundary).await?;
         let start = Location::new(self.bounds().start);
-        Ok((self, start, pruned || boundary > old))
+        let moved = self.boundary > old;
+        Ok((self, start, pruned || moved))
     }
 
     /// Destroy the authenticated journal, removing all data from disk.
@@ -822,6 +833,8 @@ where
     journal: C::Recovery,
     /// Durable frontier.
     frontier: Frontier<F, E, H::Digest>,
+    /// The frontier's pruning boundary.
+    boundary: Location<F>,
     /// Digests at the pruning boundary, before the selected operations are replayed.
     merkle: Tree<F, H::Digest, S>,
     /// Hasher and peak-bagging mode retained for Merkle alignment and the published journal.
@@ -842,7 +855,7 @@ where
 {
     /// Range selected for publication.
     pub(crate) fn bounds(&self) -> Range<u64> {
-        *self.merkle.bounds().start..self.selected_end
+        *self.boundary..self.selected_end
     }
 
     /// Whether storage was empty before commit selection.
@@ -864,7 +877,7 @@ where
         let merkle =
             Journal::<F, E, C, H, S>::align(self.merkle, &journal, &self.hasher, APPLY_BATCH_SIZE)
                 .await?;
-        Self::assemble(journal, merkle, self.frontier, self.hasher).await
+        Self::assemble(journal, merkle, self.frontier, self.boundary, self.hasher).await
     }
 
     /// Like [Self::finish], but runs `read` over the selected operations while their Merkle
@@ -920,7 +933,7 @@ where
         };
         let journal = Arc::into_inner(journal).expect("read must drop every journal clone");
         Ok((
-            Self::assemble(journal, merkle, self.frontier, self.hasher).await?,
+            Self::assemble(journal, merkle, self.frontier, self.boundary, self.hasher).await?,
             value,
         ))
     }
@@ -978,7 +991,7 @@ where
         let merkle = merkle.map_err(Error::from)??;
         let journal = Arc::into_inner(journal).expect("read must drop every journal clone");
         Ok((
-            Self::assemble(journal, merkle, self.frontier, self.hasher).await?,
+            Self::assemble(journal, merkle, self.frontier, self.boundary, self.hasher).await?,
             value,
         ))
     }
@@ -1003,13 +1016,15 @@ where
         journal: C,
         merkle: Tree<F, H::Digest, S>,
         frontier: Frontier<F, E, H::Digest>,
+        boundary: Location<F>,
         hasher: StandardHasher<H>,
     ) -> Result<Journal<F, E, C, H, S>, Error<F>> {
-        let (journal, _) = journal.prune(*merkle.bounds().start).await?;
+        let (journal, _) = journal.prune(*boundary).await?;
         Ok(Journal {
             journal,
             merkle,
             frontier,
+            boundary,
             hasher,
         })
     }
@@ -1151,6 +1166,7 @@ where
         Ok(Recovery {
             journal,
             frontier,
+            boundary: Location::new(boundary),
             merkle,
             hasher: StandardHasher::<H>::new(bagging),
             selected_end,
@@ -1171,7 +1187,7 @@ where
 
     fn bounds(&self) -> Range<u64> {
         let mut bounds = self.journal.bounds();
-        bounds.start = bounds.start.max(*self.merkle.bounds().start);
+        bounds.start = bounds.start.max(*self.boundary);
         bounds
     }
 
@@ -1287,7 +1303,7 @@ where
     fn prune_target(&self, min_position: u64) -> u64 {
         self.journal
             .prune_target(min_position)
-            .max(*self.merkle.bounds().start)
+            .max(*self.boundary)
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), JournalError> {

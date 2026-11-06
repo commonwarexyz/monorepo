@@ -2009,12 +2009,14 @@ mod test {
         let authenticated::Journal {
             merkle,
             frontier,
+            boundary,
             journal,
             hasher,
         } = log;
         let log = authenticated::Journal {
             merkle,
             frontier,
+            boundary,
             journal: Controlled {
                 inner: journal,
                 mode,
