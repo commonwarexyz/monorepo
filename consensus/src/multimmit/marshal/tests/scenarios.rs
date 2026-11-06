@@ -985,3 +985,103 @@ fn a_pending_subscription_never_blocks_fetching_a_proven_block() {
         assert_eq!(block.reference(), wanted);
     });
 }
+
+/// Returns the chain and height of every delivered block.
+fn coordinates(delivered: &[Delivered]) -> Vec<(u32, u64)> {
+    delivered
+        .iter()
+        .map(|update| {
+            let block = update.block.reference();
+            (block.chain().get(), block.height().get())
+        })
+        .collect()
+}
+
+#[test]
+fn payment_chains_are_delivered_first_in_every_sweep() {
+    runner(21).start(|context| async move {
+        let mut harness = Harness::with_payments(context, 21, 1).await;
+        harness.start(0).await;
+        harness.script.certify([2, 1]);
+        harness.script.certify([1, 3]);
+        let mailbox = harness.mailbox(0);
+        for view in 0..2 {
+            harness.script.stage(&mailbox, view).await;
+            harness.script.prove(&mailbox, view);
+        }
+        let expected = harness.script.ordered();
+        let delivered = harness.wait_delivered(0, expected.len()).await;
+        assert_eq!(stream(&delivered), numbered(1, &expected));
+        // Chain 1 is the payment chain: each sweep places all of its blocks before chain 0's.
+        assert_eq!(
+            coordinates(&delivered),
+            vec![(1, 1), (0, 1), (0, 2), (1, 2), (1, 3), (1, 4), (0, 3)]
+        );
+    });
+}
+
+#[test]
+fn a_floor_after_a_payment_pass_installs_only_where_payments_are_ordered_first() {
+    runner(22).start(|context| async move {
+        let mut harness = Harness::with_payments(context, 22, 3).await;
+        harness.start(0).await;
+        harness.script.certify([3, 3]);
+        harness.script.certify([1, 1]);
+        let holder = harness.mailbox(0);
+        harness.script.stage(&holder, 0).await;
+        // Chain 0 finalizes one block of the three it proposed: the sweep places every block of
+        // the payment chain, whose anchor jumped three heights, then halts at chain 0's second
+        // offset.
+        let weak = harness.script.weaker(0, [1, 0]);
+        harness.script.prove_certified(&holder, &weak);
+        let delivered = harness.wait_delivered(0, 4).await;
+        assert_eq!(
+            coordinates(&delivered),
+            vec![(1, 1), (1, 2), (1, 3), (0, 1)]
+        );
+        harness
+            .wait_progress(0, |progress| progress.acknowledged.get() == 4)
+            .await;
+        let (index, floor) = loop {
+            if let Some(found) = holder.floor_at(OutputIndex::new(4)).await.unwrap() {
+                break found;
+            }
+            harness.settle(Duration::from_millis(10)).await;
+        };
+        assert_eq!(index.get(), 4);
+        assert_eq!(
+            floor
+                .emitted()
+                .iter()
+                .map(|block| block.height().get())
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+
+        // A node ordering without the payment chains ends the certificate's sweep elsewhere.
+        harness.order_without_payments(2);
+        harness.start(2).await;
+        assert!(matches!(
+            harness.mailbox(2).install_floor(floor.clone()).await,
+            Err(Error::Rejected(reason))
+                if reason == "the boundary is not where the certificate's sweep ends"
+        ));
+
+        // A node ordering them first installs it and delivers only what follows.
+        harness.start(1).await;
+        let follower = harness.mailbox(1);
+        follower.install_floor(floor).await.unwrap();
+        harness.script.stage(&holder, 1).await;
+        for view in 0..2 {
+            harness.script.prove(&holder, view);
+            harness.script.prove(&follower, view);
+        }
+        let expected = harness.script.ordered();
+        let delivered = harness.wait_delivered(1, expected.len() - 4).await;
+        assert_eq!(stream(&delivered), numbered(5, &expected[4..]));
+        assert_eq!(
+            coordinates(&delivered),
+            vec![(0, 2), (0, 3), (1, 4), (0, 4)]
+        );
+    });
+}
