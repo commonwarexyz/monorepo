@@ -135,15 +135,11 @@ impl<F: Family, S: Update> fmt::Display for Operation<F, S> {
         match self {
             Self::Delete(key) => write!(f, "[key:{} <deleted>]", hex(key)),
             Self::Update(payload) => payload.fmt(f),
-            Self::Commit(value, loc) => {
+            Self::Commit(value, floor) => {
                 if let Some(value) = value {
-                    write!(
-                        f,
-                        "[commit {} with inactivity floor: {loc}]",
-                        hex(&value.encode())
-                    )
+                    write!(f, "[commit {} floor:{}]", hex(&value.encode()), **floor)
                 } else {
-                    write!(f, "[commit with inactivity floor: {loc}]")
+                    write!(f, "[commit floor:{}]", **floor)
                 }
             }
         }
@@ -204,6 +200,19 @@ mod tests {
         roundtrip(&delete, &());
         roundtrip(&update, &());
         roundtrip(&commit, &());
+    }
+
+    #[test]
+    fn commit_display() {
+        type Op = Unordered<F, FixedBytes<4>, FixedEncoding<u64>>;
+
+        let commit = Op::Commit(Some(555u64), crate::mmr::Location::new(3));
+        assert_eq!(
+            format!("{commit}"),
+            format!("[commit {} floor:3]", hex(&555u64.encode()))
+        );
+        let commit = Op::Commit(None, crate::mmr::Location::new(7));
+        assert_eq!(format!("{commit}"), "[commit floor:7]");
     }
 
     #[test]

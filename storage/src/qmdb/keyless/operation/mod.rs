@@ -69,7 +69,7 @@ impl<F: Family, V: Codec> Write for Operation<F, V> {
     }
 }
 
-impl<F: Family, V: ValueEncoding> Committable for Operation<F, V> {
+impl<F: Family, V: Codec> Committable for Operation<F, V> {
     fn is_commit(&self) -> bool {
         matches!(self, Self::Commit(_, _))
     }
