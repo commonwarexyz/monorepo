@@ -381,9 +381,7 @@ where
         self.any.root()
     }
 
-    /// Returns the witness binding [`Self::ops_root`] to [`Self::root`].
-    ///
-    /// It authenticates an ops root against a trusted canonical `current` root.
+    /// Returns the cached witness binding [`Self::ops_root`] to [`Self::root`].
     pub const fn ops_root_witness(&self) -> &OpsRootWitness<F, H::Digest> {
         &self.ops_root_witness
     }

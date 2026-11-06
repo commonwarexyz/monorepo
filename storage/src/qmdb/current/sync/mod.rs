@@ -168,7 +168,7 @@ where
         pinned_nodes
     };
 
-    // Rebuild the grafted tree, graft roots, and root witness from the synced `any` state. The
+    // Rebuild the grafted tree, graft roots, and ops root witness from the synced `any` state. The
     // resulting canonical root is deterministic because the engine authenticates the ops and the
     // bitmap is derived from them.
     let (grafted_tree, graft_roots, ops_root_witness) = db::rebuild_grafted_tree::<F, H, S, N>(

@@ -534,8 +534,8 @@ where
     )
     .await?;
 
-    // Rebuild the grafted tree, graft roots, and root witness from the persisted pins and selected
-    // operation tree.
+    // Rebuild the grafted tree, graft roots, and ops root witness from the persisted pins and
+    // selected operation tree.
     let (grafted_tree, graft_roots, ops_root_witness) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &pinned_nodes,
