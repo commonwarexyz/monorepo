@@ -44,7 +44,7 @@
 //!     let k = Digest::random(&mut ctx);
 //!     let v = Digest::random(&mut ctx);
 //!     let metadata = Some(Digest::random(&mut ctx));
-//!     let batch = db.new_batch().update(k, v).with_metadata(metadata).finalize();
+//!     let batch = db.new_batch().write(k, Some(v)).with_metadata(metadata).finalize();
 //!     let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
 //!
 //!     // Fetch the value
@@ -52,7 +52,7 @@
 //!     assert_eq!(fetched_value.unwrap(), v);
 //!
 //!     // Delete the key's value
-//!     let batch = db.new_batch().delete(k).finalize();
+//!     let batch = db.new_batch().write(k, None).finalize();
 //!     let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
 //!
 //!     // Fetch the value
@@ -68,10 +68,10 @@
 //! // Apply a batch and commit it, then build a child batch from the newly published state
 //! // and apply it. Each mutation takes the database and returns it, so committing and
 //! // building run in sequence on the threaded handle.
-//! let batch = db.new_batch().update(key_a, value_a).finalize();
+//! let batch = db.new_batch().write(key_a, Some(value_a)).finalize();
 //! let db = db.apply_batch(batch).await?.commit().await?;
 //!
-//! let child = db.new_batch().update(key_b, value_b).finalize();
+//! let child = db.new_batch().write(key_b, Some(value_b)).finalize();
 //! let db = db.apply_batch(child).await?.commit().await?;
 //! ```
 
@@ -102,8 +102,8 @@ use crate::{
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
 use commonware_runtime::Handle;
-use commonware_utils::{Widen, bitmap};
-use core::num::NonZeroUsize;
+use commonware_utils::{Widen, bitmap, iter::zip_eq};
+use core::{borrow::Borrow, num::NonZeroUsize};
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 
@@ -198,15 +198,33 @@ where
         self.db.get(key).await
     }
 
-    /// Update the value of `key` in the batch.
-    pub fn update(mut self, key: K, value: V) -> Self {
-        self.diff.insert(key, Some(value));
-        self
+    /// Batch read multiple keys, taking each from the batch if it modified the key and from the
+    /// store otherwise.
+    ///
+    /// Accepts slices of owned or borrowed keys and returns results in input order.
+    pub async fn get_many(&self, keys: &[impl Borrow<K> + Sync]) -> Result<Vec<Option<V>>, Error> {
+        let unmodified: Vec<&K> = keys
+            .iter()
+            .map(Borrow::borrow)
+            .filter(|key| !self.diff.contains_key(*key))
+            .collect();
+        let mut stored = self.db.get_many(&unmodified).await?.into_iter();
+        Ok(keys
+            .iter()
+            .map(|key| {
+                self.diff
+                    .get(key.borrow())
+                    .cloned()
+                    .unwrap_or_else(|| stored.next().expect("one stored value per unmodified key"))
+            })
+            .collect())
     }
 
-    /// Delete the value of `key` in the batch.
-    pub fn delete(mut self, key: K) -> Self {
-        self.diff.insert(key, None);
+    /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
+    ///
+    /// If the same key is written multiple times within a batch, the last value wins.
+    pub fn write(mut self, key: K, value: Option<V>) -> Self {
+        self.diff.insert(key, value);
         self
     }
 }
@@ -287,6 +305,53 @@ where
         }
 
         Ok(None)
+    }
+
+    /// Batch read multiple keys.
+    ///
+    /// Accepts slices of owned or borrowed keys and returns results in input order.
+    pub async fn get_many(&self, keys: &[impl Borrow<K> + Sync]) -> Result<Vec<Option<V>>, Error> {
+        // Read every location the index reports for any key in one batched read.
+        let mut candidates: Vec<(Location, usize)> = keys
+            .iter()
+            .enumerate()
+            .flat_map(|(index, key)| {
+                self.snapshot
+                    .get(key.borrow())
+                    .map(move |&loc| (loc, index))
+            })
+            .collect();
+        candidates.sort();
+        let mut locs: Vec<u64> = candidates.iter().map(|&(loc, _)| *loc).collect();
+        locs.dedup();
+        let ops = self.log.read_many(&locs).await.map_err(|e| match e {
+            crate::journal::Error::ItemPruned(pos) => Error::OperationPruned(Location::new(pos)),
+            e => Error::Journal(e),
+        })?;
+
+        let mut values = vec![None; keys.len()];
+        for (op, group) in zip_eq(ops, candidates.chunk_by(|a, b| a.0 == b.0)) {
+            let Operation::Update(Update(k, v)) = op else {
+                unreachable!(
+                    "location ({}) does not reference update operation",
+                    group[0].0
+                );
+            };
+            // Clone for earlier matching slots and move the decoded value into the last.
+            let mut pending = None;
+            for &(_, index) in group {
+                if &k != keys[index].borrow() {
+                    continue;
+                }
+                if let Some(previous) = pending.replace(index) {
+                    values[previous] = Some(v.clone());
+                }
+            }
+            if let Some(last) = pending {
+                values[last] = Some(v);
+            }
+        }
+        Ok(values)
     }
 
     /// Returns a new empty batch of changes.
@@ -853,17 +918,17 @@ mod test {
                 let c = Blake3::hash(&[b"c"]);
                 let batch = db
                     .new_batch()
-                    .update(a, vec![1])
-                    .update(b, vec![2])
+                    .write(a, Some(vec![1]))
+                    .write(b, Some(vec![2]))
                     .with_metadata(Some(vec![10]))
                     .finalize();
                 let db = db.apply_batch(batch).await.unwrap();
                 let first_size = db.bounds().end;
                 let batch = db
                     .new_batch()
-                    .update(a, vec![3])
-                    .delete(b)
-                    .update(c, vec![4])
+                    .write(a, Some(vec![3]))
+                    .write(b, None)
+                    .write(c, Some(vec![4]))
                     .with_metadata(Some(vec![20]))
                     .finalize();
                 let db = db.apply_batch(batch).await.unwrap();
@@ -912,8 +977,8 @@ mod test {
                 assert_eq!(db.get(&c).await.unwrap(), (!old).then(|| vec![4]));
                 let batch = db
                     .new_batch()
-                    .update(a, vec![5])
-                    .update(c, vec![6])
+                    .write(a, Some(vec![5]))
+                    .write(c, Some(vec![6]))
                     .finalize();
                 let db = db.apply_batch(batch).await.unwrap();
                 let appended_size = db.bounds().end;
@@ -1330,7 +1395,7 @@ mod test {
             let metadata = vec![99, 100];
             let batch = db
                 .new_batch()
-                .update(key, value.clone())
+                .write(key, Some(value.clone()))
                 .with_metadata(Some(metadata.clone()))
                 .finalize();
             let applied_start = db.bounds().end;
@@ -1552,6 +1617,95 @@ mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
 
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// `get_many` matches `get` for each key, in input order, across keys that share an index
+    /// bucket, deleted and absent keys, and repeated keys. A batch's `get_many` reads its own
+    /// writes first.
+    #[test_traced("DEBUG")]
+    fn test_store_get_many() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut ctx| async move {
+            let db = create_test_store(ctx.child("store")).await;
+            let (k1, v1) = (Digest::random(&mut ctx), vec![1]);
+            let (mut k2, v2) = (Digest::random(&mut ctx), vec![2]);
+            k2.0[0..2].copy_from_slice(&k1.0[0..2]);
+            let (k3, v3) = (Digest::random(&mut ctx), vec![3]);
+            let (k4, v4) = (Digest::random(&mut ctx), vec![4]);
+
+            let (db, _) = apply_entries(
+                db,
+                [
+                    (k1, Some(v1.clone())),
+                    (k2, Some(v2.clone())),
+                    (k3, Some(v3)),
+                ],
+            )
+            .await;
+            let (db, _) = apply_entries(db, [(k3, None)]).await;
+
+            let keys = [k2, k4, k1, k3, k2];
+            assert!(db.get_many(&keys[..0]).await.unwrap().is_empty());
+            let values = db.get_many(&keys).await.unwrap();
+            assert_eq!(db.get_many(&keys.each_ref()).await.unwrap(), values);
+            assert_eq!(
+                values,
+                [Some(v2.clone()), None, Some(v1), None, Some(v2.clone())]
+            );
+            for (key, value) in keys.iter().zip(&values) {
+                assert_eq!(&db.get(key).await.unwrap(), value);
+            }
+
+            let batch = db.new_batch().write(k1, None).write(k4, Some(v4.clone()));
+            let keys = [k1, k2, k4];
+            assert!(batch.get_many(&keys[..0]).await.unwrap().is_empty());
+            let values = batch.get_many(&keys).await.unwrap();
+            assert_eq!(batch.get_many(&keys.each_ref()).await.unwrap(), values);
+            assert_eq!(values, [None, Some(v2), Some(v4)]);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Decoded values move to their final matching slot, cloning only for earlier duplicates.
+    #[test_traced("DEBUG")]
+    fn test_store_get_many_moves_values() {
+        deterministic::Runner::default().start(|context| async move {
+            let colliding = |i| colliding_digest(0xAA, i);
+            let other = colliding_digest(0xBB, 0);
+            let db = open(context.child("store"), "get-many-moves").await;
+            let seed = [colliding(0), colliding(1), colliding(2), other]
+                .into_iter()
+                .zip(0u8..)
+                .map(|(key, tag)| (key, Some(CountedValue::new(tag))));
+            let (db, _) = apply(db, seed, &mut Hold).await;
+
+            let keys = [
+                colliding(1),
+                colliding(3),
+                other,
+                colliding(0),
+                colliding(1),
+                colliding(1),
+            ];
+            let values = db.get_many(&keys).await.unwrap();
+            let observed: Vec<_> = values
+                .iter()
+                .map(|value| value.as_ref().map(|value| (value.0, value.clones())))
+                .collect();
+            assert_eq!(
+                observed,
+                [
+                    Some((1, 2)),
+                    None,
+                    Some((3, 0)),
+                    Some((0, 0)),
+                    Some((1, 2)),
+                    Some((1, 2))
+                ]
+            );
             db.destroy().await.unwrap();
         });
     }
@@ -1887,7 +2041,7 @@ mod test {
                 for i in 0u64..ELEMENTS {
                     let k = Blake3::hash(&[&i.to_be_bytes()]);
                     let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
-                    batch = batch.update(k, v);
+                    batch = batch.write(k, Some(v));
                 }
 
                 // Drop the batch without applying it. This simulates a failure before apply.
@@ -1995,7 +2149,7 @@ mod test {
             assert!(result.unwrap().is_none());
 
             // Insert a key-value pair
-            let batch = batch.update(key, value.clone());
+            let batch = batch.write(key, Some(value.clone()));
 
             assert_eq!(db.bounds().end, 1); // The batch is not applied yet
             assert_eq!(db.inactivity_floor_loc, 0);
@@ -2018,7 +2172,7 @@ mod test {
             let metadata = vec![99, 100];
             let batch = db
                 .new_batch()
-                .update(key, value.clone())
+                .write(key, Some(value.clone()))
                 .with_metadata(Some(metadata.clone()))
                 .finalize();
             let applied_start = db.bounds().end;
@@ -2081,8 +2235,8 @@ mod test {
             let long = b"key-extended".to_vec();
             let batch = db
                 .new_batch()
-                .update(short.clone(), vec![1])
-                .update(long.clone(), vec![2])
+                .write(short.clone(), Some(vec![1]))
+                .write(long.clone(), Some(vec![2]))
                 .finalize();
             let db = db.apply_batch(batch).await.unwrap();
             let db = db.commit().await.unwrap();
