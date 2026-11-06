@@ -428,11 +428,6 @@ where
         self.bounds.tip.root
     }
 
-    /// The number of operations in the database once this batch is applied.
-    pub const fn size(&self) -> Location<F> {
-        self.bounds.tip.size
-    }
-
     /// Return the [`Bounds`] of the batch.
     pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
@@ -525,7 +520,7 @@ where
         H: Hasher<Digest = D>,
     {
         let db = self.bounds.compatible(db, db.commitment())?;
-        let size = self.size();
+        let size = self.bounds.tip.size;
         if loc >= size {
             return Err(Error::LocationOutOfBounds(loc, size));
         }
@@ -567,7 +562,7 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
-        super::check_locations(locs, self.size())?;
+        super::check_locations(locs, self.bounds.tip.size)?;
         check_floor(locs[0], self.bounds.inactivity_floor)?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();

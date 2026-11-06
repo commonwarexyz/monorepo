@@ -2,7 +2,7 @@ use crate::{
     merkle::Family,
     qmdb::{
         any::{FixedValue, value::FixedEncoding},
-        keyless::operation::{APPEND_CONTEXT, COMMIT_CONTEXT, Codec, Operation},
+        keyless::operation::{APPEND_CONTEXT, COMMIT_CONTEXT, Operation, OperationCodec},
         operation::{commit_fixed_operation_size, read_commit_fixed, write_commit_fixed},
     },
 };
@@ -18,7 +18,7 @@ const fn op_size<V: FixedSize>() -> usize {
     commit_fixed_operation_size::<V>()
 }
 
-impl<V: FixedValue> Codec for FixedEncoding<V> {
+impl<V: FixedValue> OperationCodec for FixedEncoding<V> {
     type ReadCfg = ();
 
     fn write_operation<F: Family>(op: &Operation<F, Self>, buf: &mut impl BufMut) {

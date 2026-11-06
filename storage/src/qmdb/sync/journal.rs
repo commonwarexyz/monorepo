@@ -42,7 +42,7 @@ pub trait Journal<F: Family>: Sized + Send {
     fn sync(self) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// The size of the journal, including pruned operations.
-    fn size(&self) -> u64;
+    fn size(&self) -> Location<F>;
 
     /// Append a non-empty batch of operations.
     fn append(self, ops: Vec<Self::Op>) -> impl Future<Output = Result<Self, Self::Error>> + Send;
@@ -81,8 +81,8 @@ where
         Self::sync(self).await
     }
 
-    fn size(&self) -> u64 {
-        Contiguous::bounds(self).end
+    fn size(&self) -> Location<F> {
+        Location::new(Contiguous::bounds(self).end)
     }
 
     async fn append(self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
@@ -124,8 +124,8 @@ where
         Self::sync(self).await
     }
 
-    fn size(&self) -> u64 {
-        Contiguous::bounds(self).end
+    fn size(&self) -> Location<F> {
+        Location::new(Contiguous::bounds(self).end)
     }
 
     async fn append(self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
@@ -186,8 +186,8 @@ where
         Ok(self)
     }
 
-    fn size(&self) -> u64 {
-        *self.start + self.ops.len() as u64
+    fn size(&self) -> Location<F> {
+        self.start + self.ops.len() as u64
     }
 
     async fn append(mut self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
