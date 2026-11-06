@@ -152,13 +152,28 @@ order and defaults to every participant.
   (default: `endorsed`), or propose only its highest held DA certificate (`certified`).
 - `--extension-bound <blocks>`: how many fresh blocks one vote extension carries per chain (16 by
   default); zero disables extensions.
+- `--pipeline-window <blocks>`: how many blocks a producer builds, and a validator DA-votes, above
+  the certified anchor (the pipeline depth by default, or one with zero depth); it may only widen
+  the default.
 - `--compute-threads` and `--critical-threads`: size the bulk verification pool and the separate
   pool for signing, certificate assembly, and the verdicts a view waits on. The critical pool
   defaults to one thread per eight validators, and at least two.
 
 The pipeline depth and extension bound are time windows in blocks: they must cover the
 DA-certificate lag at the configured block rate, so smaller bodies at the same byte throughput
-need proportionally larger values.
+need proportionally larger values. With zero depth and extension bound the pipeline window plays
+that role.
+
+Building with `--features receipts` forms DA certificates at the binding `n - f` quorum instead of
+`n - 2f`. Every chain with zero pipeline depth and extension bound is then a receipt chain: every
+validator sends its DA vote to every other validator and recovers the chain's certificates
+itself, so a certificate is a receipt that its block will be ordered. For example, run every
+node above with `cargo run --release --features receipts --` and these flags to make every chain
+a receipt chain with room for eight uncertified blocks per producer:
+
+```bash
+--pipeline-depth 0 --extension-bound 0 --pipeline-window 8
+```
 
 ## Remote Deployment
 

@@ -53,6 +53,11 @@ pub(super) enum Message {
         block: BlockRef<Sha256Digest>,
         at: SystemTime,
     },
+    /// This node durably recorded the DA certificate of `block`, of any chain, at `at`.
+    Certified {
+        block: BlockRef<Sha256Digest>,
+        at: SystemTime,
+    },
 }
 
 impl Message {
@@ -61,7 +66,10 @@ impl Message {
         match self {
             Self::Propose { response, .. } => response.is_closed(),
             Self::Verify { response, .. } => response.is_closed(),
-            Self::Finalized { .. } | Self::Placed { .. } | Self::Ordered { .. } => false,
+            Self::Finalized { .. }
+            | Self::Placed { .. }
+            | Self::Ordered { .. }
+            | Self::Certified { .. } => false,
         }
     }
 }
@@ -208,11 +216,14 @@ impl<C: Clock> Reporter for Mailbox<C> {
                     at: self.clock.current(),
                 }
             }
+            Activity::CertificateRecorded { certified, .. } => Message::Certified {
+                block: certified,
+                at: self.clock.current(),
+            },
             Activity::ProtocolAccepted { .. }
             | Activity::TransactionProposed { .. }
             | Activity::HistoryAccepted { .. }
-            | Activity::Proven { .. }
-            | Activity::CertificateRecorded { .. } => return Feedback::Ok,
+            | Activity::Proven { .. } => return Feedback::Ok,
         };
         self.sender.enqueue(message)
     }
