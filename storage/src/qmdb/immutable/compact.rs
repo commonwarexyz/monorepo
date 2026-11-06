@@ -938,7 +938,7 @@ mod tests {
         let original_pins = batch.pinned_nodes(&db).unwrap();
         assert!(original_proof.verify_with_pinned_nodes::<Sha256, _>(
             start,
-            &ops,
+            ops.iter(),
             &original_pins,
             &root
         ));
@@ -1058,10 +1058,10 @@ mod tests {
             child_proof.inactive_peaks,
             F::inactive_peaks(child_end, floor),
         );
-        assert!(child_proof.verify::<Sha256, _>(child_start, &child_ops, &child_root));
+        assert!(child_proof.verify::<Sha256, _>(child_start, child_ops.iter(), &child_root));
         assert!(child_proof.verify_with_pinned_nodes::<Sha256, _>(
             child_start,
-            &child_ops,
+            child_ops.iter(),
             &child_pins,
             &child_root
         ));
@@ -1072,7 +1072,7 @@ mod tests {
         reordered_child_pins.swap(0, 1);
         assert!(!child_proof.verify_with_pinned_nodes::<Sha256, _>(
             child_start,
-            &child_ops,
+            child_ops.iter(),
             &reordered_child_pins,
             &child_root
         ));
@@ -1085,7 +1085,7 @@ mod tests {
         assert_eq!(child.pinned_nodes(&db).unwrap(), child_pins);
         assert!(child_proof_after.verify_with_pinned_nodes::<Sha256, _>(
             child_start,
-            &child_ops,
+            child_ops.iter(),
             &child_pins,
             &child_root
         ));
@@ -1122,7 +1122,7 @@ mod tests {
         );
         assert!(commit_proof.verify_with_pinned_nodes::<Sha256, _>(
             commit_start,
-            &commit_ops,
+            commit_ops.iter(),
             &commit_pins,
             &commit_root
         ));
@@ -1165,11 +1165,12 @@ mod tests {
         let late_root = late.root();
         let late_proof = late.proof(&db).unwrap();
         let late_pins = late.pinned_nodes(&db).unwrap();
-        assert!(
-            late_proof.verify_with_pinned_nodes::<Sha256, _>(
-                late_start, &late_ops, &late_pins, &late_root
-            )
-        );
+        assert!(late_proof.verify_with_pinned_nodes::<Sha256, _>(
+            late_start,
+            late_ops.iter(),
+            &late_pins,
+            &late_root
+        ));
         let db = db.apply_batch(late).await.unwrap();
 
         db.destroy().await.unwrap();

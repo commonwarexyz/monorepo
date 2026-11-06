@@ -788,23 +788,27 @@ impl<D: Digest> Proof<D> {
     /// in a Binary Merkle Tree with `root`.
     ///
     /// This is a convenience method for verifying range proofs. The leaves must be
-    /// in order starting from `position`.
+    /// in order starting from `position`, and a `len()` that differs from the number
+    /// yielded is rejected.
     ///
     /// The `leaf_count` stored in the proof is incorporated into the finalized root
     /// computation, so any modification to it will cause verification to fail.
     pub fn verify_range_inclusion<H: Hasher<Digest = D>>(
         &self,
         position: u32,
-        leaves: &[D],
+        leaves: impl IntoIterator<Item: Borrow<D>, IntoIter: ExactSizeIterator>,
         root: &D,
     ) -> Result<(), Error> {
+        let leaves = leaves.into_iter();
+        let reported = leaves.len();
+
         // For empty trees, only position 0 with empty leaves is valid
-        if leaves.is_empty() && position != 0 {
+        if reported == 0 && position != 0 {
             return Err(Error::InvalidPosition(position));
         }
-        if !leaves.is_empty() {
+        if reported != 0 {
             let leaves_len =
-                u32::try_from(leaves.len()).map_err(|_| Error::InvalidPosition(position))?;
+                u32::try_from(reported).map_err(|_| Error::InvalidPosition(position))?;
             let end = position
                 .checked_add(leaves_len - 1)
                 .ok_or(Error::InvalidPosition(position))?;
@@ -813,12 +817,19 @@ impl<D: Digest> Proof<D> {
             }
         }
 
-        // Pair each position with its leaf.
-        let elements = leaves
-            .iter()
-            .enumerate()
-            .map(|(i, leaf)| (position + i as u32, *leaf));
-        self.verify_multi_inclusion::<H>(elements, root)
+        // Pair each position with its leaf, and reject leaves that do not match the reported
+        // length the range was checked against.
+        let mut yielded = 0usize;
+        let elements = leaves.enumerate().map(|(i, leaf)| {
+            yielded += 1;
+            (position + i as u32, *leaf.borrow())
+        });
+        self.verify_multi_inclusion::<H>(elements, root)?;
+        if yielded != reported {
+            // Verified positions stay below `leaf_count`, so this cannot overflow.
+            return Err(Error::InvalidPosition(position + yielded as u32));
+        }
+        Ok(())
     }
 }
 
@@ -1149,6 +1160,62 @@ mod tests {
                 .verify_range_inclusion::<Sha256>(2, range_leaves, &root)
                 .is_ok()
         );
+    }
+
+    /// Leaves whose reported length differs from the number they yield.
+    struct Misreported<I> {
+        inner: I,
+        len: usize,
+    }
+
+    impl<I: Iterator> Iterator for Misreported<I> {
+        type Item = I::Item;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.inner.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (self.len, Some(self.len))
+        }
+    }
+
+    impl<I: Iterator> ExactSizeIterator for Misreported<I> {}
+
+    #[test]
+    fn test_range_proof_iterator_length() {
+        let digests: Vec<Digest> = (0..8u32)
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .collect();
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+        let range_proof = tree.range_proof(2, 5).unwrap();
+
+        // Owned leaves verify like borrowed ones.
+        let leaves = digests[2..6].iter().copied();
+        assert!(
+            range_proof
+                .verify_range_inclusion::<Sha256>(2, leaves, &root)
+                .is_ok()
+        );
+
+        // Leaves that yield fewer or more than their reported length are rejected, even when
+        // the leaves they yield are the proof's range.
+        for (yielded, reported) in [(3, 4), (4, 3)] {
+            let leaves = Misreported {
+                inner: digests[2..2 + yielded].iter().copied(),
+                len: reported,
+            };
+            assert!(
+                range_proof
+                    .verify_range_inclusion::<Sha256>(2, leaves, &root)
+                    .is_err()
+            );
+        }
     }
 
     #[test]

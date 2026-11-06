@@ -1677,8 +1677,8 @@ pub(super) mod tests {
             let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
             assert_eq!(log_ops, *ops);
             assert_eq!(log_proof, proof);
-            assert!(proof.verify::<Sha256, _>(start, &ops, &root));
-            assert!(proof.verify_with_pinned_nodes::<Sha256, _>(start, &ops, &pins, &root));
+            assert!(proof.verify::<Sha256, _>(start, ops.iter(), &root));
+            assert!(proof.verify_with_pinned_nodes::<Sha256, _>(start, ops.iter(), &pins, &root));
         }
 
         // Flushing the applied batch prunes the store to its peaks. The late batch's base is
@@ -1717,7 +1717,7 @@ pub(super) mod tests {
         let flushed_pins = flushed.pinned_nodes(&db).unwrap();
         assert!(flushed_proof.verify_with_pinned_nodes::<Sha256, _>(
             flushed_start,
-            &flushed_ops,
+            flushed_ops.iter(),
             &flushed_pins,
             &flushed_root
         ));
