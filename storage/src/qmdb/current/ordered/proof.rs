@@ -153,10 +153,7 @@ where
             }
             Self::Commit(op_proof, metadata) => {
                 // An empty database's commit floor equals the commit operation's location
-                (
-                    op_proof,
-                    Operation::CommitFloor(metadata.clone(), op_proof.loc),
-                )
+                (op_proof, Operation::Commit(metadata.clone(), op_proof.loc))
             }
         };
 

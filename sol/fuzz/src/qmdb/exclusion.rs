@@ -240,7 +240,7 @@ where
             .collect(),
     )?;
     let op = |index| match args.mode {
-        ExclusionMode::Empty => ordered::Operation::<F, K, E>::CommitFloor(
+        ExclusionMode::Empty => ordered::Operation::<F, K, E>::Commit(
             args.metadata.then(|| value.clone()),
             Location::new(index),
         ),
@@ -267,7 +267,7 @@ where
     })?;
     let exclusion: ExclusionProof<F, K, E, H::Digest, _> = match op(tree.location) {
         ordered::Operation::Update(update) => ExclusionProof::KeyValue(proof, update),
-        ordered::Operation::CommitFloor(metadata, _) => ExclusionProof::Commit(proof, metadata),
+        ordered::Operation::Commit(metadata, _) => ExclusionProof::Commit(proof, metadata),
         ordered::Operation::Delete(_) => unreachable!(),
     };
     Ok(current_output(output, exclusion.verify::<H>(&query, &root)))

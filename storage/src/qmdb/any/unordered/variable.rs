@@ -208,8 +208,8 @@ pub(crate) mod test {
                 unordered::Operation::Delete(key) => {
                     batch = batch.write(key, None);
                 }
-                unordered::Operation::CommitFloor(_, _) => {
-                    panic!("CommitFloor not supported in apply_ops");
+                unordered::Operation::Commit(_, _) => {
+                    panic!("Commit not supported in apply_ops");
                 }
             }
         }
