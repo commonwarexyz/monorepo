@@ -10,6 +10,15 @@
 //! `commonware-p2p::simulated` can be run deterministically when paired with `commonware-runtime::deterministic`.
 //! This makes it possible to reproduce an arbitrary order of delivered/dropped messages with a given seed.
 //!
+//! # Peer Sets
+//!
+//! Two peers exchange messages only while each tracks the other, as on an authenticated network.
+//! A peer tracks the peers listed in the peer sets it follows. By default it follows the
+//! network-wide sets, tracked through [Oracle::manager] or [Oracle::socket_manager]. Each call to
+//! [Control::manager] or [Control::socket_manager] gives the peer new, empty sets of its own
+//! instead, as starting a node does. Use this when peers advance through peer sets at different
+//! times.
+//!
 //! # Bandwidth Simulation
 //!
 //! The simulator provides a realistic model of bandwidth contention where network
@@ -2904,6 +2913,322 @@ mod tests {
             assert_eq!(sent[0], recipient_pk);
             let (_pk, received) = receiver.recv().await.unwrap();
             assert_eq!(received, initial_msg);
+        });
+    }
+
+    /// Sends one message from `sender` to `to` and reports whether `receiver` gets it.
+    async fn delivered(
+        context: &deterministic::Context,
+        sender: &mut impl Sender<PublicKey = PublicKey>,
+        receiver: &mut impl Receiver<PublicKey = PublicKey>,
+        to: &PublicKey,
+    ) -> bool {
+        sender.send(Recipients::One(to.clone()), IoBuf::from(b"ping"), false);
+        select! {
+            message = receiver.recv() => { message.is_ok() },
+            _ = context.sleep(Duration::from_secs(1)) => { false },
+        }
+    }
+
+    /// Returns the peers `sender` would reach with [`Recipients::All`].
+    fn all_recipients(
+        sender: &mut impl crate::LimitedSender<PublicKey = PublicKey>,
+    ) -> Vec<PublicKey> {
+        sender.check(Recipients::All).unwrap().recipients()
+    }
+
+    #[test]
+    fn test_own_peer_sets_require_mutual_tracking() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.child("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(3),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let pk1 = PrivateKey::from_seed(1).public_key();
+            let pk2 = PrivateKey::from_seed(2).public_key();
+            let pk3 = PrivateKey::from_seed(3).public_key();
+            let control1 = oracle.control(pk1.clone());
+            let control2 = oracle.control(pk2.clone());
+            let (mut sender1, mut receiver1) = control1.register(0, TEST_QUOTA).await.unwrap();
+            let (mut sender2, mut receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
+            for (from, to) in [(pk1.clone(), pk2.clone()), (pk2.clone(), pk1.clone())] {
+                let link = Link {
+                    latency: Duration::from_millis(1),
+                    jitter: Duration::ZERO,
+                    success_rate: probability!(1.0),
+                };
+                oracle.add_link(from, to, link).await.unwrap();
+            }
+
+            // pk3 has its own sets but never tracks one, so it reaches no one
+            oracle.control(pk3.clone()).manager();
+
+            // Network-wide peer sets connect peers without their own
+            let mut global = oracle.manager();
+            global.track(0, Set::try_from([pk1.clone(), pk2.clone()]).unwrap());
+            assert!(global.peer_set(0).await.is_some());
+            assert_eq!(all_recipients(&mut sender1), vec![pk2.clone()]);
+            assert!(delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
+
+            // Switching to their own sets, which start empty, disconnects them
+            let mut manager1 = control1.manager();
+            let mut manager2 = control2.manager();
+            assert!(manager2.peer_set(0).await.is_none());
+            assert!(all_recipients(&mut sender1).is_empty());
+            assert!(all_recipients(&mut sender2).is_empty());
+            assert!(!delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
+
+            // Tracking on one side only does not connect
+            manager1.track(1, Set::try_from([pk2.clone()]).unwrap());
+            manager2.track(1, Set::try_from([pk3.clone()]).unwrap());
+            assert!(manager2.peer_set(1).await.is_some());
+            assert!(all_recipients(&mut sender1).is_empty());
+            assert!(!delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
+            assert!(!delivered(&context, &mut sender2, &mut receiver1, &pk1).await);
+
+            // Peers at different peer set ids connect while each tracks the other
+            manager2.track(5, Set::try_from([pk1.clone(), pk3.clone()]).unwrap());
+            assert!(manager2.peer_set(5).await.is_some());
+            assert_eq!(all_recipients(&mut sender1), vec![pk2.clone()]);
+            assert_eq!(all_recipients(&mut sender2), vec![pk1.clone()]);
+            assert!(delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
+            assert!(delivered(&context, &mut sender2, &mut receiver1, &pk1).await);
+
+            // Evicting the other peer on one side disconnects both directions
+            manager1.track(2, Set::try_from([pk3]).unwrap());
+            assert!(manager1.peer_set(2).await.is_some());
+            assert!(all_recipients(&mut sender1).is_empty());
+            assert!(all_recipients(&mut sender2).is_empty());
+            assert!(!delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
+            assert!(!delivered(&context, &mut sender2, &mut receiver1, &pk1).await);
+        });
+    }
+
+    #[test]
+    fn test_own_peer_sets_with_network_wide_peers() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.child("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(3),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let pk1 = PrivateKey::from_seed(1).public_key();
+            let pk2 = PrivateKey::from_seed(2).public_key();
+            let control1 = oracle.control(pk1.clone());
+            let control2 = oracle.control(pk2.clone());
+            let (mut sender1, mut receiver1) = control1.register(0, TEST_QUOTA).await.unwrap();
+            let (mut sender2, mut receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
+            for (from, to) in [(pk1.clone(), pk2.clone()), (pk2.clone(), pk1.clone())] {
+                let link = Link {
+                    latency: Duration::from_millis(1),
+                    jitter: Duration::ZERO,
+                    success_rate: probability!(1.0),
+                };
+                oracle.add_link(from, to, link).await.unwrap();
+            }
+
+            // pk1 tracks pk2 through its own manager, pk2 uses the network-wide sets
+            let mut manager1 = control1.manager();
+            manager1.track(1, Set::try_from([pk2.clone()]).unwrap());
+            let mut global = oracle.manager();
+
+            // The network-wide set does not list pk1, so pk2 does not track it
+            let pk3 = PrivateKey::from_seed(3).public_key();
+            global.track(0, Set::try_from([pk3]).unwrap());
+            assert!(global.peer_set(0).await.is_some());
+            assert!(all_recipients(&mut sender1).is_empty());
+            assert!(all_recipients(&mut sender2).is_empty());
+            assert!(!delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
+            assert!(!delivered(&context, &mut sender2, &mut receiver1, &pk1).await);
+
+            // Once it lists pk1, they connect in both directions, though it does not list pk2
+            global.track(1, Set::try_from([pk1.clone()]).unwrap());
+            assert!(global.peer_set(1).await.is_some());
+            assert_eq!(all_recipients(&mut sender1), vec![pk2.clone()]);
+            assert_eq!(all_recipients(&mut sender2), vec![pk1.clone()]);
+            assert!(delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
+            assert!(delivered(&context, &mut sender2, &mut receiver1, &pk1).await);
+        });
+    }
+
+    #[test]
+    fn test_own_peer_sets_are_reported_separately() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.child("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(2),
+                },
+            );
+            network.start();
+
+            let pk1 = PrivateKey::from_seed(1).public_key();
+            let pk2 = PrivateKey::from_seed(2).public_key();
+            let pk3 = PrivateKey::from_seed(3).public_key();
+            let mut global = oracle.manager();
+            let mut own = oracle.control(pk1.clone()).manager();
+            let mut global_updates = global.subscribe().await;
+            let mut own_updates = own.subscribe().await;
+
+            own.track(1, Set::try_from([pk2.clone()]).unwrap());
+            let update = own_updates.recv().await.unwrap();
+            assert_eq!(update.index, 1);
+            assert_eq!(update.latest.primary, Set::try_from([pk2.clone()]).unwrap());
+            assert!(global.peer_set(1).await.is_none());
+
+            global.track(3, Set::try_from([pk3.clone()]).unwrap());
+            assert_eq!(global_updates.recv().await.unwrap().index, 3);
+            assert!(own.peer_set(3).await.is_none());
+
+            // The next update the peer's subscriber sees is its own
+            own.track(2, Set::try_from([pk3.clone()]).unwrap());
+            let update = own_updates.recv().await.unwrap();
+            assert_eq!(update.index, 2);
+            assert_eq!(
+                update.all.primary,
+                Set::try_from([pk2.clone(), pk3.clone()]).unwrap()
+            );
+
+            // A socket manager for another peer keeps that peer's sets apart too
+            let addr: Address = SocketAddr::from(([127, 0, 0, 1], 4000)).into();
+            let mut socket = oracle.control(pk2).socket_manager();
+            socket.track(
+                9,
+                AddressableTrackedPeers::new(
+                    Map::<_, Address>::try_from([(pk1.clone(), addr)]).unwrap(),
+                    Map::default(),
+                ),
+            );
+            assert_eq!(
+                socket.peer_set(9).await.unwrap().primary,
+                Set::try_from([pk1]).unwrap()
+            );
+            assert!(own.peer_set(9).await.is_none());
+            assert!(global.peer_set(9).await.is_none());
+        });
+    }
+
+    #[test]
+    fn test_manager_starts_peer_sets_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.child("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(3),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let pk1 = PrivateKey::from_seed(1).public_key();
+            let pk2 = PrivateKey::from_seed(2).public_key();
+            let control1 = oracle.control(pk1.clone());
+            let control2 = oracle.control(pk2.clone());
+            let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
+            let (_, mut receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::ZERO,
+                success_rate: probability!(1.0),
+            };
+            oracle
+                .add_link(pk1.clone(), pk2.clone(), link)
+                .await
+                .unwrap();
+
+            let mut manager1 = control1.manager();
+            let mut manager2 = control2.manager();
+            manager2.track(1, Set::try_from([pk1.clone()]).unwrap());
+            manager1.track(2, Set::try_from([pk2.clone()]).unwrap());
+            let mut updates = manager1.subscribe().await;
+            assert_eq!(updates.recv().await.unwrap().index, 2);
+            assert!(delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
+
+            // A new manager forgets the old sets and ends their subscriptions
+            let mut restarted = control1.manager();
+            assert!(restarted.peer_set(2).await.is_none());
+            assert!(updates.recv().await.is_none());
+            assert!(!delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
+
+            // An id older than the forgotten sets is accepted
+            restarted.track(1, Set::try_from([pk2.clone()]).unwrap());
+            assert!(restarted.peer_set(1).await.is_some());
+            assert!(delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
+        });
+    }
+
+    #[test]
+    fn test_own_peer_sets_limit_connected_peers() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.child("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(3),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let pk1 = PrivateKey::from_seed(1).public_key();
+            let pk2 = PrivateKey::from_seed(2).public_key();
+            let pk3 = PrivateKey::from_seed(3).public_key();
+            let control1 = oracle.control(pk1.clone());
+            let control2 = oracle.control(pk2.clone());
+            let (mut sender, _) = control1.register(0, TEST_QUOTA).await.unwrap();
+            let (_, mut receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
+            let (_, mut receiver3) = oracle
+                .control(pk3.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            for to in [pk2.clone(), pk3.clone()] {
+                let link = Link {
+                    latency: Duration::from_millis(1),
+                    jitter: Duration::ZERO,
+                    success_rate: probability!(1.0),
+                };
+                oracle.add_link(pk1.clone(), to, link).await.unwrap();
+            }
+
+            // pk2 tracks pk1 through its own manager, pk3 has no peer sets at all
+            let mut manager1 = control1.manager();
+            let mut manager2 = control2.manager();
+            manager2.track(1, Set::try_from([pk1.clone()]).unwrap());
+            manager1.track(1, Set::try_from([pk2.clone(), pk3]).unwrap());
+            assert!(manager1.peer_set(1).await.is_some());
+
+            assert_eq!(all_recipients(&mut sender), vec![pk2]);
+            sender.send(Recipients::All, IoBuf::from(b"ping"), false);
+            assert!(receiver2.recv().await.is_ok());
+            select! {
+                _ = receiver3.recv() => panic!("pk3 does not track pk1"),
+                _ = context.sleep(Duration::from_secs(1)) => {},
+            }
         });
     }
 

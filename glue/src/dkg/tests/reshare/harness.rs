@@ -67,8 +67,7 @@ use commonware_formatting::hex;
 use commonware_macros::{test_group, test_traced};
 use commonware_math::algebra::Random;
 use commonware_p2p::{
-    Address, Message as P2pMessage, PeerSetUpdate, Provider, Receiver, TrackedPeers,
-    max_message_size, simulated,
+    Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, max_message_size, simulated,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -83,9 +82,7 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng,
-    channel::mpsc,
-    non_empty_range,
+    N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty_range,
     ordered::{Map, Quorum as _, Set},
     range::NonEmptyRange,
     sequence::Unit,
@@ -159,14 +156,15 @@ impl Network {
         }
     }
 
-    fn manager(self, oracle: &simulated::Oracle<PublicKey, DeterministicContext>) -> TestManager {
-        let transport = match self {
-            Self::Discovery => Transport::Discovery(oracle.manager()),
-            Self::Lookup => Transport::Lookup(AddressableManager::new(oracle.socket_manager())),
-        };
-        TestManager {
-            transport,
-            local: Arc::default(),
+    fn manager(
+        self,
+        oracle: &simulated::Oracle<PublicKey, DeterministicContext>,
+        public_key: &PublicKey,
+    ) -> TestManager {
+        let control = oracle.control(public_key.clone());
+        match self {
+            Self::Discovery => TestManager::Discovery(control.manager()),
+            Self::Lookup => TestManager::Lookup(AddressableManager::new(control.socket_manager())),
         }
     }
 }
@@ -210,84 +208,28 @@ impl Directory<PublicKey> for TestDirectory {
     }
 }
 
+/// One node's peer manager, tracking peer sets for that node alone.
 #[derive(Clone, Debug)]
-enum Transport {
+enum TestManager {
     Discovery(DiscoveryManager),
     Lookup(LookupManager),
-}
-
-/// One node's peer manager.
-///
-/// The simulated oracle keeps one peer-set history for the whole network and
-/// reports the latest set that any node has tracked. A real node's p2p stack
-/// reports only the sets that node tracked. This manager forwards each set to
-/// the oracle for connectivity and answers [`Provider`] queries from the sets
-/// this node tracked since it started, so a node that is catching up fetches
-/// from the peers of its own epoch.
-#[derive(Clone, Debug)]
-struct TestManager {
-    transport: Transport,
-    local: Arc<Mutex<PeerSetsState>>,
-}
-
-#[derive(Debug, Default)]
-struct PeerSetsState {
-    sets: BTreeMap<u64, TrackedPeers<PublicKey>>,
-    subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<PublicKey>>>,
-}
-
-impl PeerSetsState {
-    fn latest_update(&self) -> Option<PeerSetUpdate<PublicKey>> {
-        let (index, latest) = self.sets.last_key_value()?;
-        let primary = Set::from_iter_dedup(
-            self.sets
-                .values()
-                .flat_map(|peers| peers.primary.iter().cloned()),
-        );
-        let secondary = Set::from_iter_dedup(
-            self.sets
-                .values()
-                .flat_map(|peers| peers.secondary.iter())
-                .filter(|peer| primary.position(peer).is_none())
-                .cloned(),
-        );
-        Some(PeerSetUpdate {
-            index: *index,
-            latest: latest.clone(),
-            all: TrackedPeers::new(primary, secondary),
-        })
-    }
-
-    fn track(&mut self, id: u64, peers: TrackedPeers<PublicKey>) {
-        if let Some((&last, _)) = self.sets.last_key_value()
-            && id <= last
-        {
-            return;
-        }
-        self.sets.insert(id, peers);
-        let update = self
-            .latest_update()
-            .expect("tracked peer set must be present");
-        self.subscribers
-            .retain(|subscriber| subscriber.send(update.clone()).is_ok());
-    }
 }
 
 impl Provider for TestManager {
     type PublicKey = PublicKey;
 
     async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
-        self.local.lock().sets.get(&id).cloned()
+        match self {
+            Self::Discovery(manager) => manager.peer_set(id).await,
+            Self::Lookup(manager) => manager.peer_set(id).await,
+        }
     }
 
     async fn subscribe(&mut self) -> commonware_p2p::PeerSetSubscription<Self::PublicKey> {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        let mut state = self.local.lock();
-        if let Some(update) = state.latest_update() {
-            let _ = sender.send(update);
+        match self {
+            Self::Discovery(manager) => manager.subscribe().await,
+            Self::Lookup(manager) => manager.subscribe().await,
         }
-        state.subscribers.push(sender);
-        receiver
     }
 }
 
@@ -301,18 +243,15 @@ impl DkgManager for TestManager {
         peers: TrackedPeers<Self::PublicKey>,
         directory: &Self::Directory,
     ) -> Result<(), Self::Error> {
-        match (&mut self.transport, &directory.0) {
-            (Transport::Discovery(manager), None) => {
-                DkgManager::track(manager, epoch, peers.clone(), &Unit)
-                    .map_err(|error| match error {})?
+        match (self, &directory.0) {
+            (Self::Discovery(manager), None) => {
+                DkgManager::track(manager, epoch, peers, &Unit).map_err(|error| match error {})
             }
-            (Transport::Lookup(manager), Some(addresses)) => {
-                DkgManager::track(manager, epoch, peers.clone(), addresses)?
+            (Self::Lookup(manager), Some(addresses)) => {
+                DkgManager::track(manager, epoch, peers, addresses)
             }
             _ => panic!("network and directory must use the same transport"),
         }
-        self.local.lock().track(epoch.get(), peers);
-        Ok(())
     }
 }
 
@@ -983,7 +922,7 @@ impl EngineDefinition for ReshareEngine {
         self.initial
             .register_epoch_zero(public_key, &provider, &store)
             .await;
-        let dkg_manager = self.network.manager(oracle);
+        let dkg_manager = self.network.manager(oracle, public_key);
 
         let resolver = marshal_resolver::init(
             context.child("marshal_resolver"),
