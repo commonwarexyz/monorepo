@@ -85,6 +85,7 @@ fn config() -> Config<OneCap, Sequential> {
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(4096),
         init_concurrency: (),
+        init_graft_readers: NZUsize!(1),
     }
 }
 
