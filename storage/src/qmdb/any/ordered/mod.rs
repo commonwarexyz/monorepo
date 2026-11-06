@@ -2010,6 +2010,7 @@ mod test {
             merkle,
             frontier,
             boundary,
+            recorded,
             journal,
             hasher,
         } = log;
@@ -2017,6 +2018,7 @@ mod test {
             merkle,
             frontier,
             boundary,
+            recorded,
             journal: Controlled {
                 inner: journal,
                 mode,

@@ -484,6 +484,21 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         Ok(tree)
     }
 
+    /// Restart the empty tree at `boundary`, whose pinned digests are `pins`.
+    pub(crate) fn rebase(
+        &mut self,
+        boundary: Location<F>,
+        pins: Vec<D>,
+    ) -> Result<(), super::Error<F>> {
+        assert_eq!(self.leaves(), self.boundary, "only an empty tree can be rebased");
+        self.mem = Arc::new(Mem::from_components(Vec::new(), boundary, pins.clone())?);
+        self.boundary = boundary;
+        self.pins = F::nodes_to_pin(boundary).zip(pins).collect();
+        self.resident = Resident::new(self.resident.height, F::location_to_position(boundary));
+        self.update_metrics();
+        Ok(())
+    }
+
     fn update_metrics(&self) {
         let bytes = self.resident.len().saturating_mul(size_of::<D>());
         let _ = self.metrics.resident_bytes.try_set(bytes);

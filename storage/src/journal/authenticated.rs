@@ -64,7 +64,7 @@ mod tree;
 #[cfg(test)]
 pub(crate) use config::tests::low_resident_height;
 pub use config::{CacheConfig, Config};
-pub(crate) use frontier::Frontier;
+pub(crate) use frontier::{Frontier, MAX_ANCHORS};
 use metrics::Metrics;
 pub(crate) use tree::{Chunk, ChunkHasher};
 use tree::{ChunkPlan, Tree};
@@ -281,6 +281,10 @@ where
     /// operations until [Self::persist_boundary] records it. The Merkle structure starts at or
     /// after it.
     pub(crate) boundary: Location<F>,
+
+    /// Whether the frontier records `boundary`. It does not from [Self::from_components] until
+    /// [Self::persist_boundary], and no anchor is recorded meanwhile.
+    pub(crate) recorded: bool,
 
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the Merkle structure.
@@ -669,19 +673,57 @@ where
             merkle,
             frontier,
             boundary: start,
+            recorded: false,
             journal,
             hasher,
         })
     }
 
-    /// Record the boundary of a journal built by [Self::from_components] in its frontier, then
-    /// prune the operations before it.
+    /// Record the boundary of a journal built by [Self::from_components] in its frontier, dropping
+    /// the anchors the frontier held, then prune the operations before it.
     pub async fn persist_boundary(mut self) -> Result<Self, Error<F>> {
         let boundary = self.boundary;
         let pins = self.pinned_nodes_at(boundary).await?;
-        self.frontier = self.frontier.set(boundary, pins).await?;
+        self.frontier = self.frontier.reset(boundary, pins).await?;
+        self.recorded = true;
         (self.journal, _) = self.journal.prune(*boundary).await?;
         Ok(self)
+    }
+
+    /// Begin durably recording an anchor at `location`, rounded down to where a prune there would
+    /// stop. Initialization replays the Merkle structure from the newest anchor at or before a
+    /// limit its caller sets, instead of from the pruning boundary. The rounding lets a prune at or
+    /// after `location` move the pruning boundary even right after such a replay.
+    ///
+    /// The operations before `location` must be durable or about to be, and must never change
+    /// unless a later initialization discards them. Records nothing if the rounded location is
+    /// past [Self::size] or not past the pruning boundary, the Merkle structure's start and the
+    /// newest anchor. The returned handle completes once the record is durable.
+    pub async fn start_anchor(
+        mut self,
+        location: Location<F>,
+    ) -> Result<(Self, Handle<()>), Error<F>> {
+        let location = Location::new(self.journal.prune_target(*location));
+        let newest = self
+            .frontier
+            .anchors()
+            .last()
+            .map_or(self.boundary, |(anchor, _)| *anchor);
+        let floor = newest.max(self.boundary).max(self.merkle.bounds().start);
+        if !self.recorded || location <= floor || location > self.size() {
+            return Ok((self, Handle::ready(Ok(()))));
+        }
+        let pins = self.pinned_nodes_at(location).await?;
+        let handle;
+        (self.frontier, handle) = self.frontier.start_anchor(location, pins).await?;
+        Ok((self, handle))
+    }
+
+    /// Like [Self::start_anchor], but returns once the record is durable.
+    pub async fn anchor(self, location: Location<F>) -> Result<Self, Error<F>> {
+        let (journal, handle) = self.start_anchor(location).await?;
+        handle.await.map_err(JournalError::from)?;
+        Ok(journal)
     }
 
     /// Align the Merkle structure with the journal.
@@ -858,6 +900,23 @@ where
         *self.boundary..self.selected_end
     }
 
+    /// Replay the Merkle structure from the newest anchor after the pruning boundary and at or
+    /// before both `limit` and the selected end, if there is one. Proofs of the operations before
+    /// it are then unavailable until the pruning boundary passes it.
+    pub(crate) fn start_at(&mut self, limit: Location<F>) -> Result<(), Error<F>> {
+        let limit = limit.min(Location::new(self.selected_end));
+        let anchor = self
+            .frontier
+            .anchors()
+            .into_iter()
+            .rev()
+            .find(|(anchor, _)| *anchor > self.boundary && *anchor <= limit);
+        if let Some((anchor, pins)) = anchor {
+            self.merkle.rebase(anchor, pins)?;
+        }
+        Ok(())
+    }
+
     /// Whether storage was empty before commit selection.
     pub(crate) fn is_fresh(&self) -> bool {
         self.journal.bounds() == (0..0)
@@ -1020,11 +1079,16 @@ where
         hasher: StandardHasher<H>,
     ) -> Result<Journal<F, E, C, H, S>, Error<F>> {
         let (journal, _) = journal.prune(*boundary).await?;
+        // Anchors past the selected end describe operations that later appends may replace.
+        let frontier = frontier
+            .drop_anchors_after(Location::new(journal.bounds().end))
+            .await?;
         Ok(Journal {
             journal,
             merkle,
             frontier,
             boundary,
+            recorded: true,
             hasher,
         })
     }
@@ -1091,10 +1155,10 @@ where
         predicate: fn(&C::Item) -> bool,
         bagging: merkle::Bagging,
     ) -> Result<Self, Error<F>> {
-        Self::prepare(context, merkle_cfg, journal_cfg, None, predicate, bagging)
-            .await?
-            .finish()
-            .await
+        let mut recovery =
+            Self::prepare(context, merkle_cfg, journal_cfg, None, predicate, bagging).await?;
+        recovery.start_at(Location::new(recovery.selected_end))?;
+        recovery.finish().await
     }
 
     /// Recover a journal whose last matching item ends at or below `max_size`.
@@ -1110,7 +1174,7 @@ where
         predicate: fn(&C::Item) -> bool,
         bagging: merkle::Bagging,
     ) -> Result<Self, Error<F>> {
-        Self::prepare(
+        let mut recovery = Self::prepare(
             context,
             merkle_cfg,
             journal_cfg,
@@ -1118,9 +1182,9 @@ where
             predicate,
             bagging,
         )
-        .await?
-        .finish()
-        .await
+        .await?;
+        recovery.start_at(Location::new(recovery.selected_end))?;
+        recovery.finish().await
     }
 
     /// Select and validate component availability before deliberately discarding history.
@@ -3036,6 +3100,257 @@ mod tests {
     fn test_from_components_records_boundary_mmb() {
         // Imported boundaries and roots must survive recovery across the valid range.
         deterministic::Runner::default().start(from_components_records_boundary::<mmb::Family>);
+    }
+
+    /// The locations of a journal's anchors, oldest first.
+    fn anchor_locations<F: Family + PartialEq>(journal: &TestJournal<F>) -> Vec<u64> {
+        journal
+            .frontier
+            .anchors()
+            .into_iter()
+            .map(|(location, _)| *location)
+            .collect()
+    }
+
+    /// A reopen replays from the newest anchor. Before it, every retained operation is provable.
+    /// After it, operations before the anchor stay readable but cannot be proven, a prune before
+    /// the anchor keeps the pruning boundary, and a prune past it moves the boundary with pins
+    /// that a replay from there agrees with.
+    async fn anchors_reopen<F: Family + PartialEq>(context: Context) {
+        let suffix = "anchors-reopen";
+        let mut journal = create_journal_with_ops::<F>(context.child("build"), suffix, 100).await;
+        (journal, _) = journal
+            .append(&TestOp::<F>::CommitFloor(None, Location::new(0)))
+            .await
+            .unwrap();
+        journal = journal.sync().await.unwrap();
+        let root = journal.root(0).unwrap();
+        let size = journal.size();
+
+        // Anchors round down to where a prune would stop (7 items per blob), and must pass the
+        // newest one.
+        journal = journal.anchor(Location::new(40)).await.unwrap();
+        journal = journal.anchor(Location::new(41)).await.unwrap();
+        assert_eq!(anchor_locations(&journal), [35]);
+        journal = journal.anchor(Location::new(80)).await.unwrap();
+        assert_eq!(anchor_locations(&journal), [35, 77]);
+
+        // Recording an anchor keeps every digest, so earlier operations stay provable.
+        let hasher = journal.hasher.clone();
+        let (proof, ops) = journal
+            .historical_proof(size, Location::new(10), NZU64!(5), 0)
+            .await
+            .unwrap();
+        assert!(verify_proof(&proof, &hasher, Location::new(10), &ops, &root));
+        drop(journal);
+
+        // The reopen replays from the newest anchor.
+        let journal = create_empty_journal::<F>(context.child("reopen"), suffix).await;
+        assert_eq!(journal.root(0).unwrap(), root);
+        assert_eq!(journal.merkle.bounds().start, Location::new(77));
+        assert_eq!(journal.bounds().start, 0);
+        assert_eq!(journal.read(10).await.unwrap(), create_operation::<F>(10));
+        assert!(matches!(
+            journal
+                .historical_proof(size, Location::new(10), NZU64!(5), 0)
+                .await,
+            Err(Error::Journal(JournalError::ItemPruned(10)))
+        ));
+        let (proof, ops) = journal
+            .historical_proof(size, Location::new(77), NZU64!(5), 0)
+            .await
+            .unwrap();
+        assert!(verify_proof(&proof, &hasher, Location::new(77), &ops, &root));
+
+        // A prune before the anchor deletes nothing and keeps the frontier.
+        let (journal, start) = journal.prune(Location::new(50)).await.unwrap();
+        assert_eq!(start, Location::new(0));
+        assert_eq!(journal.journal.bounds().start, 0);
+        assert_eq!(journal.frontier.boundary().0, Location::new(0));
+
+        // A prune past it moves the boundary and drops the anchors at or before it.
+        let (journal, start) = journal.prune(Location::new(85)).await.unwrap();
+        assert_eq!(start, Location::new(84));
+        assert_eq!(journal.frontier.boundary().0, Location::new(84));
+        assert!(anchor_locations(&journal).is_empty());
+        drop(journal);
+
+        // A replay from the new boundary rebuilds the same root.
+        let journal = create_empty_journal::<F>(context.child("pruned"), suffix).await;
+        assert_eq!(journal.merkle.bounds().start, Location::new(84));
+        assert_eq!(journal.root(0).unwrap(), root);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_anchors_reopen_mmr() {
+        deterministic::Runner::default().start(anchors_reopen::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_anchors_reopen_mmb() {
+        deterministic::Runner::default().start(anchors_reopen::<mmb::Family>);
+    }
+
+    /// A reopen bounded below an anchor replays from the pruning boundary and drops the anchor, so
+    /// different operations appended after the bound replay correctly later.
+    async fn bounded_reopen_drops_later_anchors<F: Family + PartialEq>(context: Context) {
+        let suffix = "bounded-anchors";
+        let mut journal = create_journal_with_ops::<F>(context.child("build"), suffix, 50).await;
+        (journal, _) = journal
+            .append(&TestOp::<F>::CommitFloor(None, Location::new(0)))
+            .await
+            .unwrap();
+        for i in 51..100u8 {
+            (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+        }
+        (journal, _) = journal
+            .append(&TestOp::<F>::CommitFloor(None, Location::new(0)))
+            .await
+            .unwrap();
+        journal = journal.sync().await.unwrap();
+        journal = journal.anchor(Location::new(90)).await.unwrap();
+        assert_eq!(anchor_locations(&journal), [84]);
+        drop(journal);
+
+        let mut journal = TestJournal::<F>::init_at_most(
+            context.child("bounded"),
+            merkle_config(suffix),
+            journal_config(suffix),
+            51,
+            |op: &TestOp<F>| op.is_commit(),
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        assert_eq!(journal.size(), Location::new(51));
+        assert_eq!(journal.merkle.bounds().start, Location::new(0));
+        assert!(anchor_locations(&journal).is_empty());
+
+        // Append different operations after the bound, then reopen.
+        for i in 0..49u8 {
+            (journal, _) = journal
+                .append(&create_operation::<F>(i.wrapping_add(200)))
+                .await
+                .unwrap();
+        }
+        (journal, _) = journal
+            .append(&TestOp::<F>::CommitFloor(None, Location::new(0)))
+            .await
+            .unwrap();
+        journal = journal.sync().await.unwrap();
+        let root = journal.root(0).unwrap();
+        drop(journal);
+
+        let journal = create_empty_journal::<F>(context.child("reopen"), suffix).await;
+        assert_eq!(journal.merkle.bounds().start, Location::new(0));
+        assert_eq!(journal.root(0).unwrap(), root);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_bounded_reopen_drops_later_anchors_mmr() {
+        deterministic::Runner::default().start(bounded_reopen_drops_later_anchors::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_bounded_reopen_drops_later_anchors_mmb() {
+        deterministic::Runner::default().start(bounded_reopen_drops_later_anchors::<mmb::Family>);
+    }
+
+    /// An import records no anchor before its boundary is persisted, and persisting it drops the
+    /// anchors the frontier held.
+    async fn import_resets_anchors<F: Family + PartialEq>(context: Context) {
+        let suffix = "import-anchors";
+        let journal = create_journal_with_ops::<F>(context.child("source"), suffix, 50).await;
+        let journal = journal.anchor(Location::new(30)).await.unwrap();
+        assert_eq!(anchor_locations(&journal), [28]);
+        let start = Location::new(20);
+        let pins = journal.pinned_nodes_at(start).await.unwrap();
+        let Journal {
+            journal: ops,
+            frontier,
+            hasher,
+            ..
+        } = journal;
+        drop(frontier);
+
+        let journal = TestJournal::<F>::from_components(
+            context.child("import"),
+            &merkle_config(suffix),
+            ops,
+            hasher,
+            start,
+            pins,
+            NZU64!(7),
+        )
+        .await
+        .unwrap();
+        let journal = journal.anchor(Location::new(45)).await.unwrap();
+        assert_eq!(anchor_locations(&journal), [28]);
+        let journal = journal.persist_boundary().await.unwrap();
+        assert!(anchor_locations(&journal).is_empty());
+        let journal = journal.anchor(Location::new(45)).await.unwrap();
+        assert_eq!(anchor_locations(&journal), [42]);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test]
+    fn test_import_resets_anchors_mmr() {
+        deterministic::Runner::default().start(import_resets_anchors::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_import_resets_anchors_mmb() {
+        deterministic::Runner::default().start(import_resets_anchors::<mmb::Family>);
+    }
+
+    /// An anchor recorded over operations a crash loses lies past the recovered end, so the reopen
+    /// replays from the pruning boundary and drops it.
+    #[test_traced("INFO")]
+    fn test_anchor_past_lost_operations_is_dropped() {
+        type F = mmr::Family;
+        let suffix = "anchor-lost-ops";
+        let (root, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let mut journal =
+                    create_journal_with_ops::<F>(context.child("build"), suffix, 50).await;
+                (journal, _) = journal
+                    .append(&TestOp::<F>::CommitFloor(None, Location::new(0)))
+                    .await
+                    .unwrap();
+                journal = journal.sync().await.unwrap();
+                let root = journal.root(0).unwrap();
+                for i in 51..100u8 {
+                    (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+                }
+                (journal, _) = journal
+                    .append(&TestOp::<F>::CommitFloor(None, Location::new(0)))
+                    .await
+                    .unwrap();
+
+                // Record an anchor over the unsynced operations, then crash, losing them.
+                journal = journal.anchor(Location::new(90)).await.unwrap();
+                assert_eq!(anchor_locations(&journal), [84]);
+                *context.storage_fault_config().write() = deterministic::FaultConfig {
+                    write_rate: Some(deterministic::WriteConfig {
+                        failure_rate: probability!(0.0),
+                        retention_rate: probability!(0.0),
+                        mode: deterministic::PartialWriteMode::Prefix,
+                    }),
+                    ..Default::default()
+                };
+                drop(journal);
+                root
+            });
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let journal = create_empty_journal::<F>(context.child("reopen"), suffix).await;
+            assert_eq!(journal.size(), Location::new(51));
+            assert_eq!(journal.merkle.bounds().start, Location::new(0));
+            assert_eq!(journal.root(0).unwrap(), root);
+            assert!(anchor_locations(&journal).is_empty());
+            journal.destroy().await.unwrap();
+        });
     }
 
     /// An import outside the durable operation range leaves the existing frontier recoverable.

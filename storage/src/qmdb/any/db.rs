@@ -674,7 +674,15 @@ where
         ),
     )]
     #[boxed]
-    pub async fn sync(mut self) -> Result<Self, crate::qmdb::Error<F>> {
+    pub async fn sync(self) -> Result<Self, crate::qmdb::Error<F>> {
+        let mut db = self.sync_log().await?;
+        let boundary = db.sync_boundary();
+        db.log = db.log.anchor(boundary).await?;
+        Ok(db)
+    }
+
+    /// Sync the log to disk without recording an anchor.
+    pub(crate) async fn sync_log(mut self) -> Result<Self, crate::qmdb::Error<F>> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         self.log = self.log.sync().await?;
@@ -700,7 +708,22 @@ where
         ),
     )]
     #[boxed]
-    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), crate::qmdb::Error<F>> {
+    pub async fn start_sync(self) -> Result<(Self, Handle<()>), crate::qmdb::Error<F>> {
+        let (mut db, data) = self.start_sync_log().await?;
+        let anchor;
+        let boundary = db.sync_boundary();
+        (db.log, anchor) = db.log.start_anchor(boundary).await?;
+        let handle = Handle::from_future(async move {
+            data.await?;
+            anchor.await
+        });
+        Ok((db, handle))
+    }
+
+    /// Begin syncing the log to disk without recording an anchor.
+    pub(crate) async fn start_sync_log(
+        mut self,
+    ) -> Result<(Self, Handle<()>), crate::qmdb::Error<F>> {
         self.metrics.start_sync_calls.inc();
         let (log, handle) = self.log.start_sync().await?;
         self.log = log;

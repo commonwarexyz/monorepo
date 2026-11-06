@@ -807,6 +807,10 @@ fn test_current_sync_interrupted_between_writes_reopens_at_target() {
             local.bounds().end < target.range.end(),
             "the sync must fetch a suffix"
         );
+        assert!(
+            !local.any.log.frontier.anchors().is_empty(),
+            "the local database recorded anchors"
+        );
         drop(local);
 
         // Run the sync by hand: fetch the missing operations and the boundary pins, build the
@@ -863,8 +867,9 @@ fn test_current_sync_interrupted_between_writes_reopens_at_target() {
         .unwrap();
         assert_eq!(SyncDatabase::root(&db), target.root);
 
-        // Persist only the first of the two writes, then stop.
-        drop(db.sync_metadata().await.unwrap());
+        // Persist only the first of the two writes, then stop. The local frontier keeps its
+        // anchors, which describe operations the sync did not change.
+        drop(db.reset_metadata().await.unwrap());
 
         // The database reopens at the target. The frontier is still the local one, so the
         // operations before the target start remain readable until the next prune.

@@ -36,7 +36,7 @@
 //!
 //! A Current database ([db::Db]) wraps an Any database and adds:
 //!
-//! - **Status bitmap** ([BitMap]): One bit per operation in the log. Bit _i_ is 1 if operation _i_
+//! - **Status bitmap** ([BitMap](commonware_utils::bitmap::Prunable)): One bit per operation in the log. Bit _i_ is 1 if operation _i_
 //!   is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N` bytes (i.e. `N *
 //!   8` bits each). `N` must be a power of two.
 //!
@@ -339,7 +339,6 @@ use crate::{
                 update::{Ordered as OrderedUpdate, Unordered as UnorderedUpdate},
             },
         },
-        bitmap::Shared,
         operation::Key,
     },
     translator::Translator,
@@ -349,7 +348,7 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
-use commonware_utils::bitmap::Prunable as BitMap;
+use commonware_utils::bitmap::Readable as _;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -512,27 +511,43 @@ where
     let strategy = config.merkle.strategy.clone();
     let metadata_partition = config.grafted_metadata_partition.clone();
 
-    // Load bitmap metadata (pruned_chunks + pinned nodes for the grafted tree).
-    let (metadata, pruned_chunks, pinned_nodes) =
-        db::init_metadata(context.child("metadata"), &metadata_partition).await?;
+    // Load bitmap metadata: the pruning base and the anchors, each a pruned-chunk count with the
+    // grafted tree's pinned nodes there.
+    let (metadata, base, anchors) =
+        db::init_metadata::<F, _, H::Digest>(context.child("metadata"), &metadata_partition)
+            .await?;
 
-    // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted metadata.
-    let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
-        .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
-    let bitmap = Arc::new(Shared::<N>::new(bitmap));
-
-    // The persisted bitmap boundary and delayed-pair absorption threshold constrain which retained
-    // commit can be reconstructed. The underlying `any` database takes sole ownership of the
-    // bitmap, validates both constraints before publishing the selected journal prefix, then
-    // populates the bitmap during snapshot rebuild.
+    // The bitmap starts at the newest anchor the selected commit can be rebuilt from, else at the
+    // base. Each boundary constrains which retained commits can be reconstructed: their floors and
+    // sizes, and the delayed-pair absorption threshold. The underlying `any` database checks them
+    // before publishing the selected journal prefix, then populates the bitmap during snapshot
+    // rebuild.
+    let boundary = |chunks: usize| any::BitmapBoundary {
+        chunks,
+        min_size: db::pair_absorption_threshold::<F, N>(chunks as u64),
+    };
+    let boundaries = any::BitmapBoundaries {
+        base: boundary(base.0),
+        anchors: anchors.iter().map(|(chunks, _)| boundary(*chunks)).collect(),
+    };
     let any = any::init_with_bitmap(
         context.child("any"),
         config.into(),
-        Some(bitmap),
+        Some(boundaries),
         max_size,
-        db::pair_absorption_threshold::<F, N>(pruned_chunks as u64),
     )
     .await?;
+    let chunks = any.bitmap.pruned_chunks();
+    let pinned_nodes = if chunks == base.0 {
+        base.1
+    } else {
+        anchors
+            .into_iter()
+            .find(|(anchor, _)| *anchor == chunks)
+            .ok_or(crate::qmdb::Error::<F>::DataCorrupted("bitmap starts at no boundary"))?
+            .1
+    };
+    let metadata = db::drop_anchors_after::<F, _, N>(metadata, any.inactivity_floor_loc).await?;
 
     // Rebuild the grafted tree, graft roots, and canonical root from the persisted pins and
     // selected operation tree.
@@ -2625,6 +2640,94 @@ pub mod tests {
             });
         }
         (db, history)
+    }
+
+    /// A reopen rebuilds the bitmap from the newest anchor. A prune before the anchor keeps the
+    /// pruning base, so a bounded restart at an earlier retained commit still works afterwards.
+    #[test_traced("INFO")]
+    fn test_current_reopens_from_anchor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "current-anchor";
+            let (db, history) = build_generations(&context, partition, 6).await;
+            let last = history.last().unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("reopen"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), last.root);
+            assert_eq!(db.pruned_bits(), *last.sync_boundary);
+            assert_eq!(db.bounds().start, Location::new(0));
+
+            let earlier = history
+                .iter()
+                .find(|generation| generation.floor < last.sync_boundary)
+                .unwrap();
+            let db = db.prune(earlier.floor).await.unwrap();
+            assert_eq!(db.pruned_bits(), *last.sync_boundary);
+            assert_eq!(db.bounds().start, Location::new(0));
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("bounded"),
+                variable_config::<OneCap>(partition),
+                Some(earlier.size),
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), earlier.root);
+            assert_eq!(db.pruned_bits(), 0);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A database reopened and synced again still restarts bounded at an earlier retained commit
+    /// whose floor precedes the last sync boundary.
+    #[test_traced("INFO")]
+    fn test_current_bounded_restart_after_reopen_and_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "current-bounded-after-sync";
+            let (db, history) = build_generations(&context, partition, 6).await;
+            let last = history.last().unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("reopen"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), last.root);
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            let earlier = history
+                .iter()
+                .find(|generation| generation.floor < last.sync_boundary)
+                .unwrap();
+            let db: Result<UnorderedVariableDb, _> = UnorderedVariableDb::init(
+                context.child("bounded"),
+                variable_config::<OneCap>(partition),
+                Some(earlier.size),
+            )
+            .await;
+            let db = match db {
+                Ok(db) => db,
+                Err(error) => panic!("bounded restart at an earlier retained commit: {error:?}"),
+            };
+            assert_eq!(db.root(), earlier.root);
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test_traced("INFO")]

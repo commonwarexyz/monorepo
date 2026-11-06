@@ -1808,6 +1808,35 @@ pub(crate) mod test {
         });
     }
 
+    /// After syncing again, a database still serves a peer syncing to its previous sync target:
+    /// the pins at the target's start and a proof of its operations against the target's root.
+    #[test]
+    fn test_any_fixed_db_serves_previous_sync_target() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = create_test_db(context.child("storage")).await;
+            let db = apply_ops(db, create_test_ops(200)).await;
+            let db = db.sync().await.unwrap();
+            let (start, size, root) = (db.sync_boundary(), db.bounds().end, db.root());
+
+            let mut db = db;
+            for seed in 1..4 {
+                db = apply_ops(db, create_test_ops_seeded(100, seed)).await;
+            }
+            let db = db.sync().await.unwrap();
+            assert!(db.sync_boundary() > start, "the floor did not move");
+            assert!(db.bounds().start <= start, "the target's operations were pruned");
+
+            let pins = db.pinned_nodes_at(start).await;
+            assert!(pins.is_ok(), "pins at the previous target's start: {pins:?}");
+            let proof = db.historical_proof(size, start, NZU64!(10)).await;
+            let (proof, ops) = proof.expect("proof of the previous target's operations");
+            assert!(proof.verify::<Sha256, _>(start, &ops, &root));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test]
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
