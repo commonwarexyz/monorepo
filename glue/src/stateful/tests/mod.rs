@@ -1292,7 +1292,11 @@ fn out_of_order_certifications_complete_on_qmdb() {
         let mut certifications = Vec::with_capacity(blocks.len());
         for index in [5, 1, 4, 0, 3, 2] {
             let block = &blocks[index];
-            certifications.push(deferred.certify(block.context.round, block.digest()).await);
+            certifications.push(
+                deferred
+                    .certify(block.context.round, (), block.digest())
+                    .await,
+            );
         }
 
         for result in futures::future::join_all(certifications).await {
@@ -1435,6 +1439,7 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
         let mut proposer = stateful_mailbox.clone();
         let mut proposal = Box::pin(proposer.propose(
             (context.child("propose"), blocks[5].context.clone()),
+            (),
             PendingAncestry(PhantomData),
             (),
         ));
@@ -1460,7 +1465,11 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
         let mut certifications = Vec::with_capacity(blocks.len());
         for index in [5, 1, 4, 0, 3, 2] {
             let block = &blocks[index];
-            certifications.push(deferred.certify(block.context.round, block.digest()).await);
+            certifications.push(
+                deferred
+                    .certify(block.context.round, (), block.digest())
+                    .await,
+            );
         }
         for result in futures::future::join_all(certifications).await {
             assert!(result.expect("certification result missing"));
@@ -1798,7 +1807,9 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         // Cache the batches that will be finalized so the held descendant
         // verification does not own their replay.
         for block in &blocks[..3] {
-            let certification = deferred.certify(block.context.round, block.digest()).await;
+            let certification = deferred
+                .certify(block.context.round, (), block.digest())
+                .await;
             assert!(
                 certification
                     .await
@@ -1819,7 +1830,9 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             let block = &blocks[index];
             certifications.push((
                 index,
-                deferred.certify(block.context.round, block.digest()).await,
+                deferred
+                    .certify(block.context.round, (), block.digest())
+                    .await,
             ));
         }
 
@@ -2035,7 +2048,9 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
         // Cache the batches that will be finalized so the held descendant
         // verifications do not own their replay.
         for block in &blocks[..3] {
-            let certification = deferred.certify(block.context.round, block.digest()).await;
+            let certification = deferred
+                .certify(block.context.round, (), block.digest())
+                .await;
             assert!(
                 certification
                     .await
@@ -2056,6 +2071,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
         let mut proposer = stateful_mailbox.clone();
         let mut proposal = Box::pin(proposer.propose(
             (context.child("propose"), blocks[3].context.clone()),
+            (),
             ancestry::from_iter([digested(blocks[2].clone())]),
             (),
         ));
@@ -2082,7 +2098,9 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             let block = &blocks[index];
             certifications.push((
                 index,
-                deferred.certify(block.context.round, block.digest()).await,
+                deferred
+                    .certify(block.context.round, (), block.digest())
+                    .await,
             ));
         }
         process_started
@@ -2275,7 +2293,9 @@ fn pruning_joins_verification_on_real_qmdbs() {
         // Keep the first four batches available so the verification of block 5 executes
         // only block 5.
         for block in &blocks[..4] {
-            let certification = deferred.certify(block.context.round, block.digest()).await;
+            let certification = deferred
+                .certify(block.context.round, (), block.digest())
+                .await;
             assert!(
                 certification
                     .await
@@ -2313,7 +2333,9 @@ fn pruning_joins_verification_on_real_qmdbs() {
         );
 
         let block = &blocks[4];
-        let mut certification = deferred.certify(block.context.round, block.digest()).await;
+        let mut certification = deferred
+            .certify(block.context.round, (), block.digest())
+            .await;
         first_started
             .await
             .expect("verification should start before pruning");

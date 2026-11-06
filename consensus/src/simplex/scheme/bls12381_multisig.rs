@@ -5,8 +5,22 @@
 //! Certificates contain signer indices alongside an aggregated signature,
 //! enabling secure per-validator activity tracking and conflict detection.
 
-use crate::simplex::{scheme::Namespace, types::Subject};
-use commonware_cryptography::impl_certificate_bls12381_multisig;
+use crate::{
+    simplex::{
+        scheme::{Namespace, Seeded},
+        types::Subject,
+    },
+    types::Round,
+};
+use commonware_cryptography::{
+    PublicKey, bls12381::primitives::variant::Variant, impl_certificate_bls12381_multisig,
+};
 use commonware_utils::N3f1;
 
 impl_certificate_bls12381_multisig!(Subject<'a, D>, Namespace, N3f1);
+
+impl<P: PublicKey, V: Variant> Seeded for Scheme<P, V> {
+    type Seed = ();
+
+    fn seed(_: Round, _: Option<&Self::Certificate>) {}
+}

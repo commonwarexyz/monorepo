@@ -1,5 +1,8 @@
 use crate::{
-    simplex::elector::{self, Input, Terms},
+    simplex::{
+        elector::{self, Input, Terms},
+        scheme::Seeded,
+    },
     types::Round,
 };
 use bytes::Bytes;
@@ -185,6 +188,17 @@ where
 
     fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {
         S::certificate_codec_config_unbounded()
+    }
+}
+
+impl<S> Seeded for Scheme<S>
+where
+    S: CertificateScheme + Seeded,
+{
+    type Seed = S::Seed;
+
+    fn seed(round: Round, certificate: Option<&Self::Certificate>) -> Self::Seed {
+        S::seed(round, certificate)
     }
 }
 

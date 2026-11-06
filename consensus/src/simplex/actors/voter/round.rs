@@ -339,6 +339,17 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.finalization.as_ref()
     }
 
+    /// Returns a certificate that notarizes or finalizes this round's proposal, if any.
+    ///
+    /// Both carry the scheme's seed for the round, so either serves as its source.
+    pub const fn certificate(&self) -> Option<&S::Certificate> {
+        match (&self.finalization, &self.notarization) {
+            (Some(finalization), _) => Some(&finalization.certificate),
+            (None, Some(notarization)) => Some(&notarization.certificate),
+            (None, None) => None,
+        }
+    }
+
     /// Returns true if we have explicitly certified the proposal.
     pub const fn is_certified(&self) -> bool {
         matches!(self.certify, CertifyState::Certified(true))

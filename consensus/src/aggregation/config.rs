@@ -17,7 +17,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 pub struct Config<
     P: Provider<Scope = Epoch>,
     D: Digest,
-    A: Automaton<Context = Height, Digest = D>,
+    A: Automaton<Context = Height, Digest = D, Seed = ()>,
     Z: Reporter<Activity = Activity<P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,

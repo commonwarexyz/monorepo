@@ -1170,6 +1170,7 @@ mod tests {
                     mailbox
                         .propose(
                             (context.child("queue_fence"), proposal.context()),
+                            (),
                             ancestry::from_iter([]),
                             (),
                         )
@@ -1258,6 +1259,7 @@ mod tests {
                     mailbox
                         .propose(
                             (queue_context.child("queue_fence"), proposal.context()),
+                            (),
                             ancestry::from_iter([]),
                             (),
                         )

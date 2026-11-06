@@ -29,8 +29,9 @@ impl Application {
 impl A for Application {
     type Context = Height;
     type Digest = <Sha256 as Hasher>::Digest;
+    type Seed = ();
 
-    async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
+    async fn propose(&mut self, context: Self::Context, (): ()) -> oneshot::Receiver<Self::Digest> {
         let (sender, receiver) = oneshot::channel();
 
         let digest = match &self.strategy {
@@ -55,6 +56,7 @@ impl A for Application {
     async fn verify(
         &mut self,
         context: Self::Context,
+        (): (),
         payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         trace!(%context, ?payload, "verify");

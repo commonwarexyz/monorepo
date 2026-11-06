@@ -7,6 +7,7 @@ use crate::dkg::{
 use commonware_consensus::{
     Application as ConsensusApplication, CertifiableBlock, Handoff, Heightable,
     marshal::ancestry::Ancestry,
+    simplex::scheme::Seeded,
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
 use commonware_cryptography::{Digested, Signer, bls12381::primitives::variant::Variant};
@@ -146,6 +147,7 @@ where
     async fn prepare(
         &mut self,
         context: (E, Self::Context),
+        seed: <Self::SigningScheme as Seeded>::Seed,
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
     ) -> Handoff<Digested<Self::Block>> {
@@ -170,6 +172,7 @@ where
         self.inner
             .prepare(
                 context,
+                seed,
                 ancestry,
                 Input {
                     upstream: input,
@@ -197,6 +200,7 @@ where
     async fn propose(
         &mut self,
         context: (E, Self::Context),
+        seed: <Self::SigningScheme as Seeded>::Seed,
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
     ) -> Option<Digested<Self::Block>> {
@@ -232,6 +236,7 @@ where
             .inner
             .propose(
                 context,
+                seed,
                 ancestry,
                 Input {
                     upstream: input,
@@ -260,10 +265,11 @@ where
     async fn verify(
         &mut self,
         context: (E, Self::Context),
+        seed: <Self::SigningScheme as Seeded>::Seed,
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         let Some(tip) = ancestry.peek() else {
-            return self.inner.verify(context, ancestry).await;
+            return self.inner.verify(context, seed, ancestry).await;
         };
         let height = tip.height();
         let phase = self.phase(height);
@@ -305,7 +311,7 @@ where
                 return false;
             }
         }
-        self.inner.verify(context, ancestry).await
+        self.inner.verify(context, seed, ancestry).await
     }
 }
 
@@ -421,6 +427,7 @@ mod tests {
         async fn prepare(
             &mut self,
             context: (E, Self::Context),
+            (): (),
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
         ) -> Handoff<Digested<Self::Block>> {
@@ -428,7 +435,7 @@ mod tests {
                 return Handoff::Wait;
             }
             let decision = self.handoff;
-            self.propose(context, ancestry, input)
+            self.propose(context, (), ancestry, input)
                 .await
                 .map_or(Handoff::Wait, |block| decision.map(|()| block))
         }
@@ -436,6 +443,7 @@ mod tests {
         async fn propose(
             &mut self,
             (_, context): (E, Self::Context),
+            (): (),
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
         ) -> Option<Digested<Self::Block>> {
@@ -464,7 +472,12 @@ mod tests {
             Some(Digested::precomputed(block.clone(), block.digest()))
         }
 
-        async fn verify(&mut self, _: (E, Self::Context), _: impl Ancestry<Self::Block>) -> bool {
+        async fn verify(
+            &mut self,
+            _: (E, Self::Context),
+            (): (),
+            _: impl Ancestry<Self::Block>,
+        ) -> bool {
             *self.verify_count.lock() += 1;
             self.verify_result
         }
@@ -633,6 +646,7 @@ mod tests {
                 let prepared = app
                     .prepare(
                         (context.child("app"), block_context(&midpoint, 2)),
+                        (),
                         ancestry::from_iter([Digested::precomputed(
                             midpoint.clone(),
                             midpoint.digest(),
@@ -654,6 +668,7 @@ mod tests {
                 let proposed = app
                     .propose(
                         (context.child("propose"), block_context(&midpoint, 2)),
+                        (),
                         ancestry::from_iter([Digested::precomputed(
                             midpoint.clone(),
                             midpoint.digest(),
@@ -669,6 +684,7 @@ mod tests {
                 let prepared = app
                     .prepare(
                         (context.child("early"), block_context(&genesis, 1)),
+                        (),
                         ancestry::from_iter([Digested::precomputed(
                             genesis.clone(),
                             genesis.digest(),
@@ -734,6 +750,7 @@ mod tests {
                 let prepared = app
                     .prepare(
                         (context.child("app"), block_context(&parent, 1)),
+                        (),
                         ancestry::from_iter([Digested::precomputed(
                             parent.clone(),
                             parent.digest(),
@@ -755,6 +772,7 @@ mod tests {
                 let proposed = app
                     .propose(
                         (context.child("propose"), block_context(&parent, 1)),
+                        (),
                         ancestry::from_iter([Digested::precomputed(
                             parent.clone(),
                             parent.digest(),
@@ -782,6 +800,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
+                    (),
                     ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
@@ -795,6 +814,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app_retry"), block_context(&parent, 3)),
+                    (),
                     ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
@@ -823,6 +843,7 @@ mod tests {
 
             let mut propose = Box::pin(app.propose(
                 (context.child("app"), block_context(&parent, 2)),
+                (),
                 ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                 (),
             ));
@@ -876,6 +897,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
+                    (),
                     ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
@@ -909,6 +931,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
+                    (),
                     ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
@@ -933,6 +956,7 @@ mod tests {
                 let proposed = app
                     .propose(
                         (context.child("app"), block_context(&parent, 1)),
+                        (),
                         ancestry::from_iter([Digested::precomputed(
                             parent.clone(),
                             parent.digest(),
@@ -964,6 +988,7 @@ mod tests {
             let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
             let mut verify = Box::pin(app.verify(
                 (context.child("app"), block_context(&parent, 1)),
+                (),
                 ancestry::from_iter([tip, parent]),
             ));
 
@@ -1017,6 +1042,7 @@ mod tests {
                 let verified = app
                     .verify(
                         (context.child("app"), block_context(&parent, 1)),
+                        (),
                         ancestry::from_iter([tip, parent]),
                     )
                     .await;
@@ -1041,6 +1067,7 @@ mod tests {
             let verified = app
                 .verify(
                     (context.child("app"), block_context(&parent, 1)),
+                    (),
                     ancestry::from_iter([tip, parent]),
                 )
                 .await;
@@ -1078,6 +1105,7 @@ mod tests {
                 let verified = app
                     .verify(
                         (context.child("app"), block_context(&parent, tip.height().get())),
+                        (),
                         ancestry::from_iter([
                             Digested::precomputed(tip.clone(), tip.digest()),
                             Digested::precomputed(parent.clone(), parent.digest()),
@@ -1143,6 +1171,7 @@ mod tests {
                 let verified = app
                     .verify(
                         (context.child("app"), block_context(&parent, tip.height().get())),
+                        (),
                         ancestry::from_iter([
                             Digested::precomputed(tip.clone(), tip.digest()),
                             Digested::precomputed(parent.clone(), parent.digest()),
