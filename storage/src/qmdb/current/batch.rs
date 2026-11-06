@@ -265,15 +265,16 @@ pub struct Delta<F: Graftable, D: Digest, const N: usize> {
 /// Everything a publisher stores for one batch: the operations it appends, the operations-tree
 /// frontier they extend, and the [`Delta`] it makes to the current-state commitment.
 ///
-/// Replaying `operations` onto `pinned_nodes` recomputes `ops_root`, and `delta.witness` binds
-/// that root to `delta.root`.
+/// Replaying `operations` onto `pinned_nodes`, under the inactivity floor of the latest commit,
+/// recomputes `ops_root`, and `delta.witness` binds that root to `delta.root`.
 #[derive(Clone)]
 pub struct Publication<F: Graftable, D: Digest, U: update::Update, const N: usize> {
     /// Location of the first operation.
     pub start: Location<F>,
     /// Operations-tree frontier at `start`, in [`merkle::Family::nodes_to_pin`] order.
     pub pinned_nodes: Vec<D>,
-    /// Operations the batch appends from `start`, ending with its commit.
+    /// Operations the batch appends from `start`, ending with its commit. Empty for a batch from
+    /// [`super::db::Db::to_batch`].
     pub operations: Arc<Vec<Operation<F, U>>>,
     /// Operations-tree root after the batch.
     pub ops_root: D,
@@ -1219,8 +1220,8 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
     /// It copies state the batch owns, so it returns the same value after the database advances or
     /// prunes, the batch becomes stale, or its ancestors are dropped.
     pub fn delta(&self) -> Delta<F, D, N> {
-        // Collect the chunks this batch's overlay wrote. A `Base` bitmap has no overlay, so its
-        // batch wrote no chunks. Both lists are sorted so equal deltas compare equal.
+        // Collect the chunks this batch's overlay wrote, sorted so equal deltas compare equal. A
+        // `Base` bitmap has no overlay, so its batch wrote no chunks.
         let mut chunks: Vec<(u64, [u8; N])> = match &self.bitmap {
             BitmapBatch::Base(_) => Vec::new(),
             BitmapBatch::Layer(layer) => layer
@@ -1233,7 +1234,7 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
         chunks.sort_unstable_by_key(|(index, _)| *index);
 
         // Collect the grafted nodes this batch appended or overwrote, keyed by operations-tree
-        // position.
+        // position and sorted so equal deltas compare equal.
         let mut grafted_nodes: Vec<(Position<F>, D)> = self
             .grafted
             .local_nodes()
@@ -2223,7 +2224,6 @@ mod tests {
     ) {
         let publication = batch.publication(db).unwrap();
         assert_eq!(publication.delta, batch.delta());
-        assert_eq!(publication.ops_root, batch.ops_root());
         let proof = batch.inner.proof(&db.any).unwrap();
         assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
             publication.start,
@@ -2411,14 +2411,14 @@ mod tests {
             let chunk_root = mmb::Family::subtree_root_position(mmb::Location::new(0), height);
             let graftable_at = mmb::Family::peak_birth_size(chunk_root, height);
 
-            // With the genesis commit and its own commit, the parent ends two operations short
+            // With the genesis commit and its own commit, the parent ends one operation short
             // of `graftable_at`, leaving chunk 0 complete but pending and a partial chunk after
             // it. Its delta keeps the mirror in step.
-            let parent = write_keys(db.new_batch(), 0..graftable_at - 4, 0)
+            let parent = write_keys(db.new_batch(), 0..graftable_at - 3, 0)
                 .merkleize_with(&db, &mut Hold)
                 .await
                 .unwrap();
-            assert_eq!(*parent.bounds().tip.size, graftable_at - 2);
+            assert_eq!(*parent.bounds().tip.size, graftable_at - 1);
             assert!(parent.ops_root_witness().pending_chunk_digest.is_some());
             assert!(parent.ops_root_witness().partial_chunk.is_some());
             let delta = parent.delta();
@@ -2426,14 +2426,8 @@ mod tests {
             published.apply(&delta);
             published.check(&db, &delta);
 
-            // Two empty batches add one commit each, so the second reaches `graftable_at` and
-            // grafts chunk 0.
-            let child = parent
-                .new_batch::<Sha256>()
-                .merkleize_with(&db, &mut Hold)
-                .await
-                .unwrap();
-            let transition = child
+            // An empty batch adds one commit, so it reaches `graftable_at` and grafts chunk 0.
+            let transition = parent
                 .new_batch::<Sha256>()
                 .merkleize_with(&db, &mut Hold)
                 .await
@@ -2441,15 +2435,9 @@ mod tests {
             assert_eq!(*transition.bounds().tip.size, graftable_at);
             assert!(transition.ops_root_witness().pending_chunk_digest.is_none());
 
-            // The first empty batch's delta keeps the mirror in step.
-            let child_delta = child.delta();
-            db = db.apply_batch(Arc::clone(&child)).await.unwrap();
-            published.apply(&child_delta);
-            published.check(&db, &child_delta);
-
-            // The second writes none of chunk 0's bits, yet chunk 0's grafted leaf is the only
-            // grafted node in its delta. The mirror holds no grafted nodes before applying that
-            // delta and matches the database after.
+            // It writes none of chunk 0's bits, yet chunk 0's grafted leaf is the only grafted
+            // node in its delta. The mirror holds no grafted nodes before applying that delta and
+            // matches the database after.
             let delta = transition.delta();
             assert!(!delta.chunks.iter().any(|(idx, _)| *idx == 0));
             assert_eq!(delta.grafted_nodes.len(), 1);

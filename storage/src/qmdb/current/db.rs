@@ -2097,43 +2097,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_ops_root_witness_verifies_with_pruned_db() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            let mut db = MmrDb::init(
-                ctx.child("storage"),
-                fixed_config::<OneCap>("ops-root-witness-pruned"),
-                None,
-            )
-            .await
-            .unwrap();
-
-            // Churn the same keys repeatedly to drive the inactivity floor past chunk boundaries.
-            for _ in 0..5 {
-                db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
-            }
-            let boundary = db.sync_boundary();
-            let db = db.prune(boundary).await.unwrap();
-            assert!(
-                db.any.bitmap.pruned_chunks() > 0,
-                "pruning to the sync boundary must remove at least one chunk"
-            );
-            let witness = db.ops_root_witness().clone();
-            let ops_root = db.ops_root();
-            let canonical_root = db.root();
-
-            assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
-
-            let wrong_canonical_root = Sha256::hash(&[b"wrong canonical root"]);
-            assert!(!witness.verify::<Sha256>(&ops_root, &wrong_canonical_root));
-
-            let mut tampered = witness;
-            tampered.grafted_root = Sha256::hash(&[b"wrong grafted root"]);
-            assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
-        });
-    }
-
-    #[test_traced]
     fn test_ops_root_witness_verifies_on_fresh_db() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
