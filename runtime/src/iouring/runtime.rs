@@ -1781,9 +1781,9 @@ impl Worker {
         // Closing the driver and timer table below subsumes queued cancellations.
         // Discard queued forwarding messages so their receivers observe closure.
         // Senders can run callbacks on drop, so destroy these messages outside
-        // the local borrow.
+        // the local borrow, and retain a panic like any deferred callback's.
         for message in self.inbox.drain(..) {
-            Panics::contain(|| drop(message));
+            self.panics.run(|| drop(message));
         }
 
         // Detach local and forwarded observers before running callbacks.
