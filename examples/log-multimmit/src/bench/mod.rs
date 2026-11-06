@@ -16,6 +16,8 @@
 //! local DA certificate covering the block, at its producer. With benchmark events, every node
 //! also logs when its durable certificate first covers every eighth height of every chain, so
 //! certification at each validator can be measured against the producer's submission time.
+//! With payment chains, `application_proposal_receipt_latency` measures submission to the moment
+//! the producer forms the block's `n - f` receipt.
 //!
 //! `application_proposal_finalization_latency` measures batch submission to the first local
 //! consensus finality covering the block, including queueing, body construction, custody, and
