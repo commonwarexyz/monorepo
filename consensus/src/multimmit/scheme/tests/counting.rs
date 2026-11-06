@@ -362,7 +362,6 @@ pub(super) struct Counting;
 
 impl Scheme for Counting {
     type PublicKey = Ed25519PublicKey;
-    type DaFaults = Available;
     type Ordinary = Counted<ed25519_suite::ordinary::Scheme, OrdinarySubject>;
     type Da = Counted<ed25519_suite::da::Scheme, DaSubject>;
     type Nullify = Counted<ed25519_suite::nullify::Scheme, NullifySubject>;
@@ -373,6 +372,10 @@ impl Scheme for Counting {
 
     fn nullification_config(participants: usize) -> usize {
         participants
+    }
+
+    fn da_signers(_: &Self::Da, certificate: &DaCertificateOf<Self>) -> Option<usize> {
+        Some(certificate.signers.count())
     }
 }
 

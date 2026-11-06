@@ -173,29 +173,6 @@ impl ChainLimits {
     }
 }
 
-/// How many DA shares recover a data-availability certificate.
-///
-/// The quorum is the threshold of the DA key sharing, so it is fixed when the epoch's keys are
-/// dealt.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub enum DaQuorum {
-    /// `n - 2f` shares, so at least `f + 1` correct signers hold the block.
-    #[default]
-    Available,
-    /// `n - f` shares, from every correct validator when `f` are faulty.
-    ///
-    /// Two such quorums share at least `2f + 1` correct validators, each of which signs at most
-    /// one block per chain height, so a height has at most one binding certificate. On a chain
-    /// with `d = 0` and `e = 0`, where nothing uncertified is ever placed, such a certificate is a
-    /// binding receipt: once any correct validator holds it, its block is eventually placed and
-    /// ordered. An equivocating producer can complete a quorum with its own share and withhold the
-    /// certificate, leaving correct validators a share short, so a client holding a receipt must
-    /// deliver it to a correct validator.
-    ///
-    /// The quorum is the whole epoch's, so it applies to every chain, pipelined chains included.
-    Binding,
-}
-
 /// Bounded inputs used while decoding untrusted protocol objects, and the quorums they imply.
 ///
 /// Counts are stored as `u32` so their meaning is independent of the target
@@ -206,9 +183,9 @@ pub enum DaQuorum {
 /// # Quorums
 ///
 /// A committee of `n` participants tolerates `f` Byzantine faults with `n >= 5f + 1`, where `f`
-/// is the largest such count. A data-availability certificate needs the [`DaQuorum`]: `n - 2f`
-/// shares by default, so at least `f + 1` of its signers are correct and hold the block, or
-/// `n - f` for binding certificates. An L-QC needs exactly `n - f` votes and
+/// is the largest such count. A data-availability certificate needs `n - 2f` shares, so at least
+/// `f + 1` of its signers are correct and hold the block, and a payment chain's receipt counts
+/// `n - f`. An L-QC needs exactly `n - f` votes and
 /// a V-QC accounts for between `n - f` and `n` messages. A nullification and a V-QC designation
 /// each need `2f + 1`: such a set holds at least `f + 1` correct participants and overlaps every
 /// `n - f` set in at least `f + 1` members, at least one of them correct. That overlap is why
@@ -218,11 +195,10 @@ pub struct CodecConfig {
     participants: u32,
     chains: u32,
     limits: PathLimits,
-    da_quorum: DaQuorum,
 }
 
 impl CodecConfig {
-    /// Creates bounded codec configuration for an epoch with the default [`DaQuorum`].
+    /// Creates bounded codec configuration for an epoch.
     pub fn new(
         participants: usize,
         chains: usize,
@@ -243,19 +219,12 @@ impl CodecConfig {
             participants,
             chains,
             limits,
-            da_quorum: DaQuorum::Available,
         })
     }
 
     /// Returns this configuration with `limits` as the largest path limits of any chain.
     pub(crate) const fn with_limits(mut self, limits: PathLimits) -> Self {
         self.limits = limits;
-        self
-    }
-
-    /// Returns this configuration with DA certificates recovered from `quorum` shares.
-    pub const fn with_da_quorum(mut self, quorum: DaQuorum) -> Self {
-        self.da_quorum = quorum;
         self
     }
 
@@ -312,17 +281,9 @@ impl CodecConfig {
         N5f1::final_rank(self.participants) as usize
     }
 
-    /// Returns which [`DaQuorum`] recovers DA certificates.
-    pub const fn da_quorum_kind(self) -> DaQuorum {
-        self.da_quorum
-    }
-
-    /// Returns the exact DA-certificate quorum: `n - 2f`, or `n - f` when certificates bind.
+    /// Returns the exact DA-certificate quorum, `n - 2f`.
     pub fn da_quorum(self) -> usize {
-        match self.da_quorum {
-            DaQuorum::Available => N5f1::da_quorum(self.participants) as usize,
-            DaQuorum::Binding => self.view_quorum(),
-        }
+        N5f1::da_quorum(self.participants) as usize
     }
 
     /// Returns the exact nullification quorum, `2f + 1`.
@@ -546,10 +507,6 @@ mod tests {
                 codec.designation_quorum(),
                 N5f1::nullification_quorum(participants) as usize
             );
-
-            let binding = codec.with_da_quorum(DaQuorum::Binding);
-            assert_eq!(binding.da_quorum_kind(), DaQuorum::Binding);
-            assert_eq!(binding.da_quorum(), N5f1::quorum(participants) as usize);
         }
     }
 }
