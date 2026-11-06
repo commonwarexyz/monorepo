@@ -727,7 +727,7 @@ pub mod tests {
     use crate::{
         IoBuf, IoBufMut, IoBufs,
         iouring::{
-            deadlines::RES,
+            deadlines::RESOLUTION,
             mailbox::Mailbox,
             request::{
                 Cache, DIRECT_ALIGN, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput,
@@ -1514,7 +1514,7 @@ pub mod tests {
         assert!(harness.completed.is_empty());
         let scheduled = harness.driver.next_deadline().unwrap();
         assert!(scheduled >= deadline);
-        assert!(scheduled < deadline + Duration::from_nanos(RES));
+        assert!(scheduled < deadline + Duration::from_nanos(RESOLUTION));
 
         harness.orphan(id);
         harness.drain();
@@ -3066,7 +3066,7 @@ pub mod tests {
 
             // Never early: one nanosecond before the rounded deadline.
             let fires = harness.fires_at(deadline);
-            assert!(fires >= deadline && fires < deadline + Duration::from_nanos(RES));
+            assert!(fires >= deadline && fires < deadline + Duration::from_nanos(RESOLUTION));
             harness
                 .driver
                 .state
