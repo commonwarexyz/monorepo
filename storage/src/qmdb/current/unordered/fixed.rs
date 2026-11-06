@@ -33,10 +33,14 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 pub type Config<T, S> = current::Config<T, JournalConfig, S>;
 
 pub mod partitioned {
-    //! A partitioned variant of [super] that uses a partitioned index for the snapshot.
+    //! A variant of [super] that uses a partitioned index for the snapshot, dividing the key space
+    //! into `2^(P*8)` partitions. See [Any's counterpart] for when to use one.
     //!
-    //! See [crate::qmdb::any::unordered::fixed::partitioned] for details on partitioned indices and
-    //! when to use them.
+    //! See [Db] for the generic type, or use the convenience aliases:
+    //! - [p256::Db] for 256 partitions (P=1)
+    //! - [p64k::Db] for 65,536 partitions (P=2)
+    //!
+    //! [Any's counterpart]: crate::qmdb::any::unordered::fixed::partitioned
 
     use super::*;
     use crate::index::partitioned::unordered::Index;
