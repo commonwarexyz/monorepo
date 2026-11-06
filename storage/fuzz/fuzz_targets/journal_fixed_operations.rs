@@ -206,7 +206,10 @@ fn fuzz(input: FuzzInput) {
                     mapped.sort_unstable();
                     mapped.dedup();
                     if !mapped.is_empty() {
-                        let batch = journal.read_many(&mapped).await.unwrap();
+                        let batch = journal
+                            .read_many(&mapped, ReadOptions::default())
+                            .await
+                            .unwrap();
                         assert_eq!(batch.len(), mapped.len());
                         // Cross-check against individual reads
                         for (i, &pos) in mapped.iter().enumerate() {

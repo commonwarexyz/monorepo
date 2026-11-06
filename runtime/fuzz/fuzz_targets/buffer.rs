@@ -388,7 +388,7 @@ fn fuzz(input: FuzzInput) {
                         let size = (data_size as usize).clamp(0, MAX_SIZE);
                         let offset = offset as u64;
                         if offset.checked_add(size as u64).is_some() {
-                            let _ = append.read_at(offset, size).await;
+                            let _ = append.read_at(offset, size, ReadOptions::default()).await;
                         }
                     }
                 }

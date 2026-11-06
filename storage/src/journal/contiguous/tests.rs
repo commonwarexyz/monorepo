@@ -1017,7 +1017,10 @@ where
         (journal, _) = journal.append(&(i * 100)).await.unwrap();
     }
 
-    let items = journal.read_many(&[1, 4, 12]).await.unwrap();
+    let items = journal
+        .read_many(&[1, 4, 12], ReadOptions::default())
+        .await
+        .unwrap();
     assert_eq!(items, vec![100, 400, 1200]);
 
     journal.destroy().await.unwrap();
