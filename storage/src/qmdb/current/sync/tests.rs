@@ -824,9 +824,7 @@ fn test_current_sync_interrupted_between_writes_reopens_at_target() {
             let (response, _) = source
                 .serve(Request::Operations {
                     size: range.end(),
-                    start: crate::merkle::Location::new(<Ops as crate::qmdb::sync::Journal<
-                        Family,
-                    >>::size(&journal)),
+                    start: <Ops as crate::qmdb::sync::Journal<Family>>::size(&journal),
                     max_ops: NZU64!(64),
                 })
                 .await
