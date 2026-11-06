@@ -367,7 +367,7 @@ impl EngineDefinition for SingleDbEngine {
             SYNC_BATCH_SIZE,
             fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
         );
-        max_message_size(&[
+        max_message_size([
             simplex::max_payload_size::<MockScheme<ed25519::PublicKey>, sha256::Digest>(
                 participants,
             ),

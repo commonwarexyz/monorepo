@@ -2633,6 +2633,94 @@ pub mod tests {
         (db, history)
     }
 
+    /// Operations whose first length query reports `first`, and later ones their true length.
+    struct DriftingOps<I> {
+        inner: I,
+        first: core::cell::Cell<Option<usize>>,
+    }
+
+    impl<I: ExactSizeIterator> Iterator for DriftingOps<I> {
+        type Item = I::Item;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.inner.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            self.first
+                .take()
+                .map_or_else(|| self.inner.size_hint(), |len| (len, Some(len)))
+        }
+    }
+
+    impl<I: ExactSizeIterator> ExactSizeIterator for DriftingOps<I> {}
+
+    /// A range proof rejects operations whose reported count changes between length queries, so
+    /// it never proves operations beyond the bitmap chunks checked against the first count.
+    #[test_traced("INFO")]
+    fn test_current_range_proof_rejects_changing_operation_count() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("db"),
+                variable_config::<OneCap>("range-proof-count"),
+                None,
+            )
+            .await
+            .unwrap();
+            let db =
+                commit_writes_with_metadata(db, (0..300).map(|i| (key(i), Some(val(i)))), None)
+                    .await;
+            let root = db.root();
+
+            // Four operations straddling the first chunk boundary need both chunks.
+            let start = Location::new(CHUNK_BITS - 2);
+            let (proof, ops, chunks) = db.range_proof(start, NZU64!(4)).await.unwrap();
+            assert_eq!(ops.len(), 4);
+            assert_eq!(chunks.len(), 2);
+            assert!(proof.verify::<Sha256, _, 32>(start, &ops, &chunks, &root));
+
+            // A first length query that hides the operations past the boundary lets the first
+            // chunk alone pass the chunk count check.
+            let drifting = || DriftingOps {
+                inner: ops.iter(),
+                first: core::cell::Cell::new(Some(2)),
+            };
+            let first_chunk = &chunks[..1];
+            assert!(!proof.verify::<Sha256, _, 32>(start, drifting(), first_chunk, &root));
+            assert!(!proof.verify_with_chunk_size::<Sha256, _>(
+                start,
+                drifting(),
+                first_chunk,
+                32,
+                &root,
+            ));
+            assert!(
+                proof
+                    .verify_and_extract_digests::<Sha256, _, 32>(
+                        start,
+                        drifting(),
+                        first_chunk,
+                        &root
+                    )
+                    .is_err()
+            );
+            assert!(
+                proof
+                    .verify_and_extract_digests_with_chunk_size::<Sha256, _>(
+                        start,
+                        drifting(),
+                        first_chunk,
+                        32,
+                        &root,
+                    )
+                    .is_err()
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("INFO")]
     fn test_current_bounded_initialization_recovery() {
         let executor = deterministic::Runner::default();

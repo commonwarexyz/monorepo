@@ -822,7 +822,7 @@ pub(crate) fn test_compact_serve_refuses_previous_contents_while_import_pending<
         };
         assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
             target.size - 1,
-            std::slice::from_ref(&op),
+            [&op],
             &pinned_nodes,
             &target.root,
         ));

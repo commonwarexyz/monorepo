@@ -97,12 +97,7 @@ where
                 op,
                 pinned_nodes,
             },
-        ) => proof.verify_with_pinned_nodes::<H, _>(
-            *start,
-            core::slice::from_ref(op),
-            pinned_nodes,
-            root,
-        ),
+        ) => proof.verify_with_pinned_nodes::<H, _>(*start, [op], pinned_nodes, root),
         _ => false,
     }
 }

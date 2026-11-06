@@ -199,7 +199,7 @@ mod tests {
         let original_pins = batch.pinned_nodes(&db).unwrap();
         assert!(original_proof.verify_with_pinned_nodes::<Sha256, _>(
             start,
-            &ops,
+            ops.iter(),
             &original_pins,
             &root
         ));
