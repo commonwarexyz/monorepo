@@ -165,7 +165,7 @@ impl Waiters {
     /// remains occupied until a local result is consumed or dropped.
     pub fn insert(&mut self, request: Request, observer: Observer) -> WaiterId {
         let id = self.entries.insert_with(|id| {
-            // Reserve the maximum index for cancellation and mailbox wake tokens.
+            // Reserve the maximum index for cancellation and ring wait tokens.
             assert!(id.index < u32::MAX, "waiter slot index overflow");
             Entry::Pending(Waiter {
                 state: WaiterState::Active { target_tick: None },

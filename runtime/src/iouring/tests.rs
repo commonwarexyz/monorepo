@@ -4057,9 +4057,9 @@ fn test_push_ends_a_spin_through_its_notification() {
     });
 }
 
-/// A worker whose spin ended on a push's wake signal consumes it, so once idle
-/// again it spins out and sleeps on its futex, and does not spin on the stale
-/// signal forever.
+/// A worker whose spin ended on a push's notification observes the sequence
+/// again on its next turn, so once idle it can finish spinning and sleep on
+/// its futex.
 #[test]
 fn test_spinning_worker_sleeps_after_a_notified_spin() {
     let spinner = SpinnerConfig {

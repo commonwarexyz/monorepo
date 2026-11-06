@@ -10,7 +10,8 @@
 //! own, and joins them at shutdown.
 //!
 //! [`Idle`] tracks idle publications and search responsibility, and selects
-//! pool workers to wake. The unparkers in their mailboxes deliver the signals.
+//! pool workers to wake. The unparkers in their mailboxes deliver the
+//! notifications.
 //! [`super::idle`] describes the parking sequence and wake policy.
 //!
 //! # Placement
