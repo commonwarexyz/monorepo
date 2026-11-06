@@ -7,11 +7,11 @@ use super::{
         driver::tests::fail_after_completion,
         idle::tests::{WakePoint, on_wake_point},
         operation::Operation,
+        park::tests::waiting,
         queue::CAPACITY,
         request::{RecvRequest, Request},
         task::{Task, tests::cancelled},
         tasks::tests::AFTER_INSERT,
-        waker::tests::waiting,
     },
     *,
 };
@@ -498,7 +498,7 @@ pub fn before_overflow(pool: &Pool) {
 /// Whether worker `index` of `pool` is published idle and waits for a wake,
 /// on its futex or in its io_uring wait.
 fn is_waiting(pool: &Pool, index: u32) -> bool {
-    pool.idle().is_idle(index) && waiting(&pool.mailbox(index).waker)
+    pool.idle().is_idle(index) && waiting(&pool.mailbox(index).unparker)
 }
 
 /// Block until every worker of `pool` waits for a wake, published idle with no
@@ -4076,7 +4076,7 @@ fn test_spinning_worker_sleeps_after_a_notified_spin() {
             assert_eq!(thread, other);
         }
         let deadline = Instant::now() + TEST_TIMEOUT;
-        while !waiting(&pool.mailbox(1).waker) {
+        while !waiting(&pool.mailbox(1).unparker) {
             assert!(Instant::now() < deadline, "worker one must sleep");
             std::hint::spin_loop();
         }

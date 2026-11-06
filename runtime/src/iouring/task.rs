@@ -2007,6 +2007,7 @@ mod loom_tests {
     };
     use crate::iouring::{
         idle::{Park, Searcher},
+        park::Parker,
         queue::{CAPACITY, STEALABLE},
     };
     use loom::{
@@ -2109,26 +2110,30 @@ mod loom_tests {
     ) {
         if run(set, runnable) && completed.fetch_add(1, Ordering::AcqRel) + 1 == tasks {
             for worker in 0..pool.workers() as u32 {
-                pool.mailbox(worker).waker.notify();
+                pool.mailbox(worker).unparker.unpark();
             }
         }
     }
 
-    /// Run worker `index` of `pool` until `tasks` tasks complete. `ready` must
-    /// own that worker's run queue, and every runnable must belong to `set`.
+    /// Run worker `index` of `pool` until `tasks` tasks complete. `ready` and
+    /// `parker` must own that worker's run queue and word, and every runnable
+    /// must belong to `set`.
     ///
     /// The worker takes from its run queue, then from the global queue, and
     /// when both are empty searches and parks through the drive loop's
     /// `Searcher` methods. The model omits I/O, the root, and the global queue
-    /// interval. A worker observes its waker before it looks, and waits only
+    /// interval. A worker observes its word before it looks, and waits only
     /// while no notification moved it since. With `spin`, a worker that sees
     /// it moved runs again without arming, as an idle spin that sees it does.
     /// The worker that completes the last task wakes every worker, so none
-    /// waits forever.
+    /// waits forever. Models take every parker before starting any thread, so
+    /// the mailbox lock adds no schedules.
+    #[allow(clippy::too_many_arguments)]
     fn work(
         pool: &Pool,
         set: &Tasks,
         ready: &mut Ready,
+        parker: &Parker,
         index: u32,
         completed: &AtomicUsize,
         tasks: usize,
@@ -2143,8 +2148,7 @@ mod loom_tests {
                 ready.discard();
                 return;
             }
-            let waker = &pool.mailbox(index).waker;
-            let seen = waker.observe();
+            let seen = parker.observe();
             let next = ready.pop().or_else(|| pool.take(ready));
             if let Some(runnable) = next {
                 searcher.leave_search();
@@ -2160,8 +2164,8 @@ mod loom_tests {
                 searcher.finish_park();
                 continue;
             }
-            if !spin || !waker.moved(seen) {
-                waker.park_idle(seen, None);
+            if !spin || !parker.moved(seen) {
+                parker.park(seen, None);
             }
             searcher.finish_park();
         }
@@ -2195,25 +2199,33 @@ mod loom_tests {
                 handles.push(task);
             }
 
+            let mut parkers: Vec<Parker> = (0..workers as u32)
+                .map(|index| pool.mailbox(index).parker())
+                .collect();
+            let parker = parkers.remove(0);
             let pushing = thread::spawn(move || {
                 signal.store(true, Ordering::Release);
                 for waker in wakers {
                     waker.wake();
                 }
             });
-            let others: Vec<_> = (1..workers as u32)
-                .map(|index| {
+            let others: Vec<_> = parkers
+                .into_iter()
+                .zip(1..)
+                .map(|(parker, index)| {
                     let pool = pool.clone();
                     let set = set.clone();
                     let completed = completed.clone();
                     thread::spawn(move || {
                         let mut ready = pool.queue(index).owner();
-                        work(&pool, &set, &mut ready, index, &completed, tasks, spin);
+                        work(
+                            &pool, &set, &mut ready, &parker, index, &completed, tasks, spin,
+                        );
                     })
                 })
                 .collect();
             let mut ready = pool.queue(0).owner();
-            work(&pool, &set, &mut ready, 0, &completed, tasks, spin);
+            work(&pool, &set, &mut ready, &parker, 0, &completed, tasks, spin);
             pushing.join().unwrap();
             for other in others {
                 other.join().unwrap();
@@ -2332,6 +2344,7 @@ mod loom_tests {
         builder.preemption_bound = Some(3);
         builder.check(|| {
             let pool = pool(2);
+            let (p0, p1) = (pool.mailbox(0).parker(), pool.mailbox(1).parker());
             let set = Arc::new(Tasks::new(2));
             let completed = Arc::new(AtomicUsize::new(0));
             let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
@@ -2342,7 +2355,9 @@ mod loom_tests {
                 let completed = completed.clone();
                 move || {
                     let mut ready = pool.queue(1).owner();
-                    work(&pool, &set, &mut ready, 1, &completed, STEALABLE, false);
+                    work(
+                        &pool, &set, &mut ready, &p1, 1, &completed, STEALABLE, false,
+                    );
                 }
             });
 
@@ -2351,7 +2366,9 @@ mod loom_tests {
             let mut ready = pool.queue(0).owner();
             let handles = enqueue_raising(&pool, &set, &mut ready, &ran, STEALABLE);
             wait_ran(&ran);
-            work(&pool, &set, &mut ready, 0, &completed, STEALABLE, false);
+            work(
+                &pool, &set, &mut ready, &p0, 0, &completed, STEALABLE, false,
+            );
             thief.join().unwrap();
             for task in handles {
                 assert_eq!(refs(&task.state), 1);
@@ -2367,6 +2384,7 @@ mod loom_tests {
         builder.preemption_bound = Some(2);
         builder.check(|| {
             let pool = pool(3);
+            let (p0, p2) = (pool.mailbox(0).parker(), pool.mailbox(2).parker());
             let set = Arc::new(Tasks::new(3));
             let completed = Arc::new(AtomicUsize::new(0));
             let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
@@ -2396,7 +2414,9 @@ mod loom_tests {
                 let completed = completed.clone();
                 move || {
                     let mut ready = pool.queue(2).owner();
-                    work(&pool, &set, &mut ready, 2, &completed, STEALABLE, false);
+                    work(
+                        &pool, &set, &mut ready, &p2, 2, &completed, STEALABLE, false,
+                    );
                 }
             });
 
@@ -2404,7 +2424,9 @@ mod loom_tests {
             let handles = enqueue_raising(&pool, &set, &mut ready, &ran, STEALABLE);
             wait_ran(&ran);
             searching.join().unwrap();
-            work(&pool, &set, &mut ready, 0, &completed, STEALABLE, false);
+            work(
+                &pool, &set, &mut ready, &p0, 0, &completed, STEALABLE, false,
+            );
             parked.join().unwrap();
             for task in handles {
                 assert_eq!(refs(&task.state), 1);
@@ -2424,6 +2446,7 @@ mod loom_tests {
         builder.preemption_bound = Some(2);
         builder.check(|| {
             let pool = pool(4);
+            let (p1, p3) = (pool.mailbox(1).parker(), pool.mailbox(3).parker());
             let set = Arc::new(Tasks::new(4));
             let completed = Arc::new(AtomicUsize::new(0));
             let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
@@ -2440,17 +2463,17 @@ mod loom_tests {
                     let mut ready = pool.queue(1).owner();
                     {
                         let mut searcher = Searcher::new(&pool, 1);
-                        let seen = pool.mailbox(1).waker.observe();
+                        let seen = p1.observe();
                         assert_eq!(searcher.prepare_park(&ready), Park::Wait);
                         reach(&gate, 1);
 
-                        pool.mailbox(1).waker.park_idle(seen, None);
+                        p1.park(seen, None);
                         await_stage(&gate, 2);
                         searcher.finish_park();
                         searcher.leave_search();
                     }
 
-                    work(&pool, &set, &mut ready, 1, &completed, TASKS, false);
+                    work(&pool, &set, &mut ready, &p1, 1, &completed, TASKS, false);
                 }
             });
 
@@ -2492,7 +2515,7 @@ mod loom_tests {
             wait_ran(&ran);
             complete(&pool, &set, first_zero, &completed, TASKS);
             complete(&pool, &set, first_two, &completed, TASKS);
-            work(&pool, &set, &mut r3, 3, &completed, TASKS, false);
+            work(&pool, &set, &mut r3, &p3, 3, &completed, TASKS, false);
             peer.join().unwrap();
 
             assert_eq!(completed.load(Ordering::Acquire), TASKS);
@@ -2542,6 +2565,7 @@ mod loom_tests {
         builder.preemption_bound = Some(2);
         builder.check(|| {
             let pool = pool(3);
+            let (p0, p2) = (pool.mailbox(0).parker(), pool.mailbox(2).parker());
             let set = Arc::new(Tasks::new(3));
             let completed = Arc::new(AtomicUsize::new(0));
             let ran: Arc<(Mutex<usize>, Condvar)> = Arc::new((Mutex::new(0), Condvar::new()));
@@ -2574,7 +2598,7 @@ mod loom_tests {
                 let completed = completed.clone();
                 move || {
                     let mut ready = pool.queue(2).owner();
-                    work(&pool, &set, &mut ready, 2, &completed, TASKS, false);
+                    work(&pool, &set, &mut ready, &p2, 2, &completed, TASKS, false);
                 }
             });
 
@@ -2601,7 +2625,7 @@ mod loom_tests {
             reach(&gate, 2);
             wait_ran_count(&ran, TASKS - 1);
             thief.join().unwrap();
-            work(&pool, &set, &mut ready, 0, &completed, TASKS, false);
+            work(&pool, &set, &mut ready, &p0, 0, &completed, TASKS, false);
             parked.join().unwrap();
             for task in handles {
                 assert_eq!(refs(&task.state), 1);

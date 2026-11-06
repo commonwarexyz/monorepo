@@ -110,8 +110,8 @@
 //!
 //! Before parking, the worker checks readiness again because polls and
 //! callbacks can produce more work. Pool workers coordinate through
-//! [`Searcher`], and all workers wait through their mailbox's
-//! [`Waker`](super::waker::Waker). See [`super::idle`] for parking order.
+//! [`Searcher`], and every worker waits through the [`Parker`] it takes from
+//! its mailbox at startup. See [`super::idle`] for parking order.
 //!
 //! A held search count suppresses kicks, so a worker returns it before user
 //! code and before another turn without parking. Every drive-loop exit,
@@ -167,6 +167,7 @@ use super::{
     driver::Driver,
     idle::Searcher,
     mailbox::{Cancel, Forward, Mailbox, Message},
+    park::Parker,
     pool::{MAX_WORKERS, Pool, Threads},
     request::{RequestOutput, RetiredResources},
     sleep::{Sleep, Timers},
@@ -247,7 +248,7 @@ pub struct RingConfig {
     /// chooses 1024 for its production default and 128 when built for tests.
     ///
     /// The CQ uses the kernel default of twice the rounded SQ size. Cancellation
-    /// and mailbox wake CQEs also use that space, and cancellation acknowledgements
+    /// and ring wait CQEs also use that space, and cancellation acknowledgements
     /// can outlive their requests. The operation limit therefore does not bound
     /// all pending CQEs. The runtime relies on the kernel's CQ overflow backlog
     /// (`IORING_FEAT_NODROP`), drained by subsequent completion-service enters.
@@ -1100,9 +1101,10 @@ impl Local {
     /// submissions. A pool worker takes the mailbox the pool created for it and
     /// the owner's end of its run queue, and panics if its index is out of
     /// range or that end was already taken. A dedicated worker creates its own
-    /// mailbox and has no run queue. An I/O error at startup returns before the
-    /// run queue's owner is taken.
-    fn new(shared: Arc<Shared>, role: Role) -> std::io::Result<Self> {
+    /// mailbox and has no run queue. Every worker also takes the parker of its
+    /// mailbox's word, which panics if it was already taken. An I/O error at
+    /// startup returns before the run queue's owner or the parker is taken.
+    fn new(shared: Arc<Shared>, role: Role) -> std::io::Result<(Self, Parker)> {
         #[cfg(test)]
         tests::before_startup(&shared.workers)?;
 
@@ -1114,7 +1116,7 @@ impl Local {
         let driver = Driver::new(
             &shared.cfg.ring_config,
             shared.cfg.max_timeout(),
-            mailbox.waker.clone(),
+            mailbox.unparker.clone(),
             now,
         )?;
 
@@ -1128,7 +1130,8 @@ impl Local {
             }),
             Role::Dedicated => None,
         };
-        Ok(Self {
+        let parker = mailbox.parker();
+        let local = Self {
             seat,
             driver: Some(driver),
             timers: Timers::default(),
@@ -1139,7 +1142,8 @@ impl Local {
             deferred: Deferred::default(),
             shared,
             reported_pending: 0,
-        })
+        };
+        Ok((local, parker))
     }
 
     /// Return the worker installed on this thread, including during cleanup.
@@ -1500,8 +1504,10 @@ pub struct Worker {
     panics: Panics,
     /// Retained mailbox batch, reversed once so bounded pops remain FIFO.
     inbox: Vec<Message>,
-    /// Waker sequence observed after this turn's polls and before any of its
-    /// source checks. A wait blocks only while the word still carries it.
+    /// The parker of this worker's word, the only handle that can wait on it.
+    parker: Parker,
+    /// Sequence of the word observed after this turn's polls and before any of
+    /// its source checks. A wait blocks only while the word still carries it.
     seen_seq: u32,
     /// Calls to [`Self::next_runnable`] left until the one that looks at the
     /// pool's global queue.
@@ -1517,7 +1523,7 @@ impl Worker {
     /// Install TLS only after constructing a cleanup owner. A pool worker
     /// counts itself in the pool's shutdown barrier, and its cleanup leaves it.
     /// Panics if this thread already has a worker installed.
-    fn new(local: Local) -> Self {
+    fn new(local: Local, parker: Parker) -> Self {
         if local.role().is_pool() {
             local.shared.pool.enter();
         }
@@ -1529,6 +1535,7 @@ impl Worker {
             deferred: Deferred::default(),
             panics: Panics::default(),
             inbox: Vec::new(),
+            parker,
             seen_seq: 0,
             until_global: global_queue_interval,
             global_queue_interval,
@@ -1564,7 +1571,7 @@ impl Worker {
         // a task panic, so the hook reports it exactly once. Returning the
         // payload instead of unwinding drops `build` and `service` outside any
         // unwind, since their destructors may panic.
-        let local = Local::new(shared.clone(), role).map_err(|error| {
+        let (local, parker) = Local::new(shared.clone(), role).map_err(|error| {
             catch_unwind(AssertUnwindSafe(|| {
                 panic!(
                     "failed to create native io_uring worker (Linux 6.1 with SINGLE_ISSUER and DEFER_TASKRUN is required): {error}"
@@ -1572,7 +1579,7 @@ impl Worker {
             }))
             .expect_err("a startup error must panic")
         })?;
-        let mut worker = Self::new(local);
+        let mut worker = Self::new(local, parker);
         let mailbox = worker.local.borrow().mailbox.clone();
 
         // Register the background service as an ordinary task before constructing
@@ -1797,11 +1804,10 @@ impl Worker {
 
         // Retained writes and syncs still need to finish. Cancelled operations
         // retain their resources until their own completion arrives.
-        let mailbox = self.local.borrow().mailbox.clone();
         loop {
             // Observe before service checks permits and completions, so a wait
             // blocks only while nothing notified since.
-            self.seen_seq = mailbox.waker.observe();
+            self.seen_seq = self.parker.observe();
 
             // A retained write may still be queued without an SQE in flight.
             // Service must stage that work before we consider waiting for a CQE.
@@ -1822,7 +1828,11 @@ impl Worker {
 
             // Parking only enters the kernel and invokes no user callbacks.
             // Keeping the driver in Local preserves the cleanup owner on unwind.
-            let parked = local.driver.as_mut().unwrap().park(self.seen_seq, deadline);
+            let parked = local
+                .driver
+                .as_mut()
+                .unwrap()
+                .park(&self.parker, self.seen_seq, deadline);
             drop(local);
             parked.expect("io_uring shutdown wait failed");
         }
@@ -1851,7 +1861,7 @@ impl Worker {
     /// Apply a bounded batch of messages, taking another mailbox batch when needed.
     ///
     /// A take is due only while the mailbox reports mail, which needs no lock,
-    /// so pool claims and permit grants, which move the waker's word without a
+    /// so pool claims and permit grants, which move the worker's word without a
     /// message, cost no take. The turn observed the word before this check, so
     /// a batch it misses moves the word after that observation.
     fn messages(&mut self, mailbox: &Arc<Mailbox>) {
@@ -2011,8 +2021,8 @@ impl Worker {
         // and returns a held search count before the caller destroys the root.
         let mut searcher = index.map(|index| Searcher::new(&shared.pool, index));
 
-        // A spin ends once any notification moves the waker's word.
-        let mut spinner = Spinner::new(&spinner_cfg, || mailbox.waker.moved(self.seen_seq));
+        // A spin ends once any notification moves the worker's word.
+        let mut spinner = Spinner::new(&spinner_cfg, || self.parker.moved(self.seen_seq));
         let max_spin =
             Duration::from_micros(spinner_cfg.max_budget_us.try_into().unwrap_or(u64::MAX));
 
@@ -2072,11 +2082,11 @@ impl Worker {
                 }
             }
 
-            // Observe the waker's word before checking any source of work:
+            // Observe the worker's word before checking any source of work:
             // completions, permits, messages, and the pool. A notification
             // after this load moves the word, so a wait against it refuses to
             // block.
-            self.seen_seq = mailbox.waker.observe();
+            self.seen_seq = self.parker.observe();
 
             // Polls can leave cancelled observers behind. Run one batch before
             // deciding whether kernel service can wait until parking. Reentrant
@@ -2130,7 +2140,7 @@ impl Worker {
             if ready
                 || pending_submissions
                 || !self.inbox.is_empty()
-                || mailbox.waker.moved(self.seen_seq)
+                || self.parker.moved(self.seen_seq)
             {
                 if let Some(searcher) = &mut searcher {
                     searcher.leave_search();
@@ -2188,13 +2198,11 @@ impl Worker {
             // Unfinished requests need the io_uring wait to run deferred kernel
             // work. A futex wake alone cannot advance their I/O.
             if needs_kernel {
-                let result = self
-                    .local
-                    .borrow_mut()
-                    .driver
-                    .as_mut()
-                    .unwrap()
-                    .park(self.seen_seq, deadline);
+                let result = self.local.borrow_mut().driver.as_mut().unwrap().park(
+                    &self.parker,
+                    self.seen_seq,
+                    deadline,
+                );
 
                 // Withdraw before callbacks so their kicks cannot spend a wake
                 // on this already running worker. A claim's count stays held
@@ -2217,8 +2225,8 @@ impl Worker {
                     .is_some_and(|deadline| deadline.saturating_duration_since(now) <= max_spin);
 
                 let seen = self.seen_seq;
-                if (near_deadline || !spinner.spin(|| mailbox.waker.moved(seen)))
-                    && let Some(duration) = mailbox.waker.park_idle(seen, deadline)
+                if (near_deadline || !spinner.spin(|| self.parker.moved(seen)))
+                    && let Some(duration) = self.parker.park(seen, deadline)
                 {
                     spinner.on_wake(duration);
                 }

@@ -88,6 +88,7 @@ mod driver;
 mod idle;
 mod mailbox;
 pub(crate) mod operation;
+mod park;
 mod pool;
 mod queue;
 mod registration;
@@ -101,7 +102,6 @@ mod task;
 mod tasks;
 mod timeout;
 mod waiter;
-mod waker;
 
 pub use runtime::{Config, Context, RingConfig, Runner};
 pub use spinner::Config as SpinnerConfig;
