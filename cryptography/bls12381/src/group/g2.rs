@@ -1,6 +1,9 @@
 //! The group G2.
 
-use super::kernel::Group;
+use super::{
+    Scalar,
+    kernel::{Group, MAX_COMPONENTS},
+};
 use crate::core::{
     curve::g2::{Coordinates, IDENTITY, Point},
     field::{
@@ -43,6 +46,15 @@ impl Group for G2 {
     // Products in the quadratic extension take fewer multiplies in residues than in the lanes.
     const SUM_BATCH: Option<usize> = None;
     const MULTIPLY_BATCH: Option<usize> = None;
+
+    // Scalars split into four quarters of 64 bits: k = a0 + a1 |x| + a2 |x|^2 + a3 |x|^3 for
+    // the eigenvalue x = -|x| of the endomorphism.
+    const COMPONENTS: usize = 4;
+    const COMPONENT_BITS: u32 = 65;
+
+    fn components(scalar: &Scalar) -> [u128; MAX_COMPONENTS] {
+        scalar.split_quarters().map(u128::from)
+    }
 
     fn coordinates(&self) -> &Coordinates {
         &self.0
@@ -141,6 +153,12 @@ mod tests {
     #[test]
     fn representations_agree() {
         shared::check_representations::<G2>();
+    }
+
+    #[test]
+    fn endomorphism_multiplies_by_eigenvalue() {
+        // The curve parameter x, which is negative.
+        shared::check_endomorphism::<G2>(-Scalar::from_u64(crate::group::scalar::X_ABS));
     }
 
     #[test]

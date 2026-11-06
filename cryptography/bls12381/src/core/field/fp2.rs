@@ -59,12 +59,25 @@
 
 use super::{
     arithmetic::{Field, Signed, TIGHT, unroll},
-    fp::BYTES as FP_BYTES,
+    fp::{self, BYTES as FP_BYTES, WORDS},
 };
 use commonware_simd::Simd;
 
 /// Number of bytes in an element's big-endian encoding: `c1` followed by `c0`.
 pub const BYTES: usize = 2 * FP_BYTES;
+
+/// Returns the encoding of `c0 + c1 i` for little-endian words.
+pub(crate) const fn encode(c0: [u64; WORDS], c1: [u64; WORDS]) -> [u8; BYTES] {
+    let (c0, c1) = (fp::encode(c0), fp::encode(c1));
+    let mut bytes = [0; BYTES];
+    let mut i = 0;
+    while i < FP_BYTES {
+        bytes[i] = c1[i];
+        bytes[FP_BYTES + i] = c0[i];
+        i += 1;
+    }
+    bytes
+}
 
 /// Signed sums of products of elements in the representation `F` on backend `S`.
 pub type Product<F, S> = Fp2<Signed<<F as Field<S>>::Product>>;

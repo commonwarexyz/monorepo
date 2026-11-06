@@ -66,6 +66,106 @@ const ROOTS_OF_UNITY: [Scalar; TWO_ADICITY as usize + 1] = {
 /// The inverse of the coset shift [`GENERATOR`].
 const GENERATOR_INV: Scalar = GENERATOR.invert();
 
+/// `2^256` as an element of the field, which shifts a word chunk of a wide integer into place.
+const SHIFT: Scalar = Scalar(R2);
+
+/// `|x|`, the magnitude of the curve parameter.
+pub(crate) const X_ABS: u64 = 0xd201_0000_0001_0000;
+
+/// `t = x^2` as little-endian words, where `r = t^2 - t + 1`.
+pub(crate) const X_SQUARED: [u64; 2] = [0x0000_0001_0000_0000, 0xac45_a401_0001_a402];
+
+/// `floor(2^256 / t)`, which [`Scalar::split`] multiplies by to divide by `t`.
+const X_SQUARED_RECIPROCAL: [u64; 3] = [0x63f6_e522_f6cf_ee2e, 0x7c6b_ecf1_e01f_aadd, 1];
+
+/// `floor(2^128 / |x|)`, which [`Scalar::split_quarters`] multiplies by to divide by `|x|`.
+const X_ABS_RECIPROCAL: [u64; 2] = [0x3812_04ca_56cd_56b5, 1];
+
+/// Returns the product of two little-endian integers, in `N = A + B` words.
+const fn mul_words<const A: usize, const B: usize, const N: usize>(
+    a: &[u64; A],
+    b: &[u64; B],
+) -> [u64; N] {
+    const { assert!(N == A + B) };
+    let mut product = [0; N];
+    let mut i = 0;
+    while i < A {
+        let mut carry = 0u64;
+        let mut j = 0;
+        while j < B {
+            // A product of words plus a word and a carry is below 2^128.
+            let wide = product[i + j] as u128 + a[i] as u128 * b[j] as u128 + carry as u128;
+            product[i + j] = wide as u64;
+            carry = (wide >> 64) as u64;
+            j += 1;
+        }
+        product[i + B] = carry;
+        i += 1;
+    }
+    product
+}
+
+/// Returns `a - b` modulo `2^(64 N)` and whether it borrowed.
+const fn sub_words<const N: usize>(a: &[u64; N], b: &[u64; N]) -> ([u64; N], bool) {
+    let mut difference = [0; N];
+    let mut borrow = 0u64;
+    let mut i = 0;
+    while i < N {
+        let wide = (a[i] as u128)
+            .wrapping_sub(b[i] as u128)
+            .wrapping_sub(borrow as u128);
+        difference[i] = wide as u64;
+        borrow = (wide >> 127) as u64;
+        i += 1;
+    }
+    (difference, borrow == 1)
+}
+
+/// Returns `value / divisor` and `value mod divisor` for a value of `N = 2 D` words whose
+/// quotient fits in `D` words, given `reciprocal = floor(2^(64 N) / divisor)` in `R = D + 1`
+/// words, without branching on the value.
+///
+/// The quotient estimated from the reciprocal falls short by at most one, since
+/// `value * reciprocal / 2^(64 N)` is at least `value / divisor - value / 2^(64 N)`, so one
+/// conditional subtraction of the divisor corrects the remainder.
+const fn divide<const N: usize, const D: usize, const R: usize, const W: usize>(
+    value: &[u64; N],
+    divisor: &[u64; D],
+    reciprocal: &[u64; R],
+) -> ([u64; D], [u64; D]) {
+    const { assert!(N == 2 * D && R == D + 1 && W == N + R) };
+    let wide: [u64; W] = mul_words(value, reciprocal);
+    let mut quotient = [0; D];
+    let mut i = 0;
+    while i < D {
+        quotient[i] = wide[N + i];
+        i += 1;
+    }
+    let product: [u64; N] = mul_words(&quotient, divisor);
+    let (remainder, _) = sub_words(value, &product);
+    let mut extended = [0; N];
+    let mut i = 0;
+    while i < D {
+        extended[i] = divisor[i];
+        i += 1;
+    }
+    let (reduced, borrow) = sub_words(&remainder, &extended);
+    // Keep the remainder when it is below the divisor, and otherwise take the reduced one and
+    // add one to the quotient.
+    let keep = (borrow as u64).wrapping_neg();
+    let mut corrected = [0; D];
+    let mut carry = !keep & 1;
+    let mut i = 0;
+    while i < D {
+        corrected[i] = (remainder[i] & keep) | (reduced[i] & !keep);
+        let (sum, overflow) = quotient[i].overflowing_add(carry);
+        quotient[i] = sum;
+        carry = overflow as u64;
+        i += 1;
+    }
+    (quotient, corrected)
+}
+
 /// An element of the scalar field.
 ///
 /// Values are kept as canonical Montgomery representatives, and every operation runs in time
@@ -106,34 +206,43 @@ impl Scalar {
         montgomery::mul(&self.0, &[1, 0, 0, 0], &MODULUS, INV)
     }
 
-    /// Writes the signed digits of the canonical integer in base `2^width`, least significant
-    /// first, one per entry of `digits`.
-    ///
-    /// Each digit lies in `(-2^(width - 1), 2^(width - 1)]`, and the digits weighted by
-    /// `2^(width * i)` sum to the integer. Requires `2 <= width <= 15` and digits covering at
-    /// least `256` bits, so that the integer, below `2^255`, carries nothing out of the last
-    /// digit. Runs in variable time, so the scalar must be public.
-    pub(crate) fn signed_digits(self, width: u32, digits: &mut [i16]) {
-        debug_assert!((2..=15).contains(&width));
-        debug_assert!(digits.len() * width as usize >= 256);
-        let words = self.to_words();
-        let width = width as usize;
-        let half = 1i32 << (width - 1);
-        let mut carry = 0;
-        for (i, digit) in digits.iter_mut().enumerate() {
-            let (word, shift) = (i * width / 64, i * width % 64);
-            let mut bits = 0;
-            if word < WORDS {
-                bits = words[word] >> shift;
-                if shift + width > 64 && word + 1 < WORDS {
-                    bits |= words[word + 1] << (64 - shift);
-                }
-            }
-            let raw = (bits & ((1 << width) - 1)) as i32 + carry;
-            carry = i32::from(raw > half);
-            *digit = (raw - (carry << width)) as i16;
+    /// Reduces a little-endian integer of any length modulo the group order, without branching
+    /// on its words.
+    pub(crate) fn from_words_wide(words: &[u64]) -> Self {
+        // Each chunk of four words enters Montgomery form by one multiplication, which accepts a
+        // left operand below 2^256 when the right one is below r, and shifts the sum so far.
+        let mut sum = Self::ZERO;
+        for chunk in words.chunks(WORDS).rev() {
+            let mut padded = [0; WORDS];
+            padded[..chunk.len()].copy_from_slice(chunk);
+            let chunk = Self(montgomery::mul(&padded, &R2, &MODULUS, INV));
+            sum = sum.mul(SHIFT).add(chunk);
         }
-        debug_assert_eq!(carry, 0);
+        sum
+    }
+
+    /// Returns `[a, b]` with `a + b t` the canonical integer and `a, b < t`, for `t = x^2`,
+    /// without branching on the value.
+    ///
+    /// Since `r = t^2 - t + 1`, the quotient by `t` is below `t`, so both halves fit in `128`
+    /// bits.
+    pub(crate) fn split(self) -> [u128; 2] {
+        let (quotient, remainder) = divide::<WORDS, 2, 3, 7>(&self.to_words(), &X_SQUARED, &X_SQUARED_RECIPROCAL);
+        [remainder, quotient].map(|words| words[0] as u128 | (words[1] as u128) << 64)
+    }
+
+    /// Returns `[a0, a1, b0, b1]` with `a = a0 + a1 |x|` and `b = b0 + b1 |x|` for the halves
+    /// `[a, b]` of [`Self::split`] and every quarter below `|x|`, without branching on the
+    /// value.
+    pub(crate) fn split_quarters(self) -> [u64; 4] {
+        let [a, b] = self.split();
+        let mut quarters = [0; 4];
+        for (half, quarters) in [a, b].iter().zip(quarters.as_chunks_mut::<2>().0) {
+            let words = [*half as u64, (*half >> 64) as u64];
+            let (quotient, remainder) = divide::<2, 1, 2, 4>(&words, &[X_ABS], &X_ABS_RECIPROCAL);
+            *quarters = [remainder[0], quotient[0]];
+        }
+        quarters
     }
 
     /// Parses the canonical big-endian encoding.
@@ -660,32 +769,85 @@ mod tests {
     }
 
     #[test]
-    fn signed_digits_reconstruct_value() {
-        let mut rng = test_rng();
+    fn endomorphism_constants() {
+        let t: [u64; 2] = mul_words(&[X_ABS], &[X_ABS]);
+        assert_eq!(t, X_SQUARED);
+        // r = t^2 - t + 1.
+        let mut order: [u64; 4] = mul_words(&t, &t);
+        (order, _) = sub_words(&order, &[t[0], t[1], 0, 0]);
+        order[0] += 1;
+        assert_eq!(order, MODULUS);
+        // The reciprocals are the floors of 2^256 / t and 2^128 / |x|: the products fall short
+        // of the powers of two by less than the divisors.
+        let product: [u64; 5] = mul_words(&X_SQUARED_RECIPROCAL, &t);
+        assert_eq!(product[4], 0);
+        let (short, borrow) = sub_words(&[0, 0, 0, 0], &product[..4].try_into().unwrap());
+        assert!(borrow && short[2] == 0 && short[3] == 0);
+        assert!(short[1] < t[1] || (short[1] == t[1] && short[0] < t[0]));
+        let product: [u64; 3] = mul_words(&X_ABS_RECIPROCAL, &[X_ABS]);
+        assert_eq!(product[2], 0);
+        let (short, borrow) = sub_words(&[0, 0], &[product[0], product[1]]);
+        assert!(borrow && short[1] == 0 && short[0] < X_ABS);
+    }
+
+    #[test]
+    fn splits_reconstruct_value() {
+        let t = Scalar::from_words([X_SQUARED[0], X_SQUARED[1], 0, 0]).unwrap();
+        let x = Scalar::from_u64(X_ABS);
+        let from_u128 = |value: u128| {
+            Scalar::from_words([value as u64, (value >> 64) as u64, 0, 0]).unwrap()
+        };
         let mut values = vec![
             Scalar::ZERO,
             Scalar::ONE,
             -Scalar::ONE,
-            Scalar::from_u64(u64::MAX),
-            Scalar::from_words([0, 0, 0, 1 << 62]).unwrap(),
+            t,
+            t - &Scalar::ONE,
+            t * &t,
+            t * &t - &Scalar::ONE,
+            x * &x * &x,
         ];
-        values.extend((0..4).map(|_| Scalar::random(&mut rng)));
+        let mut rng = test_rng();
+        values.extend((0..64).map(|_| Scalar::random(&mut rng)));
+        let t_value = X_SQUARED[0] as u128 | (X_SQUARED[1] as u128) << 64;
         for value in values {
-            for width in 2..=15 {
-                let mut digits = vec![0; 256usize.div_ceil(width as usize)];
-                value.signed_digits(width, &mut digits);
-                let half = 1 << (width - 1);
-                let base = Scalar::from_u64(1 << width);
-                let mut sum = Scalar::ZERO;
-                for &digit in digits.iter().rev() {
-                    assert!(-half < i32::from(digit) && i32::from(digit) <= half);
-                    let magnitude = Scalar::from_u64(digit.unsigned_abs().into());
-                    let term = if digit < 0 { -magnitude } else { magnitude };
-                    sum = sum * &base + &term;
-                }
-                assert_eq!(sum, value, "width={width}");
-            }
+            let [a, b] = value.split();
+            assert!(a < t_value && b < t_value);
+            assert_eq!(from_u128(a) + &(from_u128(b) * &t), value);
+            let [a0, a1, b0, b1] = value.split_quarters();
+            assert!([a0, a1, b0, b1].iter().all(|quarter| *quarter < X_ABS));
+            assert_eq!(a0 as u128 + a1 as u128 * X_ABS as u128, a);
+            assert_eq!(b0 as u128 + b1 as u128 * X_ABS as u128, b);
         }
+    }
+
+    #[test]
+    fn wide_words_reduce() {
+        assert_eq!(Scalar::from_words_wide(&[]), Scalar::ZERO);
+        assert_eq!(Scalar::from_words_wide(&[1]), Scalar::ONE);
+        assert_eq!(Scalar::from_words_wide(&MODULUS), Scalar::ZERO);
+        assert_eq!(Scalar::from_words_wide(&[0, 0, 0, 0, 1]), SHIFT);
+        let mut rng = test_rng();
+        let mut bytes = [0u8; Scalar::WIDE_BYTES];
+        rng.fill_bytes(&mut bytes);
+        let mut words = [0u64; 2 * WORDS];
+        for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0.iter().rev()) {
+            *word = u64::from_be_bytes(*chunk);
+        }
+        assert_eq!(Scalar::from_words_wide(&words), Scalar::from_bytes_wide(&bytes));
+        // Nine words: the top word is shifted by 2^512.
+        let mut nine = [0; 9];
+        nine[..8].copy_from_slice(&words);
+        nine[8] = 0xdead_beef;
+        assert_eq!(
+            Scalar::from_words_wide(&nine),
+            Scalar::from_bytes_wide(&bytes) + &(Scalar::from_u64(0xdead_beef) * &SHIFT * &SHIFT)
+        );
+        // Short and padded integers agree.
+        assert_eq!(
+            Scalar::from_words_wide(&words[..5]),
+            Scalar::from_words_wide(&[words[0], words[1], words[2], words[3], words[4], 0, 0])
+        );
     }
 
     #[test]
