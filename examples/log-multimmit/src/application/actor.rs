@@ -216,6 +216,7 @@ impl<E: Clock + Spawner + Metrics> Actor<E> {
             Message::Finalized { fact, at } => self.latency.finalize((&fact).into(), at),
             Message::Placed { placed, view, at } => self.latency.place(placed, view, at),
             Message::Ordered { block, at } => self.latency.order(block, at),
+            Message::Certified { block, at } => self.latency.certify(block, at),
         }
     }
 
@@ -575,7 +576,7 @@ mod tests {
                 Sha256::hash(&[b"body"]),
             )
             .unwrap();
-            let votes = (0..DA_QUORUM)
+            let votes = (0..self.committee.codec().da_quorum())
                 .map(|signer| {
                     self.committee
                         .da_vote(Participant::from_usize(signer), header.clone())
