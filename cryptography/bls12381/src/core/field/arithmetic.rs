@@ -223,6 +223,17 @@ impl<P> Signed<P> {
             neg: self.neg.map(|neg| F::carry_product(simd, neg)),
         }
     }
+
+    /// Returns the difference of the sums as one sum of products, subtracting the negative sum
+    /// once with the bias `K` as [`Field::reduce_signed`] does before reducing, or the positive
+    /// sum alone when there is no negative sum.
+    #[inline(always)]
+    pub fn difference<S: Simd, F: Field<S, Product = P>, const K: u64>(self, simd: S) -> P {
+        let Some(neg) = self.neg else {
+            return self.pos;
+        };
+        F::product_sub::<K>(simd, self.pos, neg)
+    }
 }
 
 /// Returns the sum of two optional sums of products.
@@ -547,20 +558,14 @@ pub trait Field<S: Simd>: Copy {
     /// difference must satisfy [`Self::reduce`].
     #[inline(always)]
     fn reduce_signed<const K: u64>(simd: S, sum: Signed<Self::Product>) -> Self {
-        let Some(neg) = sum.neg else {
-            return Self::reduce(simd, sum.pos);
-        };
-        Self::reduce(simd, Self::product_sub::<K>(simd, sum.pos, neg))
+        Self::reduce(simd, sum.difference::<S, Self, K>(simd))
     }
 
     /// Reduces a signed sum as [`Self::reduce_signed`] does, to integer bound at most [`TIGHT`]
     /// as for [`Self::reduce_tight`].
     #[inline(always)]
     fn reduce_signed_tight<const K: u64>(simd: S, sum: Signed<Self::Product>) -> Self {
-        let Some(neg) = sum.neg else {
-            return Self::reduce_tight(simd, sum.pos);
-        };
-        Self::reduce_tight(simd, Self::product_sub::<K>(simd, sum.pos, neg))
+        Self::reduce_tight(simd, sum.difference::<S, Self, K>(simd))
     }
 
     /// Returns `sums(0)`, ..., `sums(N - 1)`, each reduced as [`Self::reduce`] does.

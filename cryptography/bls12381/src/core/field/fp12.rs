@@ -353,20 +353,19 @@ impl<F> Fp12<F> {
             |k| {
                 // Coefficient k sums a_j a_l over pairs whose degrees add to k, or to k + 6 with
                 // the twisted coefficient t[l - 1] of w^(l + 6) in place of a_l.
-                let square = |x: Fp2<F>| x.square_product::<K, S>(simd);
                 match DEGREE[k] {
                     0 => {
-                        let sum = acc(simd, square(a[0]), d[1], t[4]);
+                        let sum = acc(simd, a[0].square_product::<K, S>(simd), d[1], t[4]);
                         acc(simd, acc(simd, sum, d[2], t[3]), t[2], a[3])
                     }
                     1 => acc(simd, acc(simd, d[0].product(simd, a[1]), d[2], t[4]), d[3], t[3]),
                     2 => {
-                        let sum = acc(simd, square(a[1]), d[0], a[2]);
+                        let sum = acc(simd, a[1].square_product::<K, S>(simd), d[0], a[2]);
                         acc(simd, acc(simd, sum, d[3], t[4]), t[3], a[4])
                     }
                     3 => acc(simd, acc(simd, d[0].product(simd, a[3]), d[1], a[2]), d[4], t[4]),
                     4 => {
-                        let sum = acc(simd, square(a[2]), d[0], a[4]);
+                        let sum = acc(simd, a[2].square_product::<K, S>(simd), d[0], a[4]);
                         acc(simd, acc(simd, sum, d[1], a[3]), t[4], a[5])
                     }
                     _ => acc(simd, acc(simd, d[0].product(simd, a[5]), d[1], a[4]), d[2], a[3]),

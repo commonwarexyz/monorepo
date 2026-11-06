@@ -51,21 +51,6 @@ pub const BOUND: u64 = 32;
 /// Largest number of points in a value, the widest representation's lane count.
 const MAX_LANES: usize = 16;
 
-/// A doubled point, with the values of the doubling that the tangent line at the point reuses.
-///
-/// Each value has positional limb bound `1`. Within the coordinate bounds, `yy` has integer bound
-/// at most `17` and `b3zz` at most `43` in every representation, and `yz` at most `17`.
-pub(crate) struct Doubling<F> {
-    /// The doubled point.
-    pub(crate) point: Point<F>,
-    /// `Y^2`.
-    pub(crate) yy: Fp2<F>,
-    /// `3b Z^2`.
-    pub(crate) b3zz: Fp2<F>,
-    /// `Y Z`.
-    pub(crate) yz: Fp2<F>,
-}
-
 /// Projective points, one per lane of the extension values.
 ///
 /// See the [module documentation](self) for the bounds every coordinate satisfies.
@@ -230,8 +215,9 @@ impl<F> Point<F> {
     /// This is Algorithm 7 of Renes, Costello, and Batina, "Complete addition formulas for prime
     /// order elliptic curves" (2016), which accepts any pair of points, including the identity and
     /// equal points. Each cross term is a schoolbook product of sums less the two known products,
-    /// and `3b z1 z2` comes from one more product, so that `Y1 Y2 + 3b Z1 Z2` and
-    /// `Y1 Y2 - 3b Z1 Z2` each take one reduction. That leaves thirteen extension products.
+    /// or the two products accumulated for [`Field::SCHOOLBOOK`], and `3b z1 z2` comes from one
+    /// more product, so that `Y1 Y2 + 3b Z1 Z2` and `Y1 Y2 - 3b Z1 Z2` each take one reduction. That
+    /// leaves thirteen extension products, reduced in two stages of six and three values.
     ///
     /// Runs as its own kernel, so callers share one copy of the formula.
     #[inline(always)]
@@ -241,61 +227,28 @@ impl<F> Point<F> {
     {
         simd.execute(
             #[inline(always)]
-            move |simd: S| self.sum(simd, rhs),
+            move |simd: S| {
+                let first = Addition::new(simd, self, rhs);
+                let first = Fp2::<F>::reduce_each::<6, 12, S>(
+                    simd,
+                    #[cfg_attr(not(debug_assertions), inline(always))]
+                    |k| first.sum(simd, k),
+                );
+                let [x, y, z] = Fp2::<F>::reduce_each::<3, 6, S>(
+                    simd,
+                    #[cfg_attr(not(debug_assertions), inline(always))]
+                    |k| Addition::coordinate(simd, &first, k),
+                );
+                Self { x, y, z }
+            },
         )
-    }
-
-    /// Body of [`Self::add`].
-    #[inline(always)]
-    fn sum<S: Simd>(self, simd: S, rhs: Self) -> Self
-    where
-        F: Field<S>,
-    {
-        let (x1, y1, z1) = (
-            self.x.ready::<1, S>(simd),
-            self.y.ready::<1, S>(simd),
-            self.z.ready::<1, S>(simd),
-        );
-        let (x2, y2, z2) = (
-            rhs.x.ready::<1, S>(simd),
-            rhs.y.ready::<1, S>(simd),
-            rhs.z.ready::<1, S>(simd),
-        );
-        let xx = x1.product(simd, x2);
-        let yy = y1.product(simd, y2);
-        let zz = z1.product(simd, z2);
-        // x1 y2 + y1 x2, y1 z2 + z1 y2, and x1 z2 + z1 x2.
-        let xy = cross(simd, [x1, y1], [x2, y2], xx, yy);
-        let yz = cross(simd, [y1, z1], [y2, z2], yy, zz);
-        let xz = cross(simd, [x1, z1], [x2, z2], xx, zz);
-        // 3b z1 z2 = (1 + i) (12 z1) z2.
-        let z1 = z1.mul_small::<12, S>(simd).carry(simd);
-        let b3zz = Fp2::<F>::product_mul_by_nonresidue(simd, z1.product_schoolbook(simd, z2));
-        let sum = Fp2::<F>::reduce::<24, S>(simd, Fp2::<F>::accumulate(simd, yy, b3zz));
-        let difference = Fp2::<F>::reduce::<26, S>(simd, Fp2::<F>::product_sub(simd, yy, b3zz));
-        let xx3 = Fp2::<F>::reduce::<5, S>(simd, xx)
-            .mul_small::<3, S>(simd)
-            .carry(simd);
-        // 3b xz = (1 + i) (12 xz), multiplying its products by 1 + i.
-        let xz12 = xz.mul_small::<12, S>(simd).carry(simd);
-        let yz_b3xz = Fp2::<F>::product_mul_by_nonresidue(simd, yz.product_schoolbook(simd, xz12));
-        let xx3_b3xz =
-            Fp2::<F>::product_mul_by_nonresidue(simd, xz12.product_schoolbook(simd, xx3));
-        let x = Fp2::<F>::product_sub(simd, xy.product(simd, difference), yz_b3xz);
-        let y = Fp2::<F>::accumulate_product(simd, xx3_b3xz, difference, sum);
-        let z = Fp2::<F>::accumulate_product(simd, sum.product(simd, yz), xx3, xy);
-        Self {
-            x: Fp2::<F>::reduce::<14, S>(simd, x),
-            y: Fp2::<F>::reduce::<16, S>(simd, y),
-            z: Fp2::<F>::reduce::<9, S>(simd, z),
-        }
     }
 
     /// Returns `2 * self`.
     ///
     /// This is Algorithm 9 of Renes, Costello, and Batina, which accepts any point, including the
     /// identity. It returns the same point as [`Self::add`] of `self` with itself, with seven
-    /// extension products and one squaring.
+    /// extension products and one squaring, reduced in two stages of four and three values.
     ///
     /// Runs as its own kernel, so callers share one copy of the formula.
     #[inline(always)]
@@ -305,13 +258,29 @@ impl<F> Point<F> {
     {
         simd.execute(
             #[inline(always)]
-            move |simd: S| self.doubling(simd).point,
+            move |simd: S| {
+                let first = Fp2::<F>::reduce_each::<4, 8, S>(
+                    simd,
+                    #[cfg_attr(not(debug_assertions), inline(always))]
+                    |k| self.doubling(simd, k),
+                );
+                let [x, y, z] = Fp2::<F>::reduce_each::<3, 6, S>(
+                    simd,
+                    #[cfg_attr(not(debug_assertions), inline(always))]
+                    |k| Self::doubled(simd, &first, k),
+                );
+                Self { x, y, z }
+            },
         )
     }
 
-    /// Body of [`Self::double`], which also returns the values the tangent line reuses.
+    /// Returns the `k`th of the four values of the first stage of a doubling, as a sum of
+    /// products to reduce: `Y^2`, `X Y`, `Y Z`, and `3b Z^2`.
+    ///
+    /// Within the coordinate bounds, the reduced values have limb bound `1` and integer bounds at
+    /// most `17`, `5`, `5`, and `43` in every representation.
     #[inline(always)]
-    pub(crate) fn doubling<S: Simd>(self, simd: S) -> Doubling<F>
+    pub(crate) fn doubling<S: Simd>(self, simd: S, k: usize) -> Fp2<F::Product>
     where
         F: Field<S>,
     {
@@ -320,50 +289,172 @@ impl<F> Point<F> {
             self.y.ready::<1, S>(simd),
             self.z.ready::<1, S>(simd),
         );
-        let yy = y.square::<{ BOUND + 1 }, S>(simd);
-        let xy = x.mul::<5, S>(simd, y);
-        let yz = y.mul::<5, S>(simd, z);
-        // 3b z^2 = (1 + i) (12 z) z, and 9b z^2.
-        let z12 = z.mul_small::<12, S>(simd).carry(simd);
-        let b3zz = Fp2::<F>::reduce::<22, S>(
-            simd,
-            Fp2::<F>::product_mul_by_nonresidue(simd, z12.product_schoolbook(simd, z)),
-        );
+        match k {
+            0 => Fp2::<F>::difference::<{ BOUND + 1 }, S>(
+                simd,
+                y.square_product::<{ BOUND + 1 }, S>(simd),
+            ),
+            1 => Fp2::<F>::difference::<5, S>(simd, x.product(simd, y)),
+            2 => Fp2::<F>::difference::<5, S>(simd, y.product(simd, z)),
+            // 3b z^2 = (1 + i) (12 z) z.
+            _ => {
+                let z12 = z.mul_small::<12, S>(simd).carry(simd);
+                let product = Fp2::<F>::product_mul_by_nonresidue(simd, z12.product_schoolbook(simd, z));
+                Fp2::<F>::difference::<22, S>(simd, product)
+            }
+        }
+    }
+
+    /// Returns the `k`th coordinate of the doubled point, as a sum of products to reduce, given the
+    /// reduced values of [`Self::doubling`].
+    #[inline(always)]
+    pub(crate) fn doubled<S: Simd>(simd: S, [yy, xy, yz, b3zz]: &[Fp2<F>; 4], k: usize) -> Fp2<F::Product>
+    where
+        F: Field<S>,
+    {
+        let (yy, xy, yz, b3zz) = (*yy, *xy, *yz, *b3zz);
+        // 9b z^2, 8 y^2, and y^2 - 9b z^2 and y^2 + 3b z^2.
         let b9zz = b3zz.mul_small::<3, S>(simd).carry(simd);
         let yy8 = yy.mul_small::<8, S>(simd).carry(simd);
-        // y^2 - 9b z^2 and y^2 + 3b z^2.
         let difference = yy.sub::<130, S>(simd, b9zz).carry(simd);
         let sum = yy.add(simd, b3zz).carry(simd);
-        let xy2 = xy.double(simd).carry(simd);
-        let y = Fp2::<F>::accumulate_product(simd, difference.product(simd, sum), b3zz, yy8);
-        Doubling {
-            point: Self {
-                x: Fp2::<F>::reduce::<6, S>(simd, difference.product(simd, xy2)),
-                y: Fp2::<F>::reduce::<13, S>(simd, y),
-                z: Fp2::<F>::reduce::<5, S>(simd, yy8.product(simd, yz)),
-            },
-            yy,
-            b3zz,
-            yz,
+        match k {
+            0 => {
+                let xy2 = xy.double(simd).carry(simd);
+                Fp2::<F>::difference::<6, S>(simd, difference.product(simd, xy2))
+            }
+            1 => Fp2::<F>::difference::<13, S>(
+                simd,
+                Fp2::<F>::accumulate_product(simd, difference.product(simd, sum), b3zz, yy8),
+            ),
+            _ => Fp2::<F>::difference::<5, S>(simd, yy8.product(simd, yz)),
         }
     }
 }
 
-/// Returns `a[0] b[1] + a[1] b[0]`, given the products `p0 = a[0] b[0]` and `p1 = a[1] b[1]`
-/// of coordinates.
-#[cfg_attr(not(debug_assertions), inline(always))]
-fn cross<S: Simd, F: Field<S>>(
-    simd: S,
-    a: [Fp2<F>; 2],
-    b: [Fp2<F>; 2],
-    p0: Product<F, S>,
-    p1: Product<F, S>,
-) -> Fp2<F> {
-    let a = a[0].add(simd, a[1]).carry(simd);
-    let b = b[0].add(simd, b[1]).carry(simd);
-    let product = Fp2::<F>::product_sub(simd, a.product_schoolbook(simd, b), p0);
-    Fp2::<F>::reduce::<8, S>(simd, Fp2::<F>::product_sub(simd, product, p1))
+/// The first stage of an addition: the ready coordinates of both points and, for Karatsuba's
+/// cross terms, the products `X1 X2`, `Y1 Y2`, `Z1 Z2`, and `3b Z1 Z2`.
+pub(crate) struct Addition<F, S: Simd>
+where
+    F: Field<S>,
+{
+    a: [Fp2<F>; 3],
+    b: [Fp2<F>; 3],
+    xx: Product<F, S>,
+    yy: Product<F, S>,
+    zz: Product<F, S>,
+    b3zz: Product<F, S>,
 }
+
+impl<F, S: Simd> Addition<F, S>
+where
+    F: Field<S>,
+{
+    /// Readies the coordinates and forms the shared products.
+    ///
+    /// Under [`Field::SCHOOLBOOK`] the cross terms take their own products, so the products of
+    /// coordinates are left unused and unformed.
+    #[inline(always)]
+    pub(crate) fn new(simd: S, lhs: Point<F>, rhs: Point<F>) -> Self {
+        let a = [
+            lhs.x.ready::<1, S>(simd),
+            lhs.y.ready::<1, S>(simd),
+            lhs.z.ready::<1, S>(simd),
+        ];
+        let b = [
+            rhs.x.ready::<1, S>(simd),
+            rhs.y.ready::<1, S>(simd),
+            rhs.z.ready::<1, S>(simd),
+        ];
+        // 3b z1 z2 = (1 + i) (12 z1) z2.
+        let z12 = a[2].mul_small::<12, S>(simd).carry(simd);
+        Self {
+            a,
+            b,
+            xx: a[0].product(simd, b[0]),
+            yy: a[1].product(simd, b[1]),
+            zz: a[2].product(simd, b[2]),
+            b3zz: Fp2::<F>::product_mul_by_nonresidue(simd, z12.product_schoolbook(simd, b[2])),
+        }
+    }
+
+    /// Returns the `k`th of the six values of the first stage, as a sum of products to reduce: the
+    /// cross terms `X1 Y2 + Y1 X2`, `Y1 Z2 + Z1 Y2`, and `X1 Z2 + Z1 X2`, then
+    /// `Y1 Y2 + 3b Z1 Z2`, `Y1 Y2 - 3b Z1 Z2`, and `X1 X2`.
+    #[inline(always)]
+    pub(crate) fn sum(&self, simd: S, k: usize) -> Fp2<F::Product> {
+        match k {
+            0 => Fp2::<F>::difference::<8, S>(simd, self.cross(simd, 0, 1, (self.xx, self.yy))),
+            1 => Fp2::<F>::difference::<8, S>(simd, self.cross(simd, 1, 2, (self.yy, self.zz))),
+            2 => Fp2::<F>::difference::<8, S>(simd, self.cross(simd, 0, 2, (self.xx, self.zz))),
+            3 => Fp2::<F>::difference::<24, S>(
+                simd,
+                Fp2::<F>::accumulate(simd, self.yy, self.b3zz),
+            ),
+            4 => Fp2::<F>::difference::<26, S>(
+                simd,
+                Fp2::<F>::product_sub(simd, self.yy, self.b3zz),
+            ),
+            _ => Fp2::<F>::difference::<5, S>(simd, self.xx),
+        }
+    }
+
+    /// Returns `a[i] b[j] + a[j] b[i]` as a product, given the products `(a[i] b[i], a[j] b[j])`.
+    ///
+    /// Karatsuba takes a schoolbook product of the sums less the two known products; under
+    /// [`Field::SCHOOLBOOK`] the two products accumulate as they form.
+    #[inline(always)]
+    fn cross(&self, simd: S, i: usize, j: usize, (pi, pj): (Product<F, S>, Product<F, S>)) -> Product<F, S> {
+        let (a, b) = (&self.a, &self.b);
+        if F::SCHOOLBOOK {
+            return Fp2::<F>::accumulate_product(simd, a[i].product(simd, b[j]), a[j], b[i]);
+        }
+        let sum_a = a[i].add(simd, a[j]).carry(simd);
+        let sum_b = b[i].add(simd, b[j]).carry(simd);
+        let product = Fp2::<F>::product_sub(simd, sum_a.product_schoolbook(simd, sum_b), pi);
+        Fp2::<F>::product_sub(simd, product, pj)
+    }
+
+    /// Returns the `k`th coordinate of the sum, as a sum of products to reduce, given the reduced
+    /// values of [`Self::sum`].
+    #[inline(always)]
+    pub(crate) fn coordinate(simd: S, [xy, yz, xz, sum, difference, xx]: &[Fp2<F>; 6], k: usize) -> Fp2<F::Product> {
+        let (xy, yz, xz, sum, difference) = (*xy, *yz, *xz, *sum, *difference);
+        let xx3 = xx.mul_small::<3, S>(simd).carry(simd);
+        let xz12 = xz.mul_small::<12, S>(simd).carry(simd);
+        match k {
+            0 => Fp2::<F>::difference::<14, S>(
+                simd,
+                Fp2::<F>::product_sub(
+                    simd,
+                    xy.product(simd, difference),
+                    Self::by_b3xz(simd, yz, xz12),
+                ),
+            ),
+            1 => Fp2::<F>::difference::<16, S>(
+                simd,
+                Fp2::<F>::accumulate_product(simd, Self::by_b3xz(simd, xx3, xz12), difference, sum),
+            ),
+            _ => Fp2::<F>::difference::<9, S>(
+                simd,
+                Fp2::<F>::accumulate_product(simd, sum.product(simd, yz), xx3, xy),
+            ),
+        }
+    }
+
+    /// Returns `factor * 3b xz` as a product, given `xz12 = 12 xz`: `3b xz = (1 + i) (12 xz)`,
+    /// multiplying the product by `1 + i`, or under [`Field::SCHOOLBOOK`] the factor `12 xz`
+    /// itself.
+    #[inline(always)]
+    fn by_b3xz(simd: S, factor: Fp2<F>, xz12: Fp2<F>) -> Product<F, S> {
+        if F::SCHOOLBOOK {
+            let twisted = xz12.mul_by_nonresidue::<{ 12 * BOUND + 1 }, S>(simd).carry(simd);
+            return factor.product(simd, twisted);
+        }
+        Fp2::<F>::product_mul_by_nonresidue(simd, factor.product_schoolbook(simd, xz12))
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

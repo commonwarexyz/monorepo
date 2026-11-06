@@ -31,7 +31,7 @@
 //! `Fp12` satisfies the [element bounds](crate::core::field::fp12).
 
 use crate::core::{
-    curve::g2::{self, Point},
+    curve::g2::{self, Addition, Point},
     field::{
         arithmetic::Field,
         fp::BYTES as FP_BYTES,
@@ -162,7 +162,8 @@ fn shared_miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<
 ///
 /// With the curve equation, `3 x^3 - 2 y^2 z` becomes `z (y^2 - 3b z^2)`, and scaling the tangent by
 /// `-2 y z^2 / z` leaves `[3b z^2 - y^2, 3 x^2 xp, -2 y z yp]`. The point is [`Point::double`]'s,
-/// whose values the line reuses.
+/// whose stages the line's values join: `x^2` reduces with the first stage and the last two
+/// coefficients with the coordinates.
 /// Runs as its own kernel, so callers share one copy.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn double_step<S: Simd, F: Field<S>>(
@@ -174,21 +175,36 @@ fn double_step<S: Simd, F: Field<S>>(
     simd.execute(
         #[inline(always)]
         move |simd: S| {
-            let doubling = t.doubling(simd);
-            let xx3 =
-                t.x.ready::<1, S>(simd)
-                    .square::<{ g2::BOUND + 1 }, S>(simd)
-                    .mul_small::<3, S>(simd)
-                    .carry(simd);
+            let [yy, xy, yz, b3zz, xx] = Fp2::<F>::reduce_each::<5, 10, S>(
+                simd,
+                #[cfg_attr(not(debug_assertions), inline(always))]
+                |k| {
+                    if k < 4 {
+                        return t.doubling(simd, k);
+                    }
+                    let x = t.x.ready::<1, S>(simd);
+                    let square = x.square_product::<{ g2::BOUND + 1 }, S>(simd);
+                    Fp2::<F>::difference::<1, S>(simd, square)
+                },
+            );
+            let doubling = [yy, xy, yz, b3zz];
+            let xx3 = xx.mul_small::<3, S>(simd).carry(simd);
             // y^2 is below 18p in every representation.
-            let l0 = doubling.b3zz.sub::<18, S>(simd, doubling.yy).carry(simd);
-            let l2 = xx3.mul_base(simd, pair.x);
-            let l3 = doubling
-                .yz
-                .double(simd)
-                .carry(simd)
-                .mul_base(simd, pair.negated_y);
-            (doubling.point, [l0, l2, l3])
+            let l0 = b3zz.sub::<18, S>(simd, yy).carry(simd);
+            let yz2 = yz.double(simd).carry(simd);
+            let [x, y, z, l2, l3] = Fp2::<F>::reduce_each::<5, 10, S>(
+                simd,
+                #[cfg_attr(not(debug_assertions), inline(always))]
+                |k| match k {
+                    0..=2 => Point::doubled(simd, &doubling, k),
+                    3 => Fp2::<F>::difference::<1, S>(simd, xx3.product_base(simd, pair.x)),
+                    _ => {
+                        let product = yz2.product_base(simd, pair.negated_y);
+                        Fp2::<F>::difference::<1, S>(simd, product)
+                    }
+                },
+            );
+            (Point { x, y, z }, [l0, l2, l3])
         },
     )
 }
@@ -196,7 +212,8 @@ fn double_step<S: Simd, F: Field<S>>(
 /// Adds the pair's G2 point to `t` and returns the line through them, evaluated at the pair's G1
 /// point.
 ///
-/// The line is `[qx y - qy x, (qy z - y) xp, -(qx z - x) yp]` and the point is [`Point::add`]'s.
+/// The line is `[qx y - qy x, (qy z - y) xp, -(qx z - x) yp]` and the point is [`Point::add`]'s,
+/// whose second stage the line's first products join.
 /// Runs as its own kernel, so callers share one copy.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn add_step<S: Simd, F: Field<S>>(simd: S, t: Point<F>, pair: &Pair<F>) -> (Point<F>, [Fp2<F>; 3]) {
@@ -210,21 +227,39 @@ fn add_step<S: Simd, F: Field<S>>(simd: S, t: Point<F>, pair: &Pair<F>) -> (Poin
                 t.z.ready::<1, S>(simd),
             );
             let (qx, qy) = (pair.q.x, pair.q.y);
-            let l0 = Fp2::<F>::reduce::<7, S>(
+            let first = Addition::new(simd, t, pair.q);
+            let first = Fp2::<F>::reduce_each::<6, 12, S>(
                 simd,
-                Fp2::<F>::subtract_product(simd, qx.product(simd, y), qy, x),
+                #[cfg_attr(not(debug_assertions), inline(always))]
+                |k| first.sum(simd, k),
             );
-            let qyz = qy.mul::<5, S>(simd, z);
-            let qxz = qx.mul::<5, S>(simd, z);
-            let l2 = qyz
-                .sub::<{ g2::BOUND + 1 }, S>(simd, y)
-                .carry(simd)
-                .mul_base(simd, pair.x);
-            let l3 = qxz
-                .sub::<{ g2::BOUND + 1 }, S>(simd, x)
-                .carry(simd)
-                .mul_base(simd, pair.negated_y);
-            (t.add(simd, pair.q), [l0, l2, l3])
+            let [sx, sy, sz, l0, qyz, qxz] = Fp2::<F>::reduce_each::<6, 12, S>(
+                simd,
+                #[cfg_attr(not(debug_assertions), inline(always))]
+                |k| match k {
+                    0..=2 => Addition::coordinate(simd, &first, k),
+                    3 => Fp2::<F>::difference::<7, S>(
+                        simd,
+                        Fp2::<F>::subtract_product(simd, qx.product(simd, y), qy, x),
+                    ),
+                    4 => Fp2::<F>::difference::<5, S>(simd, qy.product(simd, z)),
+                    _ => Fp2::<F>::difference::<5, S>(simd, qx.product(simd, z)),
+                },
+            );
+            let [l2, l3] = Fp2::<F>::reduce_each::<2, 4, S>(
+                simd,
+                #[cfg_attr(not(debug_assertions), inline(always))]
+                |k| {
+                    let (value, point, scale) = if k == 0 {
+                        (qyz, y, pair.x)
+                    } else {
+                        (qxz, x, pair.negated_y)
+                    };
+                    let factor = value.sub::<{ g2::BOUND + 1 }, S>(simd, point).carry(simd);
+                    Fp2::<F>::difference::<1, S>(simd, factor.product_base(simd, scale))
+                },
+            );
+            (Point { x: sx, y: sy, z: sz }, [l0, l2, l3])
         },
     )
 }
