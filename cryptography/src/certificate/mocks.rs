@@ -84,7 +84,7 @@ impl Signatures {
 #[derive(Debug, Default)]
 struct Certificates {
     next: u64,
-    by: HashMap<u64, SignedSubject>,
+    by: HashMap<u64, (SignedSubject, Signers)>,
     by_artifact: HashMap<(SignedSubject, Signers), u64>,
 }
 
@@ -367,7 +367,7 @@ where
         let signers = signers.require(self.participants.quorum::<S::Faults>())?;
 
         let subject = signed_subject.expect("non-empty attestations establish a signed subject");
-        let stored_subject = subject.clone();
+        let stored = (subject.clone(), signers.clone());
         let artifact = (subject, signers);
         let certificate = inner
             .certificates
@@ -376,7 +376,7 @@ where
             .copied()
             .unwrap_or_else(|| {
                 let certificate = inner.certificates.next();
-                inner.certificates.by.insert(certificate, stored_subject);
+                inner.certificates.by.insert(certificate, stored);
                 inner.certificates.by_artifact.insert(artifact, certificate);
                 certificate
             });
@@ -401,8 +401,18 @@ where
             .certificates
             .by
             .get(&certificate)
-            .is_some_and(|subject| subject == &expected_subject)
+            .is_some_and(|(subject, _)| subject == &expected_subject)
             || Self::invalid("certificate not found or subject mismatched")
+    }
+
+    /// Returns the signers of a certificate this ledger assembled, or `None` for an unknown one.
+    pub fn certificate_signers(&self, certificate: &U64) -> Option<Signers> {
+        let inner = self.shared.0.lock();
+        inner
+            .certificates
+            .by
+            .get(&u64::from(certificate))
+            .map(|(_, signers)| signers.clone())
     }
 
     /// Verifies a batch of certificates one-by-one.
@@ -651,6 +661,16 @@ macro_rules! impl_certificate_mock {
                         shared,
                     )?,
                 })
+            }
+
+            /// Returns the signers of a certificate this scheme's ledger assembled, or `None` for
+            /// an unknown one.
+            #[allow(dead_code)]
+            pub fn certificate_signers(
+                &self,
+                certificate: &commonware_utils::sequence::U64,
+            ) -> Option<$crate::certificate::Signers> {
+                self.generic.certificate_signers(certificate)
             }
         }
 
@@ -1302,6 +1322,35 @@ mod tests {
         assert_eq!(
             U64::decode_cfg(encoded, &fixture.verifier.certificate_codec_config()).unwrap(),
             certificate
+        );
+    }
+
+    #[test]
+    fn certificates_report_their_signers() {
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let subject = TestSubject { message: b"vote-1" };
+        let sign = |index: usize| fixture.schemes[index].sign::<Sha256Digest>(subject).unwrap();
+        let quorum = fixture
+            .verifier
+            .assemble(non_empty![sign(0), sign(1), sign(3)], &Sequential)
+            .unwrap();
+        let all = fixture
+            .verifier
+            .assemble(non_empty![sign(0), sign(1), sign(2), sign(3)], &Sequential)
+            .unwrap();
+
+        let signers = fixture.verifier.certificate_signers(&quorum).unwrap();
+        assert_eq!(
+            signers.iter().collect::<Vec<_>>(),
+            [0, 1, 3].map(Participant::new)
+        );
+        assert_eq!(fixture.verifier.certificate_signers(&all).unwrap().count(), 4);
+        assert!(
+            fixture
+                .verifier
+                .certificate_signers(&U64::new(u64::MAX))
+                .is_none()
         );
     }
 
