@@ -1,5 +1,6 @@
-use crate::{Block, Heightable, Reporter, marshal::Update, types::Height};
+use crate::{Block, Heightable, Reporter, marshal::Update, simplex::scheme::Scheme, types::Height};
 use commonware_actor::Feedback;
+use commonware_cryptography::Digest;
 use commonware_utils::{
     Acknowledgement,
     acknowledgement::Exact,
@@ -7,21 +8,23 @@ use commonware_utils::{
 };
 use std::{
     collections::{BTreeMap, VecDeque},
+    marker::PhantomData,
     sync::Arc,
 };
 
 /// A mock application that stores finalized blocks.
 #[derive(Clone)]
-pub struct Application<B: Block> {
+pub struct Application<B: Block, S: Scheme<D>, D: Digest> {
     blocks: Arc<Mutex<BTreeMap<Height, Arc<B>>>>,
     #[allow(clippy::type_complexity)]
     tip: Arc<Mutex<Option<(Height, B::Digest)>>>,
     pending_acks: Arc<Mutex<VecDeque<(Height, Exact)>>>,
     notify: Arc<Notify>,
     auto_ack: bool,
+    _phantom: PhantomData<(S, D)>,
 }
 
-impl<B: Block> Default for Application<B> {
+impl<B: Block, S: Scheme<D>, D: Digest> Default for Application<B, S, D> {
     fn default() -> Self {
         Self {
             blocks: Default::default(),
@@ -29,11 +32,12 @@ impl<B: Block> Default for Application<B> {
             pending_acks: Default::default(),
             notify: Arc::new(Notify::new()),
             auto_ack: true,
+            _phantom: PhantomData,
         }
     }
 }
 
-impl<B: Block> Application<B> {
+impl<B: Block, S: Scheme<D>, D: Digest> Application<B, S, D> {
     /// Returns an application that stores acks for manual release.
     pub fn manual_ack() -> Self {
         Self {
@@ -79,12 +83,12 @@ impl<B: Block> Application<B> {
     }
 }
 
-impl<B: Block> Reporter for Application<B> {
-    type Activity = Update<B>;
+impl<B: Block, S: Scheme<D>, D: Digest> Reporter for Application<B, S, D> {
+    type Activity = Update<B, S, D>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match activity {
-            Update::Block(block, ack_tx) => {
+            Update::Block(block, _, ack_tx) => {
                 let height = block.height();
                 self.blocks.lock().insert(height, block.into());
                 if self.auto_ack {

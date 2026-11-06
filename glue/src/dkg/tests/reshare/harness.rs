@@ -8,7 +8,9 @@ use crate::{
         },
         orchestrator, probe as dkg_probe,
         reshare::{self, Input as ReshareInput},
-        state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
+        state_sync::{
+            Config as StateSyncConfig, Plan as StateSyncPlan, StateSync, recovered_epoch,
+        },
         tests::{
             max_supported_mode,
             mocks::{FilteredReceiver, MemorySecretStore},
@@ -21,7 +23,7 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Finality, Input, Proposed,
+        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
@@ -723,6 +725,8 @@ pub(super) struct ReshareEngine {
     processed_hold: Arc<Mutex<Option<(ed25519::PublicKey, u64)>>>,
     epoch_cross_during_sync: bool,
     stale: Option<Height>,
+    pruned: Option<ed25519::PublicKey>,
+    pub(super) pruned_restarts: Arc<Mutex<Vec<PrunedRestart>>>,
     processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     marshals: Arc<Mutex<BTreeMap<ed25519::PublicKey, Marshal>>>,
     failures: Arc<HashSet<u64>>,
@@ -731,6 +735,53 @@ pub(super) struct ReshareEngine {
 pub(super) struct ValidatorEngine {
     context: DeterministicContext,
     handles: [Handle<()>; 6],
+}
+
+/// Observations from one restart of the participant passed to
+/// [`ReshareEngine::with_marshal_pruning`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PrunedRestart {
+    /// The epoch recovered from marshal's processed height at the restart.
+    pub(super) epoch: Epoch,
+    /// Whether marshal still held the boundary block that introduced `epoch`.
+    pub(super) boundary_held: bool,
+    /// Whether marshal still held the node's state-sync floor block, or `None` if
+    /// the node had not state synced.
+    pub(super) floor_held: Option<bool>,
+    /// Whether the reshare actor's phase gauge showed it following the epoch once
+    /// marshal processed a block after the restart, or `None` until then.
+    pub(super) following: Option<bool>,
+}
+
+/// The reshare actor's phase gauge value while it follows an epoch without
+/// participating.
+const FOLLOWING_PHASE: &str = "0";
+
+/// Returns the reshare actor phase that validator `index`'s latest start reports in
+/// the encoded `metrics`.
+///
+/// Each start of a validator labels its metrics with a `restart` count, so the series
+/// with the highest count belongs to the running actor.
+fn reshare_phase(metrics: &str, index: usize) -> Option<&str> {
+    let label = format!("index=\"{index}\"");
+    metrics
+        .lines()
+        .filter_map(|line| {
+            let (labels, value) = line
+                .strip_prefix("validator_reshare_phase{")?
+                .split_once("} ")?;
+            let mut labels = labels.split(',');
+            labels.clone().any(|pair| pair == label).then_some(())?;
+            let restart = labels.find_map(|pair| {
+                pair.strip_prefix("restart=\"")?
+                    .strip_suffix('"')?
+                    .parse::<u64>()
+                    .ok()
+            })?;
+            Some((restart, value.trim()))
+        })
+        .max_by_key(|(restart, _)| *restart)
+        .map(|(_, value)| value)
 }
 
 #[derive(Clone)]
@@ -835,6 +886,8 @@ impl ReshareEngine {
             processed_hold: Arc::new(Mutex::new(None)),
             epoch_cross_during_sync: false,
             stale: None,
+            pruned: None,
+            pruned_restarts: Arc::new(Mutex::new(Vec::new())),
             processed: Arc::new(Mutex::new(BTreeMap::new())),
             marshals: Arc::new(Mutex::new(BTreeMap::new())),
             failures: Arc::new(HashSet::new()),
@@ -882,6 +935,15 @@ impl ReshareEngine {
     /// node's marshal.
     pub(super) const fn with_stale(mut self, height: Height) -> Self {
         self.stale = Some(height);
+        self
+    }
+
+    /// Prunes `participant`'s marshal after every block with stateful pruning and no
+    /// extra marshal retention.
+    ///
+    /// Each restart of `participant` appends a [`PrunedRestart`] to `pruned_restarts`.
+    pub(super) fn with_marshal_pruning(mut self, participant: ed25519::PublicKey) -> Self {
+        self.pruned = Some(participant);
         self
     }
 
@@ -1196,6 +1258,59 @@ impl EngineDefinition for ReshareEngine {
         self.marshals
             .lock()
             .insert(public_key.clone(), marshal.clone());
+        let pruned = self.pruned.as_ref() == Some(public_key);
+
+        // Report the epoch this restart recovers, whether marshal still holds the
+        // epoch's boundary block and the node's state-sync floor block, and whether the
+        // reshare actor follows the epoch.
+        if pruned && restarted {
+            let marshal = marshal.clone();
+            let pruned_restarts = self.pruned_restarts.clone();
+            let floor = self.state_syncs.lock().get(public_key).copied();
+            context
+                .child("pruned_restart_probe")
+                .spawn(move |context| async move {
+                    let processed = marshal
+                        .get_processed()
+                        .await
+                        .expect("restarted marshal must have processed a block");
+                    let epoch = recovered_epoch(processed, &FixedEpocher::new(EPOCH_LENGTH));
+                    let boundary = epoch
+                        .previous()
+                        .map_or(Height::zero(), |previous| final_height(previous.get()));
+                    let boundary_held = marshal.get_block(boundary).await.is_some();
+                    let floor_held = match floor {
+                        Some(floor) => Some(marshal.get_block(Height::new(floor)).await.is_some()),
+                        None => None,
+                    };
+                    let restart = {
+                        let mut pruned_restarts = pruned_restarts.lock();
+                        pruned_restarts.push(PrunedRestart {
+                            epoch,
+                            boundary_held,
+                            floor_held,
+                            following: None,
+                        });
+                        pruned_restarts.len() - 1
+                    };
+
+                    // Marshal processes a block only after every reporter, including
+                    // the reshare actor, acknowledges it. Once marshal passes the
+                    // restart position, the actor has finished setup and its phase
+                    // gauge shows its role.
+                    while marshal
+                        .get_processed()
+                        .await
+                        .is_none_or(|current| current.height() <= processed.height())
+                    {
+                        context.sleep(Duration::from_millis(10)).await;
+                    }
+                    let metrics = context.encode();
+                    let phase = reshare_phase(&metrics, index)
+                        .expect("restarted reshare actor must report its phase");
+                    pruned_restarts.lock()[restart].following = Some(phase == FOLLOWING_PHASE);
+                });
+        }
 
         let db_config = fixed::Config {
             merkle: MmrJournalConfig {
@@ -1266,10 +1381,12 @@ impl EngineDefinition for ReshareEngine {
                 partition_prefix: partition_prefix.clone(),
                 max_participants: MAX_PARTICIPANTS,
                 max_supported_mode: max_supported_mode(),
+                block_codec_config: (),
             },
             state_sync,
         )
         .await;
+        let probe_plan = state_sync.clone();
         let (reshare_actor, reshare_mailbox) = reshare::Actor::new(
             context.child("reshare"),
             reshare::Config {
@@ -1325,7 +1442,11 @@ impl EngineDefinition for ReshareEngine {
                     apply_batch_size: NZU64!(64),
                     max_outstanding_requests: NZUsize!(8),
                 },
-                prune_config: None,
+                prune_config: pruned.then_some(PruneConfig {
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 0,
+                    retained_qmdb_blocks: 0,
+                }),
                 strategy: Sequential,
             },
         );
@@ -1389,7 +1510,7 @@ impl EngineDefinition for ReshareEngine {
             buffer,
             resolver,
         );
-        probe_mailbox.attach(marshal.clone());
+        probe_mailbox.attach(marshal.clone(), probe_plan);
         // Record the synced height without blocking init: awaiting the floor
         // block here would stall the simulator's restart arm (and with it the
         // crash monitor) until the block is fetched.

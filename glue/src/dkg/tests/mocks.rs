@@ -108,7 +108,7 @@ pub(crate) type TestElector = RoundRobin;
 pub(crate) type TestStrategy = Sequential;
 pub(crate) type TestBlocker = Control<TestPublicKey, deterministic::Context>;
 pub(crate) type TestManager = SimManager<TestPublicKey, deterministic::Context>;
-pub(crate) type TestMailbox = orchestrator::Mailbox<TestBlock>;
+pub(crate) type TestMailbox = orchestrator::Mailbox<TestBlock, TestScheme, TestDigest>;
 pub(crate) type TestMarshalMailbox = MarshalMailbox<TestScheme, TestMarshalVariant>;
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
@@ -628,6 +628,18 @@ impl Registrar for MockConsumer {
     }
 }
 
+/// Creates a block update with the block digest as its commitment and no finalization.
+pub(crate) fn block_update(
+    block: Digested<TestBlock>,
+    acknowledgement: Exact,
+) -> Update<TestBlock, TestScheme, TestDigest> {
+    let finality = marshal::Finality {
+        commitment: block.digest(),
+        finalization: None,
+    };
+    Update::Block(block, finality, acknowledgement)
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct MarshalApplication {
     blocks: Arc<Mutex<BTreeMap<Height, Digested<TestBlock>>>>,
@@ -640,10 +652,10 @@ impl MarshalApplication {
 }
 
 impl Reporter for MarshalApplication {
-    type Activity = Update<TestBlock>;
+    type Activity = Update<TestBlock, TestScheme, TestDigest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        if let Update::Block(block, ack) = activity {
+        if let Update::Block(block, _, ack) = activity {
             self.blocks.lock().insert(block.height(), block);
             ack.acknowledge();
         }

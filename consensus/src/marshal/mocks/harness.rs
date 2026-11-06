@@ -251,7 +251,7 @@ pub async fn setup_network_links(
 
 /// Result of setting up a validator.
 pub struct ValidatorSetup<H: TestHarness> {
-    pub application: Application<H::ApplicationBlock>,
+    pub application: Application<H::ApplicationBlock, S, H::Commitment>,
     pub mailbox: Mailbox<S, H::Variant>,
     pub extra: H::ValidatorExtra,
     pub height: Option<Height>,
@@ -321,7 +321,7 @@ pub trait TestHarness: 'static + Sized {
         validator: K,
         provider: P,
         max_pending_acks: NonZeroUsize,
-        application: Application<Self::ApplicationBlock>,
+        application: Application<Self::ApplicationBlock, S, Self::Commitment>,
     ) -> impl Future<Output = ValidatorSetup<Self>> + Send;
 
     /// Create a test block from parent and height.
@@ -433,7 +433,7 @@ pub trait TestHarness: 'static + Sized {
         Output = (
             Mailbox<S, Self::Variant>,
             Self::ValidatorExtra,
-            Application<Self::ApplicationBlock>,
+            Application<Self::ApplicationBlock, S, Self::Commitment>,
         ),
     > + Send;
 
@@ -459,7 +459,7 @@ fn restart_cycles_for_seed(seed: u64) -> usize {
 }
 
 struct HailstormValidator<H: TestHarness> {
-    application: Application<H::ApplicationBlock>,
+    application: Application<H::ApplicationBlock, S, H::Commitment>,
     handle: ValidatorHandle<H>,
     actor_handle: commonware_runtime::Handle<()>,
 }
@@ -1753,7 +1753,7 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
 
         let me = participants[0].clone();
         let provider = ConstantProvider::new(schemes[0].clone());
-        let application = Application::<H::ApplicationBlock>::manual_ack();
+        let application = Application::<H::ApplicationBlock, S, H::Commitment>::manual_ack();
         let round = Round::new(Epoch::zero(), View::new(1));
         let block = H::make_test_block(
             Sha256::hash(&[b""]),
@@ -1906,7 +1906,7 @@ impl TestHarness for StandardHarness {
         validator: K,
         provider: P,
         max_pending_acks: NonZeroUsize,
-        application: Application<Self::ApplicationBlock>,
+        application: Application<Self::ApplicationBlock, S, Self::Commitment>,
     ) -> ValidatorSetup<Self> {
         let config = Config {
             provider,
@@ -2142,7 +2142,7 @@ impl TestHarness for StandardHarness {
     ) -> (
         Mailbox<S, Self::Variant>,
         Self::ValidatorExtra,
-        Application<B>,
+        Application<B, S, D>,
     ) {
         let control = oracle.control(validator.clone());
         let provider = ConstantProvider::new(schemes[0].clone());
@@ -2240,7 +2240,7 @@ impl TestHarness for StandardHarness {
             config,
         )
         .await;
-        let application = Application::<B>::default();
+        let application = Application::<B, S, D>::default();
         actor.start(application.clone(), buffer.clone(), resolver);
 
         (mailbox, buffer, application)
@@ -2287,7 +2287,7 @@ impl TestHarness for InlineHarness {
         validator: K,
         provider: P,
         max_pending_acks: NonZeroUsize,
-        application: Application<Self::ApplicationBlock>,
+        application: Application<Self::ApplicationBlock, S, Self::Commitment>,
     ) -> ValidatorSetup<Self> {
         let setup = StandardHarness::setup_validator_with(
             context,
@@ -2417,7 +2417,7 @@ impl TestHarness for InlineHarness {
     ) -> (
         Mailbox<S, Self::Variant>,
         Self::ValidatorExtra,
-        Application<Self::ApplicationBlock>,
+        Application<Self::ApplicationBlock, S, Self::Commitment>,
     ) {
         StandardHarness::setup_prunable_validator(
             context,
@@ -2479,7 +2479,7 @@ impl TestHarness for DeferredHarness {
         validator: K,
         provider: P,
         max_pending_acks: NonZeroUsize,
-        application: Application<Self::ApplicationBlock>,
+        application: Application<Self::ApplicationBlock, S, Self::Commitment>,
     ) -> ValidatorSetup<Self> {
         let setup = InlineHarness::setup_validator_with(
             context,
@@ -2609,7 +2609,7 @@ impl TestHarness for DeferredHarness {
     ) -> (
         Mailbox<S, Self::Variant>,
         Self::ValidatorExtra,
-        Application<Self::ApplicationBlock>,
+        Application<Self::ApplicationBlock, S, Self::Commitment>,
     ) {
         InlineHarness::setup_prunable_validator(
             context,
@@ -2706,7 +2706,7 @@ impl TestHarness for CodingHarness {
         validator: K,
         provider: P,
         max_pending_acks: NonZeroUsize,
-        application: Application<Self::ApplicationBlock>,
+        application: Application<Self::ApplicationBlock, S, Self::Commitment>,
     ) -> ValidatorSetup<Self> {
         let config = Config {
             provider: provider.clone(),
@@ -2974,7 +2974,7 @@ impl TestHarness for CodingHarness {
     ) -> (
         Mailbox<S, Self::Variant>,
         Self::ValidatorExtra,
-        Application<CodingB>,
+        Application<CodingB, S, TestCommitment>,
     ) {
         let control = oracle.control(validator.clone());
         let provider = ConstantProvider::new(schemes[0].clone());
@@ -3072,7 +3072,7 @@ impl TestHarness for CodingHarness {
             config,
         )
         .await;
-        let application = Application::<CodingB>::default();
+        let application = Application::<CodingB, S, TestCommitment>::default();
         actor.start(application.clone(), shard_mailbox.clone(), resolver);
 
         (mailbox, shard_mailbox, application)
@@ -3253,7 +3253,7 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
         .await;
 
         let validator = participants[0].clone();
-        let application = Application::<H::ApplicationBlock>::manual_ack();
+        let application = Application::<H::ApplicationBlock, S, H::Commitment>::manual_ack();
         let setup = H::setup_validator_with(
             context.child("validator").with_attribute("index", 0),
             &mut oracle,
@@ -3351,7 +3351,7 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
         .await;
 
         let validator = participants[0].clone();
-        let application = Application::<H::ApplicationBlock>::manual_ack();
+        let application = Application::<H::ApplicationBlock, S, H::Commitment>::manual_ack();
         let setup = H::setup_validator_with(
             context.child("validator").with_attribute("index", 0),
             &mut oracle,
@@ -3462,7 +3462,7 @@ pub fn genesis_emitted_once<H: TestHarness>() {
             validator.clone(),
             ConstantProvider::new(schemes[0].clone()),
             NZUsize!(1),
-            Application::<H::ApplicationBlock>::manual_ack(),
+            Application::<H::ApplicationBlock, S, H::Commitment>::manual_ack(),
         )
         .await;
         assert_eq!(setup.height, None);
@@ -3491,7 +3491,7 @@ pub fn genesis_emitted_once<H: TestHarness>() {
             validator,
             ConstantProvider::new(schemes[0].clone()),
             NZUsize!(1),
-            Application::<H::ApplicationBlock>::manual_ack(),
+            Application::<H::ApplicationBlock, S, H::Commitment>::manual_ack(),
         )
         .await;
         assert_eq!(restart.height, Some(Height::zero()));

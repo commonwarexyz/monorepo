@@ -65,10 +65,10 @@ impl FixtureReporter {
 }
 
 impl Reporter for FixtureReporter {
-    type Activity = Update<TestBlock>;
+    type Activity = Update<TestBlock, TestScheme, Sha256Digest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        if let Update::Block(block, ack) = activity {
+        if let Update::Block(block, _, ack) = activity {
             if self.acknowledge {
                 ack.acknowledge();
             } else {
@@ -308,7 +308,7 @@ pub(crate) async fn marshal_fixture_with_reporter<R>(
     reporter: R,
 ) -> MarshalFixture
 where
-    R: Reporter<Activity = Update<TestBlock>>,
+    R: Reporter<Activity = Update<TestBlock, TestScheme, Sha256Digest>>,
 {
     marshal_fixture_inner(
         context,
@@ -391,7 +391,7 @@ async fn marshal_fixture_inner<R>(
     mut options: Options<'_, R>,
 ) -> MarshalFixture
 where
-    R: Reporter<Activity = Update<TestBlock>>,
+    R: Reporter<Activity = Update<TestBlock, TestScheme, Sha256Digest>>,
 {
     let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
     let mut finalizations_by_height = immutable::Archive::init(
@@ -457,7 +457,7 @@ where
             Scheme = TestScheme,
         >,
     FB: marshal::store::Blocks<Block = Arc<TestBlock>>,
-    R: Reporter<Activity = Update<TestBlock>>,
+    R: Reporter<Activity = Update<TestBlock, TestScheme, Sha256Digest>>,
 {
     let provider = ConstantProvider::new(scheme);
     let (actor, mailbox, floor) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(

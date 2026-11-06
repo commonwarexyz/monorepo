@@ -29,9 +29,10 @@ use crate::dkg::{
     types::EpochInfo,
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiver};
+use commonware_codec::Codec;
 use commonware_consensus::{
     Block as _, Heightable as _,
-    marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
+    marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{EpochPhase, FixedEpocher, Height},
 };
@@ -55,6 +56,10 @@ use std::{
 };
 
 type DkgCompletion<V, P, D> = Box<dyn FnOnce(Option<EpochInfo<V, P, D>>) + Send>;
+
+/// The reshare actor's [`Mailbox`], installed as a marshal reporter.
+type MarshalReporter<B, V, C, S, MV, A> =
+    Mailbox<B, V, C, S, <MV as MarshalVariant>::Commitment, A>;
 
 /// Height and digest of the latest finalized block the actor has applied.
 #[derive(Clone, Copy)]
@@ -139,13 +144,8 @@ where
     /// Marshal mailbox used to read finalized blocks.
     pub marshal: MarshalMailbox<S, MV>,
 
-    /// State-sync recovery plan shared with the orchestrator.
-    pub state_sync: StateSyncPlan<
-        S,
-        MV::Commitment,
-        R::Variant,
-        <MV::ApplicationBlock as ReshareBlock>::Directory,
-    >,
+    /// State-sync recovery plan shared with the orchestrator and the probe.
+    pub state_sync: StateSyncPlan<S, MV>,
 
     /// Fence marked after each epoch's scheme is registered.
     pub fence: Fence,
@@ -215,7 +215,7 @@ where
     strategy: T,
     registrar: R,
     marshal: MarshalMailbox<S, MV>,
-    state_sync: StateSyncPlan<S, MV::Commitment, V, B::Directory>,
+    state_sync: StateSyncPlan<S, MV>,
     fence: Fence,
     namespace: &'static [u8],
     sharing_mode: SharingMode,
@@ -234,7 +234,7 @@ where
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + Clock + Storage,
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -252,7 +252,7 @@ where
     pub fn new(
         context: E,
         config: Config<C, M, X, P, SS, T, S, MV, R>,
-    ) -> (Self, Mailbox<B, V, C, A>) {
+    ) -> (Self, MarshalReporter<B, V, C, S, MV, A>) {
         let epocher = FixedEpocher::new(config.blocks_per_epoch);
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         let metrics = ReshareMetrics::new(&context);
@@ -291,7 +291,7 @@ where
         context: E,
         config: Config<C, M, X, P, SS, T, S, MV, R>,
         dkg: DkgConfig<V, C::PublicKey, B::Directory>,
-    ) -> (Self, Mailbox<B, V, C, A>) {
+    ) -> (Self, MarshalReporter<B, V, C, S, MV, A>) {
         let (mut actor, mailbox) = Self::new(context, config);
         actor.mode = Mode::Dkg {
             participants: dkg.participants,
@@ -353,24 +353,18 @@ where
             )
             .await;
 
-        // Register the synced epoch, then resolve its floor height. Setup uses
-        // the floor to decide whether the epoch's dealer-log window is complete.
+        // With state-sync material, resolve the floor's height and, when startup needs
+        // it, the floor block. Setup uses the height to decide whether the epoch's
+        // dealer-log window is complete.
         let (mut state_sync, floor) = if let Some(state_sync) = state_sync {
-            let share = self.recovered_share(&mut store, &state_sync.info).await;
-            self.register_epoch(&state_sync.info, share).await;
-            let floor = self
-                .marshal
-                .subscribe_by_commitment(
-                    state_sync.floor.proposal.payload,
-                    CommitmentFallback::Wait,
-                )
-                .await
-                .expect("marshal must yield state sync floor block");
+            let (height, block) = self
+                .resolve_floor(&mut store, &anchor, &state_sync.info, state_sync.floor)
+                .await;
             let start = StateSyncStart {
                 info: state_sync.info,
-                floor: floor.height(),
+                floor: height,
             };
-            (Some(start), Some(floor))
+            (Some(start), block)
         } else {
             (None, None)
         };
