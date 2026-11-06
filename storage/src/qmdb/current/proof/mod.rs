@@ -524,10 +524,13 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             }
         }
 
+        // Reconstruction queries the length again, so count the operations it consumes and
+        // require the count the chunks were checked against.
+        let mut consumed = 0usize;
         let merkle_root = match self.proof.reconstruct_root_inner(
             &grafting_verifier,
             start_loc,
-            ops.map(|op| op.encode()),
+            ops.inspect(|_| consumed += 1).map(|op| op.encode()),
             collected,
         ) {
             Ok(root) => root,
@@ -536,6 +539,10 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
                 return Err(merkle::Error::InvalidProof);
             }
         };
+        if consumed != ops_len {
+            debug!("verification failed, operation count changed");
+            return Err(merkle::Error::InvalidProof);
+        }
 
         let partial =
             has_partial_chunk.then(|| (next_bit, self.partial_chunk_digest.as_ref().unwrap()));

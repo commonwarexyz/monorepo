@@ -115,21 +115,21 @@ mod tests {
 
     #[test]
     fn test_max_message_size() {
-        assert_eq!(max_message_size(&[]), 0);
-        assert_eq!(max_message_size(&[3, 7, 5]), 7);
+        assert_eq!(max_message_size(core::iter::empty::<usize>()), 0);
+        assert_eq!(max_message_size([3, 7, 5]), 7);
         assert_eq!(
             max_message_size([3usize, 7, 5].into_iter().filter(|p| *p != 7)),
             5
         );
         let largest: usize = Widen::widen(u32::MAX);
-        assert_eq!(max_message_size(&[0, largest]), u32::MAX);
+        assert_eq!(max_message_size([0, largest]), u32::MAX);
     }
 
     #[test]
     #[should_panic(expected = "payload must fit in u32")]
     fn test_max_message_size_overflow() {
         let largest = Widen::<usize>::widen(u32::MAX) + 1;
-        max_message_size(&[0, largest]);
+        max_message_size([0, largest]);
     }
 
     #[test]
