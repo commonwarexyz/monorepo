@@ -571,6 +571,10 @@
 //! malicious leader front-run the outcome. Consume `seed(v)` only in a later view or epoch (see [scheme::bls12381_threshold::vrf] for
 //! extended discussion of the attack and the commit-then-reveal mitigation).
 //!
+//! Consensus hands the automaton the seed of a proposal's parent round with every request to propose, verify, or certify
+//! (see [`Automaton::Seed`](crate::Automaton::Seed) and [`scheme::Seeded`]). The parent is certified before it is built on, so
+//! that seed is already public and only a commitment made earlier can safely bind to it.
+//!
 //! #### Succinct Certificates
 //!
 //! All broadcast consensus messages (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) contain attestations (partial signatures) for a static
@@ -923,7 +927,7 @@ pub(crate) fn quorum(n: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::{
-        Handoff, Monitor, Viewable,
+        Epochable, Handoff, Monitor, Viewable,
         simplex::{
             elector::{
                 Config as _, Elector, Random, RandomVersion, RoundRobin, RoundRobinElector,
@@ -943,7 +947,7 @@ mod tests {
                 ed25519, secp256r1,
             },
             types::{
-                Certificate, Finalization as TFinalization, Finalize as TFinalize,
+                Certificate, Context, Finalization as TFinalization, Finalize as TFinalize,
                 Notarization as TNotarization, Notarize as TNotarize,
                 Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
             },
@@ -8244,6 +8248,163 @@ mod tests {
         tle::<MinSig, Random>(Random::new(RandomVersion::V1));
     }
 
+    /// Every proposal and verification request carries the seed of the parent's round, as
+    /// recovered from the parent's notarization, and no seed for a genesis parent.
+    fn seeded_requests<V, L>(elector: L)
+    where
+        V: Variant,
+        L: elector::Config<bls12381_threshold_vrf::Scheme<PublicKey, V>>,
+    {
+        let n = 4;
+        let namespace = b"consensus".to_vec();
+        let epoch = Epoch::new(333);
+        let target = View::new(20);
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, &namespace, n);
+            let mut oracle = start_test_network_with_peers::<
+                bls12381_threshold_vrf::Scheme<PublicKey, V>,
+                _,
+            >(context.child("network"), participants.clone(), true)
+            .await;
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(5),
+                success_rate: probability!(1.0),
+            };
+            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+
+            // Record every request the first validator's application receives.
+            type Observed<V> = Arc<
+                Mutex<
+                    Vec<(
+                        Context<Sha256Digest, PublicKey>,
+                        Option<bls12381_threshold_vrf::Seed<V>>,
+                    )>,
+                >,
+            >;
+            let observed: Observed<V> = Arc::new(Mutex::new(Vec::new()));
+            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+            let mut reporters = Vec::new();
+            let mut engine_handlers = Vec::new();
+            for (idx, validator) in participants.iter().enumerate() {
+                let context = context
+                    .child("validator")
+                    .with_attribute("public_key", validator);
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+
+                let application_cfg = mocks::application::Config::<Sha256, _> {
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Always,
+                };
+                let (mut actor, application) = mocks::application::Application::new(
+                    context.child("application"),
+                    application_cfg,
+                );
+                if idx == 0 {
+                    let proposed = observed.clone();
+                    actor.set_propose_observer(Box::new(move |context, seed| {
+                        proposed.lock().push((context, seed));
+                    }));
+                    let verified = observed.clone();
+                    actor.set_verify_observer(Box::new(move |context, _, seed| {
+                        verified.lock().push((context, seed));
+                    }));
+                }
+                actor.start();
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: validator.to_string(),
+                    mailbox_size: NZUsize!(1024),
+                    epoch,
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                    leader_timeout: Duration::from_millis(100),
+                    certification_timeout: Duration::from_millis(200),
+                    timeout_retry: Duration::from_millis(500),
+                    fetch_timeout: NZDuration!(Duration::from_millis(100)),
+                    fetch_retry_delay: Duration::from_millis(100),
+                    view_retention: ViewDelta::new(100),
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(50),
+                        budget: SkipBudget::Participants,
+                    },
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    forward: ForwardPolicy::Disabled,
+                    track_historical_votes: false,
+                };
+                let engine = Engine::new(context.child("engine"), cfg);
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(pending, recovered, resolver));
+            }
+
+            // Wait for the first validator to finalize the target view.
+            loop {
+                context.sleep(Duration::from_millis(100)).await;
+                let finalizations = reporters[0].finalizations.lock();
+                if finalizations.contains_key(&target) {
+                    break;
+                }
+            }
+
+            // Every request names a certified parent whose seed matches the parent's
+            // notarization, except the genesis parent, which has none.
+            let observed = observed.lock();
+            let notarizations = reporters[0].notarizations.lock();
+            let mut seeded = 0;
+            for (context, seed) in observed.iter() {
+                assert_eq!(context.epoch(), epoch);
+                let (parent, _) = context.parent;
+                if parent == View::zero() {
+                    assert!(seed.is_none(), "genesis parent has no seed");
+                    continue;
+                }
+                let notarization = notarizations
+                    .get(&parent)
+                    .expect("parent of a request must be notarized");
+                assert_eq!(
+                    seed.as_ref(),
+                    Some(&notarization.seed()),
+                    "request seed must be the parent round's seed"
+                );
+                seeded += 1;
+            }
+            assert!(seeded > 0, "expected seeded requests");
+        });
+    }
+
+    #[test_traced]
+    fn test_seeded_requests() {
+        seeded_requests::<MinPk, Random>(Random::new(RandomVersion::V1));
+        seeded_requests::<MinSig, Random>(Random::new(RandomVersion::V1));
+    }
+
     fn run_hailstorm<S, F, L>(
         seed: u64,
         shutdowns: usize,
@@ -8669,8 +8830,8 @@ mod tests {
     /// prefix and wait for parent certification afterward, so early-vote evidence comes only from
     /// prefix views. `returned` counts the candidates the application returns during the
     /// prefix.
-    fn configure_twins_handoff(
-        actor: &mut mocks::application::Application<deterministic::Context, Sha256, PublicKey>,
+    fn configure_twins_handoff<X: Clone + Send + 'static>(
+        actor: &mut mocks::application::Application<deterministic::Context, Sha256, PublicKey, X>,
         prefix_end: View,
         returned: Arc<AtomicUsize>,
     ) {

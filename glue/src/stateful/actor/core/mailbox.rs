@@ -12,6 +12,7 @@ use commonware_consensus::{
         Update,
         ancestry::{Ancestry, BoxedAncestry},
     },
+    simplex::scheme::Seeded,
 };
 use commonware_cryptography::{Digested, Digestible};
 use commonware_runtime::telemetry::traces::TracedExt as _;
@@ -282,9 +283,12 @@ where
     type Input = A::Input;
 
     /// Builds through [`Application::prepare`] on the actor, which owns the database batches.
+    ///
+    /// The seed of the parent's round is dropped: [`Application`] does not take it.
     async fn prepare(
         &mut self,
         context: (E, Self::Context),
+        _seed: <Self::SigningScheme as Seeded>::Seed,
         ancestry: impl Ancestry<Self::Block>,
         upstream: Self::Input,
     ) -> Handoff<Digested<Self::Block>> {
@@ -307,6 +311,7 @@ where
     async fn propose(
         &mut self,
         context: (E, Self::Context),
+        _seed: <Self::SigningScheme as Seeded>::Seed,
         ancestry: impl Ancestry<Self::Block>,
         upstream: Self::Input,
     ) -> Option<Digested<Self::Block>> {
@@ -329,6 +334,7 @@ where
     async fn verify(
         &mut self,
         context: (E, Self::Context),
+        _seed: <Self::SigningScheme as Seeded>::Seed,
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         // The actor holds only a weak handle, so dropping this future releases the ancestry's

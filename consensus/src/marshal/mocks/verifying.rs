@@ -4,7 +4,9 @@
 //! `Application` trait, suitable for testing the `Marshaled` wrapper in
 //! both standard and coding variants.
 
-use crate::{CertifiableBlock, Epochable, Handoff, marshal::ancestry::Ancestry};
+use crate::{
+    CertifiableBlock, Epochable, Handoff, marshal::ancestry::Ancestry, simplex::scheme::Seeded,
+};
 use commonware_cryptography::Digested;
 use commonware_parallel::Sequential;
 use commonware_runtime::deterministic;
@@ -99,7 +101,7 @@ impl<B, S> crate::Application<deterministic::Context> for MockVerifyingApp<B, S>
 where
     B: CertifiableBlock,
     B::Context: Epochable + Send + Sync + 'static,
-    S: commonware_cryptography::certificate::Scheme,
+    S: commonware_cryptography::certificate::Scheme + Seeded,
 {
     type Block = B;
     type Context = B::Context;
@@ -109,6 +111,7 @@ where
     async fn prepare(
         &mut self,
         context: (deterministic::Context, Self::Context),
+        seed: S::Seed,
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
     ) -> Handoff<Digested<Self::Block>> {
@@ -116,7 +119,7 @@ where
             return Handoff::Wait;
         }
         let decision = self.handoff;
-        self.propose(context, ancestry, input)
+        self.propose(context, seed, ancestry, input)
             .await
             .map_or(Handoff::Wait, |block| decision.map(|()| block))
     }
@@ -124,6 +127,7 @@ where
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
+        _seed: S::Seed,
         _ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
     ) -> Option<Digested<Self::Block>> {
@@ -143,6 +147,7 @@ where
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
+        _seed: S::Seed,
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         if let (Some(reject), Some(block)) = (self.reject, ancestry.peek())
@@ -186,7 +191,7 @@ impl<B, S> crate::Application<deterministic::Context> for GatedVerifyingApp<B, S
 where
     B: CertifiableBlock,
     B::Context: Epochable + Send + Sync + 'static,
-    S: commonware_cryptography::certificate::Scheme,
+    S: commonware_cryptography::certificate::Scheme + Seeded,
 {
     type Block = B;
     type Context = B::Context;
@@ -196,6 +201,7 @@ where
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
+        _seed: S::Seed,
         _ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
     ) -> Option<Digested<Self::Block>> {
@@ -205,6 +211,7 @@ where
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
+        _seed: S::Seed,
         _ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         if let Some(started) = self.started.lock().take() {

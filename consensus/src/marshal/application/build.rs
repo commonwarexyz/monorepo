@@ -10,7 +10,7 @@
 use crate::{
     Application, Handoff,
     marshal::{ancestry::Ancestry, application::gates::Gates},
-    simplex::types::Context,
+    simplex::{scheme::Seeded, types::Context},
 };
 use commonware_cryptography::{Digest, Digested, PublicKey};
 use commonware_macros::select;
@@ -32,8 +32,8 @@ pub(crate) enum Resolved<D, S, A, M = ()> {
     Build(A, Timer, M),
 }
 
-/// Answers a prepare request for `consensus_context` from a task spawned from `context` and
-/// instrumented with `span`.
+/// Answers a prepare request for `consensus_context`, whose parent round has `seed`, from a
+/// task spawned from `context` and instrumented with `span`.
 ///
 /// `checks` resolves the parent. The epoch boundary block is re-proposed as is and answered
 /// [`Handoff::Stage`], and a parent the marshal cannot build on answers [`Handoff::Wait`], in
@@ -48,6 +48,7 @@ pub(crate) fn prepare<E, A, D, P, S, N, Fut, M, Seal>(
     application: &A,
     gates: Gates<D, S>,
     consensus_context: Context<D, P>,
+    seed: <A::SigningScheme as Seeded>::Seed,
     checks: Fut,
     span: Span,
     build_span: impl FnOnce() -> Span + Send + 'static,
@@ -108,6 +109,7 @@ where
             let build = application
                 .prepare(
                     (runtime_context.child("app_prepare"), consensus_context),
+                    seed,
                     ancestry,
                     (),
                 )
@@ -152,8 +154,8 @@ where
     rx
 }
 
-/// Answers a propose request for `consensus_context` from a task spawned from `context` and
-/// instrumented with `span`.
+/// Answers a propose request for `consensus_context`, whose parent round has `seed`, from a
+/// task spawned from `context` and instrumented with `span`.
 ///
 /// `checks` resolves the parent. The epoch boundary block is re-proposed as is. A parent the
 /// marshal cannot build on, or a build that produces no block, closes the receiver. Otherwise
@@ -167,6 +169,7 @@ pub(crate) fn propose<E, A, D, P, S, N, Fut, M, Seal>(
     application: &A,
     gates: Gates<D, S>,
     consensus_context: Context<D, P>,
+    seed: <A::SigningScheme as Seeded>::Seed,
     checks: Fut,
     span: Span,
     build_span: impl FnOnce() -> Span + Send + 'static,
@@ -226,6 +229,7 @@ where
             let build_request = application
                 .propose(
                     (runtime_context.child("app_propose"), consensus_context),
+                    seed,
                     ancestor_stream,
                     (),
                 )

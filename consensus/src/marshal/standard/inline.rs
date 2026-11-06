@@ -71,6 +71,7 @@ use crate::{
     },
     simplex::{
         Plan,
+        scheme::Seeded,
         types::{Activity, Context},
     },
     types::{Epocher, Round, View},
@@ -188,7 +189,7 @@ where
 impl<E, S, A, B, ES> Inline<E, S, A, B, ES>
 where
     E: Metrics + Clock,
-    S: Scheme,
+    S: Scheme + Seeded,
     A: Application<
             E,
             Block = B,
@@ -296,7 +297,7 @@ where
 impl<E, S, A, B, ES> Automaton for Inline<E, S, A, B, ES>
 where
     E: Spawner + Metrics + Clock,
-    S: Scheme,
+    S: Scheme + Seeded,
     A: Application<
             E,
             Block = B,
@@ -309,6 +310,7 @@ where
 {
     type Digest = B::Digest;
     type Context = Context<Self::Digest, S::PublicKey>;
+    type Seed = S::Seed;
 
     /// Proposes a new block or re-proposes an epoch boundary block.
     ///
@@ -323,6 +325,7 @@ where
     async fn propose(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
+        seed: S::Seed,
     ) -> oneshot::Receiver<Self::Digest> {
         let checks = self.checks(consensus_context.clone());
         let span = info_span!(
@@ -336,6 +339,7 @@ where
             &self.application,
             self.gates.clone(),
             consensus_context,
+            seed,
             checks,
             span,
             move || {
@@ -367,6 +371,7 @@ where
     async fn verify(
         &mut self,
         context: Context<Self::Digest, S::PublicKey>,
+        seed: S::Seed,
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         let round = context.round;
@@ -499,6 +504,7 @@ where
                     let valid = run_app_verify(
                         runtime_context,
                         context,
+                        seed,
                         block.clone(),
                         parent,
                         &mut application,
@@ -526,7 +532,7 @@ where
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Spawner + Metrics + Clock,
-    S: Scheme,
+    S: Scheme + Seeded,
     A: Application<
             E,
             Block = B,
@@ -547,6 +553,7 @@ where
     async fn prepare(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
+        seed: S::Seed,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let checks = self.checks(consensus_context.clone());
         let span = info_span!(
@@ -560,6 +567,7 @@ where
             &self.application,
             self.gates.clone(),
             consensus_context,
+            seed,
             checks,
             span,
             move || {
@@ -576,7 +584,12 @@ where
 
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
-    async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
+    async fn certify(
+        &mut self,
+        round: Round,
+        _seed: S::Seed,
+        digest: Self::Digest,
+    ) -> oneshot::Receiver<bool> {
         // `prepare`, `propose`, and `verify` register an in-flight certification gate whose
         // result resolves once the block's sync handle completes. Awaiting it here is the
         // durability barrier for the finalize vote, and it lets the sync overlap consensus voting
@@ -655,7 +668,7 @@ where
 impl<E, S, A, B, ES> Relay for Inline<E, S, A, B, ES>
 where
     E: Send + Sync + 'static,
-    S: Scheme,
+    S: Scheme + Seeded,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Codec,
     ES: Epocher,
@@ -679,7 +692,7 @@ where
 impl<E, S, A, B, ES> Reporter for Inline<E, S, A, B, ES>
 where
     E: Send + Sync + 'static,
-    S: Scheme,
+    S: Scheme + Seeded,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Codec,
     ES: Epocher,
@@ -713,7 +726,10 @@ mod tests {
             },
             standard::tests::ready,
         },
-        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
+        simplex::{
+            scheme::{Seeded, bls12381_threshold::vrf as bls12381_threshold_vrf},
+            types::Context,
+        },
         types::{Epoch, FixedEpocher, Height, Round, View},
     };
     use commonware_broadcast::Broadcaster;
@@ -733,7 +749,7 @@ mod tests {
     fn assert_non_certifiable_block_supported<E, S, A, B, ES>()
     where
         E: Spawner + Metrics + Clock,
-        S: Scheme,
+        S: Scheme + Seeded,
         A: Application<
                 E,
                 Block = B,
@@ -812,14 +828,14 @@ mod tests {
             assert!(marshal.verified(round, ready(block)).await);
 
             // Complete verify first so the block is already available locally.
-            let verify_rx = inline.verify(verify_context, digest).await;
+            let verify_rx = inline.verify(verify_context, None, digest).await;
             assert!(
                 verify_rx.await.unwrap(),
                 "verify should complete successfully before certify"
             );
 
             // Certify should return immediately instead of waiting on marshal.
-            let certify_rx = inline.certify(round, digest).await;
+            let certify_rx = inline.certify(round, None, digest).await;
 
             select! {
                 result = certify_rx => {
@@ -894,7 +910,7 @@ mod tests {
             assert!(marshal.verified(round, ready(block)).await);
 
             // Certify should still resolve by waiting on marshal block availability directly.
-            let certify_rx = inline.certify(round, digest).await;
+            let certify_rx = inline.certify(round, None, digest).await;
 
             select! {
                 result = certify_rx => {
@@ -970,7 +986,7 @@ mod tests {
                 parent: (View::new(boundary_height.get()), boundary_digest),
             };
 
-            let verify_rx = inline.verify(reproposal_context, boundary_digest).await;
+            let verify_rx = inline.verify(reproposal_context, None, boundary_digest).await;
             assert!(
                 verify_rx.await.unwrap(),
                 "verify should accept a valid boundary re-proposal"
@@ -980,7 +996,7 @@ mod tests {
             drop(marshal);
             context.sleep(Duration::from_millis(1)).await;
 
-            let certify_rx = inline.certify(reproposal_round, boundary_digest).await;
+            let certify_rx = inline.certify(reproposal_round, None, boundary_digest).await;
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1059,7 +1075,7 @@ mod tests {
                 leader: me,
                 parent: (View::new(2), digest),
             };
-            let verify_rx = inline.verify(reproposal_context, digest).await;
+            let verify_rx = inline.verify(reproposal_context, None, digest).await;
             assert!(
                 !verify_rx.await.expect("verify result missing"),
                 "a non-boundary re-proposal must be rejected"
@@ -1067,7 +1083,7 @@ mod tests {
 
             // The header-scoped rejection must not become the certification
             // verdict for the notarized digest.
-            let certify_rx = inline.certify(round, digest).await;
+            let certify_rx = inline.certify(round, None, digest).await;
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1165,9 +1181,9 @@ mod tests {
                 "buffer broadcast for child should be accepted"
             );
 
-            let verify_rx = inline.verify(child_ctx, child_digest).await;
+            let verify_rx = inline.verify(child_ctx, None, child_digest).await;
             let certify_result = inline
-                .certify(child_round, child_digest)
+                .certify(child_round, None, child_digest)
                 .await
                 .await
                 .expect("certify result missing");
@@ -1264,7 +1280,7 @@ mod tests {
             );
 
             let digest = inline
-                .propose(ctx)
+                .propose(ctx, None)
                 .await
                 .await
                 .expect("propose must return a digest");
@@ -1276,7 +1292,7 @@ mod tests {
             // The leader certifies its own proposal, which awaits the deferred sync handle.
             assert!(
                 inline
-                    .certify(round, child_digest)
+                    .certify(round, None, child_digest)
                     .await
                     .await
                     .expect("certify result missing"),
@@ -1356,7 +1372,7 @@ mod tests {
                 B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
             let digest = block.digest();
 
-            let verify_rx = inline.verify(block_context, digest).await;
+            let verify_rx = inline.verify(block_context, None, digest).await;
             drop(verify_rx);
 
             // Give the verify task a chance to observe the dropped receiver while its
@@ -1364,7 +1380,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(marshal.verified(round, ready(block)).await);
-            let certify_rx = inline.certify(round, digest).await;
+            let certify_rx = inline.certify(round, None, digest).await;
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1449,7 +1465,7 @@ mod tests {
                 "buffer broadcast for child should be accepted"
             );
 
-            let verify_rx = inline.verify(child_ctx, child_digest).await;
+            let verify_rx = inline.verify(child_ctx, None, child_digest).await;
 
             // Application verification is now blocked. The store request runs concurrently
             // with it, so the block is locally queryable even though the notarize vote has
@@ -1469,7 +1485,7 @@ mod tests {
                 verify_rx.await.expect("verify result missing"),
                 "inline verify should pass once verification is released"
             );
-            let certify_rx = inline.certify(child_round, child_digest).await;
+            let certify_rx = inline.certify(child_round, None, child_digest).await;
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1580,14 +1596,14 @@ mod tests {
                 leader,
                 parent: (View::new(1), certified_digest),
             };
-            let verify_rx = inline.verify(equivocating_ctx, digest).await;
+            let verify_rx = inline.verify(equivocating_ctx, None, digest).await;
             assert!(
                 !verify_rx.await.expect("verify result missing"),
                 "the equivocating proposal must not be notarized"
             );
 
             // The honest notarization for the same `(round, digest)` arrives.
-            let certify_rx = inline.certify(round, digest).await;
+            let certify_rx = inline.certify(round, None, digest).await;
             select! {
                 result = certify_rx => {
                     assert!(

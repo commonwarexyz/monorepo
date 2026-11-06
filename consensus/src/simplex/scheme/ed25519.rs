@@ -5,8 +5,20 @@
 //! contain signer indices alongside individual signatures, enabling secure
 //! per-validator activity tracking and fault detection.
 
-use crate::simplex::{scheme::Namespace, types::Subject};
+use crate::{
+    simplex::{
+        scheme::{Namespace, Seeded},
+        types::Subject,
+    },
+    types::Round,
+};
 use commonware_cryptography::impl_certificate_ed25519;
 use commonware_utils::N3f1;
 
 impl_certificate_ed25519!(Subject<'a, D>, Namespace, N3f1);
+
+impl Seeded for Scheme {
+    type Seed = ();
+
+    fn seed(_: Round, _: Option<&Self::Certificate>) {}
+}

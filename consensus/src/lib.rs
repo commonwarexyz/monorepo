@@ -150,6 +150,14 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Hash of an arbitrary payload.
         type Digest: Digest;
 
+        /// Randomness the consensus engine derives from the certificate that certifies a
+        /// payload's parent, handed over with every request.
+        ///
+        /// Unlike [`Self::Context`], the seed is not part of a payload's identity: participants
+        /// derive it from the certificates they hold, so it is never embedded in a payload. Engines
+        /// or signing schemes without such randomness use `()`.
+        type Seed: Send + 'static;
+
         /// Generate a new payload for the given context.
         ///
         /// If it is possible to generate a payload, the Digest should be returned over the provided
@@ -174,6 +182,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn propose(
             &mut self,
             context: Self::Context,
+            seed: Self::Seed,
         ) -> impl Future<Output = oneshot::Receiver<Self::Digest>> + Send;
 
         /// Verify the payload is valid.
@@ -200,6 +209,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn verify(
             &mut self,
             context: Self::Context,
+            seed: Self::Seed,
             payload: Self::Digest,
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
     }
@@ -259,6 +269,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub trait CertifiableAutomaton: Automaton {
         /// Prepare a payload for a term-start proposal whose parent is not yet certified.
         ///
+        /// The parent has no certificate yet, so the seed is the engine's value for a missing one.
+        ///
         /// Returning [`Handoff::Vote`] or [`Handoff::Stage`] commits the application to
         /// the same verification and certification obligations as returning a payload from
         /// [`Automaton::propose`].
@@ -300,6 +312,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn prepare(
             &mut self,
             _context: Self::Context,
+            _seed: Self::Seed,
         ) -> impl Future<Output = oneshot::Receiver<Handoff<Self::Digest>>> + Send
         {
             #[allow(clippy::async_yields_async)]
@@ -316,6 +329,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// applications to associate certification with the correct verification context. The
         /// same payload may appear in multiple rounds, so implementations must key any state
         /// on `(round, payload)` rather than `payload` alone.
+        ///
+        /// The seed is the one [`Automaton::verify`] received for the same `(round, payload)`
+        /// when this participant holds the certificates it is derived from, so a participant that
+        /// never verified the payload can still apply the same checks. Without them, it is the
+        /// engine's value for a missing certificate.
         ///
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
         /// Also like [`Automaton::verify`], certification is single-shot for the given
@@ -349,6 +367,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn certify(
             &mut self,
             _round: Round,
+            _seed: Self::Seed,
             _payload: Self::Digest,
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send {
             #[allow(clippy::async_yields_async)]
@@ -423,14 +442,15 @@ stability_scope!(ALPHA {
     pub mod aggregation;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use crate::marshal::ancestry::Ancestry;
+    use crate::{marshal::ancestry::Ancestry, simplex::scheme::Seeded};
     use commonware_cryptography::certificate::Scheme;
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
     pub trait Application<E>: Clone + Send + 'static {
-        /// The signing scheme used by the application.
-        type SigningScheme: Scheme;
+        /// The signing scheme used by the application. Its [`Seeded::Seed`] is the seed of the
+        /// parent's round that every request carries.
+        type SigningScheme: Scheme + Seeded;
 
         /// Context is metadata provided by the consensus engine associated with a given payload.
         ///
@@ -491,6 +511,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn prepare(
             &mut self,
             _context: (E, Self::Context),
+            _seed: <Self::SigningScheme as Seeded>::Seed,
             _ancestry: impl Ancestry<Self::Block>,
             _input: Self::Input,
         ) -> impl Future<Output = Handoff<Digested<Self::Block>>> + Send {
@@ -500,18 +521,25 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// or the proposer's slot should be skipped, the implementor should return [None].
         ///
-        /// `input` is the per-proposal input for this build.
+        /// `seed` is the seed of the parent's round (see [`Seeded::Seed`]) and `input` is the
+        /// per-proposal input for this build.
         ///
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.
         fn propose(
             &mut self,
             context: (E, Self::Context),
+            seed: <Self::SigningScheme as Seeded>::Seed,
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
         ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send;
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.
+        ///
+        /// `seed` is the seed of the parent's round (see [`Seeded::Seed`]). It is the same for
+        /// every participant that holds a certificate for that round, and the scheme's value for
+        /// a missing certificate otherwise; that absence is local, so it must not make a block
+        /// invalid.
         ///
         /// This future should not resolve until the implementation can produce a stable verdict.
         /// Return `false` only when the block is permanently invalid for the supplied context and
@@ -528,6 +556,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn verify(
             &mut self,
             context: (E, Self::Context),
+            seed: <Self::SigningScheme as Seeded>::Seed,
             ancestry: impl Ancestry<Self::Block>,
         ) -> impl Future<Output = bool> + Send;
     }

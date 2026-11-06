@@ -53,7 +53,7 @@ use crate::simplex::scheme::seed_namespace;
 use crate::{
     Epochable, Viewable,
     simplex::{
-        scheme::Namespace,
+        scheme::{Namespace, Seeded},
         types::{Finalization, Notarization, Subject},
     },
     types::{Epoch, Participant, Round, View},
@@ -609,6 +609,22 @@ where
 pub trait Seedable<V: Variant> {
     /// Returns the seed associated with this object.
     fn seed(&self) -> Seed<V>;
+}
+
+impl<P: PublicKey, V: Variant> Seeded for Scheme<P, V> {
+    type Seed = Option<Seed<V>>;
+
+    /// Returns the seed carried by a certificate for `round`, or `None` without one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the certificate was not verified and its signature fails to decode.
+    fn seed(round: Round, certificate: Option<&Self::Certificate>) -> Option<Seed<V>> {
+        let cert = certificate?
+            .get()
+            .expect("verified certificate must decode");
+        Some(Seed::new(round, cert.seed_signature))
+    }
 }
 
 impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Notarization<Scheme<P, V>, D> {

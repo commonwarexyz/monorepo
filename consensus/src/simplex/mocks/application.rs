@@ -27,23 +27,27 @@ use std::{
 };
 use tracing::debug;
 
-pub enum Message<D: Digest, P: PublicKey> {
+pub enum Message<D: Digest, P: PublicKey, X = ()> {
     Prepare {
         context: Context<D, P>,
+        seed: X,
         response: oneshot::Sender<Handoff<D>>,
     },
     Propose {
         context: Context<D, P>,
+        seed: X,
         response: oneshot::Sender<D>,
     },
     Verify {
         context: Context<D, P>,
         payload: D,
+        seed: X,
         response: oneshot::Sender<bool>,
     },
     Certify {
         round: Round,
         payload: D,
+        seed: X,
         response: oneshot::Sender<bool>,
     },
     Broadcast {
@@ -52,66 +56,93 @@ pub enum Message<D: Digest, P: PublicKey> {
     },
 }
 
-#[derive(Clone)]
-pub struct Mailbox<D: Digest, P: PublicKey> {
-    sender: mpsc::UnboundedSender<Message<D, P>>,
+pub struct Mailbox<D: Digest, P: PublicKey, X = ()> {
+    sender: mpsc::UnboundedSender<Message<D, P, X>>,
 }
 
-impl<D: Digest, P: PublicKey> Mailbox<D, P> {
-    pub(super) const fn new(sender: mpsc::UnboundedSender<Message<D, P>>) -> Self {
+impl<D: Digest, P: PublicKey, X> Clone for Mailbox<D, P, X> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
+}
+
+impl<D: Digest, P: PublicKey, X> Mailbox<D, P, X> {
+    pub(super) const fn new(sender: mpsc::UnboundedSender<Message<D, P, X>>) -> Self {
         Self { sender }
     }
 }
 
-impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
+impl<D: Digest, P: PublicKey, X: Send + 'static> Au for Mailbox<D, P, X> {
     type Digest = D;
     type Context = Context<D, P>;
+    type Seed = X;
 
-    async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
+    async fn propose(
+        &mut self,
+        context: Self::Context,
+        seed: Self::Seed,
+    ) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::Propose { context, response });
+        self.sender.send_lossy(Message::Propose {
+            context,
+            seed,
+            response,
+        });
         receiver
     }
 
     async fn verify(
         &mut self,
         context: Self::Context,
+        seed: Self::Seed,
         payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         self.sender.send_lossy(Message::Verify {
             context,
             payload,
+            seed,
             response,
         });
         receiver
     }
 }
 
-impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
+impl<D: Digest, P: PublicKey, X: Send + 'static> CAu for Mailbox<D, P, X> {
     async fn prepare(
         &mut self,
         context: Self::Context,
+        seed: Self::Seed,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::Prepare { context, response });
+        self.sender.send_lossy(Message::Prepare {
+            context,
+            seed,
+            response,
+        });
         receiver
     }
 
-    async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
+    async fn certify(
+        &mut self,
+        round: Round,
+        seed: Self::Seed,
+        payload: Self::Digest,
+    ) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         self.sender.send_lossy(Message::Certify {
             round,
             payload,
+            seed,
             response: tx,
         });
         rx
     }
 }
 
-impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
+impl<D: Digest, P: PublicKey, X: Send + 'static> Re for Mailbox<D, P, X> {
     type Digest = D;
     type PublicKey = P;
     type Plan = Plan<P>;
@@ -133,8 +164,8 @@ pub fn genesis<H: Hasher>(epoch: Epoch) -> H::Digest {
 
 type Latency = (f64, f64);
 
-/// Callback that receives the context of each handoff or ordinary proposal request.
-type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Send + 'static>;
+/// Callback that receives the context and seed of each handoff or ordinary proposal request.
+type ProposeObserver<H, P, X> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>, X) + Send + 'static>;
 
 /// Callback that receives a built handoff proposal's round, the proposal, and its response sender.
 type HandoffController<D> =
@@ -142,8 +173,8 @@ type HandoffController<D> =
 
 /// Observer invoked on every `Message::Verify` request. Used by tests to
 /// detect spurious verification calls.
-type VerifyObserver<H, P> =
-    Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest) + Send + 'static>;
+type VerifyObserver<H, P, X> =
+    Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest, X) + Send + 'static>;
 
 /// Callback that receives a certification request's round, payload, and response sender.
 type CertificationController<D> = Box<dyn Fn(Round, D, oneshot::Sender<bool>) + Send + 'static>;
@@ -183,14 +214,14 @@ pub struct Config<H: Hasher, P: PublicKey> {
     pub should_certify: Certifier<H::Digest>,
 }
 
-pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
+pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey, X = ()> {
     context: ContextCell<E>,
     me: P,
 
     relay: Arc<Relay<H::Digest, P>>,
     broadcast: mpsc::UnboundedReceiver<(H::Digest, Bytes)>,
 
-    mailbox: mpsc::UnboundedReceiver<Message<H::Digest, P>>,
+    mailbox: mpsc::UnboundedReceiver<Message<H::Digest, P, X>>,
 
     propose_latency: Normal<f64>,
     verify_latency: Normal<f64>,
@@ -212,7 +243,7 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     /// Invoked for every handoff and ordinary proposal request. Tests use it to
     /// count requests per view and detect spurious local-leader requests after
     /// replay.
-    propose_observer: Option<ProposeObserver<H, P>>,
+    propose_observer: Option<ProposeObserver<H, P, X>>,
 
     /// Receives each built handoff proposal with its response sender, so a test
     /// decides when and how to respond.
@@ -221,7 +252,7 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     /// Invoked on every `Message::Verify` request received by the application.
     /// Used by tests to detect spurious verification requests (e.g. after replay
     /// of a leader-owned proposal).
-    verify_observer: Option<VerifyObserver<H, P>>,
+    verify_observer: Option<VerifyObserver<H, P, X>>,
 
     /// Handoff response senders held alive while `stall_proposals` is set.
     pending_prepares: Vec<oneshot::Sender<Handoff<H::Digest>>>,
@@ -234,8 +265,10 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     pending_certifications: Vec<oneshot::Sender<bool>>,
 }
 
-impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
-    pub fn new(context: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest, P>) {
+impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey, X: Clone + Send + 'static>
+    Application<E, H, P, X>
+{
+    pub fn new(context: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest, P, X>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.me.clone());
 
@@ -307,7 +340,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.drop_verifications = drop;
     }
 
-    pub fn set_propose_observer(&mut self, observer: ProposeObserver<H, P>) {
+    pub fn set_propose_observer(&mut self, observer: ProposeObserver<H, P, X>) {
         self.propose_observer = Some(observer);
     }
 
@@ -315,7 +348,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.handoff_controller = Some(controller);
     }
 
-    pub fn set_verify_observer(&mut self, observer: VerifyObserver<H, P>) {
+    pub fn set_verify_observer(&mut self, observer: VerifyObserver<H, P, X>) {
         self.verify_observer = Some(observer);
     }
 
@@ -488,10 +521,11 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 match message {
                     Message::Prepare {
                         context,
+                        seed,
                         response,
                     } => {
                         if let Some(observer) = &self.propose_observer {
-                            observer(context.clone());
+                            observer(context.clone(), seed);
                         }
                         let decision = self.handoff;
                         if decision.is_wait() {
@@ -514,9 +548,13 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                             response.send_lossy(proposal);
                         }
                     }
-                    Message::Propose { context, response } => {
+                    Message::Propose {
+                        context,
+                        seed,
+                        response,
+                    } => {
                         if let Some(observer) = &self.propose_observer {
-                            observer(context.clone());
+                            observer(context.clone(), seed);
                         }
                         if self.stall_proposals {
                             self.pending_proposes.push(response);
@@ -531,10 +569,11 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                     Message::Verify {
                         context,
                         payload,
+                        seed,
                         response,
                     } => {
                         if let Some(observer) = &self.verify_observer {
-                            observer(context.clone(), payload);
+                            observer(context.clone(), payload, seed);
                         }
                         if self.drop_verifications {
                             continue;
@@ -552,6 +591,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                     Message::Certify {
                         round,
                         payload,
+                        seed: _,
                         response,
                     } => {
                         let contents = self.seen.get(&payload).cloned().unwrap_or_default();

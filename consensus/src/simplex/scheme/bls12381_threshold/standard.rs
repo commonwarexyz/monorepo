@@ -10,8 +10,22 @@
 //! authenticated, evidence can be used locally (as it must be sent by said
 //! participant) but can't be used by an external observer.
 
-use crate::simplex::{scheme::Namespace, types::Subject};
-use commonware_cryptography::impl_certificate_bls12381_threshold;
+use crate::{
+    simplex::{
+        scheme::{Namespace, Seeded},
+        types::Subject,
+    },
+    types::Round,
+};
+use commonware_cryptography::{
+    PublicKey, bls12381::primitives::variant::Variant, impl_certificate_bls12381_threshold,
+};
 use commonware_utils::N3f1;
 
 impl_certificate_bls12381_threshold!(Subject<'a, D>, Namespace, N3f1);
+
+impl<P: PublicKey, V: Variant> Seeded for Scheme<P, V> {
+    type Seed = ();
+
+    fn seed(_: Round, _: Option<&Self::Certificate>) {}
+}

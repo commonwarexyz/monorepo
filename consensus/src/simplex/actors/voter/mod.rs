@@ -395,7 +395,7 @@ mod tests {
         actor.set_handoff(options.handoff);
         actor.set_fail_verification(options.fail_verification);
         if let Some(propose_requests) = propose_requests {
-            actor.set_propose_observer(Box::new(move |context| {
+            actor.set_propose_observer(Box::new(move |context, _| {
                 propose_requests.lock().push(context);
             }));
         }
@@ -405,7 +405,7 @@ mod tests {
             }));
         }
         if let Some(verify_requests) = verify_requests {
-            actor.set_verify_observer(Box::new(move |context, _| {
+            actor.set_verify_observer(Box::new(move |context, _, _| {
                 verify_requests.lock().push(context.view());
             }));
         }
@@ -8798,8 +8798,8 @@ mod tests {
             let (mut app_actor, application) =
                 mocks::application::Application::new(context.child("app"), app_cfg);
             app_actor
-                .set_propose_observer(Box::new(move |ctx| propose_tracker.lock().push(ctx.view())));
-            app_actor.set_verify_observer(Box::new(move |ctx, _| {
+                .set_propose_observer(Box::new(move |ctx, _| propose_tracker.lock().push(ctx.view())));
+            app_actor.set_verify_observer(Box::new(move |ctx, _, _| {
                 verify_tracker.lock().push(ctx.view())
             }));
             app_actor.start();
@@ -9059,8 +9059,8 @@ mod tests {
                 app_cfg,
             );
             app_actor
-                .set_propose_observer(Box::new(move |ctx| propose_tracker.lock().push(ctx.view())));
-            app_actor.set_verify_observer(Box::new(move |ctx, _| {
+                .set_propose_observer(Box::new(move |ctx, _| propose_tracker.lock().push(ctx.view())));
+            app_actor.set_verify_observer(Box::new(move |ctx, _, _| {
                 verify_tracker.lock().push(ctx.view())
             }));
             app_actor.start();
@@ -9228,7 +9228,7 @@ mod tests {
             // `Nullify` before we can abort, which would in turn cause replay
             // to skip the propose path entirely post-restart.
             app_actor.set_stall_proposals(true);
-            app_actor.set_propose_observer(Box::new(move |ctx| {
+            app_actor.set_propose_observer(Box::new(move |ctx, _| {
                 pre_propose_tracker.lock().push(ctx.view());
             }));
             app_actor.start();
@@ -9337,7 +9337,7 @@ mod tests {
             let (mut app_actor, application) =
                 mocks::application::Application::new(context.child("app_restarted"), app_cfg);
             app_actor.set_drop_proposals(true);
-            app_actor.set_propose_observer(Box::new(move |ctx| {
+            app_actor.set_propose_observer(Box::new(move |ctx, _| {
                 post_propose_tracker.lock().push(ctx.view());
             }));
             app_actor.start();
@@ -9619,8 +9619,8 @@ mod tests {
                 app_cfg,
             );
             app_actor
-                .set_propose_observer(Box::new(move |ctx| propose_tracker.lock().push(ctx.view())));
-            app_actor.set_verify_observer(Box::new(move |ctx, _| {
+                .set_propose_observer(Box::new(move |ctx, _| propose_tracker.lock().push(ctx.view())));
+            app_actor.set_verify_observer(Box::new(move |ctx, _, _| {
                 verify_tracker.lock().push(ctx.view())
             }));
             app_actor.start();

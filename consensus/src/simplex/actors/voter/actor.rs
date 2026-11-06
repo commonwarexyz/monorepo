@@ -148,7 +148,7 @@ pub struct Actor<
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
+    A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>, Seed = S::Seed>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
@@ -185,7 +185,7 @@ impl<
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
+    A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>, Seed = S::Seed>,
     R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
     F: Reporter<Activity = Activity<S, D>>,
 > Actor<E, S, L, B, D, A, R, F>
@@ -436,6 +436,7 @@ impl<
         // Check if we are ready to propose
         let request = self.state.try_propose()?;
         let context = request.context().clone();
+        let seed = self.state.parent_seed(context.parent.0);
 
         // Request proposal from application
         let span = info_span!(
@@ -453,10 +454,10 @@ impl<
             match &request {
                 ProposalRequest::Prepare(_) => {
                     self.record_handoff_event(HandoffEventKind::Requested);
-                    ProposalState::Preparing(self.automaton.prepare(context).await)
+                    ProposalState::Preparing(self.automaton.prepare(context, seed).await)
                 }
                 ProposalRequest::Propose(_) => {
-                    ProposalState::Proposing(self.automaton.propose(context).await)
+                    ProposalState::Proposing(self.automaton.propose(context, seed).await)
                 }
             }
         }
@@ -491,9 +492,10 @@ impl<
             view = context.view().traced()
         );
         let round = context.round;
+        let seed = self.state.parent_seed(context.parent.0);
         let receiver = async {
             debug!(?proposal, "requested proposal verification");
-            self.automaton.verify(context, proposal.payload).await
+            self.automaton.verify(context, seed, proposal.payload).await
         }
         .instrument(span.clone())
         .await;
@@ -1261,10 +1263,15 @@ impl<
                         epoch = round.epoch().traced(),
                         view = view.traced()
                     );
+                    let seed = self.state.parent_seed(proposal.parent);
                     #[allow(clippy::async_yields_async)]
-                    let receiver = async { self.automaton.certify(round, proposal.payload).await }
-                        .instrument(span.clone())
-                        .await;
+                    let receiver = async {
+                        self.automaton
+                            .certify(round, seed, proposal.payload)
+                            .await
+                    }
+                    .instrument(span.clone())
+                    .await;
                     let handle = certify_pool.push(async move { (round, span, receiver.await) });
                     self.state.set_certify_handle(view, handle);
                 }

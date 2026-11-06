@@ -1029,6 +1029,18 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.explicit_ancestry_payload(view) == Some(&payload)
     }
 
+    /// Returns the scheme's seed for `parent`'s round, derived from the certificate that
+    /// notarizes or finalizes it, or the scheme's value for a missing certificate when `parent`
+    /// is the genesis view or we hold no certificate for it (as for a pipelined handoff,
+    /// optimistic in-term ancestry, or a notarized candidate whose parent we never certified).
+    pub(super) fn parent_seed(&self, parent: View) -> S::Seed {
+        let certificate = self
+            .views
+            .get(&parent)
+            .and_then(|round| round.certificate());
+        S::seed(Rnd::new(self.epoch, parent), certificate)
+    }
+
     /// Returns whether we voted to nullify `view`.
     pub(super) fn voted_nullify(&self, view: View) -> bool {
         self.nullify_views.contains(&view)
@@ -7424,7 +7436,7 @@ mod tests {
             );
             let application = application.start();
             relay.broadcast(&participants[3], Recipients::All, (c.payload, contents));
-            assert!(!mailbox.verify(ctx, c.payload).await.await.unwrap());
+            assert!(!mailbox.verify(ctx, (), c.payload).await.await.unwrap());
             follower.verification_failed(c.view(), TimeoutReason::InvalidProposal);
             assert!(follower.construct_notarize(c.view()).is_none());
             application.abort();
