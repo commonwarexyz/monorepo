@@ -1909,7 +1909,7 @@ mod tests {
             drop(db);
 
             // Reopen with four lanes.
-            let config = crate::qmdb::current::FixedConfig {
+            let config = crate::qmdb::current::Config {
                 init_graft_readers: commonware_utils::NZUsize!(4),
                 ..config
             };

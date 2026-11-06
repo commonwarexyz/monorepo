@@ -6122,7 +6122,7 @@ pub(crate) mod test {
         /// until it is dropped, so a finished init is a bug in the test itself.
         async fn init_with_pending_overlap(
             context: Context,
-            cfg: VariableConfig<OneCap, ((), ()), Sequential>,
+            cfg: Config<OneCap, VConfig<((), ())>, Sequential>,
             held: Arc<()>,
         ) -> Result<(UnorderedVariable, ()), crate::qmdb::Error<mmr::Family>> {
             init_with_bitmap(context, cfg, None, None, None, move |_| async move {
