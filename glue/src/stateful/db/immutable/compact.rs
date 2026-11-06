@@ -33,7 +33,7 @@ use commonware_utils::{
 use std::{ops::Deref, sync::Arc};
 
 /// A speculative batch of new keyed values over a shared compact immutable database.
-pub struct ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>
+pub struct ImmutableCompactUnmerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -48,7 +48,7 @@ where
     db: Shared<CompactDb<F, E, K, V, H, S>>,
 }
 
-impl<F, E, K, V, H, S> Deref for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>
+impl<F, E, K, V, H, S> Deref for ImmutableCompactUnmerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -66,7 +66,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, S> ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>
+impl<F, E, K, V, H, S> ImmutableCompactUnmerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -99,7 +99,7 @@ where
 }
 
 /// A sealed compact immutable batch with a computed root.
-pub struct ImmutableUnjournaledMerkleized<F, E, K, V, H, S>
+pub struct ImmutableCompactMerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -114,7 +114,7 @@ where
     db: Shared<CompactDb<F, E, K, V, H, S>>,
 }
 
-impl<F, E, K, V, H, S> Clone for ImmutableUnjournaledMerkleized<F, E, K, V, H, S>
+impl<F, E, K, V, H, S> Clone for ImmutableCompactMerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -133,7 +133,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, S> Deref for ImmutableUnjournaledMerkleized<F, E, K, V, H, S>
+impl<F, E, K, V, H, S> Deref for ImmutableCompactMerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -151,7 +151,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, S> UnmerkleizedTrait for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>
+impl<F, E, K, V, H, S> UnmerkleizedTrait for ImmutableCompactUnmerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -162,20 +162,20 @@ where
     Operation<F, K, V>: CodecRead,
     S: Strategy,
 {
-    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, V, H, S>;
+    type Merkleized = ImmutableCompactMerkleized<F, E, K, V, H, S>;
     type Error = Error<F>;
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
         let merkleized = self.batch.merkleize(&db).await?;
-        Ok(ImmutableUnjournaledMerkleized {
+        Ok(ImmutableCompactMerkleized {
             inner: merkleized,
             db: self.db.clone(),
         })
     }
 }
 
-impl<F, E, K, V, H, S> MerkleizedTrait for ImmutableUnjournaledMerkleized<F, E, K, V, H, S>
+impl<F, E, K, V, H, S> MerkleizedTrait for ImmutableCompactMerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -187,14 +187,14 @@ where
     S: Strategy,
 {
     type Digest = H::Digest;
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>;
+    type Unmerkleized = ImmutableCompactUnmerkleized<F, E, K, V, H, S>;
 
     fn root(&self) -> H::Digest {
         self.inner.root()
     }
 
     fn new_batch(&self) -> Self::Unmerkleized {
-        ImmutableUnjournaledUnmerkleized {
+        ImmutableCompactUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             db: self.db.clone(),
         }
@@ -211,8 +211,8 @@ where
     S: Strategy,
     Operation<F, K, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
 {
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, FixedEncoding<V>, H, S>;
-    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, FixedEncoding<V>, H, S>;
+    type Unmerkleized = ImmutableCompactUnmerkleized<F, E, K, FixedEncoding<V>, H, S>;
+    type Merkleized = ImmutableCompactMerkleized<F, E, K, FixedEncoding<V>, H, S>;
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
@@ -237,7 +237,7 @@ where
 
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
         let (database, shared) = database.into_parts();
-        ImmutableUnjournaledUnmerkleized {
+        ImmutableCompactUnmerkleized {
             batch: database.new_batch(),
             db: shared,
         }
@@ -274,8 +274,8 @@ where
     Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead,
     S: Strategy,
 {
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, VariableEncoding<V>, H, S>;
-    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, VariableEncoding<V>, H, S>;
+    type Unmerkleized = ImmutableCompactUnmerkleized<F, E, K, VariableEncoding<V>, H, S>;
+    type Merkleized = ImmutableCompactMerkleized<F, E, K, VariableEncoding<V>, H, S>;
     type Error = Error<F>;
     type Config =
         variable::CompactConfig<<Operation<F, K, VariableEncoding<V>> as CodecRead>::Cfg, S>;
@@ -301,7 +301,7 @@ where
 
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
         let (database, shared) = database.into_parts();
-        ImmutableUnjournaledUnmerkleized {
+        ImmutableCompactUnmerkleized {
             batch: database.new_batch(),
             db: shared,
         }
@@ -439,7 +439,7 @@ mod tests {
         fixed::CompactConfig {
             strategy: Sequential,
             witness: commonware_storage::journal::contiguous::variable::Config {
-                partition: format!("stateful-immutable-unjournaled-{suffix}-witness"),
+                partition: format!("stateful-immutable-compact-{suffix}-witness"),
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
@@ -583,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn immutable_unjournaled_trait_impls_compile() {
+    fn immutable_compact_trait_impls_compile() {
         assert_managed_db::<FixedDb>();
         assert_managed_db::<VariableDb>();
         assert_state_sync_db::<FixedDb, Arc<FixedDb>>();
@@ -591,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_apply_and_finalize_persists_fixed_immutable_unjournaled_batches() {
+    fn managed_db_apply_and_finalize_persists_fixed_immutable_compact_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("managed-db");
             let db = FixedDb::init(context.child("db"), config, None)
@@ -940,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_initializes_fixed_immutable_unjournaled_multiple_commit_ranges() {
+    fn managed_db_initializes_fixed_immutable_compact_multiple_commit_ranges() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("bounded-init");
             let db = FixedDb::init(context.child("db"), config.clone(), None)
@@ -987,7 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_prune_bounds_fixed_immutable_unjournaled_bounded_initialization_history() {
+    fn managed_db_prune_bounds_fixed_immutable_compact_bounded_initialization_history() {
         deterministic::Runner::default().start(|context| async move {
             // One witness entry per section so pruning takes effect at entry granularity.
             let mut config = fixed_config("prune");
