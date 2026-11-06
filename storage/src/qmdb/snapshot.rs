@@ -6,7 +6,10 @@ use crate::{
         Cursor, Unordered as Index,
         partitioned::{PartitionRange, Partitioned},
     },
-    journal::{authenticated::LeafSink, contiguous::Contiguous},
+    journal::{
+        authenticated::{LEAF_CHUNK, LeafSink},
+        contiguous::Contiguous,
+    },
     merkle::{Family, Location},
     qmdb::operation::{Floored, Operation},
     translator::Translator,
@@ -286,6 +289,10 @@ const SNAPSHOT_DECODE_CHUNK: u64 = 1 << 17;
 #[cfg(test)]
 const SNAPSHOT_DECODE_CHUNK: u64 = 64;
 
+/// How many times the plan's decoders a build runs when it also hashes the journal's leaves and
+/// their subtrees, which costs about as much as decoding.
+const SHARED_DECODER_FACTOR: usize = 2;
+
 /// Send the leaf digest of every operation from `leaves`' start to the end of `log` to `leaves`, in
 /// chunks of [SNAPSHOT_DECODE_CHUNK] operations, for builds that do not hash on decode tasks.
 async fn hash_leaves<F, C, D>(
@@ -296,35 +303,38 @@ async fn hash_leaves<F, C, D>(
 where
     F: Family,
     C: Contiguous<Item: Operation<F>>,
-    D: Send + 'static,
+    D: Copy + Send + 'static,
 {
-    let hash = leaves.hasher();
+    let hashers = leaves.hashers();
+    let start = *leaves.start();
     let stream = log
         .replay(
-            *leaves.start()..log.bounds().end,
+            start..log.bounds().end,
             init_buffer,
             ReadOptions::DONT_CACHE,
         )
         .await?;
     pin_mut!(stream);
+    let mut chunk_start = start;
     let mut digests = Vec::new();
     let mut scratch = Vec::new();
     while let Some(batch) = stream.next().await {
         for (loc, op) in batch? {
-            digests.push(hash(
-                F::location_to_position(Location::new(loc)),
-                &op,
-                &mut scratch,
-            ));
-            if digests.len() as u64 >= SNAPSHOT_DECODE_CHUNK
-                && !leaves.send(std::mem::take(&mut digests)).await
-            {
-                return Ok(());
+            let pos = F::location_to_position(Location::new(loc));
+            digests.push(hashers.leaf(pos, &op, &mut scratch));
+
+            // End chunks at multiples of [LEAF_CHUNK], so complete ones are hashed as subtrees.
+            if (loc + 1) % LEAF_CHUNK == 0 {
+                let chunk = hashers.chunk(chunk_start, std::mem::take(&mut digests));
+                if !leaves.send(chunk).await {
+                    return Ok(());
+                }
+                chunk_start = loc + 1;
             }
         }
     }
     if !digests.is_empty() {
-        leaves.send(digests).await;
+        leaves.send(hashers.chunk(chunk_start, digests)).await;
     }
     Ok(())
 }
@@ -595,7 +605,7 @@ where
     E: Spawner,
     C: Contiguous<Item: Operation<F>> + 'static,
     I: Partitioned + Index<Value = Location<F>>,
-    D: Send + 'static,
+    D: Copy + Send + 'static,
 {
     let Some(plan) = ParallelPlan::new(snapshot.partition_count(), init_concurrency, cache_size)
     else {
@@ -619,9 +629,9 @@ where
     // A build that hashes the journal's leaves scans from the journal's boundary on decode tasks,
     // which hash every operation and route only those at or after the floor.
     let scan_start = leaves.as_ref().map_or(floor, |leaves| *leaves.start());
-    let leaf_hash = leaves.as_ref().map(LeafSink::hasher);
+    let hashers = leaves.as_ref().map(LeafSink::hashers);
     let decoders = if leaves.is_some() {
-        plan.decoders.max(1)
+        (plan.decoders * SHARED_DECODER_FACTOR).max(1)
     } else {
         plan.decoders
     };
@@ -692,16 +702,29 @@ where
 
         // Each chunk's channel holds the whole chunk (full sub-batches plus a final partial per
         // worker), so every decoder can finish regardless of which chunk is being forwarded.
-        let chunk_capacity = SNAPSHOT_DECODE_CHUNK as usize / SNAPSHOT_ROUTE_BATCH + plan.workers;
-        let mut starts = (scan_start..end)
-            .step_by(usize::try_from(SNAPSHOT_DECODE_CHUNK).expect("chunk size fits usize"));
+        // Chunks end at multiples of their length, so a build that hashes the journal's leaves
+        // sends whole subtrees for every chunk but the first and last.
+        let chunk_len = if leaves.is_some() {
+            LEAF_CHUNK
+        } else {
+            SNAPSHOT_DECODE_CHUNK
+        };
+        let chunk_capacity = chunk_len as usize / SNAPSHOT_ROUTE_BATCH + plan.workers;
+        let mut next_start = scan_start;
+        let mut chunks = core::iter::from_fn(move || {
+            let start = next_start;
+            if start >= end {
+                return None;
+            }
+            next_start = ((start / chunk_len + 1) * chunk_len).min(end);
+            Some((start, next_start - start))
+        });
         let mut spawn_next = |pending: &mut VecDeque<_>| {
-            let Some(start) = starts.next() else {
+            let Some((start, len)) = chunks.next() else {
                 return false;
             };
             let log = log.clone();
-            let leaf_hash = leaf_hash.clone();
-            let len = SNAPSHOT_DECODE_CHUNK.min(end - start);
+            let hashers = hashers.clone();
             let (tx, rx) = mpsc::channel(chunk_capacity);
             let handle = context
                 .child("snapshot_decoder")
@@ -716,15 +739,15 @@ where
                         floor,
                         routing,
                         |loc, op| {
-                            if let Some(hash) = &leaf_hash {
+                            if let Some(hashers) = &hashers {
                                 let pos = F::location_to_position(Location::new(loc));
-                                digests.push(hash(pos, op, &mut scratch));
+                                digests.push(hashers.leaf(pos, op, &mut scratch));
                             }
                         },
                         |w, batch| async move { tx.send((w, batch)).await.is_ok() },
                     )
                     .await?;
-                    Ok::<_, Error<F>>(digests)
+                    Ok::<_, Error<F>>(hashers.map(|hashers| hashers.chunk(start, digests)))
                 });
             pending.push_back((rx, handle.abort_on_drop()));
             true
@@ -746,10 +769,10 @@ where
                 }
             }
             let (_, decoder) = pending.pop_front().expect("front exists");
-            let digests = decoder.join().await??;
+            let chunk = decoder.join().await??;
             spawn_next(&mut pending);
-            if let Some(leaves) = &leaves
-                && !leaves.send(digests).await
+            if let (Some(leaves), Some(chunk)) = (&leaves, chunk)
+                && !leaves.send(chunk).await
             {
                 return Ok(());
             }
@@ -857,7 +880,7 @@ pub trait SnapshotBuild<F: Family>:
     where
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
-        D: Send + 'static,
+        D: Copy + Send + 'static,
     {
         async move {
             let built = self
@@ -947,7 +970,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     where
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
-        D: Send + 'static,
+        D: Copy + Send + 'static,
     {
         build_snapshot_parallel(
             self,
@@ -1011,7 +1034,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     where
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
-        D: Send + 'static,
+        D: Copy + Send + 'static,
     {
         build_snapshot_parallel(
             self,

@@ -947,27 +947,32 @@ where
         let journal = Arc::new(Self::persist(self.journal, self.selected_end).await?);
         let end = Location::new(journal.bounds().end);
         let (tx, mut rx) = mpsc::channel(LEAF_CHUNKS_IN_FLIGHT);
-        let leaf_hasher = self.hasher.clone();
-        let hash: LeafHash<F, C::Item, H::Digest> = Arc::new(move |pos, item, scratch| {
-            scratch.clear();
-            item.write(scratch);
-            merkle::hasher::Hasher::<F>::leaf_digest(&leaf_hasher, pos, scratch)
-        });
+        let (leaf_hasher, node_hasher) = (self.hasher.clone(), self.hasher.clone());
+        let hashers = LeafHashers {
+            leaf: Arc::new(move |pos, item: &C::Item, scratch: &mut Vec<u8>| {
+                scratch.clear();
+                item.write(scratch);
+                merkle::hasher::Hasher::<F>::leaf_digest(&leaf_hasher, pos, scratch)
+            }),
+            node: Arc::new(move |pos, left: &H::Digest, right: &H::Digest| {
+                merkle::hasher::Hasher::<F>::node_digest(&node_hasher, pos, left, right)
+            }),
+        };
         let sink = LeafSink {
             start: self.merkle.leaves(),
-            hash,
+            hashers,
             tx,
         };
 
-        // Apply each chunk's digests in order as the reader sends them.
+        // Apply each chunk in order as the reader sends it.
         let apply = {
             let (merkle, hasher) = (self.merkle, self.hasher.clone());
             self.context
                 .dedicated()
                 .spawn(move |_| async move {
                     let mut merkle = merkle;
-                    while let Some(digests) = rx.recv().await {
-                        merkle = merkle.apply_digests(&hasher, digests).await?;
+                    while let Some(chunk) = rx.recv().await {
+                        merkle = merkle.apply_chunk(&hasher, chunk).await?;
                     }
                     if merkle.leaves() != end {
                         return Err(merkle::Error::DataCorrupted(
@@ -1033,9 +1038,44 @@ const APPLY_BATCH_SIZE: NonZeroU64 = NZU64!(1 << 16);
 /// Chunks of leaf digests a [LeafSink] buffers ahead of the Merkle structure applying them.
 const LEAF_CHUNKS_IN_FLIGHT: usize = 8;
 
+/// Leaves per chunk a [LeafSink] takes. Chunks should end at multiples of it, so every chunk but
+/// the first and last is a complete subtree that [LeafHashers::chunk] hashes whole.
+pub(crate) const LEAF_CHUNK: u64 = tree::REPLAY_CHUNK;
+
 /// Encodes an operation into the scratch buffer and returns its leaf digest at the position.
-pub(crate) type LeafHash<F, Item, D> =
-    Arc<dyn Fn(Position<F>, &Item, &mut Vec<u8>) -> D + Send + Sync>;
+type LeafHash<F, Item, D> = Arc<dyn Fn(Position<F>, &Item, &mut Vec<u8>) -> D + Send + Sync>;
+
+/// Returns the digest of the node at the position from its children's digests.
+type NodeHash<F, D> = Arc<dyn Fn(Position<F>, &D, &D) -> D + Send + Sync>;
+
+/// The journal's leaf and node hashing, for the tasks that scan its operations.
+pub(crate) struct LeafHashers<F: Family, Item, D> {
+    leaf: LeafHash<F, Item, D>,
+    node: NodeHash<F, D>,
+}
+
+impl<F: Family, Item, D> Clone for LeafHashers<F, Item, D> {
+    fn clone(&self) -> Self {
+        Self {
+            leaf: self.leaf.clone(),
+            node: self.node.clone(),
+        }
+    }
+}
+
+impl<F: Family, Item, D: Copy> LeafHashers<F, Item, D> {
+    /// Encode `item` into `scratch` and return its leaf digest at `pos`.
+    pub(crate) fn leaf(&self, pos: Position<F>, item: &Item, scratch: &mut Vec<u8>) -> D {
+        (self.leaf)(pos, item, scratch)
+    }
+
+    /// The chunk to send for the leaf digests `leaves` from `first_leaf`, which hashes the whole
+    /// subtree of a complete aligned chunk here, on the caller's thread.
+    pub(crate) fn chunk(&self, first_leaf: u64, leaves: Vec<D>) -> tree::Chunk<D> {
+        let node = |pos, left: &D, right: &D| (self.node)(pos, left, right);
+        tree::chunk_of::<F, D>(node, first_leaf, leaves)
+    }
+}
 
 /// Where a reader that scans a recovering journal's operations sends their leaf digests, so the
 /// journal rebuilds its Merkle structure without reading them again. Only this crate creates and
@@ -1043,8 +1083,8 @@ pub(crate) type LeafHash<F, Item, D> =
 #[commonware_macros::stability(ALPHA)]
 pub struct LeafSink<F: Family, Item, D> {
     start: Location<F>,
-    hash: LeafHash<F, Item, D>,
-    tx: mpsc::Sender<Vec<D>>,
+    hashers: LeafHashers<F, Item, D>,
+    tx: mpsc::Sender<tree::Chunk<D>>,
 }
 
 #[commonware_macros::stability(ALPHA)]
@@ -1054,15 +1094,14 @@ impl<F: Family, Item, D> LeafSink<F, Item, D> {
         self.start
     }
 
-    /// The function that encodes an operation and returns its leaf digest.
-    pub(crate) fn hasher(&self) -> LeafHash<F, Item, D> {
-        self.hash.clone()
+    /// The journal's leaf and node hashing.
+    pub(crate) fn hashers(&self) -> LeafHashers<F, Item, D> {
+        self.hashers.clone()
     }
 
-    /// Send the leaf digests of the next operations, in position order. Returns false if the
-    /// journal stopped receiving them.
-    pub(crate) async fn send(&self, digests: Vec<D>) -> bool {
-        self.tx.send(digests).await.is_ok()
+    /// Send the next chunk, in position order. Returns false if the journal stopped receiving.
+    pub(crate) async fn send(&self, chunk: tree::Chunk<D>) -> bool {
+        self.tx.send(chunk).await.is_ok()
     }
 }
 

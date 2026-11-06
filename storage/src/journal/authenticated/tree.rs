@@ -39,11 +39,12 @@ use std::{
 /// Encoded bytes after which a replay batch ends.
 const REPLAY_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
-/// Leaves each task of a chunked replay reads, encodes, and hashes.
+/// Leaves each task of a chunked replay reads, encodes, and hashes. Chunks end at multiples of it,
+/// so every chunk but the first and last covers a complete subtree.
 #[cfg(not(test))]
-const REPLAY_CHUNK: u64 = 1 << 17;
+pub(crate) const REPLAY_CHUNK: u64 = 1 << 17;
 #[cfg(test)]
-const REPLAY_CHUNK: u64 = 64;
+pub(crate) const REPLAY_CHUNK: u64 = 64;
 
 /// Chunks a chunked replay reads and hashes concurrently.
 const REPLAY_TASKS: usize = 8;
@@ -54,7 +55,7 @@ const SUBTREE_HEIGHT: u32 = REPLAY_CHUNK.trailing_zeros();
 /// The digests of a complete subtree over the [REPLAY_CHUNK] leaves from `first_leaf`, a multiple
 /// of [REPLAY_CHUNK]. `levels[h][i]` is the node of height `h` whose ordinal is
 /// `(first_leaf >> h) + i`.
-struct Subtree<D> {
+pub(crate) struct Subtree<D> {
     first_leaf: u64,
     levels: Vec<Vec<D>>,
 }
@@ -68,17 +69,31 @@ impl<D: Copy> Subtree<D> {
     }
 }
 
-/// What a chunk task returns: a complete aligned subtree, or the leaf digests of a partial chunk
-/// at either end of the replay.
-enum Chunk<D> {
+/// What a chunk of the replay yields: a complete aligned subtree, or the leaf digests of a partial
+/// chunk at either end.
+pub(crate) enum Chunk<D> {
     Subtree(Subtree<D>),
     Leaves(Vec<D>),
 }
 
+/// The chunk of the leaf digests `leaves` from `first_leaf`: its whole subtree, hashed with `node`,
+/// if it is a complete [REPLAY_CHUNK]-aligned chunk, and otherwise just its leaves.
+pub(crate) fn chunk_of<F: Family, D: Copy>(
+    node: impl Fn(Position<F>, &D, &D) -> D,
+    first_leaf: u64,
+    leaves: Vec<D>,
+) -> Chunk<D> {
+    if first_leaf % REPLAY_CHUNK == 0 && leaves.len() as u64 == REPLAY_CHUNK {
+        Chunk::Subtree(hash_subtree::<F, D>(node, first_leaf, leaves))
+    } else {
+        Chunk::Leaves(leaves)
+    }
+}
+
 /// Hash every node of the subtree over `leaves`, the leaf digests from `first_leaf`, a multiple of
-/// [REPLAY_CHUNK].
-fn hash_subtree<F: Family, D: Digest, H: Hasher<F, Digest = D>>(
-    hasher: &H,
+/// [REPLAY_CHUNK], with `node`.
+fn hash_subtree<F: Family, D: Copy>(
+    node: impl Fn(Position<F>, &D, &D) -> D,
     first_leaf: u64,
     leaves: Vec<D>,
 ) -> Subtree<D> {
@@ -90,7 +105,7 @@ fn hash_subtree<F: Family, D: Digest, H: Hasher<F, Digest = D>>(
             .map(|i| {
                 let leaf = Location::new(first_leaf + ((i as u64) << h));
                 let pos = F::subtree_root_position(leaf, h);
-                hasher.node_digest(pos, &below[2 * i], &below[2 * i + 1])
+                node(pos, &below[2 * i], &below[2 * i + 1])
             })
             .collect();
         levels.push(level);
@@ -505,10 +520,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                             merkle::Error::DataCorrupted("replay ended before its range").into(),
                         );
                     }
-                    if len == REPLAY_CHUNK {
-                        return Ok(Chunk::Subtree(hash_subtree(&hasher, start, digests)));
-                    }
-                    Ok::<_, super::Error<F>>(Chunk::Leaves(digests))
+                    let node = |pos, left: &D, right: &D| hasher.node_digest(pos, left, right);
+                    Ok::<_, super::Error<F>>(chunk_of::<F, D>(node, start, digests))
                 });
             pending.push_back(task.abort_on_drop());
         };
@@ -522,17 +535,29 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         while let Some(task) = pending.pop_front() {
             let chunk = task.join().await.map_err(JournalError::from)??;
             spawn_next(&mut pending);
-            self = match chunk {
-                Chunk::Subtree(subtree) => {
-                    self.apply_subtree(hasher, &subtree)?;
-                    self
-                }
-                Chunk::Leaves(digests) => self.apply_digests(hasher, digests).await?,
-            };
+            self = self.apply_chunk(hasher, chunk).await?;
         }
         // Every chunk returned exactly the leaves of its range.
         debug_assert_eq!(self.leaves(), end);
         Ok(self)
+    }
+
+    /// Append the leaves of `chunk`, whose first leaf is the next to append.
+    pub(crate) async fn apply_chunk<H>(
+        mut self,
+        hasher: &H,
+        chunk: Chunk<D>,
+    ) -> Result<Self, super::Error<F>>
+    where
+        H: Hasher<F, Digest = D> + 'static,
+    {
+        match chunk {
+            Chunk::Subtree(subtree) => {
+                self.apply_subtree(hasher, &subtree)?;
+                Ok(self)
+            }
+            Chunk::Leaves(digests) => self.apply_digests(hasher, digests).await,
+        }
     }
 
     /// Append the leaves of `subtree`, whose first leaf is the next to append, copying the nodes
