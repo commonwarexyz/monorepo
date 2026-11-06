@@ -290,7 +290,7 @@ where
     /// Returns the ops root (not the canonical root), since the sync engine verifies
     /// batches against the ops tree.
     fn ops_root(&self) -> Self::Digest {
-        self.any.root()
+        Self::ops_root(self)
     }
 }
 
