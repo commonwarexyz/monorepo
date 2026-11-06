@@ -24,7 +24,7 @@
 
 use crate::core::field::{
     arithmetic::Field,
-    fp::{BYTES, MINUS_ONE},
+    fp::{BYTES, MINUS_ONE, ONE, encode},
 };
 use commonware_simd::Simd;
 
@@ -55,6 +55,18 @@ const PRODUCT_BIAS: u64 = 64;
 
 /// Largest number of points in a value, the widest representation's lane count.
 const MAX_LANES: usize = 16;
+
+/// A cube root of unity `beta` such that `(x, y) -> (beta x, y)` multiplies every point of the
+/// prime-order subgroup by `-x^2`, for the curve parameter `x`: a cube root of unity modulo the
+/// subgroup order `r = x^4 - x^2 + 1`.
+const BETA: [u8; BYTES] = encode([
+    0x2e01_ffff_fffe_fffe,
+    0xde17_d813_620a_0002,
+    0xddb3_a93b_e6f8_9688,
+    0xba69_c607_6a0f_77ea,
+    0x5f19_672f_df76_ce51,
+    0,
+]);
 
 /// Projective points, one per lane of the field values.
 ///
@@ -183,6 +195,35 @@ impl<F> Point<F> {
         let minus_one = F::load(simd, &[], &MINUS_ONE);
         Self {
             y: self.y.ready::<1>(simd).mul(simd, minus_one),
+            ..self
+        }
+    }
+
+    /// Returns `-self` in every lane whose bit is set in `lanes`, and `self` in the others.
+    ///
+    /// Multiplies `Y` by `1` or `-1`, selected without branching on `lanes`.
+    #[inline(always)]
+    pub fn negate_lanes<S: Simd>(self, simd: S, lanes: u64) -> Self
+    where
+        F: Field<S>,
+    {
+        let sign = F::load(simd, &[], &ONE).select(simd, F::load(simd, &[], &MINUS_ONE), lanes);
+        Self {
+            y: self.y.ready::<1>(simd).mul(simd, sign),
+            ..self
+        }
+    }
+
+    /// Returns the image of every lane under the endomorphism `(x, y) -> (beta x, y)`, which
+    /// multiplies points of the prime-order subgroup by `-x^2` for the curve parameter `x`.
+    #[inline(always)]
+    pub fn endomorphism<S: Simd>(self, simd: S) -> Self
+    where
+        F: Field<S>,
+    {
+        let beta = F::load(simd, &[], &BETA);
+        Self {
+            x: self.x.ready::<1>(simd).mul(simd, beta),
             ..self
         }
     }

@@ -138,11 +138,11 @@ macro_rules! group_traits {
                 *self = $crate::group::kernel::dispatch($crate::group::kernel::Double(*self));
             }
 
-            /// Multiplies by an integer without branching on its value.
+            /// Multiplies by an integer of any length without branching on its value.
             fn scale(&self, bits_le: &[u64]) -> Self {
                 $crate::group::kernel::dispatch($crate::group::kernel::Multiply {
                     element: *self,
-                    words: bits_le,
+                    scalar: $crate::group::Scalar::from_words_wide(bits_le),
                 })
             }
         }
@@ -151,7 +151,7 @@ macro_rules! group_traits {
             fn mul_assign(&mut self, rhs: &'a $crate::group::Scalar) {
                 *self = $crate::group::kernel::dispatch($crate::group::kernel::Multiply {
                     element: *self,
-                    words: &rhs.to_words(),
+                    scalar: *rhs,
                 });
             }
         }
@@ -238,16 +238,21 @@ use group_traits;
 mod tests {
     use super::{
         MSM_BATCH, Scalar,
-        kernel::{Group, Kernel, MAX_LANES, Msm, Multiply, MultiplyEach, Plan, Sum, dispatch},
+        kernel::{
+            Group, Kernel, MAX_LANES, Msm, Multiply, MultiplyEach, Plan, Points, Sum, dispatch,
+        },
     };
-    use crate::core::field::fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49};
-    use commonware_math::algebra::CryptoGroup;
+    use crate::core::field::{
+        arithmetic::Field,
+        fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
+    };
+    use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::{
         Sequential,
         mocks::{Explorer, pooled},
     };
     use commonware_simd::{Operation, Simd, X86V4C, check_consistent};
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, test_rng};
     use std::{fmt::Debug, vec, vec::Vec};
 
     /// Elements of a slice operation, more than the lanes of the widest representation.
@@ -310,6 +315,60 @@ mod tests {
                 assert_eq!(p == q, a == b);
             }
         }
+        // Integers of any length, reduced modulo the order.
+        let a = scalars[6];
+        let mut words = [0; 9];
+        words[..4].copy_from_slice(&a.to_words());
+        words[8] = 5;
+        let expected = reference(&Scalar::from_words_wide(&words));
+        assert_eq!(generator.scale(&words), expected);
+        assert_eq!(generator.scale(&[]), G::zero());
+    }
+
+    /// Applies the endomorphism to an element.
+    #[derive(Clone, Copy)]
+    struct Endomorphism<G>(G);
+
+    impl<G: Group> Kernel for Endomorphism<G> {
+        type Output = G;
+
+        fn run<S: Simd, F: Field<S>>(self, simd: S) -> G {
+            let mut output = [G::IDENTITY];
+            G::Points::<S, F>::load(simd, &[], self.0.coordinates())
+                .endomorphism(simd)
+                .store(simd, &mut output);
+            G::from_coordinates(output[0])
+        }
+    }
+
+    /// Checks that the endomorphism multiplies by `eigenvalue` in every representation, and that
+    /// the components of a scalar, weighted by the powers of the negated eigenvalue, reconstruct
+    /// it.
+    pub fn check_endomorphism<G: CryptoGroup<Scalar = Scalar> + Group + Debug>(eigenvalue: Scalar) {
+        let generator = G::generator();
+        let mut scalars = scalars();
+        let mut rng = test_rng();
+        scalars.extend((0..16).map(|_| Scalar::random(&mut rng)));
+        let bound = 1u128.checked_shl(G::COMPONENT_BITS - 1);
+        for scalar in scalars {
+            let element = generator * &scalar;
+            assert_eq!(dispatch(Endomorphism(element)), element * &eigenvalue);
+            check_consistent(|| Representations(Endomorphism(element)));
+
+            let components = G::components(&scalar);
+            let mut sum = Scalar::ZERO;
+            let mut power = Scalar::ONE;
+            for (c, component) in components.into_iter().enumerate() {
+                assert!(bound.is_none_or(|bound| component < bound));
+                assert!(c < G::COMPONENTS || component == 0);
+                let component =
+                    Scalar::from_words([component as u64, (component >> 64) as u64, 0, 0]).unwrap();
+                sum += &(component * &power);
+                power *= &-eigenvalue;
+            }
+            assert_eq!(sum, scalar);
+        }
+        assert_eq!(dispatch(Endomorphism(G::zero())), G::zero());
     }
 
     /// Returns `count` elements of a multi-scalar multiplication with their discrete logarithms:
@@ -385,7 +444,7 @@ mod tests {
         let mut sizes = vec![0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 33];
         for lanes in [1, 4, 8, 16] {
             let crossover = (1..count)
-                .find(|&n| matches!(Plan::choose(n, lanes), Plan::Pippenger(_)))
+                .find(|&n| matches!(Plan::choose::<G>(n, lanes), Plan::Pippenger(_)))
                 .unwrap();
             sizes.extend([crossover - 1, crossover]);
         }
@@ -397,11 +456,12 @@ mod tests {
             );
         }
 
-        // The window widths of both methods up to eight bits; wider ones only add buckets.
+        // The window widths of both methods up to eight bits, with and without splitting the
+        // scalars; wider ones only add buckets.
         let n = 37;
         let expected = msm_expected::<G>(&logarithms[..n], &scalars[..n]);
         let plans = (2..=8)
-            .map(Plan::Straus)
+            .flat_map(|width| [false, true].map(|split| Plan::Straus { width, split }))
             .chain((2..=8).map(Plan::Pippenger));
         for plan in plans {
             let msm = Msm {
@@ -515,7 +575,18 @@ mod tests {
         let generator = G::generator();
         let scalars = scalars();
         let elements: Vec<G> = scalars.iter().map(|scalar| generator * scalar).collect();
-        for plan in [Plan::Straus(5), Plan::Pippenger(3)] {
+        let plans = [
+            Plan::Straus {
+                width: 5,
+                split: false,
+            },
+            Plan::Straus {
+                width: 4,
+                split: true,
+            },
+            Plan::Pippenger(3),
+        ];
+        for plan in plans {
             check_consistent(|| {
                 Representations(Msm {
                     elements: &elements,
@@ -525,11 +596,10 @@ mod tests {
             });
         }
         check_consistent(|| Representations(Sum(&elements)));
-        let words = scalars[5].to_words();
         check_consistent(|| {
             Representations(Multiply {
                 element: elements[6],
-                words: &words,
+                scalar: scalars[5],
             })
         });
         check_consistent(|| EachRepresentations(&elements, &scalars));

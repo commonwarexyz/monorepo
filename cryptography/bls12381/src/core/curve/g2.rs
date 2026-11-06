@@ -26,9 +26,9 @@
 //! limb bounds of at most `12`, and wide sums of products reach at most `334848`.
 
 use crate::core::field::{
-    arithmetic::Field,
-    fp::MINUS_ONE,
-    fp2::{BYTES, Fp2, Product},
+    arithmetic::{Field, Signed},
+    fp::{self, MINUS_ONE, ONE},
+    fp2::{BYTES, Fp2, Product, encode},
 };
 use commonware_simd::Simd;
 
@@ -50,6 +50,37 @@ pub const BOUND: u64 = 32;
 
 /// Largest number of points in a value, the widest representation's lane count.
 const MAX_LANES: usize = 16;
+
+/// `c` such that `c i = (1 + i)^(-(p - 1) / 3)`, the coefficient of the untwisted Frobenius
+/// map on `X` (RFC 9380, Appendix G.3), which is purely imaginary.
+const PSI_X: [u8; fp::BYTES] = fp::encode([
+    0x8bfd_0000_0000_aaad,
+    0x4094_27eb_4f49_fffd,
+    0x897d_2965_0fb8_5f9b,
+    0xaa0d_857d_8975_9ad4,
+    0xec02_4086_63d4_de85,
+    0x1a01_11ea_397f_e699,
+]);
+
+/// `(1 + i)^(-(p - 1) / 2)`, the coefficient of the untwisted Frobenius map on `Y`.
+const PSI_Y: [u8; BYTES] = encode(
+    [
+        0xf1ee_7b04_121b_dea2,
+        0x3044_66cf_3e67_fa0a,
+        0xef39_6489_f61e_b45e,
+        0x1c3d_edd9_30b1_cf60,
+        0xe2e9_c448_d77a_2cd9,
+        0x1352_03e6_0180_a68e,
+    ],
+    [
+        0xc810_84fb_ede3_cc09,
+        0xee67_992f_72ec_05f4,
+        0x77f7_6e17_0092_41c5,
+        0x4839_5dab_c2d3_435e,
+        0x6831_e36d_6bd1_7ffe,
+        0x06af_0e04_37ff_400b,
+    ],
+);
 
 /// Projective points, one per lane of the extension values.
 ///
@@ -208,6 +239,76 @@ impl<F> Point<F> {
             y: self.y.ready::<1, S>(simd).mul_base(simd, minus_one),
             ..self
         }
+    }
+
+    /// Returns `-self` in every lane whose bit is set in `lanes`, and `self` in the others.
+    ///
+    /// Multiplies `Y` by `1` or `-1`, selected without branching on `lanes`.
+    #[inline(always)]
+    pub fn negate_lanes<S: Simd>(self, simd: S, lanes: u64) -> Self
+    where
+        F: Field<S>,
+    {
+        let sign = F::load(simd, &[], &ONE).select(simd, F::load(simd, &[], &MINUS_ONE), lanes);
+        Self {
+            y: self.y.ready::<1, S>(simd).mul_base(simd, sign),
+            ..self
+        }
+    }
+
+    /// Returns the image of every lane under the endomorphism `psi`, the Frobenius map carried
+    /// through the twist, which multiplies points of the prime-order subgroup by the curve
+    /// parameter `x`.
+    ///
+    /// Conjugates each coordinate and multiplies `X` by [`PSI_X`]` i` and `Y` by [`PSI_Y`],
+    /// forming `conj(y) PSI_Y` from its four base field products so that no conjugate needs a
+    /// bias; `Z`'s conjugate multiplies its imaginary component by `-1` instead, as
+    /// [`Self::neg`] does, so the coordinates keep their bounds. Seven base field products and
+    /// five reductions in all.
+    ///
+    /// Runs as its own kernel, so callers share one copy.
+    #[inline(always)]
+    pub fn endomorphism<S: Simd>(self, simd: S) -> Self
+    where
+        F: Field<S>,
+    {
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| {
+                let psi_x = F::load(simd, &[], &PSI_X);
+                let psi_y = Fp2::load(simd, &[], &PSI_Y);
+                let minus_one = F::load(simd, &[], &MINUS_ONE);
+                let (x, y, z) = (
+                    self.x.ready::<1, S>(simd),
+                    self.y.ready::<1, S>(simd),
+                    self.z.ready::<1, S>(simd),
+                );
+                // conj(x) c i = (x1 c) + (x0 c) i.
+                let x = Fp2 {
+                    c0: x.c1.mul(simd, psi_x),
+                    c1: x.c0.mul(simd, psi_x),
+                };
+                // conj(y) (p0 + p1 i) = (y0 p0 + y1 p1) + (y0 p1 - y1 p0) i.
+                let product = Fp2 {
+                    c0: Signed::positive(F::accumulate_product(
+                        simd,
+                        y.c0.product(simd, psi_y.c0),
+                        y.c1,
+                        psi_y.c1,
+                    )),
+                    c1: Signed {
+                        pos: y.c0.product(simd, psi_y.c1),
+                        neg: Some(y.c1.product(simd, psi_y.c0)),
+                    },
+                };
+                let y = Fp2::reduce::<3, S>(simd, product);
+                let z = Fp2 {
+                    c0: z.c0,
+                    c1: z.c1.mul(simd, minus_one),
+                };
+                Self { x, y, z }
+            },
+        )
     }
 
     /// Returns `self + rhs`.

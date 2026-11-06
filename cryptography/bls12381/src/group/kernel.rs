@@ -11,6 +11,10 @@
 //! per lane, so they amortize the boundary and fill every lane; the single-element operations
 //! use one lane and measure latency. [`Msm`] converts each element once and keeps every
 //! intermediate point in the representation's own form, through raw coordinates.
+//!
+//! Multiplications split each scalar by the group's endomorphism ([`Group::components`]) into
+//! two components of 128 bits in G1 and four of 64 bits in G2, so that the doublings they share
+//! cover a component rather than the whole scalar, at the cost of one image per component.
 
 use super::Scalar;
 use crate::core::{
@@ -26,15 +30,21 @@ use commonware_simd::{Operation, Simd, X86V4C};
 /// Largest lane count of any representation.
 pub const MAX_LANES: usize = 16;
 
-/// Width in bits of the scalar windows of [`multiply`].
-const WINDOW_BITS: usize = 4;
+/// Width in bits of the signed scalar windows of [`multiply`].
+const WINDOW_BITS: usize = 5;
 
-/// Number of windows in a scalar.
-const SCALAR_WINDOWS: usize = 256 / WINDOW_BITS;
+/// Entries of a table of multiples: a signed window selects a multiple by `1` through this.
+const TABLE: usize = 1 << (WINDOW_BITS - 1);
 
-/// Bits that the signed digits of [`Msm`] cover. Scalars lie below `r < 2^255`, so these leave
-/// room for the carry out of the top digit.
-const SCALAR_BITS: u32 = 256;
+/// Most components a scalar splits into, by the endomorphism of G2.
+pub const MAX_COMPONENTS: usize = 4;
+
+/// Most windows of [`WINDOW_BITS`] bits in a component, for the halves of a scalar split by the
+/// endomorphism of G1.
+const MAX_WINDOWS: usize = 26;
+
+/// Signed digits of a scalar, by component then by window from the least significant.
+type Digits = [[i16; MAX_WINDOWS]; MAX_COMPONENTS];
 
 /// Window widths that [`Plan::choose`] considers for Straus's method.
 const STRAUS_WIDTHS: core::ops::RangeInclusive<u32> = 2..=8;
@@ -49,8 +59,13 @@ const ADD_COST: usize = 10;
 /// Estimated cost of a doubling, which takes about two thirds of an addition's products.
 const DOUBLE_COST: usize = 7;
 
-/// Estimated cost of a negation, which multiplies one coordinate.
-const NEGATE_COST: usize = 2;
+/// Estimated cost of a negation or an endomorphism, a few products reduced one after another,
+/// which overlap less than a formula's.
+const IMAGE_COST: usize = 4;
+
+/// Bits that the signed digits of a whole scalar cover: scalars lie below `r < 2^255`, so the
+/// top digit absorbs the carry.
+const SCALAR_BITS: u32 = 256;
 
 /// An operation written once over every base field representation.
 pub trait Kernel: Sized {
@@ -127,6 +142,13 @@ pub trait Points<S: Simd>: Copy {
     /// Returns `-self`.
     fn negate(self, simd: S) -> Self;
 
+    /// Returns `-self` in every lane whose bit is set in `lanes`, and `self` in the others.
+    fn negate_lanes(self, simd: S, lanes: u64) -> Self;
+
+    /// Returns the image of every lane under the group's endomorphism, which multiplies elements
+    /// by the eigenvalue that [`Group::components`] splits scalars by.
+    fn endomorphism(self, simd: S) -> Self;
+
     /// One lane of a point in the representation's own form.
     type Raw: Copy + Default;
 
@@ -176,6 +198,16 @@ macro_rules! points {
             }
 
             #[inline(always)]
+            fn negate_lanes(self, simd: S, lanes: u64) -> Self {
+                self.negate_lanes(simd, lanes)
+            }
+
+            #[inline(always)]
+            fn endomorphism(self, simd: S) -> Self {
+                self.endomorphism(simd)
+            }
+
+            #[inline(always)]
             fn store_raw(self, simd: S, points: &mut [Self::Raw]) {
                 self.store_raw(simd, points);
             }
@@ -209,6 +241,21 @@ pub trait Group: Copy + Send + Sync {
     /// Fewest elements for which [`MultiplyEach`] favors the 64-bit lanes over residues, or
     /// `None` when residues finish every count sooner.
     const MULTIPLY_BATCH: Option<usize>;
+
+    /// Number of components [`Self::components`] splits a scalar into: the powers of the
+    /// endomorphism's eigenvalue that span the scalars.
+    const COMPONENTS: usize;
+
+    /// Bits that the signed digits of a component cover: one more than the components' width,
+    /// so that the top digit absorbs the carry.
+    const COMPONENT_BITS: u32;
+
+    /// Splits a scalar `k` into components below `2^(COMPONENT_BITS - 1)` such that, for the
+    /// eigenvalue `e` of [`Points::endomorphism`], `k` is the sum over components `c` of
+    /// `components[c] (-e)^c`: the eigenvalue is the negation of the base in both groups, so
+    /// the odd components count negatively. Components beyond [`Self::COMPONENTS`] are zero.
+    /// Runs in time independent of the scalar.
+    fn components(scalar: &Scalar) -> [u128; MAX_COMPONENTS];
 
     /// Returns the element's coordinates.
     fn coordinates(&self) -> &Self::Coordinates;
@@ -257,14 +304,69 @@ fn sum_lanes<S: Simd, F: Field<S>, G: Group>(simd: S, points: G::Points<S, F>) -
     G::from_coordinates(lanes[0])
 }
 
-/// Returns window `window` of a little-endian integer, or zero beyond its words.
-#[inline(always)]
-const fn digit(words: &[u64], window: usize) -> u64 {
-    let bit = window * WINDOW_BITS;
-    if bit / 64 >= words.len() {
-        return 0;
+/// Writes the signed digits of a little-endian integer in base `2^width`, least significant
+/// first, one per entry of `digits`, each in `(-2^(width - 1), 2^(width - 1)]`, or their
+/// negations for `negate`.
+///
+/// Requires `2 <= width <= 15` and `value < 2^(width * digits.len() - 1)`, so that the last
+/// digit absorbs the carry. Runs in time independent of the value.
+fn signed_digits(value: &[u64], width: u32, negate: bool, digits: &mut [i16]) {
+    debug_assert!((2..=15).contains(&width));
+    let width = width as usize;
+    let half = 1i32 << (width - 1);
+    let sign = if negate { -1 } else { 1 };
+    let mut carry = 0;
+    for (i, digit) in digits.iter_mut().enumerate() {
+        let (word, shift) = (i * width / 64, i * width % 64);
+        let mut bits = 0;
+        if word < value.len() {
+            bits = value[word] >> shift;
+            if shift + width > 64 && word + 1 < value.len() {
+                bits |= value[word + 1] << (64 - shift);
+            }
+        }
+        let raw = (bits & ((1 << width) - 1)) as i32 + carry;
+        carry = i32::from(raw > half);
+        *digit = (sign * (raw - (carry << width))) as i16;
     }
-    (words[bit / 64] >> (bit % 64)) & ((1 << WINDOW_BITS) - 1)
+    // A value within the bound has no bits at or above the top digit's sign bit, and leaves no
+    // carry.
+    debug_assert_eq!(carry, 0);
+    debug_assert!(value.iter().enumerate().all(|(i, word)| {
+        let bound = (width * digits.len() - 1).saturating_sub(64 * i);
+        bound >= 64 || word >> bound == 0
+    }));
+}
+
+/// Returns the little-endian words of a component.
+const fn words(component: u128) -> [u64; 2] {
+    [component as u64, (component >> 64) as u64]
+}
+
+/// Returns the number of windows of `width` bits in a component of `G`.
+const fn windows<G: Group>(width: u32) -> usize {
+    G::COMPONENT_BITS.div_ceil(width) as usize
+}
+
+/// Returns the signed digits of a scalar in base `2^WINDOW_BITS`, by component then by window,
+/// with the odd components negated as [`Group::components`] counts them, so that `k P` is the
+/// sum over components `c` and windows `w` of `digits[c][w] 2^(WINDOW_BITS w) psi^c(P)` for
+/// the endomorphism `psi`. Each digit's magnitude is at most [`TABLE`].
+fn digits<G: Group>(scalar: &Scalar) -> Digits {
+    let components = G::components(scalar);
+    let mut digits = [[0; MAX_WINDOWS]; MAX_COMPONENTS];
+    let windows = windows::<G>(WINDOW_BITS as u32);
+    for (c, (digits, component)) in digits.iter_mut().zip(components).enumerate() {
+        if c < G::COMPONENTS {
+            signed_digits(
+                &words(component),
+                WINDOW_BITS as u32,
+                c % 2 == 1,
+                &mut digits[..windows],
+            );
+        }
+    }
+    digits
 }
 
 /// Returns `1` when `value` is zero and `0` otherwise, without branching.
@@ -273,42 +375,69 @@ const fn is_zero(value: u64) -> u64 {
     ((value | value.wrapping_neg()) >> 63) ^ 1
 }
 
-/// Returns, in each lane, the lane's point times the lane's integer.
+/// Returns, in each lane, the table entry for the magnitude of the lane's digit, negated for a
+/// negative digit, or the identity for zero.
 ///
-/// `digits(window)` returns each lane's digit of window `window`, for `windows` windows counted
-/// from the least significant. Fixed four-bit windows index a table of sixteen multiples, and
-/// every window selects from the whole table, so neither the operations nor the memory accesses
-/// depend on the digits.
+/// Entry `k` of the table holds `k + 1` times a point. Every lane selects from the whole table,
+/// so neither the operations nor the memory accesses depend on the digits.
+#[inline(always)]
+fn gather<S: Simd, P: Points<S>>(simd: S, identity: P, table: &[P], digits: [i16; MAX_LANES]) -> P {
+    let mut negative = 0;
+    let mut magnitudes = [0; MAX_LANES];
+    for (lane, digit) in digits.iter().enumerate() {
+        // The sign extends to a mask that negates the digit without branching.
+        let mask = digit >> (i16::BITS - 1);
+        negative |= u64::from(mask as u16 & 1) << lane;
+        magnitudes[lane] = u64::from((digit ^ mask).wrapping_sub(mask) as u16);
+    }
+    let mut term = identity;
+    for (k, entry) in table.iter().enumerate() {
+        let mut lanes = 0;
+        for (lane, magnitude) in magnitudes.iter().enumerate() {
+            lanes |= is_zero(magnitude ^ (k as u64 + 1)) << lane;
+        }
+        term = term.select(simd, *entry, lanes);
+    }
+    term.negate_lanes(simd, negative)
+}
+
+/// Returns, in each lane, the lane's point times the lane's scalar.
+///
+/// `digits(component, window)` returns each lane's digit of the window, as [`digits`] splits
+/// them for `components` components of `windows` windows. A table holds the multiples of the
+/// base, and every window selects one entry per component through [`gather`] and combines them
+/// by Horner's rule over the endomorphism, from the last component down, then adds the sum to
+/// an accumulator doubled [`WINDOW_BITS`] times between windows. The schedule is fixed, so
+/// neither the operations nor the memory accesses depend on the digits.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn multiply<S: Simd, P: Points<S>>(
     simd: S,
     base: P,
     identity: P,
+    components: usize,
     windows: usize,
-    digits: impl Fn(usize) -> [u64; MAX_LANES],
+    digits: impl Fn(usize, usize) -> [i16; MAX_LANES],
 ) -> P {
-    let mut table = [identity; 1 << WINDOW_BITS];
-    table[1] = base;
-    for i in 2..table.len() {
-        table[i] = if i % 2 == 0 {
-            table[i / 2].double(simd)
+    // Entry k holds k + 1 times the base.
+    let mut table = [base; TABLE];
+    for k in 2..=TABLE {
+        table[k - 1] = if k % 2 == 0 {
+            table[k / 2 - 1].double(simd)
         } else {
-            table[i - 1].add(simd, base)
+            table[k - 2].add(simd, base)
         };
     }
     let mut result = identity;
     for window in (0..windows).rev() {
-        for _ in 0..WINDOW_BITS {
-            result = result.double(simd);
+        let mut term = gather(simd, identity, &table, digits(components - 1, window));
+        for c in (0..components - 1).rev() {
+            let entry = gather(simd, identity, &table, digits(c, window));
+            term = term.endomorphism(simd).add(simd, entry);
         }
-        let digits = digits(window);
-        let mut term = table[0];
-        for (i, entry) in table.iter().enumerate().skip(1) {
-            let mut lanes = 0;
-            for (lane, digit) in digits.iter().enumerate() {
-                lanes |= is_zero(digit ^ i as u64) << lane;
+        if window + 1 < windows {
+            for _ in 0..WINDOW_BITS {
+                result = result.double(simd);
             }
-            term = term.select(simd, *entry, lanes);
         }
         result = result.add(simd, term);
     }
@@ -335,13 +464,14 @@ fn products<S: Simd, F: Field<S>, G: Group>(
     elements: &[G],
     scalars: &[Scalar],
 ) -> G::Points<S, F> {
-    let mut words = [[0; 4]; MAX_LANES];
+    let mut digits = [[[0; MAX_WINDOWS]; MAX_COMPONENTS]; MAX_LANES];
     for (lane, scalar) in scalars.iter().enumerate().take(elements.len()) {
-        words[lane] = scalar.to_words();
+        digits[lane] = self::digits::<G>(scalar);
     }
     let base = lanes::<S, F, G>(simd, elements);
-    multiply(simd, base, identity, SCALAR_WINDOWS, |window| {
-        words.map(|words| digit(&words, window))
+    let windows = windows::<G>(WINDOW_BITS as u32);
+    multiply(simd, base, identity, G::COMPONENTS, windows, |c, w| {
+        digits.map(|digits| digits[c][w])
     })
 }
 
@@ -372,16 +502,16 @@ impl<G: Group> Kernel for Double<G> {
     }
 }
 
-/// Multiplies an element by a little-endian integer, without branching on the integer.
+/// Multiplies an element by a scalar, without branching on the scalar.
 #[derive(Clone, Copy)]
-pub struct Multiply<'a, G> {
+pub struct Multiply<G> {
     /// The element.
     pub element: G,
-    /// The integer's little-endian words.
-    pub words: &'a [u64],
+    /// The scalar.
+    pub scalar: Scalar,
 }
 
-impl<G: Group> Kernel for Multiply<'_, G> {
+impl<G: Group> Kernel for Multiply<G> {
     type Output = G;
 
     // Debug builds keep this a call so that each representation's frame stays separate.
@@ -389,10 +519,10 @@ impl<G: Group> Kernel for Multiply<'_, G> {
     fn run<S: Simd, F: Field<S>>(self, simd: S) -> G {
         let identity = G::Points::<S, F>::load(simd, &[], &G::IDENTITY);
         let base = splat::<S, F, G>(simd, &self.element);
-        let words = self.words;
-        let windows = words.len() * 64 / WINDOW_BITS;
-        let product = multiply(simd, base, identity, windows, |window| {
-            [digit(words, window); MAX_LANES]
+        let digits = digits::<G>(&self.scalar);
+        let windows = windows::<G>(WINDOW_BITS as u32);
+        let product = multiply(simd, base, identity, G::COMPONENTS, windows, |c, w| {
+            [digits[c][w]; MAX_LANES]
         });
         first::<S, F, G>(simd, product)
     }
@@ -462,22 +592,30 @@ type Raw<S, F, G> = <<G as Group>::Points<S, F> as Points<S>>::Raw;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plan {
     /// Straus's method: each lane multiplies its own elements through tables of their multiples,
-    /// sharing one chain of doublings.
-    Straus(u32),
-    /// Pippenger's method: each lane sums one window of every element into its own buckets.
+    /// sharing one chain of doublings. With `split`, the scalars split into their components
+    /// and the tables hold the images of every multiple, which halves the doublings at the cost
+    /// of the images: worthwhile for a few elements.
+    Straus { width: u32, split: bool },
+    /// Pippenger's method: each lane sums one window of every component of every element into
+    /// its own buckets.
     Pippenger(u32),
 }
 
 impl Plan {
-    /// Returns the plan of least estimated cost for `count` elements on `lanes` lanes.
-    pub fn choose(count: usize, lanes: usize) -> Self {
+    /// Returns the plan of least estimated cost for `count` elements of `G` on `lanes` lanes.
+    pub fn choose<G: Group>(count: usize, lanes: usize) -> Self {
         let plans = STRAUS_WIDTHS
-            .map(Self::Straus)
+            .flat_map(|width| {
+                [false, true].map(|split| Self::Straus { width, split })
+            })
             .chain(PIPPENGER_WIDTHS.map(Self::Pippenger));
-        let mut best = Self::Straus(*STRAUS_WIDTHS.start());
+        let mut best = Self::Straus {
+            width: *STRAUS_WIDTHS.start(),
+            split: false,
+        };
         let mut least = usize::MAX;
         for plan in plans {
-            let cost = plan.cost(count, lanes);
+            let cost = plan.cost::<G>(count, lanes);
             if cost < least {
                 (best, least) = (plan, cost);
             }
@@ -485,27 +623,34 @@ impl Plan {
         best
     }
 
-    /// Returns the estimated cost of the plan, counting the additions, doublings, and negations
-    /// of points on all lanes at once.
-    const fn cost(self, count: usize, lanes: usize) -> usize {
+    /// Returns the estimated cost of the plan, counting the additions, doublings, negations, and
+    /// endomorphisms of points on all lanes at once.
+    const fn cost<G: Group>(self, count: usize, lanes: usize) -> usize {
         match self {
-            Self::Straus(width) => {
-                // Each group of lanes builds a table of its multiples and their negations, then
-                // adds one entry per window.
+            Self::Straus { width, split } => {
+                // Each group of lanes builds a table of its multiples, the images of every
+                // entry, and their negations, then adds one entry per component and window.
+                let (components, windows) = if split {
+                    (G::COMPONENTS, windows::<G>(width))
+                } else {
+                    (1, SCALAR_BITS.div_ceil(width) as usize)
+                };
                 let groups = count.div_ceil(lanes);
                 let entries = 1 << (width - 1);
-                let windows = SCALAR_BITS.div_ceil(width) as usize;
-                ADD_COST * groups * (entries - 1 + windows)
-                    + NEGATE_COST * groups * entries
+                ADD_COST * groups * (entries - 1 + components * windows)
+                    + IMAGE_COST * groups * (2 * components - 1) * entries
                     + DOUBLE_COST * width as usize * windows
             }
             Self::Pippenger(width) => {
-                // Each group of windows adds every element and sums the buckets in two running
-                // sums, then shifts the accumulated windows by `width * lanes` bits.
-                let groups = SCALAR_BITS.div_ceil(width).div_ceil(lanes as u32) as usize;
+                // Each group of windows adds every image of every element and sums the buckets
+                // in two running sums, then shifts the accumulated windows by `width * lanes`
+                // bits.
+                let components = G::COMPONENTS;
+                let groups = windows::<G>(width).div_ceil(lanes);
                 let buckets = 1 << (width - 1);
-                ADD_COST * groups * (count + 2 * buckets)
-                    + NEGATE_COST * count.div_ceil(lanes)
+                let images = count.div_ceil(lanes);
+                ADD_COST * groups * (count * components + 2 * buckets)
+                    + IMAGE_COST * images * (2 * components - 1)
                     + DOUBLE_COST * width as usize * lanes * groups
             }
         }
@@ -549,18 +694,36 @@ fn load_lanes<S: Simd, F: Field<S>, G: Group>(simd: S, points: &[Raw<S, F, G>]) 
     G::Points::<S, F>::load_raw(simd, &lanes[..F::LANES])
 }
 
-/// Returns the signed digits of every scalar in base `2^width`, `stride` digits per scalar.
+/// Returns the signed digits of every component of every scalar in base `2^width`, `stride`
+/// digits per component, by scalar then by component, with the odd components negated as
+/// [`Group::components`] counts them; or, without `split`, of every whole scalar as its only
+/// component.
 ///
-/// `stride` digits must cover [`SCALAR_BITS`] bits.
-fn recode(scalars: &[Scalar], width: u32, stride: usize) -> Vec<i16> {
-    let mut digits = vec![0; scalars.len() * stride];
-    for (scalar, digits) in scalars.iter().zip(digits.chunks_exact_mut(stride)) {
-        scalar.signed_digits(width, digits);
+/// `stride` digits must cover [`Group::COMPONENT_BITS`] or [`SCALAR_BITS`] bits.
+fn component_digits<G: Group>(
+    scalars: &[Scalar],
+    width: u32,
+    stride: usize,
+    split: bool,
+) -> Vec<i16> {
+    let components = if split { G::COMPONENTS } else { 1 };
+    let mut digits = vec![0; scalars.len() * components * stride];
+    let mut digits_by_scalar = digits.chunks_exact_mut(components * stride);
+    for (scalar, digits) in scalars.iter().zip(&mut digits_by_scalar) {
+        if split {
+            let components = G::components(scalar);
+            for (c, digits) in digits.chunks_exact_mut(stride).enumerate() {
+                signed_digits(&words(components[c]), width, c % 2 == 1, digits);
+            }
+        } else {
+            signed_digits(&scalar.to_words(), width, false, digits);
+        }
     }
     digits
 }
 
-/// Returns the raw form of every element followed by that of its negation.
+/// Returns the raw form of every image of every element under the powers of the endomorphism,
+/// each followed by that of its negation, by element then by component.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn prepare<S: Simd, F: Field<S>, G: Group>(
     simd: S,
@@ -568,19 +731,25 @@ fn prepare<S: Simd, F: Field<S>, G: Group>(
     identity: Raw<S, F, G>,
 ) -> Vec<[Raw<S, F, G>; 2]> {
     const { assert!(F::LANES <= MAX_LANES) };
-    let mut prepared = vec![[identity; 2]; elements.len()];
+    let mut prepared = vec![[identity; 2]; elements.len() * G::COMPONENTS];
     let mut stored = [identity; MAX_LANES];
-    for (elements, prepared) in elements.chunks(F::LANES).zip(prepared.chunks_mut(F::LANES)) {
-        let points = lanes::<S, F, G>(simd, elements);
-        points.store_raw(simd, &mut stored[..elements.len()]);
-        for (prepared, stored) in prepared.iter_mut().zip(&stored) {
-            prepared[0] = *stored;
-        }
-        points
-            .negate(simd)
-            .store_raw(simd, &mut stored[..elements.len()]);
-        for (prepared, stored) in prepared.iter_mut().zip(&stored) {
-            prepared[1] = *stored;
+    let span = F::LANES * G::COMPONENTS;
+    for (elements, prepared) in elements.chunks(F::LANES).zip(prepared.chunks_mut(span)) {
+        let mut points = lanes::<S, F, G>(simd, elements);
+        for c in 0..G::COMPONENTS {
+            if c > 0 {
+                points = points.endomorphism(simd);
+            }
+            points.store_raw(simd, &mut stored[..elements.len()]);
+            for (prepared, stored) in prepared[c..].iter_mut().step_by(G::COMPONENTS).zip(&stored) {
+                prepared[0] = *stored;
+            }
+            points
+                .negate(simd)
+                .store_raw(simd, &mut stored[..elements.len()]);
+            for (prepared, stored) in prepared[c..].iter_mut().step_by(G::COMPONENTS).zip(&stored) {
+                prepared[1] = *stored;
+            }
         }
     }
     prepared
@@ -588,26 +757,32 @@ fn prepare<S: Simd, F: Field<S>, G: Group>(
 
 /// Returns the sum of the elements times their scalars by Straus's method.
 ///
-/// Each lane holds one element of every group of [`Field::LANES`]. A group's table holds its
-/// multiples by `1` through `2^(width - 1)` and their negations, so that each signed digit
-/// selects one entry per lane, and every window shares the doublings of one accumulator. Lanes
-/// whose digits are all zero in a window skip that window's addition.
+/// Each lane holds one element of every group of [`Field::LANES`]. A group's table holds, for
+/// each component, the multiples of its elements' images by `1` through `2^(width - 1)` and
+/// their negations, so that each signed digit selects one entry per lane, and every window shares
+/// the doublings of one accumulator. Lanes whose digits are all zero in a window skip that
+/// window's addition.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn straus<S: Simd, F: Field<S>, G: Group>(
     simd: S,
     elements: &[G],
     scalars: &[Scalar],
     width: u32,
+    split: bool,
 ) -> G {
     let identity = G::Points::<S, F>::load(simd, &[], &G::IDENTITY);
     let zero = first_raw::<S, F, G>(simd, identity);
-    let windows = SCALAR_BITS.div_ceil(width) as usize;
-    let digits = recode(scalars, width, windows);
+    let (components, windows) = if split {
+        (G::COMPONENTS, windows::<G>(width))
+    } else {
+        (1, SCALAR_BITS.div_ceil(width) as usize)
+    };
+    let digits = component_digits::<G>(scalars, width, windows, split);
     let entries = 1 << (width - 1);
 
-    // Entry k of a group's table holds k + 1 times its elements, one lane each, and entry
-    // entries + k their negations.
-    let span = 2 * entries * F::LANES;
+    // Entry 2 c entries + k of a group's table holds k + 1 times the c-th images of its
+    // elements, one lane each, and entry (2 c + 1) entries + k their negations.
+    let span = 2 * entries * F::LANES * components;
     let mut tables = vec![zero; elements.len().div_ceil(F::LANES) * span];
     for (elements, table) in elements.chunks(F::LANES).zip(tables.chunks_exact_mut(span)) {
         let base = lanes::<S, F, G>(simd, elements);
@@ -620,14 +795,24 @@ fn straus<S: Simd, F: Field<S>, G: Group>(
             } else if k > 0 {
                 multiple = sum(simd, multiple, base);
             }
-            multiple.store_raw(simd, &mut table[k * F::LANES..(k + 1) * F::LANES]);
-            let negated = &mut table[(entries + k) * F::LANES..(entries + k + 1) * F::LANES];
-            multiple.negate(simd).store_raw(simd, negated);
+            let mut image = multiple;
+            for c in 0..components {
+                if c > 0 {
+                    image = image.endomorphism(simd);
+                }
+                let entry = (2 * c * entries + k) * F::LANES;
+                image.store_raw(simd, &mut table[entry..entry + F::LANES]);
+                let negated = entry + entries * F::LANES;
+                image
+                    .negate(simd)
+                    .store_raw(simd, &mut table[negated..negated + F::LANES]);
+            }
         }
     }
 
     let mut total = identity;
     let mut started = false;
+    let stride = components * windows;
     for window in (0..windows).rev() {
         if started {
             for _ in 0..width {
@@ -635,22 +820,24 @@ fn straus<S: Simd, F: Field<S>, G: Group>(
             }
         }
         for (group, table) in tables.chunks_exact(span).enumerate() {
-            let mut entries_used = [&zero; MAX_LANES];
-            let mut any = false;
-            let group_digits = digits[group * F::LANES * windows..].chunks_exact(windows);
-            for (lane, digits) in group_digits.take(F::LANES).enumerate() {
-                let digit = digits[window];
-                if digit != 0 {
-                    let magnitude = digit.unsigned_abs() as usize;
-                    let entry = magnitude - 1 + if digit < 0 { entries } else { 0 };
-                    entries_used[lane] = &table[entry * F::LANES + lane];
-                    any = true;
+            let group_digits = &digits[group * F::LANES * stride..];
+            for c in 0..components {
+                let mut entries_used = [&zero; MAX_LANES];
+                let mut any = false;
+                for (lane, digits) in group_digits.chunks_exact(stride).take(F::LANES).enumerate() {
+                    let digit = digits[c * windows + window];
+                    if digit != 0 {
+                        let magnitude = digit.unsigned_abs() as usize;
+                        let entry = 2 * c * entries + magnitude - 1 + if digit < 0 { entries } else { 0 };
+                        entries_used[lane] = &table[entry * F::LANES + lane];
+                        any = true;
+                    }
                 }
-            }
-            if any {
-                let term = G::Points::<S, F>::load_raw(simd, &entries_used[..F::LANES]);
-                total = sum(simd, total, term);
-                started = true;
+                if any {
+                    let term = G::Points::<S, F>::load_raw(simd, &entries_used[..F::LANES]);
+                    total = sum(simd, total, term);
+                    started = true;
+                }
             }
         }
     }
@@ -659,12 +846,12 @@ fn straus<S: Simd, F: Field<S>, G: Group>(
 
 /// Returns the sum of the elements times their scalars by Pippenger's method.
 ///
-/// Lane `l` of group `g` takes window `g * F::LANES + l` of every scalar, and sums each element
-/// into its own bucket for the digit's magnitude, negated for a negative digit, so the lanes
-/// never touch the same bucket. Buckets stay in raw form, and each addition gathers one bucket
-/// per lane. Running sums over the buckets weight each by its magnitude, and the groups combine
-/// by doubling, from the most significant down. Finally lane `l` is shifted by `width * l` bits
-/// and the lanes are summed.
+/// Lane `l` of group `g` takes window `g * F::LANES + l` of every component of every scalar,
+/// and sums each element's image into its own bucket for the digit's magnitude, negated for a
+/// negative digit, so the lanes never touch the same bucket. Buckets stay in raw form, and each
+/// addition gathers one bucket per lane. Running sums over the buckets weight each by its
+/// magnitude, and the groups combine by doubling, from the most significant down. Finally lane
+/// `l` is shifted by `width * l` bits and the lanes are summed.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn pippenger<S: Simd, F: Field<S>, G: Group>(
     simd: S,
@@ -674,9 +861,9 @@ fn pippenger<S: Simd, F: Field<S>, G: Group>(
 ) -> G {
     let identity = G::Points::<S, F>::load(simd, &[], &G::IDENTITY);
     let zero = first_raw::<S, F, G>(simd, identity);
-    let groups = SCALAR_BITS.div_ceil(width).div_ceil(F::LANES as u32) as usize;
+    let groups = windows::<G>(width).div_ceil(F::LANES);
     let span = groups * F::LANES;
-    let digits = recode(scalars, width, span);
+    let digits = component_digits::<G>(scalars, width, span, true);
     let prepared = prepare::<S, F, G>(simd, elements, zero);
 
     // Bucket b of lane l, for magnitude b + 1, is entry b * F::LANES + l.
@@ -780,8 +967,10 @@ impl<G: Group> Kernel for Msm<'_, G> {
             return G::from_coordinates(G::IDENTITY);
         }
         let (elements, scalars) = (&self.elements[..count], &self.scalars[..count]);
-        match self.plan.unwrap_or_else(|| Plan::choose(count, F::LANES)) {
-            Plan::Straus(width) => straus::<S, F, G>(simd, elements, scalars, width),
+        match self.plan.unwrap_or_else(|| Plan::choose::<G>(count, F::LANES)) {
+            Plan::Straus { width, split } => {
+                straus::<S, F, G>(simd, elements, scalars, width, split)
+            }
             Plan::Pippenger(width) => pippenger::<S, F, G>(simd, elements, scalars, width),
         }
     }
