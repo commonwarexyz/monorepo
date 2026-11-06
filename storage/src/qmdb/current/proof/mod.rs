@@ -286,7 +286,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
     /// Build the range proof planned by `plan` from digests already in memory.
     ///
     /// `get_node` supplies the digest at each of the plan's positions as the grafted view of the
-    /// ops tree serves them, like [crate::qmdb::current::db::Db::grafted_storage]: plain ops-tree
+    /// ops tree serves them, like [crate::qmdb::current::Db::grafted_storage]: plain ops-tree
     /// digests below the grafting height and bitmap-authenticated grafted digests at and above it.
     /// `status` supplies the bitmap chunks of [required_chunks]. The plan's leaf count, the digests,
     /// `status`, `inactivity_floor`, and `ops_root` must all describe one snapshot.

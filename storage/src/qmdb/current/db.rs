@@ -700,7 +700,7 @@ where
     /// plus a best-effort attempt to bound the recovery needed on startup.
     /// Bitmap metadata is not persisted by this call or by [Self::commit]. A new sync waits for
     /// the prior sync before starting. Failures surface as described on
-    /// [`any::Db::start_sync`](crate::qmdb::any::db::Db::start_sync).
+    /// [`any::Db::start_sync`](crate::qmdb::any::Db::start_sync).
     #[tracing::instrument(name = "qmdb.current.db.start_sync", level = "info", skip_all)]
     #[boxed]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {

@@ -24,8 +24,8 @@ use commonware_storage::{
     qmdb::{
         Error,
         any::{
+            Db,
             batch::{MerkleizedBatch, Slot, Staged, UnmerkleizedBatch},
-            db::Db,
             initial_root,
             operation::{Operation, Update},
             ordered, unordered,
