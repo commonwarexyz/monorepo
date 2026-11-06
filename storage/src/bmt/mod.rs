@@ -568,10 +568,42 @@ impl<D: Digest> Proof<D> {
     /// computation, so any modification to it will cause verification to fail.
     pub fn verify_element_inclusion<H: Hasher<Digest = D>>(
         &self,
-        mut position: u32,
+        position: u32,
         leaf: &D,
         root: &D,
     ) -> Result<(), Error> {
+        Self::ensure_root_matches(self.reconstruct_element_root::<H>(position, leaf)?, root)
+    }
+
+    /// Reconstruct the finalized root from this proof and the `leaf` at `position`, or return
+    /// an error if the input data is invalid. Use this when the trusted value is derived from
+    /// the root, and [Proof::verify_element_inclusion] when it is the root.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use commonware_storage::bmt::Builder;
+    /// use commonware_cryptography::{Sha256, sha256::Digest, Hasher as _};
+    ///
+    /// let digests: Vec<Digest> = [b"a", b"b", b"c"].iter().map(|x| Sha256::hash(&[*x])).collect();
+    /// let mut builder = Builder::<Sha256>::new(digests.len());
+    /// for digest in &digests {
+    ///     builder.add(digest);
+    /// }
+    /// let tree = builder.build();
+    ///
+    /// // The trusted value commits to the root, not the root itself.
+    /// let commitment = Sha256::hash(&[b"domain", tree.root().as_ref()]);
+    ///
+    /// let proof = tree.proof(2).unwrap();
+    /// let root = proof.reconstruct_element_root::<Sha256>(2, &digests[2]).unwrap();
+    /// assert_eq!(Sha256::hash(&[b"domain", root.as_ref()]), commitment);
+    /// ```
+    pub fn reconstruct_element_root<H: Hasher<Digest = D>>(
+        &self,
+        mut position: u32,
+        leaf: &D,
+    ) -> Result<D, Error> {
         // Validate position
         if position >= self.leaf_count {
             return Err(Error::InvalidPosition(position));
@@ -617,13 +649,7 @@ impl<D: Digest> Proof<D> {
 
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
-        let finalized = H::hash(&[&self.leaf_count.to_be_bytes(), computed.as_ref()]);
-
-        if finalized == *root {
-            Ok(())
-        } else {
-            Err(Error::InvalidProof(finalized.to_string(), root.to_string()))
-        }
+        Ok(H::hash(&[&self.leaf_count.to_be_bytes(), computed.as_ref()]))
     }
 
     /// Verifies that the given `elements` at their respective positions are included
@@ -640,17 +666,22 @@ impl<D: Digest> Proof<D> {
         elements: &[(u32, D)],
         root: &D,
     ) -> Result<(), Error> {
+        Self::ensure_root_matches(self.reconstruct_multi_root::<H>(elements)?, root)
+    }
+
+    /// Reconstruct the finalized root from this proof and the `(position, leaf)` `elements`,
+    /// or return an error if the input data is invalid. Positions must be strictly ascending
+    /// and in range, as for [Proof::verify_multi_inclusion].
+    pub fn reconstruct_multi_root<H: Hasher<Digest = D>>(
+        &self,
+        elements: &[(u32, D)],
+    ) -> Result<D, Error> {
         // Handle empty case
         if elements.is_empty() {
             if self.leaf_count == 0 && self.siblings.is_empty() {
                 // Compute finalized empty root: H(0 || empty_tree_root)
                 let empty_tree_root = H::hash(&[]);
-                let finalized = H::hash(&[&0u32.to_be_bytes(), empty_tree_root.as_ref()]);
-                if finalized == *root {
-                    return Ok(());
-                } else {
-                    return Err(Error::InvalidProof(finalized.to_string(), root.to_string()));
-                }
+                return Ok(H::hash(&[&0u32.to_be_bytes(), empty_tree_root.as_ref()]));
             }
             return Err(Error::NoLeaves);
         }
@@ -760,7 +791,7 @@ impl<D: Digest> Proof<D> {
             level_size = level_size.div_ceil(2);
         }
 
-        // 4. Verify root
+        // 4. Ensure all siblings were consumed and a single root remains
         if sibling_iter.next().is_some() {
             return Err(Error::UnalignedProof);
         }
@@ -772,13 +803,7 @@ impl<D: Digest> Proof<D> {
         // Finalize the root by incorporating the leaf count: H(leaf_count || tree_root)
         // This binds the proof to the specific tree size, preventing malleability attacks.
         let tree_root = current[0].1;
-        let finalized = H::hash(&[&self.leaf_count.to_be_bytes(), tree_root.as_ref()]);
-
-        if finalized == *root {
-            Ok(())
-        } else {
-            Err(Error::InvalidProof(finalized.to_string(), root.to_string()))
-        }
+        Ok(H::hash(&[&self.leaf_count.to_be_bytes(), tree_root.as_ref()]))
     }
 
     /// Verifies that a contiguous range of `leaves` starting at `position` are included
@@ -795,6 +820,16 @@ impl<D: Digest> Proof<D> {
         leaves: &[D],
         root: &D,
     ) -> Result<(), Error> {
+        Self::ensure_root_matches(self.reconstruct_range_root::<H>(position, leaves)?, root)
+    }
+
+    /// Reconstruct the finalized root from this proof and the consecutive `leaves` starting
+    /// at `position`, or return an error if the input data is invalid.
+    pub fn reconstruct_range_root<H: Hasher<Digest = D>>(
+        &self,
+        position: u32,
+        leaves: &[D],
+    ) -> Result<D, Error> {
         // For empty trees, only position 0 with empty leaves is valid
         if leaves.is_empty() && position != 0 {
             return Err(Error::InvalidPosition(position));
@@ -816,7 +851,16 @@ impl<D: Digest> Proof<D> {
             .enumerate()
             .map(|(i, leaf)| (position + i as u32, *leaf))
             .collect();
-        self.verify_multi_inclusion::<H>(&elements, root)
+        self.reconstruct_multi_root::<H>(&elements)
+    }
+
+    /// Returns [Error::InvalidProof] unless `reconstructed` equals `root`.
+    fn ensure_root_matches(reconstructed: D, root: &D) -> Result<(), Error> {
+        if reconstructed == *root {
+            Ok(())
+        } else {
+            Err(Error::InvalidProof(reconstructed.to_string(), root.to_string()))
+        }
     }
 }
 
@@ -2817,6 +2861,241 @@ mod tests {
         // The function is O(elements * levels), not O(leaf_count)
         let result = multi_proof.verify_multi_inclusion::<Sha256>(&elements, &root);
         assert!(result.is_err(), "Should reject malicious large leaf_count");
+    }
+
+    fn build_tree(n: u32) -> (Vec<Digest>, Tree<Digest>) {
+        let digests: Vec<Digest> = (0..n).map(|i| Sha256::hash(&[&i.to_be_bytes()])).collect();
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        (digests, builder.build())
+    }
+
+    /// Returns `proof` marked honest, followed by tampered copies marked dishonest: each
+    /// sibling replaced, a sibling added, a sibling removed, and the leaf count moved by one.
+    fn proof_cases(proof: &Proof<Digest>) -> Vec<(bool, Proof<Digest>)> {
+        let bad = Sha256::hash(&[b"tampered"]);
+        let mut cases = vec![(true, proof.clone())];
+        for i in 0..proof.siblings.len() {
+            let mut p = proof.clone();
+            p.siblings[i] = bad;
+            cases.push((false, p));
+        }
+        let mut p = proof.clone();
+        p.siblings.push(bad);
+        cases.push((false, p));
+        if !proof.siblings.is_empty() {
+            let mut p = proof.clone();
+            p.siblings.pop();
+            cases.push((false, p));
+        }
+        for leaf_count in [proof.leaf_count - 1, proof.leaf_count + 1] {
+            let mut p = proof.clone();
+            p.leaf_count = leaf_count;
+            cases.push((false, p));
+        }
+        cases
+    }
+
+    /// Asserts that honest input reconstructs `root` and dishonest input never does, and that
+    /// `verify` against either `root` or a wrong root matches comparing with `reconstructed`.
+    fn assert_agrees(
+        honest: bool,
+        root: &Digest,
+        reconstructed: Result<Digest, Error>,
+        verify: impl Fn(&Digest) -> Result<(), Error>,
+    ) {
+        match &reconstructed {
+            Ok(r) if honest => assert_eq!(r, root),
+            Ok(r) => assert_ne!(r, root, "dishonest input reconstructed the root"),
+            Err(e) => assert!(!honest, "honest input failed to reconstruct: {e:?}"),
+        }
+        let wrong_root = Sha256::hash(&[b"wrong root"]);
+        for expected in [root, &wrong_root] {
+            match (&reconstructed, verify(expected)) {
+                (Ok(r), Ok(())) => assert_eq!(r, expected),
+                (Ok(r), Err(Error::InvalidProof(_, _))) => assert_ne!(r, expected),
+                // `Error` does not implement `PartialEq`, so compare variants.
+                (Err(a), Err(b)) => assert_eq!(
+                    core::mem::discriminant(a),
+                    core::mem::discriminant(&b)
+                ),
+                (r, v) => panic!("reconstruct {r:?} disagrees with verify {v:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_element_root_matches_tree_root() {
+        for n in 1..=33 {
+            let (digests, tree) = build_tree(n);
+            for (i, leaf) in (0..).zip(&digests) {
+                let proof = tree.proof(i).unwrap();
+                assert_eq!(
+                    proof.reconstruct_element_root::<Sha256>(i, leaf).unwrap(),
+                    tree.root(),
+                    "size={n} position={i}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_range_root_matches_tree_root() {
+        let (_, empty) = build_tree(0);
+        let proof = empty.range_proof(0, 0).unwrap();
+        assert_eq!(
+            proof.reconstruct_range_root::<Sha256>(0, &[]).unwrap(),
+            empty.root()
+        );
+        for n in 1..=17 {
+            let (digests, tree) = build_tree(n);
+            for start in 0..n {
+                for end in start..n {
+                    let proof = tree.range_proof(start, end).unwrap();
+                    let leaves = &digests[start as usize..=end as usize];
+                    assert_eq!(
+                        proof.reconstruct_range_root::<Sha256>(start, leaves).unwrap(),
+                        tree.root(),
+                        "size={n} range={start}..={end}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_multi_root_matches_tree_root() {
+        let (_, empty) = build_tree(0);
+        assert_eq!(
+            Proof::<Digest>::default()
+                .reconstruct_multi_root::<Sha256>(&[])
+                .unwrap(),
+            empty.root()
+        );
+        for n in 1..=10u32 {
+            let (digests, tree) = build_tree(n);
+            for mask in 1u32..(1 << n) {
+                let positions: Vec<u32> = (0..n).filter(|p| mask & (1 << p) != 0).collect();
+                let proof = tree.multi_proof(&positions).unwrap();
+                let elements: Vec<(u32, Digest)> =
+                    positions.iter().map(|&p| (p, digests[p as usize])).collect();
+                assert_eq!(
+                    proof.reconstruct_multi_root::<Sha256>(&elements).unwrap(),
+                    tree.root(),
+                    "size={n} positions={positions:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_verify_element_inclusion_agrees_with_reconstruct() {
+        let wrong_leaf = Sha256::hash(&[b"wrong leaf"]);
+        for n in 1..=17 {
+            let (digests, tree) = build_tree(n);
+            let root = tree.root();
+            for (i, &leaf) in (0..).zip(&digests) {
+                let inputs = [(true, i, leaf), (false, i, wrong_leaf), (false, i + 1, leaf)];
+                for (honest_proof, proof) in proof_cases(&tree.proof(i).unwrap()) {
+                    for (honest_input, position, leaf) in inputs {
+                        assert_agrees(
+                            honest_proof && honest_input,
+                            &root,
+                            proof.reconstruct_element_root::<Sha256>(position, &leaf),
+                            |expected| {
+                                proof.verify_element_inclusion::<Sha256>(position, &leaf, expected)
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_verify_range_inclusion_agrees_with_reconstruct() {
+        let wrong_leaf = Sha256::hash(&[b"wrong leaf"]);
+        for n in 1..=9 {
+            let (digests, tree) = build_tree(n);
+            let root = tree.root();
+            for start in 0..n {
+                for end in start..n {
+                    let leaves = digests[start as usize..=end as usize].to_vec();
+                    let mut wrong = leaves.clone();
+                    wrong[0] = wrong_leaf;
+                    let short = leaves[..leaves.len() - 1].to_vec();
+                    let mut long = leaves.clone();
+                    long.push(wrong_leaf);
+                    let inputs = [
+                        (true, start, &leaves),
+                        (false, start, &wrong),
+                        (false, start, &short),
+                        (false, start, &long),
+                        (false, start + 1, &leaves),
+                        (false, u32::MAX, &leaves),
+                    ];
+                    for (honest_proof, proof) in proof_cases(&tree.range_proof(start, end).unwrap())
+                    {
+                        for (honest_input, position, leaves) in inputs {
+                            assert_agrees(
+                                honest_proof && honest_input,
+                                &root,
+                                proof.reconstruct_range_root::<Sha256>(position, leaves),
+                                |expected| {
+                                    proof.verify_range_inclusion::<Sha256>(
+                                        position, leaves, expected,
+                                    )
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_verify_multi_inclusion_agrees_with_reconstruct() {
+        let wrong_leaf = Sha256::hash(&[b"wrong leaf"]);
+        for n in 1..=7u32 {
+            let (digests, tree) = build_tree(n);
+            let root = tree.root();
+            for mask in 1u32..(1 << n) {
+                let positions: Vec<u32> = (0..n).filter(|p| mask & (1 << p) != 0).collect();
+                let elements: Vec<(u32, Digest)> =
+                    positions.iter().map(|&p| (p, digests[p as usize])).collect();
+                let mut wrong = elements.clone();
+                wrong[0].1 = wrong_leaf;
+                let mut duplicate = elements.clone();
+                duplicate.push(elements[elements.len() - 1]);
+                let mut out_of_range = elements.clone();
+                out_of_range.push((n, wrong_leaf));
+                let mut inputs = vec![
+                    (true, elements),
+                    (false, wrong),
+                    (false, duplicate),
+                    (false, out_of_range),
+                    (false, Vec::new()),
+                ];
+                if positions.len() >= 2 {
+                    let mut unsorted = inputs[0].1.clone();
+                    unsorted.swap(0, 1);
+                    inputs.push((false, unsorted));
+                }
+                for (honest_proof, proof) in proof_cases(&tree.multi_proof(&positions).unwrap()) {
+                    for (honest_input, elements) in &inputs {
+                        assert_agrees(
+                            honest_proof && *honest_input,
+                            &root,
+                            proof.reconstruct_multi_root::<Sha256>(elements),
+                            |expected| proof.verify_multi_inclusion::<Sha256>(elements, expected),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[cfg(feature = "arbitrary")]
