@@ -137,7 +137,7 @@ pub(crate) mod harnesses {
     use crate::{
         journal::contiguous::Mutable,
         merkle::{Family, mmb, mmr},
-        qmdb::any::value::ValueEncoding,
+        qmdb::value::ValueEncoding,
     };
     use commonware_codec::{EncodeShared, Read};
     use commonware_cryptography::Hasher as _;

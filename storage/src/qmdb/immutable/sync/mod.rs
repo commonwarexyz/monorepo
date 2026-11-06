@@ -7,10 +7,10 @@ use crate::{
     },
     qmdb::{
         self, Error,
-        any::ValueEncoding,
         immutable::{self, CompactDb, Metrics, Operation},
         operation::Key,
         sync,
+        value::ValueEncoding,
     },
     translator::Translator,
 };

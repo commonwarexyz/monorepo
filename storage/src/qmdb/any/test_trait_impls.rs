@@ -1,7 +1,6 @@
 //! Test trait implementations for the Any QMDB.
 
 use super::{
-    ValueEncoding,
     batch::{MerkleizedBatch, UnmerkleizedBatch},
     db::Db,
     operation::{Operation, Update, update},
@@ -15,7 +14,7 @@ use crate::{
     index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
     journal::contiguous::Mutable,
     merkle::{Family, Location, Proof},
-    qmdb::{Error, floor::Policy, operation::Key},
+    qmdb::{Error, floor::Policy, operation::Key, value::ValueEncoding},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};

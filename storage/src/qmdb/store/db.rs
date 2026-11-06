@@ -88,7 +88,7 @@ use crate::{
     merkle::mmr::Location,
     qmdb::{
         any::{
-            BITMAP_CHUNK_BYTES, VariableValue,
+            BITMAP_CHUNK_BYTES,
             unordered::{Update, variable::Operation},
         },
         bitmap::fill_from,
@@ -96,6 +96,7 @@ use crate::{
         floor::{Action, Entry, Limits, Policy, Proportional, Walk},
         operation::{Committable as _, Floored as _, Key, Operation as _},
         update_known_loc,
+        value::VariableValue,
     },
     translator::Translator,
 };

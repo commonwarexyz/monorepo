@@ -3,12 +3,10 @@
 use crate::{
     merkle::Graftable,
     qmdb::{
-        any::{
-            ValueEncoding,
-            unordered::{Operation, Update},
-        },
+        any::unordered::{Operation, Update},
         current::proof::operation::Proof as OperationProof,
         operation::Key,
+        value::ValueEncoding,
     },
 };
 use bytes::BufMut;
@@ -49,7 +47,7 @@ impl<F: Graftable, D: Digest, C: AsRef<[u8]>> KeyValueProof<F, D, C> {
     /// use commonware_cryptography::{Sha256, sha256::Digest};
     /// use commonware_storage::{
     ///     merkle::mmr,
-    ///     qmdb::{any::value::FixedEncoding, current::unordered::proof::dynamic::KeyValueProof},
+    ///     qmdb::{value::FixedEncoding, current::unordered::proof::dynamic::KeyValueProof},
     /// };
     ///
     /// fn verify(

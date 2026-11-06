@@ -5,7 +5,7 @@
 use super::{Config as BaseConfig, operation::Operation as BaseOperation};
 use crate::{
     journal::contiguous::fixed::{self, Config as JournalConfig},
-    qmdb::any::value::FixedEncoding,
+    qmdb::value::FixedEncoding,
 };
 
 /// Type alias for a fixed-size operation.

@@ -4,8 +4,9 @@ use crate::{
     journal::contiguous::Contiguous,
     merkle::{Family, Location},
     qmdb::{
-        any::{ValueEncoding, db::Db},
+        any::db::Db,
         operation::{Key, Operation as OperationTrait},
+        value::ValueEncoding,
     },
 };
 use commonware_codec::Codec;

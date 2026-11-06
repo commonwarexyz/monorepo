@@ -8,7 +8,10 @@ use crate::{
     index::unordered::Index,
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::any::{self, unordered, value::VariableEncoding},
+    qmdb::{
+        any::{self, unordered},
+        value::VariableEncoding,
+    },
 };
 
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;

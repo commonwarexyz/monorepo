@@ -4,7 +4,10 @@ use crate::{
     index::unordered::Index,
     journal::contiguous::fixed::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::any::{self, unordered, value::FixedEncoding},
+    qmdb::{
+        any::{self, unordered},
+        value::FixedEncoding,
+    },
 };
 
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;

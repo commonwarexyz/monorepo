@@ -31,10 +31,10 @@ use crate::{
     merkle::{Family, Location, Proof, batch, compact as compact_merkle},
     qmdb::{
         self, Error,
-        any::value::ValueEncoding,
         chain::{self, Bounds, Commitment},
         compact::{batch as compact_batch, witness},
         sync::{CompactTarget, Request, Source, source},
+        value::ValueEncoding,
     },
 };
 use commonware_codec::{Encode, EncodeShared, Read};
@@ -668,7 +668,7 @@ mod tests {
         journal::contiguous::variable::Config as JournalConfig,
         merkle::{mmb, mmr},
         metadata::{Config as MetadataConfig, Metadata},
-        qmdb::{ProofExt as _, any::value::FixedEncoding, compact::witness, sync::Response},
+        qmdb::{ProofExt as _, compact::witness, sync::Response, value::FixedEncoding},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;

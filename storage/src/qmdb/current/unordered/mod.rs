@@ -29,7 +29,6 @@ pub mod tests {
         qmdb::{
             Error,
             any::{
-                ValueEncoding,
                 operation::update::Unordered as UnorderedUpdate,
                 traits::{DbAny, UnmerkleizedBatch as _},
                 unordered::Operation,
@@ -40,6 +39,7 @@ pub mod tests {
                 tests::apply_random_ops,
             },
             store::tests::{TestKey, TestValue},
+            value::ValueEncoding,
         },
         translator::TwoCap,
     };

@@ -17,12 +17,12 @@ use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
         Error,
-        any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         keyless::{
             CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch, Operation, fixed,
             initial_root, variable,
         },
         sync,
+        value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
     },
 };
 use commonware_utils::channel::{mpsc, ring};

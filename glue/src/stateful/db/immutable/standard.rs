@@ -21,7 +21,6 @@ use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
         Error,
-        any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         immutable::{
             Db, Operation,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
@@ -29,6 +28,7 @@ use commonware_storage::{
         },
         operation::Key,
         sync::{self, Target as AnySyncTarget},
+        value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
     },
     translator::Translator,
 };

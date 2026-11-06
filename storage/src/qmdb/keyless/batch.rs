@@ -7,8 +7,8 @@ use crate::{
     merkle::{Family, Location, Proof},
     qmdb::{
         Error,
-        any::value::ValueEncoding,
         chain::{self, Bounds, Commitment, Compatible},
+        value::ValueEncoding,
     },
 };
 use commonware_codec::EncodeShared;
