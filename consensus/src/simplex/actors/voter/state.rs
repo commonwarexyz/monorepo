@@ -1487,6 +1487,16 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .copied()
     }
 
+    /// Returns true if `view` is covered by a nullification: the view itself
+    /// was nullified, or an earlier view in its term was (a nullification
+    /// nullifies the rest of its term).
+    fn view_nullified(&self, view: View) -> bool {
+        self.nullification_views
+            .range(view.term_start(self.term_length())..=view)
+            .next_back()
+            .is_some()
+    }
+
     /// Returns the highest view below `view` in `view`'s term that we voted to nullify.
     fn highest_local_nullify_in_term(&self, view: View) -> Option<View> {
         let term_start = view.term_start(self.term_length());
@@ -1721,13 +1731,25 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 .ok_or(parent);
         }
 
-        // Find the highest certified view below `view`, or use genesis when none.
-        let result = self
-            .views
-            .range(..view)
-            .rev()
-            .find_map(|(&v, round)| round.certified_payload().map(|p| (v, p)));
-        let (candidate, payload) = match result {
+        // Find the highest certified view below `view`, preferring one not
+        // covered by a nullification; use genesis when none exists. A
+        // nullified certified view stays a valid last-resort ancestor: its
+        // payload can never finalize on its own, but a descendant anchored to
+        // it can still pull it into finality.
+        let mut result = None;
+        let mut covered = None;
+        for (&v, round) in self.views.range(..view).rev() {
+            let Some(payload) = round.certified_payload() else {
+                continue;
+            };
+            if self.view_nullified(v) {
+                covered.get_or_insert((v, payload));
+                continue;
+            }
+            result = Some((v, payload));
+            break;
+        }
+        let (candidate, payload) = match result.or(covered) {
             Some((v, p)) => (v, p),
             None => (
                 GENESIS_VIEW,
@@ -3687,6 +3709,91 @@ mod tests {
                 Sha256Digest::from([7u8; 32]),
             );
             assert_eq!(state.parent_payload(&proposal), Ok(parent_payload));
+        });
+    }
+
+    /// A certified view covered by a nullification can never finalize on its
+    /// own, so `find_parent` must prefer a lower certified ancestor when one
+    /// exists. The covered payload remains a valid last-resort ancestor (a
+    /// descendant anchored to it can still rescue it into finality).
+    #[test]
+    fn find_parent_prefers_unnullified_certified_view() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 1, 20, 5, 4);
+
+            let lower_view = View::new(1);
+            let lower_payload = Sha256Digest::from([42u8; 32]);
+            let lower_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), lower_view),
+                GENESIS_VIEW,
+                lower_payload,
+            );
+            let notarization = build_notarization(&verifier, &schemes, &lower_proposal);
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(lower_view, true).is_some());
+
+            let dead_view = View::new(2);
+            let dead_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), dead_view),
+                lower_view,
+                Sha256Digest::from([7u8; 32]),
+            );
+            let notarization = build_notarization(&verifier, &schemes, &dead_proposal);
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(dead_view, true).is_some());
+
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(1), dead_view));
+            assert!(state.add_nullification(nullification));
+
+            // View 6 is the start of the next term. The proposer must anchor
+            // at certified view 1, not the certified-but-nullified view 2.
+            assert_eq!(
+                state.find_parent(View::new(6)),
+                Ok((lower_view, lower_payload))
+            );
+        });
+    }
+
+    /// When every certified ancestor is covered by a nullification, the
+    /// highest one remains the parent: a descendant anchored to it can still
+    /// rescue the payload into finality.
+    #[test]
+    fn find_parent_falls_back_to_nullified_certified_view() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 1, 20, 5, 4);
+
+            let dead_view = View::new(2);
+            let dead_payload = Sha256Digest::from([7u8; 32]);
+            let dead_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), dead_view),
+                GENESIS_VIEW,
+                dead_payload,
+            );
+            let notarization = build_notarization(&verifier, &schemes, &dead_proposal);
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(dead_view, true).is_some());
+
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(1), dead_view));
+            assert!(state.add_nullification(nullification));
+
+            assert_eq!(
+                state.find_parent(View::new(6)),
+                Ok((dead_view, dead_payload))
+            );
         });
     }
 
