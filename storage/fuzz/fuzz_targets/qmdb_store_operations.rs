@@ -169,16 +169,15 @@ fn fuzz(input: FuzzInput) {
                     let mut batch = db.new_batch();
                     for (key, value) in std::mem::take(&mut pending) {
                         keys.insert(key);
-                        batch = match value {
+                        match &value {
                             Some(v) => {
                                 model.insert(key, v.clone());
-                                batch.update(key, v)
                             }
                             None => {
                                 model.remove(&key);
-                                batch.delete(key)
                             }
-                        };
+                        }
+                        batch = batch.write(key, value);
                     }
                     let changeset = batch.with_metadata(metadata_bytes.clone()).finalize();
                     let inherited = db.inactivity_floor_loc();
