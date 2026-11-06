@@ -572,13 +572,13 @@ where
                 UnorderedOperation::Update => {}
                 UnorderedOperation::Delete => return unordered::Operation::Delete(key(0)),
                 UnorderedOperation::Commit => {
-                    return unordered::Operation::CommitFloor(
+                    return unordered::Operation::Commit(
                         None,
                         Location::new(tree.inactivity_floor),
                     );
                 }
                 UnorderedOperation::CommitMetadata => {
-                    return unordered::Operation::CommitFloor(
+                    return unordered::Operation::Commit(
                         Some(value(index)),
                         Location::new(tree.inactivity_floor),
                     );
@@ -604,7 +604,7 @@ where
             unordered::Operation::Delete(key) => {
                 live.remove(&key);
             }
-            unordered::Operation::CommitFloor(_, _) => commit = Some(index),
+            unordered::Operation::Commit(_, _) => commit = Some(index),
         }
     }
     let mut active = vec![false; usize::try_from(tree.leaves).map_err(|e| e.to_string())?];

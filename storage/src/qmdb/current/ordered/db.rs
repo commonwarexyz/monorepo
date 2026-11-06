@@ -147,13 +147,13 @@ where
                 Ok(ExclusionProof::KeyValue(op_proof, key_data))
             }
             None => {
-                // The DB is empty. Use the last CommitFloor to prove emptiness. The Commit proof
-                // variant requires the CommitFloor's floor to equal its own location (genuinely
+                // The DB is empty. Use the last Commit to prove emptiness. The Commit proof
+                // variant requires the Commit's floor to equal its own location (genuinely
                 // empty at commit time). If this doesn't hold, the persisted state is inconsistent.
                 let last_commit_loc = self.any.log.size() - 1;
                 let op = self.any.log.read(*last_commit_loc).await?;
-                let Operation::CommitFloor(value, floor) = op else {
-                    unreachable!("last_commit_loc should always point to a CommitFloor");
+                let Operation::Commit(value, floor) = op else {
+                    unreachable!("last_commit_loc should always point to a Commit");
                 };
                 assert_eq!(
                     floor, last_commit_loc,

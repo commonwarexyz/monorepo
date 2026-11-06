@@ -155,7 +155,7 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
             }
         }
 
-        // Maintain the invariant that only the most recent CommitFloor operation can be active.
+        // Maintain the invariant that only the most recent Commit operation can be active.
         bitmap.set_bit(db_size - 1, false);
         bitmap.set_bit(tip - 1, true);
     }

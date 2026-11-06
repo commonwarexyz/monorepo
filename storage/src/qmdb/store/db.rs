@@ -326,8 +326,8 @@ where
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         // The log always ends with a commit operation.
-        let Operation::CommitFloor(metadata, _) = self.log.read(self.log.size() - 1).await? else {
-            unreachable!("last commit should be a commit floor operation");
+        let Operation::Commit(metadata, _) = self.log.read(self.log.size() - 1).await? else {
+            unreachable!("last commit should be a commit operation");
         };
 
         Ok(metadata)
@@ -422,7 +422,7 @@ where
         if size == 0 {
             warn!("Log is empty, initializing new db");
             (log, _) = log
-                .append(&Operation::CommitFloor(None, Location::new(0)))
+                .append(&Operation::Commit(None, Location::new(0)))
                 .await?;
         }
 
@@ -635,7 +635,7 @@ where
 
         // Append the batch's operations and its commit with the new inactivity floor.
         self.bitmap.push(true);
-        ops.push(Operation::CommitFloor(metadata, self.inactivity_floor_loc));
+        ops.push(Operation::Commit(metadata, self.inactivity_floor_loc));
         (self.log, _) = self.log.append_many(Many::Flat(&ops)).await?;
 
         Ok(self)
@@ -1305,7 +1305,7 @@ mod test {
             assert!(result.unwrap().is_none());
 
             // Insert a key-value pair. apply_batch writes the Update, the floor walk's move, and
-            // a CommitFloor: 3 new ops on top of the initial commit.
+            // a Commit: 3 new ops on top of the initial commit.
             let (db, _) = apply_entries(db, [(key, Some(value.clone()))]).await;
 
             assert_eq!(*db.bounds().end, 4);
@@ -1365,7 +1365,7 @@ mod test {
             assert_eq!(*db.bounds().end, 10);
             assert_eq!(*db.inactivity_floor_loc, 5);
 
-            // Each apply_entries writes a CommitFloor with None metadata, replacing
+            // Each apply_entries writes a Commit with None metadata, replacing
             // the previously committed metadata.
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
@@ -1427,12 +1427,12 @@ mod test {
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.count(), 1);
 
-            // Each apply_entries appends the Update, one move of it, and a CommitFloor. The walk
+            // Each apply_entries appends the Update, one move of it, and a Commit. The walk
             // ends at the tip the writes reached, so it does not reach the moved Update. Total:
             // 1 (init) + 100 * 3 = 301.
             assert_eq!(*db.bounds().end, 301);
 
-            // Only the last moved Update and CommitFloor are active, so the floor is 299.
+            // Only the last moved Update and Commit are active, so the floor is 299.
             assert_eq!(*db.inactivity_floor_loc, 299);
             let floor = db.inactivity_floor_loc;
 
@@ -1810,7 +1810,7 @@ mod test {
                         .iter()
                         .map(|&i| Operation::Update(Update(seed[i].0, value(i).unwrap()))),
                 )
-                .chain([Operation::CommitFloor(None, Location::new(floor))])
+                .chain([Operation::Commit(None, Location::new(floor))])
                 .collect();
             assert_eq!(Widen::widen(expected.len()), range.end - range.start);
             for (loc, op) in range.zip(expected) {
@@ -2390,7 +2390,7 @@ mod test {
                 assert!(matches!(op, Operation::Delete(key) if key == evicted));
             }
             let op = db.get_op(Location::new(11)).await.unwrap();
-            assert!(matches!(op, Operation::CommitFloor(None, floor) if *floor == 11));
+            assert!(matches!(op, Operation::Commit(None, floor) if *floor == 11));
 
             // Every key reads `None`.
             for (_, key, ..) in &policy.evicted {
@@ -2432,7 +2432,7 @@ mod test {
             };
             assert_eq!((key, value.0), (digest(0), 7));
             let op = db.get_op(Location::new(2)).await.unwrap();
-            assert!(matches!(op, Operation::CommitFloor(None, floor) if *floor == 0));
+            assert!(matches!(op, Operation::Commit(None, floor) if *floor == 0));
             assert_bitmap_consistent(&db).await;
             db.destroy().await.unwrap();
         });
@@ -2742,7 +2742,7 @@ mod test {
                 Operation::Update(Update(key(2), replacement)),
                 Operation::Delete(key(3)),
                 Operation::Delete(key(4)),
-                Operation::CommitFloor(None, Location::new(10)),
+                Operation::Commit(None, Location::new(10)),
             ];
             for (loc, expected) in (11..).zip(expected) {
                 assert_eq!(db.get_op(Location::new(loc)).await.unwrap(), expected);

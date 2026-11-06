@@ -61,7 +61,7 @@ where
                 p.write(buf);
                 buf.put_bytes(0, total - update_op_size::<S>());
             }
-            Operation::CommitFloor(metadata, floor_loc) => {
+            Operation::Commit(metadata, floor_loc) => {
                 COMMIT_CONTEXT.write(buf);
                 write_commit_fixed(metadata, *floor_loc, buf);
                 buf.put_bytes(0, total - commit_fixed_operation_size::<V>());
@@ -90,7 +90,7 @@ where
             COMMIT_CONTEXT => {
                 let (metadata, floor_loc) = read_commit_fixed(buf)?;
                 ensure_zeros(buf, total - commit_fixed_operation_size::<V>())?;
-                Ok(Operation::CommitFloor(metadata, floor_loc))
+                Ok(Operation::Commit(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }
