@@ -96,10 +96,11 @@ impl Kernel for Product {
 
     #[inline(always)]
     fn run<S: Simd, F: Field<S>>(self, simd: S) -> GT {
-        let a = Fp12::<F>::load(simd, &[], &self.0.0);
+        let mut a = Fp12::<F>::load(simd, &[], &self.0.0);
         let b = Fp12::<F>::load(simd, &[], &self.1.0);
         let mut output = [fp12::ONE];
-        a.mul(simd, &b).store(simd, &mut output);
+        a.mul(simd, &b);
+        a.store(simd, &mut output);
         GT(output[0])
     }
 }
@@ -137,7 +138,10 @@ impl Pairings<'_> {
             count += 1;
             if count == SHARED || groups.peek().is_none() {
                 let lines = miller_loop(simd, &prepared[..count]);
-                product = Some(product.map_or(lines, |product| product.mul(simd, &lines)));
+                match &mut product {
+                    Some(product) => product.mul(simd, &lines),
+                    None => product = Some(lines),
+                }
                 count = 0;
             }
         }
