@@ -7,11 +7,11 @@ use super::{
         driver::tests::fail_after_completion,
         idle::tests::{WakePoint, on_wake_point},
         operation::Operation,
+        park::tests::waiting,
         queue::CAPACITY,
         request::{RecvRequest, Request},
         task::{Task, tests::cancelled},
         tasks::tests::AFTER_INSERT,
-        waker::tests::state_bits,
     },
     *,
 };
@@ -498,9 +498,7 @@ pub fn before_overflow(pool: &Pool) {
 /// Whether worker `index` of `pool` is published idle and waits for a wake,
 /// on its futex or in its io_uring wait.
 fn is_waiting(pool: &Pool, index: u32) -> bool {
-    // The two waiting bits of the wake state.
-    const WAITING: u32 = 0b11;
-    pool.idle().is_idle(index) && state_bits(&pool.mailbox(index).waker) & WAITING != 0
+    pool.idle().is_idle(index) && waiting(&pool.mailbox(index).unparker)
 }
 
 /// Block until every worker of `pool` waits for a wake, published idle with no
@@ -647,8 +645,8 @@ fn occupy_worker_one(context: &Context, in_ring: bool) -> (ThreadId, Option<Unix
     (other, Some(peer))
 }
 
-/// A spin outlasting the test's timeout, so only a push's wake signal can end
-/// it, as no message is published.
+/// A spin outlasting the test's timeout, so only a push's notification can end
+/// it, as no message is sent.
 fn endless_spinner() -> SpinnerConfig {
     SpinnerConfig {
         budget_us: 60_000_000,
@@ -4044,9 +4042,9 @@ fn test_push_racing_a_park_reaches_the_worker() {
 }
 
 /// A push into the global queue ends a spinning worker's spin through its
-/// wake signal.
+/// notification.
 #[test]
-fn test_push_ends_a_spin_through_the_wake_signal() {
+fn test_push_ends_a_spin_through_its_notification() {
     let cfg = config()
         .with_worker_threads(2)
         .with_idle_spinner(endless_spinner());
@@ -4059,11 +4057,11 @@ fn test_push_ends_a_spin_through_the_wake_signal() {
     });
 }
 
-/// A worker whose spin ended on a push's wake signal consumes it, so once idle
-/// again it spins out and sleeps on its futex, and does not spin on the stale
-/// signal forever.
+/// A worker whose spin ended on a push's notification observes the sequence
+/// again on its next turn, so once idle it can finish spinning and sleep on
+/// its futex.
 #[test]
-fn test_spinning_worker_sleeps_after_a_signalled_spin() {
+fn test_spinning_worker_sleeps_after_a_notified_spin() {
     let spinner = SpinnerConfig {
         budget_us: 1_000,
         max_budget_us: 1_000,
@@ -4078,7 +4076,7 @@ fn test_spinning_worker_sleeps_after_a_signalled_spin() {
             assert_eq!(thread, other);
         }
         let deadline = Instant::now() + TEST_TIMEOUT;
-        while state_bits(&pool.mailbox(1).waker) & 1 == 0 {
+        while !waiting(&pool.mailbox(1).unparker) {
             assert!(Instant::now() < deadline, "worker one must sleep");
             std::hint::spin_loop();
         }

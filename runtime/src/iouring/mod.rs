@@ -49,8 +49,11 @@
 //!
 //! # Requirements and Progress
 //!
-//! Linux 6.1 or newer is required for single-issuer rings with deferred task
-//! work. Task polls must return so their worker can service I/O and deadlines.
+//! The runtime targets Linux 7.0 or newer. Older kernels may work, but they
+//! are untested and nothing is guaranteed on them. Each worker's ring uses
+//! single-issuer mode with deferred task work and parks on
+//! `IORING_OP_FUTEX_WAIT`. Task polls must return so their worker can service
+//! I/O and deadlines.
 //! I/O and sleeps stay registered on the worker that first polled them, so a
 //! poll that blocks one worker also delays their results for tasks that have
 //! moved elsewhere.
@@ -88,6 +91,7 @@ mod driver;
 mod idle;
 mod mailbox;
 pub(crate) mod operation;
+mod park;
 mod pool;
 mod queue;
 mod registration;
@@ -101,7 +105,6 @@ mod task;
 mod tasks;
 mod timeout;
 mod waiter;
-mod waker;
 
 pub use runtime::{Config, Context, RingConfig, Runner};
 pub use spinner::Config as SpinnerConfig;
