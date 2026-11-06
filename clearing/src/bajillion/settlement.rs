@@ -1,14 +1,14 @@
 //! Balances and payouts that a close settles.
 //!
 //! The operator and validators settle each account with the same rule ([Flow::settle]), so an
-//! honest operator always knows the balances its close will post.
+//! operator that applies the flows of each posted close knows the balances validators hold.
 
 use super::{Amount, Amounts, Deposit, Epoch, Error, ForcedWithdrawal, Withdrawal};
 use bytes::BufMut;
 use commonware_codec::{
     Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write, varint::UInt,
 };
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::PublicKey;
 use commonware_utils::iter::zip_eq;
 use std::collections::HashMap;
 
@@ -96,15 +96,13 @@ where
     }
 }
 
-/// Funds moving into and out of one account in the close of an epoch, and the root of the account's
-/// payment map in it.
+/// Funds moving into and out of one account in the close of an epoch.
 ///
 /// Each part is an exact sum, so it may exceed the largest amount even when the balance the close
 /// leaves fits. [Close::assemble](super::Close::assemble) computes the flow of every account a
-/// close touches. The deployment routes each to the shard serving its account in the next epoch,
-/// and [Operator::settle](super::Operator::settle) applies it there.
+/// close touches, and [Flow::settle] applies one to the account's balance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Flow<D: Digest, A: Amount> {
+pub struct Flow<A: Amount> {
     /// Epoch of the close.
     epoch: Epoch,
     /// Incoming payments and processed deposits.
@@ -113,11 +111,9 @@ pub struct Flow<D: Digest, A: Amount> {
     debit: Total<A>,
     /// Requested forced and soft withdrawals.
     withdraw: Total<A>,
-    /// Root of the account's payment map in the close, if it pays in it.
-    root: Option<D>,
 }
 
-impl<D: Digest, A: Amount> Flow<D, A> {
+impl<A: Amount> Flow<A> {
     /// Returns a flow of the close of `epoch` that moves nothing.
     const fn zero(epoch: Epoch) -> Self {
         Self {
@@ -125,32 +121,20 @@ impl<D: Digest, A: Amount> Flow<D, A> {
             credit: Total::ZERO,
             debit: Total::ZERO,
             withdraw: Total::ZERO,
-            root: None,
         }
     }
 
     /// Returns the epoch of the close.
-    pub(crate) const fn epoch(&self) -> Epoch {
+    pub const fn epoch(&self) -> Epoch {
         self.epoch
     }
 
-    /// Returns whether the flow debits its account or asks to withdraw from it.
-    pub(crate) fn takes(&self) -> bool {
-        self.debit != Total::ZERO || self.withdraw != Total::ZERO
-    }
-
-    /// Returns the root of the account's payment map in the close, if it pays in it.
-    pub(crate) const fn root(&self) -> Option<&D> {
-        self.root.as_ref()
-    }
-
-    /// Settles the flow on top of the account's `previous` balance, and returns the balance left
-    /// and the amount paid out.
+    /// Settles the flow on the account's `previous` balance and returns the balance left and the
+    /// payout. The payout is the lesser of the settled balance and the amount requested.
     ///
-    /// The balance gains the credits and loses the debits, and must not go negative or exceed the
-    /// largest amount. The account is then paid the lesser of that balance and the amount it asked
-    /// to withdraw.
-    pub(crate) fn settle(&self, previous: A) -> Result<(A, A), Error> {
+    /// Returns Overdraft if the settled balance is negative, and Overflow if it exceeds the largest
+    /// amount.
+    pub fn settle(&self, previous: A) -> Result<(A, A), Error> {
         let settled = Total::new(previous)
             .add(self.credit)?
             .sub(self.debit)
@@ -168,27 +152,25 @@ impl<D: Digest, A: Amount> Flow<D, A> {
     }
 }
 
-impl<D: Digest, A: Amount> Write for Flow<D, A> {
+impl<A: Amount> Write for Flow<A> {
     fn write(&self, buf: &mut impl BufMut) {
         self.epoch.write(buf);
         self.credit.write(buf);
         self.debit.write(buf);
         self.withdraw.write(buf);
-        self.root.write(buf);
     }
 }
 
-impl<D: Digest, A: Amount> EncodeSize for Flow<D, A> {
+impl<A: Amount> EncodeSize for Flow<A> {
     fn encode_size(&self) -> usize {
         Epoch::SIZE
             + self.credit.encode_size()
             + self.debit.encode_size()
             + self.withdraw.encode_size()
-            + self.root.encode_size()
     }
 }
 
-impl<D: Digest, A: Amount> Read for Flow<D, A> {
+impl<A: Amount> Read for Flow<A> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -197,15 +179,13 @@ impl<D: Digest, A: Amount> Read for Flow<D, A> {
             credit: Total::read(buf)?,
             debit: Total::read(buf)?,
             withdraw: Total::read(buf)?,
-            root: Option::<D>::read(buf)?,
         })
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D: Digest, A: Amount> arbitrary::Arbitrary<'_> for Flow<D, A>
+impl<A: Amount> arbitrary::Arbitrary<'_> for Flow<A>
 where
-    D: for<'a> arbitrary::Arbitrary<'a>,
     A: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -214,7 +194,6 @@ where
             credit: u.arbitrary()?,
             debit: u.arbitrary()?,
             withdraw: u.arbitrary()?,
-            root: u.arbitrary()?,
         })
     }
 }
@@ -228,25 +207,23 @@ pub(crate) struct Settlement<P: PublicKey, A: Amount> {
 }
 
 /// The flows of a close, aggregated per account.
-pub(crate) struct Flows<P: PublicKey, D: Digest, A: Amount> {
+pub(crate) struct Flows<P: PublicKey, A: Amount> {
     /// Flow of every account the close touches, in account order.
-    flows: Vec<(P, Flow<D, A>)>,
+    flows: Vec<(P, Flow<A>)>,
 }
 
-impl<P: PublicKey, D: Digest, A: Amount> Flows<P, D, A> {
+impl<P: PublicKey, A: Amount> Flows<P, A> {
     /// Aggregates the payments, soft withdrawals, deposits, and forced withdrawals of the close of
-    /// `epoch`.
-    ///
-    /// `rows` holds each sender's payment map with its root.
+    /// `epoch`, given each sender's payment map in `rows`.
     pub(crate) fn new<'a>(
         epoch: Epoch,
-        rows: impl IntoIterator<Item = (&'a P, &'a Amounts<P, A>, &'a D)>,
+        rows: impl IntoIterator<Item = (&'a P, &'a Amounts<P, A>)>,
         withdrawals: &[Withdrawal<P, A>],
         deposits: &[Deposit<P, A>],
         forced_withdrawals: &[ForcedWithdrawal<P, A>],
     ) -> Result<Self, Error> {
-        let mut flows = HashMap::<P, Flow<D, A>>::new();
-        for (sender, payments, root) in rows {
+        let mut flows = HashMap::<P, Flow<A>>::new();
+        for (sender, payments) in rows {
             let mut paid = Total::ZERO;
             for (receiver, amount) in payments.iter() {
                 let amount = Total::new(amount);
@@ -254,7 +231,6 @@ impl<P: PublicKey, D: Digest, A: Amount> Flows<P, D, A> {
                 paid = paid.add(amount)?;
             }
             add(&mut flows, epoch, sender, |flow| &mut flow.debit, paid)?;
-            flows.get_mut(sender).expect("sender must have a flow").root = Some(*root);
         }
         for deposit in deposits {
             let amount = Total::new(deposit.amount);
@@ -297,7 +273,7 @@ impl<P: PublicKey, D: Digest, A: Amount> Flows<P, D, A> {
     }
 
     /// Returns the flow of every account the close touches, in account order.
-    pub(crate) fn into_flows(self) -> Vec<(P, Flow<D, A>)> {
+    pub(crate) fn into_flows(self) -> Vec<(P, Flow<A>)> {
         self.flows
     }
 
@@ -308,18 +284,18 @@ impl<P: PublicKey, D: Digest, A: Amount> Flows<P, D, A> {
     ///
     /// Panics if `balances` does not hold one balance per account.
     pub(crate) fn settle(
-        self,
+        &self,
         balances: impl IntoIterator<Item = A>,
     ) -> Result<Settlement<P, A>, Error> {
         let mut changed = Vec::new();
         let mut payouts = Vec::new();
-        for ((account, flow), previous) in zip_eq(self.flows, balances) {
+        for ((account, flow), previous) in zip_eq(&self.flows, balances) {
             let (remaining, payout) = flow.settle(previous)?;
             if remaining != previous {
                 changed.push((account.clone(), remaining));
             }
             if payout != A::ZERO {
-                payouts.push((account, payout));
+                payouts.push((account.clone(), payout));
             }
         }
         Ok(Settlement {
@@ -330,11 +306,11 @@ impl<P: PublicKey, D: Digest, A: Amount> Flows<P, D, A> {
 }
 
 /// Adds `amount` to the total `field` selects in `account`'s flow of the close of `epoch`.
-fn add<P: PublicKey, D: Digest, A: Amount>(
-    flows: &mut HashMap<P, Flow<D, A>>,
+fn add<P: PublicKey, A: Amount>(
+    flows: &mut HashMap<P, Flow<A>>,
     epoch: Epoch,
     account: &P,
-    field: impl FnOnce(&mut Flow<D, A>) -> &mut Total<A>,
+    field: impl FnOnce(&mut Flow<A>) -> &mut Total<A>,
     amount: Total<A>,
 ) -> Result<(), Error> {
     let total = field(
@@ -351,9 +327,8 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::{
-        Hasher as _, Sha256, Signer as _,
+        Signer as _,
         ed25519::{PrivateKey, PublicKey},
-        sha256::Digest,
     };
 
     #[test]
@@ -362,12 +337,11 @@ mod tests {
         // and debits each exceed the largest amount while her balance does not change.
         let [alice, bob] = [0, 1].map(|seed| PrivateKey::from_seed(seed).public_key());
         let payments = Amounts::new([(alice.clone(), u64::MAX), (bob.clone(), u64::MAX)]).unwrap();
-        let root = Sha256::hash(&[b"alice"]);
         let deposit = Deposit {
             account: alice.clone(),
             amount: u64::MAX,
         };
-        let flows = Flows::new(2, [(&alice, &payments, &root)], &[], &[deposit], &[])
+        let flows = Flows::new(2, [(&alice, &payments)], &[], &[deposit], &[])
             .unwrap()
             .into_flows();
         let flow = |account: &PublicKey| {
@@ -379,25 +353,37 @@ mod tests {
         };
         let (paying, paid) = (flow(&alice), flow(&bob));
         assert_eq!((paying.credit.carries, paying.debit.carries), (1, 1));
-        assert_eq!(paying.root(), Some(&root));
         assert_eq!(paying.settle(5).unwrap(), (5, 0));
-        assert_eq!(paid.root(), None);
         assert_eq!(paid.settle(0).unwrap(), (u64::MAX, 0));
 
-        // Every flow round trips, with or without a root.
+        // Every flow round trips.
         for flow in [paying, paid] {
-            assert_eq!(Flow::<Digest, u64>::decode(flow.encode()).unwrap(), flow);
+            assert_eq!(Flow::<u64>::decode(flow.encode()).unwrap(), flow);
         }
+    }
+
+    #[test]
+    fn test_payout_is_capped_by_the_balance_beyond_the_largest_amount() {
+        // Alice holds 10 and is forced to withdraw the largest amount and 3 more in one close, so
+        // her requested total exceeds the largest amount while its low part is only 2.
+        let alice = PrivateKey::from_seed(0).public_key();
+        let forced = [u64::MAX, 3].map(|amount| ForcedWithdrawal {
+            account: alice.clone(),
+            amount,
+        });
+        let flows = Flows::new(2, std::iter::empty(), &[], &[], &forced)
+            .unwrap()
+            .into_flows();
+        assert_eq!(flows[0].1.settle(10).unwrap(), (0, 10));
     }
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::super::*;
         use commonware_codec::conformance::CodecConformance;
-        use commonware_cryptography::sha256::Digest;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Flow<Digest, u64>>,
+            CodecConformance<Flow<u64>>,
         }
     }
 }

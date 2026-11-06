@@ -32,13 +32,9 @@ pub(crate) fn root<'a, H: Hasher, P: PublicKey>(
 
 /// The payment maps a close settles, one row per sender.
 ///
-/// The matrix is committed row by row. Its root is the root of a binary Merkle tree over
-/// `(sender, root of the sender's payment map)` leaves in sender order, and each payment map is
-/// itself committed as [Amounts]. An [Opening] of a sender and receiver therefore authenticates
-/// the amount paid between them, or that there is none. Every row pays at least one receiver, so a
-/// sender without a row paid nothing.
-///
-/// Cloning is cheap because clones share the rows.
+/// The matrix commits to a binary Merkle tree of `(sender, payment map root)` leaves in sender
+/// order. An [Opening] proves what one sender paid one receiver, or that it paid nothing. Clones
+/// share the rows.
 #[derive(Clone, Debug)]
 pub struct Matrix<P: PublicKey, D: Digest, A: Amount> {
     inner: Arc<Inner<P, D, A>>,
@@ -62,34 +58,6 @@ impl<P: PublicKey, D: Digest, A: Amount> Matrix<P, D, A> {
     /// Returns the matrix with no rows.
     pub fn empty<H: Hasher<Digest = D>>() -> Self {
         Self::from_sorted::<H>(Vec::new())
-    }
-
-    /// Collects every sender's payment map into a matrix.
-    ///
-    /// Returns an error if a sender appears more than once, a payment map is empty, or there are
-    /// more than `u32::MAX` senders.
-    pub fn new<H: Hasher<Digest = D>>(
-        rows: impl IntoIterator<Item = (P, Amounts<P, A>)>,
-    ) -> Result<Self, Error> {
-        let mut rows: Vec<_> = rows.into_iter().collect();
-        rows.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-        if rows.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-            return Err(Error::DuplicateAccount);
-        }
-        if rows.iter().any(|(_, payments)| payments.is_empty()) {
-            return Err(Error::NoReceivers);
-        }
-        if rows.len() > u32::MAX as usize {
-            return Err(Error::TooManyEntries);
-        }
-        Ok(Self::from_sorted::<H>(
-            rows.into_iter()
-                .map(|(sender, payments)| {
-                    let root = payments.root::<H>();
-                    (sender, payments, root)
-                })
-                .collect(),
-        ))
     }
 
     /// Builds a matrix from rows that are strictly increasing by sender, each with a nonempty
@@ -162,6 +130,9 @@ impl<P: PublicKey, D: Digest, A: Amount> Matrix<P, D, A> {
     }
 
     /// Opens the amount `sender` paid `receiver`, proving that it paid nothing if it did not.
+    ///
+    /// An opening reveals the payment it opens or, when it proves that payment absent, the sender's
+    /// payments to the receivers on either side.
     pub fn open(&self, sender: &P, receiver: &P) -> Opening<P, D, A> {
         let row = Lookup::new(&self.inner.rows, &self.inner.tree, sender);
         let entry = match &row {
@@ -224,11 +195,7 @@ impl<P: PublicKey, D: Digest, A: Amount> Opening<P, D, A> {
         let amount = entry.verify::<H>(receiver, &payments, |receiver, amount| {
             amounts::leaf::<H, P, A>(receiver, *amount)
         })?;
-        match amount {
-            Some(amount) if *amount == A::ZERO => Err(Error::InvalidOpening),
-            Some(amount) => Ok(*amount),
-            None => Ok(A::ZERO),
-        }
+        Ok(amount.copied().unwrap_or(A::ZERO))
     }
 }
 
@@ -299,6 +266,17 @@ mod tests {
         .unwrap()
     }
 
+    /// Returns the matrix of `rows`. Their senders must strictly increase.
+    fn matrix(rows: &[(PublicKey, Amounts<PublicKey, u64>)]) -> Matrix<PublicKey, Digest, u64> {
+        Matrix::from_sorted::<Sha256>(
+            rows.iter()
+                .map(|(sender, payments)| {
+                    (sender.clone(), payments.clone(), payments.root::<Sha256>())
+                })
+                .collect(),
+        )
+    }
+
     #[test]
     fn test_opens_every_pair() {
         let keys = keys(6);
@@ -307,7 +285,7 @@ mod tests {
             (keys[3].clone(), amounts(&[(&keys[1], 1)])),
             (keys[4].clone(), amounts(&[(&keys[4], 2), (&keys[5], 3)])),
         ];
-        let matrix = Matrix::<_, Digest, u64>::new::<Sha256>(rows.clone()).unwrap();
+        let matrix = matrix(&rows);
         let root = matrix.root();
         assert_eq!(matrix.len(), 3);
 
@@ -345,11 +323,10 @@ mod tests {
     #[test]
     fn test_rejects_inconsistent_openings() {
         let keys = keys(4);
-        let matrix = Matrix::<_, Digest, u64>::new::<Sha256>([
+        let matrix = matrix(&[
             (keys[1].clone(), amounts(&[(&keys[0], 5)])),
             (keys[3].clone(), amounts(&[(&keys[0], 1)])),
-        ])
-        .unwrap();
+        ]);
         let root = matrix.root();
 
         // A sender with a row must open the receiver's entry, and a sender without one must not.
@@ -377,6 +354,21 @@ mod tests {
             ));
         }
 
+        // A sender that pays cannot be shown to have no row by opening only the row before it.
+        let forged = Opening::<_, _, u64> {
+            row: Lookup::NonMember {
+                position: 1,
+                lower: Some(matrix.inner.rows[0].clone()),
+                upper: None,
+                proof: matrix.inner.tree.proof(0).unwrap(),
+            },
+            entry: None,
+        };
+        assert!(matches!(
+            forged.verify::<Sha256>(&root, &keys[3], &keys[0]),
+            Err(Error::InvalidOpening)
+        ));
+
         // The entry must open under the sender's own row.
         let other = matrix.open(&keys[3], &keys[0]);
         let swapped = Opening {
@@ -397,23 +389,6 @@ mod tests {
         );
         assert!(present.verify::<Sha256>(&root, &keys[3], &keys[0]).is_err());
         assert!(present.verify::<Sha256>(&root, &keys[1], &keys[2]).is_err());
-    }
-
-    #[test]
-    fn test_new_rejects_invalid_rows() {
-        let keys = keys(2);
-        let row = amounts(&[(&keys[0], 1)]);
-        assert!(matches!(
-            Matrix::<_, Digest, u64>::new::<Sha256>([
-                (keys[1].clone(), row.clone()),
-                (keys[1].clone(), row)
-            ]),
-            Err(Error::DuplicateAccount)
-        ));
-        assert!(matches!(
-            Matrix::<_, Digest, u64>::new::<Sha256>([(keys[1].clone(), Amounts::empty())]),
-            Err(Error::NoReceivers)
-        ));
     }
 
     #[cfg(feature = "arbitrary")]

@@ -1,88 +1,355 @@
-//! Clear payments between many accounts and settle each epoch's net effect at once.
+//! Clear payments between accounts through an operator, and settle each epoch's net effect at once.
 //!
 //! Bajillion runs between users, an operator, a committee of validators, and a ledger that holds
 //! deposited funds. Users pay each other through the operator, and the operator preconfirms each
 //! payment by countersigning it. To end an epoch, the operator closes it. Validators check the
-//! close against the finalized balances and certify a [Summary] of its effects, and the [Ledger]
-//! posts the summary once a certificate verifies over it.
+//! close against the balances of the last posted close and certify a [Summary] of its effects. The
+//! ledger posts the summary once a certificate verifies over it, and the post is final at once. A
+//! challenge can later halt the ledger, but it reverts no post.
 //!
-//! A posted close finalizes its epoch at once, with no challenge period. Balances update and
-//! withdrawals pay out as soon as the close posts.
+//! # One epoch
 //!
-//! Each deployment chooses the unsigned integer type of its amounts ([Amount]). This crate
+//! Users act as senders and receivers, so each epoch involves five roles and follows the same
+//! steps. Deposits and forced withdrawals wait in the ledger's queues. A sender pays receivers
+//! through the operator and gives each a receipt. The operator closes the epoch over the oldest
+//! queued requests, validators check the close and certify its summary, and the ledger posts it.
+//! Each role then acts on the post.
+//!
+//! ```text
+//!   sender           operator          receiver         validators          ledger
+//!      |                 |                 |                 |                 |
+//!      | states, sign    |                 |                 |                 |
+//!      |---- Request --->|                 |                 |                 |
+//!      |                 | verify, admit,  |                 |                 |
+//!      |                 | fits?, persist  |                 |                 |
+//!      |<----- Ack ------|                 |                 |                 |
+//!      | verify, persist |                 |                 |                 |
+//!      | issue receipts  |                 |                 |                 |
+//!      |------------- Receipt ------------>|                 |                 |
+//!      |                 |                 | verify,         |                 |
+//!      |                 |                 | keep largest    |                 |
+//!      |                 |                 |                 |                 |
+//!      |                 |<----------------------------------|<-- queue(e) ----|
+//!      |                 | assemble        |                 |                 |
+//!      |                 |------------ Close(e) ------------>|                 |
+//!      |                 |                 |                 | check, settle,  |
+//!      |                 |                 |                 | certify         |
+//!      |                 |                 |                 |-- Summary(e) -->|
+//!      |                 |                 |                 |                 | verify, post,
+//!      |                 |                 |                 |                 | owe payouts
+//!      |                 |                 |                 |                 x final
+//!      |<----------------|<----------------|<----------------|<-- posted(e) ---|
+//!      |                 | apply flows     |                 | apply batch     |
+//!      |<----------------------------------|<-- Opening -----|                 |
+//!      | resolve         |                 | compare         |                 |
+//!      |                 |                 |                 |                 |
+//!      |                 |                 |------- Challenge, if short ------>|
+//!      |                 |                 |                 |                 | verify, halt
+//! ```
+//!
+//! Each arrow carries a protocol message, except queue(e) and posted(e), the final ledger state the
+//! roles read. Each label in a lane is a step that role takes. Validators serve openings of the
+//! posted matrix. A receiver whose receipt promises more than the post credits challenges the post,
+//! and the ledger halts. Every account then claims what the last post left it.
+//!
+//! # Trust model
+//!
+//! The operator may be malicious. It cannot debit a sender beyond what the sender signed for the
+//! epoch or credit the wrong account. Nor can it pay out a withdrawal its account did not request,
+//! since a soft withdrawal carries the account's signature and the ledger queues a forced
+//! withdrawal only on a request the account authenticated.
+//!
+//! It can refuse payments and soft withdrawals, and users can still withdraw through the ledger
+//! with forced withdrawals the next closes must process. If it omits preconfirmed payments from a
+//! close, a receiver's challenge halts the ledger. If it stops closing epochs, accounts exit
+//! through claims once the deployment's policy halts the ledger.
+//!
+//! At most `f` validators may be Byzantine. The deployment chooses the certificate scheme and its
+//! fault model, and the scheme's quorum must exceed `f` while honest validators alone must still
+//! reach it. Every certificate then includes an honest validator that checked the close and keeps
+//! the data needed to open its matrix and to apply it.
+//!
+//! # Helpers, not roles
+//!
+//! The crate prescribes what independent parties must compute identically. These are the wire
+//! formats and signature [Namespace]s, the commitments (payment maps, the payment [Matrix],
+//! payouts, the summary chain, and the balances root), the rules for checking and settling a close,
+//! the challenge, post, and claim checks, and the ledger's queue rule. Each is a function on a
+//! protocol type that reads no storage.
+//!
+//! The one exception is the validators' [Balances] database, a [QMDB](commonware_storage::qmdb).
+//! Its root commits to every write ever made to it, not only to the balances it holds, so applying
+//! a posted close to it is prescribed as well. Everything else belongs to the deployment. That
+//! covers what each role stores and where, and how it caches, batches, schedules, persists, and
+//! recovers.
+//!
+//! Each deployment also chooses the unsigned integer type of its amounts ([Amount]). This crate
 //! implements it for `u64` and `u128`, and a deployment that settles EVM tokens can implement it
-//! for a 256-bit integer.
-//!
-//! # Payments
-//!
-//! For every epoch, a [Sender] keeps a payment map ([Amounts]) from each receiver to the cumulative
-//! amount the operator has countersigned for it. To pay a batch of receivers, the sender adds the
-//! batch to its map and signs a [State] committing to the new map and to its map of the previous
-//! epoch.
+//! for its own 256-bit integer type.
 //!
 //! ```text
-//!    sender                             operator                            receiver
-//!       |                                   |                                   |
-//!       |--- Request(batch, signed state) ->|                                   |
-//!       |                                   | fits the live balance?            |
-//!       |<-- Acknowledgement or refusal ----|                                   |
-//!       |                                   |                                   |
-//!       |--- Receipt(state, cumulative amount, opening) ----------------------->|
-//!       |                                   |                                   |
+//!   role        keeps                 calls
+//!   ---------------------------------------------------------------------------------------------
+//!   sender      any store             Request::states, States::sign,
+//!                                     State::verify_acknowledgement, Receipt::issue,
+//!                                     Opening::verify_row, Withdrawal::sign
+//!   operator    any store             Request::verify, Verified::admit, State::acknowledge,
+//!                                     Withdrawal::verify, Close::assemble, Flow::settle
+//!   receiver    any store             Receipt::verify, Opening::verify, Challenge::verify
+//!   validators  Balances, any store   Close::check, Checked::settle, Proposal::apply,
+//!                                     Proposal::payouts, Matrix::open, Queue::prefix
+//!   ledger      any store             Summary::verify, Challenge::verify, BalanceProof::verify
+//!   ---------------------------------------------------------------------------------------------
+//!   prescribed  wire formats, namespaces, commitments, close rules, the balances step
 //! ```
 //!
-//! The [Operator] countersigns that same state if it is for the current epoch, extends the sender's
-//! accepted maps, and fits the sender's live balance. The live balance is the sender's finalized
-//! balance less everything it has paid in the current epoch, and less what the close still being
-//! settled, if any, may take from it. Deposits and incoming payments become spendable once a close
-//! processes them.
+//! Each role's section below names its helpers and states its obligations. An obligation is a
+//! precondition the crate cannot check, followed by what happens when a deployment breaks it. A
+//! sender's or receiver's obligations protect only that account, as long as the operator keeps its
+//! own. An operator that breaks one can get its close rejected or halt the ledger, and a validator
+//! that breaks one counts against the `f` faulty validators the trust model tolerates. The ledger's
+//! obligations protect the funds themselves.
 //!
-//! The sender then gives each receiver a [Receipt] holding the countersigned state and an opening
-//! of the receiver's cumulative amount. A receipt preconfirms the payment. The close of its epoch
-//! credits at least that amount, or the ledger halts.
+//! Every role reads the ledger's queues, posts, and halts only from ledger state that cannot be
+//! reverted, and "posted" always means final on the ledger's chain. A summary binds how many queued
+//! requests its close processes, not which ones. If the chain reorders a queue after validators
+//! read it, a certified summary posts against other requests, and the balances root credits funds
+//! the ledger does not hold.
 //!
-//! A sender keeps at most one [Request] pending. A pipelined request signs two states, one for its
-//! epoch and one for the next, so a payment refused because its epoch just closed settles in the
-//! next epoch without a new request. Each state commits to the sender's map of the preceding epoch,
-//! so a close that settles one of the two states makes the other unsettleable.
+//! # Senders
+//!
+//! For each epoch, a sender keeps a payment map ([Amounts]) from each receiver to the cumulative
+//! amount the operator has countersigned for it. To pay a batch of receivers, it adds the batch to
+//! its latest countersigned map of the epoch and signs a [State] committing to the new map and to
+//! the map the previous close settled for it.
+//!
+//! [Request::states] derives the states, and [States::sign] signs them into a [Request]. A signer
+//! outside the process signs each state's encoding in [Namespace::state], and [States::request]
+//! builds the request from those signatures.
+//!
+//! The operator countersigns the state it admits, and the sender checks that acknowledgement with
+//! [State::verify_acknowledgement]. [Receipt::issue] then gives each receiver a [Receipt] holding
+//! the state, both signatures, and an opening of the receiver's cumulative amount. A receipt
+//! preconfirms the payment, because the close of its epoch must credit at least that amount or its
+//! receiver can halt the ledger.
+//!
+//! A pipelined request also signs a state for the next epoch that pays only the batch, on top of
+//! the map without it. A payment refused because its epoch just closed then settles in the next
+//! epoch without a new request. Each state commits to the root it builds on, so the sender's row in
+//! the close of the request's epoch decides which of the two can settle.
 //!
 //! ```text
-//!                               close(e) settles state(e)
-//!                            +-------------------------------> paid in e, state(e+1) never settles
-//!     pipelined request      |
-//!     state(e), state(e+1) --+
-//!                            |  close(e) leaves state(e) out
-//!                            +-------------------------------> paid in e+1 by state(e+1)
+//!              close(e-1)               close(e)                 close(e+1)
+//!                  row                     row                       row
+//!
+//!   state(e)    previous <---------- root(M + batch)                                pays in e
+//!                                          or
+//!   state(e+1)                           root(M) <-------------- root(batch)        pays in e+1
+//!
+//!   M   latest countersigned map of e         <--   builds on
 //! ```
 //!
-//! # Closing an epoch
+//! If close(e) settles M + batch, state(e+1) builds on a root no close settled and never settles.
+//! If close(e) settles M, the operator can admit state(e+1) in epoch e+1. The sender learns which
+//! happened from the row root [Opening::verify_row] proves under each post's matrix root.
 //!
-//! A [Close] carries every sender's latest countersigned map with the sender's signature over its
-//! state, the signed [Withdrawal]s the operator honors, and how many [Deposit]s and
-//! [ForcedWithdrawal]s queued on the ledger it processes. The operator signs it and opens the next
-//! epoch right away.
+//! - **S1.** Derive a request's states from the latest countersigned map of its epoch and from
+//!   `previous`. Until the close of the epoch before posts, `previous` is the root of the latest
+//!   countersigned map of that epoch. Once it posts, it is the posted row root. Either is the empty
+//!   map's root when there is none. Sign no request while another may still be countersigned, and
+//!   none for an epoch before one with a countersigned map. Otherwise [Verified::admit] refuses the
+//!   state, and the sender's requests fail until a post shows which map settled.
+//!
+//! - **S2.** Record a map as countersigned only once [State::verify_acknowledgement] accepts the
+//!   operator's acknowledgement of its state. Otherwise the sender's record diverges as in S1, and
+//!   its receivers reject the receipts.
+//!
+//! - **S3.** Persist each request with its [States] before sending it. On an acknowledgement,
+//!   persist the state, both signatures, and the map in one write that clears the request, before
+//!   releasing any receipt. Otherwise a crash leaves the sender unable to issue receipts the close
+//!   still settles, or to extend its map until a post resolves the epoch.
+//!
+//! - **S4.** Treat a refusal as final only for a request delivered once, with no copy in flight.
+//!   Otherwise an earlier copy may have been admitted, and the record diverges as in S1.
+//!
+//! - **S5.** Resolve a pending request against each post from its epoch on, in epoch order, before
+//!   dropping it or building on a posted row root. The request settled in epoch `e` if it has a
+//!   state of `e` whose root equals the row root the post of `e` proves, and it is dropped once
+//!   none of its states is for a later epoch. Otherwise the sender drops a request a close settled,
+//!   or builds on the wrong root.
+//!
+//! # The operator
+//!
+//! The operator admits payments and soft withdrawals, closes each epoch, and tracks what each
+//! account can spend. [Request::verify] reads no storage and checks the sender's signature over the
+//! state a request asks for in the current epoch. [Verified::admit] compares that state with the
+//! operator's record of the sender and returns an [Admission]. The operator then checks that a new
+//! state fits the sender's balance and the validators' limits, persists it, and countersigns it
+//! with [State::acknowledge].
 //!
 //! ```text
-//!   operator         validators                      ledger                 receivers
-//!       |                 |                             |                       |
-//!       |--- Close(e) --->|                             |                       |
-//!       | opens e+1       | verify and settle           |                       |
-//!       |                 |--- Summary + certificate -->|                       |
-//!       |                 |                             | pays withdrawals      |
-//!       |                 |<------------- posted(e) ----|--- posted(e) -------->|
-//!       |                 | apply to QMDB               |                       | audit receipts
-//!       |                 |                             |                       |
-//!       |                 |                             |<------- Challenge ----| if underpaid
-//!       |                 |                             | halts                 |
+//!                                      +---------------- Retry --------------->+
+//!                                      |                                       v
+//!   Request --> verify --Verified--> admit --New--> fits? --> persist --> acknowledge --> Ack
+//!                  :                   ^              ^          |
+//!            reads nothing             | latest map,  | balance, | state, map,
+//!                                      | row in e-1   | deducted | signature
+//!                                      |              |          |
+//!                                      |              |          v
+//!                                +-----+--------------+----------+-----------+
+//!                                |        operator store, any layout         |
+//!                                +-------------------------------------------+
 //! ```
 //!
-//! A [Validator] keeps the finalized balances in a QMDB and the payment [Matrix] of the last posted
-//! close. It checks that the operator signed the close, that every map in it was signed by its
-//! sender for that epoch on top of the map the last close settled for it, and that no balance goes
-//! negative. Each account withdrawing is paid the lesser of its requested amount and its balance.
+//! A retry repeats the latest countersigned state, so the operator countersigns it again and
+//! nothing is paid twice. A new state, its map, and the sender's signature form the sender's [Row]
+//! in the close. The store's layout is the deployment's, because the helpers take the records they
+//! compare against as arguments.
 //!
-//! Validators certify the resulting [Summary]. It chains to the summary before it and commits to
-//! the payments, the new balances, the payouts, and how many queued requests the close processes.
+//! The ledger fixes which queued requests the close of epoch e must process only when the post of
+//! e-1 is final. The operator then cuts epoch e. It fixes the epoch's rows, assembles its close,
+//! and opens e+1 at once. Validators certify close(e) while the operator admits e+1.
+//!
+//! ```text
+//!   admit      |============ e ===========|=========== e+1 ==========|=========== e+2 ==========>
+//!
+//!   close(e-1)  -- certify, post ---------x
+//!   close(e)                              |- assemble, certify, post x
+//!   close(e+1)                                                       |- assemble, ... ---------->
+//!
+//!                                         ^                          ^
+//!                                  post(e-1) final             post(e) final
+//!                                  cut e, open e+1           cut e+1, open e+2
+//! ```
+//!
+//! [Close::assemble] takes the rows and the honored soft [Withdrawal]s in any order, with how many
+//! queued [Deposit]s and [ForcedWithdrawal]s to process. It recomputes every root, signs the close,
+//! and returns each touched account's [Flow]. [Flow::settle] applies a flow with the rule
+//! validators use, so an operator that applies the flows of each posted close holds the balances
+//! validators hold.
+//!
+//! An account asks for a soft withdrawal by signing a [Withdrawal] with [Withdrawal::sign]. The
+//! operator honors one only if [Withdrawal::verify] accepts it, because [Close::assemble] checks no
+//! signature and validators reject a close that holds a forged one.
+//!
+//! Until it applies close(e), the operator admits e+1 against a floor. It deducts from each account
+//! everything close(e) may take from it. These are the payments the account made in e and the soft
+//! and forced withdrawals it asked for. Credits only add and a payout never exceeds its request, so
+//! close(e) leaves each balance at or above its floor.
+//!
+//! ```text
+//!                0                         floor                            B, after close(e-1)
+//!   balance      |============|==============|------------------------------|
+//!                  paid in e+1    spendable       close(e) may take this
+//! ```
+//!
+//! One process can admit every account. A deployment whose traffic exceeds one machine routes
+//! accounts to shards, each admitting its own accounts with the operator's key. The shards' rows
+//! and soft withdrawals assemble into one close, and each flow goes back to the shard serving its
+//! account.
+//!
+//! ```text
+//!                   +--> shard A  records -- rows, withdrawals -+
+//!                   |              ^                            |
+//!   requests ------>+--> shard B  records -- rows, withdrawals -+--> Close::assemble --> Close(e)
+//!   by account      |              ^                            |           |
+//!                   +--> shard C  records -- rows, withdrawals -+           |
+//!                                  ^                                        |
+//!                                  '--- flows, by account, after post(e) ---'
+//! ```
+//!
+//! The operator's obligations follow. Breaking O1 or O6 costs the operator or its senders, and
+//! breaking any other halts the ledger or gets a close rejected.
+//!
+//! - **O1.** Verify each request with [Request::verify] before reading anything stored about its
+//!   sender. Otherwise forged requests cost the operator storage reads.
+//!
+//! - **O2.** Admit each sender's states in one place at a time, each extending the latest
+//!   countersigned one, and pass [Verified::admit] that latest state and its map. Countersign no
+//!   state of an epoch for a sender once its row of that epoch is fixed, or after any of its states
+//!   of the next epoch. Otherwise a countersigned state is missing from its close, and its
+//!   receiver's challenge halts the ledger.
+//!
+//! - **O3.** Countersign a new state only if its batch fits the sender's spendable balance, its
+//!   balance as of the last close applied less what unapplied closes may take and what it paid in
+//!   the epoch. Fix which forced withdrawals close(e) processes before countersigning anything of
+//!   e+1, and lift a deduction only by applying that account's flow. Otherwise a close overdrafts,
+//!   and no acceptable close exists for its countersigned rows. Omitting a row lets its receiver's
+//!   challenge halt the ledger, and posting no close leaves the halt to the deployment's policy.
+//!
+//! - **O4.** Pass [Verified::admit] the root of the sender's row in the close of the epoch before
+//!   as `previous`, or the empty map's root if it has no row. Otherwise the operator countersigns
+//!   states validators refuse, with the outcome of O3.
+//!
+//! - **O5.** Keep each epoch's rows, receivers per row, and soft withdrawals within the validators'
+//!   [Limits], and honor only soft withdrawals [Withdrawal::verify] accepts. [Close::assemble]
+//!   checks neither. Otherwise validators cannot decode the close or reject it. Rows are
+//!   countersigned, so too many rows or receivers end as in O3, while a soft withdrawal that is
+//!   forged or over the limit only needs assembling again without it.
+//!
+//! - **O6.** When a request arrives after its own epoch closed, verify it with [Request::verify]
+//!   for the next epoch, and admit its pipelined state if [Verified::admit] and the checks of O3
+//!   and O5 accept it. Otherwise a payment refused because its epoch just closed needs a new
+//!   request.
+//!
+//! - **O7.** Persist each [Admission::New] state with its map and the sender's signature before
+//!   releasing its acknowledgement, each close with its counts before releasing it, and the
+//!   balances with the epoch of the last flows applied. Otherwise a crash loses a preconfirmed
+//!   payment, a released close, or which flows were applied.
+//!
+//! - **O8.** Release one close per epoch, and assemble it again, with the same rows, only after
+//!   validators reject it. Apply the flows of the close that posts exactly once each, in epoch
+//!   order ([Flow::epoch]). Otherwise the operator's balances part from the validators', and it
+//!   admits payments a later close cannot settle.
+//!
+//! # Receivers
+//!
+//! A receiver relies on receipts while their epoch is open and audits each post. [Receipt::verify]
+//! checks both signatures and the receipt's entry under the state's payments root. After a post,
+//! the receiver gets an opening of the posted matrix from a validator for every sender it holds
+//! receipts from. [Opening::verify] returns what the post credits, and if that is less than a
+//! receipt, the receiver submits a [Challenge] holding the receipt and the opening.
+//!
+//! ```text
+//!          post(1)       post(2)       post(3)                    halt
+//!   ---------+-------------+-------------+----------------------x---------> time
+//!                          ^                                    |
+//!                          '------- challenge against post(2) --'
+//! ```
+//!
+//! A challenge halts the ledger even after later closes posted, and those closes stay final. It
+//! stops the operator but does not restore the omitted payment, because claims pay balances as of
+//! the last post.
+//!
+//! - **R1.** Rely on a receipt only if it names this account as receiver, [Receipt::verify] accepts
+//!   it under the deployment's namespace and operator key, the close of its epoch has not posted,
+//!   and the ledger has not halted. Verify it before comparing it with the receipts held. Otherwise
+//!   the receiver relies on a payment it cannot enforce, and a refusal that depends on what it
+//!   holds reveals that to whoever sent a forged receipt.
+//!
+//! - **R2.** Keep, per epoch and sender, the receipt with the largest amount, persisted before
+//!   relying on it. Otherwise, after an omission, it may hold no receipt above the posted amount
+//!   and cannot challenge.
+//!
+//! - **R3.** Before discarding a receipt, compare it with what the post of its epoch credits from
+//!   its sender, and submit a challenge if the post credits less. Accept no receipt of an epoch
+//!   after that comparison. Otherwise an omitted or reduced payment goes unchallenged, and the
+//!   receiver loses it.
+//!
+//! # Validators
+//!
+//! A validator checks each close as the successor of the last post, settles it on its balances, and
+//! certifies the summary. [Close::check] takes the close, the [Checkpoint] of the last post, and
+//! the ledger's [Queue], and reads no storage. It checks the epochs and counts, the operator's
+//! signature before any user's, each sender's signature over a state built on its row in the parent
+//! matrix, and each soft withdrawal. [Checked::settle] reads the touched balances at the parent's
+//! root and stages the close's writes in a [Proposal].
+//!
+//! Each balance gains its incoming payments and deposits, loses its outgoing payments, and must end
+//! between zero and the largest amount. An account withdrawing is then paid the lesser of what it
+//! asked for and its balance. The summary chains to the one before it and commits to the payments,
+//! the new balances, the payouts, and how many queued requests the close processes. The post
+//! carries the proposal's summary, its certificate, and its payouts ([Proposal::payouts]).
 //!
 //! ```text
 //!   Summary(e)
@@ -90,327 +357,252 @@
 //!   | epoch | parent | matrix | balances | payouts | deposits | forced withdrawals |
 //!   +-------+--------+--------+----------+---------+----------+--------------------+
 //!               |        |          |          |        '--- how many ---'
-//!               v        |          |          '--> BMT of H(account || payout)
-//!         Summary(e-1)   |          '--> QMDB of balances by account
+//!               v        |          |          '--> tree of H(account || payout)
+//!        H(Summary(e-1)) |          '--> root of Balances, keyed by account
 //!                        v
 //!                   matrix root
 //!                  /           \
-//!     H(alice || a_root)     H(bob || b_root)    one leaf per sender
+//!     H(alice || a_root)     H(bob || b_root)      one leaf per sender
 //!             |
 //!             v
 //!           a_root
 //!          /      \
-//!   H(bob || 5)  H(carol || 2)                   alice's payment map, one leaf per receiver
+//!   H(bob || 5)  H(carol || 2)                     alice's payment map, one leaf per receiver
 //! ```
 //!
-//! The [Ledger] posts a close once its summary follows the last posted one and a certificate
-//! verifies over it. It pays the payouts and removes the processed requests from its queues. The
-//! close of an epoch must process every request queued before that epoch opened.
+//! Once the close posts, [Proposal::apply] applies its batch and returns the database with the
+//! close's [Checkpoint]. Before touching the database, it refuses a proposal whose summary did not
+//! post or a database not at the parent's root. It does not make the writes durable, and committing
+//! and pruning leave the root unchanged.
 //!
-//! # Challenges and halts
-//!
-//! A close can omit payments the operator preconfirmed. After a close posts, a [Receiver] opens the
-//! posted matrix at its entry for every sender it holds receipts from. If the posted amount is
-//! lower than a receipt, it submits a [Challenge] and the ledger halts.
+//! Because the root commits to every write, an empty batch changes it and the same balances reached
+//! through other batches give another root. Validators therefore apply one batch per posted close,
+//! in epoch order, each the batch [Checked::settle] staged at its parent's root.
 //!
 //! ```text
-//!        close(1)      close(2)      close(3)                   halt
-//!   ---------+-------------+-------------+----------------------x---------> time
-//!                          ^                                    |
-//!                          '------ challenge against close(2) --'
+//!                       apply after              apply after            apply after
+//!                     post(e-1) final           post(e) final         post(e+1) final
+//!                            v                        v                      v
+//!   Balances  R(e-2) -- batch(e-1) --> R(e-1) --- batch(e) ---> R(e) -- batch(e+1) --> R(e+1)
+//!                                                                ^
+//!                                                                |
+//!                                                 settle of close(e+1) reads here
+//!                                                      and stages batch(e+1)
+//! ```
 //!
-//!   validator --balance proof--> account --claim(proof)--> ledger --> balance as of close(3)
+//! Settling close(e+1) reads R(e), so it waits for close(e) to apply. Checking close(e+1) needs
+//! only the checkpoint of close(e).
+//!
+//! The validators' obligations follow. V4 and V6 put funds at risk if every honest validator in a
+//! certificate breaks them.
+//!
+//! - **V1.** Attest only the summary of a [Proposal] that [Checked::settle] returned. Otherwise the
+//!   validator certifies a close it did not check.
+//!
+//! - **V2.** Pass [Close::check] the checkpoint of the last post, the one [Proposal::apply]
+//!   returned. After a restart, take the persisted summary on the chain ending at the ledger's last
+//!   posted digest whose balances root is the database's, with that close's matrix
+//!   ([Close::matrix]). Use [Summary::genesis] with [Matrix::empty] only for a database that never
+//!   committed a batch. Otherwise the validator's attestation matches no honest validator's.
+//!
+//! - **V3.** Pass [Close::check] the ledger's queues as final ledger state holds them while the
+//!   ledger expects the close. Queues grow only at their tail, so read them again at a later final
+//!   block before treating an [Error::InvalidCount] refusal as a rejection. Otherwise the validator
+//!   rejects a valid close or credits requests the ledger does not hold.
+//!
+//! - **V4.** Before releasing an attestation, persist the close, the requests it processes
+//!   ([Queue::prefix], in the [Deposit] and [ForcedWithdrawal] encodings), and the proposal's
+//!   summary. Checking the close again needs only a queue of exactly that prefix, with each
+//!   required count equal to its length. Otherwise, once the close posts and the ledger drops those
+//!   requests, a crash leaves the validator unable to apply or serve it.
+//!
+//! - **V5.** Apply exactly the posted closes, once each, in epoch order, each to a database at its
+//!   parent's root, and no other batch. Otherwise its root diverges, and [Checked::settle] and
+//!   [Proposal::apply] refuse with [Error::InvalidCheckpoint] until it recovers by reopening at a
+//!   retained posted commit, by replaying persisted posted closes, or by state sync to a posted
+//!   root.
+//!
+//! - **V6.** Keep each posted matrix while receivers may still audit it, and serve openings
+//!   ([Matrix::open]). Serve each close and the requests it processes to validators that did not
+//!   check it, and after a halt serve balance proofs under the last posted root. Otherwise
+//!   receivers cannot challenge, peers cannot apply the close, and accounts cannot claim.
+//!
+//! - **V7.** Decode closes with the deployment's [Limits]. Otherwise the validator rejects valid
+//!   closes or attests closes beyond the agreed limits.
+//!
+//! # The ledger
+//!
+//! The production ledger is a contract on the chain that holds the funds, with its own storage. The
+//! crate supplies the checks that protect funds and specifies the rest. [Summary::verify] checks
+//! posts, [Challenge::verify] checks challenges, and [BalanceProof::verify] checks claims. The
+//! ledger keeps three stores, and the requests and payouts below move through them.
+//!
+//! ```text
+//!                           +------------------------------+
+//!                           | queues, oldest first         |-- prefix --> close(e)
+//!   deposit --------------->| deposits                     |-- claim, after halt --> account
+//!   forced withdrawal ----->| forced withdrawals           |
+//!                           +------------------------------+
+//!                           +------------------------------+
+//!   Summary, certificate -->| posted                       |-- claim, after halt --> account
+//!   Challenge ------------->| last digest, balances root   |
+//!                           | matrix root of each epoch    |
+//!                           | halted or not                |
+//!                           +------------------------------+
+//!                           +------------------------------+
+//!   post(e) payouts ------->| owed payouts                 |-- withdraw --> account
+//!                           | alice 5, bob 7               |
+//!                           +------------------------------+
+//! ```
+//!
+//! The funds the ledger holds have three parts. The liability is the sum of balances as of the last
+//! post, the unprocessed deposits are the sum of those queued, and the owed payouts are those not
+//! yet withdrawn.
+//!
+//! ```text
+//!                0                                                               largest amount
+//!   funds held   |================================|=================|=============|...........|
+//!                            liability                 unprocessed        owed         room
+//!                    balances at the last post          deposits         payouts
+//! ```
+//!
+//! A post only moves funds between the three parts. Funds enter only by deposit and leave only by
+//! withdrawal or claim, so bounding deposits bounds the funds held.
+//!
+//! ```text
+//!   deposit --> unprocessed -- post --> liability -- post --> owed -- withdraw --> account
+//!               deposits      processed              payouts  payouts
+//!                   |                       |
+//!                   |                       '-- claim with proof, after halt --> account
+//!                   '-- claim, after halt --> account
+//! ```
+//!
+//! - **L1.** Start with the digest of [Summary::genesis] over the root of an empty [Balances]
+//!   database as the last post, expecting the close of epoch 1, with empty queues, required counts
+//!   of zero, and no funds. Otherwise the first summary validators certify names a parent the
+//!   ledger refuses.
+//!
+//! - **L2.** A deposit takes custody of its amount before it is queued. Deposits and forced
+//!   withdrawals join the tail of their queue, only before a halt and only with nonzero amounts,
+//!   and leave it only as L5 and L8 say. Otherwise a deposit credits funds the ledger does not
+//!   hold, or validators and the ledger read different requests for the same counts.
+//!
+//! - **L3.** Refuse a deposit that would take the funds held past the largest amount. Otherwise a
+//!   close can credit a balance past the largest amount, and validators reject it with
+//!   [Error::Overflow], or the ledger's sum of owed payouts overflows. When the excess comes from
+//!   its rows or a required deposit, no acceptable close exists, as in O3.
+//!
+//! - **L4.** Queue a forced withdrawal only on a request its account authenticated. Otherwise
+//!   anyone can force an account's balance out and learn the amount.
+//!
+//! - **L5.** Post only before a halt, and only a summary [Summary::verify] accepts for the expected
+//!   epoch, the last post's digest, and each queue's range from its required count to its length.
+//!   The payouts' total must fit and be at most the liability plus the deposits processed.
+//!   Otherwise a summary honest validators did not certify can post.
+//!
+//!   In one state change, a post drops the processed requests and sets each required count to what
+//!   remains queued. It moves the deposits processed from the unprocessed deposits into the
+//!   liability, moves the payouts from the liability into the owed payouts, and records the
+//!   summary's matrix root, balances root, and digest. It transfers nothing. A lower required count
+//!   lets closes defer a forced withdrawal forever, and a transfer that can fail inside a post
+//!   blocks every later post.
+//!
+//! - **L6.** An account withdraws what it is owed, to its destination (L10), at most once per
+//!   payout, before or after a halt. Otherwise a payout is paid twice or never.
+//!
+//! - **L7.** Before a halt, halt on a challenge that [Challenge::verify] accepts against a posted
+//!   epoch and its matrix root, and keep every posted matrix root. Otherwise receivers lose their
+//!   recourse, anyone can halt the ledger, or receipts of a forgotten epoch become unenforceable.
+//!
+//! - **L8.** Once halted, by a valid challenge or the deployment's own policy, post nothing and
+//!   take no deposit or forced withdrawal. Make each queued deposit claimable by its account, and
+//!   drop the queued forced withdrawals and the required counts. Owed payouts stay withdrawable.
+//!   Otherwise a post after the halt changes the balances accounts claim against.
+//!
+//! - **L9.** After a halt, pay each account its balance at most once, only if
+//!   [BalanceProof::verify] accepts its proof under the last posted balances root and the balance
+//!   is at most the remaining liability. Pay its claimable deposits at most once. Otherwise an
+//!   account claims twice or claims a balance it does not have.
+//!
+//! - **L10.** Send every transfer of L6 and L9 to a destination the account fixed through a request
+//!   it authenticated, or one derived from its key, never one the caller chooses. Otherwise anyone
+//!   holding a balance proof claims another account's balance, because validators may serve proofs
+//!   to anyone after a halt.
+//!
+//! - **L11.** Make every check depend only on the ledger's state and the call's inputs. Otherwise
+//!   two replicas of the ledger diverge.
+//!
+//! After a halt, each account claims its balance and its unprocessed deposits, and withdraws its
+//! owed payouts. Only the balance claim needs a proof, and a validator supplies it.
+//!
+//! ```text
+//!   validator --balance proof--> account --claim(proof)--> ledger --> balance as of the last post
 //!                                account --claim---------> ledger --> deposits no close processed
+//!                                account --withdraw------> ledger --> payouts owed to it
 //! ```
 //!
-//! A challenge that lands after later closes posted still halts the ledger, and those closes stay
-//! final. Epochs whose close never posted are discarded. A halted ledger accepts only claims, and
-//! the operator plays no further part. Every account claims its balance at the last posted close
-//! with a [BalanceProof] against that close's balances root, and claims the deposits no close
-//! processed without one. Validators serve these proofs through [Validator::prove].
+//! Owed payouts take one of two forms. With per-account credits, a post adds each payout to its
+//! account's credit at one write per payout, and L6 pays and zeroes the credit. With payouts roots,
+//! a post records the summary's payouts root. An account then withdraws with an opening of its
+//! entry (port item 4), and the ledger marks that epoch and account withdrawn. The crate has no
+//! helper for that opening.
 //!
-//! # Trust model
+//! A post in the second form makes a constant number of writes. It still receives the payouts,
+//! because L3, L5, and L9 need their total.
 //!
-//! The operator may be malicious. It cannot debit a sender beyond what the sender signed for the
-//! epoch, pay out a withdrawal its account did not request, or credit the wrong account. It can
-//! refuse payments and soft withdrawals, and users can still withdraw through the ledger. If it
-//! omits preconfirmed payments from a close, a receiver's challenge halts the ledger.
+//! ## What a port reproduces
 //!
-//! At most `f` validators may be Byzantine. The deployment chooses the certificate scheme and its
-//! fault model, and the scheme's quorum must exceed `f` while honest validators alone must still
-//! reach it. Every certificate then includes an honest validator that checked the close and keeps
-//! the data needed to open its matrix and to apply it.
+//! A ledger port reproduces these rules bit for bit. Each is what the crate computes for a post, a
+//! challenge, or a claim, so a port checks its results against the crate's before it holds funds.
 //!
-//! # Running a sharded operator
+//! 1. **Integers.** Fixed-width integers (every epoch, count, and built-in amount) encode
+//!    big-endian, and lengths encode as varints. Public keys and digests encode as their raw bytes,
+//!    and the genesis summary's parent is all zeros.
 //!
-//! One [Operator] can admit every account. A deployment whose traffic exceeds one machine splits
-//! accounts across shards. Each shard is an [Operator] that serves the accounts the deployment
-//! routes to it, such as a range of key hashes. Only the deployment's router knows which shard
-//! serves an account. A shard holds no partition and processes what it is sent, so shards admit in
-//! parallel without coordinating.
+//! 2. **Trees.** Payment maps, the matrix, and payouts commit with the binary Merkle tree of
+//!    [commonware_storage::bmt]. A leaf is hashed with its big-endian `u32` position, each level
+//!    hashes pairs and duplicates an unpaired last node, and the root is
+//!    `H(leaf_count || tree_root)`. An empty tree holds the single node `H()`, so its root is
+//!    `H(0u32 || H())`.
 //!
-//! Each shard countersigns the requests it admits as they arrive, so every shard holds the
-//! operator's signing key.
+//! 3. **Leaves.** A map or payouts entry is `H(account || amount)`, and a matrix row is
+//!    `H(sender || payments root)`. Entries are strictly increasing by account.
 //!
-//! Each shard admits within its own [Limits], while validators decode the close with theirs. A
-//! deployment therefore gives each shard limits whose senders and soft withdrawals sum to at most
-//! the validators', with the same receivers per sender. When shards outnumber the senders a close
-//! may hold, as with one shard per account, the deployment's router keeps each epoch's senders and
-//! soft withdrawals within the validators' limits.
+//! 4. **Openings.** A member [Lookup] proves one leaf. A non-member lookup proves the neighbors at
+//!    `position - 1` and `position`, with the key strictly between them, and a missing neighbor
+//!    means the key precedes the first entry or follows the last. An [Opening] verifies the row
+//!    under the matrix root, then the entry under the row's root, and has an entry exactly when the
+//!    row exists.
 //!
-//! An epoch ends in three steps. Each shard cuts the epoch with [Operator::cut], given the forced
-//! withdrawals the close processes for its accounts. The cut freezes what the shard admitted into a
-//! [Cut], and the shard opens the next epoch at once. A builder assembles the shards' cuts into the
-//! [Close] with [Close::assemble], on any thread or machine, and sums the [Flow] of every account
-//! the close touches. The deployment routes each flow to the shard serving its account in the next
-//! epoch, and each shard settles its flows with [Operator::settle].
+//! 5. **Signatures.** Each scheme's verification defines its framing. An Ed25519 signature covers
+//!    the namespace's varint length, the namespace, and the message, and each [Namespace] field is
+//!    itself that framing of the deployment's namespace and a fixed suffix.
 //!
-//! A deployment with one operator does all three with [Operator::close].
+//! 6. **Receipts.** A [State] encodes as epoch, account, payments root, and previous root. The
+//!    sender signs it in [Namespace::state] and the operator in [Namespace::acknowledgement], and
+//!    the receipt's entry proves under the state's payments root at its position.
 //!
-//! ```text
-//!             epoch e       cut(e)   e+1, against the floor     settle(e)   e+1, exact
-//!   shard 1   accept .....>   x  ----> accept ...............>      s  ----> accept ...
-//!   shard 2   accept .....>   x  ----> accept ...............>      s  ----> accept ...
-//!                             |                                     ^
-//!                             | cuts                                | flows, by shard in e+1
-//!                             v                                     |
-//!   builder              assemble(e) -------------------------------'
-//!                             |  merge rows, matrix root, sign, sum flows
-//!                             v
-//!                          Close(e) ----> validators
-//! ```
+//! 7. **Summaries.** A [Summary] encodes as epoch, parent, matrix, balances, payouts, deposits, and
+//!    forced withdrawals. Its digest is the hash of that encoding, and the certificate covers the
+//!    encoding in [Namespace::summary].
 //!
-//! Until a shard settles an epoch, it does not know what the epoch left in each balance, because
-//! credits from other shards are summed only at assembly. Meanwhile it admits the next epoch
-//! against a floor. At the cut, it deducts from each account active in the epoch everything the
-//! close may take from it. That is what the account paid in the epoch and the withdrawals it asked
-//! for, soft and forced.
+//! 8. **Counts.** Each count lies between its queue's required count and its length.
 //!
-//! The floor is the account's balance as of the last epoch settled (B below) less these deductions.
-//! Credits only add and payouts never exceed the requests, so the close leaves at least the floor.
-//! It leaves exactly the floor plus the account's credits whenever the floor is above zero.
+//! 9. **The empty balances root.** A deployment reads it from an empty [Balances] database. It
+//!    depends on the hasher, account type, and amount type, because the database pads its
+//!    fixed-size operations to the key and value widths.
 //!
-//! ```text
-//!                 0                        floor                             B
-//!   at cut(e)     |===========|============|---------------------------------|
-//!                  paid in e+1  live        deductions of e
-//!                                          |
-//!   at settle(e)  |========================|++++++++++|
-//!                                           credits
-//!                 |<------- balance after e -------->|
-//! ```
-//!
-//! A shard settles each epoch before it cuts the next. The builder has the flows as soon as it
-//! assembles the close, while the ledger reports the queues of the next close only once it posts
-//! this one, so the next cut never waits on a settle.
-//!
-//! ```text
-//!             cut(e)                         settle(e)                 cut(e+1)
-//!   shard  ----x--------------------------------s-------------------------x------> time
-//!              |  e+1 against the floor         ^  e+1 against the        ^
-//!              v                                |  exact balance          |
-//!   builder  assemble(e) ------- flows ---------'                         |
-//!              |                                                          |
-//!              v                                                          |
-//!   ledger   Close(e) ---> certified ---> posted(e) --- queues of e+1 ----'
-//! ```
-//!
-//! Each flow names its epoch, and a shard refuses flows of another. It also refuses, with
-//! [Error::MissingFlow], flows that leave out an account it deducted from. Lifting that deduction
-//! without applying what the close took would let the account spend it twice. A missing flow that
-//! only credits its account goes unnoticed. It leaves the account's stored balance below the
-//! validators', and that only holds the account back.
-//!
-//! ## Shards that skip epochs
-//!
-//! A shard takes part in an epoch only when it has something to do in it, so a deployment may run
-//! as many shards as it has accounts. A shard cuts an epoch if it admitted payments or soft
-//! withdrawals in it, or serves an account whose forced withdrawal the close processes. It settles
-//! the epoch if it cut it or a flow reaches it. Every other shard skips the epoch, and the close of
-//! an epoch no shard cuts only processes the ledger's queues.
-//!
-//! A shard admits an epoch until it is cut, so before assembling epoch `e`, no shard may still
-//! admit `e`. With several routers, or clients that reach shards directly, the deployment cuts
-//! every shard whose current epoch is `e`. A single router that handles every account can instead
-//! stop forwarding requests of `e`, drain those in flight, and cut every shard it forwarded one to.
-//! A payment admitted by a shard left out would be missing from the close, and its receiver's
-//! challenge would halt the ledger.
-//!
-//! A shard that skipped an epoch settles the flows that reach it without a cut, as long as they
-//! only credit its accounts. Before a shard that skipped epochs takes part again, it catches up by
-//! settling the epoch before, with no flows. It does so only once that epoch's flows reached it, so
-//! a shard behind the current epoch admits a request of it only after the flows of the epoch
-//! before. Either settle records its epoch in the store and opens the epoch after it, so one call
-//! skips any number of epochs. The deployment chooses the epoch, never a request.
-//!
-//! ```text
-//!               epoch 5                 epoch 6                    epoch 7
-//!   shard a   pay ...> x ---> s       .   .   .   .   .   .      s(6) --> pay ...> x ---> s
-//!   shard b   .   .   .   .   .       s <--- credit              .   .   .   .   .   .   .
-//!   shard c   .   .   .   .   .       s(5) --> x ---> s          .   .   .   .   .   .   .
-//!                                              ^
-//!                                              forced withdrawal of c's account
-//!
-//!   x  cut      s  settle      s(e)  catch-up settle of epoch e, with no flows
-//! ```
-//!
-//! A catch-up settle records its epoch, so the deployment delivers an epoch's flows to the shard of
-//! every account they touch before it lets any shard catch up past that epoch. Delivering the flows
-//! right after assembly, before announcing the next epoch, does that.
-//!
-//! A shard ignores a repeated settle of the latest epoch its store includes, and refuses a settle
-//! of an older one with [Error::Late]. A credit that arrives after its shard caught up past the
-//! epoch is therefore lost, and the account's stored balance stays below the validators'. That
-//! holds the account back but never lets it overspend. A flow that takes from its account and
-//! arrives that late returns [Error::MissingCut], because the shard did not cut the epoch.
-//!
-//! ## Balance stores
-//!
-//! Each shard keeps its finalized balances in a [Balances] store. The store may hold every account
-//! of a large deployment, while the shard holds in memory only what the current epoch and its last
-//! cut involve. It reads a balance from the store when an account first pays or settles, and caches
-//! it while either involves the account.
-//!
-//! ```text
-//!   operator memory, bounded by activity              store, every finalized balance
-//!   +------------------------------------+           +------------------------------+
-//!   | payment maps of the current epoch  |   get     | balance of each account      |
-//!   | roots of the previous maps         | <-------- |                              |
-//!   | floor deductions of the last cut   |           | epoch of the last close      |
-//!   | cached balances of active accounts | --------> | this shard wrote             |
-//!   +------------------------------------+   put     +------------------------------+
-//! ```
-//!
-//! Settling reads the previous balance of every account in the shard's flows, applies the rule
-//! validators apply, and writes the new balances to the store with the epoch. The epoch's
-//! deductions drop only once that write completes. A shard that fails or restarts before then still
-//! holds them, and one that restarts after starts from balances that include the epoch.
-//!
-//! ```text
-//!              get            apply the rule          put(e)          drop deductions of e
-//!   shard  -----x-------------------x---------------------x------------------x--------> time
-//!               ^                                         |
-//!               | balances after e-1                      v  balances after e, epoch e
-//!   store  -----'-----------------------------------------x-----------------------------> time
-//!          |<---- a restart here holds the deductions --->|<-- a restart here starts at e ->
-//! ```
-//!
-//! Only the shard's own settles write the epoch its store records. The shard reads that epoch when
-//! it starts, and passes the epoch it last read or wrote with each put. The store checks it in the
-//! same transaction as its writes, so if another writer or a stale process has moved the store's
-//! epoch, the shard's put fails without writing and leaves the shard failed.
-//!
-//! ## Moving accounts between shards
-//!
-//! Each account is served by one shard in each epoch. The deployment routes the account's requests,
-//! soft withdrawals, and processed forced withdrawals of an epoch to the shard serving it in that
-//! epoch, and the account's flow of the epoch to the shard serving it in the next. The two differ
-//! only for an account that moves at the epoch's cut.
-//!
-//! An account moves to another shard only at a cut, and only if it was idle in the epoch being cut,
-//! with no payments, soft withdrawals, or processed forced withdrawals. No shard then holds a
-//! deduction for it, and its payment map in the epoch is empty. Its new shard reads its stored
-//! balance and admits it at once, and its next states commit to an empty previous map, as
-//! validators expect. Its flow of the epoch can only credit it, so admitting it before the new
-//! shard settles that flow only holds it back.
-//!
-//! The stored balance must include every flow the old shard settles for the account. The last of
-//! these is of the epoch before the move. A shard settles each epoch before it cuts the next, so
-//! this holds whenever the old shard cut the epoch of the move. Otherwise, if the old shard cut the
-//! epoch before or received flows of it, the deployment waits for that settle before it routes the
-//! account to the new shard. With a store per shard, it then copies the account's balance to the
-//! new shard's store.
-//!
-//! ```text
-//!                   epoch e      cut(e)      epoch e+1       cut(e+1)     epoch e+2
-//!   shard 1   B pays ............> x --- s --- B held ------------------------------------> time
-//!   shard 2   .   .   .   .   .   .  A pays at once ..........> x --- B pays at once -----> time
-//!                                  ^                            ^
-//!                                  A moves, idle in e           B moves, idle in e+1
-//!
-//!   x  cut      s  settle of e
-//! ```
-//!
-//! A new shard cannot know an active account's deductions or its payment map in the epoch. Only the
-//! old shard's cut holds the deductions, and the account's next states commit to the map. To move
-//! an active account, the deployment holds its requests for one epoch, so the account is idle in
-//! it, and moves it at that epoch's cut. If the close of that epoch processes a forced withdrawal
-//! of the account, the account is active in it and waits another epoch.
-//!
-//! Moving an active account early comes to light at its old shard. That shard's cut deducted from
-//! the account, and the account's flow goes to the new shard, so the old shard's settle returns
-//! [Error::MissingFlow]. The new shard may by then have admitted the account against a balance that
-//! misses what the epoch took.
-//!
-//! # Persistence
-//!
-//! The types in this module are in-memory state machines, except for the balances each validator
-//! keeps in QMDB and each operator keeps in its [Balances] store. Applications persist the rest and
-//! must order it with what they release:
-//!
-//! - A sender persists each request before sending it. It persists each acknowledged payment map,
-//!   and clears the request in the same write, before releasing receipts. It resumes with
-//!   [Sender::resume].
-//! - The operator, or each shard of it, persists each request and soft withdrawal before
-//!   acknowledging it, and each cut before acknowledging a request of the next epoch.
-//!   [Operator::settle] writes the balances an epoch leaves to the store before it drops the
-//!   epoch's deductions, and a failed write leaves the operator failed. The operator restarts with
-//!   [Operator::init] from its store and its last cut, reading the store's epoch to tell whether
-//!   that cut settled. [Operator::close] returns no cut, so an operator that closes with it passes
-//!   the rows of the matrix of the last close the store includes. It then replays the current
-//!   epoch's requests and soft withdrawals.
-//! - The builder persists each close and its flows before releasing the close or routing a flow.
-//!   After the ledger posts the close, it holds none of the requests the close processed, so the
-//!   close and its flows cannot be rebuilt from it.
-//! - A receiver persists a receipt before relying on it. It resumes with [Receiver::resume].
-//! - A validator persists a close before releasing its attestation and before applying it. It
-//!   retains every posted close while receivers may still request openings of it, and resumes with
-//!   [Validator::init].
-//! - The ledger applies a posted close and transfers its payouts atomically. It is deterministic,
-//!   so replaying its operations in order rebuilds it.
-//!
-//! Messages between the shards, the builder, and the stores can fail, so every step of a sharded
-//! operator can be retried. A shard answers a repeated cut request from the cut it persisted.
-//! Assembly is deterministic, and the builder persists the close and its flows before releasing
-//! them, so resent flows are the same. A repeated settle of the latest epoch the shard settled
-//! returns without effect, and accepting a request or collecting a soft withdrawal again has no
-//! effect either.
-//!
-//! A sharded deployment also keeps contracts the crate cannot check:
-//!
-//! - The close of an epoch holds the cut of every shard that admitted payments or soft withdrawals,
-//!   or serves an account whose forced withdrawal it processes. A close missing a shard's cut omits
-//!   payments that shard preconfirmed, so a receiver's challenge halts the ledger. That shard's
-//!   settle also returns [Error::MissingFlow] when an account it deducted from has no flow.
-//! - The shards' limits on senders and soft withdrawals sum to at most the validators', with the
-//!   same limit on receivers per sender, or the router keeps each epoch's senders and soft
-//!   withdrawals within the validators' limits.
-//! - Before assembling an epoch, no shard may still admit it. The deployment cuts every shard whose
-//!   current epoch it is, or, with a single router, stops forwarding the epoch's requests, drains
-//!   those in flight, and cuts every shard it forwarded one to.
-//! - Each account is served by one shard in each epoch. That shard receives the account's requests,
-//!   soft withdrawals, and processed forced withdrawals of the epoch, and its flow of the epoch
-//!   before. Each shard's cut is given exactly the processed forced withdrawals of its accounts.
-//!   Assembly refuses an account that pays or withdraws in two cuts, but cannot check the rest.
-//! - An account moves to another shard only at a cut, only if it was idle in the epoch being cut,
-//!   and only once its stored balance includes every flow its old shard settles for it.
-//! - The deployment delivers an epoch's flows before any shard catches up past that epoch. A shard
-//!   receives its flows of an epoch in one settle, and a retry carries the same flows, because the
-//!   first settle of an epoch is final.
+//! 10. **Balance proofs.** [BalanceProof::verify] is the key-value proof of QMDB's current
+//!     database, an operation proof under the canonical root together with its bitmap chunk. It is
+//!     the largest part of a port.
 
 mod amounts;
-mod balances;
 mod close;
-mod cut;
 mod error;
-mod ledger;
 mod lookup;
 mod matrix;
 mod namespace;
-mod operator;
 mod payment;
-mod receiver;
-mod sender;
 mod settlement;
 mod summary;
 #[cfg(test)]
@@ -418,21 +610,17 @@ mod tests;
 mod validator;
 
 pub use amounts::{Amount, Amounts};
-pub use balances::{Balances, MemoryBalances};
 pub use close::{Close, Deposit, ForcedWithdrawal, Limits, Queue, Row, Withdrawal};
-pub use cut::Cut;
 pub use error::Error;
-pub use ledger::{Halt, Ledger};
 pub use lookup::Lookup;
 pub use matrix::{Matrix, Opening};
 pub use namespace::Namespace;
-pub use operator::Operator;
-pub use payment::{Acknowledgement, Challenge, Receipt, Request, State};
-pub use receiver::Receiver;
-pub use sender::{Outcome, Sender};
+pub use payment::{
+    Acknowledgement, Admission, Challenge, Receipt, Request, State, States, Verified,
+};
 pub use settlement::Flow;
-pub use summary::{Scheme, Summary};
-pub use validator::{BalanceProof, Checkpoint, Config, Proposal, Validator};
+pub use summary::Summary;
+pub use validator::{BalanceProof, Balances, Checked, Checkpoint, Proposal};
 
 /// An epoch number. Epochs start at one, and epoch zero names the state before the first close.
 pub type Epoch = u64;

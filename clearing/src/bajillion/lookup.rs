@@ -12,12 +12,12 @@ const MEMBER: u8 = 0;
 /// Tag of [Lookup::NonMember] in the encoding.
 const NON_MEMBER: u8 = 1;
 
-/// Opens the value bound to one key in a list that is strictly increasing by key and committed
-/// with a binary Merkle tree.
+/// Opens the value bound to one key in a list that is strictly increasing by key and committed with
+/// a binary Merkle tree.
 ///
 /// The tree's root binds the number of entries, so an opening also proves whether an entry is the
-/// first or last. Whoever certifies a root must check that the list behind it is sorted, because
-/// an unsorted list can prove a present key absent.
+/// first or last. Whoever certifies a root must check that the list behind it is sorted, because an
+/// unsorted list can prove a present key absent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Lookup<K, V, D: Digest> {
     /// The key is present.
@@ -101,22 +101,11 @@ impl<K: Ord + Clone, V: Clone, D: Digest> Lookup<K, V, D> {
                 upper,
                 proof,
             } => {
-                // An empty list has no neighbors, and only the empty proof opens its root.
+                // The key lies strictly between its neighbors, and an entry is missing only because
+                // the key precedes the first entry or follows the last one. An empty list has
+                // neither neighbor, and only the empty proof opens its root.
                 let count = proof.leaf_count;
-                if count == 0 {
-                    if *position != 0 || lower.is_some() || upper.is_some() {
-                        return Err(Error::InvalidOpening);
-                    }
-                    proof
-                        .verify_multi_inclusion::<H>(&[], root)
-                        .map_err(|_| Error::InvalidOpening)?;
-                    return Ok(None);
-                }
-
-                // Otherwise the key lies strictly between its neighbors, and an entry is missing
-                // only because the key precedes the first entry or follows the last one.
-                if *position > count
-                    || lower.is_some() != (*position > 0)
+                if lower.is_some() != (*position > 0)
                     || upper.is_some() != (*position < count)
                     || lower.as_ref().is_some_and(|(lower, _)| lower >= key)
                     || upper.as_ref().is_some_and(|(upper, _)| upper <= key)
@@ -356,21 +345,37 @@ mod tests {
             panic!("key must be absent");
         };
 
-        // Neighbors must be present unless the key precedes or follows every entry, and must sit
-        // at the claimed position.
+        // Neighbors must be present unless the key precedes or follows every entry, so a present
+        // key cannot be proven absent with one neighbor and that neighbor's own proof.
+        for (key, tampered) in [
+            (
+                30,
+                Lookup::NonMember {
+                    position: 2,
+                    lower: Some(entries[1]),
+                    upper: None,
+                    proof: tree.proof(1).unwrap(),
+                },
+            ),
+            (
+                20,
+                Lookup::NonMember {
+                    position: 2,
+                    lower: None,
+                    upper: Some(entries[2]),
+                    proof: tree.proof(2).unwrap(),
+                },
+            ),
+        ] {
+            assert!(matches!(
+                verify(&tampered, key, &root),
+                Err(Error::InvalidOpening)
+            ));
+        }
+
+        // Neighbors must sit at the claimed position, and a list with entries does not open as
+        // empty.
         for tampered in [
-            Lookup::NonMember {
-                position,
-                lower,
-                upper: None,
-                proof: proof.clone(),
-            },
-            Lookup::NonMember {
-                position,
-                lower: None,
-                upper,
-                proof: proof.clone(),
-            },
             Lookup::NonMember {
                 position: position + 1,
                 lower,

@@ -20,7 +20,6 @@ commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-macros = { workspace = true, features = ["std"] }
 commonware-parallel = { workspace = true, features = ["std"] }
-commonware-runtime.workspace = true
 commonware-storage = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
 rand_core.workspace = true
@@ -35,7 +34,6 @@ commonware-runtime = { workspace = true, features = ["test-utils"] }
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
-	"commonware-runtime/arbitrary",
 	"commonware-storage/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",

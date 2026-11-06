@@ -1,12 +1,32 @@
 //! Summaries of closes, certified by validators and posted to the ledger.
 
-use super::{Epoch, Namespace};
+use super::{Amount, Amounts, Epoch, Error, Namespace};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, Encode, Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_cryptography::{Digest, Hasher, certificate};
+use commonware_cryptography::{
+    Digest, Hasher, PublicKey,
+    certificate::{self, Verifier},
+};
+use commonware_parallel::Sequential;
 use commonware_storage::bmt::Builder;
+use core::ops::RangeInclusive;
+use rand_core::CryptoRng;
 
 /// The effects of one close, as certified by validators and posted to the ledger.
+///
+/// Validators certify summaries with a scheme the deployment builds from the certificate macros of
+/// `commonware_cryptography`. The deployment chooses the signature scheme and its fault model. For
+/// example, for Ed25519 with up to `f` Byzantine validators out of `3f + 1`:
+///
+/// ```
+/// mod scheme {
+///     use commonware_clearing::bajillion::{Namespace, Summary};
+///     use commonware_cryptography::impl_certificate_ed25519;
+///     use commonware_utils::N3f1;
+///
+///     impl_certificate_ed25519!(&'a Summary<D>, Namespace, N3f1);
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Summary<D: Digest> {
     /// Epoch the close finalizes.
@@ -45,6 +65,56 @@ impl<D: Digest> Summary<D> {
     /// Returns the digest the next summary names as its parent.
     pub fn digest<H: Hasher<Digest = D>>(&self) -> D {
         H::hash(&[&self.encode()])
+    }
+
+    /// Checks that a ledger expecting the close of `epoch` after the post with digest `parent` may
+    /// post this summary with `payouts` under `certificate`. `deposits` and `forced_withdrawals`
+    /// each range from the queue's required count to its length.
+    ///
+    /// Returns WrongEpoch unless the summary is for `epoch`, WrongParent unless it names `parent`,
+    /// InvalidCount unless each count is in its range, InvalidPayouts unless `payouts` has the
+    /// summary's payouts root, and InvalidCertificate unless `certificate` verifies. The
+    /// certificate is checked last.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify<H, P, A, V, R>(
+        &self,
+        rng: &mut R,
+        verifier: &V,
+        certificate: &V::Certificate,
+        epoch: Epoch,
+        parent: &D,
+        deposits: RangeInclusive<u64>,
+        forced_withdrawals: RangeInclusive<u64>,
+        payouts: &Amounts<P, A>,
+    ) -> Result<(), Error>
+    where
+        H: Hasher<Digest = D>,
+        P: PublicKey,
+        A: Amount,
+        V: for<'a> Verifier<Subject<'a, D> = &'a Self>,
+        R: CryptoRng,
+    {
+        if self.epoch != epoch {
+            return Err(Error::WrongEpoch {
+                expected: epoch,
+                found: self.epoch,
+            });
+        }
+        if self.parent != *parent {
+            return Err(Error::WrongParent);
+        }
+        if !deposits.contains(&self.deposits)
+            || !forced_withdrawals.contains(&self.forced_withdrawals)
+        {
+            return Err(Error::InvalidCount);
+        }
+        if payouts.root::<H>() != self.payouts {
+            return Err(Error::InvalidPayouts);
+        }
+        if !verifier.verify_certificate::<_, D>(rng, self, certificate, &Sequential) {
+            return Err(Error::InvalidCertificate);
+        }
+        Ok(())
     }
 }
 
@@ -110,34 +180,20 @@ impl<D: Digest> certificate::Subject for &Summary<D> {
     }
 }
 
-/// A certificate scheme that validators use to certify [Summary]s.
-///
-/// Deployments build one with the certificate macros of `commonware_cryptography`, choosing the
-/// scheme and its fault model. For example, for Ed25519 with up to `f` Byzantine validators out
-/// of `3f + 1`:
-///
-/// ```
-/// mod scheme {
-///     use commonware_clearing::bajillion::{Namespace, Summary};
-///     use commonware_cryptography::impl_certificate_ed25519;
-///     use commonware_utils::N3f1;
-///
-///     impl_certificate_ed25519!(&'a Summary<D>, Namespace, N3f1);
-/// }
-/// ```
-pub trait Scheme<D: Digest>: for<'a> certificate::Scheme<Subject<'a, D> = &'a Summary<D>> {}
-
-impl<D: Digest, S> Scheme<D> for S where
-    S: for<'a> certificate::Scheme<Subject<'a, D> = &'a Summary<D>>
-{
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bajillion::{Amounts, Matrix};
+    use crate::bajillion::{
+        Matrix,
+        tests::{NAMESPACE, amounts, certify, scheme},
+    };
     use commonware_codec::DecodeExt as _;
-    use commonware_cryptography::{Sha256, ed25519::PublicKey, sha256::Digest};
+    use commonware_cryptography::{
+        Digest as _, Sha256,
+        ed25519::{self, PublicKey},
+        sha256::Digest,
+    };
+    use commonware_utils::{TestRng, test_rng};
 
     #[test]
     fn test_genesis_and_digest() {
@@ -190,6 +246,119 @@ mod tests {
         ] {
             assert_ne!(changed.digest::<Sha256>(), digest);
         }
+    }
+
+    /// The posted summary must follow the ledger's last post and process its queues within their
+    /// bounds, with the payouts it commits to and a certificate over it. The certificate is checked
+    /// only once everything else holds.
+    #[test]
+    fn test_verify_checks_every_field_before_the_certificate() {
+        let fixture = ed25519::certificate::mocks::fixture(
+            &mut test_rng(),
+            NAMESPACE,
+            4,
+            scheme::Scheme::signer,
+            scheme::Scheme::verifier,
+        );
+        let genesis = Summary::<Digest>::genesis::<Sha256>(Sha256::hash(&[b"balances"]));
+        let parent = genesis.digest::<Sha256>();
+        let payouts = amounts(&[(0, 3)]);
+        let summary = Summary {
+            epoch: 1,
+            parent,
+            matrix: Sha256::hash(&[b"matrix"]),
+            balances: Sha256::hash(&[b"after"]),
+            payouts: payouts.root::<Sha256>(),
+            deposits: 2,
+            forced_withdrawals: 1,
+        };
+        let certificate = certify(&fixture.schemes, &summary);
+        let other = certify(&fixture.schemes, &genesis);
+        let mut rng = test_rng();
+        let mut verify = |summary: &Summary<Digest>,
+                          certificate,
+                          parent: &Digest,
+                          deposits,
+                          forced_withdrawals,
+                          payouts: &Amounts<PublicKey, u64>| {
+            summary.verify::<Sha256, _, _, _, TestRng>(
+                &mut rng,
+                &fixture.verifier,
+                certificate,
+                1,
+                parent,
+                deposits,
+                forced_withdrawals,
+                payouts,
+            )
+        };
+
+        // Each count may lie anywhere from the queue's required count to its length.
+        for (deposits, forced_withdrawals) in [(0..=2, 1..=1), (2..=5, 0..=3)] {
+            verify(
+                &summary,
+                &certificate,
+                &parent,
+                deposits,
+                forced_withdrawals,
+                &payouts,
+            )
+            .unwrap();
+        }
+
+        // Every other refusal comes before the certificate's.
+        for certificate in [&certificate, &other] {
+            let wrong = Summary {
+                epoch: 2,
+                ..summary
+            };
+            assert!(matches!(
+                verify(&wrong, certificate, &parent, 0..=2, 0..=1, &payouts),
+                Err(Error::WrongEpoch {
+                    expected: 1,
+                    found: 2
+                })
+            ));
+            assert!(matches!(
+                verify(
+                    &summary,
+                    certificate,
+                    &Digest::EMPTY,
+                    0..=2,
+                    0..=1,
+                    &payouts
+                ),
+                Err(Error::WrongParent)
+            ));
+            for (deposits, forced_withdrawals) in [(3..=4, 0..=1), (0..=1, 0..=1), (0..=2, 2..=2)] {
+                assert!(matches!(
+                    verify(
+                        &summary,
+                        certificate,
+                        &parent,
+                        deposits,
+                        forced_withdrawals,
+                        &payouts
+                    ),
+                    Err(Error::InvalidCount)
+                ));
+            }
+            assert!(matches!(
+                verify(
+                    &summary,
+                    certificate,
+                    &parent,
+                    0..=2,
+                    0..=1,
+                    &amounts(&[(0, 4)])
+                ),
+                Err(Error::InvalidPayouts)
+            ));
+        }
+        assert!(matches!(
+            verify(&summary, &other, &parent, 0..=2, 0..=1, &payouts),
+            Err(Error::InvalidCertificate)
+        ));
     }
 
     #[cfg(feature = "arbitrary")]

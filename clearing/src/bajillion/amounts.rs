@@ -12,9 +12,8 @@ use core::{fmt::Debug, hash::Hash};
 /// An unsigned integer amount of funds.
 ///
 /// An implementation must be an unsigned integer type whose order is numeric order. Its codec
-/// encoding must have a fixed width of at most 32 bytes and exactly one encoding per value, and
-/// `From<u64>` must convert every `u64` to the equal amount.
-pub trait Amount: Copy + Ord + Hash + Debug + From<u64> + CodecFixedShared + 'static {
+/// encoding must have a fixed width of at most 32 bytes and exactly one encoding per value.
+pub trait Amount: Copy + Ord + Hash + Debug + CodecFixedShared + 'static {
     /// The amount zero.
     const ZERO: Self;
 
@@ -79,10 +78,10 @@ pub(crate) fn leaf<H: Hasher, P: PublicKey, A: Amount>(account: &P, amount: A) -
 
 /// Nonzero amounts per account, sorted by account.
 ///
-/// Payment maps, request batches, and the payouts of a close are all [Amounts]. They are
-/// committed by the root of a binary Merkle tree whose leaves are the `(account, amount)` entries
-/// in account order. The root also binds the number of entries, so a [Lookup] of two adjacent
-/// entries proves that an account between them has no amount.
+/// Payment maps, request batches, and the payouts of a close are all [Amounts]. They are committed
+/// by the root of a binary Merkle tree whose leaves are the `(account, amount)` entries in account
+/// order. The root also binds the number of entries, so a [Lookup] of two adjacent entries proves
+/// that an account between them has no amount.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Amounts<P: PublicKey, A: Amount> {
     entries: Vec<(P, A)>,
@@ -104,8 +103,8 @@ impl<P: PublicKey, A: Amount> Amounts<P, A> {
 
     /// Collects `entries` in account order.
     ///
-    /// Returns an error if an amount is zero, an account appears more than once, or there are
-    /// more than `u32::MAX` entries.
+    /// Returns an error if an amount is zero, an account appears more than once, or there are more
+    /// than `u32::MAX` entries.
     pub fn new(entries: impl IntoIterator<Item = (P, A)>) -> Result<Self, Error> {
         let mut entries: Vec<_> = entries.into_iter().collect();
         entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
@@ -258,7 +257,7 @@ where
 #[cfg(feature = "arbitrary")]
 pub(crate) fn arbitrary_nonzero<A>(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<A>
 where
-    A: Amount + for<'a> arbitrary::Arbitrary<'a>,
+    A: Amount + From<u64> + for<'a> arbitrary::Arbitrary<'a>,
 {
     let amount: A = u.arbitrary()?;
     Ok(if amount == A::ZERO {

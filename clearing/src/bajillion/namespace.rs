@@ -20,16 +20,21 @@ const SUMMARY: &[u8] = b"_COMMONWARE_CLEARING_SUMMARY";
 
 /// Signature namespaces of one deployment.
 ///
-/// Each kind of signed message has its own namespace, so a signature on one kind never verifies
-/// as another. All namespaces derive from the deployment's namespace. Deployments must use
-/// different namespaces so signatures from one cannot be replayed in another.
+/// Each kind of signed message has its own namespace, so a signature on one kind never verifies as
+/// another. All namespaces derive from the deployment's namespace. Deployments must use different
+/// namespaces so signatures from one cannot be replayed in another.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Namespace {
-    pub(crate) state: Vec<u8>,
-    pub(crate) acknowledgement: Vec<u8>,
-    pub(crate) withdrawal: Vec<u8>,
-    pub(crate) close: Vec<u8>,
-    pub(crate) summary: Vec<u8>,
+    /// Namespace in which senders sign their states.
+    pub state: Vec<u8>,
+    /// Namespace in which the operator countersigns states.
+    pub acknowledgement: Vec<u8>,
+    /// Namespace in which accounts sign soft withdrawals.
+    pub withdrawal: Vec<u8>,
+    /// Namespace in which the operator signs closes.
+    pub close: Vec<u8>,
+    /// Namespace in which validators certify summaries.
+    pub summary: Vec<u8>,
 }
 
 impl Namespace {
