@@ -193,7 +193,7 @@ where
     {
         // Keyless restores commit fields without replaying a keyed snapshot, so its logical floor
         // may precede the retained operation prefix.
-        let pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
+        let mut pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle,
             cfg.log,
@@ -203,6 +203,7 @@ where
         let inactivity_floor_loc = crate::qmdb::validate_initialization(&pending, false)
             .await?
             .unwrap_or(Location::new(0));
+        pending.start_at(inactivity_floor_loc)?;
         // With no snapshot to build, the Merkle replay is all of initialization's work.
         let (mut journal, ()) = pending
             .finish_with(|_| async { Ok::<_, Error<F>>(()) })
@@ -435,6 +436,8 @@ where
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         self.journal = self.journal.sync().await?;
+        let start = self.sync_boundary();
+        self.journal = self.journal.advance_start(start).await?;
         Ok(self)
     }
 
@@ -452,6 +455,13 @@ where
         self.metrics.start_sync_calls.inc();
         let handle;
         (self.journal, handle) = self.journal.start_sync().await?;
+        let start = self.sync_boundary();
+        let started;
+        (self.journal, started) = self.journal.start_advance(start).await?;
+        let handle = Handle::from_future(async move {
+            handle.await?;
+            started.await
+        });
         Ok((self, handle))
     }
 
@@ -2320,17 +2330,16 @@ pub(crate) mod tests {
         let db = db.prune(Location::new(PRUNE_LOC)).await.unwrap();
         let oldest_retained = db.bounds().start;
         assert_eq!(db.root(), root);
-
-        db.sync().await.unwrap();
-        let db = reopen(context).await;
-        assert_eq!(db.root(), root);
-
-        for (start_loc, max_ops) in [
+        let starts = [
             (oldest_retained, 10),
             (Location::new(50), 20),
             (Location::new(150), 10),
             (Location::new(190), 15),
-        ] {
+        ];
+
+        // Until a sync starts the Merkle digests at the sync boundary, retained history is
+        // provable.
+        for (start_loc, max_ops) in starts {
             if start_loc < oldest_retained {
                 continue;
             }
@@ -2338,19 +2347,43 @@ pub(crate) mod tests {
             assert!(proof.verify::<Sha256, _>(start_loc, &ops, &root));
         }
 
+        // After it, history before the sync boundary stays readable but cannot be proven.
+        let boundary = db.sync_boundary();
+        db.sync().await.unwrap();
+        let db = reopen(context).await;
+        assert_eq!(db.root(), root);
+        assert_eq!(db.bounds().start, oldest_retained);
+        assert!(db.get(oldest_retained).await.unwrap().is_some());
+        let check = async |db: &TestDb<F, V, C, Sha256, S>, start_loc: Location<F>, max_ops| {
+            let result = db.proof(start_loc, NZU64!(max_ops)).await;
+            if start_loc < boundary {
+                assert!(matches!(
+                    result,
+                    Err(Error::Journal(crate::journal::Error::ItemPruned(loc))) if loc == *start_loc
+                ));
+            } else {
+                let (proof, ops) = result.unwrap();
+                assert!(proof.verify::<Sha256, _>(start_loc, &ops, &root));
+            }
+        };
+        for (start_loc, max_ops) in starts.into_iter().chain([(boundary, 5)]) {
+            if start_loc < oldest_retained {
+                continue;
+            }
+            check(&db, start_loc, max_ops).await;
+        }
+
         let aggressive_prune: Location<F> = Location::new(150);
         let db = db.prune(aggressive_prune).await.unwrap();
-
         let new_oldest = db.bounds().start;
-        let (proof, ops) = db.proof(new_oldest, NZU64!(20)).await.unwrap();
-        assert!(proof.verify::<Sha256, _>(new_oldest, &ops, &root));
+        check(&db, new_oldest, 20).await;
+        check(&db, boundary, 5).await;
 
         let almost_all = db.bounds().end - 5;
         let db = db.prune(almost_all).await.unwrap();
         let final_oldest = db.bounds().start;
         if final_oldest < db.bounds().end {
-            let (final_proof, final_ops) = db.proof(final_oldest, NZU64!(10)).await.unwrap();
-            assert!(final_proof.verify::<Sha256, _>(final_oldest, &final_ops, &root));
+            check(&db, final_oldest, 10).await;
         }
 
         db.destroy().await.unwrap();

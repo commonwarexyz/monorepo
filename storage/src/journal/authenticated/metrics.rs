@@ -28,4 +28,15 @@ impl Metrics {
             resident_bytes: context.gauge("resident_bytes", "Bytes occupied by resident digests"),
         }
     }
+
+    /// Metrics that no registry exposes, for transient trees.
+    pub(crate) fn detached() -> Self {
+        Self {
+            resident_hits: Counter::detached(Default::default()),
+            region_fills: Counter::detached(Default::default()),
+            filled_leaves: Counter::detached(Default::default()),
+            replayed_leaves: Counter::detached(Default::default()),
+            resident_bytes: Gauge::detached(Default::default()),
+        }
+    }
 }

@@ -64,7 +64,7 @@ mod tree;
 #[cfg(test)]
 pub(crate) use config::tests::low_resident_height;
 pub use config::{CacheConfig, Config};
-pub(crate) use frontier::Frontier;
+pub(crate) use frontier::{Boundary, Frontier};
 use metrics::Metrics;
 use tree::Tree;
 
@@ -273,7 +273,7 @@ where
     /// Invariant: leaf i corresponds to item i in the journal.
     pub(crate) merkle: Tree<F, H::Digest, S>,
 
-    /// Durable pruning boundary and the digests pinned there.
+    /// Durable pruning boundary, replay start, and the digests pinned at each.
     pub(crate) frontier: Frontier<F, E, H::Digest>,
 
     /// Journal of items.
@@ -281,6 +281,11 @@ where
     pub(crate) journal: C,
 
     pub(crate) hasher: StandardHasher<H>,
+
+    /// First readable item and the digests pinned there: the durable pruning boundary, or the
+    /// start of a journal built by [Self::from_components] until [Self::persist_boundary] records
+    /// it. The Merkle digests may start later.
+    pub(crate) base: Boundary<F, H::Digest>,
 }
 
 impl<F, E, C, H, S> core::fmt::Debug for Journal<F, E, C, H, S>
@@ -473,7 +478,8 @@ where
     ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
         let bounds = self.bounds();
 
-        if *start_loc < bounds.start {
+        // Items before the Merkle digests' start stay readable but cannot be proven.
+        if *start_loc < bounds.start || start_loc < self.merkle.bounds().start {
             return Err(JournalError::ItemPruned(*start_loc).into());
         }
 
@@ -650,7 +656,7 @@ where
         pins: Vec<H::Digest>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
-        let merkle = Tree::new(start, pins, config, Metrics::new(&context))?;
+        let merkle = Tree::new(start, pins.clone(), config, Metrics::new(&context))?;
         let bounds = journal.bounds();
         if *start < bounds.start || *start > bounds.end {
             return Err(merkle::Error::RangeOutOfBounds(start).into());
@@ -663,17 +669,58 @@ where
             frontier,
             journal,
             hasher,
+            base: (start, pins),
         })
     }
 
-    /// Record the boundary of a journal built by [Self::from_components] in its frontier, then
-    /// prune the operations before it.
+    /// Record the boundary of a journal built by [Self::from_components] in its frontier, with the
+    /// replay start if its Merkle digests now start later, then prune the operations before it.
     pub async fn persist_boundary(mut self) -> Result<Self, Error<F>> {
-        let boundary = self.merkle.bounds().start;
-        let pins = self.pinned_nodes_at(boundary).await?;
-        self.frontier = self.frontier.set(boundary, pins).await?;
-        (self.journal, _) = self.journal.prune(*boundary).await?;
+        let start = self.merkle.bounds().start;
+        let start = if start > self.base.0 {
+            Some((start, self.pinned_nodes_at(start).await?))
+        } else {
+            None
+        };
+        self.frontier = self.frontier.replace(self.base.clone(), start).await?;
+        (self.journal, _) = self.journal.prune(*self.base.0).await?;
         Ok(self)
+    }
+
+    /// Start the Merkle digests at `location`, dropping those before it, and begin recording it so
+    /// a reopened journal replays from it. Items before it stay readable but can no longer be
+    /// proven. Does nothing if the digests already start at or after `location`.
+    ///
+    /// Returns a handle that completes once the record is durable. A failure surfaces on the
+    /// handle and again on the journal's next record write. The operations before `location` need
+    /// not be durable yet: a reopened journal that does not retain them ignores and drops the
+    /// record.
+    ///
+    /// Returns [Error::Merkle] with [`merkle::Error::RangeOutOfBounds`] if `location` exceeds the
+    /// journal's size.
+    pub async fn start_advance(
+        mut self,
+        location: Location<F>,
+    ) -> Result<(Self, Handle<()>), Error<F>> {
+        if location <= self.merkle.bounds().start {
+            return Ok((self, Handle::ready(Ok(()))));
+        }
+        let pins = self.pinned_nodes_at(location).await?;
+        let handle;
+        (self.frontier, handle) = self
+            .frontier
+            .start_set_start(location, pins.clone())
+            .await?;
+        self.merkle.prune(location, pins);
+        debug!(size = ?self.size(), start = ?location, "advanced replay start");
+        Ok((self, handle))
+    }
+
+    /// Like [Self::start_advance], but returns once the record is durable.
+    pub async fn advance_start(self, location: Location<F>) -> Result<Self, Error<F>> {
+        let (journal, handle) = self.start_advance(location).await?;
+        handle.await.map_err(JournalError::from)?;
+        Ok(journal)
     }
 
     /// Align the Merkle structure with the journal.
@@ -766,15 +813,27 @@ where
         mut self,
         prune_loc: Location<F>,
     ) -> Result<(Self, Location<F>, bool), Error<F>> {
-        let old = self.merkle.bounds().start;
+        let old = self.base.0;
         let boundary = Location::new(self.prune_target(*prune_loc));
         if boundary > old {
-            let pins = self.pinned_nodes_at(boundary).await?;
+            let start = self.merkle.bounds().start;
+            // No digests are held before the replay start, so pins before it are rebuilt from the
+            // operations after the old boundary.
+            let pins = if boundary >= start {
+                self.pinned_nodes_at(boundary).await?
+            } else {
+                self.merkle
+                    .regenerate_pins(&self.journal, &self.hasher, self.base.clone(), boundary)
+                    .await?
+            };
             // The frontier must never get ahead of durable operations, and the new boundary may be
             // justified by a buffered append (e.g. a commit operation), so commit first.
             self.journal = self.journal.commit().await?;
             self.frontier = self.frontier.set(boundary, pins.clone()).await?;
-            self.merkle.prune(boundary, pins);
+            if boundary > start {
+                self.merkle.prune(boundary, pins.clone());
+            }
+            self.base = (boundary, pins);
             debug!(size = ?self.journal.bounds().end, ?prune_loc, ?boundary, "pruned inactive ops");
         }
         let pruned;
@@ -821,7 +880,9 @@ where
     journal: C::Recovery,
     /// Durable frontier.
     frontier: Frontier<F, E, H::Digest>,
-    /// Digests at the pruning boundary, before the selected operations are replayed.
+    /// Durable pruning boundary.
+    base: Location<F>,
+    /// Digests at the replay start, before the selected operations are replayed.
     merkle: Tree<F, H::Digest, S>,
     /// Hasher and peak-bagging mode retained for Merkle alignment and the published journal.
     hasher: StandardHasher<H>,
@@ -841,7 +902,20 @@ where
 {
     /// Range selected for publication.
     pub(crate) fn bounds(&self) -> Range<u64> {
-        *self.merkle.bounds().start..self.selected_end
+        *self.base..self.selected_end
+    }
+
+    /// Replay the Merkle digests from the recorded replay start if it is at most `limit` and
+    /// within the selected operations, and otherwise from the pruning boundary.
+    pub(crate) fn start_at(&mut self, limit: Location<F>) -> Result<(), Error<F>> {
+        if let Some((start, pins)) = self.frontier.start()
+            && start > self.merkle.bounds().start
+            && start <= limit
+            && *start <= self.selected_end
+        {
+            self.merkle.rebase(start, pins)?;
+        }
+        Ok(())
     }
 
     /// Whether storage was empty before commit selection.
@@ -855,6 +929,13 @@ where
             return Err(JournalError::ItemPruned(pos));
         }
         self.journal.read(pos).await
+    }
+
+    /// Like [Self::finish], but replays from the recorded replay start if the selected operations
+    /// retain it.
+    async fn finish_from_start(mut self) -> Result<Journal<F, E, C, H, S>, Error<F>> {
+        self.start_at(Location::new(self.selected_end))?;
+        self.finish().await
     }
 
     /// Persist the selected operations and rebuild their Merkle digests.
@@ -1014,20 +1095,30 @@ where
         Ok(journal.sync().await?)
     }
 
-    /// Delete operations below the boundary, left by a crash during pruning or by a sync, and
-    /// publish the journal.
+    /// Drop a replay start the replay did not use, delete operations below the boundary, left by
+    /// a crash during pruning or by a sync, and publish the journal.
     async fn assemble(
         journal: C,
         merkle: Tree<F, H::Digest, S>,
-        frontier: Frontier<F, E, H::Digest>,
+        mut frontier: Frontier<F, E, H::Digest>,
         hasher: StandardHasher<H>,
     ) -> Result<Journal<F, E, C, H, S>, Error<F>> {
-        let (journal, _) = journal.prune(*merkle.bounds().start).await?;
+        // An unused replay start may cover operations recovery discarded, which later appends
+        // would replace.
+        if frontier
+            .start()
+            .is_some_and(|(start, _)| start != merkle.bounds().start)
+        {
+            frontier = frontier.clear_start().await?;
+        }
+        let base = frontier.boundary();
+        let (journal, _) = journal.prune(*base.0).await?;
         Ok(Journal {
             journal,
             merkle,
             frontier,
             hasher,
+            base,
         })
     }
 }
@@ -1126,7 +1217,7 @@ where
     ) -> Result<Self, Error<F>> {
         Self::prepare(context, merkle_cfg, journal_cfg, None, predicate, bagging)
             .await?
-            .finish()
+            .finish_from_start()
             .await
     }
 
@@ -1152,7 +1243,7 @@ where
             bagging,
         )
         .await?
-        .finish()
+        .finish_from_start()
         .await
     }
 
@@ -1199,6 +1290,7 @@ where
         Ok(Recovery {
             journal,
             frontier,
+            base: Location::new(boundary),
             merkle,
             hasher: StandardHasher::<H>::new(bagging),
             selected_end,
@@ -1219,7 +1311,7 @@ where
 
     fn bounds(&self) -> Range<u64> {
         let mut bounds = self.journal.bounds();
-        bounds.start = bounds.start.max(*self.merkle.bounds().start);
+        bounds.start = bounds.start.max(*self.base.0);
         bounds
     }
 
@@ -1333,9 +1425,7 @@ where
     }
 
     fn prune_target(&self, min_position: u64) -> u64 {
-        self.journal
-            .prune_target(min_position)
-            .max(*self.merkle.bounds().start)
+        self.journal.prune_target(min_position).max(*self.base.0)
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), JournalError> {
@@ -4875,5 +4965,139 @@ mod tests {
     #[test]
     fn test_fully_pruned_authenticated_reopens_mmb() {
         deterministic::Runner::default().start(fully_pruned_authenticated_reopens::<mmb::Family>);
+    }
+
+    /// Reopen the journal named by `suffix`, capped at `max_size` if given, keeping every item.
+    async fn reopen<F: Family + PartialEq>(
+        context: Context,
+        suffix: &str,
+        max_size: Option<u64>,
+    ) -> TestJournal<F> {
+        let (merkle_cfg, journal_cfg) = (merkle_config(suffix), journal_config(suffix));
+        match max_size {
+            Some(max_size) => TestJournal::<F>::init_at_most(
+                context,
+                merkle_cfg,
+                journal_cfg,
+                max_size,
+                |_| true,
+                ForwardFold,
+            )
+            .await
+            .unwrap(),
+            None => TestJournal::<F>::new(context, merkle_cfg, journal_cfg, |_| true, ForwardFold)
+                .await
+                .unwrap(),
+        }
+    }
+
+    /// A reopened journal replays from its replay start. Items before it stay readable but cannot
+    /// be proven, and the root is unchanged.
+    async fn replay_start_reopens<F: Family + PartialEq>(context: Context) {
+        let journal = create_journal_with_ops::<F>(context.child("create"), "start", 300).await;
+        let root = journal_root(&journal);
+        let start = Location::<F>::new(200);
+        let journal = journal.advance_start(start).await.unwrap();
+        assert_eq!(journal.merkle.bounds().start, start);
+        assert_eq!(journal_root(&journal), root);
+        assert!(matches!(
+            journal.proof(Location::new(199), NZU64!(5), 0).await,
+            Err(Error::Journal(JournalError::ItemPruned(199)))
+        ));
+        drop(journal);
+
+        let journal = reopen::<F>(context.child("reopen"), "start", None).await;
+        assert_eq!(journal.merkle.bounds().start, start);
+        assert_eq!(journal.bounds(), 0..300);
+        assert_eq!(journal_root(&journal), root);
+        assert_eq!(journal.read(10).await.unwrap(), create_operation::<F>(10));
+        assert!(matches!(
+            journal.proof(Location::new(199), NZU64!(5), 0).await,
+            Err(Error::Journal(JournalError::ItemPruned(199)))
+        ));
+        let (proof, ops) = journal.proof(start, NZU64!(50), 0).await.unwrap();
+        assert!(verify_proof(&proof, &journal.hasher, start, &ops, &root));
+
+        // Pruning at or past the replay start drops it.
+        let (journal, retained) = journal.prune(Location::new(250)).await.unwrap();
+        assert_eq!(retained, Location::new(245));
+        assert_eq!(journal.merkle.bounds().start, retained);
+        assert!(journal.frontier.start().is_none());
+        assert_eq!(journal_root(&journal), root);
+        drop(journal);
+        let journal = reopen::<F>(context.child("pruned"), "start", None).await;
+        assert_eq!(journal.merkle.bounds().start, Location::new(245));
+        assert_eq!(journal_root(&journal), root);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_replay_start_reopens_mmr() {
+        deterministic::Runner::default().start(replay_start_reopens::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_replay_start_reopens_mmb() {
+        deterministic::Runner::default().start(replay_start_reopens::<mmb::Family>);
+    }
+
+    /// Pruning below the replay start rebuilds the boundary's pins from the operations, and a
+    /// reopen capped below the replay start rebuilds from them and drops the replay start.
+    async fn prune_below_replay_start<F: Family + PartialEq>(context: Context) {
+        // Span several regeneration segments.
+        const SIZE: u64 = 9_000;
+        const CAP: u64 = 8_800;
+        let mut journal = create_empty_journal::<F>(context.child("create"), "below").await;
+        let mut capped_root = None;
+        for i in 0..SIZE {
+            (journal, _) = journal
+                .append(&create_operation::<F>(i as u8))
+                .await
+                .unwrap();
+            if *journal.size() == CAP {
+                capped_root = Some(journal_root(&journal));
+            }
+        }
+        let journal = journal.sync().await.unwrap();
+        let root = journal_root(&journal);
+        let start = Location::<F>::new(8_900);
+        let journal = journal.advance_start(start).await.unwrap();
+
+        let (journal, retained) = journal.prune(Location::new(8_500)).await.unwrap();
+        assert_eq!(retained, Location::new(8_498));
+        assert_eq!(journal.frontier.boundary().0, retained);
+        assert_eq!(journal.frontier.start().map(|(loc, _)| loc), Some(start));
+        assert_eq!(journal.merkle.bounds().start, start);
+        assert_eq!(journal.bounds(), *retained..SIZE);
+        assert_eq!(journal_root(&journal), root);
+        drop(journal);
+
+        // An unbounded reopen still replays from the replay start.
+        let journal = reopen::<F>(context.child("reopen"), "below", None).await;
+        assert_eq!(journal.merkle.bounds().start, start);
+        assert_eq!(journal_root(&journal), root);
+        drop(journal);
+
+        // A reopen capped below the replay start replays from the boundary's rebuilt pins.
+        let journal = reopen::<F>(context.child("capped"), "below", Some(CAP)).await;
+        assert_eq!(*journal.size(), CAP);
+        assert_eq!(journal.merkle.bounds().start, retained);
+        assert!(journal.frontier.start().is_none());
+        assert_eq!(Some(journal_root(&journal)), capped_root);
+        drop(journal);
+        let journal = reopen::<F>(context.child("restart"), "below", None).await;
+        assert_eq!(journal.merkle.bounds().start, retained);
+        assert_eq!(Some(journal_root(&journal)), capped_root);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_prune_below_replay_start_mmr() {
+        deterministic::Runner::default().start(prune_below_replay_start::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_prune_below_replay_start_mmb() {
+        deterministic::Runner::default().start(prune_below_replay_start::<mmb::Family>);
     }
 }

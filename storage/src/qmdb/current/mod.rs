@@ -36,7 +36,7 @@
 //!
 //! A Current database ([db::Db]) wraps an Any database and adds:
 //!
-//! - **Status bitmap** ([BitMap]): One bit per operation in the log. Bit _i_ is 1 if operation _i_
+//! - **Status bitmap** ([BitMap](commonware_utils::bitmap::Prunable)): One bit per operation in the log. Bit _i_ is 1 if operation _i_
 //!   is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N` bytes (i.e. `N *
 //!   8` bits each). `N` must be a power of two.
 //!
@@ -339,7 +339,6 @@ use crate::{
                 update::{Ordered as OrderedUpdate, Unordered as UnorderedUpdate},
             },
         },
-        bitmap::Shared,
         operation::Key,
     },
     translator::Translator,
@@ -349,7 +348,7 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
-use commonware_utils::bitmap::Prunable as BitMap;
+use commonware_utils::bitmap::Readable as _;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -512,27 +511,37 @@ where
     let strategy = config.merkle.strategy.clone();
     let metadata_partition = config.grafted_metadata_partition.clone();
 
-    // Load bitmap metadata (pruned_chunks + pinned nodes for the grafted tree).
-    let (metadata, pruned_chunks, pinned_nodes) =
+    // Load bitmap metadata (pruned chunks + pinned nodes for the grafted tree, at the pruning
+    // boundary and the replay start).
+    let (metadata, base, start) =
         db::init_metadata(context.child("metadata"), &metadata_partition).await?;
 
-    // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted metadata.
-    let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
-        .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
-    let bitmap = Arc::new(Shared::<N>::new(bitmap));
+    // The persisted bitmap boundaries and delayed-pair absorption thresholds constrain which
+    // retained commit can be reconstructed. The underlying `any` database builds the bitmap from
+    // the latest boundary the selected commit can rebuild from, validating both constraints before
+    // publishing the selected journal prefix, then populates the bitmap during snapshot rebuild.
+    let boundary = |chunks: usize| any::BitmapBoundary {
+        chunks,
+        min_size: db::pair_absorption_threshold::<F, N>(chunks as u64),
+    };
+    let starts = any::BitmapStarts {
+        base: boundary(base.0),
+        start: start.as_ref().map(|start| boundary(start.0)),
+    };
+    let any =
+        any::init_with_bitmap(context.child("any"), config.into(), Some(starts), max_size).await?;
 
-    // The persisted bitmap boundary and delayed-pair absorption threshold constrain which retained
-    // commit can be reconstructed. The underlying `any` database takes sole ownership of the
-    // bitmap, validates both constraints before publishing the selected journal prefix, then
-    // populates the bitmap during snapshot rebuild.
-    let any = any::init_with_bitmap(
-        context.child("any"),
-        config.into(),
-        Some(bitmap),
-        max_size,
-        db::pair_absorption_threshold::<F, N>(pruned_chunks as u64),
-    )
-    .await?;
+    // A replay start the bitmap was not rebuilt from may cover operations initialization
+    // discarded, which later appends would replace.
+    let pruned_chunks = any.bitmap.pruned_chunks();
+    let (metadata, pinned_nodes) = match start {
+        Some((chunks, pins)) if chunks == pruned_chunks => (metadata, pins),
+        Some(_) => (
+            db::Db::<F, E, J, I, H, U, N, S>::clear_start_metadata(metadata).await?,
+            base.1,
+        ),
+        None => (metadata, base.1),
+    };
 
     // Rebuild the grafted tree, graft roots, and canonical root from the persisted pins and
     // selected operation tree.
@@ -2625,6 +2634,64 @@ pub mod tests {
             });
         }
         (db, history)
+    }
+
+    /// A reopen rebuilds the bitmap and grafted tree from the replay start the last sync recorded,
+    /// and the log replays from there. A reopen capped at a commit whose floor precedes it
+    /// rebuilds from the pruning boundary and drops the replay start.
+    #[test_traced("INFO")]
+    fn test_current_reopens_from_replay_start() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "current-replay-start";
+            let (db, history) = build_generations(&context, partition, 6).await;
+            let last = history.last().unwrap();
+            assert!(*last.sync_boundary >= 2 * CHUNK_BITS);
+            let db = db.sync().await.unwrap();
+            assert_eq!(db.any.log.merkle.bounds().start, last.sync_boundary);
+            drop(db);
+
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("reopen"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), last.root);
+            assert_eq!(db.bounds().start, Location::new(0));
+            assert_eq!(db.pruned_bits(), *last.sync_boundary);
+            assert_eq!(db.any.log.merkle.bounds().start, last.sync_boundary);
+            drop(db);
+
+            let earlier = history
+                .iter()
+                .find(|generation| generation.floor < last.sync_boundary)
+                .unwrap();
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("capped"),
+                variable_config::<OneCap>(partition),
+                Some(earlier.size),
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.bounds().end, earlier.size);
+            assert_eq!(db.root(), earlier.root);
+            assert_eq!(db.pruned_bits(), 0);
+            assert_eq!(db.any.log.merkle.bounds().start, Location::new(0));
+            drop(db);
+
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("restart"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), earlier.root);
+            assert_eq!(db.pruned_bits(), 0);
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test_traced("INFO")]

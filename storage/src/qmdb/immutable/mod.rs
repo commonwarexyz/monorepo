@@ -282,7 +282,7 @@ where
     {
         // Snapshot reconstruction replays from the selected commit's inactivity floor, so that
         // floor must remain in the retained operation prefix.
-        let pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
+        let mut pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle,
             cfg.log,
@@ -292,6 +292,7 @@ where
         let inactivity_floor_loc = crate::qmdb::validate_initialization(&pending, true)
             .await?
             .unwrap_or(Location::new(0));
+        pending.start_at(inactivity_floor_loc)?;
 
         // Rebuild the in-memory state the last commit defines, while the journal rebuilds its
         // digests. Its inactivity floor is where the snapshot replay starts, so keys set before
@@ -623,6 +624,8 @@ where
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         self.journal = self.journal.sync().await?;
+        let start = self.sync_boundary();
+        self.journal = self.journal.advance_start(start).await?;
         Ok(self)
     }
 
@@ -640,6 +643,13 @@ where
         self.metrics.start_sync_calls.inc();
         let handle;
         (self.journal, handle) = self.journal.start_sync().await?;
+        let start = self.sync_boundary();
+        let started;
+        (self.journal, started) = self.journal.start_advance(start).await?;
+        let handle = Handle::from_future(async move {
+            handle.await?;
+            started.await
+        });
         Ok((self, handle))
     }
 

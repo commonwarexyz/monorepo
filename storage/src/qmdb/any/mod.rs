@@ -141,6 +141,7 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
+use commonware_utils::bitmap::Prunable;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 use tracing::warn;
@@ -225,7 +226,7 @@ where
         cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
         max_size: Option<Location<F>>,
     ) -> Result<Self, QmdbError<F>> {
-        init_with_bitmap(context, cfg, None, max_size, None).await
+        init_with_bitmap(context, cfg, None, max_size).await
     }
 }
 
@@ -252,19 +253,35 @@ where
         cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
         max_size: Option<Location<F>>,
     ) -> Result<Self, QmdbError<F>> {
-        init_with_bitmap(context, cfg, None, max_size, None).await
+        init_with_bitmap(context, cfg, None, max_size).await
     }
 }
 
-/// Like [`db::Db::init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes
-/// pruned chunks from grafted metadata). `bitmap = None` allocates internally.
+/// A bitmap boundary a `current::Db` can rebuild from: its pruned chunk count, and the minimum
+/// size at which every chunk pair it absorbs exists.
+#[derive(Clone, Copy)]
+pub(crate) struct BitmapBoundary {
+    pub(crate) chunks: usize,
+    pub(crate) min_size: Option<u64>,
+}
+
+/// The bitmap boundaries a `current::Db` recorded: where its bitmap was pruned, and optionally a
+/// later replay start.
+#[derive(Clone, Copy)]
+pub(crate) struct BitmapStarts {
+    pub(crate) base: BitmapBoundary,
+    pub(crate) start: Option<BitmapBoundary>,
+}
+
+/// Like [`db::Db::init`] but builds the bitmap from the latest of `bitmap`'s boundaries the
+/// selected commit can rebuild from (used by `current::Db`, which records them in grafted
+/// metadata). `bitmap = None` allocates internally.
 #[boxed]
 pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     context: E,
     cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
-    bitmap: Option<Arc<Shared<N>>>,
+    bitmap: Option<BitmapStarts>,
     max_size: Option<Location<F>>,
-    pair_absorption_threshold: Option<u64>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, QmdbError<F>>
 where
     F: Family,
@@ -278,7 +295,7 @@ where
 {
     // Keep the selected commit unpublished until every variant-owned reconstruction constraint has
     // been checked against the same retained prefix.
-    let pending = crate::qmdb::prepare_initialization::<F, E, J, H, S>(
+    let mut pending = crate::qmdb::prepare_initialization::<F, E, J, H, S>(
         context.child("log"),
         cfg.merkle,
         cfg.log,
@@ -289,20 +306,38 @@ where
     // Snapshot replay requires both the selected commit and its floor to remain above the bitmap
     // boundary. Current also requires every absorbed chunk pair to exist at the selected size.
     let size = pending.bounds().end;
-    if bitmap
-        .as_ref()
-        .is_some_and(|bitmap| size < bitmap.pruned_bits())
-    {
+    let bits = |boundary: BitmapBoundary| boundary.chunks as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
+    if bitmap.is_some_and(|starts| size < bits(starts.base)) {
         return Err(QmdbError::HistoricalFloorPruned(Location::new(size)));
     }
     let floor = crate::qmdb::validate_initialization(&pending, true).await?;
-    if let (Some(bitmap), Some(floor)) = (&bitmap, floor)
-        && *floor < bitmap.pruned_bits()
-    {
-        return Err(QmdbError::HistoricalFloorPruned(Location::new(size)));
-    }
-    if pair_absorption_threshold.is_some_and(|minimum| size < minimum) {
-        return Err(QmdbError::HistoricalFloorPruned(Location::new(size)));
+    let rebuildable = |boundary: BitmapBoundary| {
+        size >= bits(boundary)
+            && floor.is_none_or(|floor| *floor >= bits(boundary))
+            && boundary.min_size.is_none_or(|minimum| size >= minimum)
+    };
+    let boundary = match bitmap {
+        Some(starts) => match starts.start {
+            Some(start) if rebuildable(start) => Some(start),
+            _ if rebuildable(starts.base) => Some(starts.base),
+            _ => return Err(QmdbError::HistoricalFloorPruned(Location::new(size))),
+        },
+        None => None,
+    };
+    let bitmap = match boundary {
+        Some(boundary) => {
+            let bitmap = Prunable::<N>::new_with_pruned_chunks(boundary.chunks)
+                .map_err(|_| QmdbError::<F>::DataCorrupted("pruned chunks overflow"))?;
+            Some(Arc::new(Shared::<N>::new(bitmap)))
+        }
+        None => None,
+    };
+
+    // Replay the log's Merkle digests from its recorded start if the snapshot and bitmap rebuild
+    // from at or after it.
+    if let Some(floor) = floor {
+        let limit = boundary.map_or(floor, |boundary| Location::new(bits(boundary)));
+        pending.start_at(limit)?;
     }
 
     // Build the snapshot while the journal rebuilds its digests.

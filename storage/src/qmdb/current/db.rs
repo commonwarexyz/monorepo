@@ -148,6 +148,12 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the metadata key for the number of pruned bitmap chunks.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
+/// Prefix used for the metadata key for the bitmap chunk count at the replay start.
+const START_CHUNKS_PREFIX: u8 = 2;
+
+/// Prefix used for the metadata keys for the grafted tree pinned nodes at the replay start.
+const START_NODE_PREFIX: u8 = 3;
+
 /// `(position, digest)` pairs for a grafted tree's pinned nodes, in `Family::nodes_to_pin` order.
 type GraftedPinnedNodes<F, D> = Vec<(Position<F>, D)>;
 
@@ -247,6 +253,8 @@ pub struct Db<
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
     /// - The grafted tree pinned nodes at key [NODE_PREFIX]
+    /// - The bitmap chunk count at the replay start at key [START_CHUNKS_PREFIX]
+    /// - The grafted tree pinned nodes there at key [START_NODE_PREFIX]
     pub(super) metadata: Metadata<E, U64, Vec<u8>>,
 
     /// Strategy used to parallelize batch operations across the ops tree, the grafted tree,
@@ -662,6 +670,14 @@ where
 
     /// Sync the metadata to disk.
     pub(crate) async fn sync_metadata(mut self) -> Result<Self, Error<F>> {
+        self.stage_metadata()?;
+        self.metadata = self.metadata.sync().await?;
+        Ok(self)
+    }
+
+    /// Stage the pruning boundary and the replay start, with the grafted tree's pinned nodes at
+    /// each, in the metadata.
+    fn stage_metadata(&mut self) -> Result<(), Error<F>> {
         self.metadata.clear();
 
         // Snapshot the pruning boundary under the read lock; the guard drops before any await.
@@ -683,23 +699,76 @@ where
             self.metadata.put(key, digest.to_vec());
         }
 
-        self.metadata = self.metadata.sync().await?;
+        // Record the sync boundary as the replay start, so a reopened database rebuilds its
+        // bitmap and grafted tree from there.
+        let start_chunks = *self.sync_boundary() / bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
+        if start_chunks > pruned_chunks_u64 {
+            let key = U64::new(START_CHUNKS_PREFIX, 0);
+            self.metadata.put(key, start_chunks.to_be_bytes().to_vec());
+            for (i, (_, digest)) in self
+                .grafted_pinned_nodes(Location::new(start_chunks))?
+                .into_iter()
+                .enumerate()
+            {
+                let key = U64::new(START_NODE_PREFIX, i as u64);
+                self.metadata.put(key, digest.to_vec());
+            }
+        }
+        Ok(())
+    }
 
-        Ok(self)
+    /// Durably drop the replay start from the metadata.
+    pub(super) async fn clear_start_metadata(
+        mut metadata: Metadata<E, U64, Vec<u8>>,
+    ) -> Result<Metadata<E, U64, Vec<u8>>, Error<F>> {
+        let keys: Vec<_> = metadata
+            .keys()
+            .filter(|key| matches!(key.prefix(), START_CHUNKS_PREFIX | START_NODE_PREFIX))
+            .cloned()
+            .collect();
+        if keys.is_empty() {
+            return Ok(metadata);
+        }
+        for key in &keys {
+            metadata.remove(key);
+        }
+        Ok(metadata.sync().await?)
     }
 
     /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
-    /// plus a best-effort attempt to bound the recovery needed on startup.
-    /// Bitmap metadata is not persisted by this call or by [Self::commit]. A new sync waits for
+    /// plus a best-effort attempt to bound the recovery needed on startup. A new sync waits for
     /// the prior sync before starting. Failures surface as described on
     /// [`any::Db::start_sync`](crate::qmdb::any::db::Db::start_sync).
     #[tracing::instrument(name = "qmdb.current.db.start_sync", level = "info", skip_all)]
     #[boxed]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
-        let (any, handle) = self.any.start_sync().await?;
+        let (any, data) = self.any.start_sync_log().await?;
         self.any = any;
+        let start;
+        (self, start) = self.start_advance().await?;
+        let handle = Handle::from_future(async move {
+            data.await?;
+            start.await
+        });
+        Ok((self, handle))
+    }
+
+    /// Begin recording the sync boundary as the replay start of the grafted metadata and of the
+    /// log, returning a handle that completes once both are durable. If only the log's survives a
+    /// crash, initialization rebuilds from the pruning boundary.
+    async fn start_advance(mut self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.stage_metadata()?;
+        let (metadata, grafted) = self.metadata.start_sync().await?;
+        self.metadata = metadata;
+        let start = self.sync_boundary();
+        let (log, journal) = self.any.log.start_advance(start).await?;
+        self.any.log = log;
+        let handle = Handle::from_future(async move {
+            grafted.await?;
+            journal.await
+        });
         Ok((self, handle))
     }
 
@@ -718,11 +787,13 @@ where
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
-        self.any = self.any.sync().await?;
+        self.any = self.any.sync_log().await?;
 
-        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
-        // re-Merkleize the inactive portion up to the inactivity floor.
-        self = self.sync_metadata().await?;
+        // Write the bitmap pruning boundary and replay start to disk so that next startup doesn't
+        // have to re-Merkleize the inactive portion up to the sync boundary.
+        let start;
+        (self, start) = self.start_advance().await?;
+        start.await.map_err(crate::journal::Error::from)?;
         self.update_metrics();
         Ok(self)
     }
@@ -1183,20 +1254,31 @@ pub(super) async fn build_grafted_tree<
     Ok((grafted_tree, graft_roots))
 }
 
+/// A bitmap chunk count and the grafted tree's pinned nodes there.
+pub(super) type GraftedBoundary<D> = (usize, Vec<D>);
+
+/// The metadata handle, the pruning boundary, and the replay start if one was recorded.
+type RecoveredMetadata<E, D> = (
+    Metadata<E, U64, Vec<u8>>,
+    GraftedBoundary<D>,
+    Option<GraftedBoundary<D>>,
+);
+
 /// Load the metadata and recover the pruning state persisted by previous runs.
 ///
-/// The metadata store holds two kinds of entries (keyed by prefix):
-/// - **Pruned chunks count** ([PRUNED_CHUNKS_PREFIX]): the number of bitmap chunks that have been
-///   pruned. This tells us where the active portion of the bitmap begins.
-/// - **Pinned node digests** ([NODE_PREFIX]): grafted tree digests at peak positions whose
-///   underlying data has been pruned. These are needed to recompute the grafted tree root without
-///   the pruned chunks.
+/// The metadata store holds two kinds of entries (keyed by prefix), for the pruning boundary and
+/// again for the replay start:
+/// - **Pruned chunks count** ([PRUNED_CHUNKS_PREFIX], [START_CHUNKS_PREFIX]): the number of bitmap
+///   chunks that have been pruned. This tells us where the active portion of the bitmap begins.
+/// - **Pinned node digests** ([NODE_PREFIX], [START_NODE_PREFIX]): grafted tree digests at peak
+///   positions whose underlying data has been pruned. These are needed to recompute the grafted
+///   tree root without the pruned chunks.
 ///
-/// Returns `(metadata_handle, pruned_chunks, pinned_node_digests)`.
+/// Returns `(metadata_handle, pruning_boundary, replay_start)`.
 pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
     context: E,
     partition: &str,
-) -> Result<(Metadata<E, U64, Vec<u8>>, usize, Vec<D>), Error<F>> {
+) -> Result<RecoveredMetadata<E, D>, Error<F>> {
     let metadata_cfg = MConfig {
         partition: partition.into(),
         codec_config: ((0..).into(), ()),
@@ -1204,44 +1286,53 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
     let metadata =
         Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), metadata_cfg).await?;
 
-    let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-    let pruned_chunks = match metadata.get(&key) {
-        Some(bytes) => u64::from_be_bytes(bytes.as_slice().try_into().map_err(|_| {
-            error!("pruned chunks value not a valid u64");
-            Error::<F>::DataCorrupted("pruned chunks value not a valid u64")
-        })?),
-        None => {
-            warn!("bitmap metadata does not contain pruned chunks, initializing as empty");
-            0
-        }
-    } as usize;
+    let base = read_grafted_boundary::<F, E, D>(&metadata, PRUNED_CHUNKS_PREFIX, NODE_PREFIX)?;
+    let base = base.unwrap_or_else(|| {
+        warn!("bitmap metadata does not contain pruned chunks, initializing as empty");
+        (0, Vec::new())
+    });
+    let start =
+        read_grafted_boundary::<F, E, D>(&metadata, START_CHUNKS_PREFIX, START_NODE_PREFIX)?;
+    Ok((metadata, base, start))
+}
+
+/// Read the chunk count at `chunks_prefix` and the grafted tree pinned nodes for it under
+/// `node_prefix`, if the count was recorded.
+fn read_grafted_boundary<F: merkle::Graftable, E: Context, D: Digest>(
+    metadata: &Metadata<E, U64, Vec<u8>>,
+    chunks_prefix: u8,
+    node_prefix: u8,
+) -> Result<Option<GraftedBoundary<D>>, Error<F>> {
+    let Some(bytes) = metadata.get(&U64::new(chunks_prefix, 0)) else {
+        return Ok(None);
+    };
+    let chunks = u64::from_be_bytes(bytes.as_slice().try_into().map_err(|_| {
+        error!("pruned chunks value not a valid u64");
+        Error::<F>::DataCorrupted("pruned chunks value not a valid u64")
+    })?) as usize;
 
     // Load pinned nodes if database was pruned. We use nodes_to_pin on the grafted leaf count
     // to determine how many peaks to read. (Multiplying pruned_chunks by chunk_size is a
     // left-shift, preserving popcount, so the peak count is the same in grafted or ops space.)
-    let pinned_nodes = if pruned_chunks > 0 {
-        let pruned_loc = Location::<F>::new(pruned_chunks as u64);
-        if !pruned_loc.is_valid() {
-            return Err(Error::DataCorrupted("pruned chunks exceeds MAX_LEAVES"));
-        }
-        let mut pinned = Vec::new();
-        for (index, _pos) in F::nodes_to_pin(pruned_loc).enumerate() {
-            let metadata_key = U64::new(NODE_PREFIX, index as u64);
-            let Some(bytes) = metadata.get(&metadata_key) else {
-                return Err(Error::DataCorrupted(
-                    "missing pinned node in grafted tree metadata",
-                ));
-            };
-            let digest = D::decode(Copying(bytes))
-                .map_err(|_| Error::<F>::DataCorrupted("invalid pinned node digest"))?;
-            pinned.push(digest);
-        }
-        pinned
-    } else {
-        Vec::new()
-    };
-
-    Ok((metadata, pruned_chunks, pinned_nodes))
+    if chunks == 0 {
+        return Ok(Some((0, Vec::new())));
+    }
+    let loc = Location::<F>::new(chunks as u64);
+    if !loc.is_valid() {
+        return Err(Error::DataCorrupted("pruned chunks exceeds MAX_LEAVES"));
+    }
+    let mut pinned = Vec::new();
+    for (index, _pos) in F::nodes_to_pin(loc).enumerate() {
+        let Some(bytes) = metadata.get(&U64::new(node_prefix, index as u64)) else {
+            return Err(Error::DataCorrupted(
+                "missing pinned node in grafted tree metadata",
+            ));
+        };
+        let digest = D::decode(Copying(bytes))
+            .map_err(|_| Error::<F>::DataCorrupted("invalid pinned node digest"))?;
+        pinned.push(digest);
+    }
+    Ok(Some((chunks, pinned)))
 }
 
 #[cfg(test)]

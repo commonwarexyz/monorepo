@@ -2011,6 +2011,7 @@ mod test {
             frontier,
             journal,
             hasher,
+            base,
         } = log;
         let log = authenticated::Journal {
             merkle,
@@ -2023,6 +2024,7 @@ mod test {
                 state: state.clone(),
             },
             hasher,
+            base,
         };
         (
             Db {
