@@ -177,6 +177,7 @@ pub struct Parameters {
     chain_limits: ChainLimits,
     producers: Arc<[Participant]>,
     leaders: LeaderSchedule,
+    payments: bool,
 }
 
 impl Parameters {
@@ -211,6 +212,7 @@ impl Parameters {
             chain_limits: ChainLimits::uniform(limits, producers.len()),
             producers: producers.into(),
             leaders: LeaderSchedule::round_robin(participants)?,
+            payments: false,
         })
     }
 
@@ -238,6 +240,16 @@ impl Parameters {
     /// shares too.
     pub const fn with_da_quorum(mut self, quorum: DaQuorum) -> Self {
         self.codec_config = self.codec_config.with_da_quorum(quorum);
+        self
+    }
+
+    /// Enables or disables payment chains for the epoch (off by default).
+    ///
+    /// With payments on, every chain with `d = 0` and `e = 0` is a payment chain (see
+    /// [`Self::payment_chain`]). With payments off, such a chain is an ordinary certified-only
+    /// chain, and the epoch behaves exactly as one without the toggle.
+    pub const fn with_payments(mut self, payments: bool) -> Self {
+        self.payments = payments;
         self
     }
 
@@ -301,6 +313,25 @@ impl Parameters {
     /// Returns which quorum recovers DA certificates.
     pub const fn da_quorum(&self) -> DaQuorum {
         self.codec_config.da_quorum_kind()
+    }
+
+    /// Returns whether the epoch runs payment chains (see [`Self::with_payments`]).
+    pub const fn payments(&self) -> bool {
+        self.payments
+    }
+
+    /// Returns whether `chain` is a payment chain: payments are on and the chain has `d = 0` and
+    /// `e = 0`.
+    ///
+    /// A payment chain places only certified blocks, its producer assembles `n - f` receipts from
+    /// the DA votes it collects, and the ordering sweep visits payment-chain positions before the
+    /// ordinary passes.
+    pub fn payment_chain(&self, chain: ChainId) -> bool {
+        self.payments
+            && self
+                .chain_limits
+                .get(chain)
+                .is_some_and(|limits| limits.certified_only() && limits.extension_bound() == 0)
     }
 
     /// Returns whether `chain` issues binding receipts: certificates bind under
@@ -449,6 +480,11 @@ impl<D: Digest> Protocol<D> {
     /// Returns whether `chain` issues binding receipts (see [`Parameters::receipt_chain`]).
     pub fn receipt_chain(&self, chain: ChainId) -> bool {
         self.parameters.receipt_chain(chain)
+    }
+
+    /// Returns whether `chain` is a payment chain (see [`Parameters::payment_chain`]).
+    pub fn payment_chain(&self, chain: ChainId) -> bool {
+        self.parameters.payment_chain(chain)
     }
 
     /// Returns the epoch's synthetic genesis facts.
@@ -694,6 +730,32 @@ mod tests {
             parameters.codec_config().da_quorum(),
             parameters.codec_config().view_quorum()
         );
+    }
+
+    #[test]
+    fn payment_chains_need_the_toggle_and_zero_depth_and_extension() {
+        let namespace = b"_COMMONWARE_CONSENSUS_MULTIMMIT_PAYMENT_CHAIN_TEST";
+        let certified = PathLimits::new(0, 0).with_pipeline_window(4).unwrap();
+        let parameters = Parameters::new(Epoch::new(1), namespace, 6, producers(3), certified)
+            .unwrap()
+            .with_chain_limits(vec![certified, PathLimits::new(0, 1), PathLimits::new(2, 0)])
+            .unwrap();
+        let chains = || (0..3).map(ChainId::new);
+
+        // Off by default: a certified-only chain is an ordinary chain.
+        assert!(!parameters.payments());
+        assert!(chains().all(|chain| !parameters.payment_chain(chain)));
+
+        // On: only the chain with d = 0 and e = 0 is a payment chain.
+        let parameters = parameters.with_payments(true);
+        assert!(parameters.payments());
+        assert_eq!(
+            chains()
+                .map(|chain| parameters.payment_chain(chain))
+                .collect::<Vec<_>>(),
+            [true, false, false]
+        );
+        assert!(!parameters.payment_chain(ChainId::new(3)));
     }
 
     #[test]
