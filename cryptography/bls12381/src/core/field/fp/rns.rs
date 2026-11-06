@@ -70,7 +70,7 @@ use crate::{
         debug_counter::DebugCounter,
         field::arithmetic::{Field, Signed, TIGHT, UNROLLED, unroll},
     },
-    montgomery::subtract_modulus,
+    montgomery::{self, subtract_modulus},
 };
 use commonware_simd::{Operation, Simd, X86V4C};
 use core::hint::black_box;
@@ -96,6 +96,13 @@ const MASK: u64 = (1 << WORD) - 1;
 
 /// Largest integer bound of any value, in units of `p`.
 pub const LIMIT: u64 = 1 << 11;
+
+/// Limbs of the signed representation of [`montgomery::invert`] that hold the modulus with two
+/// spare bits.
+const INVERSE_LIMBS: usize = 7;
+
+/// `p^(-1) mod 2^62`, for [`montgomery::invert`].
+const INVERSE_LIMB: u64 = montgomery::inverse_mod_limb(MODULUS[0]);
 
 /// Bound on the multiple of `M` by which the unestimated quotient of a multiplication may exceed
 /// the exact one, which adds at most this multiple of `p` to the product.
@@ -1388,6 +1395,19 @@ impl<S: X86V4C> Field<S> for Rns<S> {
     fn cross(simd: S, a: [Self; 2], b: [Self; 2], _p0: Wide<S>, _p1: Wide<S>) -> Signed<Wide<S>> {
         let high = Field::product(a[0], simd, b[1]);
         Signed::positive(Self::accumulate_product(simd, high, a[1], b[0]))
+    }
+
+    /// Inverts the canonical integer in scalar arithmetic with [`montgomery::invert`], then loads
+    /// the inverse: a single element has nothing to overlap the chain of an exponentiation
+    /// with, and the constant-time division steps cost a small fraction of it.
+    #[inline(always)]
+    fn invert(self, simd: S) -> Self {
+        let mut element = [[0; BYTES]];
+        self.store(simd, &mut element);
+        let words = words_from_bytes(&element[0]);
+        let inverse = montgomery::invert::<WORDS, INVERSE_LIMBS>(&words, &MODULUS, INVERSE_LIMB);
+        let element = bytes_from_words(&inverse);
+        Self::load(simd, &[element], &element)
     }
 
     /// Multiply-adds each of the four products into the sum it belongs to: the real component
