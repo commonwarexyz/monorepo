@@ -54,7 +54,7 @@ const Z: u64 = 0xd201_0000_0001_0000;
 const HALF_Z: u64 = Z / 2;
 
 /// Most pairs whose Miller loops share squarings, which bounds the points held at once.
-const SHARED: usize = 4;
+pub const SHARED: usize = 8;
 
 /// Largest number of pairs in a value, the widest representation's lane count.
 const MAX_LANES: usize = 16;
@@ -113,7 +113,7 @@ impl<F> Pair<F> {
 /// Returns, in each lane, the product of the Miller loops of that lane's pairs, or one for no
 /// pairs.
 ///
-/// Every group of up to four pairs shares its squarings. The result is only defined up to the
+/// Every group of up to [`SHARED`] pairs shares its squarings. The result is only defined up to the
 /// factors that [`final_exponentiation`] removes.
 pub fn miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<F> {
     let mut chunks = pairs.chunks(SHARED);
