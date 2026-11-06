@@ -19,6 +19,7 @@ use crate::{
     Reporter,
     multimmit::{
         config::max_outbox_effects,
+        order::Lanes,
         scheme::Scheme,
         types::{Body, ChainId, CodecConfig, TransactionBlock, genesis_history},
     },
@@ -68,6 +69,7 @@ where
 {
     context: E,
     codec: CodecConfig,
+    lanes: Lanes,
     limits: Limits,
     stores: Stores<E, H, S, B>,
     inputs: Inputs<H, S, B>,
@@ -101,7 +103,9 @@ where
         codec_config: codec,
         body_codec_config: body_codec,
         limits,
+        payment_chains,
     } = config;
+    let lanes = Lanes::new(payment_chains);
     let chains = codec.chains();
     let buffers = Buffers {
         page_cache,
@@ -177,6 +181,7 @@ where
         Service {
             context,
             codec,
+            lanes,
             limits,
             stores: Stores {
                 blocks,
@@ -238,6 +243,7 @@ where
             self.limits.max_pending_acks,
         );
         let codec = self.codec;
+        let lanes = self.lanes;
         let limits = self.limits;
         let stores = self.stores;
         let inputs = self.inputs;
@@ -249,6 +255,7 @@ where
                 let ledger = Ledger::new(
                     context,
                     codec,
+                    lanes,
                     limits,
                     stores,
                     inputs,

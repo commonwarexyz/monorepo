@@ -4,6 +4,7 @@ use crate::{
     Epochable as _, Reporter,
     multimmit::{
         algebra::FinalTips,
+        config::Parameters,
         marshal::{
             Bridge, Config, Floor, Key, Limits, LqcVerifier, Mailbox, MarshalProgress, OutputIndex,
             ServiceHandle, Update, open,
@@ -210,13 +211,14 @@ pub(super) struct Node {
     broadcast: Handle<()>,
 }
 
-/// One view's certified proposal: its L-QC, the history record its leader commits to, and the
-/// blocks it proposes on every chain.
+/// One view's certified proposal: its L-QC, the history record its leader commits to, the
+/// blocks it proposes on every chain, and which chains are payment chains.
 #[derive(Clone)]
 pub(super) struct Certified {
     pub(super) lqc: Arc<Lqc<S, D>>,
     pub(super) history: Arc<TipRecord<D>>,
     pub(super) blocks: Vec<Vec<Arc<TestBlock>>>,
+    pub(super) payment: Arc<[bool]>,
 }
 
 impl Certified {
@@ -229,14 +231,20 @@ impl Certified {
             .collect()
     }
 
-    /// Returns the blocks in the order they are delivered: offset by offset, chain by chain.
+    /// Returns the blocks in the order they are delivered: offset by offset, chain by chain, the
+    /// payment chains' first.
     pub(super) fn ordered(&self) -> Vec<Arc<TestBlock>> {
         let depth = self.blocks.iter().map(Vec::len).max().unwrap_or(0);
-        (0..depth)
-            .flat_map(|offset| {
-                self.blocks
-                    .iter()
-                    .filter_map(move |chain| chain.get(offset).cloned())
+        [true, false]
+            .into_iter()
+            .flat_map(|payment| {
+                (0..depth).flat_map(move |offset| {
+                    self.blocks
+                        .iter()
+                        .zip(self.payment.iter())
+                        .filter(move |(_, is_payment)| **is_payment == payment)
+                        .filter_map(move |(chain, _)| chain.get(offset).cloned())
+                })
             })
             .collect()
     }
@@ -274,6 +282,8 @@ impl Certified {
 /// A scripted consensus: a chain of certified views over the genesis tips.
 pub(super) struct Script {
     pub(super) committee: Committee<S>,
+    /// The epoch parameters marshal orders with.
+    pub(super) parameters: Parameters,
     pub(super) views: Vec<Certified>,
     /// Tips after each view, the genesis tips first.
     pub(super) tips: Vec<Vec<BlockRef<D>>>,
@@ -281,17 +291,41 @@ pub(super) struct Script {
 
 impl Script {
     pub(super) fn new(seed: u64) -> Self {
-        let committee = Committee::builder(seed, PARTICIPANTS)
+        Self::build(seed, false)
+    }
+
+    /// Returns a script whose last chain is a payment chain (`d = 0`, `e = 0`, payments on).
+    pub(super) fn with_payments(seed: u64) -> Self {
+        Self::build(seed, true)
+    }
+
+    fn build(seed: u64, payments: bool) -> Self {
+        let mut builder = Committee::builder(seed, PARTICIPANTS)
             .namespace(NAMESPACE)
             .producers((0..CHAINS as u32).map(Participant::new).collect())
-            .limits(PathLimits::new(4, 1))
-            .build();
+            .limits(PathLimits::new(4, 1));
+        if payments {
+            let mut limits = vec![PathLimits::new(4, 1); CHAINS];
+            limits[CHAINS - 1] = PathLimits::new(0, 0);
+            builder = builder.chain_limits(limits);
+        }
+        let committee = builder.build();
+        let parameters =
+            Arc::unwrap_or_clone(Arc::clone(committee.config.parameters())).with_payments(payments);
         let tips = vec![committee.config.genesis().tips().to_vec()];
         Self {
             committee,
+            parameters,
             views: Vec::new(),
             tips,
         }
+    }
+
+    /// Returns whether each chain is a payment chain.
+    fn payment(&self) -> Arc<[bool]> {
+        (0..CHAINS as u32)
+            .map(|chain| self.parameters.payment_chain(ChainId::new(chain)))
+            .collect()
     }
 
     pub(super) fn codec(&self) -> crate::multimmit::types::CodecConfig {
@@ -307,7 +341,14 @@ impl Script {
             None => genesis_history::<Sha256>(self.committee.config.genesis()),
         };
         let history = Arc::new(TipRecord::at_tips(parent, bases.clone()).unwrap());
-        let certified = certify(&self.committee, view, history, &bases, counts);
+        let certified = certify(
+            &self.committee,
+            view,
+            history,
+            &bases,
+            counts,
+            self.payment(),
+        );
         self.tips.push(certified.tips(&bases));
         self.views.push(certified);
         self.views.last().unwrap()
@@ -344,6 +385,7 @@ impl Script {
             lqc: Arc::new(lqc),
             history: Arc::clone(&certified.history),
             blocks: certified.blocks.clone(),
+            payment: Arc::clone(&certified.payment),
         }
     }
 
@@ -372,6 +414,7 @@ impl Script {
                 lqc: Arc::new(lqc),
                 history: Arc::clone(&certified.history),
                 blocks: certified.blocks.clone(),
+                payment: Arc::clone(&certified.payment),
             };
         }
         panic!("no single-byte change keeps the certificate decodable");
@@ -428,12 +471,16 @@ fn body(marker: u64) -> TestBody {
 }
 
 /// Certifies view `view`: `counts` new blocks above `bases`, every vote supporting all of them.
+///
+/// A payment chain (`d = 0`) proposes no blocks: its proposal anchors at a DA certificate of its
+/// newest block, so its tip jumps there.
 fn certify(
     committee: &Committee<S>,
     view: u64,
     history: Arc<TipRecord<D>>,
     bases: &[BlockRef<D>],
     counts: [usize; CHAINS],
+    payment: Arc<[bool]>,
 ) -> Certified {
     let epoch = committee.config.epoch();
     let mut blocks = Vec::with_capacity(CHAINS);
@@ -454,14 +501,15 @@ fn certify(
             parent = block.reference().digest();
             chain_blocks.push(block);
         }
+        let anchor = match chain_blocks.last() {
+            Some(tip) if payment[chain] => {
+                payloads.clear();
+                Anchor::Certificate(committee.da_certificate(tip.header().clone()))
+            }
+            _ => Anchor::Tip(*base),
+        };
         proposals.push(
-            ChainProposal::new(
-                id,
-                Anchor::Tip(*base),
-                payloads,
-                committee.codec().pipeline_depth(),
-            )
-            .unwrap(),
+            ChainProposal::new(id, anchor, payloads, committee.codec().pipeline_depth()).unwrap(),
         );
         blocks.push(chain_blocks);
     }
@@ -475,7 +523,8 @@ fn certify(
     .unwrap();
     let positions = blocks
         .iter()
-        .map(|chain| Position::new(chain.len() as u32))
+        .zip(payment.iter())
+        .map(|(chain, payment)| Position::new(if *payment { 0 } else { chain.len() as u32 }))
         .collect();
     let vote = VoteBody::for_leader(
         DigestedLeader::new::<Sha256>(&leader),
@@ -495,6 +544,7 @@ fn certify(
         lqc: Arc::new(lqc),
         history,
         blocks,
+        payment,
     }
 }
 
@@ -508,12 +558,26 @@ pub(super) struct Harness {
     launches: Vec<usize>,
     /// Nodes that corrupt every response they serve.
     corrupt: Vec<bool>,
+    /// Nodes that order without the epoch's payment chains.
+    ordinary: Vec<bool>,
     pub(super) limits: Limits,
 }
 
 impl Harness {
     pub(super) async fn new(context: deterministic::Context, seed: u64, nodes: usize) -> Self {
-        let script = Script::new(seed);
+        Self::with_script(context, Script::new(seed), nodes).await
+    }
+
+    /// Returns a harness whose script runs a payment chain (see [`Script::with_payments`]).
+    pub(super) async fn with_payments(
+        context: deterministic::Context,
+        seed: u64,
+        nodes: usize,
+    ) -> Self {
+        Self::with_script(context, Script::with_payments(seed), nodes).await
+    }
+
+    async fn with_script(context: deterministic::Context, script: Script, nodes: usize) -> Self {
         let identities = script.committee.identities[..nodes].to_vec();
         let oracle = start_network(&context, identities.clone(), 4 * 1024 * 1024).await;
         link_all(&oracle, &identities).await;
@@ -530,6 +594,7 @@ impl Harness {
             nodes: (0..nodes).map(|_| None).collect(),
             launches: vec![0; nodes],
             corrupt: vec![false; nodes],
+            ordinary: vec![false; nodes],
             limits,
         }
     }
@@ -568,14 +633,18 @@ impl Harness {
             },
         );
         let broadcast = broadcast_engine.start(broadcast_network);
-        let config = Config::new(
+        let mut config = Config::new(
             self.script.committee.config.genesis().clone(),
             format!("marshal_{index}"),
             CacheRef::new(NZU16!(1024), NZUsize!(8)),
             self.script.codec(),
             (),
         )
-        .with_limits(self.limits);
+        .with_limits(self.limits)
+        .with_payments(&self.script.parameters);
+        if self.ordinary[index] {
+            config.payment_chains = Vec::new();
+        }
         let (service, bridge) = open::<_, Sha256, S, TestBody, ed25519::PublicKey>(
             context.child("marshal"),
             config,
@@ -614,6 +683,12 @@ impl Harness {
             resolver: resolver_handle,
             broadcast,
         });
+    }
+
+    /// Makes node `index` order without the payment chains from its next start, as a node
+    /// configured unlike its peers would.
+    pub(super) fn order_without_payments(&mut self, index: usize) {
+        self.ordinary[index] = true;
     }
 
     /// Makes node `index` corrupt every response it serves from its next start.
