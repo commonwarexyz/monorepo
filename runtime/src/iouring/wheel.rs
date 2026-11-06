@@ -30,7 +30,7 @@
 //!
 //! The wheel holds no payload. Its owner keys slots by a stable index of its
 //! own, such as a slab index, and keeps the state behind them. Each worker's
-//! sleep timers ([`super::sleep::TimerShard`], 1024 ns ticks) and each
+//! sleep timers ([`super::sleep::Timers`], 1024 ns ticks) and each
 //! driver's request deadlines ([`super::deadlines::Deadlines`], 2^20 ns ticks)
 //! own an instance. Each owner counts nanoseconds from an [`Instant`] of its
 //! own, its creation, and converts with [`InstantExt`]: an instant before
