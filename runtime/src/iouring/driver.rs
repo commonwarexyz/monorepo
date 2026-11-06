@@ -1529,6 +1529,7 @@ pub mod tests {
         let id = harness.admit(recv(left, 1, Some(deadline)), 0);
         harness.service_at(harness.start, true);
 
+        // The request is in flight, and its firing time bounds the next wait.
         assert!(harness.completed.is_empty());
         assert!(harness.driver.state.waiters.is_in_flight(id));
         assert_eq!(
@@ -2988,6 +2989,7 @@ pub mod tests {
 
     #[test]
     fn test_completed_requests_leave_no_deadlines() {
+        // Six receives with installed deadlines, each with a byte waiting.
         let mut harness = Harness::new(8);
         let deadline = harness.start + Duration::from_secs(30);
         let mut peers = Vec::new();
@@ -3028,7 +3030,8 @@ pub mod tests {
         );
         assert!(harness.driver.next_deadline().is_none());
 
-        // A later pass past the deadline expires nothing.
+        // A later pass past the deadline expires nothing, so every request
+        // reports its received byte.
         let fires = harness.fires_at(deadline);
         harness
             .driver
@@ -3043,6 +3046,8 @@ pub mod tests {
     #[test]
     fn test_expiry_cancels_and_reports_timeout() {
         for in_flight in [false, true] {
+            // A receive that never completes, with its deadline installed
+            // while queued or in flight.
             let mut harness = Harness::new(1);
             let deadline = harness.start + Duration::from_secs(10);
             let (socket, _peer) = UnixStream::pair().unwrap();
@@ -3068,6 +3073,8 @@ pub mod tests {
             assert!(harness.driver.state.waiters.is_scheduled(id));
             assert!(harness.driver.state.pending_cancels.is_empty());
 
+            // At its firing time, expiry unlinks the deadline and cancels the
+            // request.
             harness
                 .driver
                 .state
@@ -3087,6 +3094,8 @@ pub mod tests {
                 assert!(harness.driver.is_empty());
                 harness.collect();
             }
+
+            // Either way, the request reports a timeout.
             assert_eq!(harness.completed.len(), 1);
             assert!(timed_out(&harness.completed[0], 0));
             harness.drain();
@@ -3095,6 +3104,7 @@ pub mod tests {
 
     #[test]
     fn test_cancelled_request_deadline_is_removed_exactly_once() {
+        // Two in-flight receives share one deadline.
         let mut harness = Harness::new(2);
         let deadline = harness.start + Duration::from_secs(10);
         let (left, _right) = UnixStream::pair().unwrap();
@@ -3143,6 +3153,7 @@ pub mod tests {
         );
         assert!(harness.driver.next_deadline().is_none());
 
+        // The orphan retires without an observer, and the sibling times out.
         harness.until(2);
         let orphaned = harness
             .completed
@@ -3161,6 +3172,7 @@ pub mod tests {
 
     #[test]
     fn test_stale_and_reused_ids_cannot_unlink_another_request() {
+        // An orphaned request leaves its slot and its deadline at once.
         let mut harness = Harness::new(1);
         let early = harness.start + Duration::from_millis(5);
         let late = harness.start + Duration::from_millis(15);
@@ -3271,6 +3283,9 @@ pub mod tests {
         assert_eq!(harness.completed.len(), BUDGET as usize);
         assert_eq!(harness.driver.state.deadlines.len(), 3);
         assert!(harness.driver.next_deadline().unwrap() <= now);
+
+        // The next pass at the same time expires the rest, and each request
+        // reports a timeout.
         harness
             .driver
             .state

@@ -2706,12 +2706,12 @@ fn test_spawn_refused_by_the_closed_task_set_is_disposed_on_its_caller() {
 /// Teardown drops every idle or queued future, spawned locally or from
 /// another thread, while the worker's timers are still registered.
 #[test]
-fn test_teardown_drops_every_future_before_clearing_timers() {
+fn test_teardown_drops_every_future_before_closing_timers() {
     /// Record whether the worker still holds timers when a future is dropped.
     struct TimerCheck {
         /// Futures dropped.
         drops: Arc<AtomicUsize>,
-        /// Futures dropped while the worker's timer table was still open.
+        /// Futures dropped while the worker's timers were still open.
         early: Arc<AtomicUsize>,
     }
 
@@ -4387,6 +4387,7 @@ fn test_expiry_backlog_keeps_pace_with_long_polls() {
     /// Long polls measured after the storm, enough to span a full batch after
     /// several batches cut short while the backlog lingers.
     const MEASURED: usize = 4 * BATCH_SIZE;
+
     Runner::new(config()).start(|context| async move {
         // A task that requeues itself after polling for twice the slice. Once
         // the storm has drained, it measures the longest run of its polls that
@@ -4424,6 +4425,7 @@ fn test_expiry_backlog_keeps_pace_with_long_polls() {
             .map(|_| {
                 let polls = polls.clone();
                 context.child("group").spawn(move |context| async move {
+                    // Register every sleep in one poll.
                     let mut sleeps: Vec<_> = (0..2 * BUDGET)
                         .map(|_| context.sleep_until(deadline))
                         .collect();
@@ -4434,6 +4436,9 @@ fn test_expiry_backlog_keeps_pace_with_long_polls() {
                         Poll::Ready(())
                     })
                     .await;
+
+                    // Report the long polls counted when the first sleep
+                    // completed and when the last one did.
                     let mut first = None;
                     for sleep in sleeps {
                         sleep.await;
@@ -4443,6 +4448,9 @@ fn test_expiry_backlog_keeps_pace_with_long_polls() {
                 })
             })
             .collect();
+
+        // The storm spans from the earliest first completion to the latest
+        // last one. Once it has drained, the spinner measures.
         let (mut first, mut last) = (usize::MAX, 0);
         for group in groups {
             let (began, ended) = group.await.unwrap();
