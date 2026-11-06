@@ -1456,7 +1456,7 @@ mod tests {
     async fn populate_fixed_db<F, DB>(db: DB, start: u64, count: u64) -> DB
     where
         F: merkle::Graftable,
-        DB: DbAny<F, Key = sha256::Digest, Value = sha256::Digest>,
+        DB: DbAny<Family = F, Key = sha256::Digest, Value = sha256::Digest>,
     {
         let mut batch = db.new_batch();
         for idx in start..start + count {

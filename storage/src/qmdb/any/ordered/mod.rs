@@ -549,7 +549,7 @@ mod test {
     #[boxed]
     pub(crate) async fn test_ordered_any_db_empty<
         F: Family,
-        D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+        D: DbAny<Family = F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         context: Context,
         db: D,
@@ -612,7 +612,7 @@ mod test {
     #[boxed]
     pub(crate) async fn test_ordered_any_db_basic<
         F: Family,
-        D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+        D: DbAny<Family = F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         context: Context,
         db: D,
@@ -819,7 +819,7 @@ mod test {
     #[boxed]
     pub(crate) async fn test_ordered_any_update_collision_edge_case<
         F: Family,
-        D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+        D: DbAny<Family = F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         db: D,
     ) {

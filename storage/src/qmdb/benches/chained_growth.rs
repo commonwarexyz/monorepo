@@ -158,7 +158,7 @@ macro_rules! with_current_db {
 /// batch.
 async fn run_chained_growth<
     F: merkle::Family,
-    C: DbAny<F, Key = Digest, Value = Digest>,
+    C: DbAny<Family = F, Key = Digest, Value = Digest>,
     Fork: Fn(&C::Merkleized) -> C::Batch,
 >(
     db: C,

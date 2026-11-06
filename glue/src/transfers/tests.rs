@@ -626,7 +626,7 @@ fn plan_deduplicates_many_keys() {
 
 /// A database of `A` accounts that the tests stage, settle, merkleize, and read back.
 trait TestDb<A: Account>:
-    DbAny<mmr::Family, Key = Key, Value = A, Digest = Digest>
+    DbAny<Family = mmr::Family, Key = Key, Value = A, Digest = Digest>
     + BatchableDb<Merkleized: MerkleizedBatch<Digest = Digest>>
 {
     /// Stages `keys` in a new batch, settles their reads with `settle`, and merkleizes the slots it

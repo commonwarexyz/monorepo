@@ -36,7 +36,7 @@ type ImmDb = ImmFixDb<Mmb>;
 // Ordered "any" DB with a partitioned snapshot index.
 type ODb = AnyOFixP256Db<Mmb>;
 
-fn write_updates<D: BatchableDb<K = Digest, V = Digest>>(
+fn write_updates<D: BatchableDb<Key = Digest, Value = Digest>>(
     mut batch: D::Batch,
     updates: u64,
     rng: &mut TestRng,

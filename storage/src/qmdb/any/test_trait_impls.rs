@@ -38,8 +38,8 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     type Family = F;
-    type K = K;
-    type V = V::Value;
+    type Key = K;
+    type Value = V::Value;
     type Metadata = V::Value;
     type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>;
 
@@ -75,8 +75,8 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     type Family = F;
-    type K = K;
-    type V = V::Value;
+    type Key = K;
+    type Value = V::Value;
     type Metadata = V::Value;
     type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>;
 
@@ -122,15 +122,15 @@ where
     UnmerkleizedBatch<F, H, U, S>: UnmerkleizedBatchTrait<
             Self,
             Family = F,
-            K = U::Key,
-            V = U::Value,
+            Key = U::Key,
+            Value = U::Value,
             Metadata = U::Value,
             Merkleized = Arc<MerkleizedBatch<F, H::Digest, U, S>>,
         >,
 {
     type Family = F;
-    type K = U::Key;
-    type V = U::Value;
+    type Key = U::Key;
+    type Value = U::Value;
     type Merkleized = Arc<MerkleizedBatch<F, H::Digest, U, S>>;
     type Batch = UnmerkleizedBatch<F, H, U, S>;
 
@@ -146,7 +146,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> DbAny<F> for Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> DbAny for Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -156,10 +156,8 @@ where
     U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
-    Self: BatchableDb<Family = F, K = U::Key, V = U::Value>,
+    Self: BatchableDb<Family = F, Key = U::Key, Value = U::Value>,
 {
-    type Key = U::Key;
-    type Value = U::Value;
     type Digest = H::Digest;
 
     async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
@@ -214,7 +212,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> Provable<F> for Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Provable for Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -224,7 +222,7 @@ where
     U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
-    Self: BatchableDb<Family = F, K = U::Key, V = U::Value>,
+    Self: BatchableDb<Family = F, Key = U::Key, Value = U::Value>,
 {
     type Operation = Operation<F, U>;
 
