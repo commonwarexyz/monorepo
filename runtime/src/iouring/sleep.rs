@@ -120,7 +120,7 @@
 use super::{
     runtime::{Deferred, Local, MAX_TIMEOUT},
     slab::{Id, Slab},
-    task::is_task_waker,
+    task::Task,
     wheel::{BUDGET, InstantExt as _, Wheel},
 };
 use crossbeam_utils::CachePadded;
@@ -612,7 +612,7 @@ impl Fast {
     /// is held as an integer so that a sleep stays `Send` and `Sync`.
     fn stored(waker: &Waker) -> Self {
         Self::Stored(
-            is_task_waker(waker)
+            Task::is_waker(waker)
                 .then(|| NonZeroUsize::new(waker.data().addr()))
                 .flatten(),
         )
@@ -622,7 +622,7 @@ impl Fast {
     #[inline]
     fn matches(&self, waker: &Waker) -> bool {
         match self {
-            Self::Stored(Some(data)) => is_task_waker(waker) && waker.data().addr() == data.get(),
+            Self::Stored(Some(data)) => Task::is_waker(waker) && waker.data().addr() == data.get(),
             Self::Stored(None) => false,
             Self::Held(held) => held.will_wake(waker),
         }
@@ -632,7 +632,7 @@ impl Fast {
     fn describes(&self, stored: &Waker) -> bool {
         match self {
             Self::Stored(Some(_)) => self.matches(stored),
-            Self::Stored(None) | Self::Held(_) => !is_task_waker(stored),
+            Self::Stored(None) | Self::Held(_) => !Task::is_waker(stored),
         }
     }
 
@@ -722,7 +722,7 @@ impl Sleeper {
                     // The registration waits with an equivalent waker that is
                     // not a task waker, so polls may match a held clone from
                     // now on. It displaces any older one.
-                    Some(clone) if current.will_wake(waker) && !is_task_waker(&clone) => {
+                    Some(clone) if current.will_wake(waker) && !Task::is_waker(&clone) => {
                         let held = Fast::Held(ManuallyDrop::new(clone));
                         (self.fast.replace(held), None)
                     }

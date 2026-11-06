@@ -698,6 +698,20 @@ impl Task {
         (Self(ptr), Runnable(Self(ptr)))
     }
 
+    /// Whether `waker` is a task's waker, whose data pointer is its task's
+    /// header.
+    ///
+    /// Sleeps use this to compare a task waker's identity without keeping a
+    /// clone of it. A header outlives every reference to its task: the cell is
+    /// freed only after its last reference is released, by a thread that has
+    /// acquired every earlier release, and the allocator orders a free before
+    /// any later allocation at the same address. So a new task's waker can
+    /// share a consumed waker's identity only after everything that preceded
+    /// the consumption.
+    pub fn is_waker(waker: &Waker) -> bool {
+        ptr::eq(waker.vtable(), &WAKER_VTABLE)
+    }
+
     /// The header pointer, with the allocation's provenance, holding no
     /// reference of its own.
     pub const fn as_ptr(&self) -> NonNull<Header> {
@@ -965,18 +979,6 @@ impl Deref for WakerRef<'_> {
 /// Waker operations on a header pointer that carries one reference.
 static WAKER_VTABLE: RawWakerVTable =
     RawWakerVTable::new(waker_clone, waker_wake, waker_wake_by_ref, waker_drop);
-
-/// Whether `waker` is a task's waker, whose data pointer is its task's header.
-///
-/// Sleeps use this to compare a task waker's identity without keeping a clone
-/// of it. A header outlives every reference to its task: the cell is freed
-/// only after its last reference is released, by a thread that has acquired
-/// every earlier release, and the allocator orders a free before any later
-/// allocation at the same address. So a new task's waker can share a consumed
-/// waker's identity only after everything that preceded the consumption.
-pub fn is_task_waker(waker: &Waker) -> bool {
-    ptr::eq(waker.vtable(), &WAKER_VTABLE)
-}
 
 /// Borrow the header behind a waker's data pointer.
 ///
