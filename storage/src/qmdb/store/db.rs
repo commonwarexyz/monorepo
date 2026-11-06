@@ -103,7 +103,7 @@ use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
 use commonware_runtime::Handle;
 use commonware_utils::{Widen, bitmap};
-use core::num::NonZeroUsize;
+use core::{borrow::Borrow, num::NonZeroUsize};
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 
@@ -201,19 +201,21 @@ where
     /// Batch read multiple keys, taking each from the batch if it modified the key and from the
     /// store otherwise.
     ///
-    /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V>>, Error> {
+    /// Accepts slices of owned or borrowed keys and returns results in input order.
+    pub async fn get_many(&self, keys: &[impl Borrow<K> + Sync]) -> Result<Vec<Option<V>>, Error> {
         let unmodified: Vec<&K> = keys
             .iter()
-            .copied()
+            .map(Borrow::borrow)
             .filter(|key| !self.diff.contains_key(*key))
             .collect();
         let mut stored = self.db.get_many(&unmodified).await?.into_iter();
         Ok(keys
             .iter()
-            .map(|key| match self.diff.get(*key) {
-                Some(value) => value.clone(),
-                None => stored.next().expect("one stored value per unmodified key"),
+            .map(|key| {
+                self.diff
+                    .get(key.borrow())
+                    .cloned()
+                    .unwrap_or_else(|| stored.next().expect("one stored value per unmodified key"))
             })
             .collect())
     }
@@ -307,13 +309,17 @@ where
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V>>, Error> {
+    /// Accepts slices of owned or borrowed keys and returns results in input order.
+    pub async fn get_many(&self, keys: &[impl Borrow<K> + Sync]) -> Result<Vec<Option<V>>, Error> {
         // Read every location the index reports for any key in one batched read.
         let mut candidates: Vec<(Location, usize)> = keys
             .iter()
             .enumerate()
-            .flat_map(|(index, key)| self.snapshot.get(key).map(move |&loc| (loc, index)))
+            .flat_map(|(index, key)| {
+                self.snapshot
+                    .get(key.borrow())
+                    .map(move |&loc| (loc, index))
+            })
             .collect();
         candidates.sort();
         let mut locs: Vec<u64> = candidates.iter().map(|&(loc, _)| *loc).collect();
@@ -331,7 +337,7 @@ where
             let Operation::Update(Update(k, v)) = &ops[read] else {
                 unreachable!("location ({loc}) does not reference update operation");
             };
-            if k == keys[index] {
+            if k == keys[index].borrow() {
                 values[index] = Some(v.clone());
             }
         }
@@ -1630,9 +1636,10 @@ mod test {
             .await;
             let (db, _) = apply_entries(db, [(k3, None)]).await;
 
-            assert!(db.get_many(&[]).await.unwrap().is_empty());
-            let keys = [&k2, &k4, &k1, &k3, &k2];
+            let keys = [k2, k4, k1, k3, k2];
+            assert!(db.get_many(&keys[..0]).await.unwrap().is_empty());
             let values = db.get_many(&keys).await.unwrap();
+            assert_eq!(db.get_many(&keys.each_ref()).await.unwrap(), values);
             assert_eq!(
                 values,
                 [Some(v2.clone()), None, Some(v1), None, Some(v2.clone())]
@@ -1642,10 +1649,11 @@ mod test {
             }
 
             let batch = db.new_batch().write(k1, None).write(k4, Some(v4.clone()));
-            assert_eq!(
-                batch.get_many(&[&k1, &k2, &k4]).await.unwrap(),
-                [None, Some(v2), Some(v4)]
-            );
+            let keys = [k1, k2, k4];
+            assert!(batch.get_many(&keys[..0]).await.unwrap().is_empty());
+            let values = batch.get_many(&keys).await.unwrap();
+            assert_eq!(batch.get_many(&keys.each_ref()).await.unwrap(), values);
+            assert_eq!(values, [None, Some(v2), Some(v4)]);
 
             db.destroy().await.unwrap();
         });
