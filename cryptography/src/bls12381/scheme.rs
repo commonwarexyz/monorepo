@@ -28,22 +28,20 @@
 //! ```
 
 use super::primitives::{
-    group::{self, Private},
+    group::{self, G1_ELEMENT_BYTE_LENGTH, G1Bytes, G2_ELEMENT_BYTE_LENGTH, G2Bytes, Private},
     ops,
     variant::{MinPk, Variant},
 };
-use crate::{BatchEntry, BatchVerifier, Secret, Signer as _};
+use crate::{BatchEntry, BatchVerifier, Encoding, Malformed, Secret, Signer as _};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, Copying, DecodeExt, EncodeFixed, Error as CodecError, FixedArray, FixedSize, Read,
-    ReadExt, Write,
+    Buf, Copying, DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
-use commonware_utils::{Array, Span};
 use core::{
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
@@ -180,8 +178,15 @@ impl BatchVerifier for PublicKey {
     }
 }
 
+/// The encoding of a BLS12-381 public key.
+pub type PublicKeyBytes = Encoding<PublicKey, G1_ELEMENT_BYTE_LENGTH>;
+
 /// BLS12-381 public key.
-#[derive(Clone, Eq, FixedArray)]
+///
+/// A key is built from its [PublicKeyBytes], which must encode a point of the prime-order
+/// subgroup other than the identity, so a key needs none of the checks [group] requires of
+/// untrusted points.
+#[derive(Clone, Eq)]
 pub struct PublicKey {
     raw: [u8; <MinPk as Variant>::Public::SIZE],
     key: <MinPk as Variant>::Public,
@@ -211,24 +216,29 @@ impl Write for PublicKey {
     }
 }
 
-impl Read for PublicKey {
-    type Cfg = ();
+impl TryFrom<PublicKeyBytes> for PublicKey {
+    type Error = Malformed;
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let key = <MinPk as Variant>::Public::decode(Copying(&raw))
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+    fn try_from(bytes: PublicKeyBytes) -> Result<Self, Malformed> {
+        let raw = *bytes.as_array();
+        let key = <MinPk as Variant>::Public::try_from(G1Bytes::new(raw))?;
         Ok(Self { raw, key })
     }
+}
+
+impl From<PublicKey> for PublicKeyBytes {
+    fn from(key: PublicKey) -> Self {
+        Self::new(key.raw)
+    }
+}
+
+impl crate::Validated for PublicKey {
+    type Bytes = PublicKeyBytes;
 }
 
 impl FixedSize for PublicKey {
     const SIZE: usize = <MinPk as Variant>::Public::SIZE;
 }
-
-impl Span for PublicKey {}
-
-impl Array for PublicKey {}
 
 impl Hash for PublicKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -292,8 +302,15 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
     }
 }
 
+/// The encoding of a BLS12-381 signature.
+pub type SignatureBytes = Encoding<Signature, G2_ELEMENT_BYTE_LENGTH>;
+
 /// BLS12-381 signature.
-#[derive(Clone, Eq, PartialEq, FixedArray)]
+///
+/// A signature is built from its [SignatureBytes] with the same subgroup and identity checks as
+/// [PublicKey]. Those checks are expensive, so messages carry [SignatureBytes] and convert many
+/// signatures together through [crate::Validated::try_from_batch].
+#[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
     raw: [u8; <MinPk as Variant>::Signature::SIZE],
     signature: <MinPk as Variant>::Signature,
@@ -313,24 +330,29 @@ impl Write for Signature {
     }
 }
 
-impl Read for Signature {
-    type Cfg = ();
+impl TryFrom<SignatureBytes> for Signature {
+    type Error = Malformed;
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let signature = <MinPk as Variant>::Signature::decode(Copying(&raw))
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+    fn try_from(bytes: SignatureBytes) -> Result<Self, Malformed> {
+        let raw = *bytes.as_array();
+        let signature = <MinPk as Variant>::Signature::try_from(G2Bytes::new(raw))?;
         Ok(Self { raw, signature })
     }
+}
+
+impl From<Signature> for SignatureBytes {
+    fn from(signature: Signature) -> Self {
+        Self::new(signature.raw)
+    }
+}
+
+impl crate::Validated for Signature {
+    type Bytes = SignatureBytes;
 }
 
 impl FixedSize for Signature {
     const SIZE: usize = <MinPk as Variant>::Signature::SIZE;
 }
-
-impl Span for Signature {}
-
-impl Array for Signature {}
 
 impl Hash for Signature {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -427,8 +449,9 @@ mod tests {
             .unwrap();
         let encoded = original.encode();
         assert_eq!(encoded.len(), PublicKey::SIZE);
-        let decoded = PublicKey::decode(encoded).unwrap();
-        assert_eq!(original, decoded);
+        let decoded = PublicKeyBytes::decode(encoded).unwrap();
+        assert_eq!(decoded, PublicKeyBytes::from(original.clone()));
+        assert_eq!(PublicKey::try_from(decoded).unwrap(), original);
     }
 
     #[test]
@@ -438,20 +461,23 @@ mod tests {
             .unwrap();
         let encoded = original.encode();
         assert_eq!(encoded.len(), Signature::SIZE);
-        let decoded = Signature::decode(encoded).unwrap();
-        assert_eq!(original, decoded);
+        let decoded = SignatureBytes::decode(encoded).unwrap();
+        assert_eq!(decoded, SignatureBytes::from(original.clone()));
+        assert_eq!(Signature::try_from(decoded).unwrap(), original);
     }
 
     fn parse_private_key(private_key: &str) -> Result<PrivateKey, CodecError> {
         PrivateKey::decode(commonware_formatting::from_hex(private_key).unwrap())
     }
 
-    fn parse_public_key(public_key: &str) -> Result<PublicKey, CodecError> {
-        PublicKey::decode(commonware_formatting::from_hex(public_key).unwrap())
+    fn parse_public_key(public_key: &str) -> Option<PublicKey> {
+        let bytes = PublicKeyBytes::decode(commonware_formatting::from_hex(public_key).unwrap());
+        PublicKey::try_from(bytes.ok()?).ok()
     }
 
-    fn parse_signature(signature: &str) -> Result<Signature, CodecError> {
-        Signature::decode(commonware_formatting::from_hex(signature).unwrap())
+    fn parse_signature(signature: &str) -> Option<Signature> {
+        let bytes = SignatureBytes::decode(commonware_formatting::from_hex(signature).unwrap());
+        Signature::try_from(bytes.ok()?).ok()
     }
 
     #[test]
@@ -589,15 +615,43 @@ mod tests {
         check(&batch, true);
     }
 
+    #[test]
+    fn validation_contract() {
+        // Keys that must fail to convert: the canonical identity encoding, an encoding whose
+        // compression flag is clear, and the curve point `x = 4` outside the prime-order
+        // subgroup.
+        let mut identity_g1 = [0u8; 48];
+        identity_g1[0] = 0xc0;
+        let mut outside_g1 = [0u8; 48];
+        outside_g1[0] = 0x80;
+        outside_g1[47] = 4;
+
+        // Signatures are validated at conversion as well, so the malformed signatures are the
+        // same kinds of encoding in G2, with `x = 2` the curve point outside the subgroup.
+        let mut identity_g2 = [0u8; 96];
+        identity_g2[0] = 0xc0;
+        let mut outside_g2 = [0u8; 96];
+        outside_g2[0] = 0x80;
+        outside_g2[95] = 2;
+
+        // The contract also accepts a malformed signature that converts and then fails to
+        // verify, so this asserts that the subgroup check happens at conversion.
+        assert!(Signature::try_from(SignatureBytes::new(outside_g2)).is_err());
+        crate::assert_validation_contract::<PrivateKey>(
+            &[&identity_g1, &[0; 48], &outside_g1],
+            |_| vec![identity_g2.to_vec(), vec![0; 96], outside_g2.to_vec()],
+        );
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<PublicKey>,
+            CodecConformance<PublicKeyBytes>,
             CodecConformance<PrivateKey>,
-            CodecConformance<Signature>,
+            CodecConformance<SignatureBytes>,
         }
     }
 }

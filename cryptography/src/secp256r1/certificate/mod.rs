@@ -7,16 +7,15 @@
 pub mod mocks;
 
 use crate::{
-    Signer as _, Verifier as _,
+    Signer as _, Validated as _, Verifier as _,
     certificate::{AssemblyError, Attestation, Namespace, Scheme, Signers, Subject, Verification},
-    secp256r1::standard::{PrivateKey, PublicKey, Signature as Secp256r1Signature},
+    secp256r1::standard::{PrivateKey, PublicKey, Signature as Secp256r1Signature, SignatureBytes},
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::BufMut;
-use commonware_codec::{
-    Buf, EncodeSize, Error, FixedSize, Read, ReadRangeExt, Write, types::lazy::Lazy,
-};
+use commonware_codec::{Buf, EncodeSize, Error, FixedSize, Read, ReadRangeExt, Write};
+use commonware_parallel::Strategy;
 use commonware_utils::{
     Participant, Widen,
     iter::NonEmpty,
@@ -103,7 +102,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
 
         Some(Attestation {
             signer: *index,
-            signature: signature.into(),
+            signature,
         })
     }
 
@@ -119,14 +118,11 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         let Some(public_key) = self.participants.value(attestation.signer.into()) else {
             return false;
         };
-        let Some(signature) = attestation.signature.get() else {
-            return false;
-        };
 
         public_key.verify(
             subject.namespace(&self.namespace),
             &subject.message(),
-            signature,
+            &attestation.signature,
         )
     }
 
@@ -153,12 +149,8 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
                 invalid.insert(attestation.signer);
                 continue;
             };
-            let Some(signature) = attestation.signature.get() else {
-                invalid.insert(attestation.signer);
-                continue;
-            };
 
-            if public_key.verify(namespace, &message, signature) {
+            if public_key.verify(namespace, &message, &attestation.signature) {
                 verified.push(attestation);
             } else {
                 invalid.insert(attestation.signer);
@@ -180,11 +172,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
             self.participants
                 .value(signer.into())
                 .ok_or(AssemblyError::UnknownSigner(signer))?;
-            let signature = signature
-                .get()
-                .cloned()
-                .ok_or(AssemblyError::MalformedSignature(signer))?;
-            entries.push((signer, signature));
+            entries.push((signer, SignatureBytes::from(signature)));
         }
 
         // Sort the signatures by signer index.
@@ -192,7 +180,6 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         let (signer, signatures): (Vec<Participant>, Vec<_>) = entries.into_iter().unzip();
         let signers = Signers::try_from((self.participants.keys(), signer))?
             .require(self.participants.quorum::<S::Faults>())?;
-        let signatures = signatures.into_iter().map(Lazy::from).collect();
 
         Ok(Certificate {
             signers,
@@ -201,11 +188,15 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     }
 
     /// Verifies a certificate by checking each signature individually.
+    ///
+    /// Returns `false` if the certificate structure is invalid or any signature encoding is
+    /// malformed.
     pub fn verify_certificate<S, R>(
         &self,
         _rng: &mut R,
         subject: impl Subject<Namespace = N>,
         certificate: &Certificate,
+        strategy: &impl Strategy,
     ) -> bool
     where
         S: Scheme,
@@ -228,14 +219,15 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
 
         let namespace = subject.namespace(&self.namespace);
         let message = subject.message();
-        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
+        let signatures = Secp256r1Signature::try_from_batch(&certificate.signatures, strategy);
+        for (signer, signature) in certificate.signers.iter().zip(signatures) {
             let Some(public_key) = self.participants.value(signer.into()) else {
                 return false;
             };
-            let Some(signature) = signature.get() else {
+            let Some(signature) = signature else {
                 return false;
             };
-            if !public_key.verify(namespace, &message, signature) {
+            if !public_key.verify(namespace, &message, &signature) {
                 return false;
             }
         }
@@ -271,8 +263,9 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
 pub struct Certificate {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
-    /// Secp256r1 signatures emitted by the respective participants ordered by signer index.
-    pub signatures: Vec<Lazy<Secp256r1Signature>>,
+    /// Encodings of the Secp256r1 signatures emitted by the respective participants, ordered by
+    /// signer index. They are checked when the certificate is verified.
+    pub signatures: Vec<SignatureBytes>,
 }
 
 #[cfg(feature = "arbitrary")]
@@ -280,7 +273,7 @@ impl arbitrary::Arbitrary<'_> for Certificate {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let signers = Signers::arbitrary(u)?;
         let signatures = (0..signers.count())
-            .map(|_| u.arbitrary::<Secp256r1Signature>().map(Lazy::from))
+            .map(|_| u.arbitrary::<SignatureBytes>())
             .collect::<arbitrary::Result<Vec<_>>>()?;
         Ok(Self {
             signers,
@@ -314,7 +307,7 @@ impl Read for Certificate {
             ));
         }
 
-        let signatures = Vec::<Lazy<Secp256r1Signature>>::read_range(reader, ..=*participants)?;
+        let signatures = Vec::<SignatureBytes>::read_range(reader, ..=*participants)?;
         if signers.count() != signatures.len() {
             return Err(Error::Invalid(
                 "cryptography::secp256r1::certificate::Certificate",
@@ -467,7 +460,7 @@ macro_rules! impl_certificate_secp256r1 {
                 rng: &mut R,
                 subject: Self::Subject<'_, D>,
                 certificate: &Self::Certificate,
-                _strategy: &impl commonware_parallel::Strategy,
+                strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
                 R: rand_core::CryptoRng,
@@ -477,6 +470,7 @@ macro_rules! impl_certificate_secp256r1 {
                     rng,
                     subject,
                     certificate,
+                    strategy,
                 )
             }
 
@@ -484,7 +478,7 @@ macro_rules! impl_certificate_secp256r1 {
                 &self,
                 rng: &mut R,
                 certificates: commonware_utils::iter::NonEmpty<I>,
-                _strategy: &impl commonware_parallel::Strategy,
+                strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
                 R: rand_core::CryptoRng,
@@ -492,7 +486,10 @@ macro_rules! impl_certificate_secp256r1 {
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
             {
                 for (subject, certificate) in certificates {
-                    if !self.generic.verify_certificate::<Self, _>(rng, subject, certificate) {
+                    if !self
+                        .generic
+                        .verify_certificate::<Self, _>(rng, subject, certificate, strategy)
+                    {
                         return false;
                     }
                 }
@@ -1254,13 +1251,13 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_certificate_rejects_malformed_signature() {
+    fn test_certificate_rejects_malformed_signature() {
         let mut rng = test_rng();
-        let (schemes, _) = setup_signers(&mut rng, 4);
+        let (schemes, verifier) = setup_signers(&mut rng, 4);
         let quorum =
             usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
 
-        let mut attestations: Vec<_> = schemes
+        let attestations: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -1271,14 +1268,37 @@ mod tests {
             })
             .collect();
 
-        let malformed_signer = attestations[0].signer;
-        let mut truncated = Bytes::from_static(&[0u8]);
-        attestations[0].signature = Lazy::deferred(&mut truncated, ());
+        let valid = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
 
-        assert_eq!(
-            schemes[0].assemble(non_empty![@attestations], &Sequential),
-            Err(AssemblyError::MalformedSignature(malformed_signer))
-        );
+        // A certificate with a signature whose `s` is in the upper half of the curve order is
+        // rejected, alone or in a batch with a valid certificate.
+        let subject = TestSubject {
+            message: Bytes::from_static(MESSAGE),
+        };
+        let mut invalid = valid.clone();
+        let last = invalid.signatures.last_mut().unwrap();
+        let mut malformed = <[u8; 64]>::from(last.clone());
+        malformed[32] |= 0x80;
+        *last = SignatureBytes::new(malformed);
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject.clone(),
+            &valid,
+            &Sequential,
+        ));
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject.clone(),
+            &invalid,
+            &Sequential,
+        ));
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            non_empty![(subject.clone(), &valid), (subject, &invalid)],
+            &Sequential,
+        ));
     }
 
     #[test]

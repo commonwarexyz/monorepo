@@ -218,7 +218,7 @@ impl VerificationKey {
     pub fn verify(&self, signature: &Signature, msg: &[u8]) -> Result<(), Error> {
         let k = Scalar::from_hash(
             Sha512::default()
-                .chain(&signature.R_bytes[..])
+                .chain(signature.R_bytes())
                 .chain(&self.A_bytes.0[..])
                 .chain(msg),
         );
@@ -229,15 +229,9 @@ impl VerificationKey {
     /// same as "prehashing" in RFC8032.
     #[allow(non_snake_case)]
     pub(super) fn verify_prehashed(&self, signature: &Signature, k: Scalar) -> Result<(), Error> {
-        // `s_bytes` MUST represent an integer less than the prime `l`.
-        let s = Scalar::from_canonical_bytes(signature.s_bytes)
-            .into_option()
-            .ok_or(Error::InvalidSignature)?;
-        // `R_bytes` MUST be an encoding of a point on the twisted Edwards form of Curve25519.
-        let R = CompressedEdwardsY(signature.R_bytes)
-            .decompress()
-            .ok_or(Error::InvalidSignature)?;
-        // We checked the encoding of A_bytes when constructing `self`.
+        // The encodings of `A`, `R`, and `s` were checked when `self` and `signature` were
+        // constructed.
+        let Signature { R, s, .. } = *signature;
 
         //       [8][s]B = [8]R + [8][k]A
         // <=>   [8]R = [8][s]B - [8][k]A

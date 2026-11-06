@@ -226,16 +226,17 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                         greeting_received = true;
 
                         // Verify the greeting is from the expected peer
-                        if info.public_key != peer {
+                        let expected: C::Bytes = peer.clone().into();
+                        if info.public_key != expected {
                             debug!(?peer, greeting_pk = ?info.public_key, "greeting public key mismatch");
                             return Err(Error::GreetingMismatch);
                         }
 
                         // Verify the greeting info is valid
-                        self.info_verifier.validate_info(&context, &info).map_err(Error::Types)?;
+                        let public_key = self.info_verifier.validate_info(&context, &info).map_err(Error::Types)?;
 
                         // Send greeting info to tracker
-                        tracker.peers(vec![info]);
+                        tracker.peers(vec![(public_key, info)]);
                         continue;
                     } else if !greeting_received {
                         debug!(?peer, "expected greeting as first message");
@@ -262,10 +263,10 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                             first_peers_received = true;
 
                             // Verify all info is valid
-                            self.info_verifier.validate(&context, &peers).map_err(Error::Types)?;
+                            let public_keys = self.info_verifier.validate(&context, &peers).map_err(Error::Types)?;
 
                             // Send peers to tracker
-                            tracker.peers(peers);
+                            tracker.peers(public_keys.into_iter().zip(peers).collect());
                         }
                     }
                 }
@@ -787,7 +788,7 @@ mod tests {
                 context.current().epoch().as_millis() as u64,
                 |namespace, message| signer.sign(namespace, message),
             );
-            wrong_greeting.public_key = wrong_pk;
+            wrong_greeting.public_key = wrong_pk.into();
             let greeting_payload = types::Payload::<PublicKey>::Greeting(wrong_greeting);
             local_sender
                 .send(greeting_payload.encode())

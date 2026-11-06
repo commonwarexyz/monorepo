@@ -7,6 +7,9 @@ use commonware_cryptography::{
     secp256r1::recoverable::{PrivateKey, PublicKey, Signature},
 };
 use libfuzzer_sys::fuzz_target;
+
+mod common;
+use common::convert;
 use p256::{
     ecdsa::{
         Signature as RefSignature, SigningKey as RefSigningKey, VerifyingKey as RefVerifyingKey,
@@ -69,7 +72,7 @@ fn test_private_key(data: &[u8]) {
 // Test public key validation and encoding
 fn test_public_key(data: &[u8]) {
     let ref_result = RefVerifyingKey::from_sec1_bytes(data);
-    let our_result = PublicKey::decode(Copying(data));
+    let our_result = convert::<PublicKey>(data);
     assert_eq!(ref_result.is_err(), our_result.is_err());
 
     if let (Ok(ref_key), Ok(our_key)) = (ref_result, our_result) {
@@ -80,7 +83,7 @@ fn test_public_key(data: &[u8]) {
 }
 
 fn test_public_key_roundtrip(data: &[u8]) {
-    if let Ok(public_key) = PublicKey::decode(Copying(data)) {
+    if let Ok(public_key) = convert::<PublicKey>(data) {
         let encoded = public_key.encode();
         assert_eq!(
             data,
@@ -99,7 +102,7 @@ fn test_signature(data: &[u8]) {
     }
 
     let ref_result = RefSignature::from_slice(&data[1..]);
-    let our_result = Signature::decode(Copying(data));
+    let our_result = convert::<Signature>(data);
 
     if data[0] >= 4 {
         assert!(
@@ -144,7 +147,7 @@ fn test_sign_verify(private_key_data: &[u8; 32], message: &[u8]) {
 
         // Test encoding round-trip
         let encoded_sig = signature.encode();
-        let decoded_sig = Signature::decode(encoded_sig).unwrap();
+        let decoded_sig = convert::<Signature>(&encoded_sig).unwrap();
         assert!(public_key.verify(b"", message, &decoded_sig));
     }
 }

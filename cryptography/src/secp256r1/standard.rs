@@ -6,15 +6,16 @@ cfg_if::cfg_if! {
     }
 }
 use super::common::{
-    CURVE_NAME, PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH, PrivateKeyInner, PublicKeyInner,
+    PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH, PrivateKeyInner, PublicKeyInner,
     impl_private_key_wrapper, impl_public_key_wrapper,
 };
+use crate::{Encoding, Malformed};
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
 use bytes::BufMut;
-use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{FixedSize, Write};
 use commonware_formatting::Hex;
-use commonware_utils::{Array, Span, union_unique};
+use commonware_utils::union_unique;
 use core::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
@@ -64,7 +65,10 @@ impl From<PrivateKey> for PublicKey {
 }
 
 /// Secp256r1 Public Key.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, FixedArray)]
+///
+/// A key is built from its [PublicKeyBytes], which must encode a compressed SEC1 point on the
+/// curve. P-256 has cofactor one, so every key has prime order.
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct PublicKey(PublicKeyInner);
 
@@ -100,11 +104,50 @@ impl PublicKey {
     }
 }
 
+/// The encoding of a Secp256r1 signature, as `R || S`.
+pub type SignatureBytes = Encoding<Signature, SIGNATURE_LENGTH>;
+
 /// Secp256r1 Signature.
-#[derive(Clone, Eq, PartialEq, FixedArray)]
+///
+/// A signature is built from its [SignatureBytes], which must encode `r` and `s` in `[1, n)`
+/// with `s` in the lower half of the curve order, so every signature is in its low-`s` form.
+#[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
     signature: p256::ecdsa::Signature,
+}
+
+impl TryFrom<SignatureBytes> for Signature {
+    type Error = Malformed;
+
+    fn try_from(bytes: SignatureBytes) -> Result<Self, Malformed> {
+        let raw = *bytes.as_array();
+        let signature = p256::ecdsa::Signature::from_slice(&raw).map_err(|_| Malformed)?;
+
+        // Reject any signatures with a `s` value in the upper half of the curve order.
+        if signature.s().is_high().into() {
+            return Err(Malformed);
+        }
+        Ok(Self { raw, signature })
+    }
+}
+
+impl From<Signature> for SignatureBytes {
+    fn from(signature: Signature) -> Self {
+        Self::new(signature.raw)
+    }
+}
+
+impl TryFrom<p256::ecdsa::Signature> for Signature {
+    type Error = Malformed;
+
+    fn try_from(value: p256::ecdsa::Signature) -> Result<Self, Malformed> {
+        Self::try_from(SignatureBytes::new(value.to_bytes().into()))
+    }
+}
+
+impl crate::Validated for Signature {
+    type Bytes = SignatureBytes;
 }
 
 impl crate::Signature for Signature {}
@@ -115,32 +158,9 @@ impl Write for Signature {
     }
 }
 
-impl Read for Signature {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let result = p256::ecdsa::Signature::from_slice(&raw);
-        #[cfg(feature = "std")]
-        let signature = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
-        #[cfg(not(feature = "std"))]
-        let signature = result
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
-        // Reject any signatures with a `s` value in the upper half of the curve order.
-        if signature.s().is_high().into() {
-            return Err(CodecError::Invalid(CURVE_NAME, "Signature S is high"));
-        }
-        Ok(Self { raw, signature })
-    }
-}
-
 impl FixedSize for Signature {
     const SIZE: usize = SIGNATURE_LENGTH;
 }
-
-impl Span for Signature {}
-
-impl Array for Signature {}
 
 impl Hash for Signature {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -170,15 +190,6 @@ impl Deref for Signature {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         &self.raw
-    }
-}
-
-impl TryFrom<p256::ecdsa::Signature> for Signature {
-    type Error = CodecError;
-
-    fn try_from(value: p256::ecdsa::Signature) -> Result<Self, Self::Error> {
-        let raw: [u8; _] = value.to_bytes().into();
-        Self::try_from(raw)
     }
 }
 
@@ -217,11 +228,21 @@ impl arbitrary::Arbitrary<'_> for Signature {
 mod tests {
     use super::*;
     use crate::{Signer as _, Verifier as _, secp256r1::common::tests::*};
-    use commonware_codec::{Copying, DecodeExt, Encode};
+    use commonware_codec::{Copying, DecodeExt, Encode, Error as CodecError};
     use p256::elliptic_curve::scalar::IsHigh;
     use rstest::rstest;
 
     const NAMESPACE: &[u8] = b"test-namespace";
+
+    /// Decodes the encoding of a public key and builds the key from it.
+    fn convert_public_key(encoded: &[u8]) -> Result<PublicKey, Malformed> {
+        PublicKey::try_from(PublicKeyBytes::decode(Copying(encoded)).unwrap())
+    }
+
+    /// Decodes the encoding of a signature and builds the signature from it.
+    fn convert_signature(encoded: &[u8]) -> Result<Signature, Malformed> {
+        Signature::try_from(SignatureBytes::decode(Copying(encoded)).unwrap())
+    }
 
     #[test]
     fn test_codec_private_key() {
@@ -241,8 +262,9 @@ mod tests {
         let encoded = original.encode();
         assert_eq!(encoded.len(), PUBLIC_KEY_LENGTH);
 
-        let decoded = PublicKey::decode(encoded).unwrap();
+        let decoded = convert_public_key(&encoded).unwrap();
         assert_eq!(original, decoded);
+        assert_eq!(PublicKeyBytes::from(decoded).as_ref(), encoded.as_ref());
     }
 
     #[test]
@@ -253,15 +275,15 @@ mod tests {
         let encoded = original.encode();
         assert_eq!(encoded.len(), SIGNATURE_LENGTH);
 
-        let decoded = Signature::decode(encoded).unwrap();
+        let decoded = convert_signature(&encoded).unwrap();
         assert_eq!(original, decoded);
+        assert_eq!(SignatureBytes::from(decoded).as_ref(), encoded.as_ref());
     }
 
     #[test]
     fn test_codec_signature_invalid() {
         let (_, sig, ..) = vector_sig_verification_5();
-        let result = Signature::decode(sig);
-        assert!(result.is_err());
+        assert_eq!(convert_signature(&sig), Err(Malformed));
     }
 
     #[test]
@@ -287,8 +309,7 @@ mod tests {
 
     #[test]
     fn test_decode_zero_signature_fails() {
-        let result = Signature::decode(vec![0u8; SIGNATURE_LENGTH]);
-        assert!(result.is_err());
+        assert_eq!(convert_signature(&[0u8; SIGNATURE_LENGTH]), Err(Malformed));
     }
 
     #[test]
@@ -299,7 +320,7 @@ mod tests {
         let signature = private_key.sign(NAMESPACE, message);
         let mut bad_signature = signature.to_vec();
         bad_signature[32] |= 0x80;
-        assert!(Signature::decode(bad_signature).is_err());
+        assert_eq!(convert_signature(&bad_signature), Err(Malformed));
     }
 
     #[test]
@@ -313,7 +334,7 @@ mod tests {
             *b = 0x00;
         }
         bad_signature[32] = 1;
-        assert!(Signature::decode(bad_signature).is_err());
+        assert_eq!(convert_signature(&bad_signature), Err(Malformed));
     }
 
     #[test]
@@ -362,17 +383,16 @@ mod tests {
         let qy_hex = "d0720dc691aa80096ba32fed1cb97c2b620690d06de0317b8618d5ce65eb728f";
 
         let uncompressed_public_key = parse_public_key_as_uncompressed_vector(qx_hex, qy_hex);
-        let public_key = PublicKey::decode(uncompressed_public_key);
-        assert!(matches!(public_key, Err(CodecError::Invalid(_, _))));
+        let public_key = PublicKeyBytes::decode(uncompressed_public_key);
+        assert!(matches!(public_key, Err(CodecError::ExtraData(32))));
 
         let mut compressed_public_key = parse_public_key_as_compressed_vector(qx_hex, qy_hex);
         compressed_public_key.push(0u8);
-        let public_key = PublicKey::decode(compressed_public_key);
+        let public_key = PublicKeyBytes::decode(compressed_public_key);
         assert!(matches!(public_key, Err(CodecError::ExtraData(1))));
 
         let compressed_public_key = parse_public_key_as_compressed_vector(qx_hex, qy_hex);
-        let public_key = PublicKey::decode(compressed_public_key);
-        assert!(public_key.is_ok());
+        assert!(convert_public_key(&compressed_public_key).is_ok());
     }
 
     #[test]
@@ -390,7 +410,7 @@ mod tests {
         let mut signature: Vec<u8> = vec![0x00; 32];
         signature.extend_from_slice(s);
 
-        assert!(Signature::decode(signature).is_err());
+        assert_eq!(convert_signature(&signature), Err(Malformed));
     }
 
     #[test]
@@ -409,7 +429,7 @@ mod tests {
         let mut signature = r.to_vec();
         signature.extend(s);
 
-        assert!(Signature::decode(signature).is_err());
+        assert_eq!(convert_signature(&signature), Err(Malformed));
     }
 
     #[rstest]
@@ -446,8 +466,10 @@ mod tests {
         #[case] n: usize,
         #[case] (public_key, exp_valid): (Vec<u8>, bool),
     ) {
-        let res = PublicKey::decode(public_key);
-        assert_eq!(exp_valid, res.is_ok(), "vector_public_key_validation_{n}");
+        let res = PublicKeyBytes::decode(public_key)
+            .ok()
+            .and_then(|bytes| PublicKey::try_from(bytes).ok());
+        assert_eq!(exp_valid, res.is_some(), "vector_public_key_validation_{n}");
     }
 
     fn vector_sig_verification_1() -> (PublicKey, Vec<u8>, Vec<u8>, bool) {
@@ -547,25 +569,44 @@ mod tests {
         let expected = if expected {
             let mut ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig).unwrap();
             if ecdsa_signature.s().is_high().into() {
-                assert!(Signature::decode(Copying(&sig)).is_err());
-                assert!(Signature::decode(sig).is_err());
+                assert_eq!(convert_signature(&sig), Err(Malformed));
 
                 ecdsa_signature = ecdsa_signature.normalize_s();
             }
             let signature = Signature::try_from(ecdsa_signature).unwrap();
             public_key.verify_inner(None, &message, &signature)
         } else {
-            let tf_res = Signature::decode(Copying(&sig));
-            let dc_res = Signature::decode(sig);
-            if tf_res.is_err() && dc_res.is_err() {
-                true
-            } else {
-                let f1 = !public_key.verify_inner(None, &message, &tf_res.unwrap());
-                let f2 = !public_key.verify_inner(None, &message, &dc_res.unwrap());
-                f1 && f2
-            }
+            convert_signature(&sig)
+                .ok()
+                .is_none_or(|signature| !public_key.verify_inner(None, &message, &signature))
         };
         assert!(expected);
+    }
+
+    #[test]
+    fn validation_contract() {
+        // Keys that must fail to decode: an uncompressed SEC1 tag, a compressed tag with `x`
+        // above the field modulus, a zero tag, and a compressed tag with the off-curve `x = 1`.
+        let mut uncompressed_tag = [0u8; 33];
+        uncompressed_tag[0] = 0x04;
+        let mut x_too_large = [0xffu8; 33];
+        x_too_large[0] = 0x02;
+        let mut off_curve = [0u8; 33];
+        off_curve[0] = 0x02;
+        off_curve[32] = 1;
+        crate::assert_validation_contract::<PrivateKey>(
+            &[&uncompressed_tag, &x_too_large, &[0; 33], &off_curve],
+            |honest| {
+                // Signatures that must be rejected: the honest signature in its high form with
+                // `s` replaced by `n - s`, the all-zero encoding with `r = 0`, and the honest
+                // signature with `s` above the curve order.
+                let mut s_high = honest.to_vec();
+                negate_scalar(&mut s_high[32..]);
+                let mut s_too_large = honest.to_vec();
+                s_too_large[32..].fill(0xff);
+                vec![s_high, vec![0; 64], s_too_large]
+            },
+        );
     }
 
     #[cfg(feature = "arbitrary")]
@@ -574,7 +615,8 @@ mod tests {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Signature> => 1024,
+            CodecConformance<PublicKeyBytes> => 1024,
+            CodecConformance<SignatureBytes> => 1024,
         }
     }
 }

@@ -2,7 +2,7 @@ use clap::{Arg, Command};
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{
     ChaCha20Poly1305, Signer as _,
-    ed25519::{PrivateKey, PublicKey},
+    ed25519::{PrivateKey, PublicKey, PublicKeyBytes},
 };
 use commonware_deployer::aws::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
@@ -55,7 +55,8 @@ fn main() {
         .into_iter()
         .map(|host| {
             let key = from_hex(&host.name).expect("Could not parse host key");
-            let key = PublicKey::decode(key).expect("Peer key is invalid");
+            let key = PublicKeyBytes::decode(key).expect("Peer key is invalid");
+            let key = PublicKey::try_from(key).expect("Peer key is invalid");
             (key, host.ip)
         })
         .collect();
@@ -123,7 +124,8 @@ fn main() {
         let mut bootstrappers = Vec::new();
         for bootstrapper in &config.bootstrappers {
             let key = from_hex(bootstrapper).expect("Could not parse bootstrapper key");
-            let key = PublicKey::decode(key).expect("Bootstrapper key is invalid");
+            let key = PublicKeyBytes::decode(key).expect("Bootstrapper key is invalid");
+            let key = PublicKey::try_from(key).expect("Bootstrapper key is invalid");
             let ip = peers.get(&key).expect("Could not find bootstrapper in IPs");
             let bootstrapper_socket = format!("{}:{}", ip, config.port);
             let bootstrapper_socket = SocketAddr::from_str(&bootstrapper_socket)

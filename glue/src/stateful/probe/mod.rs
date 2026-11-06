@@ -484,7 +484,7 @@ mod test {
         {
             let attestation = Attestation::<Scheme> {
                 signer: attestation.signer,
-                signature: attestation.signature.clone(),
+                signature: attestation.signature,
             };
             self.inner
                 .verify_attestation(rng, subject, &attestation, strategy)

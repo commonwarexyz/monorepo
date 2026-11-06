@@ -1,6 +1,5 @@
 use commonware_cryptography::PublicKey;
 use commonware_runtime::telemetry::metrics::{EncodeLabelSet, EncodeLabelValue, EncodeStruct};
-use commonware_utils::Array;
 
 /// Per-peer label.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
@@ -96,7 +95,7 @@ pub struct Timeout {
 }
 
 impl Timeout {
-    pub fn new(leader: &impl Array, reason: TimeoutReason) -> Self {
+    pub fn new(leader: &impl PublicKey, reason: TimeoutReason) -> Self {
         Self {
             leader: leader.to_string(),
             reason,
@@ -170,42 +169,42 @@ pub struct Inbound {
 }
 
 impl Inbound {
-    pub fn notarize(peer: &impl Array) -> Self {
+    pub fn notarize(peer: &impl PublicKey) -> Self {
         Self {
             peer: peer.to_string(),
             message: MessageType::Notarize,
         }
     }
 
-    pub fn nullify(peer: &impl Array) -> Self {
+    pub fn nullify(peer: &impl PublicKey) -> Self {
         Self {
             peer: peer.to_string(),
             message: MessageType::Nullify,
         }
     }
 
-    pub fn finalize(peer: &impl Array) -> Self {
+    pub fn finalize(peer: &impl PublicKey) -> Self {
         Self {
             peer: peer.to_string(),
             message: MessageType::Finalize,
         }
     }
 
-    pub fn notarization(peer: &impl Array) -> Self {
+    pub fn notarization(peer: &impl PublicKey) -> Self {
         Self {
             peer: peer.to_string(),
             message: MessageType::Notarization,
         }
     }
 
-    pub fn nullification(peer: &impl Array) -> Self {
+    pub fn nullification(peer: &impl PublicKey) -> Self {
         Self {
             peer: peer.to_string(),
             message: MessageType::Nullification,
         }
     }
 
-    pub fn finalization(peer: &impl Array) -> Self {
+    pub fn finalization(peer: &impl PublicKey) -> Self {
         Self {
             peer: peer.to_string(),
             message: MessageType::Finalization,

@@ -3,7 +3,7 @@
 use commonware_codec::{DecodeExt as _, Encode};
 use commonware_cryptography::{
     Signer,
-    ed25519::{PrivateKey, PublicKey},
+    ed25519::{PrivateKey, PublicKey, PublicKeyBytes},
 };
 use commonware_formatting::{from_hex, hex};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
@@ -119,6 +119,13 @@ mod hex_private_key {
     }
 }
 
+/// Decodes a hex-encoded [`PublicKey`] and checks that it is a key.
+fn public_key_from_hex<E: serde::de::Error>(raw: &str) -> Result<PublicKey, E> {
+    let bytes = from_hex(raw).ok_or_else(|| E::custom("invalid hex"))?;
+    let bytes = PublicKeyBytes::decode(bytes).map_err(E::custom)?;
+    PublicKey::try_from(bytes).map_err(E::custom)
+}
+
 /// Serde codec for a hex-encoded [`PublicKey`].
 mod hex_public_key {
     use super::*;
@@ -129,8 +136,7 @@ mod hex_public_key {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PublicKey, D::Error> {
         let raw = String::deserialize(deserializer)?;
-        let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        PublicKey::decode(bytes).map_err(D::Error::custom)
+        public_key_from_hex(&raw)
     }
 }
 
@@ -150,13 +156,7 @@ mod hex_public_keys {
         deserializer: D,
     ) -> Result<Vec<PublicKey>, D::Error> {
         let values = Vec::<String>::deserialize(deserializer)?;
-        values
-            .into_iter()
-            .map(|raw| {
-                let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-                PublicKey::decode(bytes).map_err(D::Error::custom)
-            })
-            .collect()
+        values.iter().map(|raw| public_key_from_hex(raw)).collect()
     }
 }
 

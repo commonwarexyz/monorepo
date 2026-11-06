@@ -36,7 +36,7 @@ mod tests {
     use commonware_codec::{Encode, FixedSize, MaxEncodeSize};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
-        certificate::{Attestation, mocks::Fixture},
+        certificate::{AttestationBytes, mocks::Fixture},
         sha256::Digest as Sha256Digest,
     };
     use commonware_math::algebra::Random;
@@ -64,7 +64,7 @@ mod tests {
             View::new(u64::MAX - 1),
             Sha256Digest::random(test_rng()),
         );
-        let widest = |attestation: &Attestation<S>| Attestation::<S> {
+        let widest = |attestation: &AttestationBytes<S>| AttestationBytes::<S> {
             signer: Participant::new(u32::MAX),
             signature: attestation.signature.clone(),
         };

@@ -460,6 +460,7 @@ impl G {
     };
 
     /// Compresses this point to its canonical Ed25519 encoding.
+    #[cfg(any(test, feature = "fuzz"))]
     pub fn compress(self) -> [u8; 32] {
         let z_inverse = self.z.invert();
         let x = self.x.mul(z_inverse);
@@ -902,8 +903,7 @@ fn pow_p58<B: FBackend>(backend: B, value: FVec) -> FVec {
 ///
 /// Fixed-base multiplication passes secret points through these operations, so no branch, memory
 /// index, or early exit of a point operation may depend on the coordinates of its points. Only the
-/// `negate` flags of [`Backend::add_cached`] and [`Backend::add_niels`] may be variable-time, and
-/// [`Backend::decompress_pair`] is variable-time on its encodings, which must be public.
+/// `negate` flags of [`Backend::add_cached`] and [`Backend::add_niels`] may be variable-time.
 ///
 /// The point types follow a point through a chain: an addition or doubling returns a
 /// [`Backend::Completed`] point, which converts to [`Backend::Projective`] coordinates for a
@@ -968,13 +968,6 @@ pub trait Backend: MBackend + 'static {
     /// Constant time: every entry of `row` is read, and the selection and negation use masks,
     /// so no branch, memory index, or early exit depends on `digit` or on the points.
     fn add_selected(self, point: Self::Extended, row: &[Niels; 8], digit: i8) -> Self::Completed;
-
-    /// Decompresses two point encodings as [`GAffine::decompress`] does, or returns `None` when
-    /// either is invalid.
-    #[inline(always)]
-    fn decompress_pair(self, [first, second]: [&[u8; 32]; 2]) -> Option<[GAffine; 2]> {
-        Some([GAffine::decompress(first)?, GAffine::decompress(second)?])
-    }
 }
 
 /// A computation which can run over an arbitrary [`Backend`].

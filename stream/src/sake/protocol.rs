@@ -1,7 +1,7 @@
 use crate::utils::codec::{Error as FrameError, recv_frame, send_frame};
 use commonware_codec::{DecodeExt, Encode, Error as CodecError, FixedSize};
 use commonware_cryptography::{
-    Signer,
+    Signer, Validated,
     handshake::sake::{
         Ack, Context, Error as HandshakeError, Syn, SynAck, Version, dial_end, dial_start,
         listen_end, listen_start,
@@ -24,6 +24,8 @@ pub enum Error {
     UnableToDecode(CodecError),
     #[error("peer rejected: {}", hex(_0))]
     PeerRejected(Vec<u8>),
+    #[error("malformed peer: {}", hex(_0))]
+    MalformedPeer(Vec<u8>),
     #[error(transparent)]
     Frame(#[from] FrameError),
 }
@@ -168,9 +170,12 @@ impl<S: Signer> crate::Handshake for Sake<S> {
         B: FnOnce(S::PublicKey) -> F + Send,
         F: Future<Output = bool> + Send,
     {
-        // Consult the bouncer on the unauthenticated claim before any handshake work. Only a
-        // successful `listen_end` authenticates it.
-        let peer = recv_handshake_frame::<S::PublicKey, _>(stream).await?;
+        // Check the form of the unauthenticated claim and consult the bouncer on it before any
+        // handshake work. Only a successful `listen_end` authenticates it.
+        let claim = recv_handshake_frame::<<S::PublicKey as Validated>::Bytes, _>(stream).await?;
+        let Ok(peer) = S::PublicKey::try_from(claim.clone()) else {
+            return Err(Error::MalformedPeer(claim.encode().to_vec()));
+        };
         if !bouncer(peer.clone()).await {
             return Err(Error::PeerRejected(peer.encode().to_vec()));
         }

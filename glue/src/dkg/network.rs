@@ -64,6 +64,8 @@ impl<P: PublicKey> Directory<P> for Unit {
 }
 
 /// Address directory for transports that dial by [`Address`].
+///
+/// Decoding checks every public key and rejects a malformed one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Addresses<P: PublicKey>(Map<P, Address>);
 
@@ -111,7 +113,13 @@ impl<P: PublicKey> Read for Addresses<P> {
     type Cfg = RangeCfg<usize>;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self(Map::read_cfg(buf, &(*cfg, (), ()))?))
+        let addresses = Map::<P::Bytes, Address>::read_cfg(buf, &(*cfg, (), ()))?
+            .into_iter()
+            .map(|(peer, address)| P::try_from(peer).ok().map(|peer| (peer, address)))
+            .collect::<Option<Vec<_>>>()
+            .and_then(|addresses| Map::try_from(addresses).ok())
+            .ok_or(CodecError::Invalid("Addresses", "malformed public key"))?;
+        Ok(Self(addresses))
     }
 }
 

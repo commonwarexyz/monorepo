@@ -9,12 +9,17 @@ use bytes::{BufMut, Bytes};
 use commonware_codec::{
     Buf, Encode, EncodeSize, Error as CodecError, MaxEncodeSize, Read, ReadExt, Write,
 };
+#[cfg(feature = "arbitrary")]
+use commonware_cryptography::Validated;
 use commonware_cryptography::{
     Digest,
-    certificate::{AssemblyError, Attestation, Namespace as CertificateNamespace, Scheme, Subject},
+    certificate::{
+        AssemblyError, Attestation, AttestationBytes, Namespace as CertificateNamespace, Scheme,
+        Subject,
+    },
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{channel::oneshot, iter::NonEmpty, union};
+use commonware_utils::{channel::oneshot, iter::NonEmpty, ordered::Quorum as _, union};
 use rand_core::CryptoRng;
 use std::hash::Hash;
 
@@ -176,20 +181,23 @@ pub struct Ack<S: Scheme, D: Digest> {
     /// assemble a certificate. See the [module docs](super#epoch-independent-signatures).
     pub epoch: Epoch,
     /// Scheme-specific attestation material
-    pub attestation: Attestation<S>,
+    pub attestation: AttestationBytes<S>,
 }
 
 impl<S: Scheme, D: Digest> Ack<S, D> {
     /// Verifies the attestation on this acknowledgment.
     ///
-    /// Returns `true` if the attestation is valid for the given namespace and public key.
-    /// Domain separation is automatically applied to prevent signature reuse.
+    /// Returns `true` if the attestation is well formed and valid for the given namespace and
+    /// public key. Domain separation is automatically applied to prevent signature reuse.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRng,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<_, D>(rng, &self.item, &self.attestation, strategy)
+        let Ok(attestation) = Attestation::try_from(self.attestation.clone()) else {
+            return false;
+        };
+        scheme.verify_attestation::<_, D>(rng, &self.item, &attestation, strategy)
     }
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
@@ -209,7 +217,7 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
         Some(Self {
             item,
             epoch,
-            attestation,
+            attestation: attestation.into(),
         })
     }
 }
@@ -228,7 +236,7 @@ impl<S: Scheme, D: Digest> Read for Ack<S, D> {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let item = Item::read(reader)?;
         let epoch = Epoch::read(reader)?;
-        let attestation = Attestation::read(reader)?;
+        let attestation = AttestationBytes::read(reader)?;
         Ok(Self {
             item,
             epoch,
@@ -244,20 +252,21 @@ impl<S: Scheme, D: Digest> EncodeSize for Ack<S, D> {
 }
 
 impl<S: Scheme, D: Digest> MaxEncodeSize for Ack<S, D> {
-    const MAX_ENCODE_SIZE: usize =
-        Item::<D>::MAX_ENCODE_SIZE + Epoch::MAX_ENCODE_SIZE + Attestation::<S>::MAX_ENCODE_SIZE;
+    const MAX_ENCODE_SIZE: usize = Item::<D>::MAX_ENCODE_SIZE
+        + Epoch::MAX_ENCODE_SIZE
+        + AttestationBytes::<S>::MAX_ENCODE_SIZE;
 }
 
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Ack<S, D>
 where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    <S::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let item = u.arbitrary::<Item<D>>()?;
         let epoch = u.arbitrary::<Epoch>()?;
-        let attestation = Attestation::arbitrary(u)?;
+        let attestation = AttestationBytes::arbitrary(u)?;
         Ok(Self {
             item,
             epoch,
@@ -339,11 +348,19 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     {
         let (first, acks) = acks.into_parts();
         let item = first.item.clone();
-        let attestations = NonEmpty::new(
-            first.attestation.clone(),
-            acks.filter(|ack| ack.item == item)
-                .map(|ack| ack.attestation.clone()),
-        );
+
+        // Malformed attestations do not count toward the quorum.
+        let bytes: Vec<_> = core::iter::once(first)
+            .chain(acks.filter(|ack| ack.item == item))
+            .map(|ack| ack.attestation.clone())
+            .collect();
+        let attestations = Attestation::try_from_batch(&bytes, strategy)
+            .into_iter()
+            .flatten();
+        let Some(attestations) = NonEmpty::try_new(attestations) else {
+            let quorum = scheme.participants().quorum::<S::Faults>();
+            return Err(AssemblyError::InsufficientAttestations(quorum, 0));
+        };
         let certificate = scheme.assemble(attestations, strategy)?;
 
         Ok(Self { item, certificate })

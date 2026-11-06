@@ -134,6 +134,7 @@ use crate::{
         variant::MinPk,
     },
     transcript::{Summary, Transcript, Version},
+    validate_set,
 };
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
@@ -141,13 +142,13 @@ use commonware_math::{
     algebra::{Additive, CryptoGroup, Random, Space},
     poly::{Interpolator, Poly},
 };
-use commonware_parallel::Strategy;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{
     Faults, NZU32, Participant, TryCollect as _,
     ordered::{Map, Quorum as _, Set},
 };
-pub use evrf::{PrivateKey, PublicKey, Setup};
-use evrf::{Signature, VrfCommitments};
+pub use evrf::{PrivateKey, PublicKey, PublicKeyBytes, Setup};
+use evrf::{Signature, SignatureBytes, VrfCommitments};
 use rand_core::CryptoRng;
 use std::{borrow::Cow, collections::BTreeMap, num::NonZeroU32};
 
@@ -184,6 +185,8 @@ pub enum Error {
 }
 
 /// The output of a successful DKG.
+///
+/// Decoding an output checks every public key it lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output<P> {
     summary: Summary,
@@ -263,7 +266,7 @@ impl<P: EncodeSize> EncodeSize for Output<P> {
     }
 }
 
-impl<P: Read<Cfg = ()> + Ord> Read for Output<P> {
+impl<P: crate::PublicKey> Read for Output<P> {
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(
@@ -275,8 +278,8 @@ impl<P: Read<Cfg = ()> + Ord> Read for Output<P> {
         let public: Sharing<MinPk> =
             Read::read_cfg(buf, &(*max_participants, *max_supported_mode))?;
         let quorum: NonZeroU32 = ReadExt::read(buf)?;
-        let dealers: Set<P> = Read::read_cfg(buf, &(RangeCfg::new(1..=max_usize), ()))?;
-        let players: Set<P> = Read::read_cfg(buf, &(RangeCfg::new(1..=max_usize), ()))?;
+        let dealers: Set<P::Bytes> = Read::read_cfg(buf, &(RangeCfg::new(1..=max_usize), ()))?;
+        let players: Set<P::Bytes> = Read::read_cfg(buf, &(RangeCfg::new(1..=max_usize), ()))?;
         if public.total().get() as usize != players.len() {
             return Err(commonware_codec::Error::Invalid(
                 "Output",
@@ -289,6 +292,9 @@ impl<P: Read<Cfg = ()> + Ord> Read for Output<P> {
                 "quorum must not exceed players length",
             ));
         }
+        let malformed = |_| commonware_codec::Error::Invalid("Output", "malformed public key");
+        let dealers = validate_set::<P>(&dealers, &Sequential).map_err(malformed)?;
+        let players = validate_set::<P>(&players, &Sequential).map_err(malformed)?;
         Ok(Self {
             summary,
             public,
@@ -654,6 +660,7 @@ pub fn play(
     let selection = select(rng, setup, info, logs, strategy)?;
 
     // For each dealing, recover our share by unmasking.
+    let me_key = PublicKeyBytes::from(me_pub);
     let dealings: Map<PublicKey, Scalar> = selection
         .dealings
         .iter()
@@ -661,7 +668,7 @@ pub fn play(
             let mask = me.vrf_recv(&dealing.nonce, dealer);
             let masked_share = dealing
                 .masked_shares
-                .get_value(&me_pub)
+                .get_value(&me_key)
                 .expect("select checks that all players have shares");
             (dealer.clone(), masked_share.clone() - &mask)
         })
@@ -712,8 +719,8 @@ pub fn play(
 /// dealer's public key and log.
 #[derive(Clone)]
 pub struct SignedDealerLog {
-    dealer: PublicKey,
-    signature: Signature,
+    dealer: PublicKeyBytes,
+    signature: SignatureBytes,
     log: DealerLog,
 }
 
@@ -735,8 +742,8 @@ impl Read for SignedDealerLog {
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let dealer: PublicKey = ReadExt::read(buf)?;
-        let signature: Signature = ReadExt::read(buf)?;
+        let dealer = ReadExt::read(buf)?;
+        let signature = ReadExt::read(buf)?;
         let log = Read::read_cfg(buf, cfg)?;
         Ok(Self {
             dealer,
@@ -748,9 +755,9 @@ impl Read for SignedDealerLog {
 
 impl SignedDealerLog {
     fn sign(signer: &PrivateKey, info: &Info, log: DealerLog) -> Self {
-        let dealer = signer.public();
+        let dealer = signer.public().into();
         let msg = Self::signature_message(info, &log);
-        let signature = signer.sign(NAMESPACE, &msg);
+        let signature = signer.sign(NAMESPACE, &msg).into();
         Self {
             dealer,
             signature,
@@ -761,13 +768,16 @@ impl SignedDealerLog {
     /// Verify the signature against a specific round [`Info`] and extract the
     /// dealer's public key and log.
     ///
-    /// Returns `None` if the signature is invalid for that round's summary.
+    /// Returns `None` if the dealer's key or the signature is malformed, or if
+    /// the signature is invalid for that round's summary.
     pub fn identify(self, info: &Info) -> Option<(PublicKey, DealerLog)> {
+        let dealer = PublicKey::try_from(self.dealer).ok()?;
+        let signature = Signature::try_from(self.signature).ok()?;
         let msg = Self::signature_message(info, &self.log);
-        if !self.dealer.verify(NAMESPACE, &msg, &self.signature) {
+        if !dealer.verify(NAMESPACE, &msg, &signature) {
             return None;
         }
-        Some((self.dealer, self.log))
+        Some((dealer, self.log))
     }
 
     fn signature_message(info: &Info, log: &DealerLog) -> Vec<u8> {
@@ -862,7 +872,7 @@ impl DealerLog {
 struct Dealing {
     nonce: Summary,
     poly: Poly<G1>,
-    masked_shares: Map<PublicKey, Scalar>,
+    masked_shares: Map<PublicKeyBytes, Scalar>,
 }
 
 impl Write for Dealing {
@@ -915,11 +925,16 @@ impl Dealing {
         for (player, mask) in inner.iter_pairs_mut() {
             *mask += &poly.eval(&info.player_scalar(player)?);
         }
+        let masked_shares = inner
+            .into_iter()
+            .map(|(player, share)| (PublicKeyBytes::from(player), share))
+            .try_collect()
+            .expect("players must be unique");
         let poly = Poly::commit(poly);
         Ok(Self {
             nonce,
             poly,
-            masked_shares: inner,
+            masked_shares,
         })
     }
 
@@ -929,7 +944,7 @@ impl Dealing {
         rng: &mut impl CryptoRng,
         info: &Info,
         dealer: &PublicKey,
-        mask_commitments: &Map<PublicKey, G1>,
+        mask_commitments: &Map<PublicKeyBytes, G1>,
         strategy: &impl Strategy,
     ) -> bool {
         if self.poly.degree_exact() != info.degree() {
@@ -982,19 +997,16 @@ impl Dealing {
                 // not algebraically meaningful (the dealer knows `f` and could
                 // produce any consistent `(z, M)` pair), but `play` relies on
                 // its presence to recover its own share.
-                if self.masked_shares.get_value(p).is_none() {
+                let key = PublicKeyBytes::from(p.clone());
+                let Some(z_i) = self.masked_shares.get_value(&key) else {
                     return false;
-                }
+                };
                 if p == dealer {
                     continue;
                 }
                 r.push(SmallScalar::random(&mut *rng));
-                let z_i = self
-                    .masked_shares
-                    .get_value(p)
-                    .expect("presence checked above");
                 z.push(z_i.clone());
-                let Some(m_i) = mask_commitments.get_value(p) else {
+                let Some(m_i) = mask_commitments.get_value(&key) else {
                     return false;
                 };
                 m.push(*m_i);
@@ -1352,10 +1364,9 @@ mod test_plan {
 
                 // P1: corrupt signature
                 if self.bad_signatures.contains(&i) {
-                    let mut sig_bytes = signed.signature.encode_mut();
+                    let mut sig_bytes = *signed.signature.as_array();
                     sig_bytes[0] ^= 0xFF;
-                    signed.signature = commonware_codec::ReadExt::read(&mut sig_bytes)
-                        .expect("signature should decode");
+                    signed.signature = SignatureBytes::new(sig_bytes);
                 }
 
                 signed_logs.push((i, signed));
@@ -1368,9 +1379,9 @@ mod test_plan {
                     // P2: corrupt masked shares
                     for &(d, p) in &self.bad_shares {
                         if d == i {
-                            let player_pk = &player_keys[p as usize].public();
+                            let player_pk = PublicKeyBytes::from(player_keys[p as usize].public());
                             if let Some(share_val) =
-                                log.dealing.masked_shares.get_value_mut(player_pk)
+                                log.dealing.masked_shares.get_value_mut(&player_pk)
                             {
                                 *share_val += &Scalar::random(&mut rng);
                             }
@@ -1387,8 +1398,8 @@ mod test_plan {
                     // P4: remove player's share
                     for &(d, p) in &self.missing_shares {
                         if d == i {
-                            let player_pk = player_keys[p as usize].public();
-                            let new_shares: Map<PublicKey, Scalar> = log
+                            let player_pk = PublicKeyBytes::from(player_keys[p as usize].public());
+                            let new_shares: Map<PublicKeyBytes, Scalar> = log
                                 .dealing
                                 .masked_shares
                                 .iter_pairs()
@@ -1412,7 +1423,11 @@ mod test_plan {
                     if self.fake_masks.contains(&i) {
                         for p in &info.players {
                             let delta = Scalar::random(&mut rng);
-                            if let Some(share_val) = log.dealing.masked_shares.get_value_mut(p) {
+                            if let Some(share_val) = log
+                                .dealing
+                                .masked_shares
+                                .get_value_mut(&PublicKeyBytes::from(p.clone()))
+                            {
                                 *share_val += &delta;
                             }
                             log.commitments.perturb(p, &(G1::generator() * &delta));
@@ -1628,10 +1643,9 @@ mod tests {
             let mut signed = deal(&mut rng, &TEST_SETUP, &info, dk, None, &Sequential)
                 .expect("honest deal should succeed");
             if i == 0 {
-                let mut sig_bytes = signed.signature.encode_mut();
+                let mut sig_bytes = *signed.signature.as_array();
                 sig_bytes[0] ^= 0xFF;
-                signed.signature = commonware_codec::ReadExt::read(&mut sig_bytes)
-                    .expect("signature should decode");
+                signed.signature = SignatureBytes::new(sig_bytes);
             }
             if let Some((pk, log)) = signed.identify(&info) {
                 logs.insert(pk, log);
@@ -2041,17 +2055,18 @@ mod tests {
             .expect("honest deal should succeed");
         let (pk, mut log) = signed.identify(&info).expect("valid signature");
         assert_eq!(pk, me_pub);
+        let me_key = PublicKeyBytes::from(me_pub);
         assert!(
-            log.dealing.masked_shares.get_value(&me_pub).is_some(),
+            log.dealing.masked_shares.get_value(&me_key).is_some(),
             "honest dealing should include the dealer's self-row when it overlaps with players",
         );
 
         // Strip the self-row, leaving the rest of the dealing intact.
-        let new_shares: Map<PublicKey, Scalar> = log
+        let new_shares: Map<PublicKeyBytes, Scalar> = log
             .dealing
             .masked_shares
             .iter_pairs()
-            .filter(|(p, _)| **p != me_pub)
+            .filter(|(p, _)| **p != me_key)
             .map(|(p, v)| (p.clone(), v.clone()))
             .try_collect()
             .unwrap();
@@ -2074,6 +2089,63 @@ mod tests {
             "play should reject a dealing missing the self-row, got {:?}",
             play_result.as_ref().map(|_| "Ok"),
         );
+    }
+
+    #[test]
+    fn identify_rejects_malformed_dealer_key() {
+        let mut rng = commonware_utils::test_rng();
+        let me = PrivateKey::random(&mut rng);
+        let participants: Set<PublicKey> = std::iter::once(me.public()).try_collect().unwrap();
+        let info =
+            Info::new::<N3f1>(TEST_NAMESPACE, 0, None, participants.clone(), participants).unwrap();
+        let mut signed = deal(&mut rng, &TEST_SETUP, &info, &me, None, &Sequential)
+            .expect("honest deal must succeed");
+        assert!(signed.clone().identify(&info).is_some());
+
+        // An `x` that is not a canonical field element encodes no key.
+        signed.dealer = PublicKeyBytes::new([0xff; 32]);
+        assert!(signed.identify(&info).is_none());
+    }
+
+    #[test]
+    fn output_decode_rejects_malformed_key() {
+        let mut rng = commonware_utils::test_rng();
+        let players: Set<PublicKey> = (0..4)
+            .map(|_| PrivateKey::random(&mut rng).public())
+            .try_collect()
+            .unwrap();
+        let public = Sharing::new(
+            Mode::NonZeroCounter,
+            NZU32!(4),
+            Poly::commit(Poly::new(&mut rng, 2)),
+        );
+        let output = Output::new(
+            Summary::random(&mut rng),
+            public,
+            NZU32!(3),
+            players.clone(),
+            players,
+        );
+        let cfg = (NZU32!(4), ModeVersion::v0());
+        let decoded: Output<PublicKey> = Read::read_cfg(&mut output.encode(), &cfg).unwrap();
+        assert_eq!(decoded, output);
+
+        // The same output with a dealer whose `x` is not a canonical field element.
+        let dealers: Set<PublicKeyBytes> =
+            vec![PublicKeyBytes::new([0xff; 32])].try_into().unwrap();
+        let mut encoded = Vec::new();
+        output.summary.write(&mut encoded);
+        output.public.write(&mut encoded);
+        output.quorum.write(&mut encoded);
+        dealers.write(&mut encoded);
+        output.players.write(&mut encoded);
+        assert!(matches!(
+            Output::<PublicKey>::read_cfg(&mut Bytes::from(encoded), &cfg),
+            Err(commonware_codec::Error::Invalid(
+                "Output",
+                "malformed public key"
+            ))
+        ));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::{
-    BatchEntry, BatchVerifier, Secret,
+    BatchEntry, BatchVerifier, Encoding, Malformed, Secret,
     ed25519::core::{self as ed_core, VerificationKey},
 };
 #[cfg(not(feature = "std"))]
@@ -7,14 +7,15 @@ use alloc::borrow::{Cow, ToOwned};
 #[cfg(all(not(feature = "std"), feature = "arbitrary"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
-use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
-use commonware_utils::{Array, Span, union_unique};
+use commonware_utils::union_unique;
 use core::{
+    cmp::Ordering,
     fmt::{Debug, Display},
-    hash::Hash,
+    hash::{Hash, Hasher},
     ops::Deref,
 };
 use rand_core::CryptoRng;
@@ -22,7 +23,6 @@ use rand_core::CryptoRng;
 use std::borrow::{Cow, ToOwned};
 use zeroize::Zeroizing;
 
-const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 32;
 const SIGNATURE_LENGTH: usize = 64;
@@ -123,11 +123,18 @@ impl PartialEq for PrivateKey {
     }
 }
 
+/// The encoding of an Ed25519 public key.
+pub type PublicKeyBytes = Encoding<PublicKey, PUBLIC_KEY_LENGTH>;
+
 /// Ed25519 Public Key.
+///
+/// A key is built from its [PublicKeyBytes], which must encode a curve point. As
+/// [ZIP215](https://zips.z.cash/zip-0215) requires, non-canonical encodings and points of small
+/// order are accepted. The decoded point is cached for verification.
 ///
 /// Equality, ordering, and hashing use the original encoding. Distinct encodings of the same
 /// curve point are distinct keys.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PublicKey {
     key: ed_core::VerificationKey,
 }
@@ -138,6 +145,25 @@ impl From<PrivateKey> for PublicKey {
             key: key.verification_key(),
         })
     }
+}
+
+impl TryFrom<PublicKeyBytes> for PublicKey {
+    type Error = Malformed;
+
+    fn try_from(bytes: PublicKeyBytes) -> Result<Self, Malformed> {
+        let key = VerificationKey::try_from(*bytes.as_array()).map_err(|_| Malformed)?;
+        Ok(Self { key })
+    }
+}
+
+impl From<PublicKey> for PublicKeyBytes {
+    fn from(key: PublicKey) -> Self {
+        Self::new(key.key.to_bytes())
+    }
+}
+
+impl crate::Validated for PublicKey {
+    type Bytes = PublicKeyBytes;
 }
 
 impl crate::PublicKey for PublicKey {}
@@ -169,7 +195,7 @@ impl BatchVerifier for PublicKey {
                 let entry = project(i, item);
                 (
                     &entry.public_key.key,
-                    ed_core::Signature::from(entry.signature.raw),
+                    entry.signature.signature,
                     Some(entry.namespace),
                     entry.message,
                 )
@@ -186,9 +212,7 @@ impl PublicKey {
         let payload = namespace
             .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
             .unwrap_or_else(|| Cow::Borrowed(msg));
-        self.key
-            .verify(&ed_core::Signature::from(sig.raw), &payload)
-            .is_ok()
+        self.key.verify(&sig.signature, &payload).is_ok()
     }
 }
 
@@ -198,29 +222,9 @@ impl Write for PublicKey {
     }
 }
 
-impl Read for PublicKey {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let result = VerificationKey::try_from(raw);
-        #[cfg(feature = "std")]
-        let key = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
-        #[cfg(not(feature = "std"))]
-        let key = result
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
-
-        Ok(Self { key })
-    }
-}
-
 impl FixedSize for PublicKey {
     const SIZE: usize = PUBLIC_KEY_LENGTH;
 }
-
-impl Span for PublicKey {}
-
-impl Array for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
@@ -251,7 +255,6 @@ impl Display for PublicKey {
 impl arbitrary::Arbitrary<'_> for PublicKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use crate::Signer;
-        use commonware_math::algebra::Random;
         use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
@@ -260,7 +263,13 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
     }
 }
 
+/// The encoding of an Ed25519 signature.
+pub type SignatureBytes = Encoding<Signature, SIGNATURE_LENGTH>;
+
 /// Ed25519 Signature.
+///
+/// A signature is built from its [SignatureBytes], which must encode a curve point `R` and a
+/// scalar `s` below the group order. Verification then judges it against a key and message.
 ///
 /// Signatures from honestly generated keys are *non-malleable*: an adversary
 /// with access to many messages and signatures, verifying against an honestly
@@ -271,25 +280,35 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 /// one message also verify against another. This property does not hold for maliciously
 /// generated public keys. In particular, it's possible to craft public keys (which would
 /// otherwise not be honestly generatable) for which a signature will verify against any message.
-#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedArray)]
+#[derive(Clone)]
 pub struct Signature {
-    raw: [u8; SIGNATURE_LENGTH],
+    signature: ed_core::Signature,
+}
+
+impl TryFrom<SignatureBytes> for Signature {
+    type Error = Malformed;
+
+    fn try_from(bytes: SignatureBytes) -> Result<Self, Malformed> {
+        let signature = ed_core::Signature::try_from(*bytes.as_array()).map_err(|_| Malformed)?;
+        Ok(Self { signature })
+    }
+}
+
+impl From<Signature> for SignatureBytes {
+    fn from(signature: Signature) -> Self {
+        Self::new(signature.signature.to_bytes())
+    }
+}
+
+impl crate::Validated for Signature {
+    type Bytes = SignatureBytes;
 }
 
 impl crate::Signature for Signature {}
 
 impl Write for Signature {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
-    }
-}
-
-impl Read for Signature {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        Ok(Self { raw })
+        self.signature.to_bytes().write(buf);
     }
 }
 
@@ -297,42 +316,62 @@ impl FixedSize for Signature {
     const SIZE: usize = SIGNATURE_LENGTH;
 }
 
-impl Span for Signature {}
+impl PartialEq for Signature {
+    fn eq(&self, other: &Self) -> bool {
+        self.signature.to_bytes() == other.signature.to_bytes()
+    }
+}
 
-impl Array for Signature {}
+impl Eq for Signature {}
+
+impl PartialOrd for Signature {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Signature {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.signature.to_bytes().cmp(&other.signature.to_bytes())
+    }
+}
+
+impl Hash for Signature {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.signature.to_bytes().hash(state);
+    }
+}
 
 impl AsRef<[u8]> for Signature {
     fn as_ref(&self) -> &[u8] {
-        &self.raw
+        self.signature.as_bytes()
     }
 }
 
 impl Deref for Signature {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.raw
+        self.signature.as_bytes()
     }
 }
 
 impl From<ed_core::Signature> for Signature {
-    fn from(value: ed_core::Signature) -> Self {
-        let raw = value.to_bytes();
-        Self { raw }
+    fn from(signature: ed_core::Signature) -> Self {
+        Self { signature }
     }
 }
 
 impl Debug for Signature {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", Hex(&self.raw))
+        write!(f, "{}", Hex(self))
     }
 }
 
 impl Display for Signature {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", Hex(&self.raw))
+        write!(f, "{}", Hex(self))
     }
 }
-
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Signature {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -380,11 +419,20 @@ mod tests {
     }
 
     fn parse_public_key(public_key: &str) -> PublicKey {
-        PublicKey::decode(commonware_formatting::from_hex(public_key).unwrap()).unwrap()
+        let bytes = PublicKeyBytes::decode(commonware_formatting::from_hex(public_key).unwrap());
+        PublicKey::try_from(bytes.unwrap()).unwrap()
     }
 
     fn parse_signature(signature: &str) -> Signature {
-        Signature::decode(commonware_formatting::from_hex(signature).unwrap()).unwrap()
+        let bytes = SignatureBytes::decode(commonware_formatting::from_hex(signature).unwrap());
+        Signature::try_from(bytes.unwrap()).unwrap()
+    }
+
+    /// Returns `signature` with one byte of its encoding replaced.
+    fn alter_signature(signature: &Signature, index: usize, byte: u8) -> Signature {
+        let mut bytes = <[u8; SIGNATURE_LENGTH]>::from(SignatureBytes::from(signature.clone()));
+        bytes[index] = byte;
+        Signature::try_from(SignatureBytes::new(bytes)).unwrap()
     }
 
     fn vector_1() -> (PrivateKey, PublicKey, Vec<u8>, Signature) {
@@ -471,8 +519,9 @@ mod tests {
         );
         let encoded = public_key.encode();
         assert_eq!(encoded.len(), PUBLIC_KEY_LENGTH);
-        let decoded = PublicKey::decode(encoded).unwrap();
-        assert_eq!(public_key, decoded);
+        let decoded = PublicKeyBytes::decode(encoded).unwrap();
+        assert_eq!(decoded, PublicKeyBytes::from(public_key.clone()));
+        assert_eq!(PublicKey::try_from(decoded).unwrap(), public_key);
     }
 
     #[test]
@@ -487,8 +536,9 @@ mod tests {
         );
         let encoded = signature.encode();
         assert_eq!(encoded.len(), SIGNATURE_LENGTH);
-        let decoded = Signature::decode(encoded).unwrap();
-        assert_eq!(signature, decoded);
+        let decoded = SignatureBytes::decode(encoded).unwrap();
+        assert_eq!(decoded, SignatureBytes::from(signature.clone()));
+        assert_eq!(Signature::try_from(decoded).unwrap(), signature);
     }
 
     #[test]
@@ -678,9 +728,9 @@ mod tests {
         .unwrap();
         test_sign_and_verify(
             PrivateKey::decode(private_key).unwrap(),
-            PublicKey::decode(public_key).unwrap(),
+            PublicKey::try_from(PublicKeyBytes::decode(public_key).unwrap()).unwrap(),
             &message,
-            Signature::decode(signature).unwrap(),
+            Signature::try_from(SignatureBytes::decode(signature).unwrap()).unwrap(),
         )
     }
 
@@ -691,7 +741,7 @@ mod tests {
             |_, (_, public_key, message, signature)| {
                 (
                     &public_key.key,
-                    ed_core::Signature::from(signature.raw),
+                    signature.signature,
                     None,
                     message.as_slice(),
                 )
@@ -709,7 +759,7 @@ mod tests {
     #[test]
     fn batch_verify_invalid() {
         let mut v2 = vector_2();
-        v2.3.raw[3] = 0xff;
+        v2.3 = alter_signature(&v2.3, 32, v2.3[32] ^ 1);
         assert!(!verify_raw_vectors(&[vector_1(), v2]));
     }
 
@@ -822,9 +872,9 @@ mod tests {
             records[index].0.pop();
         }
 
-        // A noncanonical scalar in the final record must invalidate the batch.
+        // An altered scalar in the final record must invalidate the batch.
         let mut invalid = records;
-        invalid[24].1.raw[63] |= 0x80;
+        invalid[24].1 = alter_signature(&invalid[24].1, 32, invalid[24].1[32] ^ 1);
         assert!(!explore(|strategy| verify(
             &invalid, namespace, &publics, strategy
         )));
@@ -896,28 +946,27 @@ mod tests {
     #[test]
     fn test_zero_signature_fails() {
         let (_, public_key, message, _) = vector_1();
-        let zero_sig = Signature::decode(vec![0u8; Signature::SIZE]).unwrap();
+        let zero_sig = Signature::try_from(SignatureBytes::new([0u8; SIGNATURE_LENGTH])).unwrap();
         assert!(!public_key.verify_inner(None, &message, &zero_sig));
     }
 
     #[test]
     fn test_high_s_fails() {
-        let (_, public_key, message, signature) = vector_1();
-        let mut bad_signature = signature.to_vec();
+        let (_, _, _, signature) = vector_1();
+        let mut bad_signature = <[u8; SIGNATURE_LENGTH]>::from(SignatureBytes::from(signature));
         bad_signature[63] |= 0x80; // make S non-canonical
-        let bad_signature = Signature::decode(bad_signature).unwrap();
-        assert!(!public_key.verify_inner(None, &message, &bad_signature));
+        assert!(Signature::try_from(SignatureBytes::new(bad_signature)).is_err());
     }
 
     #[test]
     fn test_invalid_r_fails() {
-        let (_, public_key, message, signature) = vector_1();
-        let mut bad_signature = signature.to_vec();
-        for b in bad_signature.iter_mut().take(32) {
-            *b = 0xff; // invalid R component
-        }
-        let bad_signature = Signature::decode(bad_signature).unwrap();
-        assert!(!public_key.verify_inner(None, &message, &bad_signature));
+        let (_, _, _, signature) = vector_1();
+        let mut bad_signature = <[u8; SIGNATURE_LENGTH]>::from(SignatureBytes::from(signature));
+
+        // No curve point has `y = 2`, so `R` does not decompress.
+        bad_signature[..32].copy_from_slice(&[0; 32]);
+        bad_signature[0] = 2;
+        assert!(Signature::try_from(SignatureBytes::new(bad_signature)).is_err());
     }
 
     #[test]
@@ -943,6 +992,38 @@ mod tests {
         assert_eq!(private_key.public_key(), PublicKey::from(private_key));
     }
 
+    #[test]
+    fn validation_contract() {
+        // Keys that must be rejected: encodings one byte short or long, and `y = 2`. No curve
+        // point has that `y` coordinate.
+        let mut non_point = [0u8; 32];
+        non_point[0] = 2;
+        crate::assert_validation_contract::<PrivateKey>(
+            &[&non_point, &[0; 31], &[0; 33]],
+            |honest| {
+                // The group order `L`, little-endian.
+                const L: [u8; 32] = [
+                    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde,
+                    0xf9, 0xde, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+                ];
+
+                // Signatures that must be rejected: encodings one byte short or long, and the
+                // honest signature with a non-point `R` or with `s + L` in place of `s`. Adding
+                // `L` encodes the same scalar non-canonically.
+                let mut s_plus_l = honest.to_vec();
+                let mut carry = 0u16;
+                for (byte, l) in s_plus_l[32..].iter_mut().zip(L) {
+                    let [low, high] = (u16::from(*byte) + u16::from(l) + carry).to_le_bytes();
+                    *byte = low;
+                    carry = u16::from(high);
+                }
+                let mut r_non_point = honest.to_vec();
+                r_non_point[..32].copy_from_slice(&non_point);
+                vec![s_plus_l, r_non_point, vec![0; 63], vec![0; 65]]
+            },
+        );
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
@@ -950,8 +1031,8 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<PrivateKey>,
-            CodecConformance<PublicKey>,
-            CodecConformance<Signature>,
+            CodecConformance<PublicKeyBytes>,
+            CodecConformance<SignatureBytes>,
         }
     }
 }

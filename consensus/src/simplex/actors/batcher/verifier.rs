@@ -10,7 +10,7 @@ use crate::{
 };
 use commonware_cryptography::{
     Digest,
-    certificate::{Attestation, Scheme as CertificateScheme},
+    certificate::{Attestation, AttestationBytes, Scheme as CertificateScheme},
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::traces::TracedExt as _;
@@ -38,7 +38,7 @@ where
 pub struct Batch<C> {
     /// Pending votes processed, whether individually or through a certificate.
     pub processed: usize,
-    /// Signers identified as invalid by attestation verification.
+    /// Signers identified as invalid by a malformed attestation or by attestation verification.
     ///
     /// An empty result does not mean every input vote was individually verified:
     /// successful optimistic assembly returns no per-vote results.
@@ -65,7 +65,7 @@ enum State<C, S: CertificateScheme> {
     /// No certificate yet. Votes accumulate toward a quorum.
     Incomplete {
         /// Votes awaiting signature verification.
-        pending: Vec<(C, Attestation<S>)>,
+        pending: Vec<(C, AttestationBytes<S>)>,
         /// Votes with verified signatures, held for certificate construction.
         verified: Vec<(C, Attestation<S>)>,
     },
@@ -88,7 +88,12 @@ impl<C, S: CertificateScheme> Certification<C, S> {
     /// Buffers a vote for verification (or, if already verified, for
     /// certificate construction). The caller owns signer uniqueness. Votes that
     /// arrive after completion are dropped.
-    fn add(&mut self, context: C, attestation: Attestation<S>, is_verified: bool) {
+    ///
+    /// # Panics
+    ///
+    /// Panics if a verified attestation is malformed. Only locally signed votes
+    /// are added as verified.
+    fn add(&mut self, context: C, attestation: AttestationBytes<S>, is_verified: bool) {
         let State::Incomplete { pending, verified } = &mut self.state else {
             return;
         };
@@ -101,11 +106,19 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         } else {
             1
         };
-        let votes = if is_verified { verified } else { pending };
-        if votes.capacity() == 0 {
-            votes.reserve_exact(initial_capacity);
+        if is_verified {
+            let attestation =
+                Attestation::try_from(attestation).expect("verified vote must be well formed");
+            if verified.capacity() == 0 {
+                verified.reserve_exact(initial_capacity);
+            }
+            verified.push((context, attestation));
+        } else {
+            if pending.capacity() == 0 {
+                pending.reserve_exact(initial_capacity);
+            }
+            pending.push((context, attestation));
         }
-        votes.push((context, attestation));
     }
 
     /// Whether an unfinished kind has a verified quorum, allowing construction
@@ -170,19 +183,37 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         let (votes, result) = offload(len, span(), strategy, move |strategy| {
             let context = verified
                 .first()
-                .or_else(|| pending.first())
+                .map(|(context, _)| context)
+                .or_else(|| pending.first().map(|(context, _)| context))
                 .expect("construction attempt requires votes")
-                .0
                 .clone();
+
+            // Malformed attestations are invalid without verification and leave the
+            // candidate quorum.
+            let bytes: Vec<_> = pending
+                .into_iter()
+                .map(|(_, attestation)| attestation)
+                .collect();
+            let mut malformed = Vec::new();
+            let pending: Vec<_> = Attestation::try_from_batch(&bytes, &strategy)
+                .into_iter()
+                .zip(&bytes)
+                .filter_map(|(attestation, bytes)| {
+                    if attestation.is_none() {
+                        malformed.push(bytes.signer);
+                    }
+                    attestation
+                })
+                .collect();
 
             // A candidate quorum can authenticate the certificate without establishing
             // individual vote validity. Failure returns verification results for pending votes.
             // Below quorum, non-batchable schemes verify pending votes directly.
-            let (result, fallback) = if len >= quorum {
+            let (mut result, fallback) = if pending.len() + verified.len() >= quorum {
                 match scheme.optimistic_assemble::<_, D, _, _>(
                     &mut rng,
                     subject(&context),
-                    pending.into_iter().map(|(_, attestation)| attestation),
+                    pending,
                     verified.iter().map(|(_, attestation)| attestation),
                     &strategy,
                 ) {
@@ -191,7 +222,7 @@ impl<C, S: CertificateScheme> Certification<C, S> {
                             Vec::new(),
                             Batch {
                                 processed,
-                                invalid: Vec::new(),
+                                invalid: malformed,
                                 certificate: Some(wrap(context, certificate)),
                                 fallback: false,
                             },
@@ -204,12 +235,13 @@ impl<C, S: CertificateScheme> Certification<C, S> {
                     scheme.verify_attestations::<_, D, _>(
                         &mut rng,
                         subject(&context),
-                        pending.into_iter().map(|(_, attestation)| attestation),
+                        pending,
                         &strategy,
                     ),
                     false,
                 )
             };
+            result.invalid.extend(malformed);
 
             // A quorum of prior and newly verified votes must assemble. Otherwise retain
             // them with their context so proposal changes can filter them.
@@ -644,7 +676,9 @@ mod tests {
         },
         types::{Epoch, Round, View},
     };
+    use commonware_codec::{Copying, DecodeExt, FixedSize};
     use commonware_cryptography::{
+        Validated,
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::mocks::Fixture,
         ed25519::PublicKey,
@@ -670,7 +704,7 @@ mod tests {
 
     impl<C, S: CertificateScheme> Certification<C, S> {
         /// Returns the pending buffer (empty once complete).
-        fn pending(&self) -> &[(C, Attestation<S>)] {
+        fn pending(&self) -> &[(C, AttestationBytes<S>)] {
             match &self.state {
                 State::Incomplete { pending, .. } => pending,
                 State::Complete => &[],
@@ -1060,7 +1094,7 @@ mod tests {
                 .verified()
                 .iter()
                 .any(|(proposal, attestation)| proposal == &leader_vote.proposal
-                    && attestation == &leader_vote.attestation)
+                    && AttestationBytes::from(attestation.clone()) == leader_vote.attestation)
         );
         assert_eq!(failed_second, vec![faulty_vote.signer()]);
     }
@@ -1169,6 +1203,68 @@ mod tests {
         ready_and_construct_nullification(bls12381_multisig::fixture::<MinPk, _>).await;
         ready_and_construct_nullification(ed25519::fixture).await;
         ready_and_construct_nullification(secp256r1::fixture).await;
+    }
+
+    /// A malformed attestation counts as processed and invalid, and leaves the
+    /// candidate quorum without blocking a certificate from the remaining votes.
+    async fn malformed_nullify_is_invalid<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
+        let quorum = N3f1::quorum(schemes.len());
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let malformed = <<S as CertificateScheme>::Signature as Validated>::Bytes::decode(Copying(
+            &vec![0xFF; <<S as CertificateScheme>::Signature as Validated>::Bytes::SIZE],
+        ))
+        .unwrap();
+        let mut nullifies: Vec<_> = schemes
+            .iter()
+            .map(|scheme| create_nullify(scheme, round))
+            .collect();
+        let faulty = nullifies[3].signer();
+        nullifies[3].attestation.signature = malformed;
+
+        // Below quorum, the malformed vote is rejected and the others are retained.
+        let mut verifier = Verifier::<S, Sha256>::new(round, schemes[0].clone(), quorum);
+        for nullify in nullifies.iter().take(4) {
+            verifier.add(Vote::Nullify(nullify.clone()), false);
+        }
+        let batch = verifier
+            .try_construct_nullification(&mut rng, &Sequential)
+            .await
+            .unwrap();
+        assert_eq!(batch.processed, 4);
+        assert_eq!(batch.invalid, vec![faulty]);
+        assert!(batch.certificate.is_none());
+        assert_eq!(verifier.nullify.verified().len(), 3);
+
+        // With a well-formed quorum, the certificate forms and the malformed vote is still invalid.
+        let mut verifier = Verifier::<S, Sha256>::new(round, schemes[0].clone(), quorum);
+        for nullify in &nullifies {
+            verifier.add(Vote::Nullify(nullify.clone()), false);
+        }
+        let batch = verifier
+            .try_construct_nullification(&mut rng, &Sequential)
+            .await
+            .unwrap();
+        assert_eq!(batch.processed, 5);
+        assert_eq!(batch.invalid, vec![faulty]);
+        assert!(batch.certificate.is_some());
+    }
+
+    #[test_async]
+    async fn test_malformed_nullify_is_invalid() {
+        malformed_nullify_is_invalid(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
+        malformed_nullify_is_invalid(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
+        malformed_nullify_is_invalid(bls12381_threshold_std::fixture::<MinSig, _>).await;
+        malformed_nullify_is_invalid(bls12381_threshold_std::fixture::<MinPk, _>).await;
+        malformed_nullify_is_invalid(bls12381_multisig::fixture::<MinSig, _>).await;
+        malformed_nullify_is_invalid(bls12381_multisig::fixture::<MinPk, _>).await;
+        malformed_nullify_is_invalid(ed25519::fixture).await;
+        malformed_nullify_is_invalid(secp256r1::fixture).await;
     }
 
     fn add_finalize<S, F>(mut fixture: F)

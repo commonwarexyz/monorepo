@@ -22,7 +22,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
-        certificate::{Attestation, mocks::Fixture},
+        certificate::{AttestationBytes, mocks::Fixture},
         sha256::Digest as Sha256Digest,
     };
     use commonware_math::algebra::Random;
@@ -44,7 +44,7 @@ mod tests {
         let ack = TipAck {
             tip: Height::new(u64::MAX),
             ack: Ack {
-                attestation: Attestation {
+                attestation: AttestationBytes {
                     signer: Participant::new(u32::MAX),
                     signature: ack.attestation.signature.clone(),
                 },

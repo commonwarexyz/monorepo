@@ -1414,7 +1414,10 @@ impl<P: PublicKey> Peer<P> {
                                 return;
                             }
                         };
-                        let Ok(dialer) = P::decode(dialer.coalesce()) else {
+                        let Some(dialer) = P::Bytes::decode(dialer.coalesce())
+                            .ok()
+                            .and_then(|dialer| P::try_from(dialer).ok())
+                        else {
                             error!("received public key is invalid");
                             return;
                         };
