@@ -12,7 +12,7 @@
 //! down from the tip, so a block is identified by its authenticated descendant rather than by
 //! whichever block happens to be stored at its height.
 
-use super::{Error, FinalSweep, SlotStream};
+use super::{Error, FinalSweep, Lanes, SlotStream};
 use crate::{
     multimmit::{
         algebra::FinalTips,
@@ -198,15 +198,22 @@ impl<D: Digest> Cut<D> {
         })
     }
 
-    /// Returns the cut after the final sweep `fact` fixes above this cut's record.
+    /// Returns the cut after the final sweep `fact` fixes above this cut's record, with the
+    /// payment chains of `lanes`.
     ///
     /// The caller authenticates that `fact` belongs to a leader whose history is
     /// [`Self::history`].
-    pub(crate) fn sweep(&self, fact: &SweepFact<D>) -> Result<Self, Error> {
+    pub(crate) fn sweep(&self, fact: &SweepFact<D>, lanes: &Lanes) -> Result<Self, Error> {
         if fact.tips.len() != self.chains() {
             return Err(Error::Frontier);
         }
-        let placed = FinalSweep::placed(&self.ordered, &fact.tips, &fact.proposed, &fact.settled)?;
+        let placed = FinalSweep::placed(
+            &self.ordered,
+            &fact.tips,
+            &fact.proposed,
+            &fact.settled,
+            lanes,
+        )?;
         let (emitted, grown) = raise(&self.emitted, placed.into_iter())?;
         Ok(Self {
             index: self.index.checked_add(grown).ok_or(Error::Frontier)?,
@@ -277,21 +284,30 @@ struct Active<D: Digest> {
 /// An expansion opens each queued record and then applies a queued sweep. Slots at or below a
 /// chain's emitted height are skipped, so an expansion resumes correctly from a cut taken in the
 /// middle of an opening or a sweep: within one step a chain's slots strictly increase in height,
-/// so its emitted prefix is exactly the slots skipped. Memory is O(chains) plus the queued steps.
+/// so its emitted prefix is exactly the slots skipped. A chain's slots lie in one pass, the payment
+/// pass or the ordinary ones, so this holds with payment chains too. Memory is O(chains) plus the
+/// queued steps.
 pub(crate) struct Expansion<D: Digest> {
     cut: Cut<D>,
+    lanes: Lanes,
     steps: VecDeque<Step<D>>,
     active: Option<Active<D>>,
 }
 
 impl<D: Digest> Expansion<D> {
-    /// Starts an expansion at `cut`.
-    pub(crate) const fn new(cut: Cut<D>) -> Self {
+    /// Starts an expansion at `cut` whose payment passes visit the payment chains of `lanes`.
+    pub(crate) const fn new(cut: Cut<D>, lanes: Lanes) -> Self {
         Self {
             cut,
+            lanes,
             steps: VecDeque::new(),
             active: None,
         }
+    }
+
+    /// Returns the payment chains of the expansion.
+    pub(crate) const fn lanes(&self) -> &Lanes {
+        &self.lanes
     }
 
     /// Returns the cut after every position yielded so far, including steps that the last
@@ -340,16 +356,22 @@ impl<D: Digest> Expansion<D> {
             let (end, stream, sweep) = match step {
                 Step::Open(commitment, record) => (
                     self.cut.open(commitment, &record)?,
-                    SlotStream::new(&self.cut.ordered, record.tips(), record.proposed())?,
+                    SlotStream::new(
+                        &self.cut.ordered,
+                        record.tips(),
+                        record.proposed(),
+                        &self.lanes,
+                    )?,
                     false,
                 ),
                 Step::Sweep(fact) => (
-                    self.cut.sweep(&fact)?,
+                    self.cut.sweep(&fact, &self.lanes)?,
                     FinalSweep::new(
                         &self.cut.ordered,
                         fact.tips.clone(),
                         &fact.proposed,
                         fact.settled.clone(),
+                        &self.lanes,
                     )?
                     .into_stream(),
                     true,
@@ -482,7 +504,10 @@ mod tests {
         let (commitment, wide) = record(genesis(), &[1, 1, 1]);
         assert_eq!(cut.open(commitment, &wide), Err(Error::Frontier));
         assert_eq!(
-            cut.sweep(&fact(&[1, 1, 1], &[1, 1, 1], &[true, true, true])),
+            cut.sweep(
+                &fact(&[1, 1, 1], &[1, 1, 1], &[true, true, true]),
+                &Lanes::none()
+            ),
             Err(Error::Frontier)
         );
         assert!(SweepFact::new(frontier(&[1]), heights(&[1, 1]), vec![true]).is_err());
@@ -492,7 +517,7 @@ mod tests {
     fn a_record_that_emits_nothing_only_advances_the_history() {
         let cut = start(&[2, 2]);
         let (commitment, unchanged) = record(genesis(), &[2, 2]);
-        let mut expansion = Expansion::new(cut.clone());
+        let mut expansion = Expansion::new(cut.clone(), Lanes::none());
         expansion.open(commitment, Arc::clone(&unchanged));
         assert_eq!(drain(&mut expansion), Vec::new());
         assert_eq!(expansion.cut().history(), commitment);
@@ -505,7 +530,7 @@ mod tests {
         let cut = start(&[0, 0]);
         let record = TipRecord::new(genesis(), frontier(&[2, 1]), heights(&[1, 1])).unwrap();
         let commitment = record.commitment::<Sha256>();
-        let mut expansion = Expansion::new(cut.clone());
+        let mut expansion = Expansion::new(cut.clone(), Lanes::none());
         expansion.open(commitment, Arc::new(record.clone()));
         assert_eq!(drain(&mut expansion), vec![(0, 1), (1, 1), (0, 2)]);
         assert_eq!(expansion.cut(), &cut.open(commitment, &record).unwrap());
@@ -515,7 +540,7 @@ mod tests {
     #[test]
     fn a_superseded_sweep_resumes_through_the_next_opening() {
         let (first, opening) = record(genesis(), &[0, 0]);
-        let mut expansion = Expansion::new(start(&[0, 0]));
+        let mut expansion = Expansion::new(start(&[0, 0]), Lanes::none());
         expansion.open(first, opening);
         expansion.sweep(fact(&[2, 2], &[2, 2], &[true, true]));
         let mut yielded = Vec::new();
@@ -543,7 +568,7 @@ mod tests {
     #[test]
     fn abandoning_keeps_queued_openings() {
         let (first, opening) = record(genesis(), &[1, 0]);
-        let mut expansion = Expansion::new(start(&[0, 0]));
+        let mut expansion = Expansion::new(start(&[0, 0]), Lanes::none());
         expansion.sweep(fact(&[0, 1], &[0, 1], &[true, true]));
         expansion.open(first, opening);
         expansion.abandon_sweep();
@@ -556,10 +581,74 @@ mod tests {
         // Chain 0 fell short of its proposed tip, so the sweep halts at its first missing slot.
         let cut = start(&[0, 0]);
         let halted = fact(&[1, 3], &[2, 2], &[false, true]);
-        let mut expansion = Expansion::new(cut.clone());
+        let mut expansion = Expansion::new(cut.clone(), Lanes::none());
         expansion.sweep(Arc::clone(&halted));
         assert_eq!(drain(&mut expansion), vec![(0, 1), (1, 1)]);
-        assert_eq!(expansion.cut(), &cut.sweep(&halted).unwrap());
+        assert_eq!(
+            expansion.cut(),
+            &cut.sweep(&halted, &Lanes::none()).unwrap()
+        );
         assert_eq!(expansion.cut().history(), genesis());
+    }
+
+    #[test]
+    fn payment_chains_lead_every_step_and_resume_mid_payment_pass() {
+        // Chain 1 is a payment chain. The opening and the sweep each place its slots first; the
+        // sweep's short, unsettled chain 0 does not hold them back, while it halts chain 2 at its
+        // second offset.
+        let lanes = Lanes::new([false, true, false]);
+        let record = TipRecord::new(genesis(), frontier(&[1, 2, 1]), heights(&[1, 2, 1])).unwrap();
+        let commitment = record.commitment::<Sha256>();
+        let record = Arc::new(record);
+        let swept = fact(&[2, 5, 3], &[3, 5, 3], &[false, true, true]);
+        let expected = vec![
+            (1, 1),
+            (1, 2),
+            (0, 1),
+            (2, 1),
+            (1, 3),
+            (1, 4),
+            (1, 5),
+            (0, 2),
+            (2, 2),
+        ];
+        let cut = start(&[0, 0, 0]);
+        let end = cut
+            .open(commitment, &record)
+            .unwrap()
+            .sweep(&swept, &lanes)
+            .unwrap();
+        assert_eq!(end.emitted(), heights(&[2, 5, 2]));
+        assert_eq!(end.index(), expected.len() as u64);
+
+        // Stop after every prefix, including inside the sweep's payment pass, and resume from
+        // the cut reached.
+        for stop in 0..=expected.len() {
+            let mut expansion = Expansion::new(cut.clone(), lanes.clone());
+            expansion.open(commitment, Arc::clone(&record));
+            expansion.sweep(Arc::clone(&swept));
+            let mut yielded = Vec::new();
+            for _ in 0..stop {
+                let position = expansion.next_position().unwrap().unwrap();
+                yielded.push((position.chain().get(), position.height.get()));
+            }
+            let mut resumed = Expansion::new(expansion.cut().clone(), lanes.clone());
+            if expansion.cut().history() != commitment {
+                resumed.open(commitment, Arc::clone(&record));
+            }
+            resumed.sweep(Arc::clone(&swept));
+            yielded.extend(drain(&mut resumed));
+            assert_eq!(yielded, expected, "resumed after {stop} positions");
+            assert_eq!(resumed.cut(), &end);
+        }
+
+        // Without payment chains, chain 1 also waits behind chain 0's hole in the sweep.
+        let mut ordinary = Expansion::new(cut, Lanes::none());
+        ordinary.open(commitment, Arc::clone(&record));
+        ordinary.sweep(Arc::clone(&swept));
+        assert_eq!(
+            drain(&mut ordinary),
+            vec![(0, 1), (1, 1), (2, 1), (1, 2), (0, 2), (1, 3), (2, 2)]
+        );
     }
 }

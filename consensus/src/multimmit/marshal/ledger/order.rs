@@ -13,7 +13,7 @@
 
 use crate::{
     multimmit::{
-        order::{Cut, Error as OrderError, Expansion, Position, SweepFact},
+        order::{Cut, Error as OrderError, Expansion, Lanes, Position, SweepFact},
         types::{BlockRef, CertificateId, TipRecord},
     },
     types::Height,
@@ -130,11 +130,11 @@ pub(crate) struct Order<D: Digest> {
 
 impl<D: Digest> Order<D> {
     /// Starts at `cut`, whose history has local ordinal `ordinal`, holding at most `capacity`
-    /// undispatched positions.
-    pub(crate) fn new(cut: Cut<D>, ordinal: u64, capacity: usize) -> Self {
+    /// undispatched positions, with the payment chains of `lanes`.
+    pub(crate) fn new(cut: Cut<D>, ordinal: u64, capacity: usize, lanes: Lanes) -> Self {
         Self {
             opened: BTreeMap::from([(ordinal, cut.clone())]),
-            expansion: Expansion::new(cut),
+            expansion: Expansion::new(cut, lanes),
             queued: ordinal,
             swept: None,
             start: ordinal,
@@ -147,6 +147,11 @@ impl<D: Digest> Order<D> {
     /// Returns the cut after the newest position taken into the window.
     pub(crate) const fn cut(&self) -> &Cut<D> {
         self.expansion.cut()
+    }
+
+    /// Returns the payment chains every opening and sweep of the order visits first.
+    pub(crate) const fn lanes(&self) -> &Lanes {
+        self.expansion.lanes()
     }
 
     /// Returns the ordinal of the newest record whose opening is queued.
@@ -424,7 +429,7 @@ mod tests {
     fn records_then_sweep_resolve_through_held_parents() {
         let (first, opened) = record(genesis(), vec![block(0, 2, 0), block(1, 1, 0)]);
         let records = HashMap::from([(1u64, (first, opened))]);
-        let mut order = Order::new(start(2), 0, 16);
+        let mut order = Order::new(start(2), 0, 16, Lanes::none());
         let proof = target(1, first, 1, vec![block(0, 3, 0), block(1, 2, 0)]);
         assert_eq!(
             order.feed(&proof, |ordinal| records.get(&ordinal).cloned(), |_| true),
@@ -446,7 +451,7 @@ mod tests {
     fn a_missing_record_stops_feeding_until_it_arrives() {
         let (first, opened) = record(genesis(), vec![block(0, 1, 0)]);
         let (second, next) = record(first, vec![block(0, 2, 0)]);
-        let mut order = Order::new(start(1), 0, 16);
+        let mut order = Order::new(start(1), 0, 16, Lanes::none());
         let proof = target(1, second, 2, vec![block(0, 2, 0)]);
         let mut records = HashMap::from([(1u64, (first, opened))]);
         assert_eq!(
@@ -468,7 +473,7 @@ mod tests {
         let (first, opened) = record(genesis(), vec![block(0, 1, 0)]);
         let (second, next) = record(first, vec![block(0, 2, 0)]);
         let records = HashMap::from([(1u64, (first, opened)), (2u64, (second, next))]);
-        let mut order = Order::new(start(1), 0, 16);
+        let mut order = Order::new(start(1), 0, 16, Lanes::none());
         let proof = target(1, second, 2, vec![block(0, 3, 0)]);
         // Ordinal 1 opens, but its L-QCs' ends are unknown: the next record waits.
         let projected = std::cell::Cell::new(0u64);
@@ -495,7 +500,7 @@ mod tests {
     #[test]
     fn missing_headers_and_durability_hold_the_front() {
         let (first, opened) = record(genesis(), vec![block(0, 3, 0)]);
-        let mut order = Order::new(start(1), 0, 16);
+        let mut order = Order::new(start(1), 0, 16, Lanes::none());
         let proof = target(1, first, 1, vec![block(0, 3, 0)]);
         order.feed(&proof, |_| Some((first, opened.clone())), |_| true);
         order.fill().unwrap();
@@ -522,7 +527,7 @@ mod tests {
         let (first, opened) = record(genesis(), vec![block(0, 0, 0), block(1, 0, 0)]);
         let (second, next) = record(first, vec![block(0, 3, 0), block(1, 2, 0)]);
         let records = HashMap::from([(1u64, (first, opened)), (2u64, (second, next))]);
-        let mut order = Order::new(start(2), 0, 2);
+        let mut order = Order::new(start(2), 0, 2, Lanes::none());
         let early = target(1, first, 1, vec![block(0, 2, 0), block(1, 2, 0)]);
         order.feed(&early, |ordinal| records.get(&ordinal).cloned(), |_| true);
         // The window holds two positions of the early sweep.

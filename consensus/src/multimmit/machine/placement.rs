@@ -1,9 +1,11 @@
 //! Placement of producer blocks in the canonical order as soon as local finality fixes it.
 //!
 //! Finality of a leader fixes a prefix of the total order: the openings of its recursive tip
-//! history, oldest first, then the final sweep toward the leader's finalized tips. The sweep halts
-//! at the first chain that fell short of its proposed tip, and its extension pass at the first
-//! unsettled chain, so a block below the finalized tips may wait a later view for its position.
+//! history, oldest first, then the final sweep toward the leader's finalized tips. Each opening and
+//! sweep first places the payment chains, up to their tips, in the payment pass. The sweep then
+//! halts at the first ordinary chain that fell short of its proposed tip, and its extension pass at
+//! the first unsettled ordinary chain, so a block below the finalized tips may wait a later view
+//! for its position.
 //!
 //! [`PlacementState`] follows that prefix with the extraction marshal orders its output by. Each
 //! history opening and each sweep reads its new blocks off its own target tip, above the heights
@@ -16,7 +18,7 @@
 
 use crate::{
     multimmit::{
-        order::FinalSweep,
+        order::{FinalSweep, Lanes},
         scheme::Scheme,
         types::{Activity, BlockRef, FinalityFact, Placement, TipRecord},
     },
@@ -97,11 +99,14 @@ pub(crate) struct PlacementState<D: Digest> {
     floor: Option<View>,
     /// Placed records no proof report took yet, oldest first, by commitment.
     unproven: VecDeque<Committed<D>>,
+    /// The epoch's payment chains, which every sweep places first.
+    lanes: Lanes,
 }
 
 impl<D: Digest> PlacementState<D> {
-    /// Creates a tracker whose order starts at the genesis \`history\` commitment and \`tips\`.
-    pub(crate) fn new(history: D, tips: &[BlockRef<D>]) -> Self {
+    /// Creates a tracker whose order starts at the genesis `history` commitment and `tips`, with
+    /// the payment chains of `lanes`.
+    pub(crate) fn new(history: D, tips: &[BlockRef<D>], lanes: Lanes) -> Self {
         Self {
             ordered: history,
             placed: tips.iter().map(BlockRef::height).collect(),
@@ -111,6 +116,7 @@ impl<D: Digest> PlacementState<D> {
             stalled: BTreeMap::new(),
             floor: None,
             unproven: VecDeque::new(),
+            lanes,
         }
     }
 
@@ -327,6 +333,7 @@ impl<D: Digest> PlacementState<D> {
             fact.blocks(),
             fact.proposed(),
             fact.settled(),
+            &self.lanes,
         ) else {
             return true;
         };
@@ -467,7 +474,7 @@ mod tests {
     }
 
     fn state(chains: usize) -> PlacementState<Sha256Digest> {
-        PlacementState::new(genesis(), &frontier(&vec![0; chains]))
+        PlacementState::new(genesis(), &frontier(&vec![0; chains]), Lanes::none())
     }
 
     fn record(
@@ -579,7 +586,7 @@ mod tests {
 
     #[test]
     fn placement_starts_above_the_genesis_tips() {
-        let mut placement = PlacementState::new(genesis(), &frontier(&[2, 0]));
+        let mut placement = PlacementState::new(genesis(), &frontier(&[2, 0]), Lanes::none());
         let opening = record(genesis(), frontier(&[2, 0]));
         history(&mut placement, 1, leader(1), &opening);
         let placed = finality(
@@ -700,6 +707,35 @@ mod tests {
             runs(&placed),
             vec![(reference(0, 2), 1, 2), (reference(1, 3), 1, 3)]
         );
+    }
+
+    #[test]
+    fn payment_blocks_behind_a_shortfall_are_placed_at_once() {
+        // Chain 1 is a payment chain: the payment pass places it up to its finalized tip before
+        // chain 0's shortfall halts the ordinary pass.
+        let mut placement =
+            PlacementState::new(genesis(), &frontier(&[0, 0]), Lanes::new([false, true]));
+        let first = record(genesis(), frontier(&[0, 0]));
+        history(&mut placement, 3, leader(3), &first);
+        let placed = finality(
+            &mut placement,
+            &fact(3, leader(3), &[1, 3], &[2, 2], &[false, true]),
+        );
+        assert_eq!(placement.heights(), heights(&[1, 3]));
+        assert_eq!(
+            runs(&placed),
+            vec![(reference(0, 1), 0, 1), (reference(1, 3), 0, 3)]
+        );
+
+        // The next view's opening carries chain 0 past the halt; chain 1 is already placed.
+        let second = record(commitment(&first), frontier(&[2, 3]));
+        history(&mut placement, 4, leader(4), &second);
+        let placed = finality(
+            &mut placement,
+            &fact(4, leader(4), &[2, 3], &[2, 3], &[true, true]),
+        );
+        assert_eq!(placement.heights(), heights(&[2, 3]));
+        assert_eq!(runs(&placed), vec![(reference(0, 2), 1, 2)]);
     }
 
     #[test]
