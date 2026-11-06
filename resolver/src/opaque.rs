@@ -98,7 +98,7 @@ where
         self.send(Message::Fetch(vec![FetchKey::from(fetch.into())]))
     }
 
-    fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
+    fn fetch_all<F>(&mut self, fetches: impl IntoIterator<Item = F>) -> Feedback
     where
         F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
@@ -136,14 +136,14 @@ where
         <Self as crate::Resolver>::fetch(self, fetch)
     }
 
-    fn fetch_all_targeted<F>(&mut self, fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>) -> Feedback
+    fn fetch_all_targeted<F>(
+        &mut self,
+        fetches: impl IntoIterator<Item = (F, NonEmptyVec<Self::PublicKey>)>,
+    ) -> Feedback
     where
         F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
-        <Self as crate::Resolver>::fetch_all(
-            self,
-            fetches.into_iter().map(|(fetch, _)| fetch).collect(),
-        )
+        <Self as crate::Resolver>::fetch_all(self, fetches.into_iter().map(|(fetch, _)| fetch))
     }
 }
 
@@ -724,16 +724,11 @@ mod tests {
                 assert_eq!(first.value, Bytes::from_static(b"value"));
                 assert!(
                     resolver
-                        .fetch_all(
-                            [11, 12]
-                                .into_iter()
-                                .map(|subscriber| Fetch {
-                                    key: 1,
-                                    subscriber,
-                                    span: tracing::Span::none(),
-                                })
-                                .collect()
-                        )
+                        .fetch_all([11, 12].into_iter().map(|subscriber| Fetch {
+                            key: 1,
+                            subscriber,
+                            span: tracing::Span::none(),
+                        }))
                         .accepted()
                 );
                 context.sleep(Duration::from_millis(10)).await;
@@ -1049,16 +1044,11 @@ mod tests {
 
             assert!(
                 resolver
-                    .fetch_all(
-                        [10, 11]
-                            .into_iter()
-                            .map(|subscriber| Fetch {
-                                key: 1,
-                                subscriber,
-                                span: tracing::Span::none(),
-                            })
-                            .collect()
-                    )
+                    .fetch_all([10, 11].into_iter().map(|subscriber| Fetch {
+                        key: 1,
+                        subscriber,
+                        span: tracing::Span::none(),
+                    }))
                     .accepted()
             );
             let expected = Delivery {

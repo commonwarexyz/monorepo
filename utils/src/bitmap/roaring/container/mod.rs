@@ -630,8 +630,8 @@ impl Write for Container {
 
                 match self {
                     Self::Array(a) => a.write(buf),
-                    Self::Bitmap(b) => Array::from(b.iter().collect()).write(buf),
-                    Self::Run(r) => Array::from(r.iter().collect()).write(buf),
+                    Self::Bitmap(b) => Array::write_values(b.iter(), buf),
+                    Self::Run(r) => Array::write_values(r.iter(), buf),
                 }
             }
             CanonicalKind::Bitmap => {

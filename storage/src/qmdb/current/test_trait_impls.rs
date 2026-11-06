@@ -28,6 +28,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
+use core::borrow::Borrow;
 use std::{ops::Range, sync::Arc};
 
 impl<F, E, C, I, H, U, const N: usize, S> BitmapPrunedBits for Db<F, E, C, I, H, U, N, S>
@@ -193,7 +194,10 @@ where
         Self::get(self, key).await
     }
 
-    async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+    async fn get_many<Q: Borrow<U::Key> + Sync>(
+        &self,
+        keys: &[Q],
+    ) -> Result<Vec<Option<U::Value>>, Error<F>> {
         Self::get_many(self, keys).await
     }
 

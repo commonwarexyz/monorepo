@@ -726,7 +726,7 @@ pub mod tests {
                         // key(60) is untouched by the depth-1/2 ancestors, so its staged read
                         // stays database-resolved and exercises staged cached-location reuse
                         // behind stacked batches.
-                        let read_keys = [
+                        let keys = [
                             key(5),
                             key(6),
                             key(9000),
@@ -736,7 +736,6 @@ pub mod tests {
                             key(60),
                             key(105),
                         ];
-                        let keys: Vec<&Digest> = read_keys.iter().collect();
                         let slots = vec![
                             Slot::Put(val(5_000)),
                             Slot::Keep,
@@ -759,7 +758,7 @@ pub mod tests {
                         let metadata = val(8_000);
                         let mut explicit = new_batch().with_metadata(metadata);
                         let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
-                        for (key, slot) in read_keys.iter().zip(&slots) {
+                        for (key, slot) in keys.iter().zip(&slots) {
                             match slot {
                                 Slot::Keep => {}
                                 Slot::Put(value) => explicit = explicit.write(*key, Some(*value)),
@@ -844,8 +843,8 @@ pub mod tests {
                             .unwrap()
                             .root();
                         let expected_duplicate_root = new_batch()
-                            .write(read_keys[0], Some(planned))
-                            .write(read_keys[0], Some(duplicate_update))
+                            .write(keys[0], Some(planned))
+                            .write(keys[0], Some(duplicate_update))
                             .merkleize(&db)
                             .await
                             .unwrap()
@@ -2367,9 +2366,8 @@ pub mod tests {
             assert_ne!(db_a.root(), db_b.root());
 
             let staged_keys = [key(1)];
-            let staged_refs: Vec<_> = staged_keys.iter().collect();
             assert!(matches!(
-                db_a.new_batch().stage(&staged_refs, &db_b).await,
+                db_a.new_batch().stage(&staged_keys, &db_b).await,
                 Err(Error::StaleRead)
             ));
 
@@ -2404,8 +2402,7 @@ pub mod tests {
             // The unmerkleized and staged batches retain A's bitmap.
             let pending = db_a.new_batch().write(key(2), Some(val(2)));
             let staged_keys = [key(2)];
-            let staged_refs: Vec<_> = staged_keys.iter().collect();
-            let (_, staged) = db_a.new_batch().stage(&staged_refs, &db_a).await.unwrap();
+            let (_, staged) = db_a.new_batch().stage(&staged_keys, &db_a).await.unwrap();
 
             // Applying a sibling changes A's bitmap while B remains at the original commitment.
             let sibling = db_a
@@ -2453,8 +2450,7 @@ pub mod tests {
             // The unmerkleized and staged batches retain A's bitmap.
             let pending = db_a.new_batch().write(key(2), Some(val(2)));
             let staged_keys = [key(2)];
-            let staged_refs: Vec<_> = staged_keys.iter().collect();
-            let (_, staged) = db_a.new_batch().stage(&staged_refs, &db_a).await.unwrap();
+            let (_, staged) = db_a.new_batch().stage(&staged_keys, &db_a).await.unwrap();
 
             // Applying a sibling changes A's bitmap while B remains at the original commitment.
             let sibling = db_a

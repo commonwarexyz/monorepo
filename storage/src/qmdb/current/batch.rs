@@ -34,7 +34,7 @@ use commonware_utils::{
     Widen,
     bitmap::{self, Readable as _},
 };
-use core::ops::Range;
+use core::{borrow::Borrow, ops::Range};
 use std::sync::Arc;
 
 /// Speculative chunk-level bitmap overlay: materialized bytes for every chunk that differs from
@@ -336,7 +336,7 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, I>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, Error<F>>
     where
@@ -357,7 +357,7 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn stage<E, C, I>(
         self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
     ) -> Result<(Vec<Option<U::Value>>, Staged<F, H, U, N, S>), Error<F>>
     where
@@ -422,7 +422,7 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn expand<E, C, I>(
         self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
     ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>>
     where
@@ -1238,7 +1238,7 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, I, H>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, Error<F>>
     where

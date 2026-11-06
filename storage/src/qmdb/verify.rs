@@ -78,8 +78,8 @@ pub trait ProofExt<F: Family, D: Digest> {
 }
 
 /// Encode `ops` as the elements a Merkle proof authenticates.
-fn encode_ops<O: Encode>(ops: &[O]) -> Vec<Bytes> {
-    ops.iter().map(Encode::encode).collect()
+fn encode_ops<O: Encode>(ops: &[O]) -> impl ExactSizeIterator<Item = Bytes> + '_ {
+    ops.iter().map(Encode::encode)
 }
 
 impl<F: Family, D: Digest> ProofExt<F, D> for Proof<F, D> {
@@ -89,7 +89,7 @@ impl<F: Family, D: Digest> ProofExt<F, D> for Proof<F, D> {
         ops: &[O],
         root: &D,
     ) -> bool {
-        self.verify_range_inclusion(&qmdb::hasher::<H>(), start_loc, &encode_ops(ops), root)
+        self.verify_range_inclusion(&qmdb::hasher::<H>(), start_loc, encode_ops(ops), root)
     }
 
     fn verify_with_pinned_nodes<H: Hasher<Digest = D>, O: Encode>(
@@ -102,7 +102,7 @@ impl<F: Family, D: Digest> ProofExt<F, D> for Proof<F, D> {
         self.verify_range_inclusion_with_pinned_nodes(
             &qmdb::hasher::<H>(),
             start_loc,
-            &encode_ops(ops),
+            encode_ops(ops),
             pinned_nodes,
             root,
         )
@@ -117,7 +117,7 @@ impl<F: Family, D: Digest> ProofExt<F, D> for Proof<F, D> {
         self.verify_range_inclusion_and_extract_digests(
             &qmdb::hasher::<H>(),
             start_loc,
-            &encode_ops(ops),
+            encode_ops(ops),
             root,
         )
     }
@@ -128,13 +128,7 @@ impl<F: Family, D: Digest> ProofExt<F, D> for Proof<F, D> {
         ops: &[O],
         root: &D,
     ) -> Result<ProofStore<F, D>, Error<F>> {
-        ProofStore::new(
-            &qmdb::hasher::<H>(),
-            self,
-            start_loc,
-            &encode_ops(ops),
-            root,
-        )
+        ProofStore::new(&qmdb::hasher::<H>(), self, start_loc, encode_ops(ops), root)
     }
 
     fn verify_multi<H: Hasher<Digest = D>, O: Encode>(

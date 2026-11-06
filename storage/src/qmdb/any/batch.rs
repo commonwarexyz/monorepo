@@ -36,6 +36,7 @@ use commonware_utils::{
     range::contains_cyclic,
 };
 use core::{
+    borrow::Borrow,
     cmp::Ordering,
     num::NonZeroUsize,
     ops::{
@@ -764,7 +765,7 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
 /// `on_diff_hit` is invoked with each slot resolved by a diff entry (see
 /// [`resolve_pending_from_diffs`]). Slots resolved by `local` do not report.
 fn resolve_reads<'a, K, F: Family, V, S: Strategy>(
-    keys: &[&'a K],
+    keys: &'a [impl Borrow<K>],
     local: impl Fn(&K) -> Option<Option<V>>,
     diffs: &[&DiffSlice<K, F, V>],
     strategy: &S,
@@ -779,11 +780,12 @@ where
     let mut pending = Vec::new();
 
     for (i, key) in keys.iter().enumerate() {
+        let key = key.borrow();
         if let Some(value) = local(key) {
             results[i] = value;
             resolved[i] = true;
         } else {
-            pending.push((i, *key));
+            pending.push((i, key));
         }
     }
     resolve_pending_from_diffs(
@@ -1599,7 +1601,7 @@ where
     )]
     pub async fn expand<E, C, I, const N: usize>(
         mut self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), crate::qmdb::Error<F>>
     where
@@ -1613,7 +1615,8 @@ where
             .expect("staged slot count must fit in usize");
         let db = self.batch.compatible(db)?;
         let (values, mut resolutions) = self.batch.stage_reads(keys, db).await?;
-        self.keys.extend(keys.iter().map(|key| (*key).to_owned()));
+        self.keys
+            .extend(keys.iter().map(|key| key.borrow().clone()));
         self.resolutions.append(&mut resolutions);
         Ok((start..end, values, self))
     }
@@ -2126,7 +2129,7 @@ where
     /// ancestor resolutions.
     fn resolve_uncommitted_reads<'a>(
         &self,
-        keys: &[&'a U::Key],
+        keys: &'a [impl Borrow<U::Key>],
         strategy: &S,
         db_size: Location<F>,
         on_diff_hit: impl FnMut(usize, &DiffEntry<F, U::Value>),
@@ -2202,7 +2205,7 @@ where
     /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where
@@ -2251,7 +2254,7 @@ where
     )]
     pub async fn stage<E, C, I, const N: usize>(
         self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<(Vec<Option<U::Value>>, Staged<F, H, U, S>), crate::qmdb::Error<F>>
     where
@@ -2264,7 +2267,7 @@ where
             results,
             Staged {
                 batch: self,
-                keys: keys.iter().map(|key| (*key).to_owned()).collect(),
+                keys: keys.iter().map(|key| key.borrow().clone()).collect(),
                 resolutions,
             },
         ))
@@ -2275,7 +2278,7 @@ where
     /// they resolved to.
     async fn stage_reads<E, C, I, const N: usize>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
     ) -> Result<(Vec<Option<U::Value>>, Vec<StagedResolution<F, U>>), crate::qmdb::Error<F>>
     where
@@ -3347,7 +3350,7 @@ where
     /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, I, H, const N: usize>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where
@@ -3870,7 +3873,7 @@ pub(crate) mod tests {
                 entries: usize::MAX,
                 skips: u64::MAX,
             };
-            let (_, staged) = db.new_batch().stage(&[], &db).await.unwrap();
+            let (_, staged) = db.new_batch().stage(&keys[..0], &db).await.unwrap();
             let (prepared, _) = staged
                 .resolve_updates_prefetched(
                     Vec::new(),
@@ -3920,7 +3923,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             assert_eq!(parent.bounds().inactivity_floor, last);
-            let (_, staged) = parent.new_batch().stage(&[], &db).await.unwrap();
+            let (_, staged) = parent.new_batch().stage(&keys[..0], &db).await.unwrap();
             let (prepared, _) = staged
                 .resolve_updates_prefetched(
                     Vec::new(),
@@ -4096,13 +4099,13 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let db = db.apply_batch(seed).await.unwrap();
-            let staged_keys: Vec<_> = keys[56..].iter().collect();
+            let staged_keys = &keys[56..];
 
             // An earlier delete, an unstaged update, and an unstaged delete of active keys.
             let (_, staged) = db
                 .new_batch()
                 .write(keys[0], None)
-                .stage(&staged_keys, &db)
+                .stage(staged_keys, &db)
                 .await
                 .unwrap();
             let update = Some(sha256::Digest::from([0xFF; 32]));
@@ -4716,9 +4719,9 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let db = db.apply_batch(seed).await.unwrap();
-            let staged_keys: Vec<_> = keys[56..].iter().collect();
+            let staged_keys = &keys[56..];
 
-            let (_, staged) = db.new_batch().stage(&staged_keys, &db).await.unwrap();
+            let (_, staged) = db.new_batch().stage(staged_keys, &db).await.unwrap();
             let (prepared, _) = staged
                 .resolve_updates_prefetched(
                     vec![slot; staged_keys.len()],
@@ -6904,8 +6907,7 @@ pub(crate) mod tests {
                     let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                     // Read set with duplicate slots for k0 (0,4), missing (2,5), and del_read at 7.
-                    let read_keys = [k0, read_only, missing, k1, k0, missing, k2, del_read];
-                    let keys: Vec<_> = read_keys.iter().collect();
+                    let keys = [k0, read_only, missing, k1, k0, missing, k2, del_read];
 
                     // Slot 1 only reads. Slot 7 deletes a database-resolved read key that shares
                     // its collision bucket with a staged update, an unstaged update, and an
@@ -6949,7 +6951,7 @@ pub(crate) mod tests {
                     let metadata = colliding_digest(0x70 + $shift, 9);
                     let mut explicit = db.new_batch().with_metadata(metadata);
                     let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
-                    for (key, slot) in read_keys.iter().zip(&slots) {
+                    for (key, slot) in keys.iter().zip(&slots) {
                         if let Some(value) = slot.into_mutation() {
                             explicit = explicit.write(*key, value);
                         }
@@ -6971,10 +6973,19 @@ pub(crate) mod tests {
                         .unwrap();
 
                     let split = 3;
-                    let (mut expanded_values, staged) =
-                        db.new_batch().stage(&keys[..split], &db).await.unwrap();
+                    let (empty_values, staged) =
+                        db.new_batch().stage(&keys[..0], &db).await.unwrap();
+                    assert!(empty_values.is_empty());
+                    let (range, mut expanded_values, staged) =
+                        staged.expand(&keys[..split], &db).await.unwrap();
+                    assert_eq!(range, 0..split);
+                    let borrowed_keys = keys.each_ref();
+                    let (range, empty_values, staged) =
+                        staged.expand(&borrowed_keys[..0], &db).await.unwrap();
+                    assert_eq!(range, split..split);
+                    assert!(empty_values.is_empty());
                     let (range, suffix_values, staged) =
-                        staged.expand(&keys[split..], &db).await.unwrap();
+                        staged.expand(&borrowed_keys[split..], &db).await.unwrap();
                     assert_eq!(range, split..keys.len());
                     expanded_values.extend(suffix_values);
                     let expanded = staged
@@ -7337,8 +7348,7 @@ pub(crate) mod tests {
                     let db = TestDb::init(context, config, None).await.unwrap();
 
                     let k0 = colliding_digest(0x40, 0);
-                    let keys = vec![&k0];
-                    let (_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+                    let (_values, staged) = db.new_batch().stage(&[k0], &db).await.unwrap();
                     let _ = staged.merkleize($slots, Vec::new(), &db).await;
                 });
             }
@@ -7435,9 +7445,7 @@ pub(crate) mod tests {
                         let parent = parent.merkleize(&db).await.unwrap();
 
                         let child = if staged_read {
-                            let read_keys: Vec<_> =
-                                suffixes.iter().map(|suffix| key(*suffix)).collect();
-                            let keys: Vec<_> = read_keys.iter().collect();
+                            let keys: Vec<_> = suffixes.iter().map(|suffix| key(*suffix)).collect();
                             let child = parent.new_batch::<Sha256>();
                             // Stage a prefix before the ancestor commit and expand with the rest after
                             // it, so one staged handle holds cache entries resolved against both
@@ -9213,7 +9221,11 @@ pub(crate) mod tests {
                 from,
                 visited: Vec::new(),
             };
-            let (_, batch) = parent.new_batch::<Sha256>().stage(&[], &db).await.unwrap();
+            let (_, batch) = parent
+                .new_batch::<Sha256>()
+                .stage(&keys[..0], &db)
+                .await
+                .unwrap();
             let staged = batch
                 .merkleize_with(Vec::new(), vec![(created, value)], &db, &mut policy)
                 .await
