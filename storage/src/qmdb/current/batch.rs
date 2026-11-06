@@ -239,19 +239,6 @@ where
     bitmap_parent: BitmapBatch<N>,
 }
 
-/// The bitmap chunks and grafted nodes one batch wrote over its parent. Applying a chain's grafts
-/// in order over its base reproduces each batch's unpruned chunks and grafted nodes. Each pruned
-/// chunk is all zero, so its grafted leaf is the operations-tree subtree root it covers.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Grafts<F: Graftable, D: Digest, const N: usize> {
-    /// Bitmap chunks below this index were pruned when the batch was merkleized.
-    pub pruned_chunks: u64,
-    /// Every bitmap chunk the batch wrote, by ascending index and none below `pruned_chunks`.
-    pub chunks: Vec<(u64, [u8; N])>,
-    /// Every grafted node the batch appended or overwrote, in ascending operations-tree position.
-    pub nodes: Vec<(Position<F>, D)>,
-}
-
 /// A speculative batch of operations whose root digest has been computed, in contrast to
 /// [`UnmerkleizedBatch`].
 ///
@@ -1184,12 +1171,19 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
         &self.ops_root_witness
     }
 
-    /// Return this batch's [`Grafts`]. They depend only on state the batch owns, so they stay the
-    /// same after the database advances or prunes, the batch becomes stale, or its ancestors are
-    /// dropped.
-    pub fn grafts(&self) -> Grafts<F, D, N> {
-        // Collect the chunks this batch's overlay wrote, sorted so equal grafts compare equal. A
-        // `Base` bitmap has no overlay, so its batch wrote no chunks.
+    /// Return the bitmap pruning boundary when this batch was merkleized: chunks below it were
+    /// pruned. Each pruned chunk is all zero, so its grafted leaf is the operations-tree subtree
+    /// root it covers.
+    pub const fn pruned_chunks(&self) -> u64 {
+        self.pruned_chunks
+    }
+
+    /// Return every bitmap chunk this batch wrote over its parent, by ascending index and none
+    /// below [`Self::pruned_chunks`]. Applying a chain's chunks in order over its base reproduces
+    /// each batch's unpruned chunks. The result depends only on state the batch owns.
+    pub fn chunks(&self) -> Vec<(u64, [u8; N])> {
+        // A `Base` bitmap has no overlay, so its batch wrote no chunks. The sort gives equal
+        // results an equal order.
         let mut chunks: Vec<(u64, [u8; N])> = match &self.bitmap {
             BitmapBatch::Base(_) => Vec::new(),
             BitmapBatch::Layer(layer) => layer
@@ -1200,9 +1194,14 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
                 .collect(),
         };
         chunks.sort_unstable_by_key(|(index, _)| *index);
+        chunks
+    }
 
-        // Collect the grafted nodes this batch appended or overwrote, keyed by operations-tree
-        // position and sorted so equal grafts compare equal.
+    /// Return every grafted node this batch appended or overwrote, by ascending operations-tree
+    /// position. Applying a chain's nodes in order over its base reproduces each batch's grafted
+    /// tree. The result depends only on state the batch owns.
+    pub fn grafted_nodes(&self) -> Vec<(Position<F>, D)> {
+        // The sort gives equal results an equal order.
         let mut nodes: Vec<(Position<F>, D)> = self
             .grafted
             .local_nodes()
@@ -1214,12 +1213,7 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
             })
             .collect();
         nodes.sort_unstable_by_key(|(pos, _)| *pos);
-
-        Grafts {
-            pruned_chunks: self.pruned_chunks,
-            chunks,
-            nodes,
-        }
+        nodes
     }
 
     /// Return the [`Bounds`] of the batch.
@@ -2098,8 +2092,26 @@ mod tests {
 
     type TestUpdate = update::Unordered<Digest, any::value::FixedEncoding<Digest>>;
 
+    /// What a batch wrote: its pruned boundary, chunks, and grafted nodes.
+    #[derive(Debug, PartialEq)]
+    struct Writes<F: Graftable, const N: usize> {
+        pruned_chunks: u64,
+        chunks: Vec<(u64, [u8; N])>,
+        nodes: Vec<(Position<F>, Digest)>,
+    }
+
+    impl<F: Graftable, const N: usize> Writes<F, N> {
+        fn of(batch: &MerkleizedBatch<F, Digest, TestUpdate, N, Sequential>) -> Self {
+            Self {
+                pruned_chunks: batch.pruned_chunks(),
+                chunks: batch.chunks(),
+                nodes: batch.grafted_nodes(),
+            }
+        }
+    }
+
     /// A mirror that holds bitmap chunks by chunk index and grafted nodes by operations-tree
-    /// position. It is seeded from the database and advanced only by applying grafts.
+    /// position. It is seeded from the database and advanced only by applying writes.
     struct Mirror<F: Graftable, const N: usize> {
         chunks: BTreeMap<u64, [u8; N]>,
         nodes: BTreeMap<Position<F>, Digest>,
@@ -2131,28 +2143,28 @@ mod tests {
             Self { chunks, nodes }
         }
 
-        /// Insert every chunk and node in `grafts` into the mirror, replacing any existing entry.
-        fn apply(&mut self, grafts: &Grafts<F, Digest, N>) {
-            self.chunks.extend(grafts.chunks.iter().copied());
-            self.nodes.extend(grafts.nodes.iter().copied());
+        /// Insert every chunk and node in `writes` into the mirror, replacing any existing entry.
+        fn apply(&mut self, writes: &Writes<F, N>) {
+            self.chunks.extend(writes.chunks.iter().copied());
+            self.nodes.extend(writes.nodes.iter().copied());
         }
 
-        /// Check `grafts` and the mirror against `db`. The database must be at the state that
-        /// produced `grafts`.
-        fn check(&self, db: &TestDb<F, N>, grafts: &Grafts<F, Digest, N>) {
-            // The grafts' pruning boundary is the database's.
-            assert_eq!(grafts.pruned_chunks, db.bitmap().pruned_chunks() as u64);
+        /// Check `writes` and the mirror against `db`. The database must be at the state that
+        /// produced `writes`.
+        fn check(&self, db: &TestDb<F, N>, writes: &Writes<F, N>) {
+            // The writes' pruning boundary is the database's.
+            assert_eq!(writes.pruned_chunks, db.bitmap().pruned_chunks() as u64);
 
             // Both lists ascend without repeats, and every chunk index is at least the pruning
             // boundary.
-            assert!(grafts.chunks.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            assert!(writes.chunks.windows(2).all(|pair| pair[0].0 < pair[1].0));
             assert!(
-                grafts
+                writes
                     .chunks
                     .iter()
-                    .all(|(idx, _)| *idx >= grafts.pruned_chunks)
+                    .all(|(idx, _)| *idx >= writes.pruned_chunks)
             );
-            assert!(grafts.nodes.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            assert!(writes.nodes.windows(2).all(|pair| pair[0].0 < pair[1].0));
 
             // The mirror holds every unpruned chunk and grafted node the database retains.
             let expected = Self::from_db(db);
@@ -2202,23 +2214,23 @@ mod tests {
         batch
     }
 
-    /// Mirror the database from its grafts across three rounds of rewrites and a reopen, checking
+    /// Mirror the database from its writes across three rounds of rewrites and a reopen, checking
     /// the mirror after each step.
     async fn replay<F: Graftable + PartialEq, const N: usize>(ctx: deterministic::Context) {
-        // A batch at the database's own state has empty grafts, and the mirror starts from the
+        // A batch at the database's own state has empty writes, and the mirror starts from the
         // database's chunks and grafted nodes.
         let mut db =
-            TestDb::<F, N>::init(ctx.child("storage"), fixed_config::<OneCap>("grafts"), None)
+            TestDb::<F, N>::init(ctx.child("storage"), fixed_config::<OneCap>("writes"), None)
                 .await
                 .unwrap();
         let initial = db.to_batch();
-        let grafts = initial.grafts();
-        assert!(grafts.chunks.is_empty());
-        assert!(grafts.nodes.is_empty());
+        let writes = Writes::of(&initial);
+        assert!(writes.chunks.is_empty());
+        assert!(writes.nodes.is_empty());
         let mut mirror = Mirror::from_db(&db);
 
         // Each round writes more than two chunks of operations, and every round after the first
-        // supersedes the previous round's writes, so grafts clear bits in earlier chunks as well
+        // supersedes the previous round's writes, so writes clear bits in earlier chunks as well
         // as setting new ones. Each batch's frontier is checked before it is applied.
         let count = (N * 16 + 5) as u64;
         for round in 0..3u64 {
@@ -2226,16 +2238,16 @@ mod tests {
                 .merkleize_with(&db, &mut Hold)
                 .await
                 .unwrap();
-            let grafts = batch.grafts();
+            let writes = Writes::of(&batch);
             check_frontier(&batch, &db);
             db = db.apply_batch(batch).await.unwrap();
-            mirror.apply(&grafts);
-            mirror.check(&db, &grafts);
+            mirror.apply(&writes);
+            mirror.check(&db, &writes);
         }
 
         // Rewriting every key leaves an earlier complete chunk all zero, so its grafted leaf is the
         // operations-tree subtree root it covers. Reading that root from the operations tree checks
-        // the mirror independently of the grafts, and the mirror holds it in place of the leaf an
+        // the mirror independently of the writes, and the mirror holds it in place of the leaf an
         // earlier round grafted while the chunk was nonzero.
         let zero = mirror
             .chunks
@@ -2256,18 +2268,18 @@ mod tests {
         let witness = db.ops_root_witness().clone();
         db = db.sync().await.unwrap();
         drop(db);
-        let db = TestDb::<F, N>::init(ctx.child("reopen"), fixed_config::<OneCap>("grafts"), None)
+        let db = TestDb::<F, N>::init(ctx.child("reopen"), fixed_config::<OneCap>("writes"), None)
             .await
             .unwrap();
         assert_eq!(db.root(), root);
         assert_eq!(db.ops_root_witness(), &witness);
-        mirror.check(&db, &db.to_batch().grafts());
+        mirror.check(&db, &Writes::of(&db.to_batch()));
         db.destroy().await.unwrap();
     }
 
-    /// Replaying grafts reproduces MMR and MMB databases and a database with 64-byte chunks.
+    /// Replaying writes reproduces MMR and MMB databases and a database with 64-byte chunks.
     #[test_traced]
-    fn test_grafts_replay_mmr_and_mmb() {
+    fn test_writes_replay_mmr_and_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             replay::<mmr::Family, 32>(ctx.child("mmr")).await;
             replay::<mmb::Family, 32>(ctx.child("mmb")).await;
@@ -2278,7 +2290,7 @@ mod tests {
     /// Replay a parent and its child, both merkleized before either is applied, into a mirror.
     async fn replay_chained<F: Graftable, const N: usize>(ctx: deterministic::Context) {
         // The parent writes more than two chunks of operations, so it appends grafted nodes. The
-        // child rewrites every key, so its grafts both overwrite nodes the parent appended and
+        // child rewrites every key, so its writes both overwrite nodes the parent appended and
         // append nodes of their own.
         let mut db = TestDb::<F, N>::init(
             ctx.child("storage"),
@@ -2297,8 +2309,8 @@ mod tests {
             .merkleize_with(&db, &mut Hold)
             .await
             .unwrap();
-        let parent_grafts = parent.grafts();
-        let child_grafts = child.grafts();
+        let parent_grafts = Writes::of(&parent);
+        let child_grafts = Writes::of(&child);
         let parent_positions: BTreeSet<_> =
             parent_grafts.nodes.iter().map(|(pos, _)| *pos).collect();
         assert!(!parent_positions.is_empty());
@@ -2315,7 +2327,7 @@ mod tests {
                 .any(|(pos, _)| !parent_positions.contains(pos))
         );
 
-        // Applying the parent's grafts and then the child's keeps the mirror in step with the
+        // Applying the parent's writes and then the child's keeps the mirror in step with the
         // database.
         db = db.apply_batch(Arc::clone(&parent)).await.unwrap();
         mirror.apply(&parent_grafts);
@@ -2326,20 +2338,20 @@ mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// A child's grafts overwrite and extend its unapplied parent's grafted nodes, and replaying
+    /// A child's writes overwrite and extend its unapplied parent's grafted nodes, and replaying
     /// both in order reproduces MMR and MMB databases.
     #[test_traced]
-    fn test_grafts_replay_chained_batches() {
+    fn test_writes_replay_chained_batches() {
         deterministic::Runner::default().start(|ctx| async move {
             replay_chained::<mmr::Family, 32>(ctx.child("mmr")).await;
             replay_chained::<mmb::Family, 32>(ctx.child("mmb")).await;
         });
     }
 
-    /// Grafts carry the grafted leaf of a chunk that becomes graftable through operations-tree
+    /// Writes carry the grafted leaf of a chunk that becomes graftable through operations-tree
     /// growth alone.
     #[test_traced]
-    fn test_grafts_pending_chunk_becomes_graftable_without_bitmap_write() {
+    fn test_writes_pending_chunk_becomes_graftable_without_bitmap_write() {
         deterministic::Runner::default().start(|ctx| async move {
             // In MMB, chunk 0 becomes graftable only once the operations tree reaches
             // `graftable_at` operations.
@@ -2357,7 +2369,7 @@ mod tests {
 
             // With the genesis commit and its own commit, the parent ends one operation short
             // of `graftable_at`, leaving chunk 0 complete but pending and a partial chunk after
-            // it. Its grafts keep the mirror in step.
+            // it. Its writes keep the mirror in step.
             let parent = write_keys(db.new_batch(), 0..graftable_at - 3, 0)
                 .merkleize_with(&db, &mut Hold)
                 .await
@@ -2365,10 +2377,10 @@ mod tests {
             assert_eq!(*parent.bounds().tip.size, graftable_at - 1);
             assert!(parent.ops_root_witness().pending_chunk_digest.is_some());
             assert!(parent.ops_root_witness().partial_chunk.is_some());
-            let grafts = parent.grafts();
+            let writes = Writes::of(&parent);
             db = db.apply_batch(Arc::clone(&parent)).await.unwrap();
-            mirror.apply(&grafts);
-            mirror.check(&db, &grafts);
+            mirror.apply(&writes);
+            mirror.check(&db, &writes);
 
             // An empty batch adds one commit, so it reaches `graftable_at` and grafts chunk 0.
             let transition = parent
@@ -2380,23 +2392,23 @@ mod tests {
             assert!(transition.ops_root_witness().pending_chunk_digest.is_none());
 
             // The empty batch writes none of chunk 0's bits, yet chunk 0's grafted leaf is the only
-            // node in its grafts. The mirror holds no grafted nodes before applying those grafts
+            // node in its writes. The mirror holds no grafted nodes before applying those writes
             // and matches the database after.
-            let grafts = transition.grafts();
-            assert!(!grafts.chunks.iter().any(|(idx, _)| *idx == 0));
-            assert_eq!(grafts.nodes.len(), 1);
+            let writes = Writes::of(&transition);
+            assert!(!writes.chunks.iter().any(|(idx, _)| *idx == 0));
+            assert_eq!(writes.nodes.len(), 1);
             assert!(mirror.nodes.is_empty());
             db = db.apply_batch(transition).await.unwrap();
-            mirror.apply(&grafts);
-            mirror.check(&db, &grafts);
+            mirror.apply(&writes);
+            mirror.check(&db, &writes);
             db.destroy().await.unwrap();
         });
     }
 
-    /// Saved grafts are unchanged after apply, prune, staleness, and dropped ancestors, and a
+    /// Saved writes are unchanged after apply, prune, staleness, and dropped ancestors, and a
     /// batch held unmerkleized across a prune records the new pruning boundary.
     #[test_traced]
-    fn test_grafts_survive_apply_prune_and_stale_ancestors() {
+    fn test_writes_survive_apply_prune_and_stale_ancestors() {
         deterministic::Runner::default().start(|ctx| async move {
             // Four rounds of rewriting the same 256 keys under a proportional floor policy
             // leave enough inactive operations below the floor for a later prune to remove
@@ -2416,44 +2428,44 @@ mod tests {
                 db = db.apply_batch(batch).await.unwrap();
             }
 
-            // Save the grafts of an unapplied parent and a child that rewrites the first 16 keys,
+            // Save the writes of an unapplied parent and a child that rewrites the first 16 keys,
             // and seed a mirror, before anything is pruned.
             let parent = db.new_batch().merkleize(&db).await.unwrap();
             let child = write_keys(parent.new_batch::<Sha256>(), 0..16, 4)
                 .merkleize_with(&db, &mut Hold)
                 .await
                 .unwrap();
-            let saved = child.grafts();
-            let saved_parent = parent.grafts();
+            let saved = Writes::of(&child);
+            let saved_parent = Writes::of(&parent);
             let mut mirror = Mirror::from_db(&db);
             assert_eq!(saved.pruned_chunks, 0);
 
-            // The parent's saved grafts keep the mirror in step.
+            // The parent's saved writes keep the mirror in step.
             db = db.apply_batch(Arc::clone(&parent)).await.unwrap();
             mirror.apply(&saved_parent);
             mirror.check(&db, &saved_parent);
 
-            // Pruning to the sync boundary removes at least one chunk. The saved grafts stay
+            // Pruning to the sync boundary removes at least one chunk. The saved writes stay
             // unchanged, including those of a batch at the database's own state, and a fresh batch
             // at the pruned state records the new boundary. A copy of the child is written before
             // the prune and held unmerkleized across it.
             let base = db.to_batch();
-            let saved_base = base.grafts();
+            let saved_base = Writes::of(&base);
             let held = write_keys(parent.new_batch::<Sha256>(), 0..16, 4);
             let boundary = db.sync_boundary();
             db = db.prune(boundary).await.unwrap();
             assert!(db.bitmap().pruned_chunks() > 0);
-            assert_eq!(child.grafts(), saved);
-            assert_eq!(parent.grafts(), saved_parent);
-            assert_eq!(base.grafts(), saved_base);
-            mirror.check(&db, &db.to_batch().grafts());
+            assert_eq!(Writes::of(&child), saved);
+            assert_eq!(Writes::of(&parent), saved_parent);
+            assert_eq!(Writes::of(&base), saved_base);
+            mirror.check(&db, &Writes::of(&db.to_batch()));
 
             // The held copy writes the same 16 keys as the child, so once merkleized after the
-            // prune it has the saved child's root, witness, chunks, and nodes. Its grafts record
+            // prune it has the saved child's root, witness, chunks, and nodes. Its writes record
             // the new boundary because a batch captures the boundary when it is merkleized. The
             // saved child's frontier still passes `check_frontier` after the prune.
             let post_prune = held.merkleize_with(&db, &mut Hold).await.unwrap();
-            let post_grafts = post_prune.grafts();
+            let post_grafts = Writes::of(&post_prune);
             assert_eq!(post_prune.root(), child.root());
             assert_eq!(post_grafts.chunks, saved.chunks);
             assert_eq!(post_grafts.nodes, saved.nodes);
@@ -2464,13 +2476,13 @@ mod tests {
             assert_eq!(post_prune.ops_root_witness(), child.ops_root_witness());
             check_frontier(&child, &db);
 
-            // The post-prune child's grafts keep the mirror in step.
+            // The post-prune child's writes keep the mirror in step.
             db = db.apply_batch(Arc::clone(&post_prune)).await.unwrap();
             mirror.apply(&post_grafts);
             mirror.check(&db, &post_grafts);
 
             // Once the database moves past the saved child's chain, reading the child's frontier
-            // fails as stale. The child's and base's grafts stay unchanged after the parent and the
+            // fails as stale. The child's and base's writes stay unchanged after the parent and the
             // post-prune child are dropped and the database is destroyed.
             let successor = db.new_batch().merkleize_with(&db, &mut Hold).await.unwrap();
             db = db.apply_batch(successor).await.unwrap();
@@ -2478,8 +2490,8 @@ mod tests {
             drop(parent);
             drop(post_prune);
             db.destroy().await.unwrap();
-            assert_eq!(child.grafts(), saved);
-            assert_eq!(base.grafts(), saved_base);
+            assert_eq!(Writes::of(&child), saved);
+            assert_eq!(Writes::of(&base), saved_base);
         });
     }
 }
