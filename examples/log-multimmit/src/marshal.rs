@@ -77,6 +77,7 @@ fn config(
         Body::codec_config(tuning.body_size),
     )
     .with_limits(limits)
+    .with_payments(committee.config.parameters())
 }
 
 /// Handles of marshal and the transport services it runs on.

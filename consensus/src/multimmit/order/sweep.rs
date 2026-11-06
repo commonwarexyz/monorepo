@@ -1,6 +1,6 @@
 //! Offset-major slot streams and the final sweep one finalized leader fixes.
 
-use super::Error;
+use super::{Error, Lanes};
 use crate::{
     multimmit::types::{BlockRef, Frontier},
     types::Height,
@@ -26,11 +26,15 @@ impl<D: Digest> Slot<D> {
     }
 }
 
-/// The two ordering passes from one tip vector to a higher one.
+/// The three ordering passes from one tip vector to a higher one.
 ///
-/// Pass A holds the heights from the base up to the proposed tip, clamped to the target; pass B
-/// the heights above the proposed tip. The proposal pins pass A's blocks, so an L-QC finalizes
-/// them with fewer votes than the extensions of pass B need
+/// The payment pass holds every height of the payment chains ([`Lanes`]) from the base up to the
+/// target. A payment chain proposes no extension and is settled in every view, so nothing defers
+/// its slots, and visiting them first keeps an unsettled ordinary chain from stopping them.
+///
+/// On the ordinary chains, pass A holds the heights from the base up to the proposed tip, clamped
+/// to the target; pass B the heights above the proposed tip. The proposal pins pass A's blocks, so
+/// an L-QC finalizes them with fewer votes than the extensions of pass B need
 /// ([`FinalTips::from_lqc`](crate::multimmit::algebra::FinalTips::from_lqc) applies the
 /// thresholds). Sweeping pass A first keeps an extension that only some voters saw from deferring
 /// other chains' pinned blocks.
@@ -39,9 +43,11 @@ struct Passes {
     base: Vec<u64>,
     /// Height of each chain's proposed tip, clamped into `[base, target]`.
     boundary: Vec<u64>,
-    /// Pass A, offsets above `base`.
+    /// The payment pass, offsets above `base` on payment chains only.
+    payment: Coordinates,
+    /// Pass A, offsets above `base` on ordinary chains only.
     positional: Coordinates,
-    /// Pass B, offsets above `boundary`.
+    /// Pass B, offsets above `boundary` on ordinary chains only.
     extension: Coordinates,
 }
 
@@ -50,17 +56,21 @@ impl Passes {
         base: &[BlockRef<D>],
         target: &[BlockRef<D>],
         proposed: &[Height],
+        lanes: &Lanes,
     ) -> Result<Self, Error> {
         validate_monotone(base, target)?;
         if proposed.len() != base.len() {
             return Err(Error::Frontier);
         }
         let chains = base.len();
+        lanes.check(chains)?;
         let mut heights = Vec::with_capacity(chains);
         let mut boundaries = Vec::with_capacity(chains);
+        let mut payment = Vec::with_capacity(chains);
         let mut positional = Vec::with_capacity(chains);
         let mut extension = Vec::with_capacity(chains);
-        for ((base, target), proposed) in base.iter().zip(target).zip(proposed) {
+        for (chain, ((base, target), proposed)) in base.iter().zip(target).zip(proposed).enumerate()
+        {
             let (base, target) = (base.height().get(), target.height().get());
             if proposed.get() < base {
                 return Err(Error::Regression);
@@ -68,42 +78,58 @@ impl Passes {
             let boundary = proposed.get().min(target);
             heights.push(base);
             boundaries.push(boundary);
-            positional.push(boundary - base);
-            extension.push(target - boundary);
+            if lanes.payment(chain) {
+                payment.push(target - base);
+                positional.push(0);
+                extension.push(0);
+            } else {
+                payment.push(0);
+                positional.push(boundary - base);
+                extension.push(target - boundary);
+            }
         }
         Ok(Self {
             base: heights,
             boundary: boundaries,
+            payment: Coordinates::new(payment),
             positional: Coordinates::new(positional),
             extension: Coordinates::new(extension),
         })
     }
 
-    /// Returns the slot count of both passes together.
+    /// Returns the slot count of every pass together.
     #[cfg(any(test, feature = "mocks"))]
     fn total(&self) -> Result<u64, Error> {
-        self.positional
+        self.payment
             .maxima
             .iter()
+            .chain(&self.positional.maxima)
             .chain(&self.extension.maxima)
             .try_fold(0u64, |total, delta| total.checked_add(*delta))
             .ok_or(Error::Frontier)
     }
 
-    /// Truncates both passes for a final sweep, as [`FinalSweep`] describes.
-    fn halt(&mut self, proposed: &[Height], settled: &[bool]) {
-        let short = self
-            .boundary
-            .iter()
-            .zip(proposed)
-            .map(|(boundary, proposed)| *boundary < proposed.get());
+    /// Truncates the ordinary passes for a final sweep, as [`FinalSweep`] describes. Payment
+    /// chains never halt a pass.
+    fn halt(&mut self, proposed: &[Height], settled: &[bool], lanes: &Lanes) {
+        let short =
+            self.boundary
+                .iter()
+                .zip(proposed)
+                .enumerate()
+                .map(|(chain, (boundary, proposed))| {
+                    *boundary < proposed.get() && !lanes.payment(chain)
+                });
         let positional = truncate_at(&self.positional.maxima, short);
         let extension = if positional.halted {
             vec![0; self.extension.maxima.len()]
         } else {
             truncate_at(
                 &self.extension.maxima,
-                settled.iter().map(|settled| !*settled),
+                settled
+                    .iter()
+                    .enumerate()
+                    .map(|(chain, settled)| !*settled && !lanes.payment(chain)),
             )
             .kept
         };
@@ -112,6 +138,9 @@ impl Passes {
     }
 
     fn next<D: Digest>(&mut self, target: &[BlockRef<D>]) -> Option<Slot<D>> {
+        if let Some(coordinate) = self.payment.next() {
+            return Some(slot_above(&self.base, target, coordinate));
+        }
         if let Some(coordinate) = self.positional.next() {
             return Some(slot_above(&self.base, target, coordinate));
         }
@@ -122,8 +151,10 @@ impl Passes {
 
     fn maxima(&self) -> Vec<Option<Height>> {
         let mut maxima = vec![None; self.base.len()];
-        // Every extension slot is above the positional slots on its chain.
+        // A chain's slots lie in the payment pass alone or in the ordinary passes, and every
+        // extension slot is above the positional slots on its chain.
         for (floor, coordinates) in [
+            (&self.base, &self.payment),
             (&self.base, &self.positional),
             (&self.boundary, &self.extension),
         ] {
@@ -139,23 +170,25 @@ impl Passes {
     }
 }
 
-/// Offset-major traversal from one canonical tip vector toward a higher one, pass A first and
-/// pass B second.
+/// Offset-major traversal from one canonical tip vector toward a higher one: the payment pass
+/// first, then pass A and pass B on the ordinary chains.
 pub(crate) struct SlotStream<D: Digest> {
     target: Vec<BlockRef<D>>,
     passes: Passes,
 }
 
 impl<D: Digest> SlotStream<D> {
-    /// Creates the full traversal from `base` to `target`, with pass A ending at `proposed`.
+    /// Creates the full traversal from `base` to `target`, with the payment pass over the
+    /// payment chains of `lanes` and pass A ending at `proposed`.
     pub(crate) fn new(
         base: &[BlockRef<D>],
         target: &[BlockRef<D>],
         proposed: &[Height],
+        lanes: &Lanes,
     ) -> Result<Self, Error> {
         Ok(Self {
             target: target.to_vec(),
-            passes: Passes::new(base, target, proposed)?,
+            passes: Passes::new(base, target, proposed, lanes)?,
         })
     }
 
@@ -177,10 +210,12 @@ impl<D: Digest> Iterator for SlotStream<D> {
 
 /// Final sweep: the canonical order of the slots one L-QC finalizes, toward its final tips.
 ///
-/// Pass A halts at the first chain whose finalized position fell short of its proposed tip, since
-/// a same-view V-QC may still carry that chain up to the proposed tip. Pass B runs only when every
-/// chain reached its proposed tip and halts at the first unsettled chain, since `f + 1` votes may
-/// still endorse a block beyond its finalized tip. Either halt defers only the slots after it.
+/// The payment pass emits every payment chain up to its final tip and never halts: a payment
+/// chain is settled in every view. Pass A then halts at the first ordinary chain whose finalized
+/// position fell short of its proposed tip, since a same-view V-QC may still carry that chain up
+/// to the proposed tip. Pass B runs only when every ordinary chain reached its proposed tip and
+/// halts at the first unsettled ordinary chain, since `f + 1` votes may still endorse a block
+/// beyond its finalized tip. Either halt defers only the slots after it.
 pub(crate) struct FinalSweep<D: Digest> {
     stream: SlotStream<D>,
     /// Whether a halt deferred slots below the final tips to a later view.
@@ -197,14 +232,15 @@ impl<D: Digest> FinalSweep<D> {
         target: Vec<BlockRef<D>>,
         proposed: &[Height],
         settled: Vec<bool>,
+        lanes: &Lanes,
     ) -> Result<Self, Error> {
-        let mut passes = Passes::new(base, &target, proposed)?;
+        let mut passes = Passes::new(base, &target, proposed, lanes)?;
         if settled.len() != target.len() {
             return Err(Error::Frontier);
         }
         #[cfg(any(test, feature = "mocks"))]
         let total = passes.total()?;
-        passes.halt(proposed, &settled);
+        passes.halt(proposed, &settled, lanes);
         #[cfg(any(test, feature = "mocks"))]
         let planned = passes.total()?;
         Ok(Self {
@@ -225,12 +261,13 @@ impl<D: Digest> FinalSweep<D> {
         target: &[BlockRef<D>],
         proposed: &[Height],
         settled: &[bool],
+        lanes: &Lanes,
     ) -> Result<Vec<Height>, Error> {
-        let mut passes = Passes::new(base, target, proposed)?;
+        let mut passes = Passes::new(base, target, proposed, lanes)?;
         if settled.len() != target.len() {
             return Err(Error::Frontier);
         }
-        passes.halt(proposed, settled);
+        passes.halt(proposed, settled, lanes);
         Ok(passes
             .maxima()
             .into_iter()
@@ -434,8 +471,13 @@ mod tests {
 
     #[test]
     fn horizontal_is_offset_major() {
-        let stream =
-            SlotStream::new(&frontier(&[2, 5]), &frontier(&[4, 6]), &heights(&[2, 5])).unwrap();
+        let stream = SlotStream::new(
+            &frontier(&[2, 5]),
+            &frontier(&[4, 6]),
+            &heights(&[2, 5]),
+            &Lanes::none(),
+        )
+        .unwrap();
         assert_eq!(coordinates(stream), vec![(0, 3), (1, 6), (0, 4)]);
     }
 
@@ -443,18 +485,23 @@ mod tests {
     fn horizontal_places_positional_slots_before_extensions() {
         let base = frontier(&[0, 0]);
         let target = frontier(&[3, 2]);
-        let stream = SlotStream::new(&base, &target, &heights(&[2, 1])).unwrap();
+        let stream = SlotStream::new(&base, &target, &heights(&[2, 1]), &Lanes::none()).unwrap();
         let forward = coordinates(stream);
         assert_eq!(forward, vec![(0, 1), (1, 1), (0, 2), (0, 3), (1, 2)]);
 
         // A proposal beyond the target only pins what the target reaches.
-        let stream = SlotStream::new(&base, &target, &heights(&[5, 1])).unwrap();
+        let stream = SlotStream::new(&base, &target, &heights(&[5, 1]), &Lanes::none()).unwrap();
         assert_eq!(
             coordinates(stream),
             vec![(0, 1), (1, 1), (0, 2), (0, 3), (1, 2)]
         );
         assert!(matches!(
-            SlotStream::new(&frontier(&[2, 2]), &target, &heights(&[1, 2])),
+            SlotStream::new(
+                &frontier(&[2, 2]),
+                &target,
+                &heights(&[1, 2]),
+                &Lanes::none()
+            ),
             Err(Error::Regression)
         ));
     }
@@ -464,9 +511,10 @@ mod tests {
         let base = frontier(&[2, 5, 1, 8]);
         let target = frontier(&[6, 6, 4, 8]);
         let proposed = heights(&[4, 6, 2, 8]);
-        let expected = coordinates(SlotStream::new(&base, &target, &proposed).unwrap());
+        let expected =
+            coordinates(SlotStream::new(&base, &target, &proposed, &Lanes::none()).unwrap());
         assert_remaining_maxima(
-            SlotStream::new(&base, &target, &proposed).unwrap(),
+            SlotStream::new(&base, &target, &proposed, &Lanes::none()).unwrap(),
             4,
             &expected,
         );
@@ -481,9 +529,10 @@ mod tests {
         target[4095] = 11;
         let target = frontier(&target);
         let proposed = heights(&vec![8; base.len()]);
-        let expected = coordinates(SlotStream::new(&base, &target, &proposed).unwrap());
+        let expected =
+            coordinates(SlotStream::new(&base, &target, &proposed, &Lanes::none()).unwrap());
         assert_remaining_maxima(
-            SlotStream::new(&base, &target, &proposed).unwrap(),
+            SlotStream::new(&base, &target, &proposed, &Lanes::none()).unwrap(),
             base.len(),
             &expected,
         );
@@ -491,12 +540,18 @@ mod tests {
         let mut settled = vec![true; base.len()];
         settled[2048] = false;
         let expected = coordinates(
-            FinalSweep::new(&base, target.clone(), &proposed, settled.clone())
-                .unwrap()
-                .into_stream(),
+            FinalSweep::new(
+                &base,
+                target.clone(),
+                &proposed,
+                settled.clone(),
+                &Lanes::none(),
+            )
+            .unwrap()
+            .into_stream(),
         );
         assert_remaining_maxima(
-            FinalSweep::new(&base, target, &proposed, settled)
+            FinalSweep::new(&base, target, &proposed, settled, &Lanes::none())
                 .unwrap()
                 .into_stream(),
             base.len(),
@@ -511,12 +566,12 @@ mod tests {
         let proposed = heights(&[u64::MAX - 1, u64::MAX]);
         let expected = [(0, u64::MAX - 1), (0, u64::MAX)];
         assert_remaining_maxima(
-            SlotStream::new(&base, &target, &proposed).unwrap(),
+            SlotStream::new(&base, &target, &proposed, &Lanes::none()).unwrap(),
             2,
             &expected,
         );
         assert_remaining_maxima(
-            FinalSweep::new(&base, target, &proposed, vec![true; 2])
+            FinalSweep::new(&base, target, &proposed, vec![true; 2], &Lanes::none())
                 .unwrap()
                 .into_stream(),
             2,
@@ -527,6 +582,7 @@ mod tests {
             &frontier(&[0, 0]),
             &frontier(&[u64::MAX, u64::MAX]),
             &heights(&[0, 0]),
+            &Lanes::none(),
         )
         .unwrap();
         assert_eq!(stream.maxima(), vec![Some(Height::new(u64::MAX)); 2]);
@@ -563,6 +619,7 @@ mod tests {
                 &frontier(target),
                 &heights(proposed),
                 settled,
+                &Lanes::none(),
             )
             .unwrap();
             let sweep = FinalSweep::new(
@@ -570,6 +627,7 @@ mod tests {
                 frontier(target),
                 &heights(proposed),
                 settled.to_vec(),
+                &Lanes::none(),
             )
             .unwrap();
             let mut expected = heights(base);
@@ -587,8 +645,14 @@ mod tests {
     fn final_sweep_skips_settled_and_halts_at_unsettled_holes() {
         let base = frontier(&[0, 0]);
         let target = frontier(&[1, 2]);
-        let settled =
-            FinalSweep::new(&base, target.clone(), &heights(&[0, 0]), vec![true, true]).unwrap();
+        let settled = FinalSweep::new(
+            &base,
+            target.clone(),
+            &heights(&[0, 0]),
+            vec![true, true],
+            &Lanes::none(),
+        )
+        .unwrap();
         assert!(!settled.halted());
         assert_eq!(settled.planned(), 3);
         assert_eq!(
@@ -596,8 +660,14 @@ mod tests {
             vec![(0, 1), (1, 1), (1, 2)]
         );
 
-        let unsettled =
-            FinalSweep::new(&base, target.clone(), &heights(&[0, 0]), vec![false, true]).unwrap();
+        let unsettled = FinalSweep::new(
+            &base,
+            target.clone(),
+            &heights(&[0, 0]),
+            vec![false, true],
+            &Lanes::none(),
+        )
+        .unwrap();
         assert!(unsettled.halted());
         assert_eq!(unsettled.planned(), 2);
         assert_eq!(coordinates(unsettled.into_stream()), vec![(0, 1), (1, 1)]);
@@ -609,6 +679,7 @@ mod tests {
             target,
             &heights(&[1, 0]),
             vec![false, true],
+            &Lanes::none(),
         )
         .unwrap();
         assert!(idle.halted());
@@ -626,6 +697,7 @@ mod tests {
             frontier(&[0, 3]),
             &heights(&[0, 3]),
             vec![false, true],
+            &Lanes::none(),
         )
         .unwrap();
         assert!(!sweep.halted());
@@ -641,6 +713,7 @@ mod tests {
             frontier(&[0, 4]),
             &heights(&[0, 3]),
             vec![false, true],
+            &Lanes::none(),
         )
         .unwrap();
         assert!(sweep.halted());
@@ -656,6 +729,7 @@ mod tests {
             frontier(&[2, 3]),
             &heights(&[1, 3]),
             vec![true, true],
+            &Lanes::none(),
         )
         .unwrap();
         assert!(!sweep.halted());
@@ -676,6 +750,7 @@ mod tests {
             frontier(&[1, 3]),
             &heights(&[2, 2]),
             vec![false, true],
+            &Lanes::none(),
         )
         .unwrap();
         assert!(sweep.halted());
@@ -719,12 +794,17 @@ mod tests {
         ] {
             let base = frontier(&base);
             let target = frontier(&target);
-            let stream =
-                FinalSweep::new(&base, target.clone(), &heights(&proposed), settled.clone())
-                    .unwrap()
-                    .into_stream();
+            let stream = FinalSweep::new(
+                &base,
+                target.clone(),
+                &heights(&proposed),
+                settled.clone(),
+                &Lanes::none(),
+            )
+            .unwrap()
+            .into_stream();
             let expected = coordinates(
-                FinalSweep::new(&base, target, &heights(&proposed), settled)
+                FinalSweep::new(&base, target, &heights(&proposed), settled, &Lanes::none())
                     .unwrap()
                     .into_stream(),
             );
@@ -771,6 +851,7 @@ mod tests {
                     fact.tips().to_vec(),
                     fact.proposed(),
                     fact.settled().to_vec(),
+                    &Lanes::none(),
                 )
                 .unwrap()
                 .into_stream()
@@ -800,6 +881,7 @@ mod tests {
                 tips.blocks().to_vec(),
                 &vec![Height::zero(); codec.chains()],
                 settled,
+                &Lanes::none(),
             )
             .unwrap();
             assert_eq!(coordinates(sweep.into_stream()), expected);
@@ -818,10 +900,17 @@ mod tests {
             fact.tips().to_vec(),
             fact.proposed(),
             fact.settled().to_vec(),
+            &Lanes::none(),
         )
         .unwrap();
-        let placed =
-            FinalSweep::placed(&genesis, fact.tips(), fact.proposed(), fact.settled()).unwrap();
+        let placed = FinalSweep::placed(
+            &genesis,
+            fact.tips(),
+            fact.proposed(),
+            fact.settled(),
+            &Lanes::none(),
+        )
+        .unwrap();
         assert_eq!(
             sweep.planned(),
             placed.iter().map(|height| height.get()).sum::<u64>()
@@ -864,6 +953,197 @@ mod tests {
         }
     }
 
+    #[test]
+    fn payment_pass_precedes_ordinary_passes() {
+        // Chain 1 is a payment chain: its slots come first, then pass A and pass B of chains 0
+        // and 2.
+        let base = frontier(&[0, 0, 0]);
+        let target = frontier(&[2, 3, 2]);
+        let proposed = heights(&[1, 3, 2]);
+        let lanes = Lanes::new([false, true, false]);
+        let expected = vec![(1, 1), (1, 2), (1, 3), (0, 1), (2, 1), (2, 2), (0, 2)];
+        let stream = SlotStream::new(&base, &target, &proposed, &lanes).unwrap();
+        assert_eq!(coordinates(stream), expected);
+        assert_remaining_maxima(
+            SlotStream::new(&base, &target, &proposed, &lanes).unwrap(),
+            3,
+            &expected,
+        );
+        let sweep =
+            FinalSweep::new(&base, target.clone(), &proposed, vec![true; 3], &lanes).unwrap();
+        assert!(!sweep.halted());
+        assert_eq!(sweep.planned(), 7);
+        assert_eq!(coordinates(sweep.into_stream()), expected);
+        // Without payment chains, chain 1 is ordinary again.
+        assert_eq!(
+            coordinates(SlotStream::new(&base, &target, &proposed, &Lanes::none()).unwrap()),
+            vec![(0, 1), (1, 1), (2, 1), (1, 2), (2, 2), (1, 3), (0, 2)]
+        );
+
+        // Several payment chains are visited in horizontal order: offset first, then chain.
+        let lanes = Lanes::new([true, true, false]);
+        let stream =
+            SlotStream::new(&base, &frontier(&[2, 3, 1]), &heights(&[2, 3, 1]), &lanes).unwrap();
+        assert_eq!(
+            coordinates(stream),
+            vec![(0, 1), (1, 1), (0, 2), (1, 2), (1, 3), (2, 1)]
+        );
+
+        // A mask for another number of chains is malformed.
+        assert!(matches!(
+            SlotStream::new(&base, &target, &proposed, &Lanes::new([true, false])),
+            Err(Error::Frontier)
+        ));
+        assert!(matches!(
+            FinalSweep::placed(
+                &base,
+                &target,
+                &proposed,
+                &[true; 3],
+                &Lanes::new([true; 4])
+            ),
+            Err(Error::Frontier)
+        ));
+    }
+
+    #[test]
+    fn an_unsettled_or_short_ordinary_chain_does_not_stop_the_payment_pass() {
+        // Chain 0 fell short of its proposed tip and halts pass A at its second offset. Payment
+        // chain 2 is placed whole, whatever its own proposed height and settledness.
+        let base = frontier(&[0, 0, 0]);
+        let target = frontier(&[1, 3, 2]);
+        let proposed = heights(&[2, 3, 3]);
+        let settled = vec![false, true, false];
+        let sweep = FinalSweep::new(
+            &base,
+            target.clone(),
+            &proposed,
+            settled.clone(),
+            &Lanes::new([false, false, true]),
+        )
+        .unwrap();
+        assert!(sweep.halted());
+        assert_eq!(sweep.planned(), 4);
+        assert_eq!(
+            coordinates(sweep.into_stream()),
+            vec![(2, 1), (2, 2), (0, 1), (1, 1)]
+        );
+        // As an ordinary chain, chain 2 waits behind chain 0's hole too.
+        let ordinary = FinalSweep::new(&base, target, &proposed, settled, &Lanes::none()).unwrap();
+        assert_eq!(
+            coordinates(ordinary.into_stream()),
+            vec![(0, 1), (1, 1), (2, 1)]
+        );
+
+        // An unsettled chain that proposed nothing defers only the ordinary extensions.
+        let base = frontier(&[0, 0]);
+        let target = frontier(&[1, 2]);
+        let lanes = Lanes::new([false, true]);
+        let sweep = FinalSweep::new(
+            &base,
+            target.clone(),
+            &heights(&[0, 0]),
+            vec![false, true],
+            &lanes,
+        )
+        .unwrap();
+        assert!(!sweep.halted());
+        assert_eq!(
+            coordinates(sweep.into_stream()),
+            vec![(1, 1), (1, 2), (0, 1)]
+        );
+        let idle = FinalSweep::new(
+            &frontier(&[1, 0]),
+            target,
+            &heights(&[1, 0]),
+            vec![false, false],
+            &lanes,
+        )
+        .unwrap();
+        assert!(!idle.halted());
+        assert_eq!(idle.planned(), 2);
+        assert_eq!(coordinates(idle.into_stream()), vec![(1, 1), (1, 2)]);
+    }
+
+    #[test]
+    fn a_payment_anchor_jump_is_emitted_whole_first() {
+        // The payment chain's anchor jumps five heights in one view; the ordinary chain is short
+        // and unsettled. Every block of the jump precedes the ordinary chain's first slot.
+        let base = frontier(&[0, 0]);
+        let target = frontier(&[1, 5]);
+        let proposed = heights(&[2, 5]);
+        let lanes = Lanes::new([false, true]);
+        let sweep =
+            FinalSweep::new(&base, target.clone(), &proposed, vec![false, true], &lanes).unwrap();
+        assert_eq!(
+            coordinates(sweep.into_stream()),
+            vec![(1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (0, 1)]
+        );
+        assert_eq!(
+            FinalSweep::placed(&base, &target, &proposed, &[false, true], &lanes).unwrap(),
+            heights(&[1, 5])
+        );
+        // Without payment chains the jump waits behind chain 0's hole after its first block.
+        assert_eq!(
+            FinalSweep::placed(&base, &target, &proposed, &[false, true], &Lanes::none()).unwrap(),
+            heights(&[1, 1])
+        );
+    }
+
+    #[test]
+    fn final_sweep_places_its_highest_planned_slot_with_every_payment_mask() {
+        type Case = (
+            &'static [u64],
+            &'static [u64],
+            &'static [u64],
+            &'static [bool],
+        );
+        let cases: [Case; 5] = [
+            (&[0, 0], &[1, 2], &[0, 0], &[false, true]),
+            (&[0, 0], &[0, 4], &[0, 3], &[false, true]),
+            (&[0, 0], &[1, 3], &[2, 2], &[false, true]),
+            (&[2, 5, 1], &[6, 9, 1], &[4, 7, 3], &[true, false, true]),
+            (&[0, 0, 0], &[1, 3, 2], &[2, 3, 3], &[false, true, false]),
+        ];
+        for (base, target, proposed, settled) in cases {
+            for mask in 0..1u32 << base.len() {
+                let payment = |chain: usize| mask >> chain & 1 == 1;
+                let lanes = Lanes::new((0..base.len()).map(payment));
+                let placed = FinalSweep::placed(
+                    &frontier(base),
+                    &frontier(target),
+                    &heights(proposed),
+                    settled,
+                    &lanes,
+                )
+                .unwrap();
+                let sweep = FinalSweep::new(
+                    &frontier(base),
+                    frontier(target),
+                    &heights(proposed),
+                    settled.to_vec(),
+                    &lanes,
+                )
+                .unwrap();
+                let planned = sweep.planned();
+                let mut expected = heights(base);
+                let slots = coordinates(sweep.into_stream());
+                assert_eq!(slots.len() as u64, planned);
+                for (chain, height) in slots {
+                    expected[chain] = expected[chain].max(Height::new(height));
+                }
+                assert_eq!(
+                    placed, expected,
+                    "{base:?} -> {target:?} with mask {mask:b}"
+                );
+                // Every payment chain reaches its target.
+                for chain in (0..base.len()).filter(|chain| payment(*chain)) {
+                    assert_eq!(placed[chain].get(), target[chain]);
+                }
+            }
+        }
+    }
+
     /// One offset-major pass over `deltas` above `floors`, halting at the first empty slot of a
     /// halting chain. Returns the visited coordinates and whether the pass halted.
     fn reference_pass(floors: &[u64], deltas: &[u64], halting: &[bool]) -> (Vec<Coordinate>, bool) {
@@ -881,6 +1161,70 @@ mod tests {
         (visited, false)
     }
 
+    /// Checks that the payment slots of the sweep (or, without `sweep`, the opening) from `base`
+    /// to `target` with payment chains `mask` form a prefix that takes every payment chain to its
+    /// target, and that removing them leaves the order without payment chains in which every
+    /// payment chain stays at its base, proposes nothing and is settled.
+    fn assert_non_interference(
+        base: &[u64],
+        target: &[u64],
+        proposed: &[u64],
+        settled: &[bool],
+        mask: &[bool],
+        sweep: bool,
+    ) {
+        let chains = base.len();
+        let lanes = Lanes::new(mask.iter().copied());
+        let frozen = |heights: &[u64]| {
+            (0..chains)
+                .map(|chain| {
+                    if mask[chain] {
+                        base[chain]
+                    } else {
+                        heights[chain]
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let paid = (0..chains)
+            .filter(|chain| mask[*chain])
+            .map(|chain| target[chain] - base[chain])
+            .sum::<u64>();
+        let (frozen_target, frozen_proposed) =
+            (frontier(&frozen(target)), heights(&frozen(proposed)));
+        let (base, target, proposed) = (frontier(base), frontier(target), heights(proposed));
+        let (slots, reference) = if sweep {
+            let frozen_settled = (0..chains)
+                .map(|chain| mask[chain] || settled[chain])
+                .collect::<Vec<_>>();
+            let with = FinalSweep::new(&base, target, &proposed, settled.to_vec(), &lanes).unwrap();
+            let without = FinalSweep::new(
+                &base,
+                frozen_target,
+                &frozen_proposed,
+                frozen_settled,
+                &Lanes::none(),
+            )
+            .unwrap();
+            assert_eq!(with.halted(), without.halted());
+            let planned = (with.planned(), without.planned());
+            let slots = coordinates(with.into_stream());
+            let reference = coordinates(without.into_stream());
+            assert_eq!(planned, (slots.len() as u64, reference.len() as u64));
+            (slots, reference)
+        } else {
+            let with = SlotStream::new(&base, &target, &proposed, &lanes).unwrap();
+            let without =
+                SlotStream::new(&base, &frozen_target, &frozen_proposed, &Lanes::none()).unwrap();
+            (coordinates(with), coordinates(without))
+        };
+        let (payment, ordinary): (Vec<_>, Vec<_>) =
+            slots.iter().partition(|(chain, _)| mask[*chain]);
+        assert_eq!(payment.len() as u64, paid);
+        assert_eq!(&slots[..payment.len()], payment.as_slice());
+        assert_eq!(ordinary, reference);
+    }
+
     proptest! {
         #[test]
         fn streams_match_materialized_reference(
@@ -888,38 +1232,66 @@ mod tests {
             deltas in vec(0u64..6, 1..5),
             proposed in vec(0u64..8, 1..5),
             settled in vec(any::<bool>(), 1..5),
+            payments in any::<bool>(),
+            mask in vec(any::<bool>(), 4),
         ) {
             let chains = base.len().min(deltas.len()).min(proposed.len()).min(settled.len());
             let base = &base[..chains];
             let deltas = &deltas[..chains];
             let settled = &settled[..chains];
+            // Half the cases run without payment chains.
+            let payment = (0..chains).map(|chain| payments && mask[chain]).collect::<Vec<_>>();
+            let lanes = Lanes::new(payment.iter().copied());
             let target_heights = base.iter().zip(deltas).map(|(base, delta)| base + delta).collect::<Vec<_>>();
             let proposed_heights = base.iter().zip(&proposed[..chains]).map(|(base, delta)| base + delta).collect::<Vec<_>>();
             let boundary = target_heights.iter().zip(&proposed_heights).map(|(target, proposed)| *target.min(proposed)).collect::<Vec<_>>();
-            let positional = boundary.iter().zip(base).map(|(boundary, base)| boundary - base).collect::<Vec<_>>();
-            let extension = target_heights.iter().zip(&boundary).map(|(target, boundary)| target - boundary).collect::<Vec<_>>();
+            // A payment chain's slots are all in the payment pass, none in the ordinary ones.
+            let ordinary = |chain: usize, delta: u64| if payment[chain] { 0 } else { delta };
+            let paid = (0..chains).map(|chain| if payment[chain] { deltas[chain] } else { 0 }).collect::<Vec<_>>();
+            let positional = (0..chains).map(|chain| ordinary(chain, boundary[chain] - base[chain])).collect::<Vec<_>>();
+            let extension = (0..chains).map(|chain| ordinary(chain, target_heights[chain] - boundary[chain])).collect::<Vec<_>>();
             let base_tips = frontier(base);
             let target_tips = frontier(&target_heights);
             let proposed = heights(&proposed_heights);
 
             let never = vec![false; chains];
-            let mut expected_horizontal = reference_pass(base, &positional, &never).0;
+            let mut expected_horizontal = reference_pass(base, &paid, &never).0;
+            expected_horizontal.extend(reference_pass(base, &positional, &never).0);
             expected_horizontal.extend(reference_pass(&boundary, &extension, &never).0);
-            let horizontal_stream = SlotStream::new(&base_tips, &target_tips, &proposed).unwrap();
+            let horizontal_stream = SlotStream::new(&base_tips, &target_tips, &proposed, &lanes).unwrap();
             assert_remaining_maxima(horizontal_stream, chains, &expected_horizontal);
 
-            let short = boundary.iter().zip(&proposed_heights).map(|(boundary, proposed)| boundary < proposed).collect::<Vec<_>>();
-            let (mut expected_sweep, halted) = reference_pass(base, &positional, &short);
+            let short = (0..chains).map(|chain| !payment[chain] && boundary[chain] < proposed_heights[chain]).collect::<Vec<_>>();
+            let mut expected_sweep = reference_pass(base, &paid, &never).0;
+            let (positional_sweep, halted) = reference_pass(base, &positional, &short);
+            expected_sweep.extend(positional_sweep);
             if !halted {
-                let unsettled = settled.iter().map(|settled| !settled).collect::<Vec<_>>();
+                let unsettled = (0..chains).map(|chain| !payment[chain] && !settled[chain]).collect::<Vec<_>>();
                 expected_sweep.extend(reference_pass(&boundary, &extension, &unsettled).0);
             }
-            let total = positional.iter().chain(&extension).sum::<u64>();
+            let total = paid.iter().chain(&positional).chain(&extension).sum::<u64>();
             let sweep_stream =
-                FinalSweep::new(&base_tips, target_tips, &proposed, settled.to_vec()).unwrap();
+                FinalSweep::new(&base_tips, target_tips, &proposed, settled.to_vec(), &lanes).unwrap();
             prop_assert_eq!(sweep_stream.planned(), expected_sweep.len() as u64);
             prop_assert_eq!(sweep_stream.halted(), (expected_sweep.len() as u64) < total);
             assert_remaining_maxima(sweep_stream.into_stream(), chains, &expected_sweep);
+        }
+
+        #[test]
+        fn payment_chains_never_interfere_with_ordinary_chains(
+            base in vec(0u64..20, 1..6),
+            deltas in vec(0u64..6, 1..6),
+            proposed in vec(0u64..8, 1..6),
+            settled in vec(any::<bool>(), 1..6),
+            mask in vec(any::<bool>(), 6),
+        ) {
+            let chains = base.len().min(deltas.len()).min(proposed.len()).min(settled.len());
+            let base = &base[..chains];
+            let target = (0..chains).map(|chain| base[chain] + deltas[chain]).collect::<Vec<_>>();
+            let proposed = (0..chains).map(|chain| base[chain] + proposed[chain]).collect::<Vec<_>>();
+            for sweep in [false, true] {
+                assert_non_interference(base, &target, &proposed, &settled[..chains], &mask[..chains], sweep);
+            }
         }
     }
 }

@@ -178,20 +178,23 @@ impl<D: Digest> Ends<D> {
         let Some(fact) = view.facts.get(&id) else {
             return Projected::NeedsFact;
         };
-        let Ok(through) = cut.sweep(fact) else {
+        let lanes = view.order.lanes();
+        let Ok(through) = cut.sweep(fact, lanes) else {
             return Projected::Settled(None);
         };
         // The order's starting cut is where delivery resumed, not the cut its record opens: a
         // sweep that does not pass it may end before it, and ends exactly there only if every
         // chain stands at the sweep's own height or at the record's tip.
+        let (tips, proposed, settled) = (fact.tips(), fact.proposed(), fact.settled());
         let exact = ordinal != view.order.start()
             || through.index() > cut.index()
-            || FinalSweep::placed(cut.ordered(), fact.tips(), fact.proposed(), fact.settled())
-                .is_ok_and(|placed| {
+            || FinalSweep::placed(cut.ordered(), tips, proposed, settled, lanes).is_ok_and(
+                |placed| {
                     placed.iter().zip(cut.ordered()).zip(cut.emitted()).all(
                         |((placed, tip), emitted)| placed == emitted || tip.height() == *emitted,
                     )
-                });
+                },
+            );
         self.known.insert(id);
         if through.index() > view.delivered_index() {
             self.waiting.entry(through.index()).or_default().push((

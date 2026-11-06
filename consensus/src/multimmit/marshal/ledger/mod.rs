@@ -41,7 +41,7 @@ use super::{
 use crate::{
     Reporter,
     multimmit::{
-        order::SweepFact,
+        order::{Lanes, SweepFact},
         scheme::Scheme,
         types::{
             BlockRef, Body, CertificateId, CodecConfig, LqcProof, TipRecord, TransactionBlock,
@@ -306,11 +306,12 @@ where
     V: LqcVerifier<H, S> + Clone,
     A: Reporter<Activity = Update<TransactionBlock<H, B>>>,
 {
-    /// Creates the owner of `stores`.
+    /// Creates the owner of `stores`, ordering with the payment chains of `lanes`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         context: E,
         codec: CodecConfig,
+        lanes: Lanes,
         limits: Limits,
         stores: Stores<E, H, S, B>,
         inputs: Inputs<H, S, B>,
@@ -362,7 +363,7 @@ where
             cuts: HashMap::new(),
             facts: HashMap::new(),
             extracting: HashSet::new(),
-            order: Order::new(cut, ordinal, capacity),
+            order: Order::new(cut, ordinal, capacity, lanes),
             target: None,
             ends: ends::Ends::new(ordinal),
             delivered: state.ack.emitted.clone(),
