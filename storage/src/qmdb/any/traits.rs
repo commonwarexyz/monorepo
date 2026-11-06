@@ -22,7 +22,9 @@ pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
     type Key;
     /// The value type stored in the database.
     type Value;
+    /// The metadata type recorded in the batch's commit.
     type Metadata;
+    /// The batch that merkleizing this one produces.
     type Merkleized: MerkleizedBatch;
 
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
@@ -50,6 +52,7 @@ pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
 
 /// Merkleized batch of operations.
 pub trait MerkleizedBatch: Sized {
+    /// The digest type of the batch's root.
     type Digest: Digest;
 
     /// Return the committed root.
@@ -64,7 +67,9 @@ pub trait BatchableDb: Sized {
     type Key;
     /// The value type stored in the database.
     type Value;
+    /// The merkleized batch the database applies.
     type Merkleized: MerkleizedBatch;
+    /// The unmerkleized batch the database creates.
     type Batch: UnmerkleizedBatch<
             Self,
             Family = Self::Family,
