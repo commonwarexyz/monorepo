@@ -49,11 +49,11 @@
 //!
 //! # Requirements and Progress
 //!
-//! Linux 7.0 or newer is required. That is the runtime's documented supported
-//! floor. The kernel features the rings rely on are older. Each worker's ring
-//! uses single-issuer mode with deferred task work and parks on
-//! `IORING_OP_FUTEX_WAIT`, which needs Linux 6.7. Task polls must return so
-//! their worker can service I/O and deadlines.
+//! The runtime targets Linux 7.0 or newer. Older kernels may work, but they
+//! are untested and nothing is guaranteed on them. Each worker's ring uses
+//! single-issuer mode with deferred task work and parks on
+//! `IORING_OP_FUTEX_WAIT`. Task polls must return so their worker can service
+//! I/O and deadlines.
 //! I/O and sleeps stay registered on the worker that first polled them, so a
 //! poll that blocks one worker also delays their results for tasks that have
 //! moved elsewhere.

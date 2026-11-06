@@ -237,7 +237,7 @@ type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Configuration of each worker's io_uring instance and operation timing wheel.
 ///
-/// The runtime requires Linux 7.0 or newer and always uses single-issuer mode
+/// The runtime targets Linux 7.0 or newer and always uses single-issuer mode
 /// with deferred task work. The same configuration applies to pool and
 /// dedicated workers. The wheel horizon is derived from network timeout policy.
 #[derive(Clone, Debug)]
@@ -1574,7 +1574,7 @@ impl Worker {
         let (local, parker) = Local::new(shared.clone(), role).map_err(|error| {
             catch_unwind(AssertUnwindSafe(|| {
                 panic!(
-                    "failed to create native io_uring worker (Linux 7.0 or newer is required): {error}"
+                    "failed to create native io_uring worker (the runtime targets Linux 7.0 or newer): {error}"
                 )
             }))
             .expect_err("a startup error must panic")

@@ -30,7 +30,7 @@
 //! Queued requests expire even while all operation slots are occupied.
 //!
 //! The ring uses SINGLE_ISSUER, DEFER_TASKRUN, and IORING_OP_FUTEX_WAIT. The
-//! runtime requires Linux 7.0 or newer (see [`super`]).
+//! runtime targets Linux 7.0 or newer (see [`super`]).
 //! Unfinished requests need a GETEVENTS enter even when tasks keep the worker
 //! busy. An idle turn may defer that enter to [`Driver::park`]. Control SQEs carry
 //! no request resources and may remain until later I/O service or ring teardown.
