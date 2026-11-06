@@ -26,7 +26,7 @@ mod plan;
 pub use plan::SyncPlan;
 
 /// Durable state sync progress.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) enum SyncState<S, C>
 where
     S: Scheme,
