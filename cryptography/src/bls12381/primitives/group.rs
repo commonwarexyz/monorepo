@@ -6,15 +6,16 @@
 //! # Warning
 //!
 //! Points received from untrusted sources must be checked for membership in the correct subgroup
-//! to prevent small-subgroup attacks. The [`Read`] implementations for [`G1`] and [`G2`] perform
-//! this check and also reject the identity.
+//! to prevent small-subgroup attacks. The [`Read`] implementations for [`G1`] and [`G2`] and
+//! their conversions from [`G1Bytes`] and [`G2Bytes`] perform this check and also reject the
+//! identity.
 //!
 //! [`G1`] and [`G2`] include the identity because group operations require it. Values produced by
 //! group operations can still be the identity, so an API that treats it as invalid must reject it
 //! at its own boundary.
 
 use super::variant::Variant;
-use crate::Secret;
+use crate::{Encoding, Malformed, Secret, Validated};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
@@ -1006,6 +1007,40 @@ impl arbitrary::Arbitrary<'_> for Share {
 }
 
 impl G1 {
+    /// Decompresses an encoding, rejecting the identity and points outside G1.
+    fn from_compressed(bytes: &[u8; G1_ELEMENT_BYTE_LENGTH]) -> Result<Self, Error> {
+        let mut ret = blst_p1::default();
+        // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding.
+        // Additional checks for infinity and subgroup membership prevent small subgroup attacks.
+        unsafe {
+            let mut affine = blst_p1_affine::default();
+            match blst_p1_uncompress(&mut affine, bytes.as_ptr()) {
+                BLST_ERROR::BLST_SUCCESS => {}
+                BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G1", "Bad encoding")),
+                BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G1", "Not on curve")),
+                BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G1", "Not in group")),
+                BLST_ERROR::BLST_AGGR_TYPE_MISMATCH
+                | BLST_ERROR::BLST_VERIFY_FAIL
+                | BLST_ERROR::BLST_PK_IS_INFINITY
+                | BLST_ERROR::BLST_BAD_SCALAR => {
+                    return Err(Invalid("G1", "Unexpected uncompress error"));
+                }
+            }
+            blst_p1_from_affine(&mut ret, &affine);
+
+            // Verify that deserialized element isn't infinite
+            if blst_p1_is_inf(&ret) {
+                return Err(Invalid("G1", "Infinity"));
+            }
+
+            // Verify that the deserialized element is in G1
+            if !blst_p1_in_g1(&ret) {
+                return Err(Invalid("G1", "Outside G1"));
+            }
+        }
+        Ok(Self(ret))
+    }
+
     /// Encodes the G1 element into a slice.
     fn as_slice(&self) -> [u8; Self::SIZE] {
         let mut slice = [0u8; Self::SIZE];
@@ -1235,38 +1270,32 @@ impl Read for G1 {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let bytes = <[u8; Self::SIZE]>::read(buf)?;
-        let mut ret = blst_p1::default();
-        // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding.
-        // Additional checks for infinity and subgroup membership prevent small subgroup attacks.
-        unsafe {
-            let mut affine = blst_p1_affine::default();
-            match blst_p1_uncompress(&mut affine, bytes.as_ptr()) {
-                BLST_ERROR::BLST_SUCCESS => {}
-                BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G1", "Bad encoding")),
-                BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G1", "Not on curve")),
-                BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G1", "Not in group")),
-                BLST_ERROR::BLST_AGGR_TYPE_MISMATCH
-                | BLST_ERROR::BLST_VERIFY_FAIL
-                | BLST_ERROR::BLST_PK_IS_INFINITY
-                | BLST_ERROR::BLST_BAD_SCALAR => {
-                    return Err(Invalid("G1", "Unexpected uncompress error"));
-                }
-            }
-            blst_p1_from_affine(&mut ret, &affine);
-
-            // Verify that deserialized element isn't infinite
-            if blst_p1_is_inf(&ret) {
-                return Err(Invalid("G1", "Infinity"));
-            }
-
-            // Verify that the deserialized element is in G1
-            if !blst_p1_in_g1(&ret) {
-                return Err(Invalid("G1", "Outside G1"));
-            }
-        }
-        Ok(Self(ret))
+        Self::from_compressed(&<[u8; Self::SIZE]>::read(buf)?)
     }
+}
+
+/// The compressed encoding of a [G1] element.
+pub type G1Bytes = Encoding<G1, G1_ELEMENT_BYTE_LENGTH>;
+
+impl TryFrom<G1Bytes> for G1 {
+    type Error = Malformed;
+
+    fn try_from(bytes: G1Bytes) -> Result<Self, Malformed> {
+        Self::from_compressed(bytes.as_array()).map_err(|_| Malformed)
+    }
+}
+
+impl From<G1> for G1Bytes {
+    fn from(point: G1) -> Self {
+        Self::new(point.as_slice())
+    }
+}
+
+/// A [G1] built from its [G1Bytes] is a point of the prime-order subgroup other than the
+/// identity. Group operations can still produce the identity, and its encoding does not convert
+/// back.
+impl Validated for G1 {
+    type Bytes = G1Bytes;
 }
 
 impl FixedSize for G1 {
@@ -1457,6 +1486,40 @@ impl HashToGroup for G1 {
 }
 
 impl G2 {
+    /// Decompresses an encoding, rejecting the identity and points outside G2.
+    fn from_compressed(bytes: &[u8; G2_ELEMENT_BYTE_LENGTH]) -> Result<Self, Error> {
+        let mut ret = blst_p2::default();
+        // SAFETY: bytes is a valid 96-byte array. blst_p2_uncompress validates encoding.
+        // Additional checks for infinity and subgroup membership prevent small subgroup attacks.
+        unsafe {
+            let mut affine = blst_p2_affine::default();
+            match blst_p2_uncompress(&mut affine, bytes.as_ptr()) {
+                BLST_ERROR::BLST_SUCCESS => {}
+                BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G2", "Bad encoding")),
+                BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G2", "Not on curve")),
+                BLST_ERROR::BLST_POINT_NOT_IN_GROUP
+                | BLST_ERROR::BLST_AGGR_TYPE_MISMATCH
+                | BLST_ERROR::BLST_VERIFY_FAIL
+                | BLST_ERROR::BLST_PK_IS_INFINITY
+                | BLST_ERROR::BLST_BAD_SCALAR => {
+                    return Err(Invalid("G2", "Unexpected uncompress error"));
+                }
+            }
+            blst_p2_from_affine(&mut ret, &affine);
+
+            // Verify that deserialized element isn't infinite
+            if blst_p2_is_inf(&ret) {
+                return Err(Invalid("G2", "Infinity"));
+            }
+
+            // Verify that the deserialized element is in G2
+            if !blst_p2_in_g2(&ret) {
+                return Err(Invalid("G2", "Outside G2"));
+            }
+        }
+        Ok(Self(ret))
+    }
+
     /// Encodes the G2 element into a slice.
     fn as_slice(&self) -> [u8; Self::SIZE] {
         let mut slice = [0u8; Self::SIZE];
@@ -1665,38 +1728,32 @@ impl Read for G2 {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let bytes = <[u8; Self::SIZE]>::read(buf)?;
-        let mut ret = blst_p2::default();
-        // SAFETY: bytes is a valid 96-byte array. blst_p2_uncompress validates encoding.
-        // Additional checks for infinity and subgroup membership prevent small subgroup attacks.
-        unsafe {
-            let mut affine = blst_p2_affine::default();
-            match blst_p2_uncompress(&mut affine, bytes.as_ptr()) {
-                BLST_ERROR::BLST_SUCCESS => {}
-                BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G2", "Bad encoding")),
-                BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G2", "Not on curve")),
-                BLST_ERROR::BLST_POINT_NOT_IN_GROUP
-                | BLST_ERROR::BLST_AGGR_TYPE_MISMATCH
-                | BLST_ERROR::BLST_VERIFY_FAIL
-                | BLST_ERROR::BLST_PK_IS_INFINITY
-                | BLST_ERROR::BLST_BAD_SCALAR => {
-                    return Err(Invalid("G2", "Unexpected uncompress error"));
-                }
-            }
-            blst_p2_from_affine(&mut ret, &affine);
-
-            // Verify that deserialized element isn't infinite
-            if blst_p2_is_inf(&ret) {
-                return Err(Invalid("G2", "Infinity"));
-            }
-
-            // Verify that the deserialized element is in G2
-            if !blst_p2_in_g2(&ret) {
-                return Err(Invalid("G2", "Outside G2"));
-            }
-        }
-        Ok(Self(ret))
+        Self::from_compressed(&<[u8; Self::SIZE]>::read(buf)?)
     }
+}
+
+/// The compressed encoding of a [G2] element.
+pub type G2Bytes = Encoding<G2, G2_ELEMENT_BYTE_LENGTH>;
+
+impl TryFrom<G2Bytes> for G2 {
+    type Error = Malformed;
+
+    fn try_from(bytes: G2Bytes) -> Result<Self, Malformed> {
+        Self::from_compressed(bytes.as_array()).map_err(|_| Malformed)
+    }
+}
+
+impl From<G2> for G2Bytes {
+    fn from(point: G2) -> Self {
+        Self::new(point.as_slice())
+    }
+}
+
+/// A [G2] built from its [G2Bytes] is a point of the prime-order subgroup other than the
+/// identity. Group operations can still produce the identity, and its encoding does not convert
+/// back.
+impl Validated for G2 {
+    type Bytes = G2Bytes;
 }
 
 impl FixedSize for G2 {

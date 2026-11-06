@@ -69,14 +69,128 @@ commonware_macros::stability_scope!(ALPHA {
 
     pub mod zk;
 });
+commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)) {
+    #[cfg(not(feature = "std"))]
+    use alloc::vec;
+    use commonware_codec::{Copying, DecodeExt as _};
+    use commonware_parallel::Sequential;
+
+    /// Asserts that scheme `C` follows the validation contract on [PublicKey] and [Signature].
+    ///
+    /// Every encoding in `malformed_keys` must fail to decode as [PublicKey::Bytes] or to
+    /// convert into a [PublicKey]. `malformed_signatures` receives the encoding of an honest
+    /// signature and returns encodings that must each fail to decode as [Signature::Bytes], to
+    /// convert into a [Signature], or to verify under the honest key, without panicking. Derive
+    /// every malformed signature from the honest one so that it would verify if the check it
+    /// exercises were missing, for example the honest signature with a non-canonical scalar.
+    /// Both lists must be non-empty.
+    ///
+    /// The honest key and signature must round-trip through their encodings into equal values
+    /// under which the signature verifies, their encodings truncated by one byte must fail to
+    /// decode, and the batch conversions must agree with the single ones.
+    pub fn assert_validation_contract<C: Signer>(
+        malformed_keys: &[&[u8]],
+        malformed_signatures: impl FnOnce(&[u8]) -> Vec<Vec<u8>>,
+    ) {
+        // The honest key round-trips through its encoding, and its truncation and every
+        // malformed key fail to decode or to convert.
+        let signer = C::from_seed(0);
+        let public_key = signer.public_key();
+        let encoded = public_key.as_ref();
+        let bytes = <C::PublicKey as Validated>::Bytes::decode(Copying(encoded))
+            .expect("honest key must decode");
+        assert_eq!(bytes.encode().as_ref(), encoded);
+        let converted = C::PublicKey::try_from(bytes.clone()).expect("honest key must convert");
+        assert_eq!(converted, public_key);
+        let round_trip: <C::PublicKey as Validated>::Bytes = converted.into();
+        assert_eq!(round_trip, bytes);
+        assert!(
+            <C::PublicKey as Validated>::Bytes::decode(Copying(&encoded[..encoded.len() - 1]))
+                .is_err()
+        );
+        assert!(!malformed_keys.is_empty());
+        let mut key_batch = vec![bytes.clone()];
+        for key in malformed_keys {
+            let Ok(bytes) = <C::PublicKey as Validated>::Bytes::decode(Copying(key)) else {
+                continue;
+            };
+            assert!(
+                C::PublicKey::try_from(bytes.clone()).is_err(),
+                "malformed key converted: {key:02x?}"
+            );
+            key_batch.push(bytes);
+        }
+        key_batch.push(bytes);
+        let converted = C::PublicKey::try_from_batch(&key_batch, &Sequential);
+        assert_eq!(converted.len(), key_batch.len());
+        for (i, key) in converted.iter().enumerate() {
+            let expected = i == 0 || i == key_batch.len() - 1;
+            assert_eq!(key.is_some(), expected, "batch conversion disagrees at {i}");
+        }
+        assert_eq!(converted[0].as_ref(), Some(&public_key));
+
+        // The honest signature round-trips through its encoding and verifies, its truncation
+        // fails to decode, and every malformed signature fails to decode, to convert, or to
+        // verify.
+        let namespace = b"test_namespace";
+        let message = b"test_message";
+        let signature = signer.sign(namespace, message);
+        let encoded = signature.as_ref();
+        let bytes = <C::Signature as Validated>::Bytes::decode(Copying(encoded))
+            .expect("honest signature must decode");
+        assert_eq!(bytes.encode().as_ref(), encoded);
+        let converted =
+            C::Signature::try_from(bytes.clone()).expect("honest signature must convert");
+        assert_eq!(converted, signature);
+        assert!(public_key.verify(namespace, message, &converted));
+        let round_trip: <C::Signature as Validated>::Bytes = converted.into();
+        assert_eq!(round_trip, bytes);
+        assert!(
+            <C::Signature as Validated>::Bytes::decode(Copying(&encoded[..encoded.len() - 1]))
+                .is_err()
+        );
+        let malformed = malformed_signatures(encoded);
+        assert!(!malformed.is_empty());
+        let mut signature_batch = vec![bytes.clone()];
+        let mut accepted = vec![true];
+        for bytes in &malformed {
+            let Ok(bytes) = <C::Signature as Validated>::Bytes::decode(Copying(bytes)) else {
+                continue;
+            };
+            let converted = C::Signature::try_from(bytes.clone()).ok();
+            if let Some(signature) = &converted {
+                assert!(
+                    !public_key.verify(namespace, message, signature),
+                    "malformed signature verified: {bytes:?}"
+                );
+            }
+            signature_batch.push(bytes);
+            accepted.push(converted.is_some());
+        }
+        signature_batch.push(bytes);
+        accepted.push(true);
+        let converted = C::Signature::try_from_batch(&signature_batch, &Sequential);
+        assert_eq!(converted.len(), signature_batch.len());
+        for (i, (signature, accepted)) in converted.iter().zip(accepted).enumerate() {
+            assert_eq!(signature.is_some(), accepted, "batch conversion disagrees at {i}");
+        }
+        assert_eq!(converted[0].as_ref(), Some(&signature));
+    }
+});
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
     use alloc::{sync::Arc, vec::Vec};
-    use commonware_codec::{BufsMut, Encode, EncodeSize, ReadExt, Write};
+    use commonware_codec::{BufsMut, Encode, EncodeSize, FixedSize, ReadExt, Write};
     use commonware_math::algebra::Random;
     use commonware_parallel::Strategy;
-    use commonware_utils::Array;
-    use core::{fmt, future::Future, num::NonZeroUsize};
+    use commonware_utils::{Array, Span, ordered::Set};
+    use core::{
+        fmt::{self, Debug, Display},
+        future::Future,
+        hash::Hash,
+        num::NonZeroUsize,
+        ops::Deref,
+    };
     use rand_chacha::ChaCha20Rng;
     use rand_core::{CryptoRng, SeedableRng as _};
     #[cfg(feature = "std")]
@@ -84,6 +198,9 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod secret;
     pub use crate::secret::Secret;
+
+    pub mod encoding;
+    pub use crate::encoding::Encoding;
 
     pub mod certificate;
     pub mod transcript;
@@ -157,11 +274,77 @@ commonware_macros::stability_scope!(BETA {
         fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Self::Signature) -> bool;
     }
 
-    /// A [PublicKey], able to verify [Signature]s.
-    pub trait PublicKey: Verifier + Sized + ReadExt + Array {}
+    /// An encoding that is not a value of the type it was offered to.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+    #[error("malformed encoding")]
+    pub struct Malformed;
 
-    /// A [Signature] over a message.
-    pub trait Signature: Sized + ReadExt + Array {}
+    /// A value that exists only after its encoding was checked.
+    ///
+    /// A value is never decoded directly. [TryFrom] builds it from its [Self::Bytes] and checks
+    /// everything about its form that the encoding alone can tell. The encoding decodes as a copy,
+    /// so messages carry it and convert where a checked value is needed, one at a time or together
+    /// through [Self::try_from_batch]. Equality and hashing follow the encoding for both types.
+    pub trait Validated:
+        Clone
+        + Send
+        + Sync
+        + 'static
+        + Eq
+        + Hash
+        + Debug
+        + TryFrom<Self::Bytes, Error = Malformed>
+        + Into<Self::Bytes>
+    {
+        /// The encoding as carried on the wire.
+        ///
+        /// Decoding copies the bytes and checks nothing else, and equality, ordering, and hashing
+        /// follow them.
+        type Bytes: Span + FixedSize;
+
+        /// Checks many encodings at once, keeping each value at its encoding's position and
+        /// `None` where an encoding is malformed.
+        ///
+        /// Schemes that can check encodings together provide that path here.
+        fn try_from_batch(bytes: &[Self::Bytes], strategy: &impl Strategy) -> Vec<Option<Self>> {
+            strategy.map_collect_vec(bytes.iter().cloned(), |bytes| Self::try_from(bytes).ok())
+        }
+    }
+
+    /// Checks every encoding of a set and returns the checked values as a set.
+    ///
+    /// Fails if any encoding is malformed or two encodings denote the same value.
+    pub fn validate_set<T: Validated + Ord>(
+        bytes: &Set<T::Bytes>,
+        strategy: &impl Strategy,
+    ) -> Result<Set<T>, Malformed> {
+        let values = T::try_from_batch(bytes.as_ref(), strategy)
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or(Malformed)?;
+        Set::try_from(values).map_err(|_| Malformed)
+    }
+
+    /// A [Validated] public key, able to verify [Signature]s.
+    ///
+    /// A key can be stored, counted toward a quorum, and handed to [Verifier::verify] with no
+    /// other check, and verification fails only because of the signature or the message. Which
+    /// keys are safe to accept, such as keys of prime order, is scheme-specific and not implied.
+    /// Ordering follows the encoding, and a key encodes as its bytes.
+    pub trait PublicKey:
+        Verifier + Validated + Ord + Display + Encode + FixedSize + AsRef<[u8]> + Deref<Target = [u8]>
+    {
+    }
+
+    /// A [Validated] signature over a message.
+    ///
+    /// Building a signature checks everything about its form that does not depend on a message.
+    /// [Verifier::verify] then judges it against a key and message. Ordering follows the
+    /// encoding, and a signature encodes as its bytes.
+    pub trait Signature:
+        Validated + Ord + Display + Encode + FixedSize + AsRef<[u8]> + Deref<Target = [u8]>
+    {
+    }
 
     /// An extension of [Signature] that supports public key recovery.
     pub trait Recoverable: Signature {
@@ -593,11 +776,20 @@ mod tests {
     use commonware_utils::{NZUsize, test_rng};
     use std::collections::HashSet;
 
+    /// Round-trips a key through its encoding.
+    fn round_trip<C: Signer>(public_key: &C::PublicKey) -> C::PublicKey {
+        let bytes = <C::PublicKey as Validated>::Bytes::decode(commonware_codec::Copying(
+            public_key.as_ref(),
+        ))
+        .unwrap();
+        C::PublicKey::try_from(bytes).unwrap()
+    }
+
     fn test_validate<C: PrivateKey>() {
         let mut rng = test_rng();
         let private_key = C::random(&mut rng);
         let public_key = private_key.public_key();
-        let decoded = C::PublicKey::decode(commonware_codec::Copying(public_key.as_ref())).unwrap();
+        let decoded = round_trip::<C>(&public_key);
         assert_eq!(public_key, decoded);
         assert_eq!(public_key.cmp(&decoded), core::cmp::Ordering::Equal);
 
@@ -613,7 +805,7 @@ mod tests {
         let mut keys = Vec::new();
         for _ in 0..16 {
             let key = C::random(&mut rng).public_key();
-            let decoded = C::PublicKey::decode(commonware_codec::Copying(key.as_ref())).unwrap();
+            let decoded = round_trip::<C>(&key);
             keys.extend([key, decoded]);
         }
 
@@ -628,7 +820,7 @@ mod tests {
     }
 
     fn test_validate_invalid_public_key<C: Signer>() {
-        let result = C::PublicKey::decode(vec![0; 1024]);
+        let result = <C::PublicKey as Validated>::Bytes::decode(vec![0; 1024]);
         assert!(result.is_err());
     }
 

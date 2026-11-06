@@ -783,22 +783,8 @@ mod tests {
         vote: &mut Notarize<bls12381_threshold_vrf::Scheme<PublicKey, V>, Sha256Digest>,
         other: &Notarize<bls12381_threshold_vrf::Scheme<PublicKey, V>, Sha256Digest>,
     ) {
-        let valid = vote
-            .attestation
-            .signature
-            .get()
-            .expect("locally created signature decodes");
-        let wrong_seed = other
-            .attestation
-            .signature
-            .get()
-            .expect("locally created signature decodes")
-            .seed_signature;
-        vote.attestation.signature = bls12381_threshold_vrf::Signature {
-            vote_signature: valid.vote_signature,
-            seed_signature: wrong_seed,
-        }
-        .into();
+        vote.attestation.signature.seed_signature =
+            other.attestation.signature.seed_signature.clone();
     }
 
     /// A valid vote signature cannot hide an invalid VRF seed contribution.

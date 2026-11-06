@@ -49,7 +49,7 @@ use commonware_utils::Widen;
 use core::{iter::once, num::NonZeroUsize};
 use curve25519_dalek::{
     constants::ED25519_BASEPOINT_POINT as B,
-    edwards::{CompressedEdwardsY, EdwardsPoint},
+    edwards::EdwardsPoint,
     scalar::Scalar,
     traits::{IsIdentity, VartimeMultiscalarMul},
 };
@@ -209,9 +209,7 @@ fn verify_shard<'a>(
     let mut B_coeff = Scalar::ZERO;
 
     for (vk, sig, namespace, message) in items {
-        let mut hash = Sha512::default()
-            .chain(&sig.R_bytes[..])
-            .chain(vk.as_bytes());
+        let mut hash = Sha512::default().chain(sig.R_bytes()).chain(vk.as_bytes());
         if let Some(namespace) = namespace {
             let len = UInt(u32::try_from(namespace.len()).map_err(|_| Error::InvalidSignature)?);
             let mut prefix = [0u8; 5];
@@ -221,12 +219,7 @@ fn verify_shard<'a>(
         }
         hash.update(message);
         let k = Scalar::from_hash(hash);
-        let R = CompressedEdwardsY(sig.R_bytes)
-            .decompress()
-            .ok_or(Error::InvalidSignature)?;
-        let s = Scalar::from_canonical_bytes(sig.s_bytes)
-            .into_option()
-            .ok_or(Error::InvalidSignature)?;
+        let Signature { R, s, .. } = sig;
         let z = Scalar::from(gen_u128(&mut rng));
         B_coeff -= z * s;
         Rs.push(R);

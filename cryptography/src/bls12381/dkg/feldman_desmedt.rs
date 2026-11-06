@@ -346,13 +346,14 @@
 //! For a complete example with resharing, see [commonware-dkg](https://docs.rs/commonware-dkg).
 
 use crate::{
-    BatchEntry, BatchVerifier, PublicKey, Secret, Signer,
+    BatchEntry, BatchVerifier, PublicKey, Secret, Signer, Validated,
     bls12381::primitives::{
         group::{Private, Scalar, ScalarReadCfg, Share},
         sharing::{Mode, ModeVersion, Sharing},
         variant::Variant,
     },
     transcript::{Summary, Transcript, Version},
+    validate_set,
 };
 use commonware_codec::{
     Buf, Encode, EncodeSize, FixedSize, MaxEncodeSize, Mode as CodecMode, RangeCfg, Read, ReadExt,
@@ -566,6 +567,8 @@ pub enum FinalizeError<P> {
 }
 
 /// The output of a successful DKG.
+///
+/// Decoding an output checks every public key it lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output<V: Variant, P> {
     summary: Summary,
@@ -647,12 +650,23 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
         (max_participants, max_supported_mode): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let max_participants_usize = max_participants.get() as usize;
+        let summary = ReadExt::read(buf)?;
+        let public = Read::read_cfg(buf, &(*max_participants, *max_supported_mode))?;
+
+        // At least one dealer and one player must be part of a dealing, and there may not be
+        // any reveals.
+        let participants = RangeCfg::new(1..=max_participants_usize);
+        let dealers: Set<P::Bytes> = Read::read_cfg(buf, &(participants, ()))?;
+        let players: Set<P::Bytes> = Read::read_cfg(buf, &(participants, ()))?;
+        let revealed: Set<P::Bytes> =
+            Read::read_cfg(buf, &(RangeCfg::new(0..=max_participants_usize), ()))?;
+        let malformed = |_| commonware_codec::Error::Invalid("Output", "malformed public key");
         Ok(Self {
-            summary: ReadExt::read(buf)?,
-            public: Read::read_cfg(buf, &(*max_participants, *max_supported_mode))?,
-            dealers: Read::read_cfg(buf, &(RangeCfg::new(1..=max_participants_usize), ()))?, // at least one dealer must be part of a dealing
-            players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_participants_usize), ()))?, // at least one player must be part of a dealing
-            revealed: Read::read_cfg(buf, &(RangeCfg::new(0..=max_participants_usize), ()))?, // there may not be any reveals
+            summary,
+            public,
+            dealers: validate_set::<P>(&dealers, &Sequential).map_err(malformed)?,
+            players: validate_set::<P>(&players, &Sequential).map_err(malformed)?,
+            revealed: validate_set::<P>(&revealed, &Sequential).map_err(malformed)?,
         })
     }
 }
@@ -877,7 +891,8 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             return Ok(DealerLogOutcome::Unavailable);
         };
         let ack_summary = transcript_for_ack(round_transcript, dealer, &log.pub_msg).summarize();
-        let mut ack_batch = Vec::with_capacity(self.players.len());
+        let mut ack_players = Vec::with_capacity(self.players.len());
+        let mut ack_signatures = Vec::with_capacity(self.players.len());
         let mut reveal_count = 0;
         let max_reveals = self.max_reveals::<M>();
         let mut reveal_eval_points = Vec::new();
@@ -885,14 +900,8 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         for (player, result) in results_iter {
             match result {
                 AckOrReveal::Ack(ack) => {
-                    // The summary already binds the namespace. Transcript::sign uses an empty
-                    // outer namespace, which verification must match.
-                    ack_batch.push(BatchEntry {
-                        namespace: b"",
-                        message: ack_summary.as_ref(),
-                        public_key: player,
-                        signature: &ack.sig,
-                    });
+                    ack_players.push(player);
+                    ack_signatures.push(ack.sig.clone());
                 }
                 AckOrReveal::Reveal(priv_msg) => {
                     reveal_count += 1;
@@ -914,7 +923,31 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
                 }
             }
         }
-        if !P::verify_batch(&mut *rng, &ack_batch, |_, entry| *entry, strategy) {
+
+        // A malformed acknowledgement signature is as faulty as one that does not verify.
+        let Some(acks) = ack_players
+            .into_iter()
+            .zip(P::Signature::try_from_batch(&ack_signatures, strategy))
+            .map(|(player, signature)| Some((player, signature?)))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Err(DealerLogError::Fault(FaultReason::InvalidAck));
+        };
+
+        // The summary already binds the namespace. Transcript::sign uses an empty
+        // outer namespace, so verification must use one too.
+        let acks_verified = P::verify_batch(
+            &mut *rng,
+            &acks,
+            |_, (public_key, signature)| BatchEntry {
+                namespace: b"",
+                message: ack_summary.as_ref(),
+                public_key,
+                signature,
+            },
+            strategy,
+        );
+        if !acks_verified {
             return Err(DealerLogError::Fault(FaultReason::InvalidAck));
         }
         let lhs = log.pub_msg.commitment.lin_comb_eval(
@@ -1109,7 +1142,7 @@ impl arbitrary::Arbitrary<'_> for DealerPrivMsg {
 
 #[derive(Clone, Debug)]
 pub struct PlayerAck<P: PublicKey> {
-    sig: P::Signature,
+    sig: <P::Signature as Validated>::Bytes,
 }
 
 impl<P: PublicKey> PartialEq for PlayerAck<P> {
@@ -1119,7 +1152,7 @@ impl<P: PublicKey> PartialEq for PlayerAck<P> {
 }
 
 impl<P: PublicKey> FixedSize for PlayerAck<P> {
-    const SIZE: usize = P::Signature::SIZE;
+    const SIZE: usize = <P::Signature as Validated>::Bytes::SIZE;
 }
 
 impl<P: PublicKey> Write for PlayerAck<P> {
@@ -1141,7 +1174,7 @@ impl<P: PublicKey> Read for PlayerAck<P> {
 #[cfg(feature = "arbitrary")]
 impl<P: PublicKey> arbitrary::Arbitrary<'_> for PlayerAck<P>
 where
-    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    <P::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let sig = u.arbitrary()?;
@@ -1219,8 +1252,7 @@ impl<P: PublicKey> Read for AckOrReveal<P> {
 #[cfg(feature = "arbitrary")]
 impl<P: PublicKey> arbitrary::Arbitrary<'_> for AckOrReveal<P>
 where
-    P: for<'a> arbitrary::Arbitrary<'a>,
-    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    <P::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let choice = u.int_in_range(0..=1)?;
@@ -1240,7 +1272,7 @@ where
 
 #[derive(Clone, Debug)]
 enum DealerResult<P: PublicKey> {
-    Ok(Map<P, AckOrReveal<P>>),
+    Ok(Map<P::Bytes, AckOrReveal<P>>),
     TooManyReveals,
 }
 
@@ -1267,7 +1299,7 @@ impl<P: PublicKey> DealerResult<P> {
     /// Returns an upper bound on the encoded size of a dealer result for at most `max_players`
     /// players.
     fn max_encode_size(max_players: NonZeroU32) -> usize {
-        Map::<P, AckOrReveal<P>>::max_encode_size(
+        Map::<P::Bytes, AckOrReveal<P>>::max_encode_size(
             Widen::widen(max_players.get()),
             AckOrReveal::<P>::MAX_ENCODE_SIZE,
         ) + u8::SIZE
@@ -1310,8 +1342,8 @@ impl<P: PublicKey> Read for DealerResult<P> {
 #[cfg(feature = "arbitrary")]
 impl<P: PublicKey> arbitrary::Arbitrary<'_> for DealerResult<P>
 where
-    P: for<'a> arbitrary::Arbitrary<'a>,
-    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    P::Bytes: for<'a> arbitrary::Arbitrary<'a>,
+    <P::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let choice = u.int_in_range(0..=1)?;
@@ -1320,7 +1352,7 @@ where
                 use commonware_utils::TryFromIterator;
                 use std::collections::HashMap;
 
-                let base: HashMap<P, AckOrReveal<P>> = u.arbitrary()?;
+                let base: HashMap<P::Bytes, AckOrReveal<P>> = u.arbitrary()?;
                 let map =
                     Map::try_from_iter(base).map_err(|_| arbitrary::Error::IncorrectFormat)?;
 
@@ -1380,7 +1412,7 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
         let DealerResult::Ok(results) = &self.results else {
             return None;
         };
-        match results.get_value(player) {
+        match results.get_value(&player.clone().into()) {
             Some(AckOrReveal::Ack(ack)) => Some(ack),
             _ => None,
         }
@@ -1390,7 +1422,7 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
         let DealerResult::Ok(results) = &self.results else {
             return None;
         };
-        match results.get_value(player) {
+        match results.get_value(&player.clone().into()) {
             Some(AckOrReveal::Reveal(priv_msg)) => Some(priv_msg),
             _ => None,
         }
@@ -1403,8 +1435,14 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
         match &self.results {
             DealerResult::TooManyReveals => Ok(None),
             DealerResult::Ok(results) => {
-                // We don't check this on deserialization.
-                if results.keys() != players {
+                // We don't check this on deserialization. Both sides are sorted by encoding, so
+                // the log lists exactly the players when the encodings agree position by position.
+                let matches = results.len() == players.len()
+                    && players.iter().zip(results.keys()).all(|(player, key)| {
+                        let player: P::Bytes = player.clone().into();
+                        player == *key
+                    });
+                if !matches {
                     return Err(FaultReason::MismatchedLogPlayers);
                 }
                 Ok(Some(players.iter().zip(results.values().iter())))
@@ -1414,8 +1452,9 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
 
     /// Return a [`DealerLogSummary`] of the results in this log.
     ///
-    /// This can be useful for observing the progress of the DKG.
-    pub fn summary(&self) -> DealerLogSummary<P> {
+    /// This can be useful for observing the progress of the DKG. Players are identified by the
+    /// encodings of their keys as the log lists them.
+    pub fn summary(&self) -> DealerLogSummary<P::Bytes> {
         match &self.results {
             DealerResult::TooManyReveals => DealerLogSummary::TooManyReveals,
             DealerResult::Ok(map) => {
@@ -1453,9 +1492,9 @@ pub enum DealerLogSummary<P> {
 #[cfg(feature = "arbitrary")]
 impl<V: Variant, P: PublicKey> arbitrary::Arbitrary<'_> for DealerLog<V, P>
 where
-    P: for<'a> arbitrary::Arbitrary<'a>,
+    P::Bytes: for<'a> arbitrary::Arbitrary<'a>,
     V::Public: for<'a> arbitrary::Arbitrary<'a>,
-    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    <P::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let pub_msg = u.arbitrary()?;
@@ -1473,9 +1512,9 @@ where
 /// dealer actually produced a log.
 #[derive(Clone, Debug)]
 pub struct SignedDealerLog<V: Variant, P: PublicKey> {
-    dealer: P,
+    dealer: P::Bytes,
     log: DealerLog<V, P>,
-    sig: P::Signature,
+    sig: <P::Signature as Validated>::Bytes,
 }
 
 impl<V: Variant, P: PublicKey> PartialEq for SignedDealerLog<V, P> {
@@ -1488,7 +1527,9 @@ impl<V: Variant, P: PublicKey> SignedDealerLog<V, P> {
     /// Returns an upper bound on the encoded size of a signed log for at most `max_participants`
     /// participants.
     pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
-        DealerLog::<V, P>::max_encode_size(max_participants) + P::SIZE + P::Signature::SIZE
+        DealerLog::<V, P>::max_encode_size(max_participants)
+            + P::Bytes::SIZE
+            + <P::Signature as Validated>::Bytes::SIZE
     }
 
     // rustc does not infer `S::Signature == P::Signature` from `PublicKey = P` alone.
@@ -1499,9 +1540,9 @@ impl<V: Variant, P: PublicKey> SignedDealerLog<V, P> {
     ) -> Self {
         let sig = transcript_for_log(info, &log).sign(sk);
         Self {
-            dealer: sk.public_key(),
+            dealer: sk.public_key().into(),
             log,
-            sig,
+            sig: sig.into(),
         }
     }
 
@@ -1510,12 +1551,15 @@ impl<V: Variant, P: PublicKey> SignedDealerLog<V, P> {
     /// This will produce the public key of the dealer that signed this log,
     /// and the underlying log that they signed.
     ///
-    /// This will return [`Option::None`] if the check fails.
+    /// This will return [`Option::None`] if the check fails, including when the
+    /// dealer's key or the signature is malformed.
     pub fn check(self, info: &Info<V, P>) -> Option<(P, DealerLog<V, P>)> {
-        if !transcript_for_log(info, &self.log).verify(&self.dealer, &self.sig) {
+        let dealer = P::try_from(self.dealer).ok()?;
+        let sig = P::Signature::try_from(self.sig).ok()?;
+        if !transcript_for_log(info, &self.log).verify(&dealer, &sig) {
             return None;
         }
-        Some((self.dealer, self.log))
+        Some((dealer, self.log))
     }
 }
 
@@ -1548,9 +1592,9 @@ impl<V: Variant, P: PublicKey> Read for SignedDealerLog<V, P> {
 #[cfg(feature = "arbitrary")]
 impl<V: Variant, P: PublicKey> arbitrary::Arbitrary<'_> for SignedDealerLog<V, P>
 where
-    P: for<'a> arbitrary::Arbitrary<'a>,
+    P::Bytes: for<'a> arbitrary::Arbitrary<'a>,
     V::Public: for<'a> arbitrary::Arbitrary<'a>,
-    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    <P::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let dealer = u.arbitrary()?;
@@ -1877,7 +1921,10 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
         let Some(res_mut) = self.results.get_value_mut(&player) else {
             return Err(PlayerAckError::UnexpectedPlayer);
         };
-        if !self.transcript.verify(&player, &ack.sig) {
+        let Ok(sig) = S::Signature::try_from(ack.sig.clone()) else {
+            return Err(PlayerAckError::InvalidAck);
+        };
+        if !self.transcript.verify(&player, &sig) {
             return Err(PlayerAckError::InvalidAck);
         }
         *res_mut = AckOrReveal::Ack(ack);
@@ -1898,7 +1945,13 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
         let results = if reveals > self.info.max_reveals::<M>() {
             DealerResult::TooManyReveals
         } else {
-            DealerResult::Ok(self.results)
+            DealerResult::Ok(
+                self.results
+                    .into_iter()
+                    .map(|(player, result)| (player.into(), result))
+                    .try_collect()
+                    .expect("players must be unique"),
+            )
         };
         let log = DealerLog {
             pub_msg: self.pub_msg,
@@ -2089,9 +2142,12 @@ impl<V: Variant, S: Signer> Player<V, S> {
             let Some(ack) = log.get_ack(&this.me_pub) else {
                 return false;
             };
-            // Only trust this ack if the signature is valid for this round.
-            transcript_for_ack(&this.transcript, dealer, &log.pub_msg)
-                .verify(&this.me_pub, &ack.sig)
+
+            // Only trust this ack if the signature is well-formed and valid for this round.
+            let Ok(sig) = S::Signature::try_from(ack.sig.clone()) else {
+                return false;
+            };
+            transcript_for_ack(&this.transcript, dealer, &log.pub_msg).verify(&this.me_pub, &sig)
                 && !this.view.contains_key(dealer)
         }) {
             // If so, we have a problem, because we're missing a dealing that we're
@@ -2135,7 +2191,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
         }
         let sig = transcript_for_ack(&self.transcript, &dealer, &pub_msg).sign(&self.me);
         self.view.insert(dealer, (pub_msg, priv_msg));
-        Ok(Some(PlayerAck { sig }))
+        Ok(Some(PlayerAck { sig: sig.into() }))
     }
 
     /// Finalize the player, producing an output, and a share.
@@ -2830,7 +2886,8 @@ mod test_plan {
                                 .unwrap_or_default();
                             let (modified, transcript) =
                                 masks.transcript_for_player_ack(&info, &pk, &pub_msg)?;
-                            assert_eq!(transcript.verify(&player_pk, &ack.sig), !modified);
+                            let sig = ed25519::Signature::try_from(ack.sig.clone())?;
+                            assert_eq!(transcript.verify(&player_pk, &sig), !modified);
 
                             // Skip receiving ack if NoAck perturbation
                             if !round.no_acks.contains(&(i_dealer, player_key_idx)) {
@@ -2860,7 +2917,8 @@ mod test_plan {
                         .unwrap_or_default();
                     let (modified, transcript) =
                         masks.transcript_for_signed_dealer_log(&info, &signed_log.log)?;
-                    assert_eq!(transcript.verify(&pk, &signed_log.sig), !modified);
+                    let sig = ed25519::Signature::try_from(signed_log.sig.clone())?;
+                    assert_eq!(transcript.verify(&pk, &sig), !modified);
                     let (found_pk, mut log) = signed_log
                         .check(&info)
                         .ok_or_else(|| anyhow!("signed log should verify"))?;
@@ -2878,7 +2936,7 @@ mod test_plan {
                                 }
                                 let player_pk = keys[i_player as usize].public_key();
                                 *results
-                                    .get_value_mut(&player_pk)
+                                    .get_value_mut(&player_pk.clone().into())
                                     .ok_or_else(|| anyhow!("unknown player: {:?}", player_pk))? =
                                     AckOrReveal::Reveal(DealerPrivMsg::new(Scalar::random(
                                         &mut rng,
@@ -3340,7 +3398,7 @@ mod test {
     use crate::{bls12381::primitives::variant::MinPk, ed25519};
     use anyhow::anyhow;
     use arbitrary::{Arbitrary, Unstructured};
-    use commonware_codec::{DecodeExt, FixedSize};
+    use commonware_codec::FixedSize;
     use commonware_invariants::minifuzz;
     use commonware_utils::{N3f1, TestRng, test_rng};
     use core::num::NonZeroI32;
@@ -4073,7 +4131,7 @@ mod test {
             panic!("valid fixture should contain player results");
         };
         let player = fixture.info.players.iter().next().unwrap().clone();
-        *results.get_value_mut(&player).unwrap() =
+        *results.get_value_mut(&player.into()).unwrap() =
             AckOrReveal::Reveal(DealerPrivMsg::new(Scalar::zero()));
 
         let result = check_pre_verify_log(&fixture.info, &dealer.key, &log);
@@ -4252,8 +4310,7 @@ mod test {
         let AckOrReveal::Ack(ack) = &mut results.values_mut()[0] else {
             panic!("valid fixture should contain acknowledgements");
         };
-        ack.sig = ed25519::Signature::decode(vec![u8::MAX; ed25519::Signature::SIZE])
-            .expect("signature decoding accepts fixed-size bytes");
+        ack.sig = ed25519::SignatureBytes::new([u8::MAX; ed25519::SignatureBytes::SIZE]);
         let (_, mut log) = SignedDealerLog::sign(&dealer_sk, &fixture.info, log)
             .check(&fixture.info)
             .expect("dealer signature should authenticate the log");
@@ -4976,12 +5033,16 @@ mod test {
                 &dealer_pk,
                 &pub_msg,
             )
-            .sign(&player_sk),
+            .sign(&player_sk)
+            .into(),
         };
-        let results: Map<_, _> = vec![(player_pk, AckOrReveal::Ack(bad_ack))]
-            .into_iter()
-            .try_collect()
-            .unwrap();
+        let results: Map<_, _> = vec![(
+            ed25519::PublicKeyBytes::from(player_pk),
+            AckOrReveal::Ack(bad_ack),
+        )]
+        .into_iter()
+        .try_collect()
+        .unwrap();
         let mut logs = BTreeMap::new();
         logs.insert(
             dealer_pk,
@@ -4997,6 +5058,86 @@ mod test {
         assert!(acks.is_empty());
 
         Ok(())
+    }
+
+    #[test]
+    fn malformed_signatures_and_keys_are_rejected_as_invalid() -> anyhow::Result<()> {
+        let dealer_sk = ed25519::PrivateKey::from_seed(0);
+        let player_sk = ed25519::PrivateKey::from_seed(1);
+        let dealers: Set<_> = vec![dealer_sk.public_key()].try_into().unwrap();
+        let players: Set<_> = vec![player_sk.public_key()].try_into().unwrap();
+        let info = Info::<MinPk, _>::new::<N3f1>(
+            b"malformed-encoding-test",
+            0,
+            None,
+            Mode::NonZeroCounter,
+            Reveal::V1,
+            dealers,
+            players,
+        )?;
+        let (mut dealer, _, _) = Dealer::start::<N3f1>(test_rng(), info.clone(), dealer_sk, None)?;
+
+        // A signature whose scalar is not canonical is rejected like one that does not verify.
+        let malformed = ed25519::SignatureBytes::new([u8::MAX; ed25519::SignatureBytes::SIZE]);
+        assert!(matches!(
+            dealer.receive_player_ack(
+                player_sk.public_key(),
+                PlayerAck {
+                    sig: malformed.clone(),
+                },
+            ),
+            Err(PlayerAckError::InvalidAck)
+        ));
+
+        // A signed log fails its check when its signature or its dealer's key is malformed.
+        let signed_log = dealer.finalize::<N3f1>();
+        assert!(signed_log.clone().check(&info).is_some());
+        let mut malformed_sig = signed_log.clone();
+        malformed_sig.sig = malformed;
+        assert!(malformed_sig.check(&info).is_none());
+        let mut non_point = [0u8; 32];
+        non_point[0] = 2;
+        let mut malformed_dealer = signed_log;
+        malformed_dealer.dealer = ed25519::PublicKeyBytes::new(non_point);
+        assert!(malformed_dealer.check(&info).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn output_decode_rejects_malformed_key() {
+        let players = (0..4)
+            .map(|seed| ed25519::PrivateKey::from_seed(seed).public_key())
+            .try_collect::<Set<_>>()
+            .unwrap();
+        let (output, _) =
+            deal::<MinPk, _, N3f1>(test_rng(), Mode::NonZeroCounter, players).unwrap();
+        let cfg = (NZU32!(4), ModeVersion::v0());
+        let decoded =
+            Output::<MinPk, ed25519::PublicKey>::read_cfg(&mut output.encode(), &cfg).unwrap();
+        assert_eq!(decoded, output);
+
+        // The same output with a dealer whose encoding has `y = 2`. No curve point has that `y`.
+        let mut non_point = [0u8; 32];
+        non_point[0] = 2;
+        let dealers: Set<ed25519::PublicKeyBytes> = vec![ed25519::PublicKeyBytes::new(non_point)]
+            .try_into()
+            .unwrap();
+        let mut encoded = Vec::new();
+        output.summary.write(&mut encoded);
+        output.public.write(&mut encoded);
+        dealers.write(&mut encoded);
+        output.players.write(&mut encoded);
+        output.revealed.write(&mut encoded);
+        assert!(matches!(
+            Output::<MinPk, ed25519::PublicKey>::read_cfg(
+                &mut commonware_codec::Copying(&encoded),
+                &cfg
+            ),
+            Err(commonware_codec::Error::Invalid(
+                "Output",
+                "malformed public key"
+            ))
+        ));
     }
 
     #[test]

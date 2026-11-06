@@ -6,17 +6,15 @@
 #[cfg(feature = "mocks")]
 pub mod mocks;
 
-use super::{PrivateKey, PublicKey, Signature as Ed25519Signature};
+use super::{PrivateKey, PublicKey, Signature as Ed25519Signature, SignatureBytes};
 use crate::{
-    BatchEntry, BatchVerifier as _, Signer as _, Verifier as _,
+    BatchEntry, BatchVerifier as _, Signer as _, Validated as _, Verifier as _,
     certificate::{AssemblyError, Attestation, Namespace, Scheme, Signers, Subject, Verification},
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{BufMut, Bytes};
-use commonware_codec::{
-    Buf, EncodeSize, Error, FixedSize, Read, ReadRangeExt, Write, types::lazy::Lazy,
-};
+use commonware_codec::{Buf, EncodeSize, Error, FixedSize, Read, ReadRangeExt, Write};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     Participant, Widen,
@@ -85,7 +83,7 @@ impl<N: Namespace> Generic<N> {
 
         Some(Attestation {
             signer: *index,
-            signature: signature.into(),
+            signature,
         })
     }
 
@@ -101,14 +99,11 @@ impl<N: Namespace> Generic<N> {
         let Some(public_key) = self.participants.key(attestation.signer) else {
             return false;
         };
-        let Some(signature) = attestation.signature.get() else {
-            return false;
-        };
 
         public_key.verify(
             subject.namespace(&self.namespace),
             &subject.message(),
-            signature,
+            &attestation.signature,
         )
     }
 
@@ -137,10 +132,6 @@ impl<N: Namespace> Generic<N> {
                 invalid.insert(attestation.signer);
                 continue;
             };
-            if attestation.signature.get().is_none() {
-                invalid.insert(attestation.signer);
-                continue;
-            }
             candidates.push((attestation, public_key));
         }
 
@@ -152,15 +143,14 @@ impl<N: Namespace> Generic<N> {
                     namespace,
                     message: &message,
                     public_key,
-                    signature: attestation.signature.get().expect("validated signature"),
+                    signature: &attestation.signature,
                 },
                 strategy,
             )
         {
             // Batch failed: fall back to per-signer verification to isolate faulty attestations.
             for (attestation, public_key) in &candidates {
-                let signature = attestation.signature.get().expect("validated signature");
-                if !public_key.verify(namespace, &message, signature) {
+                if !public_key.verify(namespace, &message, &attestation.signature) {
                     invalid.insert(attestation.signer);
                 }
             }
@@ -187,11 +177,7 @@ impl<N: Namespace> Generic<N> {
             self.participants
                 .key(signer)
                 .ok_or(AssemblyError::UnknownSigner(signer))?;
-            let signature = signature
-                .get()
-                .cloned()
-                .ok_or(AssemblyError::MalformedSignature(signer))?;
-            entries.push((signer, signature));
+            entries.push((signer, SignatureBytes::from(signature)));
         }
 
         // Sort the signatures by signer index.
@@ -199,7 +185,6 @@ impl<N: Namespace> Generic<N> {
         let (signer, signatures): (Vec<Participant>, Vec<_>) = entries.into_iter().unzip();
         let signers = Signers::try_from((&self.participants, signer))?
             .require(self.participants.quorum::<S::Faults>())?;
-        let signatures = signatures.into_iter().map(Lazy::from).collect();
 
         Ok(Certificate {
             signers,
@@ -214,8 +199,9 @@ impl<N: Namespace> Generic<N> {
     fn stage_certificate<'a, S: Scheme>(
         &'a self,
         subject: impl Subject<Namespace = N>,
-        certificate: &'a Certificate,
-        mut stage: impl FnMut(&'a PublicKey, &'a Ed25519Signature),
+        certificate: &Certificate,
+        strategy: &impl Strategy,
+        mut stage: impl FnMut(&'a PublicKey, Ed25519Signature),
     ) -> Option<(&'a [u8], Bytes)> {
         if certificate.signers.len() != self.participants.len()
             || certificate.signers.count() != certificate.signatures.len()
@@ -224,8 +210,9 @@ impl<N: Namespace> Generic<N> {
             return None;
         }
 
-        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-            stage(self.participants.key(signer)?, signature.get()?);
+        let signatures = Ed25519Signature::try_from_batch(&certificate.signatures, strategy);
+        for (signer, signature) in certificate.signers.iter().zip(signatures) {
+            stage(self.participants.key(signer)?, signature?);
         }
 
         Some((subject.namespace(&self.namespace), subject.message()))
@@ -245,7 +232,7 @@ impl<N: Namespace> Generic<N> {
     {
         let mut entries = Vec::with_capacity(certificate.signatures.len());
         let Some((namespace, message)) =
-            self.stage_certificate::<S>(subject, certificate, |public_key, signature| {
+            self.stage_certificate::<S>(subject, certificate, strategy, |public_key, signature| {
                 entries.push((public_key, signature));
             })
         else {
@@ -286,11 +273,14 @@ impl<N: Namespace> Generic<N> {
             Vec::with_capacity(certificates.size_hint().0.saturating_mul(per_certificate));
         for (subject, certificate) in certificates {
             let index = messages.len();
-            let Some(message) =
-                self.stage_certificate::<S>(subject, certificate, |public_key, signature| {
+            let Some(message) = self.stage_certificate::<S>(
+                subject,
+                certificate,
+                strategy,
+                |public_key, signature| {
                     entries.push((index, public_key, signature));
-                })
-            else {
+                },
+            ) else {
                 return false;
             };
             messages.push(message);
@@ -337,8 +327,9 @@ impl<N: Namespace> Generic<N> {
 pub struct Certificate {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
-    /// Ed25519 signatures emitted by the respective participants ordered by signer index.
-    pub signatures: Vec<Lazy<Ed25519Signature>>,
+    /// Encodings of the Ed25519 signatures emitted by the respective participants, ordered by
+    /// signer index. They are checked when the certificate is verified.
+    pub signatures: Vec<SignatureBytes>,
 }
 
 #[cfg(feature = "arbitrary")]
@@ -346,7 +337,7 @@ impl arbitrary::Arbitrary<'_> for Certificate {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let signers = Signers::arbitrary(u)?;
         let signatures = (0..signers.count())
-            .map(|_| u.arbitrary::<Ed25519Signature>().map(Lazy::from))
+            .map(|_| u.arbitrary::<SignatureBytes>())
             .collect::<arbitrary::Result<Vec<_>>>()?;
         Ok(Self {
             signers,
@@ -380,7 +371,7 @@ impl Read for Certificate {
             ));
         }
 
-        let signatures = Vec::<Lazy<Ed25519Signature>>::read_range(reader, ..=*participants)?;
+        let signatures = Vec::<SignatureBytes>::read_range(reader, ..=*participants)?;
         if signers.count() != signatures.len() {
             return Err(Error::Invalid(
                 "cryptography::ed25519::certificate::Certificate",
@@ -947,18 +938,15 @@ mod tests {
         assert_eq!(result.invalid.len(), 1);
         assert_eq!(result.verified.len(), quorum - 1);
 
-        // Malformed signature encodings and unknown signers cannot reach batch verification.
+        // Unknown signers cannot reach batch verification.
         let subject = TestSubject {
             message: Bytes::from_static(MESSAGE),
         };
-        let mut malformed = schemes[0].sign::<Sha256Digest>(subject.clone()).unwrap();
-        let mut truncated = Bytes::from_static(&[0u8; 3]);
-        malformed.signature = Lazy::deferred(&mut truncated, ());
         let mut unknown = schemes[1].sign::<Sha256Digest>(subject.clone()).unwrap();
         unknown.signer = Participant::new(999);
 
         // If no attestations reach batch verification, the caller's RNG state must remain unchanged.
-        for attestations in [Vec::new(), vec![malformed, unknown]] {
+        for attestations in [Vec::new(), vec![unknown]] {
             let expected_invalid = attestations.len();
             let mut actual_rng = TestRng::new(0);
             let mut expected_rng = TestRng::new(0);
@@ -1224,7 +1212,7 @@ mod tests {
         let quorum =
             usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
 
-        let mut attestations: Vec<_> = schemes
+        let attestations: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -1236,26 +1224,19 @@ mod tests {
             .collect();
 
         let valid = schemes[0]
-            .assemble(non_empty![@attestations.clone()], &Sequential)
+            .assemble(non_empty![@attestations], &Sequential)
             .unwrap();
 
-        // Assembly must identify the signer whose attestation cannot be decoded.
-        let signer = attestations[0].signer;
-        let mut truncated = Bytes::from_static(&[0u8; 3]);
-        attestations[0].signature = Lazy::deferred(&mut truncated, ());
-
-        assert_eq!(
-            schemes[0].assemble(non_empty![@attestations], &Sequential),
-            Err(AssemblyError::MalformedSignature(signer))
-        );
-
-        // Reject a malformed certificate before drawing any verification randomness.
+        // Reject a certificate with a malformed signature (a non-canonical scalar) before
+        // drawing any verification randomness.
         let subject = TestSubject {
             message: Bytes::from_static(MESSAGE),
         };
         let mut invalid = valid.clone();
-        let mut truncated = Bytes::from_static(&[0u8; 3]);
-        *invalid.signatures.last_mut().unwrap() = Lazy::deferred(&mut truncated, ());
+        let last = invalid.signatures.last_mut().unwrap();
+        let mut malformed = <[u8; 64]>::from(last.clone());
+        malformed[63] |= 0x80;
+        *last = SignatureBytes::new(malformed);
         let mut actual_rng = TestRng::new(0);
         let mut expected_rng = TestRng::new(0);
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(

@@ -53,7 +53,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> {
 impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
     /// Create a new tracker [Actor] from the given `context` and `cfg`.
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<C>, Oracle<C>) {
-        let public_key = cfg.myself.public_key.clone();
+        let public_key = cfg.public_key;
 
         // General initialization
         let directory_cfg = directory::Config {
@@ -74,7 +74,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
         let directory = Directory::init(
             context.child("directory"),
             cfg.bootstrappers,
-            cfg.myself,
+            (public_key.clone(), cfg.myself),
             directory_cfg,
             releaser,
         );
@@ -293,10 +293,10 @@ mod tests {
             types,
         },
     };
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::Encode;
     use commonware_cryptography::{
         Signer,
-        ed25519::{PrivateKey, PublicKey, Signature},
+        ed25519::{PrivateKey, PublicKey, PublicKeyBytes, SignatureBytes},
     };
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, SystemTimeExt, bitmap::BitMap, ordered::Set};
@@ -316,6 +316,7 @@ mod tests {
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
     ) -> Config<C::PublicKey> {
         Config {
+            public_key: signer.public_key(),
             myself: Info::sign(
                 signer.public_key(),
                 IP_NAMESPACE,
@@ -356,7 +357,7 @@ mod tests {
             .and_then(|value| value.parse::<i64>().ok())
     }
 
-    // Helper to create Info
+    // Helper to create Info, paired with the public key the tracker indexes it by
     fn new_peer_info(
         signer: &mut PrivateKey,
         ip_namespace: &[u8],
@@ -364,23 +365,26 @@ mod tests {
         timestamp: u64,
         target_pk_override: Option<PublicKey>,
         make_sig_invalid: bool,
-    ) -> Info<PublicKey> {
+    ) -> (PublicKey, Info<PublicKey>) {
         let peer_info_pk = target_pk_override.unwrap_or_else(|| signer.public_key());
         let ingress: Ingress = socket.into();
-        let mut signature = signer.sign(ip_namespace, &(ingress.clone(), timestamp).encode());
+        let mut signature: SignatureBytes = signer
+            .sign(ip_namespace, &(ingress.clone(), timestamp).encode())
+            .into();
 
-        if make_sig_invalid && !signature.as_ref().is_empty() {
-            let mut sig_bytes = signature.encode_mut();
+        if make_sig_invalid {
+            let mut sig_bytes = *signature.as_array();
             sig_bytes[0] = sig_bytes[0].wrapping_add(1);
-            signature = Signature::decode(sig_bytes).unwrap();
+            signature = sig_bytes.into();
         }
 
-        Info {
+        let info = Info {
             ingress,
             timestamp,
-            public_key: peer_info_pk,
+            public_key: peer_info_pk.clone().into(),
             signature,
-        }
+        };
+        (peer_info_pk, info)
     }
 
     // Mock a connection to a peer by reserving it as if it had dialed us and the `peer` actor had
@@ -416,7 +420,7 @@ mod tests {
         runner_context: deterministic::Context,
         cfg_to_clone: Config<PublicKey>,
     ) -> TestHarness {
-        let tracker_pk = cfg_to_clone.myself.public_key.clone();
+        let tracker_pk = cfg_to_clone.public_key.clone();
         let stored_cfg = cfg_to_clone.clone();
         let (actor, mailbox, oracle) = Actor::new(runner_context, cfg_to_clone);
         let ip_namespace = IP_NAMESPACE.to_vec();
@@ -485,9 +489,12 @@ mod tests {
                 .await
                 .expect("Expected greeting info for authorized peer");
 
-            assert_eq!(tracker_info.public_key, tracker_pk);
+            assert_eq!(
+                tracker_info.public_key,
+                PublicKeyBytes::from(tracker_pk.clone())
+            );
             assert_eq!(tracker_info.ingress, cfg.myself.ingress);
-            assert!(tracker_info.verify(&ip_namespace));
+            assert_eq!(tracker_info.verify(&ip_namespace), Some(tracker_pk));
         });
     }
 
@@ -960,7 +967,7 @@ mod tests {
                 Some(peer::Message::Peers(received_peers_info)) => {
                     assert_eq!(received_peers_info.len(), 1);
                     let received_pk2_info = &received_peers_info[0];
-                    assert_eq!(received_pk2_info.public_key, pk2);
+                    assert_eq!(received_pk2_info.public_key, PublicKeyBytes::from(pk2));
                     assert_eq!(received_pk2_info.ingress, Ingress::Socket(pk2_addr));
                     assert_eq!(received_pk2_info.timestamp, pk2_timestamp);
                 }
@@ -1041,7 +1048,7 @@ mod tests {
                 Some(peer::Message::Peers(received_peers_info)) => {
                     assert_eq!(received_peers_info.len(), 1);
                     let received_pk2_info = &received_peers_info[0];
-                    assert_eq!(received_pk2_info.public_key, pk2);
+                    assert_eq!(received_pk2_info.public_key, PublicKeyBytes::from(pk2));
                     assert_eq!(received_pk2_info.timestamp, ts_new);
                 }
                 _ => panic!("pk1 did not receive Info as expected"),
@@ -1403,7 +1410,7 @@ mod tests {
             match peer_receiver1.recv().await {
                 Some(peer::Message::Peers(infos)) => {
                     assert_eq!(infos.len(), 1, "Expected 1 Info (for peer1)");
-                    assert_eq!(infos[0].public_key, peer1_pk);
+                    assert_eq!(infos[0].public_key, PublicKeyBytes::from(peer1_pk.clone()));
                     assert_eq!(infos[0].ingress, peer1_addr.into());
                 }
                 _ => panic!("Expected Peers message from tracker"),

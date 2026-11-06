@@ -76,11 +76,11 @@ impl Version {
 pub struct Syn<S: Signature> {
     time_ms: u64,
     epk: EphemeralPublicKey,
-    sig: S,
+    sig: S::Bytes,
 }
 
 impl<S: Signature> FixedSize for Syn<S> {
-    const SIZE: usize = u64::SIZE + EphemeralPublicKey::SIZE + S::SIZE;
+    const SIZE: usize = u64::SIZE + EphemeralPublicKey::SIZE + S::Bytes::SIZE;
 }
 
 impl<S: Signature> Write for Syn<S> {
@@ -92,13 +92,13 @@ impl<S: Signature> Write for Syn<S> {
 }
 
 impl<S: Signature> Read for Syn<S> {
-    type Cfg = S::Cfg;
+    type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             time_ms: ReadExt::read(buf)?,
             epk: ReadExt::read(buf)?,
-            sig: Read::read_cfg(buf, cfg)?,
+            sig: ReadExt::read(buf)?,
         })
     }
 }
@@ -106,7 +106,7 @@ impl<S: Signature> Read for Syn<S> {
 #[cfg(feature = "arbitrary")]
 impl<S: Signature> arbitrary::Arbitrary<'_> for Syn<S>
 where
-    S: for<'a> arbitrary::Arbitrary<'a>,
+    S::Bytes: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -123,12 +123,12 @@ where
 pub struct SynAck<S: Signature> {
     time_ms: u64,
     epk: EphemeralPublicKey,
-    sig: S,
+    sig: S::Bytes,
     confirmation: Summary,
 }
 
 impl<S: Signature> FixedSize for SynAck<S> {
-    const SIZE: usize = u64::SIZE + EphemeralPublicKey::SIZE + S::SIZE + Summary::SIZE;
+    const SIZE: usize = u64::SIZE + EphemeralPublicKey::SIZE + S::Bytes::SIZE + Summary::SIZE;
 }
 
 impl<S: Signature> Write for SynAck<S> {
@@ -141,13 +141,13 @@ impl<S: Signature> Write for SynAck<S> {
 }
 
 impl<S: Signature> Read for SynAck<S> {
-    type Cfg = S::Cfg;
+    type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             time_ms: ReadExt::read(buf)?,
             epk: ReadExt::read(buf)?,
-            sig: Read::read_cfg(buf, cfg)?,
+            sig: ReadExt::read(buf)?,
             confirmation: ReadExt::read(buf)?,
         })
     }
@@ -156,7 +156,7 @@ impl<S: Signature> Read for SynAck<S> {
 #[cfg(feature = "arbitrary")]
 impl<S: Signature> arbitrary::Arbitrary<'_> for SynAck<S>
 where
-    S: for<'a> arbitrary::Arbitrary<'a>,
+    S::Bytes: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -292,7 +292,7 @@ pub fn dial_start<S: Signer, P: PublicKey>(
         Syn {
             time_ms: current_time,
             epk,
-            sig,
+            sig: sig.into(),
         },
     )
 }
@@ -315,10 +315,13 @@ pub fn dial_end<P: PublicKey>(
     if !ok_timestamps.contains(&msg.time_ms) {
         return Err(Error::InvalidTimestamp(msg.time_ms, ok_timestamps));
     }
+    let Ok(sig) = P::Signature::try_from(msg.sig) else {
+        return Err(Error::InvalidSignature);
+    };
     if !transcript
         .commit(msg.time_ms.encode())
         .commit(msg.epk.encode())
-        .verify(&peer_identity, &msg.sig)
+        .verify(&peer_identity, &sig)
     {
         return Err(Error::InvalidSignature);
     }
@@ -362,10 +365,14 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         mut transcript,
     } = ctx;
 
-    // Check the dialer's timestamp and commit it with the listener identity.
+    // Check the dialer's timestamp and the form of its signature, then commit the timestamp
+    // with the listener identity.
     if !ok_timestamps.contains(&msg.time_ms) {
         return Err(Error::InvalidTimestamp(msg.time_ms, ok_timestamps));
     }
+    let Ok(sig) = P::Signature::try_from(msg.sig) else {
+        return Err(Error::InvalidSignature);
+    };
     let dialer_identity = peer_identity.encode();
     transcript
         .commit(msg.time_ms.encode())
@@ -378,7 +385,7 @@ pub fn listen_start<S: Signer, P: PublicKey>(
     }
     if !transcript
         .commit(msg.epk.encode())
-        .verify(&peer_identity, &msg.sig)
+        .verify(&peer_identity, &sig)
     {
         return Err(Error::InvalidSignature);
     }
@@ -408,7 +415,7 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         SynAck {
             time_ms: current_time,
             epk,
-            sig,
+            sig: sig.into(),
             confirmation: confirmation_l2d,
         },
     ))
@@ -706,8 +713,9 @@ mod test {
             // The signature verifies only over the transcript layout of its version.
             let with = syn_transcript(version, &syn, &listener, Some(&dialer));
             let without = syn_transcript(version, &syn, &listener, None);
-            assert_eq!(with.verify(&dialer, &syn.sig), covers, "{version:?}");
-            assert_eq!(without.verify(&dialer, &syn.sig), !covers, "{version:?}");
+            let sig = crate::ed25519::Signature::try_from(syn.sig).unwrap();
+            assert_eq!(with.verify(&dialer, &sig), covers, "{version:?}");
+            assert_eq!(without.verify(&dialer, &sig), !covers, "{version:?}");
         }
     }
 
@@ -731,7 +739,9 @@ mod test {
             .unwrap()
             .to_projective();
         let derived: AffinePoint = (-q - ProjectivePoint::GENERATOR * (e * r_inv).double()).into();
-        standard::PublicKey::decode(Copying(derived.to_sec1_point(true).as_bytes())).unwrap()
+        let bytes =
+            standard::PublicKeyBytes::decode(Copying(derived.to_sec1_point(true).as_bytes()));
+        standard::PublicKey::try_from(bytes.unwrap()).unwrap()
     }
 
     /// V1 rejects a [Syn] whose signature verifies under a derived identity.
@@ -769,9 +779,10 @@ mod test {
                 version.binds_identity_before_syn().then_some(&dialer_key),
             )
             .summarize();
-            let derived = substitute(&dialer_key, &signed, &syn.sig);
+            let sig = standard::Signature::try_from(syn.sig.clone()).unwrap();
+            let derived = substitute(&dialer_key, &signed, &sig);
             assert_ne!(derived, dialer_key);
-            assert!(signed.verify(&derived, &syn.sig));
+            assert!(signed.verify(&derived, &sig));
 
             // Rebuild the dialer transcript with the derived identity in its V0 position.
             let mut claimed = syn_transcript(version, &syn, &listener_key, None);

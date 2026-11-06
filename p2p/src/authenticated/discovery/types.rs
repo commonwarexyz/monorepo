@@ -4,7 +4,7 @@ use commonware_codec::{
     config::RangeCfg,
     varint::{MAX_U32_VARINT_SIZE, MAX_U64_VARINT_SIZE, UInt},
 };
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::{PublicKey, Validated};
 use commonware_runtime::{BufMut, Clock};
 use commonware_utils::SystemTimeExt;
 use std::time::Duration;
@@ -154,8 +154,8 @@ impl<C: PublicKey> Read for Payload<C> {
 #[cfg(feature = "arbitrary")]
 impl<C: PublicKey> arbitrary::Arbitrary<'_> for Payload<C>
 where
-    C: for<'a> arbitrary::Arbitrary<'a>,
-    C::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    C::Bytes: for<'a> arbitrary::Arbitrary<'a>,
+    <C::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let choice = u.int_in_range(0..=3)?;
@@ -208,7 +208,7 @@ impl Read for BitVec {
 /// A signed message from a peer attesting to its own ingress address and public key at a given time.
 ///
 /// This is used to share the peer's ingress address and public key with other peers in a verified
-/// manner.
+/// manner. The key and signature are held as their encodings, and [Info::verify] checks both.
 #[derive(Clone, Debug)]
 pub struct Info<C: PublicKey> {
     /// The ingress address of the peer (how to dial them).
@@ -217,11 +217,11 @@ pub struct Info<C: PublicKey> {
     /// The timestamp (epoch milliseconds) at which the ingress was signed over.
     pub timestamp: u64,
 
-    /// The public key of the peer.
-    pub public_key: C,
+    /// The encoded public key of the peer.
+    pub public_key: C::Bytes,
 
-    /// The peer's signature over the ingress and timestamp.
-    pub signature: C::Signature,
+    /// The peer's encoded signature over the ingress and timestamp.
+    pub signature: <C::Signature as Validated>::Bytes,
 }
 
 impl<C: PublicKey> Info<C> {
@@ -230,17 +230,23 @@ impl<C: PublicKey> Info<C> {
         Ingress::MAX_ENCODE_SIZE + MAX_U64_VARINT_SIZE + C::SIZE + C::Signature::SIZE
     }
 
-    /// Verify the signature of [Info].
-    pub fn verify(&self, namespace: &[u8]) -> bool {
-        self.public_key.verify(
-            namespace,
-            &(self.ingress.clone(), self.timestamp).encode(),
-            &self.signature,
-        )
+    /// Verify the signature of [Info] and return the peer's public key.
+    ///
+    /// Returns `None` if the public key or signature is malformed or the signature is invalid.
+    pub fn verify(&self, namespace: &[u8]) -> Option<C> {
+        let public_key = C::try_from(self.public_key.clone()).ok()?;
+        let signature = C::Signature::try_from(self.signature.clone()).ok()?;
+        public_key
+            .verify(
+                namespace,
+                &(self.ingress.clone(), self.timestamp).encode(),
+                &signature,
+            )
+            .then_some(public_key)
     }
 
     /// Create a new [InfoVerifier] with the provided configuration.
-    pub const fn verifier(
+    pub fn verifier(
         me: C,
         peer_gossip_max_count: usize,
         synchrony_bound: Duration,
@@ -264,8 +270,8 @@ impl<C: PublicKey> Info<C> {
         Self {
             ingress,
             timestamp,
-            public_key,
-            signature,
+            public_key: public_key.into(),
+            signature: signature.into(),
         }
     }
 }
@@ -294,8 +300,8 @@ impl<C: PublicKey> Read for Info<C> {
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let ingress = Ingress::read(buf)?;
         let timestamp = UInt::read(buf)?.into();
-        let public_key = C::read(buf)?;
-        let signature = C::Signature::read(buf)?;
+        let public_key = C::Bytes::read(buf)?;
+        let signature = <C::Signature as Validated>::Bytes::read(buf)?;
         Ok(Self {
             ingress,
             timestamp,
@@ -308,8 +314,8 @@ impl<C: PublicKey> Read for Info<C> {
 #[cfg(feature = "arbitrary")]
 impl<C: PublicKey> arbitrary::Arbitrary<'_> for Info<C>
 where
-    C: for<'a> arbitrary::Arbitrary<'a>,
-    C::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    C::Bytes: for<'a> arbitrary::Arbitrary<'a>,
+    <C::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let ingress = u.arbitrary()?;
@@ -329,8 +335,8 @@ where
 /// Validate peer gossip payloads against configurability and basic safety checks.
 #[derive(Clone)]
 pub struct InfoVerifier<C: PublicKey> {
-    /// The [PublicKey] of the verifier.
-    me: C,
+    /// The encoded [PublicKey] of the verifier.
+    me: C::Bytes,
 
     /// The maximum number of [Info] allowable in a single message.
     peer_gossip_max_count: usize,
@@ -345,14 +351,14 @@ pub struct InfoVerifier<C: PublicKey> {
 
 impl<C: PublicKey> InfoVerifier<C> {
     /// Create a new [InfoVerifier] with the provided configuration.
-    const fn new(
+    fn new(
         me: C,
         peer_gossip_max_count: usize,
         synchrony_bound: Duration,
         ip_namespace: Vec<u8>,
     ) -> Self {
         Self {
-            me,
+            me: me.into(),
             peer_gossip_max_count,
             synchrony_bound,
             ip_namespace,
@@ -361,8 +367,9 @@ impl<C: PublicKey> InfoVerifier<C> {
 
     /// Validate a list of peer information from a gossip message.
     ///
-    /// Returns an error if the list itself or any entries can be considered malformed.
-    pub fn validate(&self, clock: &impl Clock, infos: &[Info<C>]) -> Result<(), Error> {
+    /// Returns the public key of each entry, in order, or an error if the list itself or any
+    /// entries can be considered malformed.
+    pub fn validate(&self, clock: &impl Clock, infos: &[Info<C>]) -> Result<Vec<C>, Error> {
         // Ensure there aren't too many peers sent
         if infos.len() > self.peer_gossip_max_count {
             return Err(Error::TooManyPeers(infos.len()));
@@ -373,13 +380,15 @@ impl<C: PublicKey> InfoVerifier<C> {
         // for duplicates (no need to create an additional set to check this)
         infos
             .iter()
-            .try_for_each(|info| self.validate_info(clock, info))
+            .map(|info| self.validate_info(clock, info))
+            .collect()
     }
 
     /// Validate one peer's self-signed information, such as a connection greeting.
     ///
-    /// Returns an error if the information can be considered malformed.
-    pub fn validate_info(&self, clock: &impl Clock, info: &Info<C>) -> Result<(), Error> {
+    /// Returns the peer's public key, or an error if the information can be considered malformed.
+    /// A malformed public key or signature is an [Error::InvalidSignature].
+    pub fn validate_info(&self, clock: &impl Clock, info: &Info<C>) -> Result<C, Error> {
         // Check if peer is us
         if info.public_key == self.me {
             return Err(Error::ReceivedSelf);
@@ -393,11 +402,8 @@ impl<C: PublicKey> InfoVerifier<C> {
         }
 
         // Check if signature is valid
-        if !info.verify(self.ip_namespace.as_ref()) {
-            return Err(Error::InvalidSignature);
-        }
-
-        Ok(())
+        info.verify(self.ip_namespace.as_ref())
+            .ok_or(Error::InvalidSignature)
     }
 }
 
@@ -411,7 +417,7 @@ mod tests {
     use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::{
         Signer,
-        secp256r1::standard::{PrivateKey, PublicKey},
+        secp256r1::standard::{PrivateKey, PublicKey, PublicKeyBytes, SignatureBytes},
     };
     use commonware_math::algebra::Random;
     use commonware_runtime::{Clock, IoBuf, Runner, deterministic};
@@ -425,8 +431,8 @@ mod tests {
         Info {
             ingress: Ingress::Socket(SocketAddr::from(([127, 0, 0, 1], 8080))),
             timestamp: 1234567890,
-            public_key: signer.public_key(),
-            signature: signer.sign(NAMESPACE, &[1, 2, 3, 4, 5]),
+            public_key: signer.public_key().into(),
+            signature: signer.sign(NAMESPACE, &[1, 2, 3, 4, 5]).into(),
         }
     }
 
@@ -838,6 +844,53 @@ mod tests {
     }
 
     #[test]
+    fn info_verifier_rejects_malformed_public_key_and_signature() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let validator_signer = PrivateKey::random(&mut context);
+            let signer = PrivateKey::random(&mut context);
+            let validator = Info::verifier(
+                validator_signer.public_key(),
+                4,
+                Duration::from_secs(30),
+                NAMESPACE.to_vec(),
+            );
+            let timestamp = context.current().epoch_millis();
+            let peer = Info::sign(
+                signer.public_key(),
+                NAMESPACE,
+                SocketAddr::from(([8, 8, 4, 4], 8080)),
+                timestamp,
+                |namespace, message| signer.sign(namespace, message),
+            );
+            assert_eq!(
+                validator
+                    .validate(&context, std::slice::from_ref(&peer))
+                    .unwrap(),
+                vec![signer.public_key()]
+            );
+
+            // A key that is not a compressed SEC1 point is rejected like a bad signature
+            let mut malformed_key = peer.clone();
+            malformed_key.public_key = PublicKeyBytes::new([0; PublicKeyBytes::SIZE]);
+            assert!(malformed_key.verify(NAMESPACE).is_none());
+            let err = validator
+                .validate_info(&context, &malformed_key)
+                .unwrap_err();
+            assert!(matches!(err, Error::InvalidSignature));
+
+            // A signature with a zero scalar is rejected like a bad signature
+            let mut malformed_signature = peer;
+            malformed_signature.signature = SignatureBytes::new([0; SignatureBytes::SIZE]);
+            assert!(malformed_signature.verify(NAMESPACE).is_none());
+            let err = validator
+                .validate(&context, &[malformed_signature])
+                .unwrap_err();
+            assert!(matches!(err, Error::InvalidSignature));
+        });
+    }
+
+    #[test]
     fn info_with_dns_ingress_sign_and_verify() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
@@ -857,8 +910,8 @@ mod tests {
 
             assert_eq!(peer.ingress, dns_ingress);
             assert_eq!(peer.timestamp, timestamp);
-            assert_eq!(peer.public_key, signer.public_key());
-            assert!(peer.verify(NAMESPACE));
+            assert_eq!(peer.public_key, PublicKeyBytes::from(signer.public_key()));
+            assert_eq!(peer.verify(NAMESPACE), Some(signer.public_key()));
         });
     }
 
@@ -886,7 +939,7 @@ mod tests {
             assert_eq!(decoded.timestamp, timestamp);
             assert_eq!(decoded.public_key, original.public_key);
             assert_eq!(decoded.signature, original.signature);
-            assert!(decoded.verify(NAMESPACE));
+            assert_eq!(decoded.verify(NAMESPACE), Some(signer.public_key()));
         });
     }
 

@@ -7,17 +7,21 @@ use crate::{
 };
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write};
+#[cfg(feature = "arbitrary")]
+use commonware_cryptography::Validated;
 use commonware_cryptography::{
     Digest, PublicKey,
-    certificate::{AssemblyError, Attestation, Scheme},
+    certificate::{AssemblyError, Attestation, AttestationBytes, Scheme},
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{iter::NonEmpty, max, non_empty};
+use commonware_utils::{iter::NonEmpty, max, non_empty, ordered::Quorum as _};
 use rand_core::CryptoRng;
 use std::{fmt::Debug, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
+///
+/// Decoding checks the leader's public key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Context<D: Digest, P: PublicKey> {
     /// Current round of consensus.
@@ -79,7 +83,9 @@ impl<D: Digest, P: PublicKey> Read for Context<D, P> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = Round::read(reader)?;
-        let leader = P::read(reader)?;
+        let leader = P::try_from(P::Bytes::read(reader)?).map_err(|_| {
+            Error::Invalid("consensus::simplex::types::Context", "malformed public key")
+        })?;
         let parent = <(View, D)>::read_cfg(reader, &((), ()))?;
 
         Ok(Self {
@@ -311,7 +317,7 @@ impl<S: Scheme, D: Digest> Viewable for Vote<S, D> {
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Vote<S, D>
 where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    <S::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -665,7 +671,7 @@ impl<S: Scheme, D: Digest> From<Certificate<S, D>> for Artifact<S, D> {
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Artifact<S, D>
 where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    <S::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
     S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
@@ -797,7 +803,7 @@ pub struct Notarize<S: Scheme, D: Digest> {
     /// Proposal being notarized.
     pub proposal: Proposal<D>,
     /// Scheme-specific attestation material.
-    pub attestation: Attestation<S>,
+    pub attestation: AttestationBytes<S>,
 }
 
 impl<S: Scheme, D: Digest> Notarize<S, D> {
@@ -812,24 +818,27 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
 
         Some(Self {
             proposal,
-            attestation,
+            attestation: attestation.into(),
         })
     }
 
     /// Verifies the notarize vote against the provided signing scheme.
     ///
-    /// This ensures that the notarize signature is valid for the claimed proposal.
+    /// This ensures that the notarize signature is well formed and valid for the claimed proposal.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRng,
         S: scheme::Scheme<D>,
     {
+        let Ok(attestation) = Attestation::try_from(self.attestation.clone()) else {
+            return false;
+        };
         scheme.verify_attestation::<_, D>(
             rng,
             Subject::Notarize {
                 proposal: &self.proposal,
             },
-            &self.attestation,
+            &attestation,
             strategy,
         )
     }
@@ -870,7 +879,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Notarize<S, D> {
 
 impl<S: Scheme, D: Digest> MaxEncodeSize for Notarize<S, D> {
     const MAX_ENCODE_SIZE: usize =
-        Proposal::<D>::MAX_ENCODE_SIZE + Attestation::<S>::MAX_ENCODE_SIZE;
+        Proposal::<D>::MAX_ENCODE_SIZE + AttestationBytes::<S>::MAX_ENCODE_SIZE;
 }
 
 impl<S: Scheme, D: Digest> Read for Notarize<S, D> {
@@ -878,7 +887,7 @@ impl<S: Scheme, D: Digest> Read for Notarize<S, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let attestation = Attestation::read(reader)?;
+        let attestation = AttestationBytes::read(reader)?;
 
         Ok(Self {
             proposal,
@@ -908,12 +917,12 @@ impl<S: Scheme, D: Digest> Viewable for Notarize<S, D> {
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Notarize<S, D>
 where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    <S::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let proposal = Proposal::arbitrary(u)?;
-        let attestation = Attestation::arbitrary(u)?;
+        let attestation = AttestationBytes::arbitrary(u)?;
         Ok(Self {
             proposal,
             attestation,
@@ -937,6 +946,24 @@ where
     D: Digest,
 {
     scheme.verify_certificates_bisect::<_, D>(rng, certificates, strategy)
+}
+
+/// Assembles a certificate from the attestations of votes, leaving malformed attestations out of
+/// the count toward the quorum.
+fn assemble_votes<S: Scheme>(
+    scheme: &S,
+    attestations: NonEmpty<impl Iterator<Item = AttestationBytes<S>>>,
+    strategy: &impl Strategy,
+) -> Result<S::Certificate, AssemblyError> {
+    let bytes: Vec<_> = attestations.into_iter().collect();
+    let attestations = Attestation::try_from_batch(&bytes, strategy)
+        .into_iter()
+        .flatten();
+    let Some(attestations) = NonEmpty::try_new(attestations) else {
+        let quorum = scheme.participants().quorum::<S::Faults>();
+        return Err(AssemblyError::InsufficientAttestations(quorum, 0));
+    };
+    scheme.assemble(attestations, strategy)
 }
 
 /// Aggregated notarization certificate recovered from notarize votes.
@@ -977,7 +1004,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         } = first;
         let attestations =
             NonEmpty::new(attestation, notarizes.map(|notarize| notarize.attestation));
-        let certificate = scheme.assemble(attestations, strategy)?;
+        let certificate = assemble_votes(scheme, attestations, strategy)?;
 
         Ok(Self {
             proposal,
@@ -1103,7 +1130,7 @@ pub struct Nullify<S: Scheme> {
     /// The round to be nullified (skipped).
     pub round: Round,
     /// Scheme-specific attestation material.
-    pub attestation: Attestation<S>,
+    pub attestation: AttestationBytes<S>,
 }
 
 impl<S: Scheme> PartialEq for Nullify<S> {
@@ -1129,21 +1156,27 @@ impl<S: Scheme> Nullify<S> {
     {
         let attestation = scheme.sign::<D>(Subject::Nullify { round })?;
 
-        Some(Self { round, attestation })
+        Some(Self {
+            round,
+            attestation: attestation.into(),
+        })
     }
 
     /// Verifies the nullify vote against the provided signing scheme.
     ///
-    /// This ensures that the nullify signature is valid for the given round.
+    /// This ensures that the nullify signature is well formed and valid for the given round.
     pub fn verify<R, D: Digest>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRng,
         S: scheme::Scheme<D>,
     {
+        let Ok(attestation) = Attestation::try_from(self.attestation.clone()) else {
+            return false;
+        };
         scheme.verify_attestation::<_, D>(
             rng,
             Subject::Nullify { round: self.round },
-            &self.attestation,
+            &attestation,
             strategy,
         )
     }
@@ -1168,7 +1201,7 @@ impl<S: Scheme> EncodeSize for Nullify<S> {
 }
 
 impl<S: Scheme> MaxEncodeSize for Nullify<S> {
-    const MAX_ENCODE_SIZE: usize = Round::MAX_ENCODE_SIZE + Attestation::<S>::MAX_ENCODE_SIZE;
+    const MAX_ENCODE_SIZE: usize = Round::MAX_ENCODE_SIZE + AttestationBytes::<S>::MAX_ENCODE_SIZE;
 }
 
 impl<S: Scheme> Read for Nullify<S> {
@@ -1176,7 +1209,7 @@ impl<S: Scheme> Read for Nullify<S> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = Round::read(reader)?;
-        let attestation = Attestation::read(reader)?;
+        let attestation = AttestationBytes::read(reader)?;
 
         Ok(Self { round, attestation })
     }
@@ -1203,11 +1236,11 @@ impl<S: Scheme> Viewable for Nullify<S> {
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme> arbitrary::Arbitrary<'_> for Nullify<S>
 where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    <S::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let round = Round::arbitrary(u)?;
-        let attestation = Attestation::arbitrary(u)?;
+        let attestation = AttestationBytes::arbitrary(u)?;
         Ok(Self { round, attestation })
     }
 }
@@ -1247,7 +1280,7 @@ impl<S: Scheme> Nullification<S> {
             first.attestation,
             nullifies.map(|nullify| nullify.attestation),
         );
-        let certificate = scheme.assemble(attestations, strategy)?;
+        let certificate = assemble_votes(scheme, attestations, strategy)?;
 
         Ok(Self { round, certificate })
     }
@@ -1362,7 +1395,7 @@ pub struct Finalize<S: Scheme, D: Digest> {
     /// Proposal being finalized.
     pub proposal: Proposal<D>,
     /// Scheme-specific attestation material.
-    pub attestation: Attestation<S>,
+    pub attestation: AttestationBytes<S>,
 }
 
 impl<S: Scheme, D: Digest> Finalize<S, D> {
@@ -1377,24 +1410,27 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
 
         Some(Self {
             proposal,
-            attestation,
+            attestation: attestation.into(),
         })
     }
 
     /// Verifies the finalize vote against the provided signing scheme.
     ///
-    /// This ensures that the finalize signature is valid for the claimed proposal.
+    /// This ensures that the finalize signature is well formed and valid for the claimed proposal.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRng,
         S: scheme::Scheme<D>,
     {
+        let Ok(attestation) = Attestation::try_from(self.attestation.clone()) else {
+            return false;
+        };
         scheme.verify_attestation::<_, D>(
             rng,
             Subject::Finalize {
                 proposal: &self.proposal,
             },
-            &self.attestation,
+            &attestation,
             strategy,
         )
     }
@@ -1435,7 +1471,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Finalize<S, D> {
 
 impl<S: Scheme, D: Digest> MaxEncodeSize for Finalize<S, D> {
     const MAX_ENCODE_SIZE: usize =
-        Proposal::<D>::MAX_ENCODE_SIZE + Attestation::<S>::MAX_ENCODE_SIZE;
+        Proposal::<D>::MAX_ENCODE_SIZE + AttestationBytes::<S>::MAX_ENCODE_SIZE;
 }
 
 impl<S: Scheme, D: Digest> Read for Finalize<S, D> {
@@ -1443,7 +1479,7 @@ impl<S: Scheme, D: Digest> Read for Finalize<S, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let attestation = Attestation::read(reader)?;
+        let attestation = AttestationBytes::read(reader)?;
 
         Ok(Self {
             proposal,
@@ -1473,12 +1509,12 @@ impl<S: Scheme, D: Digest> Viewable for Finalize<S, D> {
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Finalize<S, D>
 where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    <S::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let proposal = Proposal::arbitrary(u)?;
-        let attestation = Attestation::arbitrary(u)?;
+        let attestation = AttestationBytes::arbitrary(u)?;
         Ok(Self {
             proposal,
             attestation,
@@ -1524,7 +1560,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
         } = first;
         let attestations =
             NonEmpty::new(attestation, finalizes.map(|finalize| finalize.attestation));
-        let certificate = scheme.assemble(attestations, strategy)?;
+        let certificate = assemble_votes(scheme, attestations, strategy)?;
 
         Ok(Self {
             proposal,
@@ -1947,7 +1983,7 @@ impl<S: Scheme, D: Digest> Viewable for Activity<S, D> {
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Activity<S, D>
 where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    <S::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
     S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
@@ -2114,7 +2150,7 @@ impl<S: Scheme, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for ConflictingNotarize<S, D>
 where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    <S::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -2242,7 +2278,7 @@ impl<S: Scheme, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for ConflictingFinalize<S, D>
 where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    <S::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -2352,7 +2388,7 @@ impl<S: Scheme, D: Digest> EncodeSize for NullifyFinalize<S, D> {
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for NullifyFinalize<S, D>
 where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    <S::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {

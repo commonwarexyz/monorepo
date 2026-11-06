@@ -7,6 +7,7 @@ use super::{
         Scalar, SmallScalar,
     },
 };
+use crate::Validated;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use blst::{blst_final_exp, blst_fp12, blst_miller_loop};
@@ -31,8 +32,8 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         + FixedSize
         + Write
         + Read<Cfg = ()>
-        + Hash
-        + Copy;
+        + Copy
+        + Validated;
 
     /// The signature type.
     type Signature: HashToGroup<Scalar = Scalar>
@@ -40,8 +41,8 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         + FixedSize
         + Write
         + Read<Cfg = ()>
-        + Hash
-        + Copy;
+        + Copy
+        + Validated;
 
     /// The domain separator tag (DST) for a proof of possession.
     const PROOF_OF_POSSESSION: DST;

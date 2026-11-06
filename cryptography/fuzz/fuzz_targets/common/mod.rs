@@ -1,11 +1,14 @@
 use arbitrary::Unstructured;
-use commonware_codec::ReadExt;
-use commonware_cryptography::bls12381::{
-    primitives::{
-        group::{G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH, Scalar, Share},
-        variant::{MinPk, MinSig, PartialSignature, Variant},
+use commonware_codec::{DecodeExt, ReadExt};
+use commonware_cryptography::{
+    Validated,
+    bls12381::{
+        primitives::{
+            group::{G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH, Scalar, Share},
+            variant::{MinPk, MinSig, PartialSignature, Variant},
+        },
+        tle::{Block, Ciphertext},
     },
-    tle::{Block, Ciphertext},
 };
 use commonware_math::{
     algebra::{Additive, CryptoGroup},
@@ -236,4 +239,12 @@ pub fn arbitrary_ciphertext_minsig(
         v: Block::new(u.arbitrary()?),
         w: Block::new(u.arbitrary()?),
     })
+}
+
+/// Decodes and checks a key or signature as a receiver does, failing for an encoding of the
+/// wrong length or a malformed value.
+#[allow(unused)]
+pub fn convert<T: Validated>(data: &[u8]) -> Result<T, ()> {
+    let bytes = T::Bytes::decode(commonware_codec::Copying(data)).map_err(|_| ())?;
+    T::try_from(bytes).map_err(|_| ())
 }

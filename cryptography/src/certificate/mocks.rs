@@ -2,8 +2,9 @@
 
 use super::{AssemblyError, Attestation, Membership, Scheme, Signers, Subject, Verification};
 use crate::{
-    PublicKey,
+    Malformed, PublicKey, Validated,
     ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
+    encoding::Encoding,
 };
 use bytes::Bytes;
 use commonware_utils::{
@@ -20,6 +21,46 @@ use std::{
     sync::Arc,
     vec::Vec,
 };
+
+/// The encoding of a mock [Signature].
+pub type SignatureBytes = Encoding<Signature, 8>;
+
+/// A synthetic signature identifier recorded in [Shared] state.
+///
+/// Every identifier decodes, so a well formed signature may still be unknown to the shared
+/// state that verifies it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Signature(u64);
+
+impl Signature {
+    /// Wraps a synthetic signature identifier.
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// Returns the synthetic signature identifier.
+    pub const fn get(&self) -> u64 {
+        self.0
+    }
+}
+
+impl TryFrom<SignatureBytes> for Signature {
+    type Error = Malformed;
+
+    fn try_from(bytes: SignatureBytes) -> Result<Self, Malformed> {
+        Ok(Self(u64::from_be_bytes(*bytes.as_array())))
+    }
+}
+
+impl From<Signature> for SignatureBytes {
+    fn from(signature: Signature) -> Self {
+        Self::new(signature.0.to_be_bytes())
+    }
+}
+
+impl Validated for Signature {
+    type Bytes = SignatureBytes;
+}
 
 /// A fixture containing identities, identity private keys, per-participant
 /// signing schemes, and a single verifier scheme.
@@ -229,7 +270,7 @@ where
     /// synthetic signature so the mock behaves like deterministic schemes.
     pub fn sign<S>(&self, subject: impl Subject<Namespace = N>) -> Option<Attestation<S>>
     where
-        S: Scheme<Signature = U64>,
+        S: Scheme<Signature = Signature>,
     {
         let signer = self.me?.signer()?;
         let signed_subject = SignedSubject::new(subject, &self.namespace);
@@ -250,7 +291,7 @@ where
 
         Some(Attestation {
             signer,
-            signature: U64::new(signature).into(),
+            signature: Signature::new(signature),
         })
     }
 
@@ -261,17 +302,14 @@ where
         attestation: &Attestation<S>,
     ) -> bool
     where
-        S: Scheme<Signature = U64>,
+        S: Scheme<Signature = Signature>,
     {
         if self.participants.key(attestation.signer).is_none() {
             return Self::invalid("attestation signer missing from participant set");
         }
 
-        let Some(signature) = attestation.signature.get() else {
-            return Self::invalid("attestation signature missing");
-        };
         let expected_subject = SignedSubject::new(subject, &self.namespace);
-        let signature = u64::from(signature);
+        let signature = attestation.signature.get();
         let inner = self.shared.0.lock();
         inner
             .signatures
@@ -290,7 +328,7 @@ where
         attestations: I,
     ) -> Verification<S>
     where
-        S: Scheme<Signature = U64>,
+        S: Scheme<Signature = Signature>,
         R: CryptoRng,
         I: IntoIterator<Item = Attestation<S>>,
     {
@@ -311,7 +349,7 @@ where
     /// Assembles a non-empty stream of attestations into a mock certificate.
     pub fn assemble<S, I>(&self, attestations: NonEmpty<I>) -> Result<U64, AssemblyError>
     where
-        S: Scheme<Signature = U64>,
+        S: Scheme<Signature = Signature>,
         I: Iterator<Item = Attestation<S>>,
     {
         let mut signers = Vec::new();
@@ -323,29 +361,20 @@ where
                 Self::assembly_error(AssemblyError::UnknownSigner(attestation.signer))
             })?;
 
-            let signature = attestation.signature.get().ok_or_else(|| {
-                Self::assembly_error(AssemblyError::MalformedSignature(attestation.signer))
-            })?;
-            let signature = u64::from(signature);
+            let signature = attestation.signature.get();
             let entry = inner
                 .signatures
                 .by_signer
                 .get(&attestation.signer)
-                .ok_or_else(|| {
-                    Self::assembly_error(AssemblyError::MalformedSignature(attestation.signer))
-                })?
+                .ok_or_else(|| Self::assembly_error(AssemblyError::RecoveryFailed))?
                 .by
                 .get(&signature)
-                .ok_or_else(|| {
-                    Self::assembly_error(AssemblyError::MalformedSignature(attestation.signer))
-                })?
+                .ok_or_else(|| Self::assembly_error(AssemblyError::RecoveryFailed))?
                 .clone();
 
             if let Some(existing) = &signed_subject {
                 if existing != &entry {
-                    return Err(Self::assembly_error(AssemblyError::MalformedSignature(
-                        attestation.signer,
-                    )));
+                    return Err(Self::assembly_error(AssemblyError::RecoveryFailed));
                 }
             } else {
                 signed_subject = Some(entry);
@@ -664,7 +693,7 @@ macro_rules! impl_certificate_mock {
             const ALLOW_INVALID: bool,
         > $crate::certificate::Scheme for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
         {
-            type Signature = commonware_utils::sequence::U64;
+            type Signature = $crate::certificate::mocks::Signature;
 
             fn me(&self) -> Option<$crate::certificate::Membership> {
                 self.generic.me()
@@ -757,9 +786,9 @@ macro_rules! impl_certificate_mock {
 
 #[cfg(test)]
 mod tests {
-    use super::{Certificates, Shared, Signatures};
+    use super::{Certificates, Shared, Signature, Signatures};
     use crate::{
-        certificate::{AssemblyError, Attestation, Lazy, Membership, Scheme as _, Verifier as _},
+        certificate::{AssemblyError, Attestation, Membership, Scheme as _, Verifier as _},
         ed25519::PublicKey as Ed25519PublicKey,
         sha256::Digest as Sha256Digest,
     };
@@ -895,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_attestation_rejects_malformed_and_foreign_attestations() {
+    fn verify_attestation_rejects_unknown_and_foreign_attestations() {
         let mut rng = test_rng();
         let scheme_fixture = fixture(&mut rng, b"mock-scheme", 4);
         let foreign_fixture = fixture(&mut rng, b"mock-scheme", 4);
@@ -905,10 +934,9 @@ mod tests {
             .expect("signer must produce an attestation");
         let mut invalid_signer = attestation;
         invalid_signer.signer = Participant::new(99);
-        let mut truncated = Bytes::from_static(&[0u8, 1, 2]);
-        let missing_signature = Attestation::<Scheme<Ed25519PublicKey>> {
+        let unknown_signature = Attestation::<Scheme<Ed25519PublicKey>> {
             signer: Participant::new(2),
-            signature: Lazy::deferred(&mut truncated, ()),
+            signature: Signature::new(u64::MAX),
         };
         let foreign = foreign_fixture.schemes[3]
             .sign::<Sha256Digest>(subject)
@@ -930,7 +958,7 @@ mod tests {
                 .verify_attestation::<_, Sha256Digest>(
                     &mut rng,
                     subject,
-                    &missing_signature,
+                    &unknown_signature,
                     &Sequential,
                 )
         );
@@ -956,8 +984,7 @@ mod tests {
         forged.signer = Participant::new(1);
 
         assert_ne!(
-            attestation_a.signature.get(),
-            attestation_b.signature.get(),
+            attestation_a.signature, attestation_b.signature,
             "different signers signing the same subject must receive distinct synthetic IDs"
         );
 
@@ -984,10 +1011,9 @@ mod tests {
         let valid_b = scheme_fixture.schemes[1]
             .sign::<Sha256Digest>(subject)
             .expect("signer must produce an attestation");
-        let mut truncated = Bytes::from_static(&[9u8, 9, 9]);
-        let missing_signature = Attestation::<Scheme<Ed25519PublicKey>> {
+        let unknown_signature = Attestation::<Scheme<Ed25519PublicKey>> {
             signer: Participant::new(2),
-            signature: Lazy::deferred(&mut truncated, ()),
+            signature: Signature::new(u64::MAX),
         };
         let foreign = foreign_fixture.schemes[3]
             .sign::<Sha256Digest>(subject)
@@ -998,7 +1024,7 @@ mod tests {
             .verify_attestations::<_, Sha256Digest, _>(
                 &mut rng,
                 subject,
-                [valid_a.clone(), missing_signature, foreign, valid_b.clone()],
+                [valid_a.clone(), unknown_signature, foreign, valid_b.clone()],
                 &Sequential,
             );
 
@@ -1200,7 +1226,7 @@ mod tests {
                 ],
                 &Sequential,
             ),
-            Err(AssemblyError::MalformedSignature(Participant::new(2)))
+            Err(AssemblyError::RecoveryFailed)
         );
     }
 

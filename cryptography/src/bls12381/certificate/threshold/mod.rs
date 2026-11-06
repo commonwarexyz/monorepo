@@ -24,7 +24,7 @@
 pub mod mocks;
 
 use crate::{
-    PublicKey,
+    PublicKey, Validated,
     bls12381::primitives::{
         group::Share,
         ops::{self, batch, threshold},
@@ -36,7 +36,7 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::BufMut;
-use commonware_codec::{Buf, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy};
+use commonware_codec::{Buf, Error, FixedSize, Read, ReadExt, Write};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     Faults, Participant,
@@ -261,7 +261,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         Some(Attestation {
             signer: share.index,
-            signature: signature.into(),
+            signature,
         })
     }
 
@@ -277,15 +277,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
             return false;
         };
-        let Some(signature) = attestation.signature.get() else {
-            return false;
-        };
 
         ops::verify_message::<V>(
             &evaluated,
             subject.namespace(self.namespace()),
             &subject.message(),
-            signature,
+            &attestation.signature,
         )
         .is_ok()
     }
@@ -304,16 +301,14 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         I: IntoIterator<Item = Attestation<S>>,
         I::IntoIter: Send,
     {
-        let (partials, failures) =
-            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
-                let index = attestation.signer;
-                let partial = attestation
-                    .signature
-                    .get()
-                    .map(|&value| PartialSignature::<V> { index, value });
-                (index, partial)
-            });
-        let mut invalid: BTreeSet<_> = failures.into_iter().collect();
+        let partials: Vec<_> = attestations
+            .into_iter()
+            .map(|attestation| PartialSignature::<V> {
+                index: attestation.signer,
+                value: attestation.signature,
+            })
+            .collect();
+        let mut invalid = BTreeSet::new();
         let polynomial = self.polynomial();
         if let Some(partials) = NonEmpty::try_new(partials.iter())
             && let Err(errs) = threshold::batch_verify_same_message::<_, V, _>(
@@ -335,7 +330,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             .filter(|partial| !invalid.contains(&partial.index))
             .map(|partial| Attestation {
                 signer: partial.index,
-                signature: partial.value.into(),
+                signature: partial.value,
             })
             .collect();
 
@@ -344,8 +339,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
     /// Assembles a candidate certificate from a non-empty collection of attestations.
     ///
-    /// Checks encoding, signer bounds, uniqueness, and quorum, but does not verify partials.
-    /// Call [`Self::verify_certificate`] before accepting a result assembled from unverified inputs.
+    /// Checks signer bounds, uniqueness, and quorum, but does not verify partials. Call
+    /// [`Self::verify_certificate`] before accepting a result assembled from unverified inputs.
     pub fn assemble<S, I>(
         &self,
         attestations: NonEmpty<I>,
@@ -355,15 +350,14 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         S: Scheme<Signature = V::Signature>,
         I: Iterator<Item = Attestation<S>> + Send,
     {
-        // Decode each partial signature under its attestation's claimed signer.
-        let partials = strategy.try_map_collect_vec(attestations, |attestation| {
-            let index = attestation.signer;
-            attestation
-                .signature
-                .get()
-                .map(|&value| PartialSignature::<V> { index, value })
-                .ok_or(AssemblyError::MalformedSignature(index))
-        })?;
+        // Place each partial signature under its attestation's claimed signer.
+        let partials: Vec<_> = attestations
+            .into_iter()
+            .map(|attestation| PartialSignature::<V> {
+                index: attestation.signer,
+                value: attestation.signature,
+            })
+            .collect();
 
         // Enforce signer bounds, uniqueness, and quorum before recovering the certificate.
         let quorum = self.polynomial();
@@ -385,14 +379,14 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     where
         R: CryptoRng,
     {
-        let Some(signature) = certificate.get() else {
+        let Ok(signature) = V::Signature::try_from(certificate.signature.clone()) else {
             return false;
         };
         ops::verify_message::<V>(
             self.identity(),
             subject.namespace(self.namespace()),
             &subject.message(),
-            signature,
+            &signature,
         )
         .is_ok()
     }
@@ -410,22 +404,26 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         I: Iterator<Item = (T, &'a Certificate<V>)>,
     {
         let mut entries: Vec<_> = Vec::new();
-
+        let mut encodings = Vec::new();
         for (subject, certificate) in certificates {
-            let Some(signature) = certificate.get() else {
-                return false;
-            };
             let namespace = subject.namespace(self.namespace());
-            let message = subject.message();
-            entries.push((namespace, message, *signature));
+            entries.push((namespace, subject.message()));
+            encodings.push(certificate.signature.clone());
         }
+        let Some(signatures) = V::Signature::try_from_batch(&encodings, strategy)
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
 
         batch::verify_same_signer::<_, V, _>(
             rng,
             self.identity(),
             non_empty![@entries
                 .iter()
-                .map(|(ns, msg, sig)| (*ns, msg.as_ref(), *sig))],
+                .zip(signatures)
+                .map(|((ns, msg), sig)| (*ns, msg.as_ref(), sig))],
             strategy,
         )
         .is_ok()
@@ -447,26 +445,17 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 /// Certificate for BLS12-381 threshold signatures.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate<V: Variant> {
-    /// The recovered threshold signature.
-    pub signature: Lazy<V::Signature>,
+    /// Encoding of the recovered threshold signature. It is checked when the certificate is
+    /// verified.
+    pub signature: <V::Signature as Validated>::Bytes,
 }
 
 impl<V: Variant> Certificate<V> {
     /// Creates a new certificate from a recovered signature.
     pub fn new(signature: V::Signature) -> Self {
         Self {
-            signature: Lazy::from(signature),
+            signature: signature.into(),
         }
-    }
-
-    /// Attempts to get the decoded signature.
-    ///
-    /// Returns `None` if the signature fails to decode.
-    // `Lazy::get` is only `const` under some feature combinations, so this
-    // cannot be `const` without breaking the default build.
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn get(&self) -> Option<&V::Signature> {
-        self.signature.get()
     }
 }
 
@@ -480,13 +469,13 @@ impl<V: Variant> Read for Certificate<V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let signature = Lazy::<V::Signature>::read(reader)?;
+        let signature = <V::Signature as Validated>::Bytes::read(reader)?;
         Ok(Self { signature })
     }
 }
 
 impl<V: Variant> FixedSize for Certificate<V> {
-    const SIZE: usize = V::Signature::SIZE;
+    const SIZE: usize = <V::Signature as Validated>::Bytes::SIZE;
 }
 
 #[cfg(feature = "arbitrary")]
@@ -495,9 +484,7 @@ where
     V::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            signature: Lazy::from(u.arbitrary::<V::Signature>()?),
-        })
+        Ok(Self::new(u.arbitrary::<V::Signature>()?))
     }
 }
 
@@ -834,12 +821,12 @@ mod tests {
                 variant::{MinPk, MinSig, Variant},
             },
         },
-        certificate::{Membership, Scheme as _, Verifier as _},
+        certificate::{AttestationBytes, Membership, Scheme as _, Verifier as _},
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;
-    use commonware_codec::{DecodeExt, Encode, types::lazy::Lazy};
+    use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::{Additive, Random};
     use commonware_parallel::Sequential;
     use commonware_utils::{
@@ -1057,7 +1044,7 @@ mod tests {
 
         // Corrupt one attestation's signature.
         let mut attestations_corrupted = attestations;
-        attestations_corrupted[0].signature = attestations_corrupted[1].signature.clone();
+        attestations_corrupted[0].signature = attestations_corrupted[1].signature;
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             TestSubject {
@@ -1329,10 +1316,10 @@ mod tests {
 
     fn test_certificate_rejects_malformed_signature<V: Variant>() {
         let mut rng = test_rng();
-        let (schemes, _, _) = setup_signers::<V>(&mut rng, 4);
+        let (schemes, verifier, _) = setup_signers::<V>(&mut rng, 4);
         let quorum =
             usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
-        let mut attestations: Vec<_> = schemes
+        let attestations: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|scheme| {
@@ -1343,14 +1330,38 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let malformed_signer = attestations[0].signer;
-        let mut malformed = Bytes::from_static(&[0u8]);
-        attestations[0].signature = Lazy::deferred(&mut malformed, ());
 
-        assert_eq!(
-            schemes[0].assemble(non_empty![@attestations], &Sequential),
-            Err(AssemblyError::MalformedSignature(malformed_signer))
-        );
+        // An all-zero encoding lacks the compression flag, so it is not a point.
+        let malformed =
+            <V::Signature as Validated>::Bytes::decode(vec![0u8; V::Signature::SIZE]).unwrap();
+
+        // An attestation carrying the malformed encoding does not convert.
+        let mut bytes = AttestationBytes::from(attestations[0].clone());
+        bytes.signature = malformed.clone();
+        assert!(Attestation::<Scheme<ed25519::PublicKey, V>>::try_from(bytes).is_err());
+
+        // A certificate carrying the malformed encoding decodes but verifies neither alone nor in
+        // a batch beside a valid certificate.
+        let valid = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
+        let mut invalid = valid.clone();
+        invalid.signature = malformed;
+        let invalid = Certificate::<V>::decode(invalid.encode()).expect("certificate must decode");
+        let subject = TestSubject {
+            message: Bytes::from_static(MESSAGE),
+        };
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject.clone(),
+            &invalid,
+            &Sequential,
+        ));
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            non_empty![(subject.clone(), &valid), (subject, &invalid)],
+            &Sequential,
+        ));
     }
 
     #[test]
@@ -1816,7 +1827,7 @@ mod tests {
         let expected = sign_message::<V>(share, NAMESPACE, MESSAGE);
 
         assert_eq!(signature.signer, share.index);
-        assert_eq!(signature.signature.get().unwrap(), &expected.value);
+        assert_eq!(signature.signature, expected.value);
     }
 
     #[test]

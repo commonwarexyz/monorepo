@@ -776,14 +776,10 @@ const MAX_STEPS: usize = 16;
 /// arbitrary points with low-order components, rescaled projective coordinates, and spread limbs,
 /// and on points, affine operands, and table rows with arbitrary limbs below `2^52`, which the
 /// contract admits whether or not they are on the curve.
-///
-/// Also checks the backend's paired decompression of arbitrary encodings against scalar
-/// decompression.
 fn fuzz_point_matches_portable<B: Backend>(
     u: &mut Unstructured<'_>,
     backend: B,
 ) -> arbitrary::Result<()> {
-    let encodings: [[u8; 32]; 2] = u.arbitrary()?;
     let order_four = GAffine::decompress(&[0; 32]).unwrap().to_extended();
     let point = |u: &mut Unstructured<'_>| -> arbitrary::Result<G> {
         let encoding: [u8; 32] = u.arbitrary()?;
@@ -848,30 +844,7 @@ fn fuzz_point_matches_portable<B: Backend>(
         chain,
     }
     .call(backend);
-
-    // Paired decompression agrees with the scalar path, including for invalid encodings.
-    let [first, second] = &encodings;
-    assert_pair_matches(backend, first, second);
-    assert_pair_matches(backend, second, first);
     Ok(())
-}
-
-/// A decompressed point's encoding and `2d*x*y`, for comparing decompression results.
-fn key(point: GAffine) -> ([u8; 32], [u8; 32]) {
-    (point.compress(), point.t2d.to_bytes())
-}
-
-/// Asserts that [`Backend::decompress_pair`] returns both scalar decompressions, or `None` when
-/// either fails.
-fn assert_pair_matches<B: Backend>(backend: B, first: &[u8; 32], second: &[u8; 32]) {
-    let expected = GAffine::decompress(first).zip(GAffine::decompress(second));
-    assert_eq!(
-        backend
-            .decompress_pair([first, second])
-            .map(|pair| pair.map(key)),
-        expected.map(|(a, b)| [key(a), key(b)]),
-        "decompress pair"
-    );
 }
 
 /// One operation of a chain that feeds each native result into the next operation.
@@ -1175,41 +1148,6 @@ fn single_point_operations_match_portable() {
     for check in checks {
         super::with_backend(check);
     }
-}
-
-/// Checks the selected backend's paired decompression against two scalar decompressions for
-/// every ordered pair of ZIP215 points, the basepoint, and undecodable encodings, so that the
-/// first, the second, both, or neither fail.
-#[cfg(test)]
-#[test]
-fn decompress_pair_matches_scalar() {
-    struct Check(Vec<[u8; 32]>);
-
-    impl WithBackend for Check {
-        type Output = ();
-
-        fn call<B: Backend>(self, backend: B) {
-            for first in &self.0 {
-                for second in &self.0 {
-                    assert_pair_matches(backend, first, second);
-                }
-            }
-        }
-    }
-
-    // The ZIP215 points, the basepoint, and the first encodings that do not decode.
-    let mut encodings = ZIP215_POINTS.to_vec();
-    encodings.push(GAffine::BASEPOINT.compress());
-    let undecodable = (2u8..)
-        .map(|y| {
-            let mut encoding = [0; 32];
-            encoding[0] = y;
-            encoding
-        })
-        .filter(|encoding| GAffine::decompress(encoding).is_none())
-        .take(3);
-    encodings.extend(undecodable);
-    super::with_backend(Check(encodings));
 }
 
 /// Checks the runtime dispatch path as one multi-operation computation.

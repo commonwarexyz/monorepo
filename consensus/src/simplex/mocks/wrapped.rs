@@ -2,10 +2,9 @@ use crate::{
     simplex::elector::{self, Input, Terms},
     types::Round,
 };
-use bytes::Bytes;
-use commonware_codec::{Encode, Read, types::lazy::Lazy};
+use commonware_codec::{Copying, DecodeExt, Encode, Read};
 use commonware_cryptography::{
-    Digest, Hasher as _,
+    Digest, Hasher as _, Validated,
     certificate::{
         self, AssemblyError, Attestation, Membership, Scheme as CertificateScheme, Verification,
         Verifier,
@@ -67,12 +66,13 @@ impl<S> Scheme<S> {
         subject: <S as Verifier>::Subject<'_, D>,
         signer: Participant,
         signature: &<S as CertificateScheme>::Signature,
-    ) -> Lazy<<S as CertificateScheme>::Signature>
+    ) -> <S as CertificateScheme>::Signature
     where
         S: CertificateScheme,
         D: Digest,
     {
-        let encoded = signature.encode().to_vec();
+        let encoded: <S::Signature as Validated>::Bytes = signature.clone().into();
+        let encoded = encoded.encode().to_vec();
         let bit_len = encoded.len() * 8;
 
         // Hash the signer and signature bytes to derive a deterministic starting
@@ -83,8 +83,8 @@ impl<S> Scheme<S> {
         // mutate the same low-order bit first.
         let start = modulo(digest.as_ref(), bit_len as u64) as usize;
 
-        // Search all single-bit mutations, wrapping around from `start`, until
-        // we find one that still decodes as a signature but fails verification.
+        // Search all single-bit mutations, wrapping around from `start`, until we find one
+        // that is still a well-formed signature but fails verification.
         (0..bit_len)
             .find_map(|offset| {
                 let flip = (start + offset) % bit_len;
@@ -93,23 +93,20 @@ impl<S> Scheme<S> {
                 let mut corrupted = encoded.clone();
                 corrupted[byte] ^= 1 << bit;
 
-                // `Lazy` lets us reject undecodable byte patterns before asking
-                // the wrapped scheme whether the mutated attestation verifies.
-                let lazy = Lazy::deferred(&mut Bytes::from(corrupted), ());
+                let bytes = <S::Signature as Validated>::Bytes::decode(Copying(&corrupted)).ok()?;
                 let attestation = Attestation {
                     signer,
-                    signature: lazy.clone(),
+                    signature: S::Signature::try_from(bytes).ok()?,
                 };
-                (lazy.get().is_some()
-                    && !inner.verify_attestation(
-                        &mut test_rng(),
-                        subject.clone(),
-                        &attestation,
-                        &Sequential,
-                    ))
-                .then_some(lazy)
+                (!inner.verify_attestation(
+                    &mut test_rng(),
+                    subject.clone(),
+                    &attestation,
+                    &Sequential,
+                ))
+                .then_some(attestation.signature)
             })
-            .expect("expected at least one invalid but decodable signature mutation")
+            .expect("some single-bit mutation must be well formed and fail verification")
     }
 }
 
@@ -206,13 +203,12 @@ where
         let attestation = self.inner.sign(subject.clone())?;
         let signature = match self.behavior {
             Behavior::Honest | Behavior::RecoveryFailure => attestation.signature,
-            Behavior::CorruptSignature => {
-                let signature = attestation
-                    .signature
-                    .get()
-                    .expect("fresh signature should decode");
-                Self::corrupt_signature(&self.inner, subject, attestation.signer, signature)
-            }
+            Behavior::CorruptSignature => Self::corrupt_signature(
+                &self.inner,
+                subject,
+                attestation.signer,
+                &attestation.signature,
+            ),
         };
 
         Some(Attestation {

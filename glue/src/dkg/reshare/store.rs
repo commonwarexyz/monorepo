@@ -50,6 +50,9 @@ use std::{
 };
 use tracing::{debug, warn};
 
+/// A journaled reshare event.
+///
+/// Decoding checks the public key and rejects a malformed one.
 enum Event<V: Variant, P: PublicKey> {
     Dealing(P, DealerPubMsg<V>),
     Ack(P, PlayerAck<P>),
@@ -92,17 +95,16 @@ impl<V: Variant, P: PublicKey> Read for Event<V, P> {
     type Cfg = NonZeroU32;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(reader)? {
-            0 => Ok(Self::Dealing(
-                ReadExt::read(reader)?,
-                Read::read_cfg(reader, cfg)?,
-            )),
-            1 => Ok(Self::Ack(ReadExt::read(reader)?, ReadExt::read(reader)?)),
-            2 => Ok(Self::Log(
-                ReadExt::read(reader)?,
-                Read::read_cfg(reader, cfg)?,
-            )),
-            tag => Err(CodecError::InvalidEnum(tag)),
+        let tag = u8::read(reader)?;
+        if tag > 2 {
+            return Err(CodecError::InvalidEnum(tag));
+        }
+        let key = P::try_from(P::Bytes::read(reader)?)
+            .map_err(|_| CodecError::Invalid("Event", "malformed public key"))?;
+        match tag {
+            0 => Ok(Self::Dealing(key, Read::read_cfg(reader, cfg)?)),
+            1 => Ok(Self::Ack(key, ReadExt::read(reader)?)),
+            _ => Ok(Self::Log(key, Read::read_cfg(reader, cfg)?)),
         }
     }
 }

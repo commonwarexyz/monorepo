@@ -1,7 +1,7 @@
 mod banderwagon;
 
 use crate::{
-    Secret,
+    Encoding, Malformed, Secret,
     bls12381::primitives::group::{G1, Scalar, ScalarReadCfg},
     transcript::{Summary, Transcript, Version},
     zk::{
@@ -12,17 +12,18 @@ use crate::{
 use banderwagon::{F, G, vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    Buf, Copying, Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize,
-    Read, ReadExt, Write,
+    Buf, Copying, Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt,
+    Write,
 };
 use commonware_formatting::hex;
 use commonware_math::algebra::{Additive as _, CryptoGroup, Random};
 use commonware_parallel::Strategy;
 use commonware_utils::{
-    Array, Span, TryCollect,
+    TryCollect,
     ordered::{Map, Set},
 };
 use core::{
+    cmp::Ordering,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
     ops::Deref,
@@ -34,6 +35,9 @@ use zeroize::Zeroizing;
 const SCHNORR_NS: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BANDERSNATCH_SCHNORR";
 
 const BULLETPROOFS_DST: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_DKG_BULLETPROOFS";
+
+const PUBLIC_KEY_LENGTH: usize = G::SIZE;
+const SIGNATURE_LENGTH: usize = G::SIZE + F::SIZE;
 
 // Linear fit, measured by `vrf_batch_checked_circuit`:
 //
@@ -196,10 +200,10 @@ impl crate::Signer for PrivateKey {
         // s = k + e * x
         let s = self.inner.expose(|x| e * x + &k);
 
-        let mut raw = [0u8; Signature::SIZE];
+        let mut raw = [0u8; SIGNATURE_LENGTH];
         raw[..G::SIZE].copy_from_slice(&k_big_bytes);
         raw[G::SIZE..].copy_from_slice(&s.encode_fixed::<{ F::SIZE }>());
-        Signature { raw }
+        Signature { raw, k_big, s }
     }
 }
 
@@ -293,6 +297,11 @@ impl PrivateKey {
             circuit_proof,
             pedersen_to_plain,
         };
+        let commitments = commitments
+            .into_iter()
+            .map(|(receiver, commitment)| (PublicKeyBytes::from(receiver), commitment))
+            .try_collect()
+            .expect("receivers must be unique");
         (outputs, VrfCommitments { proof, commitments })
     }
 }
@@ -320,13 +329,45 @@ impl FixedSize for PrivateKey {
     const SIZE: usize = F::SIZE;
 }
 
+/// The encoding of a Schnorr signature over the Bandersnatch curve.
+pub type SignatureBytes = Encoding<Signature, SIGNATURE_LENGTH>;
+
 /// A Schnorr signature over the Bandersnatch curve.
 ///
-/// Consists of a commitment point K and a scalar response s.
-#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedArray)]
+/// Consists of a commitment point K and a scalar response s. A signature is built from its
+/// [SignatureBytes], which must encode a point of the group and a canonical scalar. Both are
+/// cached for verification.
+///
+/// Equality, ordering, and hashing use the encoding.
+#[derive(Clone)]
 pub struct Signature {
-    raw: [u8; G::SIZE + F::SIZE],
+    raw: [u8; SIGNATURE_LENGTH],
+    k_big: G,
+    s: F,
 }
+
+impl TryFrom<SignatureBytes> for Signature {
+    type Error = Malformed;
+
+    fn try_from(bytes: SignatureBytes) -> Result<Self, Malformed> {
+        let raw = *bytes.as_array();
+        let k_big = ReadExt::read(&mut Copying(&raw[..G::SIZE])).map_err(|_| Malformed)?;
+        let s = ReadExt::read(&mut Copying(&raw[G::SIZE..])).map_err(|_| Malformed)?;
+        Ok(Self { raw, k_big, s })
+    }
+}
+
+impl From<Signature> for SignatureBytes {
+    fn from(signature: Signature) -> Self {
+        Self::new(signature.raw)
+    }
+}
+
+impl crate::Validated for Signature {
+    type Bytes = SignatureBytes;
+}
+
+impl crate::Signature for Signature {}
 
 impl Write for Signature {
     fn write(&self, buf: &mut impl BufMut) {
@@ -334,24 +375,35 @@ impl Write for Signature {
     }
 }
 
-impl Read for Signature {
-    type Cfg = ();
+impl FixedSize for Signature {
+    const SIZE: usize = SIGNATURE_LENGTH;
+}
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        Ok(Self { raw })
+impl PartialEq for Signature {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
     }
 }
 
-impl FixedSize for Signature {
-    const SIZE: usize = G::SIZE + F::SIZE;
+impl Eq for Signature {}
+
+impl PartialOrd for Signature {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
-impl crate::Signature for Signature {}
+impl Ord for Signature {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
 
-impl Span for Signature {}
-
-impl Array for Signature {}
+impl Hash for Signature {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
+    }
+}
 
 impl AsRef<[u8]> for Signature {
     fn as_ref(&self) -> &[u8] {
@@ -378,35 +430,52 @@ impl Display for Signature {
     }
 }
 
+/// The encoding of a public key on the Bandersnatch curve.
+pub type PublicKeyBytes = Encoding<PublicKey, PUBLIC_KEY_LENGTH>;
+
 /// A public key on the Bandersnatch curve, used for signatures and VRF outputs.
 ///
-/// This can be created using [`PrivateKey::public`].
-#[derive(Clone, FixedArray)]
+/// This can be created using [`PrivateKey::public`], or built from its [PublicKeyBytes], which
+/// must encode a point of the group. The decoded point is cached.
+///
+/// Equality, ordering, and hashing use the encoding.
+#[derive(Clone)]
 pub struct PublicKey {
-    raw: [u8; G::SIZE],
+    raw: [u8; PUBLIC_KEY_LENGTH],
     point: G,
 }
 
 impl PublicKey {
     fn from_point(point: G) -> Self {
-        let raw: [u8; G::SIZE] = point.encode_fixed();
+        let raw: [u8; PUBLIC_KEY_LENGTH] = point.encode_fixed();
         Self { raw, point }
     }
+}
+
+impl TryFrom<PublicKeyBytes> for PublicKey {
+    type Error = Malformed;
+
+    fn try_from(bytes: PublicKeyBytes) -> Result<Self, Malformed> {
+        let raw = *bytes.as_array();
+        let point = ReadExt::read(&mut Copying(&raw)).map_err(|_| Malformed)?;
+        Ok(Self { raw, point })
+    }
+}
+
+impl From<PublicKey> for PublicKeyBytes {
+    fn from(key: PublicKey) -> Self {
+        Self::new(key.raw)
+    }
+}
+
+impl crate::Validated for PublicKey {
+    type Bytes = PublicKeyBytes;
 }
 
 impl crate::Verifier for PublicKey {
     type Signature = Signature;
 
     fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
-        let k_big: G = match ReadExt::read(&mut Copying(&sig.raw[..G::SIZE])) {
-            Ok(p) => p,
-            Err(_) => return false,
-        };
-        let s: F = match ReadExt::read(&mut Copying(&sig.raw[G::SIZE..])) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-
         // Recompute the challenge
         let mut t = Transcript::new(SCHNORR_NS, Version::V1);
         t.commit(namespace)
@@ -416,8 +485,8 @@ impl crate::Verifier for PublicKey {
         let e = F::random(t.noise(b"challenge"));
 
         // Check: s * G == K + e * X
-        let lhs = G::generator() * &s;
-        let rhs = k_big + &(self.point.clone() * &e);
+        let lhs = G::generator() * &sig.s;
+        let rhs = sig.k_big.clone() + &(self.point.clone() * &e);
         lhs == rhs
     }
 }
@@ -430,23 +499,9 @@ impl Write for PublicKey {
     }
 }
 
-impl Read for PublicKey {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let point: G = ReadExt::read(&mut Copying(&raw))?;
-        Ok(Self { raw, point })
-    }
-}
-
 impl FixedSize for PublicKey {
-    const SIZE: usize = G::SIZE;
+    const SIZE: usize = PUBLIC_KEY_LENGTH;
 }
-
-impl Span for PublicKey {}
-
-impl Array for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
@@ -470,13 +525,13 @@ impl PartialEq for PublicKey {
 }
 
 impl Ord for PublicKey {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         self.raw.cmp(&other.raw)
     }
 }
 
 impl PartialOrd for PublicKey {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -572,11 +627,12 @@ impl Read for VrfCommitments {
 /// Commitments to the output of [`PrivateKey::vrf_recv`] for several receivers.
 ///
 /// These commitments bind the output value for each receiver, without revealing
-/// what it is.
+/// what it is. Receivers are identified by the encodings of their keys, and
+/// [`Self::check_batch`] resolves them against the round's players.
 #[derive(Clone)]
 pub struct VrfCommitments {
     proof: Proof,
-    commitments: Map<PublicKey, G1>,
+    commitments: Map<PublicKeyBytes, G1>,
 }
 
 impl VrfCommitments {
@@ -584,7 +640,10 @@ impl VrfCommitments {
     /// [`VrfCommitments`] that should fail [`Self::check_batch`].
     #[cfg(any(feature = "arbitrary", test))]
     pub(super) fn perturb(&mut self, receiver: &PublicKey, delta: &G1) {
-        if let Some(c) = self.commitments.get_value_mut(receiver) {
+        if let Some(c) = self
+            .commitments
+            .get_value_mut(&PublicKeyBytes::new(receiver.raw))
+        {
             *c += delta;
         }
     }
@@ -605,7 +664,7 @@ impl VrfCommitments {
     /// On success, returns each sender's verified commitments: each entry
     /// in the returned map is a plain group encoding (`G^output`, with no
     /// Pedersen blinding) of the VRF output that sender computed for that
-    /// receiver.
+    /// receiver, keyed by the encoding of the receiver's key.
     ///
     /// Returns only the commitments which successfully verified. Bad commitments
     /// are simply ommitted from the result.
@@ -620,7 +679,7 @@ impl VrfCommitments {
         players: &Set<PublicKey>,
         outputs: impl IntoIterator<Item = (PublicKey, Bytes, Self)>,
         strategy: &impl Strategy,
-    ) -> Map<PublicKey, Map<PublicKey, G1>> {
+    ) -> Map<PublicKey, Map<PublicKeyBytes, G1>> {
         // Materialize the batch up front. Each sender's `msg` must parse as a
         // `Summary` (the format the prover passed in), the sender must have
         // supplied exactly one `pedersen_to_plain` proof per commitment, and
@@ -630,8 +689,11 @@ impl VrfCommitments {
         // any of these checks are dropped before we touch the proof system.
         // The per-receiver proof count is enforced here (rather than at the
         // codec layer) because that is the first point at which we hold both
-        // the commitment map and the proof vector together.
-        let outputs: Vec<(PublicKey, Bytes, Self)> = outputs
+        // the commitment map and the proof vector together. Each receiver
+        // resolves to the player with the same encoding, so its point is
+        // already decoded. The prover used the commitment map's order, so the
+        // receivers keep it.
+        let outputs: Vec<(PublicKey, Bytes, Self, Vec<G>)> = outputs
             .into_iter()
             .filter_map(|(sender, msg, commitments)| {
                 let mut buf = msg.clone();
@@ -639,15 +701,19 @@ impl VrfCommitments {
                 if commitments.proof.pedersen_to_plain.len() != commitments.commitments.len() {
                     return None;
                 }
-                if commitments
+                let receivers = commitments
                     .commitments
                     .keys()
                     .iter()
-                    .any(|pk| players.position(pk).is_none())
-                {
-                    return None;
-                }
-                Some((sender, msg, commitments))
+                    .map(|receiver| {
+                        let position = players
+                            .as_ref()
+                            .binary_search_by(|player| player.raw.cmp(receiver.as_array()))
+                            .ok()?;
+                        Some(players[position].point.clone())
+                    })
+                    .collect::<Option<Vec<G>>>()?;
+                Some((sender, msg, commitments, receivers))
             })
             .collect();
 
@@ -666,18 +732,9 @@ impl VrfCommitments {
                 };
 
                 let mut per_sender = Vec::with_capacity(outputs.len());
-                for (sender, msg, commitments) in &outputs {
-                    // Reconstruct the per-sender circuit. Receivers are taken
-                    // from the (sorted) commitment map so they line up with the
-                    // order the prover used.
-                    let receivers: Vec<G> = commitments
-                        .commitments
-                        .keys()
-                        .iter()
-                        .map(|pk| pk.point.clone())
-                        .collect();
-                    let circuit =
-                        vrf_batch_checked_circuit(msg.as_ref(), &sender.point, &receivers);
+                for (sender, msg, commitments, receivers) in &outputs {
+                    // Reconstruct the per-sender circuit.
+                    let circuit = vrf_batch_checked_circuit(msg.as_ref(), &sender.point, receivers);
                     let claim = circuit::Claim {
                         commitments: commitments.commitments.values().to_vec(),
                     };
@@ -735,7 +792,7 @@ impl VrfCommitments {
         outputs
             .into_iter()
             .zip(per_sender)
-            .filter_map(|((sender, _, commitments), valid)| {
+            .filter_map(|((sender, _, commitments, _), valid)| {
                 valid.then_some((sender, commitments.commitments))
             })
             .try_collect()
@@ -754,6 +811,28 @@ mod tests {
     /// Cached setup used by tests in this module. Sized for 3 receivers since
     /// every test in this module uses 3.
     static TEST_SETUP: LazyLock<Setup> = LazyLock::new(|| Setup::new(NonZeroU32::new(3).unwrap()));
+
+    #[test]
+    fn validation_contract() {
+        // The malformed key is an `x` that is not a canonical field element. The malformed
+        // signature adds `r` to the honest `s`, so it encodes the same scalar non-canonically.
+        crate::assert_validation_contract::<PrivateKey>(&[&[0xff; 32]], |honest| {
+            // The order `r` of the Banderwagon group, little-endian.
+            const R: [u8; 32] = [
+                0xe1, 0xe7, 0x76, 0x28, 0xb5, 0x06, 0xfd, 0x74, 0x71, 0x04, 0x19, 0x74, 0x00, 0x87,
+                0x8f, 0xff, 0x00, 0x76, 0x68, 0x02, 0x02, 0x76, 0xce, 0x0c, 0x52, 0x5f, 0x67, 0xca,
+                0xd4, 0x69, 0xfb, 0x1c,
+            ];
+            let mut s_plus_r = honest.to_vec();
+            let mut carry = 0u16;
+            for (byte, r) in s_plus_r[G::SIZE..].iter_mut().zip(R) {
+                let [low, high] = (u16::from(*byte) + u16::from(r) + carry).to_le_bytes();
+                *byte = low;
+                carry = u16::from(high);
+            }
+            vec![s_plus_r]
+        });
+    }
 
     #[test_group("slow")]
     #[test]
@@ -786,8 +865,14 @@ mod tests {
         );
 
         let players: Set<PublicKey> = receiver_pks.iter().cloned().try_collect().unwrap();
+        let receiver_keys: Set<PublicKeyBytes> = receiver_pks
+            .iter()
+            .cloned()
+            .map(PublicKeyBytes::from)
+            .try_collect()
+            .unwrap();
         assert_eq!(outputs.keys(), &players);
-        assert_eq!(commitments.commitments.keys(), &players);
+        assert_eq!(commitments.commitments.keys(), &receiver_keys);
         for receiver in &receivers {
             assert_eq!(
                 outputs.get_value(&receiver.public()),

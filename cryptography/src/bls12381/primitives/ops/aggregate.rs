@@ -91,6 +91,11 @@ impl<V: Variant> Signature<V> {
         Self(V::Signature::zero())
     }
 
+    /// Wraps a signature that was decoded as an aggregate.
+    pub(crate) const fn new(signature: V::Signature) -> Self {
+        Self(signature)
+    }
+
     /// Returns the inner signature value.
     pub(crate) const fn inner(&self) -> &V::Signature {
         &self.0

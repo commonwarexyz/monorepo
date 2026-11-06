@@ -8,7 +8,7 @@
 //! multiplies, so IFMA only ever sees limbs below `2^52`.
 
 use super::{Backend, CachedPoint, CompletedPoint, PackedPoint, Rows};
-use crate::curve::{BIAS_16P, F, G, GAffine, GProjective, LANES, LIMBS, MASK_51, Niels, p_times};
+use crate::curve::{BIAS_16P, F, G, GProjective, LIMBS, MASK_51, Niels, p_times};
 use core::{
     arch::{asm, x86_64::*},
     mem::offset_of,
@@ -129,19 +129,6 @@ fn opaque(mut v: __m256i) -> __m256i {
         asm!("/* {v} */", v = inout(ymm_reg) v, options(pure, nomem, nostack, preserves_flags));
     }
     v
-}
-
-/// Decompresses two encodings with one lane-wise square-root chain over the backend's eight
-/// lanes, which costs less than two scalar chains, returning `None` when either is invalid.
-#[inline]
-#[target_feature(enable = "avx512f,avx512ifma")]
-fn decompress_pair(backend: Backend, encodings: [&[u8; 32]; 2]) -> Option<[GAffine; 2]> {
-    let mut lanes = [[0u8; 32]; LANES];
-    for (lane, encoding) in lanes.iter_mut().zip(encodings.iter().cycle()) {
-        *lane = **encoding;
-    }
-    let points = GAffine::decompress_batch(backend, &lanes);
-    Some([points[0]?, points[1]?])
 }
 
 // `Backend::load_niels` reads a `Niels` as 15 consecutive limbs: `y + x`, `y - x`, then `2d*x*y`.
@@ -647,11 +634,5 @@ impl crate::curve::Backend for Backend {
     #[inline(always)]
     fn add_selected(self, point: PackedPoint, row: &[Niels; 8], digit: i8) -> CompletedPoint {
         self.add_operands(&point.0, &self.select(row, digit))
-    }
-
-    #[inline(always)]
-    fn decompress_pair(self, encodings: [&[u8; 32]; 2]) -> Option<[GAffine; 2]> {
-        // SAFETY: `self` is a `Backend`, constructed only after the feature check.
-        unsafe { decompress_pair(self, encodings) }
     }
 }

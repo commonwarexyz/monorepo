@@ -67,13 +67,13 @@ pub use crate::bls12381::certificate::{
 pub use crate::ed25519::certificate as ed25519;
 #[commonware_macros::stability(ALPHA)]
 pub use crate::secp256r1::certificate as secp256r1;
-use crate::{Digest, PublicKey};
+use crate::{Digest, Malformed, PublicKey, Validated};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    Buf, Codec, CodecFixed, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read,
-    ReadExt, Write, types::lazy::Lazy, util::max_items_size,
+    Buf, Codec, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
+    util::max_items_size,
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{Faults, Participant, Widen, bitmap::BitMap, iter::NonEmpty, ordered::Set};
@@ -111,12 +111,37 @@ impl Membership {
 }
 
 /// A participant's attestation for a certificate.
+///
+/// The signature is in checked form, so an attestation can be verified and assembled with no
+/// other check. Attestations travel as [AttestationBytes] and convert at the receiver, one at a
+/// time or together through [Self::try_from_batch].
 #[derive(Clone, Debug)]
 pub struct Attestation<S: Scheme> {
     /// Index of the signer inside the participant set.
     pub signer: Participant,
     /// Scheme-specific signature or share produced for a given subject.
-    pub signature: Lazy<S::Signature>,
+    pub signature: S::Signature,
+}
+
+impl<S: Scheme> Attestation<S> {
+    /// Checks the form of many attestations at once, keeping each at its position and `None`
+    /// where a signature is malformed.
+    pub fn try_from_batch(
+        bytes: &[AttestationBytes<S>],
+        strategy: &impl Strategy,
+    ) -> Vec<Option<Self>> {
+        let signatures: Vec<_> = bytes.iter().map(|bytes| bytes.signature.clone()).collect();
+        S::Signature::try_from_batch(&signatures, strategy)
+            .into_iter()
+            .zip(bytes)
+            .map(|(signature, bytes)| {
+                signature.map(|signature| Self {
+                    signer: bytes.signer,
+                    signature,
+                })
+            })
+            .collect()
+    }
 }
 
 impl<S: Scheme> PartialEq for Attestation<S> {
@@ -134,24 +159,72 @@ impl<S: Scheme> Hash for Attestation<S> {
     }
 }
 
-impl<S: Scheme> Write for Attestation<S> {
+impl<S: Scheme> TryFrom<AttestationBytes<S>> for Attestation<S> {
+    type Error = Malformed;
+
+    fn try_from(bytes: AttestationBytes<S>) -> Result<Self, Malformed> {
+        Ok(Self {
+            signer: bytes.signer,
+            signature: S::Signature::try_from(bytes.signature)?,
+        })
+    }
+}
+
+impl<S: Scheme> From<Attestation<S>> for AttestationBytes<S> {
+    fn from(attestation: Attestation<S>) -> Self {
+        Self {
+            signer: attestation.signer,
+            signature: attestation.signature.into(),
+        }
+    }
+}
+
+/// A participant's attestation as carried on the wire.
+///
+/// Decoding copies the signature and checks nothing about it. [Attestation] is built from it
+/// where the attestation is verified or assembled.
+#[derive(Clone, Debug)]
+pub struct AttestationBytes<S: Scheme> {
+    /// Index of the signer inside the participant set.
+    pub signer: Participant,
+    /// Encoding of the scheme-specific signature or share.
+    pub signature: <S::Signature as Validated>::Bytes,
+}
+
+impl<S: Scheme> PartialEq for AttestationBytes<S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.signer == other.signer && self.signature == other.signature
+    }
+}
+
+impl<S: Scheme> Eq for AttestationBytes<S> {}
+
+impl<S: Scheme> Hash for AttestationBytes<S> {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.signer.hash(state);
+        self.signature.hash(state);
+    }
+}
+
+impl<S: Scheme> Write for AttestationBytes<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.signer.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<S: Scheme> EncodeSize for Attestation<S> {
+impl<S: Scheme> EncodeSize for AttestationBytes<S> {
     fn encode_size(&self) -> usize {
         self.signer.encode_size() + self.signature.encode_size()
     }
 }
 
-impl<S: Scheme> MaxEncodeSize for Attestation<S> {
-    const MAX_ENCODE_SIZE: usize = Participant::MAX_ENCODE_SIZE + S::Signature::SIZE;
+impl<S: Scheme> MaxEncodeSize for AttestationBytes<S> {
+    const MAX_ENCODE_SIZE: usize =
+        Participant::MAX_ENCODE_SIZE + <S::Signature as Validated>::Bytes::SIZE;
 }
 
-impl<S: Scheme> Read for Attestation<S> {
+impl<S: Scheme> Read for AttestationBytes<S> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -163,16 +236,14 @@ impl<S: Scheme> Read for Attestation<S> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<S: Scheme> arbitrary::Arbitrary<'_> for Attestation<S>
+impl<S: Scheme> arbitrary::Arbitrary<'_> for AttestationBytes<S>
 where
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    <S::Signature as Validated>::Bytes: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let signer = Participant::arbitrary(u)?;
-        let signature = S::Signature::arbitrary(u)?;
         Ok(Self {
-            signer,
-            signature: signature.into(),
+            signer: Participant::arbitrary(u)?,
+            signature: u.arbitrary()?,
         })
     }
 }
@@ -204,9 +275,6 @@ pub enum AssemblyError {
     /// More than one attestation references the same signer.
     #[error("duplicate signer: {0}")]
     DuplicateSigner(Participant),
-    /// An attestation contains a malformed encoded signature.
-    #[error("malformed signature from signer: {0}")]
-    MalformedSignature(Participant),
     /// The scheme could not recover a certificate from structurally valid attestations.
     #[error("certificate recovery failed")]
     RecoveryFailed,
@@ -385,7 +453,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
 /// provided defaults to take advantage of scheme-specific batching strategies.
 pub trait Scheme: Verifier {
     /// Signature emitted by individual participants.
-    type Signature: Clone + Debug + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
+    type Signature: Validated;
 
     /// Returns the scheme's own [`Membership`] in [`Self::participants`], or `None` if it
     /// holds no participant identity.
@@ -571,12 +639,7 @@ where
         );
     }
 
-    // Decode through the strategy before cloning so assembly and fallback reuse
-    // the decoded values.
-    let mut pending = strategy.map_collect_vec(pending, |attestation| {
-        let _ = attestation.signature.get();
-        attestation
-    });
+    let mut pending: Vec<_> = pending.collect();
     let attestations = pending.iter().cloned().chain(verified.cloned());
     if let Some(attestations) = NonEmpty::try_new(attestations)
         && let Ok(certificate) = scheme.assemble(attestations, strategy)
@@ -1820,7 +1883,7 @@ mod tests {
 
     #[cfg(feature = "bls12381")]
     #[test]
-    fn test_malformed_assembly_falls_back_to_pending_halves() {
+    fn test_invalid_assembly_falls_back_to_pending_halves() {
         let mut rng = test_rng();
         let schemes = threshold_signers::<MinPk>(&mut rng, 5);
         let quorum = N3f1::quorum(schemes.len()) as usize;
@@ -1835,8 +1898,7 @@ mod tests {
                 .take(count)
                 .map(|s| Recording::outer(s.sign::<Sha256Digest>(SUBJECT).unwrap()))
                 .collect();
-            let mut malformed = Bytes::from_static(&[0]);
-            pending[0].signature = Lazy::deferred(&mut malformed, ());
+            pending[0] = Recording::outer(schemes[0].sign::<Sha256Digest>(OTHER_SUBJECT).unwrap());
             let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
                 &mut rng,
                 SUBJECT,
@@ -2168,11 +2230,12 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::{ed25519_fixture::Scheme, *};
+        use crate::certificate::AttestationBytes;
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Signers>,
-            CodecConformance<Attestation<Scheme>>,
+            CodecConformance<AttestationBytes<Scheme>>,
         }
     }
 }

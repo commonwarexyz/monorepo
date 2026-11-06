@@ -227,7 +227,7 @@ mod tests {
             .expect("signing failed");
         let notarize = Notarize {
             proposal,
-            attestation,
+            attestation: attestation.into(),
         };
 
         // Report it.
@@ -272,7 +272,7 @@ mod tests {
             .expect("signing failed");
         let notarize = Notarize {
             proposal,
-            attestation,
+            attestation: attestation.into(),
         };
 
         // Report it
@@ -360,7 +360,7 @@ mod tests {
 
         let notarize = Notarize {
             proposal,
-            attestation,
+            attestation: attestation.into(),
         };
 
         // Report peer per-validator activity
@@ -396,7 +396,7 @@ mod tests {
 
         let notarize = Notarize {
             proposal,
-            attestation,
+            attestation: attestation.into(),
         };
 
         // Report the peer per-validator activity
