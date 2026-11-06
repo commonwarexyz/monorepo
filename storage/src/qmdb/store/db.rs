@@ -102,7 +102,7 @@ use crate::{
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
 use commonware_runtime::Handle;
-use commonware_utils::{Widen, bitmap};
+use commonware_utils::{Widen, bitmap, iter::zip_eq};
 use core::{borrow::Borrow, num::NonZeroUsize};
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
@@ -330,15 +330,25 @@ where
         })?;
 
         let mut values = vec![None; keys.len()];
-        for (loc, index) in candidates {
-            let read = locs
-                .binary_search(&*loc)
-                .expect("every candidate location was read");
-            let Operation::Update(Update(k, v)) = &ops[read] else {
-                unreachable!("location ({loc}) does not reference update operation");
+        for (op, group) in zip_eq(ops, candidates.chunk_by(|a, b| a.0 == b.0)) {
+            let Operation::Update(Update(k, v)) = op else {
+                unreachable!(
+                    "location ({}) does not reference update operation",
+                    group[0].0
+                );
             };
-            if k == keys[index].borrow() {
-                values[index] = Some(v.clone());
+            // Clone for earlier matching slots and move the decoded value into the last.
+            let mut pending = None;
+            for &(_, index) in group {
+                if &k != keys[index].borrow() {
+                    continue;
+                }
+                if let Some(previous) = pending.replace(index) {
+                    values[previous] = Some(v.clone());
+                }
+            }
+            if let Some(last) = pending {
+                values[last] = Some(v);
             }
         }
         Ok(values)
@@ -1655,6 +1665,47 @@ mod test {
             assert_eq!(batch.get_many(&keys.each_ref()).await.unwrap(), values);
             assert_eq!(values, [None, Some(v2), Some(v4)]);
 
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Decoded values move to their final matching slot, cloning only for earlier duplicates.
+    #[test_traced("DEBUG")]
+    fn test_store_get_many_moves_values() {
+        deterministic::Runner::default().start(|context| async move {
+            let colliding = |i| colliding_digest(0xAA, i);
+            let other = colliding_digest(0xBB, 0);
+            let db = open(context.child("store"), "get-many-moves").await;
+            let seed = [colliding(0), colliding(1), colliding(2), other]
+                .into_iter()
+                .zip(0u8..)
+                .map(|(key, tag)| (key, Some(CountedValue::new(tag))));
+            let (db, _) = apply(db, seed, &mut Hold).await;
+
+            let keys = [
+                colliding(1),
+                colliding(3),
+                other,
+                colliding(0),
+                colliding(1),
+                colliding(1),
+            ];
+            let values = db.get_many(&keys).await.unwrap();
+            let observed: Vec<_> = values
+                .iter()
+                .map(|value| value.as_ref().map(|value| (value.0, value.clones())))
+                .collect();
+            assert_eq!(
+                observed,
+                [
+                    Some((1, 2)),
+                    None,
+                    Some((3, 0)),
+                    Some((0, 0)),
+                    Some((1, 2)),
+                    Some((1, 2))
+                ]
+            );
             db.destroy().await.unwrap();
         });
     }
