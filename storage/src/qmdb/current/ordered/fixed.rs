@@ -163,7 +163,8 @@ pub mod test {
     fn test_current_db_get_with_next_key() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_db::<mmr::Family>(context.child("db"), "get-all".to_string()).await;
+            let db =
+                open_db::<mmr::Family>(context.child("db"), "get-with-next-key".to_string()).await;
             let mut keys = [Sha256::fill(0x11), Sha256::fill(0x22), Sha256::fill(0x33)];
             keys.sort();
             let mut batch = db.new_batch();
