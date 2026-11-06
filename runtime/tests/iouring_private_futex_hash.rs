@@ -1,17 +1,20 @@
-//! A ring futex wait queued before the process creates its first thread
-//! still receives wakes once that thread exists.
+//! A single-threaded process's io_uring worker still receives wakes after a
+//! later thread is created.
 //!
-//! On Linux 6.16 and later without the fix for the private futex hash defect,
-//! a private futex wait that io_uring queues while the process has one thread
-//! lands in the global futex hash, and the first thread created afterwards
-//! moves every later wake to a private hash, stranding that wait. The io_uring
-//! runner creates a thread at startup to install the private hash first. A
-//! libtest harness runs each test on a thread it created, so this test is its
-//! own harness and runs its scenario on the process's only thread.
+//! On Linux 6.16 and later without upstream 3eff68bce255 ("io_uring/futex:
+//! allocate private hash before waiting"), a private futex wait that io_uring
+//! queues while the process has one thread lands in the global futex hash, and
+//! the first thread created afterwards moves every later wake to a private
+//! hash, stranding that wait. The runner creates and joins a thread at startup
+//! to install the private hash before any ring wait. This scenario starts
+//! single threaded, queues a ring wait, then creates another thread whose wake
+//! must resume the worker. Only without the startup thread would that thread
+//! be the first and expose the defect. A libtest harness would create a thread
+//! before runner startup, so this test uses its own harness.
 
 /// The one test, whose name contains "iouring" so that test runners skip it
 /// where io_uring is unavailable.
-const TEST: &str = "iouring_ring_wait_hears_wakes_after_the_first_thread";
+const TEST: &str = "iouring_ring_wait_hears_wakes_from_a_later_thread";
 
 /// Command-line options of the libtest protocol that nextest uses.
 #[derive(Default)]
@@ -70,6 +73,7 @@ impl Options {
     }
 }
 
+/// List or run the selected scenario through the nextest-compatible harness.
 fn main() {
     let options = Options::parse();
     if options.list {
@@ -81,7 +85,7 @@ fn main() {
 
     if options.selected() {
         #[cfg(target_os = "linux")]
-        linux::ring_wait_hears_wakes_after_the_first_thread();
+        linux::ring_wait_hears_wakes_from_a_later_thread();
         println!("test {TEST} ... ok");
     }
 }
@@ -98,11 +102,11 @@ mod linux {
         time::{Duration, Instant},
     };
 
-    /// How long the scenario lets worker zero wait in its ring before the
-    /// first thread exists.
+    /// How long worker zero waits in its ring before the scenario creates a
+    /// thread.
     const RING_PARK: Duration = Duration::from_millis(50);
-    /// How long the first thread runs before it wakes worker zero, so worker
-    /// zero is waiting in its ring by then.
+    /// How long the scenario's thread runs before waking worker zero, so the
+    /// worker is waiting in its ring by then.
     const THREAD_RUN: Duration = Duration::from_millis(200);
     /// Longest acceptable delay between that wake and the root resuming, far
     /// below the process metrics period that otherwise ends the ring wait.
@@ -118,9 +122,9 @@ mod linux {
             .expect("procfs reports the thread count")
     }
 
-    /// Worker zero waits in its ring before the process creates its first
-    /// thread, then a wake from that thread must end a later ring wait.
-    pub fn ring_wait_hears_wakes_after_the_first_thread() {
+    /// Start the runner single threaded, queue a ring wait, then create a
+    /// thread whose wake must end a later ring wait.
+    pub fn ring_wait_hears_wakes_from_a_later_thread() {
         // Run one worker on the process's only thread.
         assert_eq!(threads(), 1, "the scenario must start single threaded");
         let runner = iouring::Runner::new(iouring::Config::default().with_worker_threads(1));
@@ -143,10 +147,10 @@ mod linux {
                 "a thread exists before the scenario creates one"
             );
 
-            // Create the first thread since startup and let it wake the root
+            // Create a thread after runner startup and let it wake the root
             // while worker zero waits in its ring.
             let woken = context
-                .child("first_thread")
+                .child("later_thread")
                 .dedicated()
                 .spawn(|_| async move {
                     std::thread::sleep(THREAD_RUN);

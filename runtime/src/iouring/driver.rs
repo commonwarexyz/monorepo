@@ -19,8 +19,8 @@
 //! follow-up SQEs after their observers are dropped.
 //!
 //! Cancellations stage first, followed by operations in FIFO order. The
-//! operation limit excludes cancellation and wake SQEs. A full SQ needs a flush,
-//! but reaching the operation limit requires a CQE to free capacity.
+//! operation limit excludes cancellation and ring wait SQEs. A full SQ needs a
+//! flush, but reaching the operation limit requires a CQE to free capacity.
 //!
 //! # Service and Parking
 //!
@@ -29,8 +29,8 @@
 //! win a race with expiry. Partial progress after expiry cannot issue another SQE.
 //! Queued requests expire even while all operation slots are occupied.
 //!
-//! The ring uses SINGLE_ISSUER and DEFER_TASKRUN, requiring Linux 6.1 or newer,
-//! and parks on IORING_OP_FUTEX_WAIT, which requires Linux 6.7 or newer.
+//! The ring uses SINGLE_ISSUER, DEFER_TASKRUN, and IORING_OP_FUTEX_WAIT. The
+//! runtime requires Linux 7.0 or newer (see [`super`]).
 //! Unfinished requests need a GETEVENTS enter even when tasks keep the worker
 //! busy. An idle turn may defer that enter to [`Driver::park`]. Control SQEs carry
 //! no request resources and may remain until later I/O service or ring teardown.
@@ -81,7 +81,8 @@ use tracing::warn;
 
 /// Shared acknowledgement token for cancellation SQEs.
 ///
-/// Like the wake token, this uses the slot index reserved by [`Waiters::insert`].
+/// Like the ring wait token, this uses the slot index reserved by
+/// [`Waiters::insert`].
 const CANCEL_USER_DATA: UserData = u32::MAX as UserData;
 
 /// Ring and request state accessed exclusively by the owning worker.
@@ -344,10 +345,11 @@ impl Driver {
     ///
     /// `parker` must be the parker of the word whose unparker this driver was
     /// created with, since permit grants unpark that word. Returns `false` when
-    /// the SQ has no room for the ring wait or a notification since the worker
-    /// observed `seen` rejects sleeping. A skipped wait does not satisfy a
-    /// deferred GETEVENTS requirement, so the worker must service nonblocking
-    /// before its next task-polling turn when kernel work remains.
+    /// submissions still need staging, the SQ has no room for the ring wait,
+    /// or a notification since the worker observed `seen` rejects sleeping.
+    /// A skipped wait does not satisfy a deferred GETEVENTS requirement, so
+    /// the worker must service nonblocking before its next task-polling turn
+    /// when kernel work remains.
     pub fn park(
         &mut self,
         parker: &Parker,
@@ -490,9 +492,9 @@ impl Drop for Driver {
         // A queued ring wait never reads or writes the word again, since wakes
         // and cancellations find it through its futex key (the address space
         // and the word's address) and kernel-owned nodes. Freeing the word
-        // under a queued wait is still a hazard: a later futex at the same
-        // address could have a wake absorbed by the stale wait. So cancel a
-        // live wait synchronously, and keep the word allocated if that fails.
+        // under a queued wait is still a hazard, since a later futex at the
+        // same address could have a wake absorbed by the stale wait. So cancel
+        // a live wait synchronously, and keep the word allocated if that fails.
         //
         // SINGLE_ISSUER rejects the cancel from any thread but the owner with
         // EEXIST, which would leak the word, so the driver must drop on its
@@ -722,17 +724,21 @@ impl State {
 
     /// Apply a CQE without invoking observer callbacks.
     fn handle_cqe(&mut self, user_data: UserData, result: i32, deferred: &mut Deferred) {
-        // The reserved wake token is outside the waiter's ID space. A wake, a
-        // changed word, or cancellation ends the one-shot ring futex wait, and
-        // the next blocking park queues another, even after service's final reap.
+        // The reserved ring wait token is outside the waiter's ID space. A
+        // wake, a changed word, or cancellation ends the one-shot ring futex
+        // wait, and the next blocking park queues another, even after
+        // service's final reap.
         if user_data == RING_WAIT_USER_DATA {
             if result == -libc::ENOMEM {
                 // The kernel allocates the wait without blocking and fails it
                 // when memory is short. The enter that submitted the wait
                 // posts this completion itself, so that park returned instead
                 // of sleeping without a wake source, and the next blocking
-                // park installs the wait again. Warn at powers of two to
-                // report persistent pressure without flooding the log.
+                // park installs the wait again. While the kernel keeps failing
+                // the allocation, a worker with requests in flight retries on
+                // every park without sleeping until memory recovers, which is
+                // accepted. Warn at powers of two to report persistent
+                // pressure without flooding the log.
                 self.ring_wait_allocation_failures += 1;
                 if self.ring_wait_allocation_failures.is_power_of_two() {
                     warn!(
@@ -796,6 +802,8 @@ pub mod tests {
     };
     use commonware_utils::channel::oneshot;
     use io_uring::opcode::Nop;
+    #[cfg(not(feature = "loom"))]
+    use std::os::fd::{FromRawFd, OwnedFd};
     use std::{
         cell::Cell,
         fs::{self, OpenOptions},
@@ -883,6 +891,22 @@ pub mod tests {
         }
 
         Ok(())
+    }
+
+    /// Duplicate the driver's ring descriptor, so the kernel keeps the ring
+    /// until the duplicate closes, even after the driver drops.
+    #[cfg(not(feature = "loom"))]
+    pub fn hold_ring(driver: &Driver) -> OwnedFd {
+        // SAFETY: `dup` only reads the driver's open ring descriptor.
+        let fd = unsafe { libc::dup(driver.ring.as_raw_fd()) };
+        assert!(
+            fd >= 0,
+            "failed to duplicate the ring descriptor: {}",
+            io::Error::last_os_error()
+        );
+
+        // SAFETY: `fd` is a new open descriptor that nothing else owns.
+        unsafe { OwnedFd::from_raw_fd(fd) }
     }
 
     /// Destination of a result collected by the harness.

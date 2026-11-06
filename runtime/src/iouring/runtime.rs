@@ -237,7 +237,7 @@ type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Configuration of each worker's io_uring instance and operation timing wheel.
 ///
-/// The runtime requires Linux 6.1 or newer and always uses single-issuer mode
+/// The runtime requires Linux 7.0 or newer and always uses single-issuer mode
 /// with deferred task work. The same configuration applies to pool and
 /// dedicated workers. The wheel horizon is derived from network timeout policy.
 #[derive(Clone, Debug)]
@@ -1574,7 +1574,7 @@ impl Worker {
         let (local, parker) = Local::new(shared.clone(), role).map_err(|error| {
             catch_unwind(AssertUnwindSafe(|| {
                 panic!(
-                    "failed to create native io_uring worker (Linux 6.1 with SINGLE_ISSUER and DEFER_TASKRUN is required): {error}"
+                    "failed to create native io_uring worker (Linux 7.0 or newer is required): {error}"
                 )
             }))
             .expect_err("a startup error must panic")
@@ -2098,7 +2098,7 @@ impl Worker {
 
             // An apparently idle turn can combine kernel service with the wait.
             // The result records whether that enter was actually deferred. A
-            // notification without mail does not stop the deferral: this turn
+            // notification without mail does not stop the deferral. This turn
             // still finds the work a claim or grant announces, and every path
             // that runs again instead of parking catches up a deferred enter.
             let defer =
@@ -2311,18 +2311,19 @@ impl crate::Runner for Runner {
         Scope::assert_vacant();
         self.cfg.validate();
 
-        // On Linux 6.16 and later, a private futex wait that io_uring queues
-        // while the process has one thread lands in the global futex hash. The
-        // first thread created afterwards installs a private hash, where every
-        // later wake looks instead, so that ring wait never completes. Worker
-        // zero runs on this thread, and with one worker no other thread may
-        // exist. Creating a thread before any worker can queue a ring wait
-        // installs the private hash first, and it stays after the thread
-        // exits. This runs on every start, since one thread costs little and
-        // needs no reasoning about which threads exist already. Upstream commit
-        // 3eff68bce255 ("io_uring/futex: allocate private hash before
-        // waiting", in 7.4, 6.18.60 and 7.2.14) fixes the kernel. Remove this
-        // once every supported kernel carries that fix.
+        // On Linux 6.16 and later without upstream fix 3eff68bce255, a private
+        // futex wait that io_uring queues while the process has one thread
+        // lands in the global futex hash. The first thread created afterwards
+        // installs a private hash, where every later wake looks instead, so
+        // that ring wait never completes. Worker zero runs on this thread, and
+        // with one worker no other thread may exist. Creating a thread before
+        // any worker can queue a ring wait installs the private hash first,
+        // and it stays after the thread exits. This runs on every start, since
+        // one thread costs little and needs no reasoning about which threads
+        // exist already. Upstream commit 3eff68bce255 ("io_uring/futex:
+        // allocate private hash before waiting", in 7.4, 6.18.60 and 7.2.14)
+        // fixes the kernel. Remove this once every supported kernel carries
+        // that fix.
         let hash = thread::Builder::new().spawn(|| {}).unwrap_or_else(|error| {
             panic!("failed to create the io_uring futex hash thread: {error}")
         });

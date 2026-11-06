@@ -18,10 +18,11 @@
 //!   armed word still carries the observed sequence,
 //! - disarms when the wait returns.
 //!
-//! Unlike a parking latch such as tokio's, a notification leaves no permit
-//! behind. [`Parker::park`] blocks only against a sequence the worker observed
-//! before it checked its sources, so a notification before that observation is
-//! found by the checks, and only one after it can end the wait.
+//! A notification leaves no permit behind. [`Parker::park`] compares against
+//! a sequence the worker observed before checking its sources, so an earlier
+//! notification publishes its condition to those checks. A later notification
+//! prevents sleeping or wakes the wait. A delayed wake syscall can also end a
+//! later park, so every return leads back to the source checks.
 //!
 //! A notification that precedes the observation makes its condition visible to
 //! the checks that follow it. One that follows changes the sequence before the
@@ -44,12 +45,11 @@
 //! fewer than a wrap needs.
 //!
 //! The worker waits on the word in two places: in the ring through a one-shot
-//! `IORING_OP_FUTEX_WAIT` ([`ArmGuard::install`], Linux 6.7 or newer) while
-//! requests are in flight, and with a thread futex wait ([`Parker::park`]) when
-//! fully idle. A ring wait stays queued until its completion is reaped, so it
-//! can outlive the park that installed it and sit ahead of the thread's idle
-//! wait. The kernel wakes waiters in queue order, so a notification releases
-//! two.
+//! `IORING_OP_FUTEX_WAIT` ([`ArmGuard::install`]) while requests are in
+//! flight, and with a thread futex wait ([`Parker::park`]) when fully idle. A
+//! ring wait remains live until its completion is reaped and can remain queued
+//! after the park that installed it ends. Such a wait can absorb a wake meant
+//! for the thread's idle wait, so a notification releases up to two waiters.
 //!
 //! The types bound who waits. A word has one [`Parker`], which is neither
 //! [`Clone`] nor [`Sync`], so one thread at a time can arm it or wait on it, and a
@@ -92,7 +92,7 @@ const WAITER: u32 = 1;
 /// Word increment of one notification, above the waiter bit.
 const INCREMENT: u32 = 2;
 /// Waiters one notification wakes: a ring wait an earlier park left queued,
-/// and the wait of the worker's current park behind it.
+/// and the wait of the worker's current park.
 const WAKE_COUNT: u32 = 2;
 /// futex2 flags of the ring wait: a private 32-bit word.
 #[cfg(not(feature = "loom"))]
@@ -207,12 +207,12 @@ struct FutexQueue {
 /// Loom cannot observe real futexes or io_uring CQEs, so its build replaces the
 /// futex with a modeled wait queue under a mutex standing in for the kernel's
 /// bucket lock, and a condvar on which modeled waits block. It models the
-/// producer and worker atomic protocol and the kernel's wake order, not CQE
-/// delivery or `io_uring_enter`.
+/// producer and worker atomic protocol, and releases waits oldest first, not
+/// CQE delivery, `io_uring_enter`, or syscall errors.
 struct Inner {
     /// Waiter bit and notification sequence, alone on its cache lines. Every
     /// notification writes it and the worker loads it on every turn and spin
-    /// iteration, so a neighbouring allocation, such as another worker's word,
+    /// iteration, so a neighboring allocation, such as another worker's word,
     /// would turn those writes into misses for unrelated threads.
     state: CachePadded<AtomicU32>,
     /// Modeled futex queue, under a mutex standing in for the bucket lock.
@@ -280,7 +280,8 @@ impl Parker {
         }
     }
 
-    /// Load the sequence before checking the sources of work.
+    /// Load the sequence before checking the sources of work. The acquire
+    /// load makes the conditions of every notification it includes visible.
     #[inline]
     pub fn observe(&self) -> u32 {
         self.inner.state.load(Ordering::Acquire) & !WAITER
@@ -311,12 +312,14 @@ impl Parker {
     }
 
     /// Park while idle until a notification or the optional absolute deadline,
-    /// comparing against the sequence observed in `seen`.
+    /// comparing against the sequence observed as `seen`.
     ///
-    /// The futex timeout is computed immediately before sleeping. An elapsed
-    /// deadline, interruption, or timeout returns `None`, so timer expiry does
-    /// not count as a quick notification wake for adaptive spinning. Every
-    /// return disarms the word, including skipped sleeps.
+    /// Returns how long the thread blocked when a notification ended the wait,
+    /// which feeds adaptive spinning. Returns `None` without blocking when a
+    /// notification arrived since `seen` or the deadline has elapsed, and after
+    /// an interruption or a timeout, so timer expiry does not count as a quick
+    /// notification wake. The futex timeout is computed immediately before
+    /// sleeping. Every return disarms the word, including skipped sleeps.
     pub fn park(&self, seen: u32, deadline: Option<Instant>) -> Option<Duration> {
         let arm = self.arm(seen);
         if !arm.still_idle() {
@@ -328,19 +331,15 @@ impl Parker {
             .then(|| before.elapsed())
     }
 
-    /// Sleep on the word for the fully-idle path.
+    /// Sleep on the word for the fully idle path, returning whether a wake
+    /// ended the sleep.
     ///
-    /// The caller must pass the exact post-arm snapshot from the same atomic
-    /// transition that set the waiter bit. `FUTEX_WAIT` only blocks while the
-    /// word still equals that value, which closes the race between arming idle
-    /// sleep and a concurrent notification.
-    ///
-    /// Returns to the loop on `EINTR`, preserving the absolute deadline for the
-    /// next parking attempt. Treats `EAGAIN` as "state already changed before
-    /// the kernel slept" and `ETIMEDOUT` as a deadline service opportunity.
-    ///
-    /// Returns `true` when `FUTEX_WAIT` succeeds. Returns `false` for timeouts,
-    /// interruptions, stale snapshots, and unexpected futex wait failures.
+    /// `snapshot` must be the exact post-arm word from the atomic transition
+    /// that set the waiter bit. `FUTEX_WAIT` blocks only while the word still
+    /// equals it, which closes the race between arming and a concurrent
+    /// notification. A stale snapshot, an elapsed deadline, `EINTR`, `EAGAIN`,
+    /// `ETIMEDOUT`, and an unexpected error all return `false`, and the caller
+    /// rechecks its sources with the deadline unchanged.
     #[cfg(not(feature = "loom"))]
     fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>) -> bool {
         // This is only a same-word equality check before entering the
@@ -404,8 +403,9 @@ impl Parker {
     #[cfg(feature = "loom")]
     fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>) -> bool {
         // Loom models notification races, not the kernel's timer queue. An
-        // already-due deadline exercises the no-sleep transition. Future timed
-        // waits use the same comparison protocol as untimed waits here.
+        // already due deadline exercises the no-sleep transition, and a deadline
+        // still ahead is ignored, so the wait compares and queues as an untimed
+        // wait does.
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             return false;
         }
@@ -451,10 +451,10 @@ impl Unparker {
 
     /// Wake the waiters on the futex word.
     ///
-    /// A ring wait that an earlier park left queued can sit ahead of the wait
-    /// of the worker's current park, and `FUTEX_WAKE` releases waiters in queue
-    /// order, so this releases two. The word has one parker, whose worker owns
-    /// one driver, which keeps at most one ring wait live.
+    /// A ring wait that an earlier park left queued can absorb a wake meant
+    /// for the worker's current wait, so this releases up to two waiters. The
+    /// word has one parker, whose worker owns one driver, which keeps at most
+    /// one ring wait live.
     #[cfg(not(feature = "loom"))]
     fn futex_wake(&self) {
         loop {
@@ -476,17 +476,12 @@ impl Unparker {
             match err.raw_os_error() {
                 Some(libc::EINTR) => continue,
                 _ => {
-                    // The operation-specific `FUTEX_WAKE` error here is `EINVAL` for
-                    // a PI waiter mismatch, and the generic futex syscall errors are
-                    // invalid or inaccessible user memory, invalid arguments, or an
-                    // unsupported op. For this private, aligned in-process futex,
-                    // all of those indicate a broken invariant or environment.
-                    // Unlike `futex_wait()`, there is no safe "just continue in
-                    // userspace" fallback here: the armed worker already compared
-                    // against the old word, so logging and continuing would risk a
-                    // permanent lost wake.
-                    //
-                    // [https://www.man7.org/linux/man-pages/man2/FUTEX_WAKE.2const.html#ERRORS]
+                    // FUTEX_WAKE fails only for invalid or inaccessible
+                    // memory, invalid arguments, an unsupported op, or a PI
+                    // waiter mismatch, none of which a private aligned
+                    // in-process word can produce. An armed worker has already
+                    // compared against the old word, so continuing without the
+                    // wake could lose it for good. Panic instead of continuing.
                     panic!("futex wake failed: {err}");
                 }
             }
@@ -495,9 +490,9 @@ impl Unparker {
 
     /// Model `FUTEX_WAKE` for the futex word.
     ///
-    /// Releasing the oldest queued waits under the modeled bucket lock mirrors
-    /// the kernel's serialization of compare-and-queue against wake, and its
-    /// wake order. A released ring wait posts its completion.
+    /// The modeled bucket lock serializes compare-and-queue against wake.
+    /// Releasing the oldest waits first exercises a stale ring wait absorbing
+    /// a wake before the thread wait. A released ring wait posts its completion.
     #[cfg(feature = "loom")]
     fn futex_wake(&self) {
         let mut queue = self.inner.futex.lock().unwrap();
@@ -518,13 +513,20 @@ pub mod tests {
     use std::sync::atomic::AtomicBool;
     #[cfg(not(feature = "loom"))]
     use {
-        crate::iouring::{RingConfig, driver::Driver},
+        crate::iouring::{
+            RingConfig,
+            driver::{Driver, tests::hold_ring},
+        },
         io_uring::IoUring,
         std::path::{Path, PathBuf},
     };
 
     /// Bound real-thread rendezvous and notification waits.
     const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// How long the idle wait must stay asleep after the single wake.
+    #[cfg(not(feature = "loom"))]
+    const STRANDED: Duration = Duration::from_millis(200);
 
     /// Wait until the owner arms, failing by the deadline if it never parks.
     pub fn wait_until_armed(unparker: &Unparker, deadline: Instant) {
@@ -534,8 +536,9 @@ pub mod tests {
         }
     }
 
-    /// Wait until the owner arms its idle wait, failing if it never parks.
-    fn wait_until_futex_armed(unparker: &Unparker) {
+    /// Wait until the owner arms, failing by the test timeout if it never
+    /// parks.
+    fn wait_until_armed_by_timeout(unparker: &Unparker) {
         wait_until_armed(unparker, Instant::now() + TEST_TIMEOUT);
     }
 
@@ -615,7 +618,9 @@ pub mod tests {
     /// itself.
     #[cfg(not(feature = "loom"))]
     fn sleeps_on_word(unparker: &Unparker, task: &Path) -> bool {
-        let report = std::fs::read_to_string(task.join("syscall")).unwrap();
+        let report = std::fs::read_to_string(task.join("syscall")).expect(
+            "reading another thread's syscall file needs this process to be dumpable, since procfs gives a non-dumpable process's files to root",
+        );
         let mut fields = report.split_whitespace();
         let number = fields.next().and_then(|field| field.parse().ok());
         let address = fields
@@ -638,6 +643,26 @@ pub mod tests {
             std::thread::yield_now();
         }
     }
+
+    /// Restore the previous signal handler after the notifier has joined.
+    struct RestoreSignal(
+        /// The signal action to restore when the guard drops.
+        libc::sigaction,
+    );
+
+    impl Drop for RestoreSignal {
+        fn drop(&mut self) {
+            // SAFETY: The saved action came from sigaction for this signal.
+            // Its storage remains live while the kernel copies it, and the
+            // notifier has been joined before the guard is normally dropped.
+            unsafe {
+                libc::sigaction(libc::SIGUSR2, &self.0, std::ptr::null_mut());
+            }
+        }
+    }
+
+    /// Interrupt a futex wait without changing any shared state.
+    extern "C" fn interrupt_wait(_: libc::c_int) {}
 
     /// A notification between the arm and the kernel's compare fails the new
     /// ring wait at once, so the enter that follows does not block.
@@ -739,9 +764,6 @@ pub mod tests {
     #[cfg(not(feature = "loom"))]
     #[test]
     fn test_waking_one_strands_idle_wait_behind_stale_ring_wait() {
-        /// How long the idle wait must stay asleep after the single wake.
-        const STRANDED: Duration = Duration::from_millis(200);
-
         // Leave a ring wait queued, as a park that ended without its
         // completion does.
         let parker = Parker::new();
@@ -787,6 +809,7 @@ pub mod tests {
     #[cfg(not(feature = "loom"))]
     #[test]
     fn test_driver_drop_cancels_ring_wait() {
+        // Create the word shared by both cancellation cases.
         let parker = Parker::new();
         let unparker = parker.unparker();
         for cancel in [false, true] {
@@ -804,21 +827,35 @@ pub mod tests {
                     .unwrap()
             );
 
-            // Either drop the driver first, or release the wait first to
-            // prove it was queued.
             if cancel {
+                // A duplicate descriptor keeps the ring alive across the drop,
+                // so its teardown, which also removes the wait, cannot run
+                // before the check.
+                let ring = hold_ring(&driver);
+
+                // Cancel the live wait by dropping its owner.
                 drop(driver);
+
+                // No wait remains while the duplicate keeps the ring alive, so
+                // only the drop's synchronous cancel removed it.
                 assert_eq!(wake(&unparker, 2), 0, "driver left its ring wait queued");
+                drop(ring);
             } else {
-                assert_eq!(wake(&unparker, 2), 1, "park did not queue its ring wait");
+                // Release the wait directly to prove the park queued it.
+                let woken = wake(&unparker, 2);
+
+                // Exactly the driver's ring wait was present.
+                assert_eq!(woken, 1, "park did not queue its ring wait");
                 drop(driver);
             }
         }
     }
 
+    /// Neither an elapsed deadline nor a kernel timeout counts as a
+    /// notification.
     #[test]
     fn test_timed_park_expiry_is_not_notification() {
-        // An elapsed deadline returns at once without a notification.
+        // Park against an elapsed deadline.
         let parker = Parker::new();
         let unparker = parker.unparker();
         let elapsed = Instant::now();
@@ -833,16 +870,17 @@ pub mod tests {
         assert_eq!(word(&unparker), 0);
     }
 
+    /// A notification after arming races the kernel's compare-and-wait, and
+    /// either way it ends a timed idle park before its deadline.
     #[test]
     fn test_timed_park_notification_race() {
-        // Notify after arming so the notification races the kernel's
-        // compare-and-wait.
+        // Notify once the owner arms.
         let parker = Parker::new();
         let unparker = parker.unparker();
         let producer = std::thread::spawn({
             let unparker = unparker.clone();
             move || {
-                wait_until_futex_armed(&unparker);
+                wait_until_armed_by_timeout(&unparker);
                 unparker.unpark();
             }
         });
@@ -861,25 +899,10 @@ pub mod tests {
         assert!(!waiting(&unparker));
     }
 
+    /// A signal interrupts a timed idle park without counting as a
+    /// notification, and the next park keeps the same absolute deadline.
     #[test]
     fn test_timed_park_interruption_preserves_absolute_deadline() {
-        /// Restore the previous signal handler after the notifier has joined.
-        struct RestoreSignal(libc::sigaction);
-
-        impl Drop for RestoreSignal {
-            fn drop(&mut self) {
-                // SAFETY: The saved action came from sigaction for this signal.
-                // Its storage remains live while the kernel copies it, and the
-                // notifier has been joined before the guard is normally dropped.
-                unsafe {
-                    libc::sigaction(libc::SIGUSR2, &self.0, std::ptr::null_mut());
-                }
-            }
-        }
-
-        /// Interrupt a futex wait without changing any shared state.
-        extern "C" fn interrupt_wait(_: libc::c_int) {}
-
         // Install a handler that only interrupts the wait.
         // SAFETY: sigaction consists of integer fields, pointers, and a signal
         // mask. Zero initialization supplies valid storage before its handler
@@ -946,10 +969,11 @@ pub mod tests {
         assert_eq!(word(&unparker), 0);
     }
 
+    /// The word tracks the sequence separately from the waiter bit across
+    /// notifications and arming.
     #[test]
     fn test_notify_arm_guard_and_sequence() {
-        // The word tracks the sequence separately from the waiter bit across
-        // notifications and arming.
+        // A fresh word has no notifications.
         let parker = Parker::new();
         let unparker = parker.unparker();
         assert_eq!(notifications(&unparker), 0);
@@ -977,6 +1001,8 @@ pub mod tests {
         drop(arm);
     }
 
+    /// `Parker::moved` reports a notification since an observation, including
+    /// across the sequence's wrap through zero.
     #[test]
     fn test_moved_tracks_notifications_across_wrap() {
         for start in [0, u32::MAX - WAITER] {
@@ -996,12 +1022,12 @@ pub mod tests {
         }
     }
 
+    /// A notification racing the idle park's equality check, futex syscall,
+    /// and disarm always ends the park. The notifier waits until the waiter
+    /// bit is visible, so each round stresses the real concurrent path rather
+    /// than only the single-threaded stale snapshot.
     #[test]
-    fn test_park_idle_handles_concurrent_notify_races() {
-        // Stress the real concurrent idle-path races rather than only the
-        // single-threaded stale-snapshot path. The notifier thread waits until
-        // the waiter bit is visible and then races a notification against the
-        // parked thread's equality check, futex syscall, and disarm.
+    fn test_park_handles_concurrent_unpark_races() {
         for _ in 0..64 {
             // Notify once the owner arms.
             let parker = Parker::new();
@@ -1010,7 +1036,7 @@ pub mod tests {
             let notifier = std::thread::spawn({
                 let unparker = unparker.clone();
                 move || {
-                    wait_until_futex_armed(&unparker);
+                    wait_until_armed_by_timeout(&unparker);
                     unparker.unpark();
                 }
             });
@@ -1030,8 +1056,10 @@ pub mod tests {
         }
     }
 
+    /// A notification after the observation prevents the next idle park from
+    /// sleeping.
     #[test]
-    fn test_notify_before_park_idle_skips_sleep() {
+    fn test_unpark_before_park_skips_sleep() {
         // Observe, then notify before the idle park arms.
         let parker = Parker::new();
         let unparker = parker.unparker();
@@ -1046,12 +1074,13 @@ pub mod tests {
         assert!(!waiting(&unparker));
     }
 
+    /// The idle path tolerates a notification that lands after the waiter bit
+    /// is armed but before the armed thread commits to a futex wait on that
+    /// snapshot.
     #[test]
     fn test_notify_after_arm_rejects_stale_snapshot() {
-        // The idle path tolerates a notification that lands after the waiter
-        // bit is armed but before the armed thread commits to a futex wait on
-        // that snapshot. Split `park_idle()` into its arm and its wait, so the
-        // notification lands exactly between them.
+        // Split `Parker::park` into its arm and its wait, so the notification
+        // lands exactly between them.
         let parker = Parker::new();
         let unparker = parker.unparker();
         let arm = parker.arm(parker.observe());
@@ -1068,6 +1097,8 @@ pub mod tests {
         assert!(!waiting(&unparker));
     }
 
+    /// A notification before arming makes the arm refuse to block against the
+    /// older sequence.
     #[test]
     fn test_arm_after_notify_skips_blocking() {
         // Notify before arming against the initial observation.
@@ -1088,23 +1119,6 @@ pub mod tests {
 
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
-    // These models explore the eventcount protocol over the futex word. They
-    // keep the production waiter bit and sequence, and replace the kernel futex
-    // with a modeled queue that compares and queues a wait atomically and
-    // releases waits oldest first. Producers make a condition visible with a
-    // relaxed store, then notify. The modeled worker observes, checks the
-    // condition with a relaxed load, and parks against its observation, so
-    // only the eventcount's release and acquire edges can make the condition
-    // visible.
-    //
-    // Most models install a fresh ring wait on every ring park and block until
-    // it completes, which behaves as a blocking wait. The persistent ring
-    // models keep one ring wait queued across parks until a wake completes it,
-    // as the driver does, so they cover ring wait reuse and the wake-two rule
-    // beside an idle wait, with a single-wake negative control. The models stop
-    // at this userspace boundary. They do not model io_uring completion
-    // delivery, `io_uring_enter`, or syscall errors.
-
     use super::{
         tests::{notifications, waiting},
         *,
@@ -1125,6 +1139,11 @@ mod loom_tests {
     use rand::{Rng, RngExt as _};
     use rstest::rstest;
     use std::mem;
+
+    /// Operations in each generated producer-only program.
+    const PRODUCER_OPS_PER_PROGRAM: usize = 5;
+    /// Operations in each generated program with a worker.
+    const WORKER_OPS_PER_PROGRAM: usize = 3;
 
     /// Block in a modeled ring futex wait installed against `guard`'s snapshot.
     ///
@@ -1153,7 +1172,7 @@ mod loom_tests {
     #[derive(Default)]
     struct Ring {
         /// Whether a ring wait was installed and its completion is not yet
-        /// reaped, as the driver's rearm flag records it.
+        /// reaped, the inverse of the driver's `ring_wait_needed` flag.
         live: bool,
     }
 
@@ -1217,6 +1236,9 @@ mod loom_tests {
     /// Simulate the worker until `source` reaches `target`: observe, check the
     /// source with a relaxed load, and park through `park` against the
     /// observation when the source is still below the target.
+    ///
+    /// The load is relaxed, as is the store in [`publish`], so only the
+    /// eventcount's release and acquire edges can make a condition visible.
     fn simulate_until(
         parker: &Parker,
         source: &AtomicU32,
@@ -1233,7 +1255,8 @@ mod loom_tests {
         }
     }
 
-    /// Make one condition visible, then notify.
+    /// Make one condition visible with a relaxed store, then notify, so only
+    /// the notification's release can publish the condition.
     fn publish(unparker: &Unparker, source: &AtomicU32) {
         source.fetch_add(1, Ordering::Relaxed);
         unparker.unpark();
@@ -1390,15 +1413,15 @@ mod loom_tests {
         });
     }
 
+    /// The mailbox notifies once per batch, after unlocking, and a pool claim
+    /// moves the word without mail. A producer can be delayed between
+    /// unlocking and notifying while the worker takes, applies part of its
+    /// scratch, and parks. The worker observes, then takes only while the
+    /// mailbox reports mail, as the run loop does, so the claim costs no take
+    /// and no batch is missed. This models userspace ownership and waking, not
+    /// kernel CQE delivery.
     #[test]
     fn test_batch_notification_and_take_gate() {
-        // The mailbox notifies once per batch, after unlocking, and a pool
-        // claim moves the word without mail. A producer can be delayed between
-        // unlocking and notifying while the worker takes, applies part of its
-        // scratch, and parks. The worker observes, then takes only while the
-        // mailbox reports mail, as the run loop does, so the claim costs no
-        // take and no batch is missed. This models userspace ownership and
-        // waking, not kernel CQE delivery.
         loom::model(|| {
             // A producer sends two messages around a claim notification.
             let mailbox = Arc::new(Mailbox::new());
@@ -1438,12 +1461,12 @@ mod loom_tests {
         });
     }
 
+    /// Closure transfers shared ownership while one already taken batch still
+    /// has local messages. A send and its delayed notification may race that
+    /// transfer, but no accepted or rejected message is lost, and closing
+    /// leaves the mail flag clear.
     #[test]
     fn test_batch_close_with_retained_scratch_and_delayed_notification() {
-        // Closure transfers shared ownership while one already taken batch
-        // still has local messages. A send and its delayed notification may
-        // race that transfer, but no accepted or rejected message is lost, and
-        // closing leaves the mail flag clear.
         loom::model(|| {
             // The worker took a batch of two and applied one, then armed.
             let mailbox = Arc::new(Mailbox::new());
@@ -1484,12 +1507,12 @@ mod loom_tests {
         });
     }
 
+    /// An already due absolute deadline stands in for the kernel's elapsed
+    /// timeout, and a racing notification across the same arm and disarm
+    /// transition still moves the word. Real tests cover syscall timeout
+    /// delivery, which this userspace model does not simulate.
     #[test]
     fn test_timed_futex_expiry_races_notification() {
-        // The kernel's elapsed timeout is represented by an already-due
-        // absolute deadline. Loom explores a notification across the same
-        // arm and disarm transition. Real tests cover syscall timeout delivery,
-        // which this userspace model does not simulate.
         loom::model(|| {
             // A producer notifies once.
             let parker = Parker::new();
@@ -1511,13 +1534,13 @@ mod loom_tests {
         });
     }
 
+    /// `Unparker::unpark` must make the producer's earlier condition visible to
+    /// a worker that observes the advanced sequence. The worker spins on
+    /// `moved()` before joining the producer, so the only intended
+    /// synchronization is the notification's release and the observation's
+    /// acquire.
     #[test]
     fn test_notify_observe_pairing() {
-        // `notify` must make the producer's earlier condition visible to a
-        // worker that observes the advanced sequence. The worker spins on
-        // `moved()` before joining the producer, so the only intended
-        // synchronization is the notification's release and the observation's
-        // acquire.
         loom::model(|| {
             // A producer stores a condition and notifies.
             let parker = Parker::new();
@@ -1544,11 +1567,11 @@ mod loom_tests {
         });
     }
 
+    /// When a producer notifies an armed word, the worker resumes from its ring
+    /// wait. Its next observation must acquire the producer's condition before
+    /// it checks the source.
     #[test]
     fn test_notify_wakes_armed_ring_wait() {
-        // When a producer notifies an armed epoch, the worker resumes from its
-        // ring wait. Its next observation must acquire the producer's condition
-        // before it checks the source.
         loom::model(|| {
             // The worker arms against a fresh observation.
             let parker = Parker::new();
@@ -1578,11 +1601,11 @@ mod loom_tests {
         });
     }
 
+    /// A notification racing with the ring arm path must be visible either in
+    /// the post-arm snapshot or through a modeled futex wake of the new ring
+    /// wait.
     #[test]
     fn test_arm_and_recheck_ring_race() {
-        // A notification racing with the ring arm path must be visible either
-        // in the post-arm snapshot or through a modeled futex wake of the new
-        // ring wait.
         loom::model(|| {
             // A producer publishes one condition.
             let parker = Parker::new();
@@ -1603,11 +1626,11 @@ mod loom_tests {
         });
     }
 
+    /// The fully idle path arms a futex wait on the same word that producers
+    /// update. A racing notification must either change the post-arm snapshot
+    /// before sleep or wake the modeled futex waiter.
     #[test]
     fn test_arm_and_recheck_futex_race() {
-        // The fully-idle path arms a futex wait on the same word that producers
-        // update. A racing notification must either change the post-arm
-        // snapshot before sleep or wake the modeled futex waiter.
         loom::model(|| {
             // A producer publishes one condition.
             let parker = Parker::new();
@@ -1628,11 +1651,11 @@ mod loom_tests {
         });
     }
 
+    /// Two notifications racing against the same armed word both advance the
+    /// sequence and leave the waiter bit, so a futex wait on the armed snapshot
+    /// returns at once.
     #[test]
     fn test_concurrent_notifications_reject_armed_snapshot() {
-        // Two notifications racing in the same armed epoch both advance the
-        // sequence and leave the waiter bit, so a futex wait on the armed
-        // snapshot returns at once.
         loom::model(|| {
             // The worker arms against a fresh observation.
             let parker = Parker::new();
@@ -1662,12 +1685,11 @@ mod loom_tests {
         });
     }
 
+    /// A notification without a counted condition racing with the ring arm path
+    /// must end the park. If it arrives before arming, the changed sequence
+    /// skips the wait, otherwise the modeled futex wake releases the ring wait.
     #[test]
     fn test_condition_free_notify_races_ring_arm() {
-        // A notification without a counted condition racing with the ring arm
-        // path must end the park. If it arrives before arming, the changed
-        // sequence skips the wait, otherwise the modeled futex wake releases
-        // the ring wait.
         loom::model(|| {
             // A producer notifies without a condition.
             let parker = Parker::new();
@@ -1687,10 +1709,10 @@ mod loom_tests {
         });
     }
 
+    /// Notifications must remain observable across the sequence's wrap through
+    /// zero.
     #[test]
     fn test_sequence_wraparound() {
-        // Notifications must remain observable across the sequence's wrap
-        // through zero.
         loom::model(|| {
             // Start the sequence at its last value.
             let parker = Parker::new();
@@ -1717,10 +1739,10 @@ mod loom_tests {
         });
     }
 
+    /// Concurrent producers without a worker must count every notification and
+    /// must not leave the waiter bit set.
     #[test]
     fn test_two_producers_conservation() {
-        // Concurrent producers without a worker must count every notification
-        // and must not leave the waiter bit set.
         loom::model(|| {
             // Two producers mix conditions and condition-free notifications.
             let parker = Parker::new();
@@ -1753,10 +1775,10 @@ mod loom_tests {
         });
     }
 
+    /// A minimal worker must see both conditions from one producer using the
+    /// ring arm-and-recheck path whenever its observation is current.
     #[test]
     fn test_producer_with_draining_loop() {
-        // A minimal worker must see both conditions from one producer using
-        // the ring arm-and-recheck path whenever its observation is current.
         loom::model(|| {
             // A producer publishes twice.
             let parker = Parker::new();
@@ -1780,11 +1802,11 @@ mod loom_tests {
         });
     }
 
+    /// The fully idle futex path must also handle a notification without a
+    /// counted condition. The worker either sees the changed sequence before
+    /// sleeping or is resumed by the modeled futex wake.
     #[test]
-    fn test_park_idle_with_concurrent_notify() {
-        // The fully-idle futex path must also handle a notification without a
-        // counted condition. The worker either sees the changed sequence
-        // before sleeping or is resumed by the modeled futex wake.
+    fn test_park_with_concurrent_unpark() {
         loom::model(|| {
             // A producer notifies without a condition.
             let parker = Parker::new();
@@ -1804,10 +1826,10 @@ mod loom_tests {
         });
     }
 
+    /// A worker must survive a notification without a counted condition between
+    /// two conditions. Both conditions must still be seen.
     #[test]
     fn test_two_cycle_drain_with_interleaved_notify() {
-        // A worker must survive a notification without a counted condition
-        // between two conditions. Both conditions must still be seen.
         loom::model(|| {
             // A producer publishes, notifies, and publishes again.
             let parker = Parker::new();
@@ -1832,10 +1854,9 @@ mod loom_tests {
         });
     }
 
+    /// Repeated fully idle futex park cycles must continue to see conditions.
     #[test]
-    fn test_multiple_park_idle_cycles() {
-        // Repeated fully-idle futex park cycles must continue to see
-        // conditions.
+    fn test_multiple_park_cycles() {
         loom::model(|| {
             // A producer publishes twice.
             let parker = Parker::new();
@@ -1859,12 +1880,13 @@ mod loom_tests {
         });
     }
 
+    /// Two producers notifying concurrently with one worker should still
+    /// preserve conservation and progress.
     #[test]
     fn test_three_thread_stress() {
-        // Two producers notifying concurrently with one worker should still
-        // preserve conservation and progress. Exploring every interleaving of
-        // three threads outlasts the per-model time budget, so preemptions are
-        // bounded at five, which finishes in seconds.
+        // Exploring every interleaving of three threads outlasts the per-model
+        // time budget, so preemptions are bounded at five, which finishes in
+        // seconds.
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(5);
         builder.check(|| {
@@ -1893,12 +1915,12 @@ mod loom_tests {
         });
     }
 
+    /// A ring wait that an earlier park left queued stays live across parks. A
+    /// later park reuses it instead of installing another, so only the arm's
+    /// recheck guards notifications since the worker observed, and a
+    /// notification while armed must still reach the reused wait.
     #[test]
     fn test_reused_ring_wait_receives_a_later_notification() {
-        // A ring wait that an earlier park left queued stays live across parks.
-        // A later park reuses it instead of installing another, so only the
-        // arm's recheck guards notifications since the worker observed, and a
-        // notification while armed must still reach the reused wait.
         loom::model(|| {
             // Leave a ring wait queued before the producer starts.
             let parker = Parker::new();
@@ -1926,27 +1948,27 @@ mod loom_tests {
         });
     }
 
+    /// A stale ring wait sits ahead of the worker's idle wait. The notification
+    /// releases two waits, so it reaches the idle wait.
     #[test]
     fn test_idle_wait_behind_stale_ring_wait_is_woken() {
-        // A stale ring wait sits ahead of the worker's idle wait. The
-        // notification releases two waits, so it reaches the idle wait.
         idle_wait_behind_stale_ring_wait(WAKE_COUNT);
     }
 
+    /// Negative control: a wake that releases one wait spends it on the stale
+    /// ring wait, so loom finds the idle wait stranded.
     #[test]
     #[should_panic(expected = "a futex wait was stranded with no waker left")]
     fn test_waking_one_strands_idle_wait_behind_stale_ring_wait() {
-        // Negative control: a wake that releases one wait spends it on the
-        // stale ring wait, so loom finds the idle wait stranded.
         idle_wait_behind_stale_ring_wait(1);
     }
 
+    /// A ring wait left queued sits ahead of idle waits, and a wake that
+    /// releases an idle wait completes the ring wait as well. A ring park that
+    /// follows finds that completion still unreaped, returns at once, and the
+    /// park after it installs a new wait.
     #[test]
     fn test_stale_ring_wait_across_idle_and_ring_parks() {
-        // A ring wait left queued sits ahead of idle waits, and a wake that
-        // releases an idle wait completes the ring wait as well. A ring park
-        // that follows finds that completion still unreaped, returns at once,
-        // and the park after it installs a new wait.
         loom::model(|| {
             // Leave a ring wait queued before the producer starts.
             let parker = Parker::new();
@@ -1976,25 +1998,21 @@ mod loom_tests {
         });
     }
 
+    /// A deterministic pair of producer-only programs, modeled with two
+    /// concurrent producers and no worker, preserves producer-side
+    /// conservation. Every generated operation advances the sequence exactly
+    /// once, every `Publish` makes exactly one condition visible, and producers
+    /// never leave the waiter bit set. Each case models one pair, so nextest
+    /// can run the pairs in parallel.
     #[rstest]
     fn test_generated_producer_only_programs(
         #[values(0, 1, 2)] seed: u64,
         #[values(0, 1, 2, 3, 4, 5, 6, 7)] index: usize,
     ) {
-        // Generate a deterministic pair of producer-only programs before
-        // entering loom, then model the pair with two concurrent producers and
-        // no worker. Each case models one pair, so nextest can run the pairs in
-        // parallel.
-        //
-        // The invariant is producer-side conservation: every generated
-        // operation advances the sequence exactly once, every `Publish` makes
-        // exactly one condition visible, and producers never leave the waiter
-        // bit set.
-        const OPS_PER_PROGRAM: usize = 5;
-
+        // Generate the pair before entering loom.
         let programs = [
-            ProducerOp::generated_program(seed, 2 * index, OPS_PER_PROGRAM),
-            ProducerOp::generated_program(seed, 2 * index + 1, OPS_PER_PROGRAM),
+            ProducerOp::generated_program(seed, 2 * index, PRODUCER_OPS_PER_PROGRAM),
+            ProducerOp::generated_program(seed, 2 * index + 1, PRODUCER_OPS_PER_PROGRAM),
         ];
 
         loom::model(move || {
@@ -2027,7 +2045,7 @@ mod loom_tests {
                 .count() as u32;
             assert_eq!(
                 notifications(&unparker),
-                (2 * OPS_PER_PROGRAM) as u32,
+                (2 * PRODUCER_OPS_PER_PROGRAM) as u32,
                 "notification conservation failed: seed={seed} index={index} programs={programs:?}",
             );
             assert_eq!(
@@ -2042,6 +2060,12 @@ mod loom_tests {
         });
     }
 
+    /// A deterministic single-producer program, modeled with one producer and
+    /// the ring worker simulator, may interleave notifications without a
+    /// counted condition before, between, or after its conditions. The worker
+    /// must eventually see exactly the generated condition count, whether it
+    /// arrives before an observation or through the arm, the ring wait, and
+    /// the next observation.
     #[rstest]
     fn test_generated_ring_loop_programs(
         #[values(10, 11, 12)] seed: u64,
@@ -2051,19 +2075,12 @@ mod loom_tests {
         )]
         index: usize,
     ) {
-        // Generate a deterministic single-producer program before entering
-        // loom, then model it with one producer and the ring worker simulator.
-        // The producer may interleave notifications without a counted
-        // condition before, between, or after its conditions.
-        //
-        // The worker must eventually see exactly the generated condition
-        // count, whether it arrives before an observation or through the arm,
-        // the ring wait, and the next observation.
-        const OPS_PER_PROGRAM: usize = 3;
-
-        generated_loop_program(seed, index, OPS_PER_PROGRAM, ring_park);
+        generated_loop_program(seed, index, WORKER_OPS_PER_PROGRAM, ring_park);
     }
 
+    /// The idle path counterpart to `test_generated_ring_loop_programs`. The
+    /// worker must see exactly the generated condition count through
+    /// observations or `Parker::park`.
     #[rstest]
     #[case(20, 0)]
     #[case(20, 1)]
@@ -2082,11 +2099,6 @@ mod loom_tests {
     #[case(22, 3)]
     #[case(22, 4)]
     fn test_generated_futex_loop_programs(#[case] seed: u64, #[case] index: usize) {
-        // This is the idle path counterpart to
-        // `test_generated_ring_loop_programs`. The worker must see exactly the
-        // generated condition count through observations or `park_idle()`.
-        const OPS_PER_PROGRAM: usize = 3;
-
-        generated_loop_program(seed, index, OPS_PER_PROGRAM, idle_park);
+        generated_loop_program(seed, index, WORKER_OPS_PER_PROGRAM, idle_park);
     }
 }

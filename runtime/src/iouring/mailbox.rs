@@ -8,11 +8,12 @@
 //! mailbox returns messages to the sender, so no payload is ever destroyed
 //! under the lock.
 //!
-//! The word's sequence also moves for pool claims and permit grants, which
-//! carry no message. So the inbox keeps a mail flag, set by the send that
-//! starts a batch and cleared by the take or close that empties the inbox,
-//! both under the lock. The worker checks the flag without locking and takes
-//! only when it is set, so a notification without mail costs no lock.
+//! The sequence of the worker's futex word (see [`super::park`]) also moves
+//! for pool claims and permit grants, which carry no message. So the inbox
+//! keeps a mail flag, set by the send that starts a batch and cleared by the
+//! take or close that empties the inbox, both under the lock. The worker
+//! checks the flag without locking and takes only when it is set, so a
+//! notification without mail costs no lock.
 //!
 //! A relaxed load of the flag suffices once the worker has observed the word.
 //! The send stores the flag before it unlocks and notifies with release
@@ -158,8 +159,9 @@ impl Mailbox {
             first
         };
 
-        // A later message of the batch needs no notification: the worker takes
-        // the whole batch once the first one's notification moves the word.
+        // A later message of the batch needs no notification, since the
+        // worker takes the whole batch once the first one's notification
+        // moves the word.
         if first {
             self.unparker.unpark();
         }
@@ -290,8 +292,12 @@ mod tests {
         })))
     }
 
+    /// Messages sent while a batch is pending share its one notification and
+    /// keep their send order, and the mail flag stays set until a take
+    /// empties the inbox.
     #[test]
     fn test_messages_notify_once_per_batch() {
+        // A fresh mailbox has no batch, no notification, and no mail.
         let mailbox = Mailbox::new();
         let mut scratch = Vec::new();
         assert!(mailbox.is_open());
@@ -316,16 +322,19 @@ mod tests {
         assert_eq!(notifications(&mailbox.unparker), 2);
         assert!(mailbox.has_mail());
 
+        // The worker takes the new batch once it has drained its scratch.
         scratch.clear();
         assert!(mailbox.take(&mut scratch));
         assert!(matches!(scratch.as_slice(), [Message::WakeRoot]));
 
+        // An empty inbox has nothing to take and no new notification.
         scratch.clear();
         assert!(!mailbox.take(&mut scratch));
         assert_eq!(notifications(&mailbox.unparker), 2);
         assert!(!mailbox.has_mail());
     }
 
+    /// Notifications without messages leave the mail flag clear.
     #[test]
     fn test_notification_without_message_is_not_mail() {
         // A pool claim or a permit grant unparks the worker without a message.
@@ -344,17 +353,22 @@ mod tests {
         assert_eq!(notifications(&mailbox.unparker), 2);
     }
 
+    /// Sending a message ends the worker's armed wait.
     #[test]
     fn test_send_wakes_armed_worker() {
+        // The worker parks on its word with a bounded deadline.
         let mailbox = Mailbox::new();
         let parker = mailbox.parker();
         let deadline = Instant::now() + Duration::from_secs(10);
         let parked = thread::spawn(move || parker.park(0, Some(deadline)));
 
-        // Sending to an armed worker must also wake its wait.
+        // Send to the armed worker.
         wait_until_armed(&mailbox.unparker, deadline);
         assert!(mailbox.send(Message::WakeRoot).is_ok());
         parked.join().unwrap();
+
+        // The send woke the wait well before the deadline, with one
+        // notification.
         assert!(Instant::now() < deadline, "send did not wake the worker");
         assert_eq!(notifications(&mailbox.unparker), 1);
     }

@@ -302,6 +302,7 @@ impl Idle {
         // publication is claimed at most once. The exchange can also fail
         // spuriously or because a worker published or withdrew its bit, and
         // the retry uses the set as it is now.
+        //
         // The exchange releases the reserved count to the claimed worker,
         // whose withdrawal acquires it, so the worker's later return of that
         // count follows the reservation in the count's modification order,
@@ -1385,6 +1386,7 @@ pub mod tests {
     /// returns it, and publishes again, and the late notification ends its
     /// next wait with no claim and no count, while a later claim brings one as
     /// usual.
+    ///
     /// Each way a worker sees a notification is checked: its futex wait, an
     /// arm that the notification turns back, and its spin.
     #[test]
