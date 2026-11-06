@@ -347,7 +347,7 @@ where
         self.inner.get_many(keys, &db.any).await
     }
 
-    /// Batch read multiple keys and return a staged batch for the same keys.
+    /// Batch read multiple keys and return `(staged, values)` for the same keys.
     ///
     /// Returns results in the same order as the input keys. The initial keys occupy staged read
     /// slots `0..keys.len()`, and each [`expand`](Staged::expand) appends another range of slots.
@@ -359,7 +359,7 @@ where
         self,
         keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(Vec<Option<U::Value>>, Staged<F, H, U, N, S>), Error<F>>
+    ) -> Result<(Staged<F, H, U, N, S>, Vec<Option<U::Value>>), Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -370,14 +370,14 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (values, inner) = inner.stage(keys, &db.any).await?;
+        let (inner, values) = inner.stage(keys, &db.any).await?;
         Ok((
-            values,
             Staged {
                 inner,
                 grafted_parent,
                 bitmap_parent,
             },
+            values,
         ))
     }
 }
@@ -407,7 +407,7 @@ where
         self
     }
 
-    /// Expand this staged batch with more reads.
+    /// Expand this staged batch with more reads, returning `(self, range, values)`.
     ///
     /// Existing slots keep their positions. Newly read keys are appended to the staged read set
     /// and assigned the returned range of slots. The returned values are in the same order as
@@ -424,7 +424,7 @@ where
         self,
         keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>>
+    ) -> Result<(Self, Range<usize>, Vec<Option<U::Value>>), Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -435,15 +435,15 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (range, values, inner) = inner.expand(keys, &db.any).await?;
+        let (inner, range, values) = inner.expand(keys, &db.any).await?;
         Ok((
-            range,
-            values,
             Self {
                 inner,
                 grafted_parent,
                 bitmap_parent,
             },
+            range,
+            values,
         ))
     }
 }

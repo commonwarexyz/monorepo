@@ -413,7 +413,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                 detail = format!(" depth={}", args.depth);
             }
             "stage" => {
-                let (values, staged) = db.new_batch().stage(keys, &db).await.unwrap();
+                let (staged, values) = db.new_batch().stage(keys, &db).await.unwrap();
                 assert!(values.iter().all(|value| value.is_some()));
                 black_box(&values);
                 let t_stage = start.elapsed();
@@ -455,7 +455,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                     let out = db.new_batch().stage(keys, &db).await.unwrap();
                     (out, t.elapsed())
                 };
-                let (t_prefetch, ((values, staged), t_stage)) = join!(prefetch, stage);
+                let (t_prefetch, ((staged, values), t_stage)) = join!(prefetch, stage);
                 assert!(values.iter().all(|value| value.is_some()));
                 black_box(&values);
                 let slots: Vec<_> = (0..keys.len())

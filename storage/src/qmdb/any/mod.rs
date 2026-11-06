@@ -3897,7 +3897,7 @@ pub(crate) mod test {
         // Merkleize the staged writes. The first key's later slot and the unstaged writes carry the
         // final values in `writes`.
         let read = [&writes[0].0, &writes[1].0, &writes[0].0];
-        let (_, staged) = make().stage(&read, db).await.unwrap();
+        let (staged, _) = make().stage(&read, db).await.unwrap();
         let mut policy = Script::new(usize::MAX, u64::MAX, choose);
         let staged = staged
             .merkleize_staged(

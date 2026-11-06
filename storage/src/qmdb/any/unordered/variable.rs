@@ -266,7 +266,7 @@ pub(crate) mod test {
             }
             let explicit_root = explicit.merkleize(&db).await.unwrap().root();
 
-            let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            let (staged, staged_values) = db.new_batch().stage(&keys, &db).await.unwrap();
             let staged_root = staged
                 .merkleize(slots.clone(), unstaged.clone(), &db)
                 .await
@@ -321,7 +321,7 @@ pub(crate) mod test {
                 .unwrap();
 
             let keys = [key(0), key(100)];
-            let (values, staged) = parent
+            let (staged, values) = parent
                 .new_batch::<Sha256>()
                 .stage(&keys, &db)
                 .await
@@ -407,7 +407,7 @@ pub(crate) mod test {
                 // key(3) is untouched by the ancestors (their floor raises move other
                 // keys), so its staged read stays committed-resolved.
                 let keys = [key(0), key(100), key(1), key(3)];
-                let (values, staged) = parent
+                let (staged, values) = parent
                     .new_batch::<Sha256>()
                     .stage(&keys, &db)
                     .await
@@ -705,7 +705,7 @@ pub(crate) mod test {
             let db = db.apply_batch(seed).await.unwrap();
 
             let keys = [&key];
-            let (_, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            let (staged, _) = db.new_batch().stage(&keys, &db).await.unwrap();
             let sibling = db
                 .new_batch()
                 .write(key, Some(vec![1]))
@@ -759,7 +759,7 @@ pub(crate) mod test {
                 .root();
 
             let target = key(0);
-            let (values, staged) = parent
+            let (staged, values) = parent
                 .new_batch::<Sha256>()
                 .stage(&[&target], &db)
                 .await
@@ -839,7 +839,7 @@ pub(crate) mod test {
                 Err(Error::StaleRead)
             ));
 
-            let (_, staged) = db_a.new_batch().stage(&keys, &db_a).await.unwrap();
+            let (staged, _) = db_a.new_batch().stage(&keys, &db_a).await.unwrap();
             assert!(matches!(
                 staged.expand(&keys, &db_b).await,
                 Err(Error::StaleRead)
@@ -1123,11 +1123,11 @@ pub(crate) mod test {
         };
         is_send(db.new_batch().merkleize_with(db, &mut policy));
         is_send(async move {
-            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            let (staged, _) = db.new_batch().stage(&[&key], db).await?;
             staged.merkleize(Vec::new(), Vec::new(), db).await
         });
         is_send(async move {
-            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            let (staged, _) = db.new_batch().stage(&[&key], db).await?;
             staged
                 .merkleize_with(Vec::new(), Vec::new(), db, &mut policy)
                 .await

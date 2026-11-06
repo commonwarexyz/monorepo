@@ -2118,7 +2118,7 @@ pub(crate) mod test {
         is_send(db.new_batch().merkleize(db));
         is_send(db.new_batch().merkleize_with(db, &mut policy));
         is_send(async move {
-            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            let (staged, _) = db.new_batch().stage(&[&key], db).await?;
             staged
                 .merkleize_with(vec![Slot::Keep], Vec::new(), db, &mut policy)
                 .await

@@ -553,7 +553,7 @@ pub(crate) mod test {
             // Stage both keys through the parent. Each must resolve in the grandparent's diff.
             let read_keys = [key(0), key(100)];
             let keys: Vec<&Digest> = read_keys.iter().collect();
-            let (values, staged) = parent
+            let (staged, values) = parent
                 .new_batch::<Sha256>()
                 .stage(&keys, &db)
                 .await
@@ -655,7 +655,7 @@ pub(crate) mod test {
                 // other keys), so its staged read stays committed-resolved.
                 let read_keys = [key(0), key(100), key(1), key(3)];
                 let keys: Vec<&Digest> = read_keys.iter().collect();
-                let (values, staged) = parent
+                let (staged, values) = parent
                     .new_batch::<Sha256>()
                     .stage(&keys, &db)
                     .await
@@ -751,7 +751,7 @@ pub(crate) mod test {
         };
         is_send(db.new_batch().merkleize_with(db, &mut policy));
         is_send(async move {
-            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            let (staged, _) = db.new_batch().stage(&[&key], db).await?;
             staged
                 .merkleize_with(vec![Slot::Keep], Vec::new(), db, &mut policy)
                 .await

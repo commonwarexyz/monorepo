@@ -774,7 +774,7 @@ pub mod tests {
                             .unwrap()
                             .root();
 
-                        let (staged_values, staged) = new_batch()
+                        let (staged, staged_values) = new_batch()
                             .with_metadata(metadata)
                             .stage(&keys, &db)
                             .await
@@ -792,9 +792,9 @@ pub mod tests {
                         assert_eq!(explicit_root, staged_root, "root mismatch at depth={depth}");
 
                         let split = 3;
-                        let (mut expanded_values, staged) =
+                        let (staged, mut expanded_values) =
                             new_batch().stage(&keys[..split], &db).await.unwrap();
-                        let (range, suffix_values, staged) =
+                        let (staged, range, suffix_values) =
                             staged.expand(&keys[split..], &db).await.unwrap();
                         assert_eq!(range, split..keys.len());
                         assert_eq!(staged.len(), keys.len());
@@ -818,9 +818,9 @@ pub mod tests {
 
                         let planned = val(7_000);
                         let duplicate_update = val(7_001);
-                        let (first_values, staged) =
+                        let (staged, first_values) =
                             new_batch().stage(&keys[..1], &db).await.unwrap();
-                        let (duplicate_range, duplicate_values, staged) =
+                        let (staged, duplicate_range, duplicate_values) =
                             staged.expand(&keys[..1], &db).await.unwrap();
                         assert_eq!(duplicate_range, 1..2);
                         assert_eq!(
@@ -2402,7 +2402,7 @@ pub mod tests {
             // The unmerkleized and staged batches retain A's bitmap.
             let pending = db_a.new_batch().write(key(2), Some(val(2)));
             let staged_keys = [key(2)];
-            let (_, staged) = db_a.new_batch().stage(&staged_keys, &db_a).await.unwrap();
+            let (staged, _) = db_a.new_batch().stage(&staged_keys, &db_a).await.unwrap();
 
             // Applying a sibling changes A's bitmap while B remains at the original commitment.
             let sibling = db_a
@@ -2450,7 +2450,7 @@ pub mod tests {
             // The unmerkleized and staged batches retain A's bitmap.
             let pending = db_a.new_batch().write(key(2), Some(val(2)));
             let staged_keys = [key(2)];
-            let (_, staged) = db_a.new_batch().stage(&staged_keys, &db_a).await.unwrap();
+            let (staged, _) = db_a.new_batch().stage(&staged_keys, &db_a).await.unwrap();
 
             // Applying a sibling changes A's bitmap while B remains at the original commitment.
             let sibling = db_a
@@ -2528,7 +2528,7 @@ pub mod tests {
             let db = db.apply_batch(seed).await.unwrap();
 
             let staged_keys = [&target];
-            let (_, staged) = db.new_batch().stage(&staged_keys, &db).await.unwrap();
+            let (staged, _) = db.new_batch().stage(&staged_keys, &db).await.unwrap();
             let sibling = db
                 .new_batch()
                 .write(target, Some(val(2)))
@@ -5412,7 +5412,7 @@ pub mod tests {
             // A child that stages and rewrites the parent's first key has two entries, one for
             // the update it supersedes and one for the previous commit. The walk spends them on
             // the applied update at the floor and the parent's update of the second key.
-            let (_, staged) = parent
+            let (staged, _) = parent
                 .new_batch::<Sha256>()
                 .stage(&[&keys[0]], &db)
                 .await
@@ -6150,21 +6150,21 @@ pub mod tests {
         is_send(unordered.new_batch().merkleize_with(unordered, &mut policy));
         is_send(ordered.new_batch().merkleize_with(ordered, &mut policy));
         is_send(async move {
-            let (_, staged) = unordered.new_batch().stage(&[&key], unordered).await?;
+            let (staged, _) = unordered.new_batch().stage(&[&key], unordered).await?;
             staged.merkleize(Vec::new(), Vec::new(), unordered).await
         });
         is_send(async move {
-            let (_, staged) = ordered.new_batch().stage(&[&key], ordered).await?;
+            let (staged, _) = ordered.new_batch().stage(&[&key], ordered).await?;
             staged.merkleize(Vec::new(), Vec::new(), ordered).await
         });
         is_send(async move {
-            let (_, staged) = unordered.new_batch().stage(&[&key], unordered).await?;
+            let (staged, _) = unordered.new_batch().stage(&[&key], unordered).await?;
             staged
                 .merkleize_with(Vec::new(), Vec::new(), unordered, &mut policy)
                 .await
         });
         is_send(async move {
-            let (_, staged) = ordered.new_batch().stage(&[&key], ordered).await?;
+            let (staged, _) = ordered.new_batch().stage(&[&key], ordered).await?;
             staged
                 .merkleize_with(Vec::new(), Vec::new(), ordered, &mut policy)
                 .await
