@@ -91,7 +91,6 @@
 //! });
 //! ```
 
-mod clock;
 mod deadlines;
 mod driver;
 mod idle;

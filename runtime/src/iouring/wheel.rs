@@ -32,7 +32,12 @@
 //! own, such as a slab index, and keeps the state behind them. Each worker's
 //! sleep timers ([`super::sleep::TimerShard`], 1024 ns ticks) and each
 //! driver's request deadlines ([`super::deadlines::Deadlines`], 2^20 ns ticks)
-//! own an instance.
+//! own an instance. Each owner counts nanoseconds from an [`Instant`] of its
+//! own, its creation, and converts with [`InstantExt`]: an instant before
+//! that epoch counts as zero, so a deadline there is due at once, and a
+//! firing time converts back to an instant at or after its deadline.
+
+use std::time::{Duration, Instant};
 
 /// Budget units per expiry pass, by every owner: one per slot fired, one per
 /// [`REFILES_PER_UNIT`] slots refiled. Bounds the work between two task
@@ -51,6 +56,33 @@ pub const BUDGET: u32 = 256;
 /// registered long before them cascade in large buckets, whose refiles would
 /// otherwise hold back the due slots behind them for many passes.
 pub const REFILES_PER_UNIT: u32 = 16;
+
+/// Conversions between instants and a wheel's nanoseconds since an epoch.
+pub trait InstantExt {
+    /// Nanoseconds from `epoch` to this instant: zero for an instant before
+    /// `epoch`, and `u64::MAX` for one more than about 584 years after it.
+    fn nanos_since(self, epoch: Instant) -> u64;
+
+    /// The instant `nanos` after this one, or `None` for `u64::MAX`, the
+    /// bound of an empty wheel, and past the end of [`Instant`]'s range.
+    fn after_nanos(self, nanos: u64) -> Option<Instant>;
+}
+
+impl InstantExt for Instant {
+    #[inline]
+    fn nanos_since(self, epoch: Instant) -> u64 {
+        let since = self.saturating_duration_since(epoch);
+        u64::try_from(since.as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    #[inline]
+    fn after_nanos(self, nanos: u64) -> Option<Instant> {
+        if nanos == u64::MAX {
+            return None;
+        }
+        self.checked_add(Duration::from_nanos(nanos))
+    }
+}
 
 /// Number of wheel levels.
 const LEVELS: usize = 9;
@@ -469,6 +501,32 @@ mod tests {
         } else {
             rng.random::<u64>() >> (64 - bits)
         }
+    }
+
+    #[test]
+    fn test_instant_conversions_round_trip_and_saturate() {
+        // Instants from the epoch on round trip exactly.
+        let epoch = Instant::now();
+        for nanos in [0, 1, FINE - 1, 1_000_000_007, 3_600_000_000_000] {
+            let at = epoch.after_nanos(nanos).unwrap();
+            assert_eq!(at.nanos_since(epoch), nanos);
+        }
+
+        // Earlier instants count as the epoch, much later ones saturate, and
+        // an empty wheel's bound has no instant.
+        if let Some(earlier) = epoch.checked_sub(Duration::from_secs(1)) {
+            assert_eq!(earlier.nanos_since(epoch), 0);
+        }
+        if let Some(far) = epoch.checked_add(Duration::from_secs(600 * 365 * 24 * 60 * 60)) {
+            assert_eq!(far.nanos_since(epoch), u64::MAX);
+        }
+        assert_eq!(epoch.after_nanos(u64::MAX), None);
+
+        // A deadline's firing time converts back to an instant after it.
+        let deadline = epoch + Duration::from_nanos(FINE + 1);
+        let firing = Wheel::<FINE>::rounded(deadline.nanos_since(epoch));
+        let fires = epoch + Duration::from_nanos(2 * FINE);
+        assert_eq!(epoch.after_nanos(firing), Some(fires));
     }
 
     /// Random insertions (past, current and future, up to the end of time),

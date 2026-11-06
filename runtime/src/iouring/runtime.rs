@@ -172,7 +172,6 @@
 //! destruction on dedicated threads can follow registration release.
 
 use super::{
-    clock,
     driver::Driver,
     idle::Searcher,
     mailbox::{Cancel, Forward, Mailbox, Message},
@@ -253,9 +252,9 @@ const BATCH_SIZE: usize = 64;
 /// [`Wheel::bound`]: super::wheel::Wheel::bound
 const BACKLOG_SLICE: Duration = Duration::from_micros(50);
 
-/// Largest network timeout, 30 years of 365 days, which keeps every request
-/// deadline representable.
-const MAX_TIMEOUT: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
+/// Largest network timeout and sleep, 30 years of 365 days, which keeps every
+/// request and sleep deadline representable. A longer sleep is clamped to it.
+pub const MAX_TIMEOUT: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
 
 /// Pinned future polled as a dedicated worker's root, or the runner's service
 /// task before it becomes a [`Task`](super::task::Task).
@@ -1092,9 +1091,10 @@ pub struct Local {
     /// Sleep registrations, in the pool's shard for this worker on a pool
     /// worker, so that peers can expire them while this worker is stalled.
     pub timers: Arc<TimerShard>,
-    /// Cached bound on the earliest firing time in `timers` in nanoseconds,
-    /// `u64::MAX` for none. Never later than that time, since only this
-    /// worker registers, so service and parking can skip the shard's lock.
+    /// Cached bound on the earliest firing time in `timers`, in nanoseconds
+    /// since the shard's origin, `u64::MAX` for none. Never later than that
+    /// time, since only this worker registers, so service and parking can
+    /// skip the shard's lock.
     pub timers_next: u64,
     /// Registrations in `timers` whose sleeps were dropped on this worker
     /// while it was not closing, which its next service pass, or its cleanup
@@ -1323,7 +1323,7 @@ impl Local {
     fn next_deadline(&self) -> Option<Instant> {
         [
             self.driver.as_ref().unwrap().next_deadline(),
-            clock::instant(self.timers_next),
+            self.timers.instant(self.timers_next),
         ]
         .into_iter()
         .flatten()
@@ -1968,9 +1968,10 @@ impl Worker {
             .service(*now, defer_kernel_service, deferred);
         let outcome = result.expect("io_uring driver service failed");
 
-        // Polls on this thread may complete sleeps due by this time.
-        let nanos = clock::nanos(*now);
-        clock::set_turn(nanos);
+        // Polls on this thread may complete sleeps due by this time, which
+        // the shard counts from its origin.
+        sleep::set_turn(*now);
+        let nanos = timers.nanos(*now);
 
         // Registrations of sleeps dropped here leave first, in critical
         // sections of at most one budget each that defer their wakers'
@@ -2003,7 +2004,7 @@ impl Worker {
             && *now >= self.rescue_at
         {
             self.rescue_at = *now + RESCUE_INTERVAL;
-            sleep::rescue(shared.pool.timers(), seat.index as usize, nanos, deferred);
+            sleep::rescue(shared.pool.timers(), seat.index as usize, *now, deferred);
         }
         local.update_pending();
         outcome
