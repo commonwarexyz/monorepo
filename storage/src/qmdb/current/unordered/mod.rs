@@ -12,6 +12,8 @@ pub mod fixed;
 pub mod proof;
 pub mod variable;
 
+pub use crate::qmdb::any::unordered::{Operation, Update};
+
 #[cfg(test)]
 pub mod tests {
     //! Shared test utilities for unordered Current QMDB variants.
@@ -83,7 +85,7 @@ pub mod tests {
     {
         let partition = "build-small".to_string();
         let db: C = open_db(context.child("first"), partition.clone()).await;
-        assert_eq!(db.inactivity_floor_loc(), Location::<F>::new(0));
+        assert_eq!(db.inactivity_floor(), Location::<F>::new(0));
         assert_eq!(db.bounds().start, Location::<F>::new(0));
         let root0 = db.root();
         drop(db);
@@ -331,7 +333,7 @@ pub mod tests {
             // retained op to tip.
             let max_ops = 4;
             let end_loc = db.bounds().end;
-            let start_loc = db.any.inactivity_floor_loc();
+            let start_loc = db.any.inactivity_floor();
 
             for loc in *start_loc..*end_loc {
                 let loc = Location::<F>::new(loc);
@@ -402,7 +404,7 @@ pub mod tests {
             let res = db.key_value_proof(&bad_key).await;
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
-            let start = *db.inactivity_floor_loc();
+            let start = *db.inactivity_floor();
             for i in start..db.any.bitmap.len() {
                 if !db.any.bitmap.get_bit(i) {
                     continue;

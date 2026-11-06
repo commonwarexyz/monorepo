@@ -511,8 +511,7 @@ async fn run_gets<D: DbAny<Mmr, Key = Digest> + 'static>(
                                     Sha256::hash(&[&index.to_be_bytes()])
                                 })
                                 .collect();
-                            let refs: Vec<_> = keys.iter().collect();
-                            let values = db.get_many(&refs).await.unwrap();
+                            let values = db.get_many(&keys).await.unwrap();
                             found += values.iter().flatten().count() as u64;
                             remaining -= n;
                         }
@@ -573,7 +572,7 @@ fn time_init(
     ) -> (Duration, u64) {
         let elapsed = start.elapsed();
         let end: u64 = *db.bounds().end;
-        let floor: u64 = *db.inactivity_floor_loc();
+        let floor: u64 = *db.inactivity_floor();
         (elapsed, end.saturating_sub(floor))
     }
 

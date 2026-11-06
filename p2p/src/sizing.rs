@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, num::NonZeroUsize};
+use std::{borrow::Borrow, cmp::Ordering, num::NonZeroUsize};
 
 /// Returns the smallest `max_message_size` that admits every payload in `payloads`, or zero if
 /// there are none.
@@ -12,8 +12,12 @@ use std::{cmp::Ordering, num::NonZeroUsize};
 /// # Panics
 ///
 /// Panics if the largest payload exceeds `u32::MAX`.
-pub fn max_message_size(payloads: &[usize]) -> u32 {
-    let largest = payloads.iter().copied().max().unwrap_or(0);
+pub fn max_message_size(payloads: impl IntoIterator<Item: Borrow<usize>>) -> u32 {
+    let largest = payloads
+        .into_iter()
+        .map(|payload| *payload.borrow())
+        .max()
+        .unwrap_or(0);
     u32::try_from(largest).expect("payload must fit in u32")
 }
 
@@ -111,17 +115,21 @@ mod tests {
 
     #[test]
     fn test_max_message_size() {
-        assert_eq!(max_message_size(&[]), 0);
-        assert_eq!(max_message_size(&[3, 7, 5]), 7);
+        assert_eq!(max_message_size(core::iter::empty::<usize>()), 0);
+        assert_eq!(max_message_size([3, 7, 5]), 7);
+        assert_eq!(
+            max_message_size([3usize, 7, 5].into_iter().filter(|p| *p != 7)),
+            5
+        );
         let largest: usize = Widen::widen(u32::MAX);
-        assert_eq!(max_message_size(&[0, largest]), u32::MAX);
+        assert_eq!(max_message_size([0, largest]), u32::MAX);
     }
 
     #[test]
     #[should_panic(expected = "payload must fit in u32")]
     fn test_max_message_size_overflow() {
         let largest = Widen::<usize>::widen(u32::MAX) + 1;
-        max_message_size(&[0, largest]);
+        max_message_size([0, largest]);
     }
 
     #[test]

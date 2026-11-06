@@ -45,6 +45,7 @@ pub mod partitioned {
     /// the number of prefix bytes used for partitioning:
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
+    /// - `P = 3`: ~16 million partitions
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
@@ -235,19 +236,19 @@ pub(crate) mod test {
                 .merkleize_with(&db, &mut Proportional)
                 .await
                 .unwrap();
-            let (_, staged) = db
+            let (staged, _) = db
                 .new_batch()
                 .with_metadata(metadata)
                 .stage(&[&key], &db)
                 .await
                 .unwrap();
-            let (_, _, staged) = staged.expand(&[&other], &db).await.unwrap();
+            let (staged, _, _) = staged.expand(&[&other], &db).await.unwrap();
             let staged = staged
                 .merkleize(vec![Slot::Put(value), Slot::Keep], vec![], &db)
                 .await
                 .unwrap();
             assert_eq!(staged.root(), explicit.root());
-            let (_, overridden) = db
+            let (overridden, _) = db
                 .new_batch()
                 .with_metadata(Digest::from([5; 32]))
                 .stage(&[&key], &db)
@@ -266,13 +267,13 @@ pub(crate) mod test {
                 .with_metadata(None);
             let sibling = sibling.merkleize(&db).await.unwrap();
             assert_eq!(child.root(), sibling.root());
-            let (_, cleared) = staged
+            let (cleared, _) = staged
                 .new_batch::<Sha256>()
                 .with_metadata(metadata)
                 .stage(&[&key], &db)
                 .await
                 .unwrap();
-            let (_, _, cleared) = cleared.expand(&[&other], &db).await.unwrap();
+            let (cleared, _, _) = cleared.expand(&[&other], &db).await.unwrap();
             let cleared = cleared
                 .with_metadata(None)
                 .merkleize(vec![Slot::Keep, Slot::Keep], vec![], &db)
@@ -417,7 +418,8 @@ pub(crate) mod test {
             (db, handle) = db.start_sync().await.unwrap();
             assert!(pending.starts() > starts_before);
 
-            let floor = db.inactivity_floor_loc();
+            // A non-trivial prune: the floor advanced past the seed commit.
+            let floor = db.inactivity_floor();
             assert!(*floor > 0);
             let db = {
                 pending.arm();
@@ -475,8 +477,7 @@ pub(crate) mod test {
             let repeats: Vec<Digest> = keys.iter().step_by(37).copied().collect();
             keys.extend_from_slice(&repeats);
             keys.extend_from_slice(&repeats[..20]);
-            let refs: Vec<&Digest> = keys.iter().collect();
-            let fused = db.get_many(&refs).await.unwrap();
+            let fused = db.get_many(&keys).await.unwrap();
             assert_eq!(fused.len(), keys.len());
             for (key, result) in keys.iter().zip(fused) {
                 assert_eq!(result, db.get(key).await.unwrap());
@@ -1330,8 +1331,7 @@ pub(crate) mod test {
                     .map(|i| key(i * 50))
                     .chain((0..5).map(|i| key(8000 + i)))
                     .collect();
-                let unwritten_refs: Vec<&Digest> = unwritten.iter().collect();
-                fb.get_many(&unwritten_refs, &db).await.unwrap();
+                fb.get_many(&unwritten, &db).await.unwrap();
                 let values = fb.get_many(&keys, &db).await.unwrap();
                 let plain = new_batch().get_many(&keys, &db).await.unwrap();
                 assert_eq!(values, plain, "value mismatch at depth={depth}");
@@ -1932,11 +1932,11 @@ pub(crate) mod test {
         };
         is_send(db.new_batch().merkleize_with(db, &mut policy));
         is_send(async move {
-            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            let (staged, _) = db.new_batch().stage(&[&key], db).await?;
             staged.merkleize(Vec::new(), Vec::new(), db).await
         });
         is_send(async move {
-            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            let (staged, _) = db.new_batch().stage(&[&key], db).await?;
             staged
                 .merkleize_with(vec![Slot::Keep], Vec::new(), db, &mut policy)
                 .await

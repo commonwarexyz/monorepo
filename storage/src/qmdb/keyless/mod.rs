@@ -156,7 +156,7 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
             .field("bounds", &self.bounds())
-            .field("inactivity_floor_loc", &self.inactivity_floor_loc())
+            .field("inactivity_floor", &self.inactivity_floor())
             .finish_non_exhaustive()
     }
 }
@@ -273,7 +273,7 @@ where
     }
 
     /// Returns the inactivity floor declared by the last committed batch.
-    pub const fn inactivity_floor_loc(&self) -> Location<F> {
+    pub const fn inactivity_floor(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
 
@@ -883,7 +883,7 @@ pub(crate) mod tests {
         // Apply the parent and prune to its floor.
         let db = db.apply_batch(parent).await.unwrap();
         let db = db.commit().await.unwrap();
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         let db = db.prune(floor).await.unwrap();
         assert!(*db.bounds().start > 0, "the prune must remove history");
 
@@ -1329,8 +1329,8 @@ pub(crate) mod tests {
             let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
             assert_eq!(log_ops, *ops);
             assert_eq!(log_proof, proof);
-            assert!(proof.verify::<H, _>(start, &ops, &root));
-            assert!(proof.verify_with_pinned_nodes::<H, _>(start, &ops, &pins, &root));
+            assert!(proof.verify::<H, _>(start, ops.iter(), &root));
+            assert!(proof.verify_with_pinned_nodes::<H, _>(start, ops.iter(), &pins, &root));
         }
 
         // Flushing the applied batch prunes the store to its peaks. The late batch's base is
@@ -1369,7 +1369,7 @@ pub(crate) mod tests {
         let flushed_pins = flushed.pinned_nodes(&db).unwrap();
         assert!(flushed_proof.verify_with_pinned_nodes::<H, _>(
             flushed_start,
-            &flushed_ops,
+            flushed_ops.iter(),
             &flushed_pins,
             &flushed_root
         ));
@@ -1626,7 +1626,7 @@ pub(crate) mod tests {
         Operation<F, V>: EncodeShared,
     {
         // Initial floor is 0, so pruning past 0 should fail.
-        assert_eq!(db.inactivity_floor_loc(), Location::new(0));
+        assert_eq!(db.inactivity_floor(), Location::new(0));
         let result = db.prune(Location::new(1)).await;
         assert!(
             matches!(result, Err(Error::PruneBeyondMinRequired(prune_loc, floor))
@@ -1647,7 +1647,7 @@ pub(crate) mod tests {
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.bounds().end - 1, first_commit_loc);
-        assert_eq!(db.inactivity_floor_loc(), first_commit_loc);
+        assert_eq!(db.inactivity_floor(), first_commit_loc);
 
         // Append one more, advancing the floor with it.
         let second_commit_loc = Location::<F>::new(5);
@@ -1666,7 +1666,7 @@ pub(crate) mod tests {
         assert_eq!(db.root(), root);
 
         // Pruning beyond the current floor fails.
-        let new_floor = db.inactivity_floor_loc();
+        let new_floor = db.inactivity_floor();
         let beyond = new_floor + 1;
         let result = db.prune(beyond).await;
         assert!(
@@ -3125,7 +3125,7 @@ pub(crate) mod tests {
         Operation<F, V>: EncodeShared,
     {
         // Freshly created db has floor = 0.
-        assert_eq!(db.inactivity_floor_loc(), Location::new(0));
+        assert_eq!(db.inactivity_floor(), Location::new(0));
 
         // Apply a batch with a declared floor; the db's floor should update.
         let floor_a = Location::<F>::new(2);
@@ -3139,12 +3139,12 @@ pub(crate) mod tests {
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        assert_eq!(db.inactivity_floor_loc(), floor_a);
+        assert_eq!(db.inactivity_floor(), floor_a);
 
         // Reopen: floor should survive restart (it's part of the last commit operation).
         drop(db);
         let db = reopen(context.child("reopen")).await;
-        assert_eq!(db.inactivity_floor_loc(), floor_a);
+        assert_eq!(db.inactivity_floor(), floor_a);
 
         // Floor may stay the same across a commit (monotonic non-decreasing).
         let merkleized = db
@@ -3155,7 +3155,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(db.inactivity_floor_loc(), floor_a);
+        assert_eq!(db.inactivity_floor(), floor_a);
 
         // Floor may advance further.
         let floor_b = Location::<F>::new(5);
@@ -3167,7 +3167,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(db.inactivity_floor_loc(), floor_b);
+        assert_eq!(db.inactivity_floor(), floor_b);
 
         db.destroy().await.unwrap();
     }
@@ -3192,7 +3192,7 @@ pub(crate) mod tests {
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        assert_eq!(db.inactivity_floor_loc(), Location::new(3));
+        assert_eq!(db.inactivity_floor(), Location::new(3));
 
         // Merkleize rejects a commit with a lower floor.
         let Err(err) = db
@@ -3293,14 +3293,14 @@ pub(crate) mod tests {
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        assert_eq!(db.inactivity_floor_loc(), floor_b);
+        assert_eq!(db.inactivity_floor(), floor_b);
 
         // Reopen at the first commit. The floor should restore to floor_a.
         drop(db);
         let db = bounded(context.child("cap"), initialization_bound)
             .await
             .unwrap();
-        assert_eq!(db.inactivity_floor_loc(), floor_a);
+        assert_eq!(db.inactivity_floor(), floor_a);
 
         // Prune is now gated at floor_a: pruning up to the floor works.
         let db = db.prune(floor_a).await.unwrap();
@@ -3375,7 +3375,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(db.inactivity_floor_loc(), commit_loc);
+        assert_eq!(db.inactivity_floor(), commit_loc);
 
         db.destroy().await.unwrap();
     }
@@ -3429,20 +3429,20 @@ pub(crate) mod tests {
 
         // Reopen to simulate a crash after both commits were durable.
         let db = reopen(context.child("reopen")).await;
-        assert_eq!(db.inactivity_floor_loc(), floor_b);
+        assert_eq!(db.inactivity_floor(), floor_b);
 
         // Reopen at the first commit. The floor should restore to floor_a.
         drop(db);
         let db = bounded(context.child("cap"), initialization_bound)
             .await
             .unwrap();
-        assert_eq!(db.inactivity_floor_loc(), floor_a);
+        assert_eq!(db.inactivity_floor(), floor_a);
         assert_eq!(db.bounds().end - 1, Location::new(3));
 
         // Bounded initialization is durable. Reopen and confirm the floor again.
         drop(db);
         let db = reopen(context.child("reopen").with_attribute("index", 2)).await;
-        assert_eq!(db.inactivity_floor_loc(), floor_a);
+        assert_eq!(db.inactivity_floor(), floor_a);
 
         db.destroy().await.unwrap();
     }
@@ -3558,7 +3558,7 @@ pub(crate) mod tests {
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.bounds().end - 1, commit_loc);
-        assert_eq!(db.inactivity_floor_loc(), commit_loc);
+        assert_eq!(db.inactivity_floor(), commit_loc);
         let root_after_commit = db.root();
 
         // Prune at the floor, the maximum prune allowed under the invariant. Pruning is
@@ -3577,7 +3577,7 @@ pub(crate) mod tests {
         assert_eq!(db.get(commit_loc).await.unwrap(), Some(metadata.clone()));
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
         assert_eq!(db.bounds().end - 1, commit_loc);
-        assert_eq!(db.inactivity_floor_loc(), commit_loc);
+        assert_eq!(db.inactivity_floor(), commit_loc);
         // Prune does not affect the root (documented invariant on `prune`).
         assert_eq!(db.root(), root_after_commit);
 
@@ -3595,7 +3595,7 @@ pub(crate) mod tests {
         let reopened_bounds = db.bounds();
         assert_eq!(reopened_bounds.end, commit_loc + 1);
         assert_eq!(db.bounds().end - 1, commit_loc);
-        assert_eq!(db.inactivity_floor_loc(), commit_loc);
+        assert_eq!(db.inactivity_floor(), commit_loc);
         assert_eq!(db.root(), root_after_commit);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
 
@@ -3616,7 +3616,7 @@ pub(crate) mod tests {
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.bounds().end - 1, next_commit_loc);
-        assert_eq!(db.inactivity_floor_loc(), next_commit_loc);
+        assert_eq!(db.inactivity_floor(), next_commit_loc);
 
         // New appends are readable, and the journal still holds the original commit op (it was
         // not pruned again), so reading it still returns its metadata.
@@ -3667,7 +3667,7 @@ pub(crate) mod tests {
 
         // Grandchild's commit is the last op, and the tip's floor is the database's floor.
         assert_eq!(db.bounds().end - 1, Location::new(6));
-        assert_eq!(db.inactivity_floor_loc(), Location::new(5));
+        assert_eq!(db.inactivity_floor(), Location::new(5));
 
         db.destroy().await.unwrap();
     }

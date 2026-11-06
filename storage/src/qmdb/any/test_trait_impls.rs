@@ -21,7 +21,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
-use core::num::NonZeroU64;
+use core::{borrow::Borrow, num::NonZeroU64};
 use std::{future::Future, ops::Range, sync::Arc};
 
 impl<F, K, V, H, E, C, I, const N: usize, S>
@@ -167,7 +167,10 @@ where
         Self::get(self, key).await
     }
 
-    async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+    async fn get_many<Q: Borrow<U::Key> + Sync>(
+        &self,
+        keys: &[Q],
+    ) -> Result<Vec<Option<U::Value>>, Error<F>> {
         Self::get_many(self, keys).await
     }
 
@@ -203,8 +206,8 @@ where
         Self::destroy(self).await
     }
 
-    fn inactivity_floor_loc(&self) -> Location<F> {
-        Self::inactivity_floor_loc(self)
+    fn inactivity_floor(&self) -> Location<F> {
+        Self::inactivity_floor(self)
     }
 
     fn sync_boundary(&self) -> Location<F> {

@@ -7,14 +7,12 @@
 //! See [Db] for the main database type and
 //! [ExclusionProof](super::proof::constant::ExclusionProof) for proving key inactivity.
 
+pub use crate::qmdb::any::ordered::variable::{Operation, Update};
 use crate::{
     index::ordered::Index,
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::{
-        any::{ordered::variable::Operation, value::VariableEncoding},
-        current,
-    },
+    qmdb::{any::value::VariableEncoding, current},
 };
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
@@ -33,9 +31,21 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 pub type Config<T, C, S> = current::Config<T, JournalConfig<C>, S>;
 
 pub mod partitioned {
-    //! A variant of [super] that uses a partitioned index for the snapshot.
+    //! A variant of [super] that uses a partitioned index for the snapshot, dividing the key space
+    //! into `2^(P*8)` partitions. See [Any's counterpart] for when to use one.
+    //!
+    //! See [Db] for the generic type, or use the convenience aliases:
+    //! - [p256::Db] for 256 partitions (P=1)
+    //! - [p64k::Db] for 65,536 partitions (P=2)
+    //!
+    //! `p256` suits smaller datasets, but its partitions spill to a `BTreeMap` once the index holds
+    //! more than 130,816 entries (see [`crate::index::partitioned::ordered`]). Prefer `p64k` to
+    //! keep ordered access mostly inline at larger scale.
+    //!
+    //! [Any's counterpart]: crate::qmdb::any::ordered::variable::partitioned
 
     use super::*;
+    pub use super::{Operation, Update};
     use crate::index::partitioned::ordered::Index;
     use core::num::NonZeroUsize;
 
@@ -60,6 +70,20 @@ pub mod partitioned {
 
     /// Configuration for a [Db].
     pub type Config<T, C, S> = current::Config<T, JournalConfig<C>, S, NonZeroUsize>;
+
+    /// Convenience type aliases for 256 partitions (P=1).
+    pub mod p256 {
+        /// Variable-value DB with 256 partitions.
+        pub type Db<F, E, K, V, H, T, const N: usize, S> = super::Db<F, E, K, V, H, T, 1, N, S>;
+        pub use super::Config;
+    }
+
+    /// Convenience type aliases for 65,536 partitions (P=2).
+    pub mod p64k {
+        /// Variable-value DB with 65,536 partitions.
+        pub type Db<F, E, K, V, H, T, const N: usize, S> = super::Db<F, E, K, V, H, T, 2, N, S>;
+        pub use super::Config;
+    }
 }
 
 #[cfg(test)]

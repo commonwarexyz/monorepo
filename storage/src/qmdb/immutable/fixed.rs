@@ -463,7 +463,7 @@ mod tests {
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::fill(1u8);
             let value0 = Sha256::fill(2u8);
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             db = apply_set(db, key0, value0, floor).await;
 
             let starts_before = pending.starts();
@@ -486,7 +486,7 @@ mod tests {
             assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
             let key1 = Sha256::fill(3u8);
             let value1 = Sha256::fill(4u8);
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             db = apply_set(db, key1, value1, floor).await;
             assert_eq!(
                 pending.completions(),
@@ -579,7 +579,7 @@ mod tests {
             let mut db = open_delayed_db(ctx.child("delayed"), "start-sync-fail", &pending)
                 .await
                 .unwrap();
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), floor).await;
 
             // Arm all future syncs to resolve to an injected error.
@@ -616,7 +616,7 @@ mod tests {
                 .unwrap();
             let key = Sha256::fill(1u8);
             let value = Sha256::fill(2u8);
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             db = apply_set(db, key, value, floor).await;
 
             let handle;
@@ -658,7 +658,7 @@ mod tests {
             (db, handle) = db.start_sync().await.unwrap();
             assert!(pending.starts() > starts_before);
 
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             assert!(*floor > 0);
             let db = {
                 pending.arm();

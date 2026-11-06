@@ -87,7 +87,7 @@ async fn populate_keyless<F: Family>(ctx: Context, operations: u64) {
         batch = batch.append(make_var_value(&mut rng));
         if rng.next_u32().is_multiple_of(COMMIT_FREQUENCY) {
             let merkleized = batch
-                .with_inactivity_floor(db.inactivity_floor_loc())
+                .with_inactivity_floor(db.inactivity_floor())
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -97,7 +97,7 @@ async fn populate_keyless<F: Family>(ctx: Context, operations: u64) {
         }
     }
     let merkleized = batch
-        .with_inactivity_floor(db.inactivity_floor_loc())
+        .with_inactivity_floor(db.inactivity_floor())
         .merkleize(&db)
         .await
         .unwrap();
@@ -323,7 +323,7 @@ fn bench_store_init(c: &mut Criterion) {
                                     make_var_value,
                                 )
                                 .await;
-                                let floor = db.inactivity_floor_loc();
+                                let floor = db.inactivity_floor();
                                 let db = db.prune(floor).await.unwrap();
                                 db.sync().await.unwrap();
                             },

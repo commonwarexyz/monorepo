@@ -6,14 +6,12 @@
 //!
 //! See [Db] for the main database type.
 
+pub use crate::qmdb::any::unordered::fixed::{Operation, Update};
 use crate::{
     index::unordered::Index,
     journal::contiguous::fixed::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::{
-        any::{unordered::fixed::Operation, value::FixedEncoding},
-        current,
-    },
+    qmdb::{any::value::FixedEncoding, current},
 };
 
 /// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
@@ -33,12 +31,17 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 pub type Config<T, S> = current::Config<T, JournalConfig, S>;
 
 pub mod partitioned {
-    //! A partitioned variant of [super] that uses a partitioned index for the snapshot.
+    //! A variant of [super] that uses a partitioned index for the snapshot, dividing the key space
+    //! into `2^(P*8)` partitions. See [Any's counterpart] for when to use one.
     //!
-    //! See [crate::qmdb::any::unordered::fixed::partitioned] for details on partitioned indices and
-    //! when to use them.
+    //! See [Db] for the generic type, or use the convenience aliases:
+    //! - [p256::Db] for 256 partitions (P=1)
+    //! - [p64k::Db] for 65,536 partitions (P=2)
+    //!
+    //! [Any's counterpart]: crate::qmdb::any::unordered::fixed::partitioned
 
     use super::*;
+    pub use super::{Operation, Update};
     use crate::index::partitioned::unordered::Index;
     use core::num::NonZeroUsize;
 
@@ -63,6 +66,20 @@ pub mod partitioned {
 
     /// Configuration for a [Db].
     pub type Config<T, S> = current::Config<T, JournalConfig, S, NonZeroUsize>;
+
+    /// Convenience type aliases for 256 partitions (P=1).
+    pub mod p256 {
+        /// Fixed-value DB with 256 partitions.
+        pub type Db<F, E, K, V, H, T, const N: usize, S> = super::Db<F, E, K, V, H, T, 1, N, S>;
+        pub use super::Config;
+    }
+
+    /// Convenience type aliases for 65,536 partitions (P=2).
+    pub mod p64k {
+        /// Fixed-value DB with 65,536 partitions.
+        pub type Db<F, E, K, V, H, T, const N: usize, S> = super::Db<F, E, K, V, H, T, 2, N, S>;
+        pub use super::Config;
+    }
 }
 
 #[cfg(test)]
@@ -133,19 +150,19 @@ pub mod test {
                 .merkleize_with(&db, &mut Proportional)
                 .await
                 .unwrap();
-            let (_, staged) = db
+            let (staged, _) = db
                 .new_batch()
                 .with_metadata(metadata)
                 .stage(&[&key], &db)
                 .await
                 .unwrap();
-            let (_, _, staged) = staged.expand(&[&other], &db).await.unwrap();
+            let (staged, _, _) = staged.expand(&[&other], &db).await.unwrap();
             let staged = staged
                 .merkleize(vec![Slot::Put(value), Slot::Keep], vec![], &db)
                 .await
                 .unwrap();
             assert_eq!(staged.root(), explicit.root());
-            let (_, overridden) = db
+            let (overridden, _) = db
                 .new_batch()
                 .with_metadata(Digest::from([5; 32]))
                 .stage(&[&key], &db)
@@ -164,13 +181,13 @@ pub mod test {
                 .with_metadata(None);
             let sibling = sibling.merkleize(&db).await.unwrap();
             assert_eq!(child.root(), sibling.root());
-            let (_, cleared) = staged
+            let (cleared, _) = staged
                 .new_batch::<Sha256>()
                 .with_metadata(metadata)
                 .stage(&[&key], &db)
                 .await
                 .unwrap();
-            let (_, _, cleared) = cleared.expand(&[&other], &db).await.unwrap();
+            let (cleared, _, _) = cleared.expand(&[&other], &db).await.unwrap();
             let cleared = cleared
                 .with_metadata(None)
                 .merkleize(vec![Slot::Keep, Slot::Keep], vec![], &db)
@@ -349,9 +366,8 @@ pub mod test {
                 .await
                 .unwrap();
 
-            let read_keys = [key(0), key(100)];
-            let keys: Vec<&Digest> = read_keys.iter().collect();
-            let (values, staged) = parent
+            let keys = [key(0), key(100)];
+            let (staged, values) = parent
                 .new_batch::<Sha256>()
                 .stage(&keys, &db)
                 .await

@@ -933,7 +933,7 @@ impl EngineDefinition for ReshareEngine {
             SYNC_BATCH_SIZE,
             fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
         );
-        max_message_size(&[
+        max_message_size([
             orchestrator::max_payload_size::<Scheme, sha256::Digest>(participants),
             marshal::max_payload_size::<MarshalVariant, Scheme>(participants, &()),
             dkg_probe::max_payload_size::<MarshalVariant, Scheme>(participants, &()),

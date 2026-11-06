@@ -503,7 +503,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         }
 
         assert!(
-            *target_db.inactivity_floor_loc() >= 256,
+            *target_db.inactivity_floor() >= 256,
             "expected inactivity floor past chunk 0"
         );
 

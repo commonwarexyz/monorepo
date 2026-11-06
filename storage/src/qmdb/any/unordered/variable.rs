@@ -50,6 +50,7 @@ pub mod partitioned {
     /// the number of prefix bytes used for partitioning:
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
+    /// - `P = 3`: ~16 million partitions
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
@@ -234,8 +235,7 @@ pub(crate) mod test {
 
             // Read set: key(5) duplicated at slots 0 and 3, read-only key(6), missing key(9000),
             // and key(20) deleted at slot 4.
-            let read_keys = [key(5), key(6), key(9000), key(5), key(20)];
-            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let keys = [key(5), key(6), key(9000), key(5), key(20)];
             let slots = vec![
                 Slot::Put(to_bytes(5_000)),
                 Slot::Keep,
@@ -251,7 +251,7 @@ pub(crate) mod test {
 
             let mut explicit = db.new_batch();
             let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
-            for (key, slot) in read_keys.iter().zip(&slots) {
+            for (key, slot) in keys.iter().zip(&slots) {
                 match slot {
                     Slot::Keep => {}
                     Slot::Put(value) => explicit = explicit.write(*key, Some(value.clone())),
@@ -263,7 +263,7 @@ pub(crate) mod test {
             }
             let explicit_root = explicit.merkleize(&db).await.unwrap().root();
 
-            let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            let (staged, staged_values) = db.new_batch().stage(&keys, &db).await.unwrap();
             let staged_root = staged
                 .merkleize(slots.clone(), unstaged.clone(), &db)
                 .await
@@ -317,9 +317,8 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let read_keys = [key(0), key(100)];
-            let keys: Vec<&Digest> = read_keys.iter().collect();
-            let (values, staged) = parent
+            let keys = [key(0), key(100)];
+            let (staged, values) = parent
                 .new_batch::<Sha256>()
                 .stage(&keys, &db)
                 .await
@@ -404,9 +403,8 @@ pub(crate) mod test {
 
                 // key(3) is untouched by the ancestors (their floor raises move other
                 // keys), so its staged read stays committed-resolved.
-                let read_keys = [key(0), key(100), key(1), key(3)];
-                let keys: Vec<&Digest> = read_keys.iter().collect();
-                let (values, staged) = parent
+                let keys = [key(0), key(100), key(1), key(3)];
+                let (staged, values) = parent
                     .new_batch::<Sha256>()
                     .stage(&keys, &db)
                     .await
@@ -588,7 +586,7 @@ pub(crate) mod test {
             let db = db.commit().await.unwrap();
 
             let root = db.root();
-            let inactivity_floor = db.inactivity_floor_loc();
+            let inactivity_floor = db.inactivity_floor();
             let db = db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             let db = db.prune(inactivity_floor).await.unwrap();
             let bounds = db.bounds();
@@ -600,7 +598,7 @@ pub(crate) mod test {
             let db = open_db(context.child("open").with_attribute("index", 5)).await;
             assert_eq!(root, db.root());
             assert_eq!(db.bounds(), bounds);
-            assert_eq!(db.inactivity_floor_loc(), inactivity_floor);
+            assert_eq!(db.inactivity_floor(), inactivity_floor);
             assert_eq!(db.snapshot.items(), snapshot_items);
 
             db.destroy().await.unwrap();
@@ -629,7 +627,7 @@ pub(crate) mod test {
             let db = db.apply_batch(merkleized).await.unwrap();
 
             // inactivity_floor should be at some location < op_count
-            let inactivity_floor = db.inactivity_floor_loc();
+            let inactivity_floor = db.inactivity_floor();
             let beyond_floor = inactivity_floor + 1;
 
             // Try to prune beyond the inactivity floor
@@ -704,7 +702,7 @@ pub(crate) mod test {
             let db = db.apply_batch(seed).await.unwrap();
 
             let keys = [&key];
-            let (_, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            let (staged, _) = db.new_batch().stage(&keys, &db).await.unwrap();
             let sibling = db
                 .new_batch()
                 .write(key, Some(vec![1]))
@@ -763,7 +761,7 @@ pub(crate) mod test {
 
             // Stage an overwrite that reads its current value from the grandparent.
             let target = key(0);
-            let (values, staged) = parent
+            let (staged, values) = parent
                 .new_batch::<Sha256>()
                 .stage(&[&target], &db)
                 .await
@@ -845,7 +843,7 @@ pub(crate) mod test {
                 Err(Error::StaleRead)
             ));
 
-            let (_, staged) = db_a.new_batch().stage(&keys, &db_a).await.unwrap();
+            let (staged, _) = db_a.new_batch().stage(&keys, &db_a).await.unwrap();
             assert!(matches!(
                 staged.expand(&keys, &db_b).await,
                 Err(Error::StaleRead)
@@ -1125,11 +1123,11 @@ pub(crate) mod test {
         };
         is_send(db.new_batch().merkleize_with(db, &mut policy));
         is_send(async move {
-            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            let (staged, _) = db.new_batch().stage(&[&key], db).await?;
             staged.merkleize(Vec::new(), Vec::new(), db).await
         });
         is_send(async move {
-            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            let (staged, _) = db.new_batch().stage(&[&key], db).await?;
             staged
                 .merkleize_with(Vec::new(), Vec::new(), db, &mut policy)
                 .await

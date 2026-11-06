@@ -20,6 +20,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
 use commonware_utils::bitmap;
 use core::{
+    borrow::Borrow,
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
 };
@@ -115,7 +116,7 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
             .field("bounds", &self.bounds())
-            .field("inactivity_floor_loc", &self.inactivity_floor_loc)
+            .field("inactivity_floor", &self.inactivity_floor())
             .finish_non_exhaustive()
     }
 }
@@ -134,8 +135,7 @@ where
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
-    #[cfg(any(test, feature = "test-traits"))]
-    pub(crate) const fn inactivity_floor_loc(&self) -> Location<F> {
+    pub const fn inactivity_floor(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
 
@@ -217,7 +217,7 @@ where
     /// Returns results in the same order as the input keys.
     pub async fn get_many(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>> {
         self.get_many_map(keys, |data, _| data.into_value()).await
     }
@@ -227,7 +227,7 @@ where
     /// `keys` receives a clone of its update in every slot but the last.
     pub(crate) async fn get_many_map<T: Send>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         map: impl Fn(U, Location<F>) -> T + Send + Sync,
     ) -> Result<Vec<Option<T>>, crate::qmdb::Error<F>> {
         if keys.is_empty() {
@@ -296,7 +296,7 @@ where
     /// fallback read still validates the position.
     fn resolve_cached<T: Send>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key>],
         map: &(impl Fn(U, Location<F>) -> T + Send + Sync),
         base: usize,
     ) -> ShardReads<T> {
@@ -304,7 +304,9 @@ where
         // collisions.
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
         self.snapshot
-            .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
+            .get_many(keys.iter().map(Borrow::borrow), |key_idx, &loc| {
+                candidates.push((key_idx, *loc))
+            });
 
         // Sort by position and deduplicate for the batched cache read.
         candidates.sort_unstable_by_key(|&(_, pos)| pos);
@@ -342,7 +344,7 @@ where
     /// position, in order: the operation read there, or `None` when the page cache could not
     /// serve it, which is reported to `on_miss` with each candidate's key index and position.
     fn match_read_ops<T>(
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key>],
         candidates: &[(usize, u64)],
         ops: impl Iterator<Item = Option<Operation<F, U>>>,
         map: &impl Fn(U, Location<F>) -> T,
@@ -367,7 +369,7 @@ where
             let loc = Location::new(pos);
             let mut pending = None;
             for &(key_idx, _) in group {
-                if results[key_idx].is_some() || data.key() != keys[key_idx] {
+                if results[key_idx].is_some() || data.key() != keys[key_idx].borrow() {
                     continue;
                 }
                 if let Some(prev) = pending.replace(key_idx) {

@@ -68,8 +68,8 @@ where
 
     /// Returns the value of `key` and the next active key, wrapping from the last key to the first,
     /// or `None` if `key` is not active.
-    pub async fn get_all(&self, key: &K) -> Result<Option<(V::Value, K)>, Error<F>> {
-        self.any.get_all(key).await
+    pub async fn get_with_next_key(&self, key: &K) -> Result<Option<(V::Value, K)>, Error<F>> {
+        self.any.get_with_next_key(key).await
     }
 
     /// Streams active (key, value) pairs in ascending key order within `range`.

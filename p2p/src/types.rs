@@ -5,6 +5,7 @@ use commonware_codec::{
 };
 use commonware_runtime::{BufMut, Error as RuntimeError, Resolver};
 use commonware_utils::{Hostname, IpAddrExt, max};
+use either::Either;
 use std::net::{IpAddr, SocketAddr};
 
 const INGRESS_SOCKET_PREFIX: u8 = 0;
@@ -76,17 +77,16 @@ impl Ingress {
         resolver: &impl Resolver,
     ) -> Result<impl Iterator<Item = SocketAddr>, RuntimeError> {
         match self {
-            Self::Socket(addr) => Ok(vec![*addr].into_iter()),
+            Self::Socket(addr) => Ok(Either::Left(core::iter::once(*addr))),
             Self::Dns { host, port } => {
                 let ips = resolver.resolve(host.as_str()).await?;
                 if ips.is_empty() {
                     return Err(RuntimeError::ResolveFailed(host.to_string()));
                 }
-                Ok(ips
-                    .into_iter()
-                    .map(move |ip| SocketAddr::new(ip, *port))
-                    .collect::<Vec<_>>()
-                    .into_iter())
+                let port = *port;
+                Ok(Either::Right(
+                    ips.into_iter().map(move |ip| SocketAddr::new(ip, port)),
+                ))
             }
         }
     }

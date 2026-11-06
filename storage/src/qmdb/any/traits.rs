@@ -11,7 +11,7 @@ use crate::{
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
 use commonware_runtime::Handle;
-use core::num::NonZeroU64;
+use core::{borrow::Borrow, num::NonZeroU64};
 use std::{future::Future, ops::Range};
 
 /// Unmerkleized batch of operations.
@@ -101,10 +101,10 @@ pub trait DbAny<F: Family>:
     ) -> impl Future<Output = Result<Option<Self::Value>, Error<F>>> + Send + use<'a, F, Self>;
 
     /// Get the values of multiple keys, returned in the same order as the input keys.
-    fn get_many<'a>(
+    fn get_many<'a, Q: Borrow<Self::Key> + Sync>(
         &'a self,
-        keys: &'a [&'a Self::Key],
-    ) -> impl Future<Output = Result<Vec<Option<Self::Value>>, Error<F>>> + Send + use<'a, F, Self>;
+        keys: &'a [Q],
+    ) -> impl Future<Output = Result<Vec<Option<Self::Value>>, Error<F>>> + Send + use<'a, F, Self, Q>;
 
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;
@@ -153,7 +153,7 @@ pub trait DbAny<F: Family>:
         Self: Sized;
 
     /// The location before which all operations are known to be inactive.
-    fn inactivity_floor_loc(&self) -> Location<F>;
+    fn inactivity_floor(&self) -> Location<F>;
 
     /// The maximum location that [`Self::prune`] accepts and the most recent location from which
     /// this database can be safely synced.

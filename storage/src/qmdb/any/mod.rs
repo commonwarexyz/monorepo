@@ -533,12 +533,12 @@ pub(crate) mod test {
         let db = db.prune(boundary).await.unwrap();
         let root = db.root();
         let op_count = db.size();
-        let inactivity_floor_loc = db.inactivity_floor_loc();
+        let inactivity_floor_loc = db.inactivity_floor();
 
         drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.size(), op_count);
-        assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
+        assert_eq!(db.inactivity_floor(), inactivity_floor_loc);
         assert_eq!(db.root(), root);
 
         // Write without applying (unapplied batch should be lost on reopen).
@@ -554,7 +554,7 @@ pub(crate) mod test {
         drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
         assert_eq!(db.size(), op_count);
-        assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
+        assert_eq!(db.inactivity_floor(), inactivity_floor_loc);
         assert_eq!(db.root(), root);
 
         // Write without applying again.
@@ -601,7 +601,7 @@ pub(crate) mod test {
         db.commit().await.unwrap();
         let db = reopen_db(context.child("reopen").with_attribute("index", 5)).await;
         assert!(db.size() > op_count);
-        assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
+        assert_ne!(db.inactivity_floor(), inactivity_floor_loc);
         assert_ne!(db.root(), root);
 
         db.destroy().await.unwrap();
@@ -801,7 +801,7 @@ pub(crate) mod test {
         let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        let durable_floor = db.inactivity_floor_loc();
+        let durable_floor = db.inactivity_floor();
 
         // Apply (but do not commit) a batch that advances the in-memory floor well past the
         // durable commit's floor.
@@ -812,7 +812,7 @@ pub(crate) mod test {
         }
         let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
-        let unsynced_floor = db.inactivity_floor_loc();
+        let unsynced_floor = db.inactivity_floor();
         assert!(unsynced_floor > durable_floor);
 
         // Prune to the in-memory floor, then crash before any further commit.
@@ -826,7 +826,7 @@ pub(crate) mod test {
         // journal durably advanced its boundary past positions that commit still needs.
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.size(), op_count);
-        assert_eq!(db.inactivity_floor_loc(), unsynced_floor);
+        assert_eq!(db.inactivity_floor(), unsynced_floor);
         assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();
@@ -848,7 +848,7 @@ pub(crate) mod test {
         let key2 = Sha256::hash(&[&2u64.to_be_bytes()]);
         let initial_root = db.root();
         let initial_size = db.size();
-        let initial_floor = db.inactivity_floor_loc();
+        let initial_floor = db.inactivity_floor();
 
         // Selecting the earlier empty commit must rebuild an empty snapshot.
         let merkleized = db.new_batch().merkleize(&db).await.unwrap();
@@ -860,7 +860,7 @@ pub(crate) mod test {
             .unwrap();
         assert_eq!(db.root(), initial_root);
         assert_eq!(db.size(), initial_size);
-        assert_eq!(db.inactivity_floor_loc(), initial_floor);
+        assert_eq!(db.inactivity_floor(), initial_floor);
         assert_eq!(db.get_metadata().await.unwrap(), None);
 
         let value0_a = make_value(10);
@@ -880,7 +880,7 @@ pub(crate) mod test {
 
         let root_a = db.root();
         let size_a = db.size();
-        let floor_a = db.inactivity_floor_loc();
+        let floor_a = db.inactivity_floor();
 
         let value0_b = make_value(20);
         let value2_b = make_value(21);
@@ -922,7 +922,7 @@ pub(crate) mod test {
         let db = bounded_db(context.child("cap"), size_a).await.unwrap();
         assert_eq!(db.root(), root_a);
         assert_eq!(db.size(), size_a);
-        assert_eq!(db.inactivity_floor_loc(), floor_a);
+        assert_eq!(db.inactivity_floor(), floor_a);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a.clone()));
         assert_eq!(db.get(&key0).await.unwrap(), Some(value0_a));
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1_a));
@@ -932,7 +932,7 @@ pub(crate) mod test {
         let db = reopen_db(context.child("reopen_after_rewind")).await;
         assert_eq!(db.root(), root_a);
         assert_eq!(db.size(), size_a);
-        assert_eq!(db.inactivity_floor_loc(), floor_a);
+        assert_eq!(db.inactivity_floor(), floor_a);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
         assert_eq!(db.get(&key0).await.unwrap(), Some(make_value(10)));
         assert_eq!(db.get(&key1).await.unwrap(), Some(make_value(11)));
@@ -970,7 +970,7 @@ pub(crate) mod test {
             .unwrap();
         assert_eq!(db.root(), initial_root);
         assert_eq!(db.size(), initial_size);
-        assert_eq!(db.inactivity_floor_loc(), initial_floor);
+        assert_eq!(db.inactivity_floor(), initial_floor);
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert_eq!(db.get(&key0).await.unwrap(), None);
         assert_eq!(db.get(&key1).await.unwrap(), None);
@@ -980,7 +980,7 @@ pub(crate) mod test {
         let db = reopen_db(context.child("reopen_initial_boundary")).await;
         assert_eq!(db.root(), initial_root);
         assert_eq!(db.size(), initial_size);
-        assert_eq!(db.inactivity_floor_loc(), initial_floor);
+        assert_eq!(db.inactivity_floor(), initial_floor);
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert_eq!(db.get(&key0).await.unwrap(), None);
         assert_eq!(db.get(&key1).await.unwrap(), None);
@@ -1061,7 +1061,7 @@ pub(crate) mod test {
             }
         }
         let bounds = db.bounds();
-        let inactivity_floor = db.inactivity_floor_loc();
+        let inactivity_floor = db.inactivity_floor();
         for loc in *inactivity_floor..*bounds.end {
             let loc = Location::new(loc);
             let (proof, ops) = db.proof(loc, NZU64!(10)).await.unwrap();
@@ -1439,7 +1439,7 @@ pub(crate) mod test {
                 .filter(|loc| bitmap.get_bit(*loc))
                 .collect(),
             len: bitmap.len(),
-            floor: db.inactivity_floor_loc(),
+            floor: db.inactivity_floor(),
             root: db.root(),
             values,
         }
@@ -1577,7 +1577,7 @@ pub(crate) mod test {
     {
         let live = live(db).await;
         let size = *db.bounds().end;
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         assert!(
             live.values().all(|loc| *loc >= floor),
             "a live update lies below the inactivity floor",
@@ -2763,7 +2763,7 @@ pub(crate) mod test {
             .map(|i| (to_digest(i), Some(make_value(i))))
             .collect();
         let db = hold(db, &writes).await;
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
 
         // Hold the floor for a batch that updates, deletes, and creates keys.
         let merkleized = db
@@ -2777,7 +2777,7 @@ pub(crate) mod test {
         let db = db.apply_batch(merkleized).await.unwrap();
 
         // The writes apply and the untouched keys keep their values.
-        assert_eq!(db.inactivity_floor_loc(), floor);
+        assert_eq!(db.inactivity_floor(), floor);
         for (key, expected) in [
             (0, Some(make_value(100))),
             (1, None),
@@ -2791,7 +2791,7 @@ pub(crate) mod test {
         // Deleting every key moves the floor to the new commit location.
         let deletes: Vec<_> = [0, 2, 3, 4].map(|i| (to_digest(i), None)).into();
         let db = hold(db, &deletes).await;
-        assert_eq!(db.inactivity_floor_loc(), db.size() - 1);
+        assert_eq!(db.inactivity_floor(), db.size() - 1);
         db.destroy().await.unwrap();
     }
 
@@ -2886,7 +2886,7 @@ pub(crate) mod test {
 
         // The batch commits the tip as the floor. The created key is absent, so two keys remain.
         let db = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(*db.inactivity_floor_loc(), 9);
+        assert_eq!(*db.inactivity_floor(), 9);
         assert_eq!(db.live().await.len(), 2);
         db.assert_exact().await;
         let expected = [
@@ -2904,12 +2904,12 @@ pub(crate) mod test {
         let db = db.commit().await.unwrap();
         let root = db.root();
         let size = db.size();
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         drop(db);
         let db = reopen_db(context.child("committed")).await;
         assert_eq!(db.root(), root);
         assert_eq!(db.size(), size);
-        assert_eq!(db.inactivity_floor_loc(), floor);
+        assert_eq!(db.inactivity_floor(), floor);
         for (key, value) in expected {
             assert_eq!(db.get(&key).await.unwrap(), value);
         }
@@ -2920,12 +2920,12 @@ pub(crate) mod test {
         let db = db.prune(boundary).await.unwrap();
         let root = db.root();
         let size = db.size();
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         drop(db);
         let db = reopen_db(context.child("pruned")).await;
         assert_eq!(db.root(), root);
         assert_eq!(db.size(), size);
-        assert_eq!(db.inactivity_floor_loc(), floor);
+        assert_eq!(db.inactivity_floor(), floor);
         for (key, value) in expected {
             assert_eq!(db.get(&key).await.unwrap(), value);
         }
@@ -2951,7 +2951,7 @@ pub(crate) mod test {
             .map(|(i, key)| (*key, Some(make_value(i as u64))))
             .collect();
         let db = hold(db, &seed).await;
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         let tip = db.size();
         assert_eq!((*floor, *tip), (0, 8));
 
@@ -3100,7 +3100,7 @@ pub(crate) mod test {
             };
             let mut written_model = model.clone();
             written_model.apply(writes);
-            let floor = *db.inactivity_floor_loc();
+            let floor = *db.inactivity_floor();
             let base = *db.size();
 
             // The walk sees the update of each live key: the batch's update, both creates, and
@@ -3181,7 +3181,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
-            assert_eq!(*db.inactivity_floor_loc(), expected);
+            assert_eq!(*db.inactivity_floor(), expected);
             db.assert_exact().await;
             model = written_model;
             assert_values(&db, &model).await;
@@ -3247,10 +3247,10 @@ pub(crate) mod test {
         model.apply(&seed);
         assert_values(&db, &model).await;
         let db = db.commit().await.unwrap();
-        let (root, floor) = (db.root(), db.inactivity_floor_loc());
+        let (root, floor) = (db.root(), db.inactivity_floor());
         drop(db);
         let db = reopen(context.child("reopened")).await;
-        assert_eq!((db.root(), db.inactivity_floor_loc()), (root, floor));
+        assert_eq!((db.root(), db.inactivity_floor()), (root, floor));
         assert_eq!(db.get(&k4).await.unwrap(), None);
         db.assert_exact().await;
         assert_values(&db, &model).await;
@@ -3372,7 +3372,7 @@ pub(crate) mod test {
             (k4, Some(make_value(404))),
             (k45, None),
         ]);
-        assert_eq!(db.inactivity_floor_loc(), state.tip);
+        assert_eq!(db.inactivity_floor(), state.tip);
         assert!(db.live().await.keys().eq(model.values.keys()));
         assert_eq!(model.values.len(), 5);
         assert_values(&db, &model).await;
@@ -3380,10 +3380,10 @@ pub(crate) mod test {
 
         // The state survives reopen.
         let db = db.commit().await.unwrap();
-        let (root, floor) = (db.root(), db.inactivity_floor_loc());
+        let (root, floor) = (db.root(), db.inactivity_floor());
         drop(db);
         let db = reopen(context.child("decided")).await;
-        assert_eq!((db.root(), db.inactivity_floor_loc()), (root, floor));
+        assert_eq!((db.root(), db.inactivity_floor()), (root, floor));
         assert_values(&db, &model).await;
         db.assert_exact().await;
 
@@ -3420,13 +3420,13 @@ pub(crate) mod test {
         // without a skip.
         let db = db.apply_batch(merkleized).await.unwrap();
         model.apply(&update);
-        assert_eq!(db.inactivity_floor_loc(), start);
+        assert_eq!(db.inactivity_floor(), start);
         db.assert_exact().await;
         let db = db.commit().await.unwrap();
         let root = db.root();
         drop(db);
         let db = reopen(context.child("stopped")).await;
-        assert_eq!((db.root(), db.inactivity_floor_loc()), (root, start));
+        assert_eq!((db.root(), db.inactivity_floor()), (root, start));
         assert_values(&db, &model).await;
         db.assert_exact().await;
         let mut policy = Script::new(1, 0, keep);
@@ -3468,7 +3468,7 @@ pub(crate) mod test {
                 .fold(start(), |batch, &(key, value)| batch.write(key, value))
         };
         let floor = ancestors.last().map_or_else(
-            || db.inactivity_floor_loc(),
+            || db.inactivity_floor(),
             |parent| D::span(parent).inactivity_floor,
         );
         let state = written(db, ancestors, start(), writes).await;
@@ -3916,7 +3916,7 @@ pub(crate) mod test {
         // Merkleize the staged writes. The first key's later slot and the unstaged writes carry the
         // final values in `writes`.
         let read = [&writes[0].0, &writes[1].0, &writes[0].0];
-        let (_, staged) = make().stage(&read, db).await.unwrap();
+        let (staged, _) = make().stage(&read, db).await.unwrap();
         let mut policy = Script::new(usize::MAX, u64::MAX, choose);
         let staged = staged
             .merkleize_staged(
@@ -4135,14 +4135,18 @@ pub(crate) mod test {
     {
         async fn assert_link(&self, key: Digest, value: Digest, next: Digest) {
             assert_eq!(
-                self.get_all(&key).await.unwrap(),
+                self.get_with_next_key(&key).await.unwrap(),
                 Some((value, next)),
                 "{key} diverged from its value and link",
             );
         }
 
         async fn assert_absent(&self, key: Digest) {
-            assert_eq!(self.get_all(&key).await.unwrap(), None, "{key} is live");
+            assert_eq!(
+                self.get_with_next_key(&key).await.unwrap(),
+                None,
+                "{key} is live"
+            );
         }
     }
 
@@ -4701,7 +4705,7 @@ pub(crate) mod test {
         let (floor, tip) = (span.inactivity_floor, span.tip.size);
         assert_bound(floor, tip, live);
         let db = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!((db.inactivity_floor_loc(), db.size()), (floor, tip));
+        assert_eq!((db.inactivity_floor(), db.size()), (floor, tip));
         db
     }
 
@@ -4730,7 +4734,7 @@ pub(crate) mod test {
             let tip = pending.pop().unwrap();
             db = db.apply_batch(tip).await.unwrap();
             pending.clear();
-            assert_bound(db.inactivity_floor_loc(), db.size(), live);
+            assert_bound(db.inactivity_floor(), db.size(), live);
         }
         (db, pending)
     }
@@ -4826,7 +4830,7 @@ pub(crate) mod test {
         let merkleized = build(&db, db.new_batch(), &seed).await;
         let db = db.apply_batch(merkleized).await.unwrap();
         let live = db.live().await;
-        assert_eq!((*db.inactivity_floor_loc(), *db.size()), (2, 23));
+        assert_eq!((*db.inactivity_floor(), *db.size()), (2, 23));
         assert_eq!(*live[&keys[0]], 21);
 
         // Deleting the five newest keys (the smallest and the four largest) makes ten operations
@@ -4877,7 +4881,7 @@ pub(crate) mod test {
 
         // The commit follows the move, so the floor trails the tip by two.
         let db = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(*db.size() - *db.inactivity_floor_loc(), 2);
+        assert_eq!(*db.size() - *db.inactivity_floor(), 2);
         assert_eq!(db.get(&keys[1]).await.unwrap(), Some(make_value(1)));
         db.assert_exact().await;
         db.destroy().await.unwrap();
@@ -5011,7 +5015,7 @@ pub(crate) mod test {
             (key(0x50), None),
             (key(0x45), Some(make_value(445))),
         ]);
-        assert_eq!(db.inactivity_floor_loc(), stopped);
+        assert_eq!(db.inactivity_floor(), stopped);
         assert_values(&db, &model).await;
         assert!(db.live().await.keys().eq(model.values.keys()));
         db.assert_exact().await;
@@ -5261,7 +5265,7 @@ pub(crate) mod test {
         }
         let start = || parent.as_ref().map_or_else(|| db.new_batch(), D::child);
         let floor = parent.as_ref().map_or_else(
-            || db.inactivity_floor_loc(),
+            || db.inactivity_floor(),
             |parent| D::span(parent).inactivity_floor,
         );
         let ancestors: Vec<_> = parent.iter().collect();
@@ -5377,12 +5381,12 @@ pub(crate) mod test {
             None => db,
         };
         let db = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(*db.inactivity_floor_loc(), floor, "{name}: applied floor");
+        assert_eq!(*db.inactivity_floor(), floor, "{name}: applied floor");
         assert_neighbors(&db, None, &live, &keys, name).await;
         let db = db.commit().await.unwrap();
         drop(db);
         let db = reopen(context.child(name)).await;
-        assert_eq!(*db.inactivity_floor_loc(), floor, "{name}: reopened floor");
+        assert_eq!(*db.inactivity_floor(), floor, "{name}: reopened floor");
         assert_neighbors(&db, None, &live, &keys, name).await;
         db
     }
@@ -5757,15 +5761,11 @@ pub(crate) mod test {
                 };
                 let fresh = fresh.apply_batch(merkleized).await.unwrap();
                 drop((grandparent, parent));
-                assert_eq!(
-                    *fresh.inactivity_floor_loc(),
-                    floor,
-                    "{label}: applied floor"
-                );
+                assert_eq!(*fresh.inactivity_floor(), floor, "{label}: applied floor");
                 assert_neighbors(&fresh, None, &live, &all, &label).await;
                 drop(fresh.commit().await.unwrap());
                 db = reopen(ctx.child("reopened")).await;
-                assert_eq!(*db.inactivity_floor_loc(), floor, "{label}: reopened floor");
+                assert_eq!(*db.inactivity_floor(), floor, "{label}: reopened floor");
                 assert_neighbors(&db, None, &live, &all, &label).await;
             }
             for outcome in &outcomes[1..] {
@@ -5967,7 +5967,7 @@ pub(crate) mod test {
             let db = db.apply_batch(deleted).await.unwrap();
             let reads = || counter(&context, "log_journal_items_read_total");
             let live = seed_start + 1;
-            let gap = *live - *db.inactivity_floor_loc();
+            let gap = *live - *db.inactivity_floor();
 
             // One skip short of the live update, the policy decides nothing. With one entry, the
             // window ends at the update, so the walk reads nothing. With unbounded entries, the
@@ -6010,7 +6010,7 @@ pub(crate) mod test {
                 .unwrap();
             assert_eq!(policy.locations(), [live]);
             let db = db.apply_batch(merkleized).await.unwrap();
-            assert_eq!(db.inactivity_floor_loc(), live);
+            assert_eq!(db.inactivity_floor(), live);
             assert_eq!(db.get(&keys[0]).await.unwrap(), None);
             assert_eq!(db.get(&keys[1]).await.unwrap(), Some(val(1)));
             db.destroy().await.unwrap();
@@ -6351,14 +6351,14 @@ pub(crate) mod test {
             let init: Vec<_> = (0..100).map(|i| (key(i), Some(val(i)))).collect();
             let db = commit_writes(db, init, None).await;
 
-            let floor_before = db.inactivity_floor_loc();
+            let floor_before = db.inactivity_floor();
 
             // Update 30 keys.
             let updates: Vec<_> = (0..30).map(|i| (key(i), Some(val(i + 500)))).collect();
             let db = commit_writes(db, updates, None).await;
 
             // Floor should have advanced.
-            assert!(db.inactivity_floor_loc() > floor_before);
+            assert!(db.inactivity_floor() > floor_before);
 
             // All keys should still be accessible with correct values.
             for i in 0..30 {
@@ -6680,7 +6680,7 @@ pub(crate) mod test {
             // Pre-populate with 50 keys.
             let init: Vec<_> = (0..50).map(|i| (key(i), Some(val(i)))).collect();
             let db = commit_writes(db, init, None).await;
-            let floor_before = db.inactivity_floor_loc();
+            let floor_before = db.inactivity_floor();
 
             // Parent: update keys 0..20.
             let mut parent = db.new_batch();
@@ -6698,7 +6698,7 @@ pub(crate) mod test {
             let db = db.apply_batch(child_m).await.unwrap();
 
             // Floor must have advanced.
-            assert!(db.inactivity_floor_loc() > floor_before);
+            assert!(db.inactivity_floor() > floor_before);
 
             // All keys should be accessible.
             for i in 0..30 {
@@ -6994,7 +6994,7 @@ pub(crate) mod test {
             .await;
 
             let initialization_bound = db.size();
-            let target_floor = db.inactivity_floor_loc();
+            let target_floor = db.inactivity_floor();
             let prune_loc = target_floor + (KEYS / 2);
             assert!(
                 initialization_bound > *prune_loc,
@@ -7003,7 +7003,7 @@ pub(crate) mod test {
             );
 
             let mut round = 0u64;
-            while db.inactivity_floor_loc() < prune_loc {
+            while db.inactivity_floor() < prune_loc {
                 round += 1;
                 assert!(
                     round <= 8,
@@ -7072,7 +7072,7 @@ pub(crate) mod test {
             let db =
                 commit_writes(db, (0..700).map(|i| (key(i), Some(val(10_000 + i)))), None).await;
             let prune_loc = Location::new(600);
-            assert!(db.inactivity_floor_loc() >= prune_loc);
+            assert!(db.inactivity_floor() >= prune_loc);
             let live_root = db.root();
             let db = db.prune(prune_loc).await.unwrap();
             assert_eq!(db.root(), live_root);
@@ -7140,7 +7140,7 @@ pub(crate) mod test {
                     };
 
                     let prune_loc = Location::new(600);
-                    assert!(db.inactivity_floor_loc() >= prune_loc);
+                    assert!(db.inactivity_floor() >= prune_loc);
                     let parent_root = db.root();
                     if prune {
                         db = db.prune(prune_loc).await.unwrap();
@@ -7338,7 +7338,7 @@ pub(crate) mod test {
                 db = commit_writes_mmb(db, [(key(i), Some(val(i)))], None).await;
             }
 
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             let db = db.prune(floor).await.unwrap();
 
             // All keys still accessible.
@@ -7610,7 +7610,7 @@ mod bitmap_tests {
                 db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
             }
             let loc = Location::new(2 * CHUNK_BITS);
-            assert!(db.inactivity_floor_loc() >= loc);
+            assert!(db.inactivity_floor() >= loc);
 
             // Prune two chunks. The log retains the section containing the prune location, which
             // starts inside the second chunk, while the live bitmap drops both chunks.

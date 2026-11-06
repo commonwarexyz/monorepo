@@ -82,7 +82,7 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
             .field("size", &self.size())
-            .field("inactivity_floor_loc", &self.inactivity_floor_loc())
+            .field("inactivity_floor", &self.inactivity_floor())
             .finish_non_exhaustive()
     }
 }
@@ -343,7 +343,7 @@ where
         let total_size = self.base.size + operations.len() as u64;
         chain::validate_merkleize_floor::<F>(
             self.parent.as_ref().map_or_else(
-                || db.inactivity_floor_loc(),
+                || db.inactivity_floor(),
                 |parent| parent.bounds.inactivity_floor,
             ),
             inactivity_floor,
@@ -483,7 +483,7 @@ where
     }
 
     /// Return the inactivity floor declared by the last committed batch.
-    pub const fn inactivity_floor_loc(&self) -> Location<F> {
+    pub const fn inactivity_floor(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
 
@@ -937,7 +937,7 @@ mod tests {
         let original_pins = batch.pinned_nodes(&db).unwrap();
         assert!(original_proof.verify_with_pinned_nodes::<Sha256, _>(
             start,
-            &ops,
+            ops.iter(),
             &original_pins,
             &root
         ));
@@ -1057,10 +1057,10 @@ mod tests {
             child_proof.inactive_peaks,
             F::inactive_peaks(child_end, floor),
         );
-        assert!(child_proof.verify::<Sha256, _>(child_start, &child_ops, &child_root));
+        assert!(child_proof.verify::<Sha256, _>(child_start, child_ops.iter(), &child_root));
         assert!(child_proof.verify_with_pinned_nodes::<Sha256, _>(
             child_start,
-            &child_ops,
+            child_ops.iter(),
             &child_pins,
             &child_root
         ));
@@ -1071,7 +1071,7 @@ mod tests {
         reordered_child_pins.swap(0, 1);
         assert!(!child_proof.verify_with_pinned_nodes::<Sha256, _>(
             child_start,
-            &child_ops,
+            child_ops.iter(),
             &reordered_child_pins,
             &child_root
         ));
@@ -1084,7 +1084,7 @@ mod tests {
         assert_eq!(child.pinned_nodes(&db).unwrap(), child_pins);
         assert!(child_proof_after.verify_with_pinned_nodes::<Sha256, _>(
             child_start,
-            &child_ops,
+            child_ops.iter(),
             &child_pins,
             &child_root
         ));
@@ -1121,7 +1121,7 @@ mod tests {
         );
         assert!(commit_proof.verify_with_pinned_nodes::<Sha256, _>(
             commit_start,
-            &commit_ops,
+            commit_ops.iter(),
             &commit_pins,
             &commit_root
         ));
@@ -1164,11 +1164,12 @@ mod tests {
         let late_root = late.root();
         let late_proof = late.proof(&db).unwrap();
         let late_pins = late.pinned_nodes(&db).unwrap();
-        assert!(
-            late_proof.verify_with_pinned_nodes::<Sha256, _>(
-                late_start, &late_ops, &late_pins, &late_root
-            )
-        );
+        assert!(late_proof.verify_with_pinned_nodes::<Sha256, _>(
+            late_start,
+            late_ops.iter(),
+            &late_pins,
+            &late_root
+        ));
         let db = db.apply_batch(late).await.unwrap();
 
         db.destroy().await.unwrap();
@@ -1622,7 +1623,7 @@ mod tests {
                 .unwrap();
             let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             assert_eq!(db.get_metadata(), Some(meta2));
-            assert_eq!(db.inactivity_floor_loc(), floor2);
+            assert_eq!(db.inactivity_floor(), floor2);
 
             let db = {
                 _ = db.sync().await.unwrap();
@@ -1636,7 +1637,7 @@ mod tests {
             .unwrap();
             assert_eq!(db.root(), root_after_first);
             assert_eq!(db.get_metadata(), Some(meta1));
-            assert_eq!(db.inactivity_floor_loc(), floor1);
+            assert_eq!(db.inactivity_floor(), floor1);
 
             db.destroy().await.unwrap();
         });
@@ -1691,7 +1692,7 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("second"), partition).await;
             assert_eq!(db.root(), root_after_first);
             assert_eq!(db.get_metadata(), Some(meta1));
-            assert_eq!(db.inactivity_floor_loc(), floor1);
+            assert_eq!(db.inactivity_floor(), floor1);
 
             db.destroy().await.unwrap();
         });
@@ -1731,7 +1732,7 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("second"), partition).await;
             assert_eq!(db.root(), root_after_second);
             assert_eq!(db.get_metadata(), Some(meta2));
-            assert_eq!(db.inactivity_floor_loc(), Location::new(1));
+            assert_eq!(db.inactivity_floor(), Location::new(1));
             db.destroy().await.unwrap();
         });
     }
