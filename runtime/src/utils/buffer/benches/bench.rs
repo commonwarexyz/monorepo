@@ -12,6 +12,7 @@ use criterion::{criterion_group, criterion_main};
 use std::num::NonZeroU16;
 
 mod append;
+mod evict;
 mod read;
 mod sync;
 
@@ -36,6 +37,12 @@ async fn destroy_append<C: Storage>(ctx: &C, append: Writer<C::Blob>, name: &[u8
     ctx.remove("bench_partition", Some(name)).await.unwrap();
 }
 
-criterion_group!(benches, append::bench, read::bench, sync::bench);
+criterion_group!(
+    benches,
+    append::bench,
+    evict::bench,
+    read::bench,
+    sync::bench
+);
 
 criterion_main!(benches);
