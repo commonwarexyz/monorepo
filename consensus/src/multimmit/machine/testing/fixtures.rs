@@ -10,7 +10,7 @@ use crate::{
         mocks::Bls,
         types::{
             Anchor, Attestation, BlockRef, CertificateId, ChainId, ChainProposal, CodecConfig,
-            DaCertificate, DaQuorum, DigestedLeader, EpochGenesis, Extension, LeaderBlock, Lqc,
+            DaCertificate, DigestedLeader, EpochGenesis, Extension, LeaderBlock, Lqc,
             Nullification, PathLimits, Position, Tally, TransactionBlockHeader, ViewMessage, Vote,
             VoteBody, Vqc, genesis_tip_commitment,
         },
@@ -142,7 +142,7 @@ pub(crate) struct TestConfig {
     pipeline_depth: u32,
     extension_bound: u32,
     chain_limits: Option<Vec<PathLimits>>,
-    da_quorum: DaQuorum,
+    payments: bool,
     epoch: Epoch,
     namespace: &'static [u8],
     genesis: Option<EpochGenesis<Digest>>,
@@ -157,7 +157,7 @@ impl TestConfig {
             pipeline_depth: 2,
             extension_bound: 1,
             chain_limits: None,
-            da_quorum: DaQuorum::Available,
+            payments: false,
             epoch: Epoch::new(7),
             namespace: NAMESPACE,
             genesis: None,
@@ -191,10 +191,10 @@ impl TestConfig {
         self
     }
 
-    /// Recovers DA certificates from `quorum` shares.
+    /// Runs payment chains (see [`Parameters::with_payments`]).
     #[cfg(test)]
-    pub(crate) const fn da_quorum(mut self, quorum: DaQuorum) -> Self {
-        self.da_quorum = quorum;
+    pub(crate) const fn payments(mut self, payments: bool) -> Self {
+        self.payments = payments;
         self
     }
 
@@ -239,7 +239,7 @@ impl TestConfig {
             PathLimits::new(self.pipeline_depth, self.extension_bound),
         )
         .expect("test configuration is valid")
-        .with_da_quorum(self.da_quorum);
+        .with_payments(self.payments);
         if let Some(limits) = self.chain_limits {
             parameters = parameters
                 .with_chain_limits(limits)
@@ -509,7 +509,7 @@ pub(crate) struct Harness {
     participants: usize,
     pipeline_depth: u32,
     chain_limits: Option<Vec<PathLimits>>,
-    da_quorum: DaQuorum,
+    payments: bool,
     producers: Option<Vec<Participant>>,
     resources: ResourceLimits,
     retention: Option<ViewDelta>,
@@ -524,7 +524,7 @@ impl Harness {
             participants: 1,
             pipeline_depth: 2,
             chain_limits: None,
-            da_quorum: DaQuorum::Available,
+            payments: false,
             producers: None,
             resources: TEST_RESOURCES,
             retention: None,
@@ -565,9 +565,9 @@ impl Harness {
         self
     }
 
-    /// Recovers DA certificates from `quorum` shares.
-    pub(crate) const fn da_quorum(mut self, quorum: DaQuorum) -> Self {
-        self.da_quorum = quorum;
+    /// Runs payment chains (see [`Parameters::with_payments`]).
+    pub(crate) const fn payments(mut self, payments: bool) -> Self {
+        self.payments = payments;
         self
     }
 
@@ -605,7 +605,7 @@ impl Harness {
         if let Some(limits) = self.chain_limits {
             config = config.chain_limits(limits);
         }
-        config = config.da_quorum(self.da_quorum);
+        config = config.payments(self.payments);
         Profile::with_limits(
             config.build(),
             self.role,

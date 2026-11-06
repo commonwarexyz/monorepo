@@ -95,10 +95,6 @@ pub(crate) struct ChainState<S: Scheme, D: Digest> {
     /// Whether any chain's placement implies a certificate (`d = 0` and `e = 0`), so that
     /// certificates may need to be recovered from peers.
     implies_certificates: bool,
-    /// The receipt chains (see [`Parameters::receipt_chain`]), by chain.
-    ///
-    /// [`Parameters::receipt_chain`]: crate::multimmit::config::Parameters::receipt_chain
-    receipts: Vec<bool>,
     pub(super) da: DaState<S, D>,
     /// The local producer's pipeline, when this node produces a chain.
     pub(super) producer: Option<ProducerState<D>>,
@@ -128,10 +124,6 @@ impl<S: Scheme, D: Digest> ChainState<S, D> {
                 ))
             });
         let config = profile.codec();
-        let receipts = config
-            .chain_ids()
-            .map(|chain| profile.protocol().receipt_chain(chain))
-            .collect();
         Self {
             config,
             proposal_policy: profile.tuning().proposal_policy,
@@ -150,7 +142,6 @@ impl<S: Scheme, D: Digest> ChainState<S, D> {
                 .chain_limits()
                 .iter()
                 .any(|limits| limits.certified_only() && limits.extension_bound() == 0),
-            receipts,
             da: DaState::new(genesis),
             producer,
             signing: ReservationBook::new(profile.resources().max_outbox_effects()),
@@ -170,23 +161,6 @@ impl<S: Scheme, D: Digest> ChainState<S, D> {
         self.limits
             .get(chain)
             .is_some_and(|limits| limits.certified_only() && limits.extension_bound() == 0)
-    }
-
-    /// Returns whether this node recovers `chain`'s DA certificates from its votes: a validator
-    /// does for the chain it produces and for every receipt chain.
-    pub(crate) fn recovers(&self, chain: ChainId) -> bool {
-        self.me.is_some() && (self.produces(chain) || self.receipt_chain(chain))
-    }
-
-    /// Returns whether this validator recovers `chain`'s certificates as a receipt chain it does
-    /// not produce. Its own chain keeps the producer's route, even when it is a receipt chain.
-    pub(crate) fn recovers_receipts(&self, chain: ChainId) -> bool {
-        self.me.is_some() && self.receipt_chain(chain) && !self.produces(chain)
-    }
-
-    /// Returns whether `chain` is a receipt chain, whose DA votes go to every validator.
-    pub(crate) fn receipt_chain(&self, chain: ChainId) -> bool {
-        self.receipts.get(chain.index()).copied().unwrap_or(false)
     }
 
     /// Returns the path limits of `chain`.
@@ -399,11 +373,10 @@ impl<S: Scheme, D: Digest> ChainState<S, D> {
                 ));
             }
             Artifact::DaVote(vote) => {
-                // Shares are only useful where certificates are recovered: the chain's producer,
-                // and every validator on a receipt chain. The chain's DA recovery task pools them
-                // and decides recovery. The machine keeps minting their observation identity.
+                // Shares are only useful to the chain's producer, whose DA recovery task pools
+                // them and decides recovery. The machine keeps minting their observation identity.
                 let chain = vote.header().chain();
-                if self.recovers(chain) {
+                if self.produces(chain) {
                     self.capabilities.push(Capability::ChainDa(
                         chain,
                         ChainCommand::Observe(Arc::new(vote.clone())),

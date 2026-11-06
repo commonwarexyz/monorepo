@@ -796,10 +796,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
                     == Some(participant)
         );
         let chain = certificate.header().chain();
-        let anchor = self
-            .chain
-            .recovers(chain)
-            .then(|| certificate.header().height());
+        let anchor = owns_chain.then(|| certificate.header().height());
         let publication = if retired.is_empty() || !owns_chain {
             None
         } else {
@@ -812,8 +809,8 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
         };
         capabilities.extend(self.reserve_change(change)?);
         self.da_order = DaOrder::ChainFirst;
-        // A remote or leader-carried certificate can advance the anchor of a chain this node
-        // recovers; tell its task so it prunes the settled pool.
+        // A remote or leader-carried certificate can advance the anchor of the chain this node
+        // produces; tell its task so it prunes the settled pool.
         if let Some(height) = anchor {
             capabilities.push(Capability::ChainDa(
                 chain,
