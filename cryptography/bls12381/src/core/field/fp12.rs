@@ -31,7 +31,7 @@
 use super::{
     arithmetic::{Field, TIGHT, unroll},
     fp::{BYTES as FP_BYTES, WORDS},
-    fp2::{BYTES as FP2_BYTES, Fp2},
+    fp2::{BYTES as FP2_BYTES, Fp2, encode},
     fp6::{self, BYTES as FP6_BYTES, Fp6},
 };
 use commonware_simd::Simd;
@@ -143,26 +143,6 @@ const FROBENIUS: [[u8; FP2_BYTES]; 5] = [
         ],
     ),
 ];
-
-/// Returns the encoding of `c0 + c1 i` for little-endian words.
-const fn encode(c0: [u64; WORDS], c1: [u64; WORDS]) -> [u8; FP2_BYTES] {
-    let mut bytes = [0; FP2_BYTES];
-    let mut i = 0;
-    while i < WORDS {
-        let (high, low) = (
-            c1[WORDS - 1 - i].to_be_bytes(),
-            c0[WORDS - 1 - i].to_be_bytes(),
-        );
-        let mut k = 0;
-        while k < 8 {
-            bytes[8 * i + k] = high[k];
-            bytes[FP2_BYTES / 2 + 8 * i + k] = low[k];
-            k += 1;
-        }
-        i += 1;
-    }
-    bytes
-}
 
 /// Elements `c0 + c1 * w`, one per lane of the coefficients.
 ///

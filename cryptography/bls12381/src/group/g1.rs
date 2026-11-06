@@ -1,6 +1,9 @@
 //! The group G1.
 
-use super::kernel::{Group, MAX_LANES};
+use super::{
+    Scalar,
+    kernel::{Group, MAX_COMPONENTS, MAX_LANES},
+};
 use crate::core::{
     curve::g1::{Coordinates, IDENTITY, Point},
     field::{
@@ -40,6 +43,16 @@ impl Group for G1 {
     // whether the lanes are full or not, so a few elements finish sooner one at a time.
     const SUM_BATCH: Option<usize> = Some(MAX_LANES);
     const MULTIPLY_BATCH: Option<usize> = Some(8);
+
+    // Scalars split into two halves of 128 bits: k = a + b x^2 for the eigenvalue -x^2 of the
+    // endomorphism.
+    const COMPONENTS: usize = 2;
+    const COMPONENT_BITS: u32 = 129;
+
+    fn components(scalar: &Scalar) -> [u128; MAX_COMPONENTS] {
+        let [a, b] = scalar.split();
+        [a, b, 0, 0]
+    }
 
     fn coordinates(&self) -> &Coordinates {
         &self.0
@@ -132,6 +145,13 @@ mod tests {
     #[test]
     fn representations_agree() {
         shared::check_representations::<G1>();
+    }
+
+    #[test]
+    fn endomorphism_multiplies_by_eigenvalue() {
+        // -x^2 for the curve parameter x.
+        let [low, high] = crate::group::scalar::X_SQUARED;
+        shared::check_endomorphism::<G1>(-Scalar::from_words([low, high, 0, 0]).unwrap());
     }
 
     #[test]
