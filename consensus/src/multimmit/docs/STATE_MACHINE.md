@@ -27,10 +27,9 @@ Protocol terms follow the specification.
   signed header naming an opaque application commitment.
 - **Leader block:** the scheduled leader's proposal for one view: one anchored path per producer
   chain and the next tip commitment.
-- **DA (data availability):** a validator's DA vote is a DA-role attestation (a threshold share in
-  the BLS suites) asserting that it holds and validated a producer block. A DA quorum of votes forms
-  a DA certificate for that chain position: `n - 2f` by default, or `n - f` when certificates bind
-  (`DaQuorum::Binding`).
+- **DA (data availability):** a validator's DA vote is a DA-role attestation (a threshold share, or
+  an ordinary-key signature under the aggregate DA role, in the BLS suites) asserting that it holds
+  and validated a producer block. `n - 2f` votes form a DA certificate for that chain position.
 - **Certified anchor:** a producer chain's highest DA-certified block.
 - **d:** pipeline depth (`pipeline_depth`), set per chain, the longest proposal path on that chain.
   `d = 0` makes the chain certified-only: proposals name its highest held DA certificate and
@@ -70,11 +69,14 @@ Protocol terms follow the specification.
   and reconstructible after a crash. Marshal body custody is a separate mechanism.
 - **Chain plane:** the voter task that validates one producer chain's blocks and offers its
   eligible DA-vote runs. Each validator runs one per producer chain.
-- **DA recovery task:** a task that pools one chain's DA shares and assembles its certificates.
-  A producer runs one for its own chain, and every validator runs one per receipt chain.
-- **Receipt chain:** a chain with `d = 0` and `e = 0` under binding DA certificates
-  (`Parameters::receipt_chain`). Its certificates are binding inclusion receipts once a correct
-  validator holds one, and every validator recovers a correct producer's certificates itself.
+- **DA recovery task:** the task that pools a producer's own chain's DA shares and assembles its
+  certificates, and on a payment chain its receipts.
+- **Payment chain:** a chain with `d = 0` and `e = 0` in an epoch with payments on
+  (`Parameters::payment_chain`). It places only certified blocks, goes first in the ordering sweep,
+  and its producer forms receipts.
+- **Receipt:** a DA certificate counting at least `n - f` signers, which a payment chain's producer
+  assembles after the block's `n - 2f` certificate. It needs DA certificates that reveal their
+  signers (`scheme::bls12381::Aggregate`, Ed25519).
 - **Network plane:** one of the engine's network channels, distinct from a chain plane.
 
 ## Canonical state
@@ -391,20 +393,23 @@ claims do not enter it.
 5. In increasing height order, Core reserves at most one DA vote per `(chain, height)`, and never
    across a gap, an unavailable predecessor, or beyond the chain's pipeline window above the
    certified anchor.
-6. The choice is staged durably before threshold-share signing. The share is exposed only after its
-   covering prefix is acknowledged and is sent only to the producer that owns the chain, or, on a
-   receipt chain, to every validator.
+6. The choice is staged durably before DA signing. The share is exposed only after its covering
+   prefix is acknowledged and is sent only to the producer that owns the chain.
 7. The chain's DA recovery task pools the first share per participant and header. At a DA quorum
    of distinct shares it assembles the certificate on the shared strategy; a failed group check
    excludes the attributed signers and waits for a fresh quorum. The certificate returns to Core as
    `CryptoCompletion::DaCertificate`.
 8. Core admits the certificate durably (`Change::DaCertificateAdvanced`) and, on the chain it
-   produces, publishes it. A validator that recovered a receipt chain's certificate admits it
-   without a publication: every correct validator recovers a correct producer's certificate
-   itself, and forwarding hands an unplaced one to upcoming leaders. Core advances the certified
-   anchor monotonically, retires covered block and share publications and obsolete validation work,
-   sends the new anchor and choices to the chain plane, and then re-evaluates the next contiguous
-   suffix.
+   produces, publishes it. Core advances the certified anchor monotonically, retires covered block
+   and share publications and obsolete validation work, sends the new anchor and choices to the
+   chain plane, and then re-evaluates the next contiguous suffix.
+9. On a payment chain the recovery task keeps the pool of a header it certified once the anchor
+   passes it, for the chain's pipeline window of certified heights, and keeps admitting the late
+   shares Core still forwards. At `n - f` distinct shares it assembles a receipt, a DA certificate
+   counting those signers, and the voter reports it as `Activity::Receipt`. Receipts are volatile
+   and best effort: a restart drops the pools, a share lost after its signer recorded the
+   certificate is not re-sent, and a validator that records a block's certificate before voting for
+   it no longer votes for it.
 
 These rules implement the specification's one-vote-per-height, contiguous-path, and depth-`d` DA
 conditions without moving signing authority into the chain plane.
@@ -413,14 +418,12 @@ conditions without moving signing authority into the chain plane.
 
 A certified-only chain's (`d = 0`) proposals place it only through a DA certificate the leader
 holds, and with `e = 0` no vote extension places anything above it either, so a producer that
-withholds its certificate from leaders would stall the chain. On a receipt chain
-every correct validator recovers a correct producer's certificate itself; forwarding then covers a
-leader that missed the shares it needs. Forwarding is also what makes a receipt bind: a height has
-at most one binding certificate (two `n - f` quorums share at least `2f + 1` correct
-validators), and once any correct validator holds it, forwarding delivers it to leaders until a
-proposal places it. An equivocating producer can complete a quorum with its own share and withhold
-the certificate, leaving correct validators a share short, so a client holding a receipt must
-deliver it to a correct validator.
+withholds its certificate from leaders would stall the chain. A correct producer broadcasts each
+certificate it assembles; forwarding covers a leader that missed it. Once any correct validator
+holds a certificate, forwarding delivers it to leaders until a proposal places it. A payment
+chain's producer that forms a receipt but withholds the certificate leaves its block unplaced until
+the certificate reaches a correct validator: a receipt verifies as a certificate, so its holder can
+deliver it. The specification's epoch close, which would also place it, is not implemented.
 
 1. On each view advance, Core reads each certified-only chain's tip in the anchor the new view's
    proposals build on, and its highest held certificate above that tip.
@@ -444,7 +447,7 @@ deliver it to a correct validator.
 
 A node never forwards a certificate of the chain it produces: that certificate leaves only through
 the producer's durable publication, which retries until a later certificate supersedes it. A node
-therefore forwards only certificates it received, or recovered as a non-producer on a receipt chain.
+therefore forwards only certificates it received.
 Those are already public and authorize nothing, so forwarding is volatile: it needs no durable
 record, and a lost send is repeated at a later view entry.
 
@@ -745,13 +748,11 @@ derives every remaining ceiling before startup.
   and the newest held DA certificate. A chain position keeps at most two verified blocks, and the
   derived remote cache partition holds every chain's full window of them while `w <= W + 13`; a
   chain whose window is widened past both `W + 13` and `max(d, 1)` adds the slots beyond them to
-  the partition. Only the validators that recover a chain's certificates keep its DA votes, the
-  producer and, on a receipt chain, every validator: above the durable tip, one per signer for a
-  header it holds a verified block for. Rejected traffic is republished until certified.
-- The DA recovery tasks of receipt chains this node does not produce share one fair permit pool
-  sized to the widest such window, so at most that many receipt-chain assemblies run at once. The
-  own-chain task is not bounded by it. Receipt chains still cost `O(n)` DA votes per height at
-  each validator, `O(n^2)` messages across the committee.
+  the partition. Only a chain's producer keeps its DA votes: above the durable tip, one per signer
+  for a header it holds a verified block for. Rejected traffic is republished until certified.
+- A payment chain's recovery task keeps at most two pipeline windows of headers' pools, one above
+  the anchor and one of certified headers awaiting receipts, each at most one share per signer.
+  Receipt assemblies share the task's recovery slots, after certificate assemblies.
 - Artifact, future-artifact, dependency-waiter, finality-pool, forwarded-certificate, and publication
   outbox counts use `ResourceLimits`; profile construction rejects a bound too small for its retained
   live set.
