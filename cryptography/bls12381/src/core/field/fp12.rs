@@ -265,27 +265,31 @@ impl<F> Fp12<F> {
         }
     }
 
-    /// Returns `self * rhs`, with Karatsuba's three products over `Fp6`, eighteen extension
-    /// products in all, or every product of two coefficients for [`Field::SCHOOLBOOK`].
+    /// Multiplies by `rhs` in place, with Karatsuba's three products over `Fp6`, eighteen
+    /// extension products in all, or every product of two coefficients for
+    /// [`Field::SCHOOLBOOK`].
     ///
-    /// Runs as its own kernel, so callers share one copy.
+    /// Runs as its own kernel, so callers share one copy, and replaces the value in place, so
+    /// that a chain of operations copies nothing.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn mul<S: Simd>(&self, simd: S, rhs: &Self) -> Self
+    pub fn mul<S: Simd>(&mut self, simd: S, rhs: &Self)
     where
         F: Field<S>,
     {
         simd.execute(
             #[inline(always)]
             move |simd: S| {
-                let (a, b) = (self, rhs);
-                if F::SCHOOLBOOK {
-                    return Self::mul_schoolbook(simd, a, b);
-                }
-                let t0 = a.c0.product(simd, &b.c0);
-                let t1 = a.c1.product(simd, &b.c1);
-                let a01 = a.c0.add(simd, a.c1).carry(simd);
-                let b01 = b.c0.add(simd, b.c1).carry(simd);
-                combine::<S, F>(simd, t0, t1, a01.product(simd, &b01))
+                let (a, b) = (&*self, rhs);
+                let product = if F::SCHOOLBOOK {
+                    Self::mul_schoolbook(simd, a, b)
+                } else {
+                    let t0 = a.c0.product(simd, &b.c0);
+                    let t1 = a.c1.product(simd, &b.c1);
+                    let a01 = a.c0.add(simd, a.c1).carry(simd);
+                    let b01 = b.c0.add(simd, b.c1).carry(simd);
+                    combine::<S, F>(simd, t0, t1, a01.product(simd, &b01))
+                };
+                *self = product;
             },
         )
     }
@@ -321,25 +325,28 @@ impl<F> Fp12<F> {
         ))
     }
 
-    /// Returns `self * self`: `c0^2 + v c1^2 + ((c0 + c1)^2 - c0^2 - c1^2) w`, with three
-    /// squarings over `Fp6`, or every product of two coefficients for [`Field::SCHOOLBOOK`].
+    /// Squares in place: `c0^2 + v c1^2 + ((c0 + c1)^2 - c0^2 - c1^2) w`, with three squarings over
+    /// `Fp6`, or every product of two coefficients for [`Field::SCHOOLBOOK`].
     ///
-    /// Runs as its own kernel, so callers share one copy.
+    /// Runs as its own kernel, so callers share one copy, and replaces the value in place.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn square<S: Simd>(&self, simd: S) -> Self
+    pub fn square<S: Simd>(&mut self, simd: S)
     where
         F: Field<S>,
     {
         simd.execute(
             #[inline(always)]
             move |simd: S| {
-                if F::SCHOOLBOOK {
-                    return Self::square_schoolbook(simd, self);
-                }
-                let t0 = self.c0.square_product(simd);
-                let t1 = self.c1.square_product(simd);
-                let sum = self.c0.add(simd, self.c1).carry(simd);
-                combine::<S, F>(simd, t0, t1, sum.square_product(simd))
+                let a = &*self;
+                let square = if F::SCHOOLBOOK {
+                    Self::square_schoolbook(simd, a)
+                } else {
+                    let t0 = a.c0.square_product(simd);
+                    let t1 = a.c1.square_product(simd);
+                    let sum = a.c0.add(simd, a.c1).carry(simd);
+                    combine::<S, F>(simd, t0, t1, sum.square_product(simd))
+                };
+                *self = square;
             },
         )
     }
@@ -386,14 +393,14 @@ impl<F> Fp12<F> {
         ))
     }
 
-    /// Returns the product of `self` and the line `l0 + l2 w^2 + l3 w^3`, given `[l0, l2, l3]`.
+    /// Multiplies in place by the line `l0 + l2 w^2 + l3 w^3`, given `[l0, l2, l3]`.
     ///
     /// As an element, the line is `(l0 + l2 v) + l3 v w`, so Karatsuba's products over `Fp6` are
     /// sparse: thirteen extension products in all, or eighteen for [`Field::SCHOOLBOOK`]. Every
     /// line component must have limb bound `1` and integer bound at most [`LINE_BOUND`].
-    /// Runs as its own kernel, so callers share one copy.
+    /// Runs as its own kernel, so callers share one copy, and replaces the value in place.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn mul_by_line<S: Simd>(&self, simd: S, line: &[Fp2<F>; 3]) -> Self
+    pub fn mul_by_line<S: Simd>(&mut self, simd: S, line: &[Fp2<F>; 3])
     where
         F: Field<S>,
     {
@@ -401,14 +408,17 @@ impl<F> Fp12<F> {
             #[inline(always)]
             move |simd: S| {
                 let [l0, l2, l3] = *line;
-                if F::SCHOOLBOOK {
-                    return Self::mul_by_line_schoolbook(simd, self, [l0, l2, l3]);
-                }
-                let t0 = self.c0.product_by_01(simd, l0, l2);
-                let t1 = self.c1.product_by_1(simd, l3);
-                let sum = self.c0.add(simd, self.c1).carry(simd);
-                let l23 = l2.add(simd, l3).carry(simd);
-                combine::<S, F>(simd, t0, t1, sum.product_by_01(simd, l0, l23))
+                let a = &*self;
+                let product = if F::SCHOOLBOOK {
+                    Self::mul_by_line_schoolbook(simd, a, [l0, l2, l3])
+                } else {
+                    let t0 = a.c0.product_by_01(simd, l0, l2);
+                    let t1 = a.c1.product_by_1(simd, l3);
+                    let sum = a.c0.add(simd, a.c1).carry(simd);
+                    let l23 = l2.add(simd, l3).carry(simd);
+                    combine::<S, F>(simd, t0, t1, sum.product_by_01(simd, l0, l23))
+                };
+                *self = product;
             },
         )
     }
@@ -442,7 +452,7 @@ impl<F> Fp12<F> {
         ))
     }
 
-    /// Returns `self^2` for `self` in the cyclotomic subgroup, where `self^(p^6 + 1) = 1`.
+    /// Squares in place an element of the cyclotomic subgroup, where `self^(p^6 + 1) = 1`.
     ///
     /// This is the squaring of Granger and Scott, "Faster squaring in the cyclotomic subgroup of
     /// sixth degree extensions" (2010), on the pairs of coefficients of `w^k` and `w^(k + 3)`,
@@ -450,39 +460,51 @@ impl<F> Fp12<F> {
     /// times a part of the square of such a pair, plus or minus twice an input coefficient. That
     /// takes nine extension squarings, or six squarings and six products accumulated as they form
     /// for [`Field::SCHOOLBOOK`]. The result is unspecified outside the subgroup.
-    /// Runs as its own kernel, so callers share one copy.
+    /// Runs as its own kernel, so callers share one copy, and replaces the value in place.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn cyclotomic_square<S: Simd>(&self, simd: S) -> Self
+    pub fn cyclotomic_square<S: Simd>(&mut self, simd: S)
     where
         F: Field<S>,
     {
         simd.execute(
             #[inline(always)]
             move |simd: S| {
-                if F::SCHOOLBOOK {
-                    return Self::cyclotomic_square_schoolbook(simd, self);
-                }
-                // The coefficients a0, ..., a5 of 1, w, ..., w^5.
-                let (a0, a1, a2) = (self.c0.c0, self.c1.c0, self.c0.c1);
-                let (a3, a4, a5) = (self.c1.c1, self.c0.c2, self.c1.c2);
-                let (real03, imaginary03) = square_pair::<S, F>(simd, a0, a3);
-                let (real14, imaginary14) = square_pair::<S, F>(simd, a1, a4);
-                let (real25, imaginary25) = square_pair::<S, F>(simd, a2, a5);
-                let imaginary25 = Fp2::<F>::product_mul_by_nonresidue(simd, imaginary25);
-                from_coefficients(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
-                    simd,
-                    #[inline(always)]
-                    |k| match k {
-                        0 => three_times::<S, F, false>(simd, real03, a0),
-                        1 => three_times::<S, F, false>(simd, real14, a2),
-                        2 => three_times::<S, F, false>(simd, real25, a4),
-                        3 => three_times::<S, F, true>(simd, imaginary25, a1),
-                        4 => three_times::<S, F, true>(simd, imaginary03, a3),
-                        _ => three_times::<S, F, true>(simd, imaginary14, a5),
-                    },
-                ))
+                let a = &*self;
+                let square = if F::SCHOOLBOOK {
+                    Self::cyclotomic_square_schoolbook(simd, a)
+                } else {
+                    Self::cyclotomic_square_pairs(simd, a)
+                };
+                *self = square;
             },
         )
+    }
+
+    /// Returns the cyclotomic square of `a` from the squares of its three pairs.
+    #[inline(always)]
+    fn cyclotomic_square_pairs<S: Simd>(simd: S, a: &Self) -> Self
+    where
+        F: Field<S>,
+    {
+        // The coefficients a0, ..., a5 of 1, w, ..., w^5.
+        let (a0, a1, a2) = (a.c0.c0, a.c1.c0, a.c0.c1);
+        let (a3, a4, a5) = (a.c1.c1, a.c0.c2, a.c1.c2);
+        let (real03, imaginary03) = square_pair::<S, F>(simd, a0, a3);
+        let (real14, imaginary14) = square_pair::<S, F>(simd, a1, a4);
+        let (real25, imaginary25) = square_pair::<S, F>(simd, a2, a5);
+        let imaginary25 = Fp2::<F>::product_mul_by_nonresidue(simd, imaginary25);
+        from_coefficients(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
+            simd,
+            #[inline(always)]
+            |k| match k {
+                0 => three_times::<S, F, false>(simd, real03, a0),
+                1 => three_times::<S, F, false>(simd, real14, a2),
+                2 => three_times::<S, F, false>(simd, real25, a4),
+                3 => three_times::<S, F, true>(simd, imaginary25, a1),
+                4 => three_times::<S, F, true>(simd, imaginary03, a3),
+                _ => three_times::<S, F, true>(simd, imaginary14, a5),
+            },
+        ))
     }
 
     /// Returns the cyclotomic square of `a` with every product accumulated into its output as it
@@ -653,9 +675,10 @@ impl<F> Fp12<F> {
                 let mut count = F::LANES;
                 while count > 1 {
                     let half = count.div_ceil(2);
-                    let low = Self::load(simd, &lanes[..half], &ONE);
+                    let mut low = Self::load(simd, &lanes[..half], &ONE);
                     let high = Self::load(simd, &lanes[half..count], &ONE);
-                    low.mul(simd, &high).store(simd, &mut lanes[..half]);
+                    low.mul(simd, &high);
+                    low.store(simd, &mut lanes[..half]);
                     count = half;
                 }
                 Self::load(simd, &[], &lanes[0])
@@ -1069,19 +1092,27 @@ pub(crate) mod tests {
     }
 
     fn mul<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        x.a.mul(simd, &x.b)
+        let mut y = x.a;
+        y.mul(simd, &x.b);
+        y
     }
 
     fn square<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        x.a.square(simd)
+        let mut y = x.a;
+        y.square(simd);
+        y
     }
 
     fn mul_by_line<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        x.a.mul_by_line(simd, &x.line)
+        let mut y = x.a;
+        y.mul_by_line(simd, &x.line);
+        y
     }
 
     fn cyclotomic_square<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        x.c.cyclotomic_square(simd)
+        let mut y = x.c;
+        y.cyclotomic_square(simd);
+        y
     }
 
     fn conjugate<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
@@ -1102,9 +1133,12 @@ pub(crate) mod tests {
         let coefficients = Fp12::<F>::frobenius_coefficients(simd);
         let mut y = x.a;
         for _ in 0..ROUNDS {
-            y = check_bound(simd, y.mul(simd, &x.b));
-            y = check_bound(simd, y.square(simd));
-            y = check_bound(simd, y.mul_by_line(simd, &x.line));
+            y.mul(simd, &x.b);
+            y = check_bound(simd, y);
+            y.square(simd);
+            y = check_bound(simd, y);
+            y.mul_by_line(simd, &x.line);
+            y = check_bound(simd, y);
             y = check_bound(simd, y.conjugate(simd));
             y = check_bound(simd, y.frobenius(simd, &coefficients));
             y = check_bound(simd, y.invert(simd));
@@ -1115,7 +1149,8 @@ pub(crate) mod tests {
     fn cyclotomic_chain<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
         let mut y = x.c;
         for _ in 0..SQUARINGS {
-            y = check_bound(simd, y.cyclotomic_square(simd).conjugate(simd));
+            y.cyclotomic_square(simd);
+            y = check_bound(simd, y.conjugate(simd));
         }
         y
     }

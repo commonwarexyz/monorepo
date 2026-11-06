@@ -122,7 +122,7 @@ pub fn miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<F> 
     };
     let mut product = shared_miller_loop(simd, first);
     for chunk in chunks {
-        product = product.mul(simd, &shared_miller_loop(simd, chunk));
+        product.mul(simd, &shared_miller_loop(simd, chunk));
     }
     product
 }
@@ -140,38 +140,32 @@ fn shared_miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<
     // The bits of |z| below the leading one. The first square of one is skipped.
     for bit in (0..63).rev() {
         if bit != 62 {
-            f = f.square(simd);
+            f.square(simd);
         }
         for (point, pair) in points.iter_mut().zip(pairs) {
-            let (doubled, line) = double_step(simd, *point, pair);
-            f = f.mul_by_line(simd, &line);
-            *point = doubled;
+            let line = double_step(simd, point, pair);
+            f.mul_by_line(simd, &line);
         }
         if (Z >> bit) & 1 == 1 {
             for (point, pair) in points.iter_mut().zip(pairs) {
-                let (sum, line) = add_step(simd, *point, pair);
-                f = f.mul_by_line(simd, &line);
-                *point = sum;
+                let line = add_step(simd, point, pair);
+                f.mul_by_line(simd, &line);
             }
         }
     }
     f.conjugate(simd)
 }
 
-/// Doubles `t` and returns the line tangent at it, evaluated at the pair's G1 point.
+/// Doubles `t` in place and returns the line tangent at it, evaluated at the pair's G1 point.
 ///
 /// With the curve equation, `3 x^3 - 2 y^2 z` becomes `z (y^2 - 3b z^2)`, and scaling the tangent by
 /// `-2 y z^2 / z` leaves `[3b z^2 - y^2, 3 x^2 xp, -2 y z yp]`. The point is [`Point::double`]'s,
 /// whose stages the line's values join: `x^2` reduces with the first stage and the last two
 /// coefficients with the coordinates.
-/// Runs as its own kernel, so callers share one copy.
+/// Runs as its own kernel, so callers share one copy, and replaces the point in place, so that
+/// the loop copies nothing.
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn double_step<S: Simd, F: Field<S>>(
-    simd: S,
-    t: Point<F>,
-    pair: &Pair<F>,
-) -> (Point<F>, [Fp2<F>; 3]) {
-    let pair = *pair;
+fn double_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> [Fp2<F>; 3] {
     simd.execute(
         #[inline(always)]
         move |simd: S| {
@@ -204,20 +198,20 @@ fn double_step<S: Simd, F: Field<S>>(
                     }
                 },
             );
-            (Point { x, y, z }, [l0, l2, l3])
+            *t = Point { x, y, z };
+            [l0, l2, l3]
         },
     )
 }
 
-/// Adds the pair's G2 point to `t` and returns the line through them, evaluated at the pair's G1
-/// point.
+/// Adds the pair's G2 point to `t` in place and returns the line through them, evaluated at the
+/// pair's G1 point.
 ///
 /// The line is `[qx y - qy x, (qy z - y) xp, -(qx z - x) yp]` and the point is [`Point::add`]'s,
 /// whose second stage the line's first products join.
-/// Runs as its own kernel, so callers share one copy.
+/// Runs as its own kernel, so callers share one copy, and replaces the point in place.
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn add_step<S: Simd, F: Field<S>>(simd: S, t: Point<F>, pair: &Pair<F>) -> (Point<F>, [Fp2<F>; 3]) {
-    let pair = *pair;
+fn add_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> [Fp2<F>; 3] {
     simd.execute(
         #[inline(always)]
         move |simd: S| {
@@ -227,7 +221,7 @@ fn add_step<S: Simd, F: Field<S>>(simd: S, t: Point<F>, pair: &Pair<F>) -> (Poin
                 t.z.ready::<1, S>(simd),
             );
             let (qx, qy) = (pair.q.x, pair.q.y);
-            let first = Addition::new(simd, t, pair.q);
+            let first = Addition::new(simd, *t, pair.q);
             let first = Fp2::<F>::reduce_each::<6, 12, S>(
                 simd,
                 #[cfg_attr(not(debug_assertions), inline(always))]
@@ -259,7 +253,8 @@ fn add_step<S: Simd, F: Field<S>>(simd: S, t: Point<F>, pair: &Pair<F>) -> (Poin
                     Fp2::<F>::difference::<1, S>(simd, factor.product_base(simd, scale))
                 },
             );
-            (Point { x: sx, y: sy, z: sz }, [l0, l2, l3])
+            *t = Point { x: sx, y: sy, z: sz };
+            [l0, l2, l3]
         },
     )
 }
@@ -272,31 +267,37 @@ fn add_step<S: Simd, F: Field<S>>(simd: S, t: Point<F>, pair: &Pair<F>) -> (Poin
 pub fn final_exponentiation<S: Simd, F: Field<S>>(simd: S, f: Fp12<F>) -> Fp12<F> {
     let coefficients = Fp12::<F>::frobenius_coefficients(simd);
     // The easy part: f^((p^6 - 1) (p^2 + 1)) lies in the cyclotomic subgroup.
-    let easy = f.conjugate(simd).mul(simd, &f.invert(simd));
-    let easy = easy
+    let mut inverse = f.conjugate(simd);
+    inverse.mul(simd, &f.invert(simd));
+    let mut easy = inverse
         .frobenius(simd, &coefficients)
-        .frobenius(simd, &coefficients)
-        .mul(simd, &easy);
+        .frobenius(simd, &coefficients);
+    easy.mul(simd, &inverse);
 
-    let y0 = easy.cyclotomic_square(simd);
-    let y1 = raise_to_z(simd, y0);
+    let mut y0 = easy;
+    y0.cyclotomic_square(simd);
+    let mut y1 = raise_to_z(simd, y0);
     let y2 = raise_to_half_z(simd, y1);
-    let y1 = y1.mul(simd, &easy.conjugate(simd)).conjugate(simd);
-    let y1 = y1.mul(simd, &y2);
+    y1.mul(simd, &easy.conjugate(simd));
+    let mut y1 = y1.conjugate(simd);
+    y1.mul(simd, &y2);
     let y2 = raise_to_z(simd, y1);
-    let y3 = raise_to_z(simd, y2);
-    let y3 = y3.mul(simd, &y1.conjugate(simd));
-    let y1 = y1
+    let mut y3 = raise_to_z(simd, y2);
+    y3.mul(simd, &y1.conjugate(simd));
+    let mut y1 = y1
         .frobenius(simd, &coefficients)
         .frobenius(simd, &coefficients)
         .frobenius(simd, &coefficients);
     let y2 = y2
         .frobenius(simd, &coefficients)
         .frobenius(simd, &coefficients);
-    let y1 = y1.mul(simd, &y2);
-    let y2 = raise_to_z(simd, y3).mul(simd, &y0).mul(simd, &easy);
-    let y1 = y1.mul(simd, &y2);
-    y1.mul(simd, &y3.frobenius(simd, &coefficients))
+    y1.mul(simd, &y2);
+    let mut y2 = raise_to_z(simd, y3);
+    y2.mul(simd, &y0);
+    y2.mul(simd, &easy);
+    y1.mul(simd, &y2);
+    y1.mul(simd, &y3.frobenius(simd, &coefficients));
+    y1
 }
 
 /// Returns `a^(z / 2)` for `a` in the cyclotomic subgroup.
@@ -305,9 +306,9 @@ fn raise_to_half_z<S: Simd, F: Field<S>>(simd: S, a: Fp12<F>) -> Fp12<F> {
     // sign of z.
     let mut result = a;
     for bit in (0..62).rev() {
-        result = result.cyclotomic_square(simd);
+        result.cyclotomic_square(simd);
         if (HALF_Z >> bit) & 1 == 1 {
-            result = result.mul(simd, &a);
+            result.mul(simd, &a);
         }
     }
     result.conjugate(simd)
@@ -315,7 +316,9 @@ fn raise_to_half_z<S: Simd, F: Field<S>>(simd: S, a: Fp12<F>) -> Fp12<F> {
 
 /// Returns `a^z` for `a` in the cyclotomic subgroup.
 fn raise_to_z<S: Simd, F: Field<S>>(simd: S, a: Fp12<F>) -> Fp12<F> {
-    raise_to_half_z(simd, a).cyclotomic_square(simd)
+    let mut result = raise_to_half_z(simd, a);
+    result.cyclotomic_square(simd);
+    result
 }
 
 #[cfg(test)]
@@ -627,7 +630,12 @@ mod tests {
             y: widen(pair.q.y),
             z: widen(pair.q.z),
         };
-        for (point, line) in [double_step(simd, t, &pair), add_step(simd, t, &pair)] {
+        let (mut doubled, mut sum) = (t, t);
+        let steps = [
+            (double_step(simd, &mut doubled, &pair), doubled),
+            (add_step(simd, &mut sum, &pair), sum),
+        ];
+        for (line, point) in steps {
             for coordinate in [point.x, point.y, point.z] {
                 coordinate.neg::<{ g2::BOUND + 1 }, S>(simd);
             }
