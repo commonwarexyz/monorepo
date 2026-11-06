@@ -424,6 +424,13 @@ impl<F> Fp2<F> {
     }
 
     /// Returns `self * self`, under the requirements of [`Self::square_product`].
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Completes the documented arithmetic, which the tests check."
+        )
+    )]
     #[inline(always)]
     pub fn square<const K: u64, S: Simd>(self, simd: S) -> Self
     where
@@ -647,6 +654,85 @@ impl<F> Fp2<F> {
             |i| {
                 if i % 2 == 0 {
                     let Fp2 { c0, c1 } = product(i / 2);
+                    imaginary = Some(c1);
+                    c0
+                } else {
+                    imaginary.take().expect("the real component comes first")
+                }
+            },
+        );
+        let mut reduced = [Self {
+            c0: components[0],
+            c1: components[1],
+        }; N];
+        unroll::<N>(
+            #[inline(always)]
+            |k| {
+                reduced[k] = Self {
+                    c0: components[2 * k],
+                    c1: components[2 * k + 1],
+                };
+            },
+        );
+        reduced
+    }
+
+    /// Returns the difference of each component's signed sums, as one sum of products per
+    /// component, subtracting the negative sums once with the bias `K` as
+    /// [`Signed::difference`] does: reducing the result as [`Field::reduce`] does is
+    /// [`Self::reduce`] with the bias `K`.
+    #[inline(always)]
+    pub fn difference<const K: u64, S: Simd>(simd: S, product: Product<F, S>) -> Fp2<F::Product>
+    where
+        F: Field<S>,
+    {
+        Fp2 {
+            c0: product.c0.difference::<S, F, K>(simd),
+            c1: product.c1.difference::<S, F, K>(simd),
+        }
+    }
+
+    /// Returns `sum(0)`, ..., `sum(N - 1)`, each a difference from [`Self::difference`] reduced
+    /// as [`Field::reduce`] does, for their `C = 2 * N` components.
+    ///
+    /// Forms each sum once, in order. When [`Field::INTERLEAVE`] covers the `C` components, they
+    /// reduce in one call of [`Field::reduce_each`], so formulas reduce every independent value
+    /// of a stage at once, each with its own bias; otherwise each sum reduces right after it is
+    /// formed.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn reduce_each<const N: usize, const C: usize, S: Simd>(
+        simd: S,
+        mut sum: impl FnMut(usize) -> Fp2<F::Product>,
+    ) -> [Self; N]
+    where
+        F: Field<S>,
+    {
+        const { assert!(N > 0 && C == 2 * N) };
+        if C > F::INTERLEAVE {
+            let reduce = |sum: Fp2<F::Product>| Self {
+                c0: F::reduce(simd, sum.c0),
+                c1: F::reduce(simd, sum.c1),
+            };
+            let mut reduced = [reduce(sum(0)); N];
+            unroll::<N>(
+                #[inline(always)]
+                |k| {
+                    if k > 0 {
+                        reduced[k] = reduce(sum(k));
+                    }
+                },
+            );
+            return reduced;
+        }
+        // Components are requested in order, so each sum forms with its real component and
+        // holds its imaginary component for the next request.
+        let mut imaginary = None;
+        let components = F::reduce_each::<C>(
+            simd,
+            #[inline(always)]
+            |i| {
+                if i % 2 == 0 {
+                    let Fp2 { c0, c1 } = sum(i / 2);
                     imaginary = Some(c1);
                     c0
                 } else {
