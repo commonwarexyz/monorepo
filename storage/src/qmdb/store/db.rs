@@ -437,7 +437,7 @@ where
         let init_buffer = cfg.init_buffer;
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
         let op = log.read(*last_commit_loc).await?;
-        let inactivity_floor_loc = op.has_floor().expect("last op should be a commit");
+        let inactivity_floor_loc = op.inactivity_floor().expect("last op should be a commit");
 
         // Seed the bitmap so its pruned prefix matches the retained log boundary. Operations
         // below the inactivity floor are inactive.

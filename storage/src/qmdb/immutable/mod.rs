@@ -305,7 +305,7 @@ where
             // Read the floor from the last commit operation.
             let last_op = journal.journal.read(*last_commit_loc).await?;
             let inactivity_floor_loc = last_op
-                .has_floor()
+                .inactivity_floor()
                 .expect("last operation should be a commit with floor");
 
             // Replay the log from the inactivity floor to build the snapshot.

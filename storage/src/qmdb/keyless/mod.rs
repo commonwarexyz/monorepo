@@ -218,7 +218,7 @@ where
             );
             let op = journal.read(*last_commit_loc).await?;
             let inactivity_floor_loc = op
-                .has_floor()
+                .inactivity_floor()
                 .expect("last operation should be a commit with floor");
             (last_commit_loc, inactivity_floor_loc)
         };
