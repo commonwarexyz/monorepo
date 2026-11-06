@@ -205,7 +205,6 @@ impl<const RES: u64> Wheel<RES> {
     }
 
     /// Whether `slot` is resident.
-    #[cfg(test)]
     pub fn contains(&self, slot: u32) -> bool {
         self.links
             .get(slot as usize)
