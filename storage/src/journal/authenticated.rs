@@ -48,7 +48,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, ReadOptions, Spawner};
-use commonware_utils::NZU64;
+use commonware_utils::{NZU64, channel::mpsc};
 use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -66,7 +66,8 @@ pub(crate) use config::tests::low_resident_height;
 pub use config::{CacheConfig, Config};
 pub(crate) use frontier::Frontier;
 use metrics::Metrics;
-use tree::Tree;
+pub(crate) use tree::{Chunk, ChunkHasher};
+use tree::{ChunkPlan, Tree};
 
 /// Errors that can occur when interacting with an authenticated journal.
 #[derive(Error, Debug)]
@@ -881,19 +882,19 @@ where
     {
         let journal = Arc::new(Self::persist(self.journal, self.selected_end).await?);
 
-        // A reader sharing this task would starve the replay until it finished.
+        // A reader sharing this task would starve the replay until it finished. The replay's
+        // subtree tasks each hold a clone of `done` until they drop the journal, so `done_rx`
+        // closing means none of them holds it.
+        let (done, mut done_rx) = mpsc::channel::<()>(1);
         let replay = {
             let (journal, merkle, hasher) = (journal.clone(), self.merkle, self.hasher.clone());
             self.context
                 .dedicated()
-                .spawn(move |_| async move {
-                    let merkle = Journal::<F, E, C, H, S>::align(
-                        merkle,
-                        &journal,
-                        &hasher,
-                        APPLY_BATCH_SIZE,
-                    )
-                    .await;
+                .spawn(move |context| async move {
+                    let end = Location::new(journal.bounds().end);
+                    let merkle = merkle
+                        .replay_subtrees(context, &journal, &hasher, end, SUBTREE_HEIGHT, done)
+                        .await;
                     drop(journal);
                     merkle
                 })
@@ -902,12 +903,78 @@ where
         let value = match read(journal.clone()).await {
             Ok(value) => value,
             Err(error) => {
-                // Release the replay's clone of the journal before returning.
+                // Release every replay clone of the journal, its subtree tasks' included, before
+                // returning.
                 replay.abort().await;
+                while done_rx.recv().await.is_some() {}
                 return Err(error);
             }
         };
         let merkle = replay.join().await.map_err(JournalError::from);
+        let merkle = match merkle.map_err(Error::from).and_then(|merkle| merkle) {
+            Ok(merkle) => merkle,
+            Err(error) => {
+                while done_rx.recv().await.is_some() {}
+                return Err(error.into());
+            }
+        };
+        let journal = Arc::into_inner(journal).expect("read must drop every journal clone");
+        Ok((
+            Self::assemble(journal, merkle, self.frontier, self.hasher).await?,
+            value,
+        ))
+    }
+
+    /// Like [Self::finish_with], but `read` scans the selected operations for the journal. It must
+    /// hash every chunk of the [LeafSink] it receives and send them in order. A task of its own
+    /// appends them to the Merkle structure, so the operations are read and decoded once.
+    pub(crate) async fn finish_hashing<T, X, Fut>(
+        self,
+        read: impl FnOnce(Arc<C>, LeafSink<F, StandardHasher<H>>) -> Fut,
+    ) -> Result<(Journal<F, E, C, H, S>, T), X>
+    where
+        E: Spawner,
+        C: 'static,
+        Fut: Future<Output = Result<T, X>>,
+        X: From<Error<F>>,
+    {
+        let journal = Arc::new(Self::persist(self.journal, self.selected_end).await?);
+        let end = Location::new(journal.bounds().end);
+        let (tx, mut rx) = mpsc::channel(CHUNKS_IN_FLIGHT);
+        let sink = LeafSink {
+            plan: self.merkle.chunk_plan(end, SUBTREE_HEIGHT),
+            hasher: self.hasher.clone(),
+            tx,
+        };
+
+        // Append each chunk in order as the reader sends it.
+        let append = {
+            let (merkle, hasher) = (self.merkle, self.hasher.clone());
+            self.context
+                .dedicated()
+                .spawn(move |_| async move {
+                    let mut merkle = merkle;
+                    while let Some(chunk) = rx.recv().await {
+                        merkle = merkle.apply_chunk(&hasher, chunk).await?;
+                    }
+                    if merkle.leaves() != end {
+                        return Err(merkle::Error::DataCorrupted(
+                            "chunks ended before the journal",
+                        )
+                        .into());
+                    }
+                    Ok::<_, Error<F>>(merkle)
+                })
+                .abort_on_drop()
+        };
+        let value = match read(journal.clone(), sink).await {
+            Ok(value) => value,
+            Err(error) => {
+                append.abort().await;
+                return Err(error);
+            }
+        };
+        let merkle = append.join().await.map_err(JournalError::from);
         let merkle = merkle.map_err(Error::from)??;
         let journal = Arc::into_inner(journal).expect("read must drop every journal clone");
         Ok((
@@ -950,6 +1017,45 @@ where
 
 /// The number of items to apply to the Merkle structure in a single batch.
 const APPLY_BATCH_SIZE: NonZeroU64 = NZU64!(1 << 16);
+
+/// The height of the aligned subtrees a replay at initialization hashes whole, apart from the
+/// tree it appends them to. Small in tests, so ordinary logs span many subtrees.
+#[cfg(not(test))]
+const SUBTREE_HEIGHT: u32 = 17;
+#[cfg(test)]
+const SUBTREE_HEIGHT: u32 = 4;
+
+/// Chunks a [LeafSink] buffers ahead of the Merkle structure appending them.
+const CHUNKS_IN_FLIGHT: usize = 8;
+
+/// Where a reader that scans a recovering journal's operations sends them hashed, chunk by chunk,
+/// so the journal rebuilds its Merkle structure without reading them again. Only this crate
+/// creates and uses one.
+#[commonware_macros::stability(ALPHA)]
+pub struct LeafSink<F: Family, H: merkle::hasher::Hasher<F>> {
+    plan: ChunkPlan,
+    hasher: H,
+    tx: mpsc::Sender<Chunk<F, H::Digest>>,
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<F: Family, H: merkle::hasher::Hasher<F>> LeafSink<F, H> {
+    /// The chunks to scan, hash and send, in position order. Together they cover every operation
+    /// from the journal's pruning boundary to its end.
+    pub(crate) fn chunks(&self) -> impl Iterator<Item = Range<u64>> + Send + 'static {
+        self.plan.chunks()
+    }
+
+    /// A hasher for `chunk`, one of [Self::chunks].
+    pub(crate) fn chunk_hasher(&self, chunk: Range<u64>) -> ChunkHasher<F, H> {
+        self.plan.hasher(chunk, self.hasher.clone())
+    }
+
+    /// Send the next chunk's digests. Returns false if the journal no longer wants them.
+    pub(crate) async fn send(&self, chunk: Chunk<F, H::Digest>) -> bool {
+        self.tx.send(chunk).await.is_ok()
+    }
+}
 
 impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where

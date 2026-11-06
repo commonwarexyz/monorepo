@@ -26,7 +26,8 @@ use crate::{
 use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::{ReadOptions, telemetry::metrics::GaugeExt as _};
+use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner, telemetry::metrics::GaugeExt as _};
+use commonware_utils::channel::mpsc;
 use futures::{Stream, StreamExt as _, TryStreamExt as _, pin_mut, stream};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -40,6 +41,9 @@ const REPLAY_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 /// Regions filled concurrently by one request.
 const CONCURRENT_FILLS: usize = 8;
+
+/// Chunks a replay reads and hashes concurrently.
+const CONCURRENT_CHUNKS: usize = 8;
 
 /// Born nodes of one resident height at or past the boundary, in ordinal order.
 struct Level<D> {
@@ -93,6 +97,18 @@ impl<D: Copy> Resident<D> {
         end: Position<F>,
         node: impl Fn(Position<F>) -> Option<D>,
     ) -> Result<(), merkle::Error<F>> {
+        self.extend_with(end, |height, ordinal| {
+            let pos = F::subtree_root_position(Location::new(ordinal << height), height);
+            node(pos).ok_or(merkle::Error::MissingNode(pos))
+        })
+    }
+
+    /// Like [Self::extend], but `node` returns each digest by its height and ordinal.
+    fn extend_with<F: Family>(
+        &mut self,
+        end: Position<F>,
+        mut node: impl FnMut(u32, u64) -> Result<D, merkle::Error<F>>,
+    ) -> Result<(), merkle::Error<F>> {
         let born = born(end);
         for (index, (level, &to)) in self
             .levels
@@ -102,10 +118,7 @@ impl<D: Copy> Resident<D> {
         {
             let height = self.height + index as u32;
             for ordinal in level.end()..to {
-                let pos = F::subtree_root_position(Location::new(ordinal << height), height);
-                level
-                    .nodes
-                    .push_back(node(pos).ok_or(merkle::Error::MissingNode(pos))?);
+                level.nodes.push_back(node(height, ordinal)?);
             }
         }
         Ok(())
@@ -210,6 +223,218 @@ impl<F: Family> Encoded<F> {
             |h, (pos, range)| h.leaf_digest(*pos, &self.bytes[range.clone()]),
         )
     }
+}
+
+/// How a replay of the leaves in `range` splits into chunks. Most are whole aligned subtrees of
+/// `2^height` leaves, with partial chunks before the first and after the last.
+#[derive(Clone)]
+pub(crate) struct ChunkPlan {
+    range: Range<u64>,
+    height: u32,
+    /// The lowest height of a subtree's nodes that appending it reads. It is the resident height,
+    /// or the subtree root's if lower.
+    low: u32,
+}
+
+impl ChunkPlan {
+    /// The chunks, in position order.
+    pub(crate) fn chunks(&self) -> impl Iterator<Item = Range<u64>> + Send + 'static {
+        let (mut next, end, width) = (self.range.start, self.range.end, 1u64 << self.height);
+        std::iter::from_fn(move || {
+            (next < end).then(|| {
+                let stop = (next / width + 1).saturating_mul(width).min(end);
+                let chunk = next..stop;
+                next = stop;
+                chunk
+            })
+        })
+    }
+
+    /// A hasher for `chunk`, one of [Self::chunks].
+    pub(crate) fn hasher<F: Family, H: Hasher<F>>(
+        &self,
+        chunk: Range<u64>,
+        hasher: H,
+    ) -> ChunkHasher<F, H> {
+        let width = 1u64 << self.height;
+        ChunkHasher {
+            whole: chunk.start.is_multiple_of(width) && chunk.end - chunk.start == width,
+            leaves: Vec::with_capacity((chunk.end - chunk.start) as usize),
+            chunk,
+            height: self.height,
+            low: self.low,
+            hasher,
+            encoded: Vec::new(),
+        }
+    }
+}
+
+/// Hashes the operations of one replay chunk, given in position order.
+pub(crate) struct ChunkHasher<F: Family, H: Hasher<F>> {
+    chunk: Range<u64>,
+    /// Whether the chunk is a whole aligned subtree.
+    whole: bool,
+    height: u32,
+    low: u32,
+    hasher: H,
+    leaves: Vec<H::Digest>,
+    /// Scratch for each operation's encoding.
+    encoded: Vec<u8>,
+}
+
+impl<F: Family, H: Hasher<F>> ChunkHasher<F, H> {
+    /// Hash the chunk's next operation into its leaf.
+    pub(crate) fn push(&mut self, item: &impl Encode) {
+        let loc = Location::new(self.chunk.start + self.leaves.len() as u64);
+        self.encoded.clear();
+        item.write(&mut self.encoded);
+        let digest = self
+            .hasher
+            .leaf_digest(F::location_to_position(loc), &self.encoded);
+        self.leaves.push(digest);
+    }
+
+    /// The chunk's digests, once every operation in it has been pushed.
+    pub(crate) fn finish(self) -> Result<Chunk<F, H::Digest>, merkle::Error<F>> {
+        if self.leaves.len() as u64 != self.chunk.end - self.chunk.start {
+            return Err(merkle::Error::DataCorrupted(
+                "replay ended before its range",
+            ));
+        }
+        if !self.whole {
+            return Ok(Chunk::Leaves {
+                start: self.chunk.start,
+                digests: self.leaves,
+            });
+        }
+        let (start, height, low) = (self.chunk.start, self.height, self.low);
+
+        // The tree's peaks at the subtree's end that lie in it below `low`.
+        let end = F::location_to_position(Location::new(self.chunk.end));
+        let wanted: Vec<_> = F::peaks(end)
+            .filter(|&(pos, h)| h < low && *F::leftmost_leaf(pos, h) >= start)
+            .collect();
+
+        // Hash each height in place from the one below, keeping the rows from `low` up and the
+        // wanted peaks.
+        let mut level = self.leaves;
+        let mut rows = Vec::with_capacity((2usize << height >> low) - 1);
+        let mut peaks = Vec::with_capacity(wanted.len());
+        for h in 0..=height {
+            if h > 0 {
+                hash_level(&self.hasher, &mut level, start, h);
+            }
+            for &(pos, _) in wanted.iter().filter(|&&(_, peak)| peak == h) {
+                let index = (*F::leftmost_leaf(pos, h) - start) >> h;
+                peaks.push((pos, level[index as usize]));
+            }
+            if h >= low {
+                rows.extend_from_slice(&level);
+            }
+        }
+        Ok(Chunk::Subtree(SubtreeNodes {
+            start,
+            height,
+            low,
+            rows,
+            peaks,
+        }))
+    }
+}
+
+/// Replace `level`, the nodes of height `h - 1` of the aligned subtree whose first leaf is `start`,
+/// with the nodes of height `h`, hashing two at a time.
+fn hash_level<F: Family, H: Hasher<F>>(hasher: &H, level: &mut Vec<H::Digest>, start: u64, h: u32) {
+    let pos = |i: usize| F::subtree_root_position(Location::new(start + ((i as u64) << h)), h);
+    let count = level.len() / 2;
+    let mut i = 0;
+    while i + 1 < count {
+        let (a, b) = hasher.node_digest_pair([
+            (pos(i), &level[2 * i], &level[2 * i + 1]),
+            (pos(i + 1), &level[2 * i + 2], &level[2 * i + 3]),
+        ]);
+        level[i] = a;
+        level[i + 1] = b;
+        i += 2;
+    }
+    if i < count {
+        let digest = hasher.node_digest(pos(i), &level[2 * i], &level[2 * i + 1]);
+        level[i] = digest;
+    }
+    level.truncate(count);
+}
+
+/// The digests of one replay chunk, as the tree appends them.
+pub(crate) enum Chunk<F: Family, D> {
+    /// A whole aligned subtree.
+    Subtree(SubtreeNodes<F, D>),
+    /// The leaves of a partial chunk.
+    Leaves {
+        /// The chunk's first leaf.
+        start: u64,
+        digests: Vec<D>,
+    },
+}
+
+/// The nodes of one aligned subtree that appending it reads.
+pub(crate) struct SubtreeNodes<F: Family, D> {
+    /// The subtree's first leaf.
+    start: u64,
+    height: u32,
+    /// The lowest height in `rows`.
+    low: u32,
+    /// Every node from height `low` up to the root, one height after another.
+    rows: Vec<D>,
+    /// The tree's peaks at the subtree's end that lie in it below `low`.
+    peaks: Vec<(Position<F>, D)>,
+}
+
+impl<F: Family, D: Digest> SubtreeNodes<F, D> {
+    /// The node of height `h` whose leftmost leaf is `leaf`, born by the end of the subtree. A
+    /// born node outside the subtree is hashed from its children, which were born with it or
+    /// were peaks before the subtree, pinned in `mem`. `computed` holds the nodes hashed so far.
+    fn node(
+        &self,
+        mem: &Mem<F, D>,
+        hasher: &impl Hasher<F, Digest = D>,
+        computed: &mut BTreeMap<Position<F>, D>,
+        leaf: u64,
+        h: u32,
+    ) -> Result<D, merkle::Error<F>> {
+        let inside = h <= self.height && leaf >= self.start && leaf - self.start < 1 << self.height;
+        if inside && h >= self.low {
+            let width = 2u64 << self.height;
+            let slot = (width >> self.low) - (width >> h) + ((leaf - self.start) >> h);
+            return Ok(self.rows[slot as usize]);
+        }
+        let pos = F::subtree_root_position(Location::new(leaf), h);
+        if inside {
+            return self
+                .peaks
+                .iter()
+                .find(|&&(peak, _)| peak == pos)
+                .map(|&(_, digest)| digest)
+                .ok_or(merkle::Error::MissingNode(pos));
+        }
+        if let Some(digest) = computed.get(&pos).copied().or_else(|| mem.get_node(pos)) {
+            return Ok(digest);
+        }
+        if h == 0 {
+            return Err(merkle::Error::MissingNode(pos));
+        }
+        let left = self.node(mem, hasher, computed, leaf, h - 1)?;
+        let right = self.node(mem, hasher, computed, leaf + (1 << (h - 1)), h - 1)?;
+        let digest = hasher.node_digest(pos, &left, &right);
+        computed.insert(pos, digest);
+        Ok(digest)
+    }
+}
+
+/// A replay task's clone of the journal, and a clone of the replay's done sender that it drops
+/// only after the journal. Fields drop in declaration order.
+struct ChunkHold<C> {
+    journal: Arc<C>,
+    _done: mpsc::Sender<()>,
 }
 
 /// The Merkle digests of an authenticated journal. Only `mem` is shared with batches.
@@ -333,27 +558,212 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     }
 
     async fn apply_encoded<H>(
-        mut self,
+        self,
         hasher: &H,
         encoded: Encoded<F>,
     ) -> Result<Self, super::Error<F>>
     where
         H: Hasher<F, Digest = D> + 'static,
     {
-        self.metrics
-            .replayed_leaves
-            .inc_by(encoded.leaves.len() as u64);
+        let digests = {
+            let hasher = hasher.clone();
+            self.strategy
+                .spawn(encoded.leaves.len(), move |strategy| {
+                    encoded.hash(&strategy, &hasher)
+                })
+                .await
+        };
+        Ok(self.apply_digests(hasher, digests).await?)
+    }
+
+    /// Append leaves with `digests`, hashing their parents on the strategy.
+    async fn apply_digests<H>(
+        mut self,
+        hasher: &H,
+        digests: Vec<D>,
+    ) -> Result<Self, merkle::Error<F>>
+    where
+        H: Hasher<F, Digest = D> + 'static,
+    {
+        self.metrics.replayed_leaves.inc_by(digests.len() as u64);
         let mem = self.snapshot();
         let hasher = hasher.clone();
         let batch = self.new_batch();
         let batch = self
             .strategy
-            .spawn(encoded.leaves.len(), move |strategy| {
-                let digests = encoded.hash(&strategy, &hasher);
+            .spawn(digests.len(), move |_| {
                 batch.add_leaf_digests(digests).merkleize(&mem, &hasher)
             })
             .await;
         self = self.apply_batch(&batch)?;
+        self.flush();
+        Ok(self)
+    }
+
+    /// How a replay from the current size to `end` splits into chunks, with whole subtrees of
+    /// `2^height` leaves.
+    pub(crate) fn chunk_plan(&self, end: Location<F>, height: u32) -> ChunkPlan {
+        ChunkPlan {
+            range: *self.leaves()..*end,
+            height,
+            low: self.resident.height.min(height),
+        }
+    }
+
+    /// Append the next chunk of a replay that [Self::chunk_plan] planned.
+    pub(crate) async fn apply_chunk<H>(
+        self,
+        hasher: &H,
+        chunk: Chunk<F, D>,
+    ) -> Result<Self, merkle::Error<F>>
+    where
+        H: Hasher<F, Digest = D> + 'static,
+    {
+        match chunk {
+            Chunk::Subtree(subtree) => self.append_subtree(hasher, &subtree),
+            Chunk::Leaves { start, .. } if start != *self.leaves() => Err(
+                merkle::Error::DataCorrupted("chunk does not start at the end"),
+            ),
+            Chunk::Leaves { digests, .. } => self.apply_digests(hasher, digests).await,
+        }
+    }
+
+    /// Like [Self::replay], but the chunks of a [Self::chunk_plan] with subtrees of `2^height`
+    /// leaves are read and hashed on tasks of their own spawned from `context`, with
+    /// [CONCURRENT_CHUNKS] at once, and appended in order. Appending a whole subtree hashes only
+    /// the nodes above its root.
+    ///
+    /// Each task holds a clone of `done` until it drops its clone of `journal`, so once every
+    /// clone of `done` is dropped, no task still holds the journal, even after the replay is
+    /// aborted or fails.
+    pub(crate) async fn replay_subtrees<E, C, H>(
+        mut self,
+        context: E,
+        journal: &Arc<C>,
+        hasher: &H,
+        end: Location<F>,
+        height: u32,
+        done: mpsc::Sender<()>,
+    ) -> Result<Self, super::Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: EncodeShared> + 'static,
+        H: Hasher<F, Digest = D> + 'static,
+    {
+        if !end.is_valid()
+            || end < self.leaves()
+            || *end > journal.bounds().end
+            || *self.leaves() < journal.bounds().start
+        {
+            return Err(merkle::Error::RangeOutOfBounds(end).into());
+        }
+        let plan = self.chunk_plan(end, height);
+        let buffer = self.replay_buffer;
+        let mut chunks = plan.chunks();
+        let mut spawn_next = |pending: &mut VecDeque<AbortOnDrop<_>>| {
+            let Some(chunk) = chunks.next() else {
+                return;
+            };
+            let hold = ChunkHold {
+                journal: journal.clone(),
+                _done: done.clone(),
+            };
+            let chunk_hasher = plan.hasher(chunk.clone(), hasher.clone());
+            let task = context
+                .child("replay_chunk")
+                .dedicated()
+                .spawn(move |_| async move {
+                    Self::hash_chunk(&*hold.journal, chunk, chunk_hasher, buffer).await
+                });
+            pending.push_back(task.abort_on_drop());
+        };
+
+        // Hash chunks ahead of appending them, and append them in order.
+        let mut pending = VecDeque::with_capacity(CONCURRENT_CHUNKS);
+        for _ in 0..CONCURRENT_CHUNKS {
+            spawn_next(&mut pending);
+        }
+        while let Some(task) = pending.pop_front() {
+            let appended = match task.join().await {
+                Ok(Ok(chunk)) => {
+                    spawn_next(&mut pending);
+                    self.apply_chunk(hasher, chunk)
+                        .await
+                        .map_err(super::Error::from)
+                }
+                Ok(Err(error)) => Err(error),
+                Err(error) => Err(JournalError::from(error).into()),
+            };
+            match appended {
+                Ok(tree) => self = tree,
+                Err(error) => {
+                    // Join the rest, so none outlives the replay holding the journal.
+                    for task in pending {
+                        task.abort().await;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(self)
+    }
+
+    /// Read the operations in `chunk` and hash them with `hasher`.
+    async fn hash_chunk<C, H>(
+        journal: &C,
+        chunk: Range<u64>,
+        mut hasher: ChunkHasher<F, H>,
+        buffer: NonZeroUsize,
+    ) -> Result<Chunk<F, D>, super::Error<F>>
+    where
+        C: Contiguous<Item: EncodeShared>,
+        H: Hasher<F, Digest = D>,
+    {
+        let stream = journal
+            .replay(chunk, buffer, ReadOptions::DONT_CACHE)
+            .await?;
+        pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for item in batch?.items {
+                hasher.push(&item);
+            }
+        }
+        Ok(hasher.finish()?)
+    }
+
+    /// Append the aligned subtree at the current size. Only the nodes the tree keeps are read:
+    /// resident nodes and peaks born by the subtree's end, hashing the ones above its root.
+    fn append_subtree<H>(
+        mut self,
+        hasher: &H,
+        subtree: &SubtreeNodes<F, D>,
+    ) -> Result<Self, merkle::Error<F>>
+    where
+        H: Hasher<F, Digest = D>,
+    {
+        if subtree.start != *self.leaves() {
+            return Err(merkle::Error::DataCorrupted(
+                "chunk does not start at the end",
+            ));
+        }
+        let width = 1u64 << subtree.height;
+        let initial = self.size();
+        let leaves = Location::new(subtree.start + width);
+        let mut computed = BTreeMap::new();
+        let Self { mem, resident, .. } = &mut self;
+        resident.extend_with(F::location_to_position(leaves), |h, ordinal| {
+            subtree.node(mem, hasher, &mut computed, ordinal << h, h)
+        })?;
+        let peaks = F::nodes_to_pin(leaves)
+            .filter(|&pos| pos >= initial)
+            .map(|pos| {
+                let h = F::pos_to_height(pos);
+                let leaf = *F::leftmost_leaf(pos, h);
+                Ok((pos, subtree.node(mem, hasher, &mut computed, leaf, h)?))
+            })
+            .collect::<Result<Vec<_>, merkle::Error<F>>>()?;
+        Arc::make_mut(mem).skip_to(leaves, peaks)?;
+        self.metrics.replayed_leaves.inc_by(width);
         self.flush();
         Ok(self)
     }
@@ -650,7 +1060,9 @@ mod tests {
     };
     use commonware_cryptography::{Sha256, sha256::Digest as D};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{ReadOptions, Runner as _, deterministic, reschedule};
+    use commonware_runtime::{
+        ReadOptions, Runner as _, Supervisor as _, deterministic, reschedule,
+    };
     use commonware_utils::NZU64;
     use std::{
         ops::Range,
@@ -874,6 +1286,135 @@ mod tests {
     #[test]
     fn matches_oracle_mmb() {
         deterministic::Runner::default().start(matches_oracle::<mmb::Family>);
+    }
+
+    /// Replaying in aligned subtrees builds the same tree as replaying in batches: subtrees of
+    /// several heights, opened at boundaries on and off subtree edges, replayed to ends before, on,
+    /// and past them. Every node at or past the boundary matches an oracle.
+    async fn subtrees_match_batches<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
+        let total = 200;
+        let expected = oracle::<F>(&Operations::new(total), &hasher);
+        for subtree in [1, 2, 4] {
+            for resident in [0, 2, 5] {
+                for boundary in [0, 1, 5, 16, 17, 45] {
+                    for end in [boundary, boundary + 1, 16, 31, 64, 100, 129, total] {
+                        if end < boundary {
+                            continue;
+                        }
+                        let case = format!(
+                            "subtree {subtree}, resident {resident}, boundary {boundary}, end {end}"
+                        );
+                        let pins: Vec<_> = F::nodes_to_pin(Location::new(boundary))
+                            .map(|p| expected.get_node(p).unwrap())
+                            .collect();
+                        let ops = Arc::new(Operations::range(boundary..total));
+                        let open = || {
+                            Tree::new(
+                                Location::new(boundary),
+                                pins.clone(),
+                                &config(resident),
+                                Metrics::new(&context),
+                            )
+                            .unwrap()
+                        };
+                        let batched = open()
+                            .replay(&*ops, &hasher, Location::new(end), NZU64!(7))
+                            .await
+                            .unwrap();
+                        let (done, _done_rx) = mpsc::channel(1);
+                        let subtrees = open()
+                            .replay_subtrees(
+                                context.child("replay"),
+                                &ops,
+                                &hasher,
+                                Location::new(end),
+                                subtree,
+                                done,
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(subtrees.size(), batched.size(), "{case}");
+                        assert_eq!(
+                            subtrees.root(&hasher, 0).unwrap(),
+                            batched.root(&hasher, 0).unwrap(),
+                            "{case}"
+                        );
+                        assert_eq!(
+                            subtrees.mem().pinned_nodes(),
+                            batched.mem().pinned_nodes(),
+                            "{case}"
+                        );
+                        assert_eq!(subtrees.resident.len(), batched.resident.len(), "{case}");
+                        let first = *F::location_to_position(Location::new(boundary));
+                        let positions: Vec<_> =
+                            (first..*subtrees.size()).map(Position::new).collect();
+                        let got = subtrees
+                            .get_nodes(&*ops, &hasher, &positions)
+                            .await
+                            .unwrap();
+                        for (&pos, node) in positions.iter().zip(got) {
+                            assert_eq!(
+                                Some(node),
+                                expected.get_node(pos),
+                                "{case}, position {pos}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn subtrees_match_batches_mmr() {
+        deterministic::Runner::default().start(subtrees_match_batches::<mmr::Family>);
+    }
+    #[test]
+    fn subtrees_match_batches_mmb() {
+        deterministic::Runner::default().start(subtrees_match_batches::<mmb::Family>);
+    }
+
+    /// A chunk, whole or partial, that does not start at the tree's end is rejected.
+    async fn misplaced_chunks_are_rejected<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
+        let tree = Tree::<F, D, Sequential>::new(
+            Location::new(0),
+            Vec::new(),
+            &config(2),
+            Metrics::new(&context),
+        )
+        .unwrap();
+        let plan = tree.chunk_plan(Location::new(40), 4);
+        let chunks: Vec<_> = plan.chunks().collect();
+        assert_eq!(chunks, [0..16, 16..32, 32..40]);
+        for chunk in [16..32, 32..40] {
+            let mut chunk_hasher = plan.hasher::<F, _>(chunk.clone(), hasher.clone());
+            for loc in chunk {
+                chunk_hasher.push(&loc);
+            }
+            let chunk = chunk_hasher.finish().unwrap();
+            let tree = Tree::<F, D, Sequential>::new(
+                Location::new(0),
+                Vec::new(),
+                &config(2),
+                Metrics::new(&context),
+            )
+            .unwrap();
+            assert!(matches!(
+                tree.apply_chunk(&hasher, chunk).await,
+                Err(merkle::Error::DataCorrupted(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn misplaced_chunks_are_rejected_mmr() {
+        deterministic::Runner::default().start(misplaced_chunks_are_rejected::<mmr::Family>);
+    }
+    #[test]
+    fn misplaced_chunks_are_rejected_mmb() {
+        deterministic::Runner::default().start(misplaced_chunks_are_rejected::<mmb::Family>);
     }
 
     /// Appending up to the largest supported size matches an oracle, and rebuilding the regions

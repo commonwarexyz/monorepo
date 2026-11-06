@@ -311,22 +311,45 @@ where
         let snapshot_context = context.child("snapshot");
         let metrics = Metrics::new(context);
         let (concurrency, buffer, cache) = (cfg.init_concurrency, cfg.init_buffer, cfg.init_cache);
-        let (log, (index, active_keys, activity)) = pending
-            .finish_with(|journal| async move {
-                let mut index = index;
-                let (active_keys, activity) = index
-                    .build_snapshot(
-                        snapshot_context,
-                        floor,
-                        &journal,
-                        concurrency,
-                        buffer,
-                        cache,
-                    )
-                    .await?;
-                Ok::<_, QmdbError<F>>((index, active_keys, activity))
-            })
-            .await?;
+
+        // An index built on decode tasks also hashes the journal's operations there, so the log
+        // is read once. Others build alongside the journal's own replay.
+        let (log, (index, active_keys, activity)) = if index.hashes_leaves(concurrency, cache) {
+            pending
+                .finish_hashing(|journal, leaves| async move {
+                    let mut index = index;
+                    let (active_keys, activity) = index
+                        .build_snapshot_hashing(
+                            snapshot_context,
+                            floor,
+                            &journal,
+                            concurrency,
+                            buffer,
+                            cache,
+                            leaves,
+                        )
+                        .await?;
+                    Ok::<_, QmdbError<F>>((index, active_keys, activity))
+                })
+                .await?
+        } else {
+            pending
+                .finish_with(|journal| async move {
+                    let mut index = index;
+                    let (active_keys, activity) = index
+                        .build_snapshot(
+                            snapshot_context,
+                            floor,
+                            &journal,
+                            concurrency,
+                            buffer,
+                            cache,
+                        )
+                        .await?;
+                    Ok::<_, QmdbError<F>>((index, active_keys, activity))
+                })
+                .await?
+        };
         return db::Db::from_snapshot(log, index, floor, active_keys, &activity, bitmap, metrics);
     }
 

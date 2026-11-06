@@ -65,7 +65,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, Spawner};
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
 
@@ -188,7 +188,8 @@ where
         max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>>
     where
-        C: authenticated::Backing<E>,
+        E: Spawner,
+        C: authenticated::Backing<E> + 'static,
     {
         // Keyless restores commit fields without replaying a keyed snapshot, so its logical floor
         // may precede the retained operation prefix.
@@ -202,7 +203,10 @@ where
         let inactivity_floor_loc = crate::qmdb::validate_initialization(&pending, false)
             .await?
             .unwrap_or(Location::new(0));
-        let mut journal = pending.finish().await?;
+        // With no snapshot to build, the Merkle replay is all of initialization's work.
+        let (mut journal, ()) = pending
+            .finish_with(|_| async { Ok::<_, Error<F>>(()) })
+            .await?;
         let metrics = Metrics::new(context);
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
