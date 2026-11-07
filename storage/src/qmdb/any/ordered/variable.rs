@@ -9,7 +9,10 @@ use crate::{
     index::ordered::Index,
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::any::{self, ordered, value::VariableEncoding},
+    qmdb::{
+        any::{self, ordered},
+        value::VariableEncoding,
+    },
 };
 
 pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
@@ -55,6 +58,7 @@ pub mod partitioned {
     /// the number of prefix bytes used for partitioning:
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
+    /// - `P = 3`: ~16 million partitions
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
@@ -552,7 +556,7 @@ pub(crate) mod test {
             // Stage both keys through the parent. Each must resolve in the grandparent's diff.
             let read_keys = [key(0), key(100)];
             let keys: Vec<&Digest> = read_keys.iter().collect();
-            let (values, staged) = parent
+            let (staged, values) = parent
                 .new_batch::<Sha256>()
                 .stage(&keys, &db)
                 .await
@@ -654,7 +658,7 @@ pub(crate) mod test {
                 // other keys), so its staged read stays committed-resolved.
                 let read_keys = [key(0), key(100), key(1), key(3)];
                 let keys: Vec<&Digest> = read_keys.iter().collect();
-                let (values, staged) = parent
+                let (staged, values) = parent
                     .new_batch::<Sha256>()
                     .stage(&keys, &db)
                     .await
@@ -741,7 +745,7 @@ pub(crate) mod test {
 
     #[allow(dead_code)]
     fn assert_non_trait_futures_are_send(db: &mut AnyTest, key: Digest) {
-        is_send(db.get_all(&key));
+        is_send(db.get_with_next_key(&key));
         is_send(db.get_with_loc(&key));
         is_send(db.get_span(&key));
         let mut policy = Bounded {
@@ -750,7 +754,7 @@ pub(crate) mod test {
         };
         is_send(db.new_batch().merkleize_with(db, &mut policy));
         is_send(async move {
-            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            let (staged, _) = db.new_batch().stage(&[&key], db).await?;
             staged
                 .merkleize_with(vec![Slot::Keep], Vec::new(), db, &mut policy)
                 .await

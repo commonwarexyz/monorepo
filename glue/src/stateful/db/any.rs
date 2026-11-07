@@ -29,10 +29,10 @@ use commonware_storage::{
             initial_root,
             operation::{Operation, Update},
             ordered, unordered,
-            value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
         },
         operation::Key,
         sync::{self, Target as AnySyncTarget},
+        value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
     },
     translator::Translator,
 };
@@ -41,6 +41,7 @@ use commonware_utils::{
     channel::{mpsc, ring},
     non_empty_range,
 };
+use core::borrow::Borrow;
 use std::{
     ops::{Deref, Range},
     sync::Arc,
@@ -114,24 +115,27 @@ where
     /// Reads multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as `keys`.
-    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+    pub async fn get_many(
+        &self,
+        keys: &[impl Borrow<U::Key> + Sync],
+    ) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &db).await
     }
 
-    /// Reads multiple values and returns a staged batch for the same keys.
+    /// Reads multiple values and returns `(staged, values)` for the same keys.
     ///
     /// Returns results in the same order as `keys`.
     pub async fn stage(
         self,
-        keys: &[&U::Key],
-    ) -> Result<(Vec<Option<U::Value>>, AnyStaged<F, E, C, I, H, U, S>), Error<F>> {
+        keys: &[impl Borrow<U::Key> + Sync],
+    ) -> Result<(AnyStaged<F, E, C, I, H, U, S>, Vec<Option<U::Value>>), Error<F>> {
         let Self { batch, db } = self;
-        let (values, staged) = {
+        let (staged, values) = {
             let guard = db.read().await;
             batch.stage(keys, &guard).await?
         };
-        Ok((values, AnyStaged { staged, db }))
+        Ok((AnyStaged { staged, db }, values))
     }
 
     /// Records an upsert (`Some`) or a delete (`None`) of `key`.
@@ -242,7 +246,7 @@ where
         self.staged.is_empty()
     }
 
-    /// Expands this staged batch with more reads.
+    /// Expands this staged batch with more reads, returning `(self, range, values)`.
     ///
     /// Existing slots keep their positions. Newly read keys are appended to the staged read set
     /// and assigned the returned range of slots. Expansion does not deduplicate against previously
@@ -250,14 +254,14 @@ where
     /// passed to `merkleize`.
     pub async fn expand(
         self,
-        keys: &[&U::Key],
-    ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>> {
+        keys: &[impl Borrow<U::Key> + Sync],
+    ) -> Result<(Self, Range<usize>, Vec<Option<U::Value>>), Error<F>> {
         let Self { staged, db } = self;
-        let (range, values, staged) = {
+        let (staged, range, values) = {
             let guard = db.read().await;
             staged.expand(keys, &guard).await?
         };
-        Ok((range, values, Self { staged, db }))
+        Ok((Self { staged, db }, range, values))
     }
 }
 
@@ -353,7 +357,10 @@ where
     /// Reads multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as `keys`.
-    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+    pub async fn get_many(
+        &self,
+        keys: &[impl Borrow<U::Key> + Sync],
+    ) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get_many(keys, &db).await
     }
@@ -862,15 +869,14 @@ mod tests {
             }
 
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
-            let read_keys = [key(1), key(2), key(999)];
-            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let keys = [key(1), key(2), key(999)];
             let slots = vec![Slot::Put(val(1_000)), Slot::Delete, Slot::Put(val(1_001))];
             let unstaged = vec![(key(3), Some(val(1_002)))];
 
             // Explicit path.
             let mut explicit = db.new_batch_for_test::<_>().await;
             let explicit_values = explicit.get_many(&keys).await.unwrap();
-            for (key, slot) in read_keys.iter().zip(&slots) {
+            for (key, slot) in keys.iter().zip(&slots) {
                 let value = match slot {
                     Slot::Put(value) => Some(*value),
                     Slot::Delete => None,
@@ -890,8 +896,8 @@ mod tests {
             // Staged path, with metadata set on the staged handle.
             let staged_batch = db.new_batch_for_test::<_>().await;
             let split = 2;
-            let (mut staged_values, staged) = staged_batch.stage(&keys[..split]).await.unwrap();
-            let (range, suffix_values, staged) = staged.expand(&keys[split..]).await.unwrap();
+            let (staged, mut staged_values) = staged_batch.stage(&keys[..split]).await.unwrap();
+            let (staged, range, suffix_values) = staged.expand(&keys[split..]).await.unwrap();
             assert_eq!(range, split..keys.len());
             assert_eq!(staged.len(), keys.len());
             assert!(!staged.is_empty());
@@ -908,7 +914,7 @@ mod tests {
 
             // Metadata set before staging must be carried through to staged merkleize.
             let carried_batch = db.new_batch_for_test::<_>().await.with_metadata(metadata);
-            let (carried_values, staged) = carried_batch.stage(&keys).await.unwrap();
+            let (staged, carried_values) = carried_batch.stage(&keys.each_ref()).await.unwrap();
             let carried_root = staged
                 .merkleize(slots.clone(), unstaged.clone())
                 .await

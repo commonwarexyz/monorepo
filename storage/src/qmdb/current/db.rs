@@ -40,7 +40,7 @@ use commonware_utils::{
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
 };
-use core::num::NonZeroU64;
+use core::{borrow::Borrow, num::NonZeroU64};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
@@ -282,7 +282,7 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
             .field("bounds", &self.bounds())
-            .field("inactivity_floor_loc", &self.any.inactivity_floor_loc)
+            .field("inactivity_floor", &self.inactivity_floor())
             .finish_non_exhaustive()
     }
 }
@@ -301,9 +301,11 @@ where
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive.
-    #[cfg(any(test, feature = "test-traits"))]
-    pub(crate) const fn inactivity_floor_loc(&self) -> Location<F> {
-        self.any.inactivity_floor_loc()
+    ///
+    /// [`Self::prune`] and sync accept locations only up to [`Self::sync_boundary`], which can be
+    /// below this floor.
+    pub const fn inactivity_floor(&self) -> Location<F> {
+        self.any.inactivity_floor()
     }
 
     /// Whether the snapshot currently has no active keys.
@@ -322,7 +324,10 @@ where
     }
 
     /// Batch read multiple keys, returning results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+    pub async fn get_many(
+        &self,
+        keys: &[impl Borrow<U::Key> + Sync],
+    ) -> Result<Vec<Option<U::Value>>, Error<F>> {
         self.any.get_many(keys).await
     }
 
@@ -492,8 +497,10 @@ where
             .await
     }
 
-    /// Return the pinned nodes for a lower operation boundary of `loc`.
-    pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
+    /// Return ops-tree pinned nodes for a lower operation boundary of `loc`.
+    ///
+    /// These belong to the operations tree authenticated by [`Self::ops_root`].
+    pub async fn ops_pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
         self.any.pinned_nodes_at(loc).await
     }
 
@@ -1922,7 +1929,7 @@ mod tests {
         // Establish a durable state, then apply (but do not commit) a batch that advances the
         // in-memory floor well past the durable commit's floor.
         let db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
-        let durable_floor = db.inactivity_floor_loc();
+        let durable_floor = db.inactivity_floor();
         let keys: Vec<_> = (0..512u64)
             .map(|idx| Sha256::hash(&[&idx.to_be_bytes()]))
             .collect();
@@ -1968,7 +1975,7 @@ mod tests {
         }
         db.assert_exact().await;
         let bounds = db.bounds();
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         let root = db.root();
 
         // Drop the production prune future while it is parked after the metadata sync, before
@@ -1992,7 +1999,7 @@ mod tests {
             .await
             .expect("prune crash must leave the db recoverable");
         assert_eq!(db.bounds(), bounds);
-        assert_eq!(db.inactivity_floor_loc(), floor);
+        assert_eq!(db.inactivity_floor(), floor);
         assert_eq!(db.root(), root);
         assert!(db.any.bitmap.pruned_bits() > *durable_floor);
         for (key, value) in &expected {

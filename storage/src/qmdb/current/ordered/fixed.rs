@@ -8,14 +8,12 @@
 //! See [Db] for the main database type and
 //! [ExclusionProof](super::proof::constant::ExclusionProof) for proving key inactivity.
 
+pub use crate::qmdb::any::ordered::fixed::{Operation, Update};
 use crate::{
     index::ordered::Index,
     journal::contiguous::fixed::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::{
-        any::{ordered::fixed::Operation, value::FixedEncoding},
-        current,
-    },
+    qmdb::{current, value::FixedEncoding},
 };
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
@@ -34,9 +32,21 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 pub type Config<T, S> = current::Config<T, JournalConfig, S>;
 
 pub mod partitioned {
-    //! A variant of [super] that uses a partitioned index for the snapshot.
+    //! A variant of [super] that uses a partitioned index for the snapshot, dividing the key space
+    //! into `2^(P*8)` partitions. See [Any's counterpart] for when to use one.
+    //!
+    //! See [Db] for the generic type, or use the convenience aliases:
+    //! - [p256::Db] for 256 partitions (P=1)
+    //! - [p64k::Db] for 65,536 partitions (P=2)
+    //!
+    //! `p256` suits smaller datasets, but its partitions spill to a `BTreeMap` once the index holds
+    //! more than 130,816 entries (see [`crate::index::partitioned::ordered`]). Prefer `p64k` to
+    //! keep ordered access mostly inline at larger scale.
+    //!
+    //! [Any's counterpart]: crate::qmdb::any::ordered::fixed::partitioned
 
     use super::*;
+    pub use super::{Operation, Update};
     use crate::index::partitioned::ordered::Index;
     use core::num::NonZeroUsize;
 
@@ -61,6 +71,20 @@ pub mod partitioned {
 
     /// Configuration for a [Db].
     pub type Config<T, S> = current::Config<T, JournalConfig, S, NonZeroUsize>;
+
+    /// Convenience type aliases for 256 partitions (P=1).
+    pub mod p256 {
+        /// Fixed-value DB with 256 partitions.
+        pub type Db<F, E, K, V, H, T, const N: usize, S> = super::Db<F, E, K, V, H, T, 1, N, S>;
+        pub use super::Config;
+    }
+
+    /// Convenience type aliases for 65,536 partitions (P=2).
+    pub mod p64k {
+        /// Fixed-value DB with 65,536 partitions.
+        pub type Db<F, E, K, V, H, T, const N: usize, S> = super::Db<F, E, K, V, H, T, 2, N, S>;
+        pub use super::Config;
+    }
 }
 
 #[cfg(test)]
@@ -157,6 +181,38 @@ pub mod test {
         });
     }
 
+    /// `get_with_next_key` returns an active key's value with the next active key, wrapping from
+    /// the last key to the first, and `None` for an inactive key.
+    #[test_traced("DEBUG")]
+    fn test_current_db_get_with_next_key() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db =
+                open_db::<mmr::Family>(context.child("db"), "get-with-next-key".to_string()).await;
+            let mut keys = [Sha256::fill(0x11), Sha256::fill(0x22), Sha256::fill(0x33)];
+            keys.sort();
+            let mut batch = db.new_batch();
+            for (i, key) in keys.iter().enumerate() {
+                batch = batch.write(*key, Some(Sha256::fill(i as u8)));
+            }
+            let merkleized = batch.merkleize(&db).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
+
+            for (i, key) in keys.iter().enumerate() {
+                assert_eq!(
+                    db.get_with_next_key(key).await.unwrap(),
+                    Some((Sha256::fill(i as u8), keys[(i + 1) % keys.len()])),
+                );
+            }
+            assert_eq!(
+                db.get_with_next_key(&Sha256::fill(0x44)).await.unwrap(),
+                None
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("DEBUG")]
     pub fn test_current_db_key_value_proof() {
         shared::test_key_value_proof(open_db::<mmr::Family>);
@@ -239,7 +295,7 @@ pub mod test {
             // Stage both keys through the parent. Each must resolve in the grandparent's diff.
             let read_keys = [key(0), key(100)];
             let keys: Vec<&Digest> = read_keys.iter().collect();
-            let (values, staged) = parent
+            let (staged, values) = parent
                 .new_batch::<Sha256>()
                 .stage(&keys, &db)
                 .await

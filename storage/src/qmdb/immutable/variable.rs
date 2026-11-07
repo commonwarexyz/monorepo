@@ -2,10 +2,10 @@
 //!
 //! For fixed-size values, use [super::fixed] instead.
 
-use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
+use super::{Config as BaseConfig, operation::Operation as BaseOperation};
 use crate::{
     journal::contiguous::variable::{self, Config as JournalConfig},
-    qmdb::any::value::VariableEncoding,
+    qmdb::value::VariableEncoding,
 };
 
 /// Type alias for a variable-size operation.
@@ -13,7 +13,7 @@ pub type Operation<F, K, V> = BaseOperation<F, K, VariableEncoding<V>>;
 
 /// Type alias for the variable-size immutable database.
 pub type Db<F, E, K, V, H, T, S> =
-    Immutable<F, E, K, VariableEncoding<V>, variable::Journal<E, Operation<F, K, V>>, H, T, S>;
+    super::Db<F, E, K, VariableEncoding<V>, variable::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the variable-size compact immutable db.
 pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, VariableEncoding<V>, H, S>;

@@ -4,8 +4,9 @@ use crate::{
     journal::contiguous::Contiguous,
     merkle::{Family, Location},
     qmdb::{
-        any::{ValueEncoding, db::Db},
+        any::db::Db,
         operation::{Key, Operation as OperationTrait},
+        value::ValueEncoding,
     },
 };
 use commonware_codec::Codec;
@@ -183,8 +184,12 @@ where
         Ok(None)
     }
 
-    /// Get the (value, next-key) pair of `key` in the db, or None if it has no value.
-    pub async fn get_all(&self, key: &K) -> Result<Option<(V::Value, K)>, crate::qmdb::Error<F>> {
+    /// Returns the value of `key` and the next active key, wrapping from the last key to the first,
+    /// or `None` if `key` is not active.
+    pub async fn get_with_next_key(
+        &self,
+        key: &K,
+    ) -> Result<Option<(V::Value, K)>, crate::qmdb::Error<F>> {
         self.get_with_loc(key)
             .await
             .map(|res| res.map(|(data, _)| (data.value, data.next_key)))

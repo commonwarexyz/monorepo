@@ -15,7 +15,7 @@ use crate::{
     qmdb::{
         Error,
         any::{
-            self, ValueEncoding,
+            self,
             batch::{DiffCursors, DiffEntry, RetainedAncestors, Staged as AnyStaged},
             operation::{Operation, update},
         },
@@ -24,6 +24,7 @@ use crate::{
         current::{db::compute_ops_root_witness, grafting, proof::OpsRootWitness},
         floor::{Policy, Proportional},
         operation::Key,
+        value::ValueEncoding,
     },
 };
 use ahash::AHashMap;
@@ -34,7 +35,7 @@ use commonware_utils::{
     Widen,
     bitmap::{self, Readable as _},
 };
-use core::ops::Range;
+use core::{borrow::Borrow, ops::Range};
 use std::sync::Arc;
 
 /// Speculative chunk-level bitmap overlay: materialized bytes for every chunk that differs from
@@ -342,7 +343,7 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, I>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, Error<F>>
     where
@@ -353,7 +354,7 @@ where
         self.inner.get_many(keys, &db.any).await
     }
 
-    /// Batch read multiple keys and return a staged batch for the same keys.
+    /// Batch read multiple keys and return `(staged, values)` for the same keys.
     ///
     /// Returns results in the same order as the input keys. The initial keys occupy staged read
     /// slots `0..keys.len()`, and each [`expand`](Staged::expand) appends another range of slots.
@@ -363,9 +364,9 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn stage<E, C, I>(
         self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(Vec<Option<U::Value>>, Staged<F, H, U, N, S>), Error<F>>
+    ) -> Result<(Staged<F, H, U, N, S>, Vec<Option<U::Value>>), Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -376,14 +377,14 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (values, inner) = inner.stage(keys, &db.any).await?;
+        let (inner, values) = inner.stage(keys, &db.any).await?;
         Ok((
-            values,
             Staged {
                 inner,
                 grafted_parent,
                 bitmap_parent,
             },
+            values,
         ))
     }
 }
@@ -413,7 +414,7 @@ where
         self
     }
 
-    /// Expand this staged batch with more reads.
+    /// Expand this staged batch with more reads, returning `(self, range, values)`.
     ///
     /// Existing slots keep their positions. Newly read keys are appended to the staged read set
     /// and assigned the returned range of slots. The returned values are in the same order as
@@ -428,9 +429,9 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn expand<E, C, I>(
         self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>>
+    ) -> Result<(Self, Range<usize>, Vec<Option<U::Value>>), Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -441,15 +442,15 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (range, values, inner) = inner.expand(keys, &db.any).await?;
+        let (inner, range, values) = inner.expand(keys, &db.any).await?;
         Ok((
-            range,
-            values,
             Self {
                 inner,
                 grafted_parent,
                 bitmap_parent,
             },
+            range,
+            values,
         ))
     }
 }
@@ -1215,7 +1216,10 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
         nodes
     }
 
-    /// Return the [`Bounds`] of the batch.
+    /// Return the ops-level [`Bounds`] of the batch.
+    ///
+    /// All commitments (`base`, `db`, `tip`, and `ancestors`) contain ops roots. In particular,
+    /// `bounds().tip.root` equals [`Self::ops_root`], not [`Self::root`].
     pub fn bounds(&self) -> &Bounds<F, D> {
         self.inner.bounds()
     }
@@ -1310,7 +1314,7 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, I, H>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, Error<F>>
     where
@@ -1533,7 +1537,7 @@ mod tests {
 
     #[test]
     fn chunk_overlay_pushes() {
-        use crate::qmdb::any::value::FixedEncoding;
+        use crate::qmdb::value::FixedEncoding;
         use commonware_utils::sequence::FixedBytes;
 
         type K = FixedBytes<4>;
@@ -1582,7 +1586,7 @@ mod tests {
 
     #[test]
     fn chunk_overlay_clears() {
-        use crate::qmdb::any::value::FixedEncoding;
+        use crate::qmdb::value::FixedEncoding;
         use commonware_utils::sequence::FixedBytes;
 
         type K = FixedBytes<4>;
@@ -1639,7 +1643,7 @@ mod tests {
     /// partial chunk data, not zero it out.
     #[test]
     fn chunk_overlay_preserves_partial_parent_chunk() {
-        use crate::qmdb::any::value::FixedEncoding;
+        use crate::qmdb::value::FixedEncoding;
         use commonware_utils::sequence::FixedBytes;
 
         type K = FixedBytes<4>;
@@ -2089,7 +2093,7 @@ mod tests {
     type TestDb<F, const N: usize> =
         fixed::Db<F, deterministic::Context, Digest, Digest, Sha256, OneCap, N, Sequential>;
 
-    type TestUpdate = update::Unordered<Digest, any::value::FixedEncoding<Digest>>;
+    type TestUpdate = update::Unordered<Digest, crate::qmdb::value::FixedEncoding<Digest>>;
 
     /// What a batch wrote: its pruned boundary, chunks, and grafted nodes.
     #[derive(Debug, PartialEq)]
@@ -2187,7 +2191,7 @@ mod tests {
         let proof = batch.inner.proof(&db.any).unwrap();
         assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
             start,
-            &operations,
+            operations.iter(),
             &pins,
             &batch.ops_root(),
         ));

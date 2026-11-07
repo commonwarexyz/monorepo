@@ -202,6 +202,10 @@ impl Strategy for Explorer {
         }
     }
 
+    fn block_on<F: Future>(&self, future: F) -> F::Output {
+        self.strategy.block_on(future)
+    }
+
     #[track_caller]
     fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
     where

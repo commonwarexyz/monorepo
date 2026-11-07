@@ -115,6 +115,7 @@ pub mod operation;
 mod snapshot;
 pub mod store;
 pub mod sync;
+pub mod value;
 pub mod verify;
 
 pub use snapshot::SnapshotBuild;
@@ -147,7 +148,7 @@ fn validate_initialization_commit<F: Family>(
         };
     }
     let floor = commit
-        .and_then(Floored::has_floor)
+        .and_then(Floored::inactivity_floor)
         .ok_or(Error::DataCorrupted(
             "selected operation has no commit floor",
         ))?;
@@ -210,7 +211,7 @@ where
         merkle,
         journal,
         max_size.map(|size| *size),
-        |op: &C::Item| op.has_floor().is_some(),
+        |op: &C::Item| op.inactivity_floor().is_some(),
         ROOT_BAGGING,
     )
     .await?)
@@ -291,7 +292,7 @@ where
 
     let op = reader.read(last_op).await?;
     let floor = op
-        .has_floor()
+        .inactivity_floor()
         .ok_or(Error::HistoricalFloorPruned(op_count))?;
     if floor > Location::new(last_op) {
         return Err(Error::DataCorrupted(

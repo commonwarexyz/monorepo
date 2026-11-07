@@ -21,13 +21,13 @@ use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
         Error,
-        any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         keyless::{
-            Keyless, Operation,
+            Db, Operation,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
             fixed, initial_root, variable,
         },
         sync::{self, Target as AnySyncTarget},
+        value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
     },
 };
 use commonware_utils::{
@@ -48,7 +48,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     batch: UnmerkleizedBatch<F, H, V, S>,
-    db: Shared<Keyless<F, E, V, C, H, S>>,
+    db: Shared<Db<F, E, V, C, H, S>>,
 }
 
 impl<F, E, V, C, H, S> Deref for KeylessUnmerkleized<F, E, V, C, H, S>
@@ -144,7 +144,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, V, S>>,
-    db: Shared<Keyless<F, E, V, C, H, S>>,
+    db: Shared<Db<F, E, V, C, H, S>>,
 }
 
 impl<F, E, V, C, H, S> Clone for KeylessMerkleized<F, E, V, C, H, S>
@@ -613,7 +613,7 @@ mod tests {
             let database = <FixedDb as ManagedDb<_>>::apply(database, next)
                 .await
                 .unwrap();
-            assert_eq!(database.inactivity_floor_loc(), mmr::Location::new(1));
+            assert_eq!(database.inactivity_floor(), mmr::Location::new(1));
             slot.put(database);
         });
     }

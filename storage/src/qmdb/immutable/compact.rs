@@ -1,7 +1,7 @@
 //! An immutable authenticated db that discards historical operations, retaining only a witness
 //! for each applied batch.
 //!
-//! Mirrors the API of [`crate::qmdb::immutable::Immutable`] (`new_batch -> merkleize ->
+//! Mirrors the API of [`crate::qmdb::immutable::Db`] (`new_batch -> merkleize ->
 //! apply_batch -> commit / sync / start_sync`, pipelined batch chains, `StaleBatch` validation)
 //! but is backed by the peak-only [`crate::merkle::compact`]. Because history is discarded,
 //! the db has no `get` / `proof` / `bounds` methods. A merkleized batch can prove only its own
@@ -19,7 +19,7 @@
 //! # Inactivity floor
 //!
 //! Commits carry an inactivity floor for wire-format compatibility with
-//! [`crate::qmdb::immutable::Immutable`]: the root is computed over the encoded operation
+//! [`crate::qmdb::immutable::Db`]: the root is computed over the encoded operation
 //! sequence, and that sequence must include the same floor to produce the same root as the
 //! full variant. The floor has no effect on pruning or snapshot rebuilding here; all
 //! historical in-memory state is discarded whenever a batch is applied.
@@ -31,11 +31,11 @@ use crate::{
     merkle::{Family, Location, Proof, batch, compact as compact_merkle},
     qmdb::{
         self, Error,
-        any::value::ValueEncoding,
         chain::{self, Bounds, Commitment},
         compact::{batch as compact_batch, witness},
         operation::Key,
         sync::{CompactTarget, Request, Source, source},
+        value::ValueEncoding,
     },
 };
 use commonware_codec::{Encode, EncodeShared, Read};
@@ -82,7 +82,7 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
             .field("size", &self.size())
-            .field("inactivity_floor_loc", &self.inactivity_floor_loc())
+            .field("inactivity_floor", &self.inactivity_floor())
             .finish_non_exhaustive()
     }
 }
@@ -297,7 +297,7 @@ where
     /// Resolve mutations into operations, merkleize, and return the batch.
     ///
     /// The commit records the batch's inactivity floor (see [`Self::with_inactivity_floor`]) for
-    /// wire-format parity with [`crate::qmdb::immutable::Immutable`].
+    /// wire-format parity with [`crate::qmdb::immutable::Db`].
     ///
     /// # Errors
     ///
@@ -344,7 +344,7 @@ where
         let total_size = self.base.size + operations.len() as u64;
         chain::validate_merkleize_floor::<F>(
             self.parent.as_ref().map_or_else(
-                || db.inactivity_floor_loc(),
+                || db.inactivity_floor(),
                 |parent| parent.bounds.inactivity_floor,
             ),
             inactivity_floor,
@@ -484,7 +484,7 @@ where
     }
 
     /// Return the inactivity floor declared by the last committed batch.
-    pub const fn inactivity_floor_loc(&self) -> Location<F> {
+    pub const fn inactivity_floor(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
 
@@ -629,7 +629,7 @@ where
         Ok(self)
     }
 
-    /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness below
+    /// Drop witnesses for commits with fewer than `prune_loc` operations. Some witness below
     /// the boundary may survive.
     ///
     /// Bounded initialization and compact sync can only use witnesses that survive. The current
@@ -639,8 +639,8 @@ where
     ///
     /// Fails if a compact-sync import has not yet been applied to the witness journal.
     #[tracing::instrument(name = "qmdb.immutable.compact.db.prune", level = "info", skip_all)]
-    pub async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
-        self.witness = self.witness.prune(pruning_boundary).await?;
+    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>> {
+        self.witness = self.witness.prune(prune_loc).await?;
         Ok(self)
     }
 
@@ -687,7 +687,7 @@ mod tests {
         journal::contiguous::{Contiguous as _, fixed, variable::Config as JournalConfig},
         merkle::{mmb, mmr},
         metadata::{Config as MetadataConfig, Metadata},
-        qmdb::{ProofExt as _, any::value::FixedEncoding, compact::witness},
+        qmdb::{ProofExt as _, compact::witness, value::FixedEncoding},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -938,7 +938,7 @@ mod tests {
         let original_pins = batch.pinned_nodes(&db).unwrap();
         assert!(original_proof.verify_with_pinned_nodes::<Sha256, _>(
             start,
-            &ops,
+            ops.iter(),
             &original_pins,
             &root
         ));
@@ -1058,10 +1058,10 @@ mod tests {
             child_proof.inactive_peaks,
             F::inactive_peaks(child_end, floor),
         );
-        assert!(child_proof.verify::<Sha256, _>(child_start, &child_ops, &child_root));
+        assert!(child_proof.verify::<Sha256, _>(child_start, child_ops.iter(), &child_root));
         assert!(child_proof.verify_with_pinned_nodes::<Sha256, _>(
             child_start,
-            &child_ops,
+            child_ops.iter(),
             &child_pins,
             &child_root
         ));
@@ -1072,7 +1072,7 @@ mod tests {
         reordered_child_pins.swap(0, 1);
         assert!(!child_proof.verify_with_pinned_nodes::<Sha256, _>(
             child_start,
-            &child_ops,
+            child_ops.iter(),
             &reordered_child_pins,
             &child_root
         ));
@@ -1085,7 +1085,7 @@ mod tests {
         assert_eq!(child.pinned_nodes(&db).unwrap(), child_pins);
         assert!(child_proof_after.verify_with_pinned_nodes::<Sha256, _>(
             child_start,
-            &child_ops,
+            child_ops.iter(),
             &child_pins,
             &child_root
         ));
@@ -1122,7 +1122,7 @@ mod tests {
         );
         assert!(commit_proof.verify_with_pinned_nodes::<Sha256, _>(
             commit_start,
-            &commit_ops,
+            commit_ops.iter(),
             &commit_pins,
             &commit_root
         ));
@@ -1165,11 +1165,12 @@ mod tests {
         let late_root = late.root();
         let late_proof = late.proof(&db).unwrap();
         let late_pins = late.pinned_nodes(&db).unwrap();
-        assert!(
-            late_proof.verify_with_pinned_nodes::<Sha256, _>(
-                late_start, &late_ops, &late_pins, &late_root
-            )
-        );
+        assert!(late_proof.verify_with_pinned_nodes::<Sha256, _>(
+            late_start,
+            late_ops.iter(),
+            &late_pins,
+            &late_root
+        ));
         let db = db.apply_batch(late).await.unwrap();
 
         db.destroy().await.unwrap();
@@ -1623,7 +1624,7 @@ mod tests {
                 .unwrap();
             let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             assert_eq!(db.get_metadata(), Some(meta2));
-            assert_eq!(db.inactivity_floor_loc(), floor2);
+            assert_eq!(db.inactivity_floor(), floor2);
 
             let db = {
                 _ = db.sync().await.unwrap();
@@ -1637,7 +1638,7 @@ mod tests {
             .unwrap();
             assert_eq!(db.root(), root_after_first);
             assert_eq!(db.get_metadata(), Some(meta1));
-            assert_eq!(db.inactivity_floor_loc(), floor1);
+            assert_eq!(db.inactivity_floor(), floor1);
 
             db.destroy().await.unwrap();
         });
@@ -1692,7 +1693,7 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("second"), partition).await;
             assert_eq!(db.root(), root_after_first);
             assert_eq!(db.get_metadata(), Some(meta1));
-            assert_eq!(db.inactivity_floor_loc(), floor1);
+            assert_eq!(db.inactivity_floor(), floor1);
 
             db.destroy().await.unwrap();
         });
@@ -1732,7 +1733,7 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("second"), partition).await;
             assert_eq!(db.root(), root_after_second);
             assert_eq!(db.get_metadata(), Some(meta2));
-            assert_eq!(db.inactivity_floor_loc(), Location::new(1));
+            assert_eq!(db.inactivity_floor(), Location::new(1));
             db.destroy().await.unwrap();
         });
     }

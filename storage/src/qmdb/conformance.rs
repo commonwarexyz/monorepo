@@ -372,7 +372,7 @@ mod tests {
     /// Apply a batch of immutable sets to the database.
     macro_rules! apply_sets {
         ($db:ident, $ops:expr) => {{
-            let floor = $db.inactivity_floor_loc();
+            let floor = $db.inactivity_floor();
             let mut batch = $db.new_batch();
             for (k, v) in $ops {
                 batch = batch.set(k, v);
@@ -389,7 +389,7 @@ mod tests {
     /// Apply a batch of keyless appends to the database.
     macro_rules! apply_appends {
         ($db:ident, $vals:expr) => {{
-            let floor = $db.inactivity_floor_loc();
+            let floor = $db.inactivity_floor();
             let mut batch = $db.new_batch();
             for v in $vals {
                 batch = batch.append(v);
@@ -482,7 +482,7 @@ mod tests {
             let mut db = Store::init(context.child("db"), cfg, None).await?;
             for writes in keyed_batches(seed) {
                 let batch = writes.into_iter().collect();
-                db = db.apply_batch(batch, &mut Proportional).await?;
+                db = db.apply_batch(batch).await?;
             }
             db.sync().await?;
             Ok(())
@@ -877,7 +877,7 @@ mod tests {
             let mut db = Store::init(context.child("db"), cfg, None).await?;
             for (writes, mut rule) in floor_batches(seed) {
                 let batch = writes.into_iter().collect();
-                db = db.apply_batch(batch, &mut rule).await?;
+                db = db.apply_batch_with(batch, &mut rule).await?;
             }
             db.sync().await?;
             Ok(())
