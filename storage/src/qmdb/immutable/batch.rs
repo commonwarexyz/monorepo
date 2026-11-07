@@ -7,10 +7,11 @@ use crate::{
     merkle::{Family, Location, Proof},
     qmdb::{
         Error,
-        any::{ValueEncoding, batch::lookup_sorted},
+        any::batch::lookup_sorted,
         chain::{self, Bounds, Commitment, Compatible},
         immutable::operation::Operation,
         operation::Key,
+        value::ValueEncoding,
     },
     translator::Translator,
 };

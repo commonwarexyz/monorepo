@@ -1,9 +1,9 @@
 use crate::{
     merkle::Family,
     qmdb::{
-        any::{FixedValue, value::FixedEncoding},
         keyless::operation::{APPEND_CONTEXT, COMMIT_CONTEXT, Operation, OperationCodec},
         operation::{commit_fixed_operation_size, read_commit_fixed, write_commit_fixed},
+        value::{FixedEncoding, FixedValue},
     },
 };
 use commonware_codec::{

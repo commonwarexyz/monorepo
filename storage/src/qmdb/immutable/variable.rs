@@ -5,7 +5,7 @@
 use super::{Config as BaseConfig, operation::Operation as BaseOperation};
 use crate::{
     journal::contiguous::variable::{self, Config as JournalConfig},
-    qmdb::any::value::VariableEncoding,
+    qmdb::value::VariableEncoding,
 };
 
 /// Type alias for a variable-size operation.

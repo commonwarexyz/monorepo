@@ -1255,11 +1255,9 @@ mod tests {
             mmb, mmr,
         },
         qmdb::{
-            any::{
-                operation::{Unordered as Op, update::Unordered as Update},
-                value::FixedEncoding,
-            },
+            any::operation::{Unordered as Op, update::Unordered as Update},
             operation::Committable,
+            value::FixedEncoding,
         },
         utils::detached::{DropMonitor, block_strategy},
     };

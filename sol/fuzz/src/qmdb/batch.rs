@@ -23,12 +23,10 @@ use commonware_storage::{
     },
     qmdb::{
         self, ProofExt as _,
-        any::{
-            ordered, unordered,
-            value::{FixedEncoding, VariableEncoding},
-        },
+        any::{ordered, unordered},
         current::proof::RangeProof,
         immutable, keyless,
+        value::{FixedEncoding, VariableEncoding},
     },
 };
 use commonware_utils::{bitmap::Prunable, sequence::FixedBytes};

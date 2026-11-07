@@ -11,7 +11,7 @@ use crate::{
     index::unordered::Index,
     journal::contiguous::fixed::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::{any::value::FixedEncoding, current},
+    qmdb::{current, value::FixedEncoding},
 };
 
 /// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.

@@ -646,13 +646,13 @@ pub(crate) fn test_compact_sync_root_mismatch_preserves_existing_state<
 
 pub(crate) mod harnesses {
     use super::*;
-    use crate::{journal::contiguous::Mutable, qmdb::any::value::ValueEncoding};
+    use crate::{journal::contiguous::Mutable, qmdb::value::ValueEncoding};
     use commonware_codec::{EncodeShared, Read};
     use commonware_parallel::Sequential;
     use commonware_utils::sequence::U64;
 
     type VariableDb<F> = variable::Db<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
-    type VariableOp<F> = Operation<F, crate::qmdb::any::value::VariableEncoding<Vec<u8>>>;
+    type VariableOp<F> = Operation<F, crate::qmdb::value::VariableEncoding<Vec<u8>>>;
 
     fn variable_config(
         suffix: &str,

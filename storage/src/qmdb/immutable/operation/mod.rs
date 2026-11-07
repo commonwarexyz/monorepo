@@ -12,8 +12,8 @@ pub(crate) mod variable;
 use crate::{
     merkle::{Family, Location},
     qmdb::{
-        any::ValueEncoding,
         operation::{Floored, Key, Operation as OperationTrait},
+        value::ValueEncoding,
     },
 };
 use commonware_codec::Encode;
@@ -136,7 +136,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{merkle::mmr, qmdb::any::value::VariableEncoding};
+    use crate::{merkle::mmr, qmdb::value::VariableEncoding};
     use commonware_codec::Encode;
     use commonware_utils::sequence::U64;
 

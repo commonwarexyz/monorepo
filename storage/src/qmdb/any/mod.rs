@@ -133,6 +133,7 @@ use crate::{
         metrics::Metrics,
         operation::Key,
         single_operation_root,
+        value::ValueEncoding,
     },
     translator::Translator,
 };
@@ -148,14 +149,12 @@ use tracing::warn;
 pub mod batch;
 pub mod db;
 pub mod operation;
-#[cfg(any(test, feature = "test-traits"))]
-pub mod traits;
-pub mod value;
-pub use value::{FixedValue, ValueEncoding, VariableValue};
 pub mod ordered;
 pub(crate) mod sync;
 #[cfg(any(test, feature = "test-traits"))]
 mod test_trait_impls;
+#[cfg(any(test, feature = "test-traits"))]
+pub mod traits;
 pub mod unordered;
 
 /// Compute the authenticated root of a newly initialized database without opening storage.
@@ -2096,8 +2095,8 @@ pub(crate) mod test {
             index::{ordered::Index as OrderedIndex, unordered::Index as UnorderedIndex},
             journal::contiguous::{fixed::Journal as FJournal, variable::Journal as VJournal},
             merkle::{Location, mmb},
-            qmdb::any::{
-                operation::{Operation, update},
+            qmdb::{
+                any::operation::{Operation, update},
                 value::{FixedEncoding, VariableEncoding},
             },
         };
@@ -7191,12 +7190,15 @@ pub(crate) mod test {
             Context,
             super::operation::Operation<
                 crate::merkle::mmb::Family,
-                super::operation::update::Unordered<Digest, super::value::VariableEncoding<Digest>>,
+                super::operation::update::Unordered<
+                    Digest,
+                    crate::qmdb::value::VariableEncoding<Digest>,
+                >,
             >,
         >,
         crate::index::unordered::Index<OneCap, crate::merkle::Location<crate::merkle::mmb::Family>>,
         Sha256,
-        super::operation::update::Unordered<Digest, super::value::VariableEncoding<Digest>>,
+        super::operation::update::Unordered<Digest, crate::qmdb::value::VariableEncoding<Digest>>,
         { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         Sequential,
     >;

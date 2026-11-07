@@ -85,8 +85,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error, any::ValueEncoding, chain, metrics::Metrics, operation::Key, single_operation_root,
-        sync::source,
+        Error, chain, metrics::Metrics, operation::Key, single_operation_root, sync::source,
+        value::ValueEncoding,
     },
     translator::Translator,
 };
@@ -776,7 +776,10 @@ pub(super) mod tests {
         translator::TwoCap,
     };
     use commonware_codec::EncodeShared;
-    use commonware_cryptography::{Sha256, sha256, sha256::Digest};
+    use commonware_cryptography::{
+        Sha256,
+        sha256::{self, Digest},
+    };
     use commonware_runtime::{Supervisor as _, deterministic};
     use commonware_utils::NZU64;
     use core::{future::Future, pin::Pin};

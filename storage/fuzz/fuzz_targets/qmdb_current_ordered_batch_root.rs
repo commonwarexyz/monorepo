@@ -8,11 +8,12 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::{ordered::Update, value::FixedEncoding as FixedEncodingGeneric},
+        any::ordered::Update,
         current::{
             batch::{MerkleizedBatch, UnmerkleizedBatch},
             ordered::fixed::{Config, Db as CurrentDb},
         },
+        value::FixedEncoding as FixedEncodingGeneric,
     },
     translator::OneCap,
 };

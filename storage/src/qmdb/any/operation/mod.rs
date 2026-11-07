@@ -1,6 +1,6 @@
 use crate::{
     merkle::{Family, Location},
-    qmdb::{any::value::ValueEncoding, operation::Committable},
+    qmdb::{operation::Committable, value::ValueEncoding},
 };
 use commonware_codec::{Buf, Encode as _, Error as CodecError, Read, Write};
 use commonware_formatting::hex;
@@ -153,7 +153,7 @@ impl<F: Family, S: Update> fmt::Display for Operation<F, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::qmdb::any::value::{FixedEncoding, VariableEncoding};
+    use crate::qmdb::value::{FixedEncoding, VariableEncoding};
     use commonware_codec::{Codec, Decode, FixedSize, RangeCfg, Read};
     use commonware_utils::sequence::FixedBytes;
 

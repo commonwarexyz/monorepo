@@ -1,8 +1,8 @@
 use crate::{
     merkle::{Family, Location},
     qmdb::{
-        any::value::ValueEncoding,
         operation::{Committable, Floored},
+        value::ValueEncoding,
     },
 };
 use commonware_codec::{Buf, Encode as _, Error as CodecError, Read, Write};
@@ -126,7 +126,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{merkle::mmr, qmdb::any::value::VariableEncoding};
+    use crate::{merkle::mmr, qmdb::value::VariableEncoding};
     use commonware_codec::Encode;
     use commonware_formatting::hex;
     use commonware_utils::sequence::U64;
@@ -163,7 +163,7 @@ mod tests {
         use super::Operation;
         use crate::{
             merkle::mmr,
-            qmdb::any::value::{FixedEncoding, VariableEncoding},
+            qmdb::value::{FixedEncoding, VariableEncoding},
         };
         use commonware_codec::conformance::CodecConformance;
         use commonware_utils::sequence::U64;

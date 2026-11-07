@@ -332,7 +332,7 @@ use crate::{
     merkle::{self, Location, full::Config as MerkleConfig},
     qmdb::{
         any::{
-            self, Config as AnyConfig, ValueEncoding,
+            self, Config as AnyConfig,
             operation::{
                 Operation, Update,
                 update::{Ordered as OrderedUpdate, Unordered as UnorderedUpdate},
@@ -340,6 +340,7 @@ use crate::{
         },
         bitmap::Shared,
         operation::Key,
+        value::ValueEncoding,
     },
     translator::Translator,
 };
@@ -577,7 +578,6 @@ pub mod tests {
         qmdb::{
             ProofExt as _,
             any::{
-                ValueEncoding,
                 batch::Slot,
                 operation::update,
                 test::{
@@ -594,11 +594,11 @@ pub mod tests {
                     test_any_proportional_one_batch,
                 },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
-                value::{FixedEncoding, VariableEncoding},
             },
             chain::Bounds,
             floor::{Bounded, Hold},
             store::tests::{TestKey, TestValue},
+            value::{FixedEncoding, ValueEncoding, VariableEncoding},
         },
         translator::Translator,
     };

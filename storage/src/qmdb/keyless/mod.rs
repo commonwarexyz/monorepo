@@ -56,8 +56,7 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error, any::value::ValueEncoding, chain, metrics::Metrics, single_operation_root,
-        sync::source,
+        Error, chain, metrics::Metrics, single_operation_root, sync::source, value::ValueEncoding,
     },
 };
 use commonware_codec::EncodeShared;

@@ -4,12 +4,10 @@ use super::{COMMIT_CONTEXT, KEY_VALUE_CONTEXT};
 use crate::{
     merkle::Graftable,
     qmdb::{
-        any::{
-            ValueEncoding,
-            ordered::{Operation, Update},
-        },
+        any::ordered::{Operation, Update},
         current::proof::operation::Proof as OperationProof,
         operation::Key,
+        value::ValueEncoding,
     },
 };
 use bytes::BufMut;

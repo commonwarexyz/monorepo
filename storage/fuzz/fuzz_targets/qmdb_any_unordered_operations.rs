@@ -14,8 +14,8 @@ use commonware_storage::{
         any::{
             db::Db as AnyDb,
             unordered::{Operation, Update, fixed::Config},
-            value::FixedEncoding,
         },
+        value::FixedEncoding,
     },
     translator::EightCap,
 };
