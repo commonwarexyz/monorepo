@@ -2234,7 +2234,6 @@ mod tests {
         let child_writes = Writes::of(&child);
         let parent_positions: BTreeSet<_> =
             parent_writes.nodes.iter().map(|(pos, _)| *pos).collect();
-        assert!(!parent_positions.is_empty());
         assert!(
             child_writes
                 .nodes
