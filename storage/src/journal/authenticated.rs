@@ -276,6 +276,10 @@ where
     /// Durable pruning boundary and the digests pinned there.
     pub(crate) frontier: Frontier<F, E, H::Digest>,
 
+    /// Whether the frontier records the Merkle structure's start. It does not from
+    /// [Self::from_components] until [Self::persist_boundary], and nothing is pruned meanwhile.
+    pub(crate) boundary_recorded: bool,
+
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the Merkle structure.
     pub(crate) journal: C,
@@ -661,6 +665,7 @@ where
         Ok(Self {
             merkle,
             frontier,
+            boundary_recorded: false,
             journal,
             hasher,
         })
@@ -672,6 +677,7 @@ where
         let boundary = self.merkle.bounds().start;
         let pins = self.pinned_nodes_at(boundary).await?;
         self.frontier = self.frontier.set(boundary, pins).await?;
+        self.boundary_recorded = true;
         (self.journal, _) = self.journal.prune(*boundary).await?;
         Ok(self)
     }
@@ -756,6 +762,8 @@ where
     /// # Returns
     /// The earliest readable item. It may be less than `prune_loc` due to blob alignment, but
     /// never precedes the journal's existing frontier, including one installed by state sync.
+    /// A journal built by [Self::from_components] prunes nothing until [Self::persist_boundary]
+    /// records its boundary.
     #[boxed]
     pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
         let (journal, boundary, _) = self.prune_inner(prune_loc).await?;
@@ -766,6 +774,11 @@ where
         mut self,
         prune_loc: Location<F>,
     ) -> Result<(Self, Location<F>, bool), Error<F>> {
+        // The boundary of synced operations is written only once their root is verified.
+        if !self.boundary_recorded {
+            let start = Location::new(self.bounds().start);
+            return Ok((self, start, false));
+        }
         let old = self.merkle.bounds().start;
         let boundary = Location::new(self.prune_target(*prune_loc));
         if boundary > old {
@@ -943,6 +956,7 @@ where
             journal,
             merkle,
             frontier,
+            boundary_recorded: true,
             hasher,
         })
     }
@@ -2912,6 +2926,55 @@ mod tests {
     fn test_from_components_records_boundary_mmb() {
         // Imported boundaries and roots must survive recovery across the valid range.
         deterministic::Runner::default().start(from_components_records_boundary::<mmb::Family>);
+    }
+
+    /// A journal built from synced operations prunes nothing until its boundary is persisted, so a
+    /// sync whose root is not yet verified never moves the frontier or deletes operations.
+    async fn import_prunes_nothing_before_persist<F: Family + PartialEq>(context: Context) {
+        let suffix = "import-prune";
+        let journal = create_journal_with_ops::<F>(context.child("source"), suffix, 50).await;
+        let start = Location::new(20);
+        let pins = journal.pinned_nodes_at(start).await.unwrap();
+        let Journal {
+            journal: ops,
+            frontier,
+            hasher,
+            ..
+        } = journal;
+        drop(frontier);
+
+        let journal = TestJournal::<F>::from_components(
+            context.child("import"),
+            &merkle_config(suffix),
+            ops,
+            hasher,
+            start,
+            pins.clone(),
+            NZU64!(7),
+        )
+        .await
+        .unwrap();
+        let retained = journal.journal.bounds();
+        let (journal, _) = journal.prune(Location::new(40)).await.unwrap();
+        assert_eq!(journal.frontier.boundary(), Default::default());
+        assert_eq!(journal.journal.bounds(), retained);
+
+        let journal = journal.persist_boundary().await.unwrap();
+        assert_eq!(journal.frontier.boundary(), (start, pins));
+        let (journal, pruned) = journal.prune(Location::new(40)).await.unwrap();
+        assert_eq!(pruned, Location::new(35));
+        assert_eq!(journal.frontier.boundary().0, Location::new(35));
+        journal.destroy().await.unwrap();
+    }
+
+    #[test]
+    fn test_import_prunes_nothing_before_persist_mmr() {
+        deterministic::Runner::default().start(import_prunes_nothing_before_persist::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_import_prunes_nothing_before_persist_mmb() {
+        deterministic::Runner::default().start(import_prunes_nothing_before_persist::<mmb::Family>);
     }
 
     /// An import outside the durable operation range leaves the existing frontier recoverable.
