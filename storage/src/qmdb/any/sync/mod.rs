@@ -139,6 +139,13 @@ where
         Ok(self)
     }
 
+    async fn drop_anchors(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> Result<(), qmdb::Error<F>> {
+        Ok(authenticated::drop_anchors::<F, _, H::Digest, S>(context, &config.merkle).await?)
+    }
+
     async fn local_pinned_nodes(
         context: Self::Context,
         config: &Self::Config,

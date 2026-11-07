@@ -6,11 +6,15 @@ use crate::{
         Cursor, Unordered as Index,
         partitioned::{PartitionRange, Partitioned},
     },
-    journal::contiguous::Contiguous,
-    merkle::{Family, Location},
+    journal::{
+        authenticated::{Chunk, ChunkHasher, LeafSink},
+        contiguous::Contiguous,
+    },
+    merkle::{self, Family, Location, hasher::Hasher as MerkleHasher},
     qmdb::operation::{Floored, Operation},
     translator::Translator,
 };
+use commonware_codec::Encode;
 use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
@@ -286,32 +290,148 @@ const SNAPSHOT_DECODE_CHUNK: u64 = 1 << 17;
 #[cfg(test)]
 const SNAPSHOT_DECODE_CHUNK: u64 = 64;
 
-/// Replay `range` and send each worker's keyed operations in log order, in batches of at most
-/// [SNAPSHOT_ROUTE_BATCH] operations.
+/// What a parallel build's decode task does with each operation of its chunk besides routing it.
+trait ChunkVisitor<F: Family, Item>: Send + 'static {
+    /// The chunk's result, passed on in position order once the chunk is routed.
+    type Output: Send + 'static;
+
+    fn visit(&mut self, item: &Item);
+
+    fn finish(self) -> Result<Self::Output, merkle::Error<F>>;
+}
+
+impl<F: Family, Item> ChunkVisitor<F, Item> for () {
+    type Output = ();
+
+    fn visit(&mut self, _: &Item) {}
+
+    fn finish(self) -> Result<(), merkle::Error<F>> {
+        Ok(())
+    }
+}
+
+impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> ChunkVisitor<F, Item>
+    for ChunkHasher<F, H>
+{
+    type Output = Chunk<F, H::Digest>;
+
+    fn visit(&mut self, item: &Item) {
+        Self::push(self, item);
+    }
+
+    fn finish(self) -> Result<Self::Output, merkle::Error<F>> {
+        Self::finish(self)
+    }
+}
+
+/// The operations a parallel build decodes, and what its decode tasks do with them besides routing
+/// those at or after the floor. They do nothing more, or hash them for the journal's Merkle
+/// structure.
+trait Scan<F: Family, Item>: Send + Sync {
+    type Visitor: ChunkVisitor<F, Item>;
+
+    /// Decode tasks the build needs at least.
+    const MIN_DECODERS: usize;
+
+    /// The chunks to decode, in position order, for a build from `floor` to `end`.
+    fn chunks(&self, floor: u64, end: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static;
+
+    /// How the decode tasks read the log.
+    fn read_options(&self) -> ReadOptions;
+
+    fn visitor(&self, chunk: Range<u64>) -> Self::Visitor;
+
+    /// Pass a routed chunk's result on. Returns false to stop the build.
+    fn send(
+        &self,
+        output: <Self::Visitor as ChunkVisitor<F, Item>>::Output,
+    ) -> impl Future<Output = bool> + Send;
+}
+
+/// A build that only routes, decoding from the floor.
+struct IndexOnly;
+
+impl<F: Family, Item> Scan<F, Item> for IndexOnly {
+    type Visitor = ();
+
+    const MIN_DECODERS: usize = 0;
+
+    fn chunks(&self, floor: u64, end: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static {
+        (floor..end)
+            .step_by(usize::try_from(SNAPSHOT_DECODE_CHUNK).expect("chunk size fits usize"))
+            .map(move |start| start..(start + SNAPSHOT_DECODE_CHUNK).min(end))
+    }
+
+    fn read_options(&self) -> ReadOptions {
+        // The journal may replay these operations alongside, so they stay in the OS page cache.
+        ReadOptions::default()
+    }
+
+    fn visitor(&self, _: Range<u64>) {}
+
+    async fn send(&self, _: ()) -> bool {
+        true
+    }
+}
+
+/// A build that also hashes every operation from the journal's boundary, in the journal's chunks.
+impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> Scan<F, Item> for LeafSink<F, H> {
+    type Visitor = ChunkHasher<F, H>;
+
+    // Hashing needs chunk boundaries, which only decode tasks keep.
+    const MIN_DECODERS: usize = 1;
+
+    // The Merkle structure's chunks, from its start, which callers keep at or before the floor.
+    fn chunks(&self, _: u64, _: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static {
+        Self::chunks(self)
+    }
+
+    fn read_options(&self) -> ReadOptions {
+        // Init reads these operations only here, so nothing gains from keeping them cached.
+        ReadOptions::DONT_CACHE
+    }
+
+    fn visitor(&self, chunk: Range<u64>) -> ChunkHasher<F, H> {
+        self.chunk_hasher(chunk)
+    }
+
+    async fn send(&self, chunk: Chunk<F, H::Digest>) -> bool {
+        Self::send(self, chunk).await
+    }
+}
+
+/// Replay `range` and send each worker's keyed operations at or after `floor` in log order, in
+/// batches of at most [SNAPSHOT_ROUTE_BATCH] operations. `visitor` sees every replayed operation,
+/// including those before `floor`.
 ///
 /// Stop if `send` returns false. The caller owns the receiving tasks and observes their errors when
 /// joining them.
-async fn route_snapshot<F, C, Fut>(
+async fn route_snapshot<F, C, T, Fut>(
     log: &C,
     range: Range<u64>,
+    floor: u64,
+    read_options: ReadOptions,
     routing: SnapshotRouting,
+    visitor: &mut T,
     mut send: impl FnMut(usize, RoutedBatch<<C::Item as Operation<F>>::Key>) -> Fut + Send,
 ) -> Result<(), Error<F>>
 where
     F: Family,
     C: Contiguous<Item: Operation<F>>,
+    T: ChunkVisitor<F, C::Item>,
     Fut: Future<Output = bool> + Send,
 {
-    // The journal replays these operations too, so they stay in the OS page cache.
-    let stream = log
-        .replay(range, routing.init_buffer, ReadOptions::default())
-        .await?;
+    let stream = log.replay(range, routing.init_buffer, read_options).await?;
     pin_mut!(stream);
     let mut batches: Vec<RoutedBatch<_>> = (0..routing.workers)
         .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
         .collect();
     while let Some(batch) = stream.next().await {
         for (loc, op) in batch? {
+            visitor.visit(&op);
+            if loc < floor {
+                continue;
+            }
             let is_delete = op.is_delete();
             let Some(key) = op.into_key() else { continue };
             let w = (routing.partition_of)(key.as_ref()) / routing.range_size;
@@ -329,6 +449,35 @@ where
     // Flush remaining batches before the caller closes the channels.
     for (w, batch) in batches.into_iter().enumerate() {
         if !batch.is_empty() && !send(w, batch).await {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Hash every chunk of `leaves` from a scan of `log` of its own, for builds without decode tasks.
+async fn hash_serially<F, C, H>(
+    log: &C,
+    init_buffer: NonZeroUsize,
+    leaves: &LeafSink<F, H>,
+) -> Result<(), Error<F>>
+where
+    F: Family,
+    C: Contiguous<Item: Encode>,
+    H: MerkleHasher<F> + 'static,
+{
+    for chunk in leaves.chunks() {
+        let mut hasher = leaves.chunk_hasher(chunk.clone());
+        let stream = log
+            .replay(chunk, init_buffer, ReadOptions::DONT_CACHE)
+            .await?;
+        pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (_, op) in batch? {
+                hasher.push(&op);
+            }
+        }
+        if !leaves.send(hasher.finish()?).await {
             break;
         }
     }
@@ -526,35 +675,25 @@ impl ParallelPlan {
 /// and routing each keyed operation to the parallel insert worker owning its partition range
 /// (see [Partitioned]). Returns the number of active keys and the activity bitmap (see
 /// [SnapshotBuild::build_snapshot]).
-async fn build_snapshot_parallel<F, E, C, I>(
+async fn build_snapshot_parallel<F, E, C, I, S>(
     snapshot: &mut I,
+    plan: ParallelPlan,
     context: E,
     inactivity_floor_loc: Location<F>,
     log: &Arc<C>,
-    init_concurrency: NonZeroUsize,
     init_buffer: NonZeroUsize,
-    cache_size: Option<NonZeroUsize>,
+    scan: S,
 ) -> Result<(usize, BitMap), Error<F>>
 where
     F: Family,
     E: Spawner,
     C: Contiguous<Item: Operation<F>> + 'static,
     I: Partitioned + Index<Value = Location<F>>,
+    S: Scan<F, C::Item>,
 {
-    let Some(plan) = ParallelPlan::new(snapshot.partition_count(), init_concurrency, cache_size)
-    else {
-        return build_snapshot_serial(
-            inactivity_floor_loc,
-            &**log,
-            snapshot,
-            init_buffer,
-            cache_size,
-        )
-        .await;
-    };
-
     let floor = *inactivity_floor_loc;
     let end = log.bounds().end;
+    let decoders = plan.decoders.max(S::MIN_DECODERS);
 
     // All workers share one atomic bitmap to track the activity bits.
     let active = Arc::new(Atomic::zeroes(end - floor));
@@ -607,45 +746,57 @@ where
     let routing_result: Result<(), Error<F>> = async {
         // With no decode tasks, decode and route on this task over one continuous replay to avoid
         // per-chunk buffered-reader overhead (measured 265s vs 369s on a 1.66B-op log).
-        if plan.decoders == 0 {
+        let read_options = scan.read_options();
+        if decoders == 0 {
             let senders = &senders;
-            return route_snapshot::<F, C, _>(&**log, floor..end, routing, |w, batch| async move {
-                senders[w].send(batch).await.is_ok()
-            })
+            return route_snapshot::<F, C, _, _>(
+                &**log,
+                floor..end,
+                floor,
+                read_options,
+                routing,
+                &mut (),
+                |w, batch| async move { senders[w].send(batch).await.is_ok() },
+            )
             .await;
         }
 
-        // Each chunk's channel holds the whole chunk (full sub-batches plus a final partial per
-        // worker), so every decoder can finish regardless of which chunk is being forwarded.
-        let chunk_capacity = SNAPSHOT_DECODE_CHUNK as usize / SNAPSHOT_ROUTE_BATCH + plan.workers;
-        let mut starts = (floor..end)
-            .step_by(usize::try_from(SNAPSHOT_DECODE_CHUNK).expect("chunk size fits usize"));
+        let mut chunks = scan.chunks(floor, end);
         let mut spawn_next = |pending: &mut VecDeque<_>| {
-            let Some(start) = starts.next() else {
+            let Some(chunk) = chunks.next() else {
                 return false;
             };
             let log = log.clone();
-            let len = SNAPSHOT_DECODE_CHUNK.min(end - start);
-            let (tx, rx) = mpsc::channel(chunk_capacity);
+            let mut visitor = scan.visitor(chunk.clone());
+
+            // Each chunk's channel holds the whole chunk (full sub-batches plus a final partial
+            // per worker), so every decoder can finish regardless of which chunk is being
+            // forwarded.
+            let capacity = (chunk.end - chunk.start) as usize / SNAPSHOT_ROUTE_BATCH + plan.workers;
+            let (tx, rx) = mpsc::channel(capacity);
             let handle = context
                 .child("snapshot_decoder")
                 .dedicated()
                 .spawn(move |_| async move {
                     let tx = &tx;
-                    route_snapshot::<F, C, _>(
+                    route_snapshot::<F, C, _, _>(
                         &*log,
-                        start..start + len,
+                        chunk,
+                        floor,
+                        read_options,
                         routing,
+                        &mut visitor,
                         |w, batch| async move { tx.send((w, batch)).await.is_ok() },
                     )
-                    .await
+                    .await?;
+                    Ok::<_, Error<F>>(visitor.finish()?)
                 });
             pending.push_back((rx, handle.abort_on_drop()));
             true
         };
 
-        // Start decoding ahead of forwarding, with at most `plan.decoders` chunks in flight.
-        for _ in 0..plan.decoders {
+        // Start decoding ahead of forwarding, with at most `decoders` chunks in flight.
+        for _ in 0..decoders {
             if !spawn_next(&mut pending) {
                 break;
             }
@@ -660,8 +811,11 @@ where
                 }
             }
             let (_, decoder) = pending.pop_front().expect("front exists");
-            decoder.join().await??;
+            let output = decoder.join().await??;
             spawn_next(&mut pending);
+            if !scan.send(output).await {
+                return Ok(());
+            }
         }
         Ok(())
     }
@@ -742,6 +896,139 @@ pub trait SnapshotBuild<F: Family>:
             build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
         }
     }
+
+    /// Whether [Self::build_snapshot_hashing] hashes the journal's operations on the build's own
+    /// decode tasks at this concurrency and cache size, rather than in a scan of their own.
+    fn hashes_leaves(
+        &self,
+        _init_concurrency: Self::Concurrency,
+        _cache_size: Option<NonZeroUsize>,
+    ) -> bool {
+        false
+    }
+
+    /// Like [Self::build_snapshot], but also hashes every chunk of `leaves` and sends them to it
+    /// in order.
+    #[allow(clippy::too_many_arguments)]
+    fn build_snapshot_hashing<E, C, H>(
+        &mut self,
+        context: E,
+        inactivity_floor_loc: Location<F>,
+        log: &Arc<C>,
+        init_concurrency: Self::Concurrency,
+        init_buffer: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+        leaves: LeafSink<F, H>,
+    ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: MerkleHasher<F> + 'static,
+    {
+        async move {
+            let built = self
+                .build_snapshot(
+                    context,
+                    inactivity_floor_loc,
+                    log,
+                    init_concurrency,
+                    init_buffer,
+                    cache_size,
+                )
+                .await?;
+            hash_serially(&**log, init_buffer, &leaves).await?;
+            Ok(built)
+        }
+    }
+}
+
+/// Build a partitioned index's snapshot on parallel workers, or serially when the concurrency
+/// allows no workers.
+async fn build_partitioned<F, E, C, I>(
+    snapshot: &mut I,
+    context: E,
+    inactivity_floor_loc: Location<F>,
+    log: &Arc<C>,
+    init_concurrency: NonZeroUsize,
+    init_buffer: NonZeroUsize,
+    cache_size: Option<NonZeroUsize>,
+) -> Result<(usize, BitMap), Error<F>>
+where
+    F: Family,
+    E: Spawner,
+    C: Contiguous<Item: Operation<F>> + 'static,
+    I: Partitioned + Index<Value = Location<F>>,
+{
+    let Some(plan) = ParallelPlan::new(snapshot.partition_count(), init_concurrency, cache_size)
+    else {
+        return build_snapshot_serial(
+            inactivity_floor_loc,
+            &**log,
+            snapshot,
+            init_buffer,
+            cache_size,
+        )
+        .await;
+    };
+    build_snapshot_parallel(
+        snapshot,
+        plan,
+        context,
+        inactivity_floor_loc,
+        log,
+        init_buffer,
+        IndexOnly,
+    )
+    .await
+}
+
+/// Like [build_partitioned], but also hashes every chunk of `leaves`, on the decode tasks.
+#[allow(clippy::too_many_arguments)]
+async fn build_partitioned_hashing<F, E, C, I, H>(
+    snapshot: &mut I,
+    context: E,
+    inactivity_floor_loc: Location<F>,
+    log: &Arc<C>,
+    init_concurrency: NonZeroUsize,
+    init_buffer: NonZeroUsize,
+    cache_size: Option<NonZeroUsize>,
+    leaves: LeafSink<F, H>,
+) -> Result<(usize, BitMap), Error<F>>
+where
+    F: Family,
+    E: Spawner,
+    C: Contiguous<Item: Operation<F> + Encode> + 'static,
+    I: Partitioned + Index<Value = Location<F>>,
+    H: MerkleHasher<F> + 'static,
+{
+    // The decode tasks scan from the Merkle structure's start, so it must not pass the floor, or
+    // the operations between them would never reach the index.
+    if leaves.start() > *inactivity_floor_loc {
+        return Err(Error::DataCorrupted("hashing scan starts after the floor"));
+    }
+    let Some(plan) = ParallelPlan::new(snapshot.partition_count(), init_concurrency, cache_size)
+    else {
+        let built = build_snapshot_serial(
+            inactivity_floor_loc,
+            &**log,
+            snapshot,
+            init_buffer,
+            cache_size,
+        )
+        .await?;
+        hash_serially(&**log, init_buffer, &leaves).await?;
+        return Ok(built);
+    };
+    build_snapshot_parallel(
+        snapshot,
+        plan,
+        context,
+        inactivity_floor_loc,
+        log,
+        init_buffer,
+        leaves,
+    )
+    .await
 }
 
 mod sealed {
@@ -785,7 +1072,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
-        build_snapshot_parallel(
+        build_partitioned(
             self,
             context,
             inactivity_floor_loc,
@@ -793,6 +1080,42 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             init_concurrency,
             init_buffer,
             cache_size,
+        )
+        .await
+    }
+
+    fn hashes_leaves(
+        &self,
+        init_concurrency: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+    ) -> bool {
+        ParallelPlan::new(self.partition_count(), init_concurrency, cache_size).is_some()
+    }
+
+    async fn build_snapshot_hashing<E, C, H>(
+        &mut self,
+        context: E,
+        inactivity_floor_loc: Location<F>,
+        log: &Arc<C>,
+        init_concurrency: NonZeroUsize,
+        init_buffer: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+        leaves: LeafSink<F, H>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: MerkleHasher<F> + 'static,
+    {
+        build_partitioned_hashing(
+            self,
+            context,
+            inactivity_floor_loc,
+            log,
+            init_concurrency,
+            init_buffer,
+            cache_size,
+            leaves,
         )
         .await
     }
@@ -816,7 +1139,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
-        build_snapshot_parallel(
+        build_partitioned(
             self,
             context,
             inactivity_floor_loc,
@@ -824,6 +1147,42 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             init_concurrency,
             init_buffer,
             cache_size,
+        )
+        .await
+    }
+
+    fn hashes_leaves(
+        &self,
+        init_concurrency: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+    ) -> bool {
+        ParallelPlan::new(self.partition_count(), init_concurrency, cache_size).is_some()
+    }
+
+    async fn build_snapshot_hashing<E, C, H>(
+        &mut self,
+        context: E,
+        inactivity_floor_loc: Location<F>,
+        log: &Arc<C>,
+        init_concurrency: NonZeroUsize,
+        init_buffer: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+        leaves: LeafSink<F, H>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: MerkleHasher<F> + 'static,
+    {
+        build_partitioned_hashing(
+            self,
+            context,
+            inactivity_floor_loc,
+            log,
+            init_concurrency,
+            init_buffer,
+            cache_size,
+            leaves,
         )
         .await
     }
