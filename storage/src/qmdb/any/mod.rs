@@ -356,7 +356,7 @@ pub(crate) mod test {
             any::{FixedConfig, MerkleConfig, VariableConfig, db::Db},
             chain::Bounds,
         },
-        translator::OneCap,
+        translator::{OneCap, TwoCap},
     };
     use commonware_codec::{Codec, CodecShared, Encode as _};
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
@@ -2683,6 +2683,64 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
+    /// Prefetching an ordered batch's keys leaves the neighbors it relinks when it creates or
+    /// deletes keys to be read from storage. Prefetching those neighbors too leaves merkleizing
+    /// the batch with [Hold] no log page to read. `prefetch_neighbors` calls the database's
+    /// method of that name, and `cache` is the database's page cache.
+    pub(crate) async fn test_ordered_db_prefetch_neighbors<F: Family, D, W>(
+        context: Context,
+        db: D,
+        cache: CacheRef,
+        prefetch_neighbors: impl Fn(&D, &[&Digest], &[&Digest]) -> W,
+    ) where
+        D: DbAny<F, Key = Digest, Value = Digest>,
+        W: Future<Output = ()>,
+    {
+        // Seed keys, then pick creates whose first two bytes no seeded key shares, so the index
+        // holds no candidates for them under a two-byte translator or partition prefix.
+        let digest = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+        let seed: Vec<_> = (0..300)
+            .map(|i| (digest(i), Some(digest(i + 1000))))
+            .collect();
+        let db = hold(db, &seed).await;
+        let db = db.sync().await.unwrap();
+        let used: BTreeSet<[u8; 2]> = seed.iter().map(|(key, _)| [key[0], key[1]]).collect();
+        let creates: Vec<Digest> = (5000..)
+            .map(digest)
+            .filter(|key| !used.contains(&[key[0], key[1]]))
+            .take(20)
+            .collect();
+        let updates: Vec<Digest> = seed[20..30].iter().map(|(key, _)| *key).collect();
+        let deletes: Vec<Digest> = seed[..20].iter().map(|(key, _)| *key).collect();
+        let changes: Vec<_> = creates
+            .iter()
+            .chain(&updates)
+            .map(|key| (*key, Some(digest(9000))))
+            .chain(deletes.iter().map(|key| (*key, None)))
+            .collect();
+        let keys: Vec<&Digest> = changes.iter().map(|(key, _)| key).collect();
+        let writes: Vec<&Digest> = creates.iter().chain(&updates).collect();
+        let deletes: Vec<&Digest> = deletes.iter().collect();
+        let misses = || counter(&context, "log_journal_cache_misses_total");
+
+        // With only the keys prefetched, relinking reads cold neighbors.
+        cache.clear();
+        db.prefetch(&keys).await;
+        let before = misses();
+        drop(hold_batch(&db, db.new_batch(), &changes).await);
+        assert!(misses() > before, "relinking must read cold neighbors");
+
+        // With the neighbors prefetched too, merkleizing reads nothing from storage.
+        cache.clear();
+        db.prefetch(&keys).await;
+        prefetch_neighbors(&db, &writes, &deletes).await;
+        let before = misses();
+        drop(hold_batch(&db, db.new_batch(), &changes).await);
+        assert_eq!(misses(), before, "a prefetched batch must not miss");
+
+        db.destroy().await.unwrap();
+    }
+
     // Instantiate the prefetch tests for one variant over a page cache the tests can clear. The
     // tests expect prefetched keys to be served from the cache, so each prefetch's page budget,
     // half of the cache's Main section, must cover every page they warm.
@@ -2706,9 +2764,12 @@ pub(crate) mod test {
                 }
             }
         };
-        (@open $context:ident, $db:ty, $cfg:ident) => {{
+        (@open $context:ident, $db:ty, $cfg:ident) => {
+            prefetch_test!(@open $context, $db, $cfg, OneCap)
+        };
+        (@open $context:ident, $db:ty, $cfg:ident, $translator:ty) => {{
             let cache = CacheRef::new(PAGE_SIZE, NZUsize!(256));
-            let mut cfg = $cfg::<OneCap>("prefetch");
+            let mut cfg = $cfg::<$translator>("prefetch");
             cfg.merkle_config.page_cache = cache.clone();
             cfg.journal_config.page_cache = cache.clone();
             let db = <$db>::init($context.child("storage"), cfg, None)
@@ -2745,6 +2806,53 @@ pub(crate) mod test {
         test_any_db_prefetch_ov_mmb,
         MmbOrderedVariable,
         variable_db_config
+    );
+
+    // Instantiate the neighbor prefetch test for one ordered variant. Its creates need an index
+    // with no candidates for keys whose first two bytes no seeded key shares, which a two-byte
+    // translator or partition prefix provides.
+    macro_rules! prefetch_neighbors_test {
+        ($name:ident, $db:ty, $cfg:ident, $translator:ty) => {
+            #[test_traced("WARN")]
+            fn $name() {
+                deterministic::Runner::default().start(|context| async move {
+                    let (db, cache) = prefetch_test!(@open context, $db, $cfg, $translator);
+                    test_ordered_db_prefetch_neighbors(
+                        context.child("test"),
+                        db,
+                        cache,
+                        |db: &$db, writes: &[&Digest], deletes: &[&Digest]| {
+                            db.prefetch_neighbors(writes, deletes)
+                        },
+                    )
+                    .await;
+                });
+            }
+        };
+    }
+
+    type OrderedFixedTwoCap =
+        OrderedFixedDb<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Sequential>;
+    type OrderedVariableTwoCap =
+        OrderedVariableDb<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Sequential>;
+
+    prefetch_neighbors_test!(
+        test_any_db_prefetch_neighbors_of,
+        OrderedFixedTwoCap,
+        fixed_db_config,
+        TwoCap
+    );
+    prefetch_neighbors_test!(
+        test_any_db_prefetch_neighbors_ov,
+        OrderedVariableTwoCap,
+        variable_db_config,
+        TwoCap
+    );
+    prefetch_neighbors_test!(
+        test_any_db_prefetch_neighbors_ovp2,
+        OrderedVariableP2,
+        variable_db_config_partitioned,
+        OneCap
     );
 
     /// Merkleize `batch` with `policy` and without metadata through [`DbAny`], for callers whose

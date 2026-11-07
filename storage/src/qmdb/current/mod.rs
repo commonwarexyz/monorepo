@@ -612,7 +612,7 @@ pub mod tests {
                     test_any_policy_limits_after_colliding_writes,
                     test_any_policy_limits_with_writes, test_any_policy_matches_proportional,
                     test_any_policy_own_writes, test_any_proportional_bound,
-                    test_any_proportional_one_batch,
+                    test_any_proportional_one_batch, test_ordered_db_prefetch_neighbors,
                 },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
                 value::{FixedEncoding, VariableEncoding},
@@ -2411,6 +2411,24 @@ pub mod tests {
     prefetch_tests!(ovp2, OrderedVariableP2Db, variable_config_partitioned);
     prefetch_tests!(uf_mmb, UnorderedFixedMmbDb, fixed_config);
     prefetch_tests!(ov_mmb, OrderedVariableMmbDb, variable_config);
+
+    // The partition prefix gives the test's creates no candidates in the index.
+    #[test_traced("WARN")]
+    fn test_prefetch_neighbors_ovp2() {
+        deterministic::Runner::default().start(|context| async move {
+            let (db, cache) =
+                prefetch_tests!(@open context, OrderedVariableP2Db, variable_config_partitioned);
+            test_ordered_db_prefetch_neighbors(
+                context.child("test"),
+                db,
+                cache,
+                |db: &OrderedVariableP2Db, writes: &[&Digest], deletes: &[&Digest]| {
+                    db.prefetch_neighbors(writes, deletes)
+                },
+            )
+            .await;
+        });
+    }
 
     test_for_all_variants!(test_build_random_close_reopen, "WARN");
     test_for_all_variants!(test_simulate_write_failures, "WARN");
