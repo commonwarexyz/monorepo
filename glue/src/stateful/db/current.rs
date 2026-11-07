@@ -30,8 +30,8 @@ use commonware_storage::{
             ordered, unordered,
         },
         current::{
+            Db,
             batch::{MerkleizedBatch, Slot, Staged, UnmerkleizedBatch},
-            db::Db,
             ordered::{
                 fixed::Config as OrderedFixedConfig, variable::Config as OrderedVariableConfig,
             },

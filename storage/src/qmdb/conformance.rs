@@ -351,11 +351,11 @@ mod tests {
         }
     }
 
-    type Store = store::db::Db<Ctx, Digest, Digest, OneCap>;
+    type Store = store::Db<Ctx, Digest, Digest, OneCap>;
 
-    fn store_config(suffix: &str) -> store::db::Config<OneCap, ((), ())> {
+    fn store_config(suffix: &str) -> store::Config<OneCap, ((), ())> {
         let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        store::db::Config {
+        store::Config {
             log: variable_log_config(suffix, pc, ((), ())),
             translator: OneCap,
             init_cache: Some(NZUsize!(1024)),

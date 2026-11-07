@@ -11,7 +11,7 @@ use commonware_storage::{
     mmr::full::Config as MerkleConfig,
     qmdb::{
         any::{
-            db::Db as AnyDb,
+            Db as AnyDb,
             ordered::{Operation, Update, fixed::Config},
         },
         value::FixedEncoding,

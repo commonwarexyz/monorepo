@@ -27,7 +27,7 @@ use futures::stream::Stream;
 /// This type is generic over the index type `I`, allowing it to be used with both regular
 /// and partitioned indices.
 pub type Db<F, E, C, K, V, I, H, const N: usize, S> =
-    crate::qmdb::current::db::Db<F, E, C, I, H, Update<K, V>, N, S>;
+    crate::qmdb::current::Db<F, E, C, I, H, Update<K, V>, N, S>;
 
 // Shared read-only functionality.
 impl<
