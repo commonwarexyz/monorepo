@@ -528,7 +528,10 @@ where
     };
     let boundaries = any::BitmapBoundaries {
         base: boundary(base.0),
-        anchors: anchors.iter().map(|(chunks, _)| boundary(*chunks)).collect(),
+        anchors: anchors
+            .iter()
+            .map(|(chunks, _)| boundary(*chunks))
+            .collect(),
     };
     let any = any::init_with_bitmap(
         context.child("any"),
@@ -544,7 +547,9 @@ where
         anchors
             .into_iter()
             .find(|(anchor, _)| *anchor == chunks)
-            .ok_or(crate::qmdb::Error::<F>::DataCorrupted("bitmap starts at no boundary"))?
+            .ok_or(crate::qmdb::Error::<F>::DataCorrupted(
+                "bitmap starts at no boundary",
+            ))?
             .1
     };
     let metadata = db::drop_anchors_after::<F, _, N>(metadata, any.inactivity_floor_loc).await?;
@@ -2680,6 +2685,71 @@ pub mod tests {
             .unwrap();
             assert_eq!(db.root(), earlier.root);
             assert_eq!(db.pruned_bits(), 0);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Under MMB, whose merges are delayed, a bitmap boundary also needs its youngest chunk pair
+    /// absorbed. A reopen from an anchor, a prune before it, a sync and a bounded restart at an
+    /// earlier retained commit all work there too.
+    #[test_traced("INFO")]
+    fn test_current_mmb_reopens_from_anchor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "current-mmb-anchor";
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                context.child("storage"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut history = Vec::new();
+            for generation in 0..6u64 {
+                let mut batch = db.new_batch();
+                for i in 0..384 {
+                    batch = batch.write(key(i), Some(val(generation * 1_000 + i)));
+                }
+                let merkleized = batch.merkleize(&db).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
+                db = db.sync().await.unwrap();
+                history.push((
+                    db.bounds().end,
+                    db.inactivity_floor(),
+                    db.sync_boundary(),
+                    db.root(),
+                ));
+            }
+            let (_, _, last_boundary, last_root) = *history.last().unwrap();
+            drop(db);
+
+            let db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                context.child("reopen"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), last_root);
+            assert_eq!(db.pruned_bits(), *last_boundary);
+
+            let &(size, floor, _, root) = history
+                .iter()
+                .find(|(_, floor, ..)| *floor < last_boundary)
+                .unwrap();
+            let db = db.prune(floor).await.unwrap();
+            assert_eq!(db.pruned_bits(), *last_boundary);
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            let db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                context.child("bounded"),
+                variable_config::<OneCap>(partition),
+                Some(size),
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), root);
             db.destroy().await.unwrap();
         });
     }

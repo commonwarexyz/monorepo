@@ -71,7 +71,11 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
     }
 
     /// Like [Self::set], but drops every anchor.
-    pub(crate) async fn reset(mut self, location: Location<F>, pins: Vec<D>) -> Result<Self, Error> {
+    pub(crate) async fn reset(
+        mut self,
+        location: Location<F>,
+        pins: Vec<D>,
+    ) -> Result<Self, Error> {
         self.metadata.put(BOUNDARY, (location, pins));
         self.metadata.retain(|key, _| key.prefix() != ANCHOR);
         self.metadata = self.metadata.sync().await?;
@@ -88,7 +92,10 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
         self.metadata
             .put(U64::new(ANCHOR, *location), (location, pins));
         let anchors = self.anchors();
-        for (oldest, _) in anchors.iter().take(anchors.len().saturating_sub(MAX_ANCHORS)) {
+        for (oldest, _) in anchors
+            .iter()
+            .take(anchors.len().saturating_sub(MAX_ANCHORS))
+        {
             self.metadata.remove(&U64::new(ANCHOR, **oldest));
         }
         let (metadata, handle) = self.metadata.start_sync().await?;

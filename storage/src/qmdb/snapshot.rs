@@ -381,6 +381,7 @@ impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> Scan<F, Item> for Le
     // Hashing needs chunk boundaries, which only decode tasks keep.
     const MIN_DECODERS: usize = 1;
 
+    // The Merkle structure's chunks, from its start, which callers keep at or before the floor.
     fn chunks(&self, _: u64, _: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static {
         Self::chunks(self)
     }
@@ -1000,6 +1001,11 @@ where
     I: Partitioned + Index<Value = Location<F>>,
     H: MerkleHasher<F> + 'static,
 {
+    // The decode tasks scan from the Merkle structure's start, so it must not pass the floor, or
+    // the operations between them would never reach the index.
+    if leaves.start() > *inactivity_floor_loc {
+        return Err(Error::DataCorrupted("hashing scan starts after the floor"));
+    }
     let Some(plan) = ParallelPlan::new(snapshot.partition_count(), init_concurrency, cache_size)
     else {
         let built = build_snapshot_serial(

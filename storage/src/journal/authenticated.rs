@@ -698,7 +698,8 @@ where
     /// The operations before `location` must be durable or about to be, and must never change
     /// unless a later initialization discards them. Records nothing if the rounded location is
     /// past [Self::size] or not past the pruning boundary, the Merkle structure's start and the
-    /// newest anchor. The returned handle completes once the record is durable.
+    /// newest anchor, or between [Self::from_components] and [Self::persist_boundary]. The returned
+    /// handle completes once the record is durable.
     pub async fn start_anchor(
         mut self,
         location: Location<F>,
@@ -1119,8 +1120,14 @@ pub struct LeafSink<F: Family, H: merkle::hasher::Hasher<F>> {
 
 #[commonware_macros::stability(ALPHA)]
 impl<F: Family, H: merkle::hasher::Hasher<F>> LeafSink<F, H> {
+    /// The first operation to scan: the Merkle structure's start, which is the pruning boundary
+    /// or an anchor after it.
+    pub(crate) const fn start(&self) -> u64 {
+        self.plan.start()
+    }
+
     /// The chunks to scan, hash and send, in position order. Together they cover every operation
-    /// from the journal's pruning boundary to its end.
+    /// from [Self::start] to the journal's end.
     pub(crate) fn chunks(&self) -> impl Iterator<Item = Range<u64>> + Send + 'static {
         self.plan.chunks()
     }
@@ -1365,9 +1372,7 @@ where
     }
 
     fn prune_target(&self, min_position: u64) -> u64 {
-        self.journal
-            .prune_target(min_position)
-            .max(*self.boundary)
+        self.journal.prune_target(min_position).max(*self.boundary)
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), JournalError> {
@@ -3141,7 +3146,13 @@ mod tests {
             .historical_proof(size, Location::new(10), NZU64!(5), 0)
             .await
             .unwrap();
-        assert!(verify_proof(&proof, &hasher, Location::new(10), &ops, &root));
+        assert!(verify_proof(
+            &proof,
+            &hasher,
+            Location::new(10),
+            &ops,
+            &root
+        ));
         drop(journal);
 
         // The reopen replays from the newest anchor.
@@ -3160,7 +3171,13 @@ mod tests {
             .historical_proof(size, Location::new(77), NZU64!(5), 0)
             .await
             .unwrap();
-        assert!(verify_proof(&proof, &hasher, Location::new(77), &ops, &root));
+        assert!(verify_proof(
+            &proof,
+            &hasher,
+            Location::new(77),
+            &ops,
+            &root
+        ));
 
         // A prune before the anchor deletes nothing and keeps the frontier.
         let (journal, start) = journal.prune(Location::new(50)).await.unwrap();

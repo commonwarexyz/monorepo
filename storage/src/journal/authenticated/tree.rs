@@ -237,6 +237,11 @@ pub(crate) struct ChunkPlan {
 }
 
 impl ChunkPlan {
+    /// The first leaf of the first chunk.
+    pub(crate) const fn start(&self) -> u64 {
+        self.range.start
+    }
+
     /// The chunks, in position order.
     pub(crate) fn chunks(&self) -> impl Iterator<Item = Range<u64>> + Send + 'static {
         let (mut next, end, width) = (self.range.start, self.range.end, 1u64 << self.height);
@@ -490,7 +495,11 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         boundary: Location<F>,
         pins: Vec<D>,
     ) -> Result<(), super::Error<F>> {
-        assert_eq!(self.leaves(), self.boundary, "only an empty tree can be rebased");
+        assert_eq!(
+            self.leaves(),
+            self.boundary,
+            "only an empty tree can be rebased"
+        );
         self.mem = Arc::new(Mem::from_components(Vec::new(), boundary, pins.clone())?);
         self.boundary = boundary;
         self.pins = F::nodes_to_pin(boundary).zip(pins).collect();
@@ -687,9 +696,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             let task = context
                 .child("replay_chunk")
                 .dedicated()
-                .spawn(move |_| async move {
-                    Self::hash_chunk(&*hold.journal, chunk, chunk_hasher, buffer).await
-                });
+                .spawn(move |_| Self::hash_chunk(hold, chunk, chunk_hasher, buffer));
             pending.push_back(task.abort_on_drop());
         };
 
@@ -723,9 +730,10 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         Ok(self)
     }
 
-    /// Read the operations in `chunk` and hash them with `hasher`.
+    /// Read the operations in `chunk` from the journal `hold` holds and hash them with `hasher`.
+    /// `hold` is taken whole, so its done sender lives until its journal is dropped.
     async fn hash_chunk<C, H>(
-        journal: &C,
+        hold: ChunkHold<C>,
         chunk: Range<u64>,
         mut hasher: ChunkHasher<F, H>,
         buffer: NonZeroUsize,
@@ -734,7 +742,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         C: Contiguous<Item: EncodeShared>,
         H: Hasher<F, Digest = D>,
     {
-        let stream = journal
+        let stream = hold
+            .journal
             .replay(chunk, buffer, ReadOptions::DONT_CACHE)
             .await?;
         pin_mut!(stream);

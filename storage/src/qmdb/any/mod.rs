@@ -141,8 +141,8 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
-use core::num::NonZeroUsize;
 use commonware_utils::bitmap::Prunable;
+use core::num::NonZeroUsize;
 use std::sync::Arc;
 use tracing::warn;
 

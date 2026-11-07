@@ -748,7 +748,10 @@ where
             .collect();
         self.metadata.put(U64::new(ANCHOR_PREFIX, chunks), pins);
         anchors.push(chunks);
-        for oldest in anchors.iter().take(anchors.len().saturating_sub(MAX_ANCHORS)) {
+        for oldest in anchors
+            .iter()
+            .take(anchors.len().saturating_sub(MAX_ANCHORS))
+        {
             self.metadata.remove(&U64::new(ANCHOR_PREFIX, *oldest));
         }
         Ok(Some(boundary))
@@ -1338,11 +1341,15 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
         let chunks = key.value();
         let loc = Location::<F>::new(chunks);
         if chunks == 0 || !loc.is_valid() {
-            return Err(Error::DataCorrupted("invalid anchor in grafted tree metadata"));
+            return Err(Error::DataCorrupted(
+                "invalid anchor in grafted tree metadata",
+            ));
         }
         let bytes = metadata.get(key).expect("listed key has a value");
         if bytes.len() != F::nodes_to_pin(loc).count() * D::SIZE {
-            return Err(Error::DataCorrupted("invalid anchor in grafted tree metadata"));
+            return Err(Error::DataCorrupted(
+                "invalid anchor in grafted tree metadata",
+            ));
         }
         let pins = bytes
             .chunks(D::SIZE)

@@ -1825,10 +1825,16 @@ pub(crate) mod test {
             }
             let db = db.sync().await.unwrap();
             assert!(db.sync_boundary() > start, "the floor did not move");
-            assert!(db.bounds().start <= start, "the target's operations were pruned");
+            assert!(
+                db.bounds().start <= start,
+                "the target's operations were pruned"
+            );
 
             let pins = db.pinned_nodes_at(start).await;
-            assert!(pins.is_ok(), "pins at the previous target's start: {pins:?}");
+            assert!(
+                pins.is_ok(),
+                "pins at the previous target's start: {pins:?}"
+            );
             let proof = db.historical_proof(size, start, NZU64!(10)).await;
             let (proof, ops) = proof.expect("proof of the previous target's operations");
             assert!(proof.verify::<Sha256, _>(start, &ops, &root));
