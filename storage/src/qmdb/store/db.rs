@@ -203,17 +203,22 @@ where
     ///
     /// Accepts slices of owned or borrowed keys and returns results in input order.
     pub async fn get_many(&self, keys: &[impl Borrow<K> + Sync]) -> Result<Vec<Option<V>>, Error> {
-        let unmodified: Vec<&K> = keys
-            .iter()
-            .map(Borrow::borrow)
-            .filter(|key| !self.diff.contains_key(*key))
-            .collect();
+        // Borrow and look up each key once, keeping the diff hit for the result mapping.
+        let mut lookups = Vec::with_capacity(keys.len());
+        let mut unmodified = Vec::new();
+        for key in keys {
+            let key = key.borrow();
+            let modified = self.diff.get(key);
+            if modified.is_none() {
+                unmodified.push(key);
+            }
+            lookups.push(modified);
+        }
         let mut stored = self.db.get_many(&unmodified).await?.into_iter();
-        Ok(keys
-            .iter()
-            .map(|key| {
-                self.diff
-                    .get(key.borrow())
+        Ok(lookups
+            .into_iter()
+            .map(|modified| {
+                modified
                     .cloned()
                     .unwrap_or_else(|| stored.next().expect("one stored value per unmodified key"))
             })
