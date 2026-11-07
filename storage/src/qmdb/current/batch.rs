@@ -1024,7 +1024,7 @@ where
         bitmap: bitmap_batch,
         canonical_root,
         ops_root_witness,
-        pruned_chunks: pruned_chunks as u64,
+        pruned_chunks: Widen::widen(pruned_chunks),
     }))
 }
 
@@ -1190,7 +1190,7 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
                 .overlay
                 .chunks
                 .iter()
-                .map(|(&index, &chunk)| (index as u64, chunk))
+                .map(|(&index, &chunk)| (Widen::widen(index), chunk))
                 .collect(),
         };
         chunks.sort_unstable_by_key(|(index, _)| *index);
@@ -1403,7 +1403,7 @@ where
             bitmap: BitmapBatch::Base(Arc::clone(&self.any.bitmap)),
             canonical_root: self.root,
             ops_root_witness: self.ops_root_witness.clone(),
-            pruned_chunks: self.any.bitmap.pruned_chunks() as u64,
+            pruned_chunks: Widen::widen(self.any.bitmap.pruned_chunks()),
         })
     }
 }
