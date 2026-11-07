@@ -4,10 +4,10 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         self, Error,
-        any::ValueEncoding,
         immutable::{self, CompactDb, Metrics, Operation},
         operation::Key,
         sync,
+        value::ValueEncoding,
     },
     translator::Translator,
 };
@@ -125,7 +125,7 @@ where
             .await
     }
 
-    fn root(&self) -> Self::Digest {
+    fn ops_root(&self) -> Self::Digest {
         self.root()
     }
 }
@@ -181,7 +181,7 @@ where
         Ok(None)
     }
 
-    fn root(&self) -> Self::Digest {
+    fn ops_root(&self) -> Self::Digest {
         self.root()
     }
 }

@@ -315,9 +315,8 @@
 //! Pending and partial slots are independent. When both are present, pending hashes in before
 //! partial.
 //!
-//! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root). The ops root is
-//! returned by the `sync::Database` trait's `root()` method, since the sync engine verifies batches
-//! against the ops root, not the canonical root.
+//! The canonical root is returned by [`db::Db::root`]. State sync uses [`db::Db::ops_root`],
+//! also exposed by [`sync::Database::ops_root`](crate::qmdb::sync::Database::ops_root).
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
 //! verifying ops proofs directly should use [`crate::qmdb::ProofExt::verify`]. After sync, the
@@ -333,13 +332,14 @@ use crate::{
     merkle::{self, Location},
     qmdb::{
         any::{
-            self, Config as AnyConfig, ValueEncoding,
+            self, Config as AnyConfig,
             operation::{
                 Operation, Update,
                 update::{Ordered as OrderedUpdate, Unordered as UnorderedUpdate},
             },
         },
         operation::Key,
+        value::ValueEncoding,
     },
     translator::Translator,
 };
@@ -431,15 +431,10 @@ where
     /// itself has been pruned.
     pub async fn init(
         context: E,
-        config: Config<
-            I::Translator,
-            C::Config,
-            S,
-            <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
-        >,
+        cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
         max_size: Option<Location<F>>,
     ) -> Result<Self, crate::qmdb::Error<F>> {
-        init_db(context, config, max_size).await
+        init_db(context, cfg, max_size).await
     }
 }
 
@@ -465,15 +460,10 @@ where
     /// itself has been pruned.
     pub async fn init(
         context: E,
-        config: Config<
-            I::Translator,
-            C::Config,
-            S,
-            <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
-        >,
+        cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
         max_size: Option<Location<F>>,
     ) -> Result<Self, crate::qmdb::Error<F>> {
-        init_db(context, config, max_size).await
+        init_db(context, cfg, max_size).await
     }
 }
 
@@ -481,7 +471,7 @@ where
 #[boxed]
 async fn init_db<F, E, U, H, I, J, const N: usize, S>(
     context: E,
-    config: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
     max_size: Option<Location<F>>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
@@ -508,8 +498,8 @@ where
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
-    let strategy = config.merkle.strategy.clone();
-    let metadata_partition = config.grafted_metadata_partition.clone();
+    let strategy = cfg.merkle.strategy.clone();
+    let metadata_partition = cfg.grafted_metadata_partition.clone();
 
     // Load bitmap metadata: the pruning base and the anchors, each a pruned-chunk count with the
     // grafted tree's pinned nodes there.
@@ -533,13 +523,8 @@ where
             .map(|(chunks, _)| boundary(*chunks))
             .collect(),
     };
-    let any = any::init_with_bitmap(
-        context.child("any"),
-        config.into(),
-        Some(boundaries),
-        max_size,
-    )
-    .await?;
+    let any =
+        any::init_with_bitmap(context.child("any"), cfg.into(), Some(boundaries), max_size).await?;
     let chunks = any.bitmap.pruned_chunks();
     let pinned_nodes = if chunks == base.0 {
         base.1
@@ -608,7 +593,6 @@ pub mod tests {
         qmdb::{
             ProofExt as _,
             any::{
-                ValueEncoding,
                 batch::Slot,
                 operation::update,
                 test::{
@@ -625,11 +609,11 @@ pub mod tests {
                     test_any_proportional_one_batch,
                 },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
-                value::{FixedEncoding, VariableEncoding},
             },
             chain::Bounds,
             floor::{Bounded, Hold},
             store::tests::{TestKey, TestValue},
+            value::{FixedEncoding, ValueEncoding, VariableEncoding},
         },
         translator::Translator,
     };
@@ -1131,12 +1115,12 @@ pub mod tests {
             .await
             .unwrap();
         let committed_root = db.root();
-        let committed_size = db.size();
+        let committed_size = db.bounds().end;
         drop(db);
 
         let db: C = Box::pin(open_db(context.child("second"), partition)).await;
         assert_eq!(db.root(), committed_root);
-        assert_eq!(db.size(), committed_size);
+        assert_eq!(db.bounds().end, committed_size);
         assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
 
@@ -1634,12 +1618,12 @@ pub mod tests {
             Box::pin(open_db(context.child("reference"), "chained-ref".into())).await;
         let reference = commit_writes(reference, seed.clone()).await.unwrap();
         let reference = commit_writes(reference, a.clone()).await.unwrap();
-        let size_a = *reference.size();
+        let size_a = *reference.bounds().end;
         let reference = commit_writes(reference, b.clone()).await.unwrap();
-        let size_b = *reference.size();
+        let size_b = *reference.bounds().end;
         let reference = commit_writes(reference, e.clone()).await.unwrap();
         let reference = commit_writes(reference, c.clone()).await.unwrap();
-        let size_c = *reference.size();
+        let size_c = *reference.bounds().end;
         let reference = commit_writes(reference, d.clone()).await.unwrap();
 
         // B appends a grafted leaf, while E and C only overwrite leaves.
@@ -2055,7 +2039,7 @@ pub mod tests {
             // the grafting boundary must differ because the corresponding bitmap chunk is nonzero.
             let pinned_positions =
                 <mmb::Family as merkle::Family>::nodes_to_pin(end).collect::<Vec<_>>();
-            let raw_pinned = db.pinned_nodes_at(end).await.unwrap();
+            let raw_pinned = db.ops_pinned_nodes_at(end).await.unwrap();
             assert_eq!(pinned_positions.len(), raw_pinned.len());
             let mut checked_grafted_node = false;
             for (pos, raw_digest) in pinned_positions.into_iter().zip(raw_pinned) {
@@ -5704,7 +5688,7 @@ pub mod tests {
                     let fillers: Vec<Digest> = (100..110).map(key).collect();
                     let mut values = BTreeMap::new();
                     let mut round = 0;
-                    while *db.size() + 11 <= CHUNK_BITS - 6 {
+                    while *db.bounds().end + 11 <= CHUNK_BITS - 6 {
                         let writes: Vec<Digest> = if round == 0 {
                             keys.iter().chain(&fillers).copied().collect()
                         } else {
@@ -5724,7 +5708,7 @@ pub mod tests {
                         }
                         round += 1;
                     }
-                    assert_eq!(*db.size(), CHUNK_BITS - 6);
+                    assert_eq!(*db.bounds().end, CHUNK_BITS - 6);
 
                     // An unapplied parent rewrites two policy keys with a held floor.
                     let parent_writes = [(keys[2], val(1002)), (keys[3], val(1003))];
@@ -5902,11 +5886,11 @@ pub mod tests {
                     let start = 3 * CHUNK_BITS - 8;
                     let mut values = BTreeMap::new();
                     let mut round = 0;
-                    while *db.size() < start {
+                    while *db.bounds().end < start {
                         let writes: Vec<Digest> = if round == 0 {
                             keys.iter().chain(&fillers).copied().collect()
                         } else {
-                            fillers[..(start - *db.size() - 1).min(10) as usize].to_vec()
+                            fillers[..(start - *db.bounds().end - 1).min(10) as usize].to_vec()
                         };
                         let batch = writes
                             .iter()
@@ -5922,7 +5906,7 @@ pub mod tests {
                         }
                         round += 1;
                     }
-                    assert_eq!(*db.size(), start);
+                    assert_eq!(*db.bounds().end, start);
 
                     // An unapplied grandparent rewrites two policy keys and six fillers at 760..768
                     // and commits at 768. An unapplied parent rewrites two more policy keys.
@@ -6029,7 +6013,7 @@ pub mod tests {
                     let ungrafted = |db: &$db| {
                         let complete = db.bitmap().complete_chunks() as u64;
                         let graftable = grafting::graftable_chunks::<$family>(
-                            *db.size(),
+                            *db.bounds().end,
                             grafting::height::<32>(),
                         );
                         complete - graftable.min(complete)
@@ -6037,7 +6021,7 @@ pub mod tests {
                     let freed = Arc::downgrade(&grandparent.inner);
                     let db = db.apply_batch(grandparent).await.unwrap();
                     assert!(freed.upgrade().is_none());
-                    assert_eq!(*db.size(), 3 * CHUNK_BITS + 1);
+                    assert_eq!(*db.bounds().end, 3 * CHUNK_BITS + 1);
                     assert_eq!(ungrafted(&db), $pending);
 
                     // The child merkleized over the applied grandparent matches the twin merkleized

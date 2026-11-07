@@ -38,10 +38,8 @@ pub mod tests {
         qmdb::{
             Error,
             any::{
-                ValueEncoding,
                 ordered::{Operation, Update},
                 traits::{DbAny, UnmerkleizedBatch as _},
-                value::{FixedEncoding, VariableEncoding},
             },
             current::{
                 BitmapPrunedBits,
@@ -49,6 +47,7 @@ pub mod tests {
                 tests::apply_random_ops,
             },
             store::tests::{TestKey, TestValue},
+            value::{FixedEncoding, ValueEncoding, VariableEncoding},
         },
         translator::OneCap,
     };
@@ -887,8 +886,8 @@ pub mod tests {
         use crate::{
             merkle::{mmb, mmr},
             qmdb::{
-                any::value::{FixedEncoding, VariableEncoding},
                 current::ordered::proof::{constant, dynamic},
+                value::{FixedEncoding, VariableEncoding},
             },
         };
         use commonware_codec::conformance::CodecConformance;

@@ -116,6 +116,7 @@ pub mod operation;
 mod snapshot;
 pub mod store;
 pub mod sync;
+pub mod value;
 pub mod verify;
 
 pub use snapshot::SnapshotBuild;

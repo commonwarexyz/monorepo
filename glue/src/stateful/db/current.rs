@@ -28,7 +28,6 @@ use commonware_storage::{
             initial_root,
             operation::{Operation, Update},
             ordered, unordered,
-            value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
         },
         current::{
             batch::{MerkleizedBatch, Slot, Staged, UnmerkleizedBatch},
@@ -42,6 +41,7 @@ use commonware_storage::{
         },
         operation::Key,
         sync::{self, Target as CurrentSyncTarget},
+        value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
     },
     translator::{OrderedTranslator, Translator},
 };
@@ -670,15 +670,12 @@ mod open {
         merkle::Graftable,
         qmdb::{
             Error,
-            any::{
-                operation::Operation,
-                ordered, unordered,
-                value::{VariableEncoding, VariableValue},
-            },
+            any::{operation::Operation, ordered, unordered},
             current::{
                 ordered::variable::{Config as OrderedConfig, Db as OrderedVariableDb},
                 unordered::variable::{Config, Db},
             },
+            value::{VariableEncoding, VariableValue},
         },
     };
     type VConfig<T, F, K, V, S> =

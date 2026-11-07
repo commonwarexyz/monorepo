@@ -57,8 +57,7 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        Error, any::value::ValueEncoding, chain, metrics::Metrics, single_operation_root,
-        sync::source,
+        Error, chain, metrics::Metrics, single_operation_root, sync::source, value::ValueEncoding,
     },
 };
 use commonware_codec::EncodeShared;
@@ -976,7 +975,7 @@ pub(crate) mod tests {
             Err(Error::StaleRead)
         ));
         assert!(matches!(
-            loser.get(loser.size(), &db).await,
+            loser.get(loser.bounds().tip.size, &db).await,
             Err(Error::StaleRead)
         ));
         assert!(matches!(
@@ -1932,7 +1931,7 @@ pub(crate) mod tests {
             parent.get_many(&[parent_loc, loc1], &db).await,
             Err(Error::LocationOutOfOrder(..))
         ));
-        let end = parent.size();
+        let end = parent.bounds().tip.size;
         assert!(matches!(
             parent.get_many(&[loc1, end], &db).await,
             Err(Error::LocationOutOfBounds(loc, bound)) if loc == end && bound == end
@@ -2711,14 +2710,14 @@ pub(crate) mod tests {
         );
         assert_eq!(child_m.get(loc1, &db).await.unwrap(), Some(v1.clone()));
         assert_eq!(child_m.get(loc2, &db).await.unwrap(), Some(v2.clone()));
-        let child_end = child_m.size();
+        let child_end = child_m.bounds().tip.size;
         assert!(matches!(
             child_m.get(child_end, &db).await,
             Err(Error::LocationOutOfBounds(loc, bound)) if loc == child_end && bound == child_end
         ));
 
         // An ancestor's view ends at its own tip.
-        let parent_end = parent_m.size();
+        let parent_end = parent_m.bounds().tip.size;
         assert!(matches!(
             parent_m.get(loc2, &db).await,
             Err(Error::LocationOutOfBounds(loc, bound)) if loc == loc2 && bound == parent_end

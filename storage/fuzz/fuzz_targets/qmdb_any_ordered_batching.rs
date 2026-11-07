@@ -11,9 +11,11 @@ use commonware_storage::{
         contiguous::fixed::{Config as FConfig, Journal},
     },
     merkle::{Family as MerkleFamily, Location, mmb, mmr},
-    qmdb::any::{
-        db::Db as AnyDb,
-        ordered::{Operation, Update, fixed::Config},
+    qmdb::{
+        any::{
+            db::Db as AnyDb,
+            ordered::{Operation, Update, fixed::Config},
+        },
         value::FixedEncoding,
     },
     translator::EightCap,

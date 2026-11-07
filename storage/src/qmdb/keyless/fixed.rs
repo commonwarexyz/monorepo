@@ -4,7 +4,7 @@
 
 use crate::{
     journal::contiguous::fixed::{self, Config as JournalConfig},
-    qmdb::{any::value::FixedEncoding, keyless::operation::Operation as BaseOperation},
+    qmdb::{keyless::operation::Operation as BaseOperation, value::FixedEncoding},
 };
 
 /// Keyless operation for fixed-size values.

@@ -8,8 +8,8 @@ use commonware_storage::{
     journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FConfig},
     merkle::{Graftable, Location, mmb, mmr},
     qmdb::{
-        any::value::FixedEncoding,
         current::unordered::fixed::{Config, Db as CurrentDb},
+        value::FixedEncoding,
     },
     translator::TwoCap,
 };

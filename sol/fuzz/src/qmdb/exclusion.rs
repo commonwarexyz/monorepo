@@ -14,12 +14,10 @@ use commonware_cryptography::{Hasher, Keccak256, Sha256};
 use commonware_storage::{
     merkle::{Graftable, Location, mmb, mmr},
     qmdb::{
-        any::{
-            ordered,
-            value::{FixedEncoding, ValueEncoding, VariableEncoding},
-        },
+        any::ordered,
         current::ordered::proof::ExclusionProof,
         operation::Key,
+        value::{FixedEncoding, ValueEncoding, VariableEncoding},
     },
 };
 use commonware_utils::sequence::FixedBytes;

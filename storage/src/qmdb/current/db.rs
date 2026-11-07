@@ -514,8 +514,10 @@ where
             .await
     }
 
-    /// Return the pinned nodes for a lower operation boundary of `loc`.
-    pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
+    /// Return ops-tree pinned nodes for a lower operation boundary of `loc`.
+    ///
+    /// These belong to the operations tree authenticated by [`Self::ops_root`].
+    pub async fn ops_pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
         self.any.pinned_nodes_at(loc).await
     }
 

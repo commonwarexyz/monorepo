@@ -1,15 +1,15 @@
 use crate::{
     merkle::Family,
     qmdb::{
-        any::{VariableValue, value::VariableEncoding},
-        keyless::operation::{APPEND_CONTEXT, COMMIT_CONTEXT, Codec, Operation},
+        keyless::operation::{APPEND_CONTEXT, COMMIT_CONTEXT, Operation, OperationCodec},
         operation::{commit_variable_payload_size, read_commit_variable, write_commit_variable},
+        value::{VariableEncoding, VariableValue},
     },
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_runtime::BufMut;
 
-impl<V: VariableValue> Codec for VariableEncoding<V> {
+impl<V: VariableValue> OperationCodec for VariableEncoding<V> {
     type ReadCfg = <V as Read>::Cfg;
 
     fn write_operation<F: Family>(op: &Operation<F, Self>, buf: &mut impl BufMut) {

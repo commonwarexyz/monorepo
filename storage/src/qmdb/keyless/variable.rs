@@ -4,7 +4,7 @@
 
 use crate::{
     journal::contiguous::variable::{self, Config as JournalConfig},
-    qmdb::{any::value::VariableEncoding, keyless::operation::Operation as BaseOperation},
+    qmdb::{keyless::operation::Operation as BaseOperation, value::VariableEncoding},
 };
 
 /// Keyless operation for variable-length values.

@@ -7,11 +7,13 @@ use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deter
 use commonware_storage::{
     journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FConfig},
     merkle::{Family as MerkleFamily, Location, mmb, mmr},
-    qmdb::any::{
-        batch::{MerkleizedBatch, UnmerkleizedBatch},
-        ordered::{
-            Update,
-            fixed::{Config, Db as AnyDb},
+    qmdb::{
+        any::{
+            batch::{MerkleizedBatch, UnmerkleizedBatch},
+            ordered::{
+                Update,
+                fixed::{Config, Db as AnyDb},
+            },
         },
         value::FixedEncoding as FixedEncodingGeneric,
     },

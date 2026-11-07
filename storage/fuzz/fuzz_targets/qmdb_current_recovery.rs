@@ -18,8 +18,8 @@ use commonware_storage::{
     journal::{authenticated::Config as MerkleConfig, contiguous::variable::Config as VConfig},
     merkle::{Graftable, Location, mmb, mmr},
     qmdb::{
-        any::value::VariableEncoding,
         current::unordered::variable::{Config, Db as Current},
+        value::VariableEncoding,
     },
     translator::TwoCap,
 };

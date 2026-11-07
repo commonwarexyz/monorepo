@@ -14,7 +14,6 @@ use crate::{
     merkle::{Family, Location, Proof},
     qmdb::{
         any::{
-            ValueEncoding,
             db::Db,
             operation::{Operation, update},
             ordered::{Neighbors, find_next_key_ascending},
@@ -23,6 +22,7 @@ use crate::{
         chain::{self, Bounds, Commitment, Compatible},
         floor::{Action, Entry, Limits, Policy, Proportional, Walk},
         operation::{Key, Operation as OperationTrait},
+        value::ValueEncoding,
     },
 };
 use ahash::AHashSet;
@@ -3445,10 +3445,10 @@ pub(crate) mod tests {
                 },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
                 unordered::fixed::Db as UnorderedFixedDb,
-                value::FixedEncoding,
             },
             current,
             floor::{Bounded, Decision, Entry, Hold, Limits, Policy, Proportional},
+            value::FixedEncoding,
         },
         translator::OneCap,
     };
@@ -3692,7 +3692,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
-        let size = db.size();
+        let size = db.bounds().end;
 
         // An unapplied parent rewrites a colliding key and the other key with a held floor.
         let pending = [
@@ -3830,8 +3830,8 @@ pub(crate) mod tests {
                 db = db.apply_batch(batch).await.unwrap();
             }
             assert_eq!(db.active_keys, 2);
-            assert_eq!((*db.inactivity_floor(), *db.size()), (0, 388));
-            let last = db.size();
+            assert_eq!((*db.inactivity_floor(), *db.bounds().end), (0, 388));
+            let last = db.bounds().end;
             let inactive = [last - 1];
 
             // An ordinary round selects both active updates and passes the last commit.
@@ -4860,7 +4860,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let db = db.apply_batch(update).await.unwrap();
-            assert_eq!(db.size(), Location::new(7));
+            assert_eq!(db.bounds().end, Location::new(7));
             let choose = |key: &sha256::Digest| {
                 if *key == b {
                     Choice::Evict
@@ -4981,7 +4981,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let db = db.apply_batch(rewrite).await.unwrap();
-            assert_eq!(db.size(), Location::new(8));
+            assert_eq!(db.bounds().end, Location::new(8));
 
             // Two skips pass the initial commit and the superseded update at 1, and one entry
             // evicts the key at 2, so the window ends at 3, below the predecessor's update at 6.

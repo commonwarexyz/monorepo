@@ -8,8 +8,8 @@
 //!
 //! The `constant` and `dynamic` forms here and in the ordered and unordered proof modules differ
 //! only in how bitmap chunks are sized. Value encoding is a separate choice: key-value verifiers
-//! name [FixedEncoding](crate::qmdb::any::value::FixedEncoding) or
-//! [VariableEncoding](crate::qmdb::any::value::VariableEncoding) to match the source database.
+//! name [FixedEncoding](crate::qmdb::value::FixedEncoding) or
+//! [VariableEncoding](crate::qmdb::value::VariableEncoding) to match the source database.
 //!
 //! # Canonical root structure
 //!
