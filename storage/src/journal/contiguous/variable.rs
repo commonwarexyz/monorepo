@@ -942,23 +942,39 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             let Some(blob) = self.data.get(blob_num) else {
                 continue;
             };
-            let ranges: Vec<(u64, usize)> = group
-                .iter()
-                .map(|&(_, offset, len)| (offset, len))
-                .collect();
+            // Frames of consecutive positions are byte-adjacent, so each run of them is read as
+            // one range, which leaves the buffer laid out as reading them one by one would. If any
+            // range misses, read the group frame by frame instead, so a partly cached run still
+            // serves its cached frames.
+            let mut ranges: Vec<(u64, usize)> = Vec::with_capacity(group.len());
+            let mut range_of: Vec<usize> = Vec::with_capacity(group.len());
+            for &(_, offset, len) in group {
+                match ranges.last_mut() {
+                    Some((start, total)) if *start + *total as u64 == offset => *total += len,
+                    _ => ranges.push((offset, len)),
+                }
+                range_of.push(ranges.len() - 1);
+            }
             let Some(total) = read_buffer_len(ranges.iter().map(|&(_, len)| len)) else {
                 continue;
             };
             buf.resize(total, 0);
-            let missed = blob.try_read_ranges_sync_into(&mut buf, &ranges);
+            let mut missed = blob.try_read_ranges_sync_into(&mut buf, &ranges);
+            if !missed.is_empty() && ranges.len() < group.len() {
+                ranges.clear();
+                ranges.extend(group.iter().map(|&(_, offset, len)| (offset, len)));
+                range_of.clear();
+                range_of.extend(0..group.len());
+                missed = blob.try_read_ranges_sync_into(&mut buf, &ranges);
+            }
             with_bytes(&mut buf, |bytes| {
                 let mut missed = missed.into_iter().peekable();
                 let mut local = 0usize;
-                for (range_idx, &(idx, offset, len)) in group.iter().enumerate() {
+                for (&range_idx, &(idx, offset, len)) in range_of.iter().zip(group) {
                     let start = local;
                     local += len;
+                    while missed.next_if(|&missed| missed < range_idx).is_some() {}
                     if missed.peek() == Some(&range_idx) {
-                        missed.next();
                         continue;
                     }
 
@@ -5409,6 +5425,50 @@ mod tests {
                 6
             );
             drop(served);
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_probe_serves_cached_part_of_a_run() {
+        // Only the data page holding item 0 is cached, so a run of consecutive frames is partly
+        // cached. Probing the run serves exactly the frames probing each alone serves.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cache = CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(64));
+            let cfg = Config {
+                partition: "probe-run".into(),
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: (),
+                page_cache: cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let items = (0..40)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
+            journal = journal.sync().await.unwrap();
+
+            let reader;
+            (journal, reader) = journal.snapshot().await.unwrap();
+            cache.clear();
+            assert_eq!(reader.read(0).await.unwrap(), items[0]);
+            let positions: Vec<u64> = (0..30).collect();
+            let batched = reader.try_read_many_sync(&positions);
+            let alone: Vec<_> = positions
+                .iter()
+                .map(|&position| reader.try_read_many_sync(&[position]).remove(0))
+                .collect();
+            assert_eq!(batched, alone);
+            assert_eq!(batched[0].as_ref(), Some(&items[0]));
+            assert!(batched.iter().any(Option::is_none));
             drop(reader);
 
             journal.destroy().await.unwrap();
