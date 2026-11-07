@@ -1,0 +1,311 @@
+//! A reference sender that pays through the operator and resolves its requests against posted
+//! closes.
+
+use commonware_clearing::bajillion::{
+    Acknowledgement, Amount, Amounts, Epoch, Error, Namespace, Opening, Receipt, Request, State,
+    States,
+};
+use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
+use std::collections::BTreeMap;
+
+/// Why the sender refused to act.
+#[derive(Debug)]
+pub enum Refusal {
+    /// A request is still pending.
+    Pending,
+    /// No request is pending.
+    NotPending,
+    /// The sender holds a countersigned map of a later epoch.
+    LaterEpoch,
+    /// The acknowledgement countersigns none of the pending request's states.
+    InvalidAcknowledgement,
+    /// The sender holds no acknowledged state of the epoch.
+    NotAcknowledged,
+    /// A helper refused it.
+    Error(Error),
+}
+
+impl From<Error> for Refusal {
+    fn from(error: Error) -> Self {
+        Self::Error(error)
+    }
+}
+
+/// What a posted close did with the pending request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// The close settled one of its states.
+    Settled,
+    /// The close settled none of its states, and none is for a later epoch.
+    Dropped,
+    /// Its state for a later epoch may still settle.
+    Pending,
+}
+
+/// A countersigned state with the sender's signature, the operator's acknowledgement if the
+/// sender received it, and the payment map the state commits to (S2, S3).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Countersigned<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
+    pub state: State<P, D>,
+    pub signature: P::Signature,
+    pub acknowledgement: Option<Acknowledgement<O>>,
+    pub payments: Amounts<P, A>,
+}
+
+/// A request awaiting an answer, with its states.
+pub type Pending<P, D, A> = (Request<P, D, A>, States<P, D, A>);
+
+/// What the sender persists. A restart resumes from it alone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Persisted<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
+    /// The latest countersigned state of each epoch the sender paid in.
+    pub countersigned: BTreeMap<Epoch, Countersigned<P, O, D, A>>,
+    /// The sender's row root in each posted close (S5).
+    pub posted: BTreeMap<Epoch, D>,
+    /// The request awaiting an answer with its states, persisted before it is sent (S3).
+    pub pending: Option<Pending<P, D, A>>,
+}
+
+/// A sender keeping its countersigned states, the row roots of posted closes, and at most one
+/// pending request with its states.
+pub struct Sender<S: Signer, O: PublicKey, H: Hasher, A: Amount> {
+    signer: S,
+    account: S::PublicKey,
+    operator: O,
+    namespace: Namespace,
+    persisted: Persisted<S::PublicKey, O, H::Digest, A>,
+}
+
+impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
+    pub fn new(signer: S, operator: O, namespace: Namespace) -> Self {
+        let persisted = Persisted {
+            countersigned: BTreeMap::new(),
+            posted: BTreeMap::new(),
+            pending: None,
+        };
+        Self::restart(signer, operator, namespace, persisted)
+    }
+
+    /// Returns a sender resuming from what it persisted.
+    pub fn restart(
+        signer: S,
+        operator: O,
+        namespace: Namespace,
+        persisted: Persisted<S::PublicKey, O, H::Digest, A>,
+    ) -> Self {
+        Self {
+            account: signer.public_key(),
+            signer,
+            operator,
+            namespace,
+            persisted,
+        }
+    }
+
+    pub const fn persisted(&self) -> &Persisted<S::PublicKey, O, H::Digest, A> {
+        &self.persisted
+    }
+
+    /// Returns the countersigned payment map of `epoch`.
+    pub fn payments(&self, epoch: Epoch) -> Option<&Amounts<S::PublicKey, A>> {
+        self.persisted
+            .countersigned
+            .get(&epoch)
+            .map(|countersigned| &countersigned.payments)
+    }
+
+    pub fn pending(&self) -> Option<&Request<S::PublicKey, H::Digest, A>> {
+        self.persisted.pending.as_ref().map(|(request, _)| request)
+    }
+
+    /// Returns the root a request in `epoch` builds on (S1). That is the posted row root of
+    /// the epoch before if its close posted, else the root of the countersigned map of that
+    /// epoch, else the empty map's root.
+    fn previous(&self, epoch: Epoch) -> H::Digest {
+        let before = epoch.checked_sub(1);
+        before
+            .and_then(|before| self.persisted.posted.get(&before).copied())
+            .or_else(|| {
+                before
+                    .and_then(|before| self.persisted.countersigned.get(&before))
+                    .map(|countersigned| countersigned.state.payments)
+            })
+            .unwrap_or_else(|| Amounts::<S::PublicKey, A>::empty().root::<H>())
+    }
+
+    /// Returns each state of the pending request with the sender's signature over it and the map
+    /// it commits to.
+    #[allow(clippy::type_complexity)]
+    fn proposed(
+        &self,
+    ) -> Vec<(
+        &State<S::PublicKey, H::Digest>,
+        &S::Signature,
+        &Amounts<S::PublicKey, A>,
+    )> {
+        let Some((request, states)) = &self.persisted.pending else {
+            return Vec::new();
+        };
+        let pipelined = states
+            .pipelined
+            .as_ref()
+            .zip(request.pipelined.as_ref())
+            .map(|((state, payments), (_, signature))| (state, signature, payments));
+        core::iter::once((&states.state, &request.signature, &states.payments))
+            .chain(pipelined)
+            .collect()
+    }
+
+    /// Signs a request paying `batch` in `epoch` on top of the countersigned map of that epoch,
+    /// and, if `pipelined`, on top of it in the next. The request is persisted before it is
+    /// returned for sending.
+    pub fn send(
+        &mut self,
+        epoch: Epoch,
+        batch: Amounts<S::PublicKey, A>,
+        pipelined: bool,
+    ) -> Result<Request<S::PublicKey, H::Digest, A>, Refusal> {
+        if self.persisted.pending.is_some() {
+            return Err(Refusal::Pending);
+        }
+        if self
+            .persisted
+            .countersigned
+            .keys()
+            .next_back()
+            .is_some_and(|latest| *latest > epoch)
+        {
+            return Err(Refusal::LaterEpoch);
+        }
+        let empty = Amounts::empty();
+        let payments = self.payments(epoch).unwrap_or(&empty);
+        let states = Request::states::<H>(
+            self.account.clone(),
+            epoch,
+            batch,
+            payments,
+            &self.previous(epoch),
+            pipelined,
+        )?;
+        let request = states.sign(&self.signer, &self.namespace);
+        self.persisted.pending = Some((request.clone(), states));
+        Ok(request)
+    }
+
+    /// Records the pending state the operator countersigned, with both signatures and its map, in
+    /// one write that also clears the request (S2, S3). Only then returns a receipt for each
+    /// receiver of its batch.
+    #[allow(clippy::type_complexity)]
+    pub fn acknowledged(
+        &mut self,
+        acknowledgement: &Acknowledgement<O>,
+    ) -> Result<Vec<Receipt<S::PublicKey, O, H::Digest, A>>, Refusal> {
+        let (_, states) = self.persisted.pending.as_ref().ok_or(Refusal::NotPending)?;
+        let receivers: Vec<_> = states
+            .batch
+            .iter()
+            .map(|(receiver, _)| receiver.clone())
+            .collect();
+        let countersigned = self
+            .proposed()
+            .into_iter()
+            .find(|(state, _, _)| {
+                state.verify_acknowledgement(
+                    &self.namespace,
+                    &self.operator,
+                    &acknowledgement.signature,
+                )
+            })
+            .map(|(state, signature, payments)| Countersigned {
+                state: state.clone(),
+                signature: signature.clone(),
+                acknowledgement: Some(acknowledgement.clone()),
+                payments: payments.clone(),
+            })
+            .ok_or(Refusal::InvalidAcknowledgement)?;
+        let epoch = countersigned.state.epoch;
+        self.persisted.countersigned.insert(epoch, countersigned);
+        self.persisted.pending = None;
+        self.receipts(epoch, receivers)
+    }
+
+    /// Issues receipts for `receivers` from the acknowledged state of `epoch` the sender
+    /// persisted.
+    #[allow(clippy::type_complexity)]
+    pub fn receipts(
+        &self,
+        epoch: Epoch,
+        receivers: impl IntoIterator<Item = S::PublicKey>,
+    ) -> Result<Vec<Receipt<S::PublicKey, O, H::Digest, A>>, Refusal> {
+        let countersigned = self
+            .persisted
+            .countersigned
+            .get(&epoch)
+            .ok_or(Refusal::NotAcknowledged)?;
+        let acknowledgement = countersigned
+            .acknowledgement
+            .as_ref()
+            .ok_or(Refusal::NotAcknowledged)?;
+        Ok(Receipt::issue::<H>(
+            &countersigned.state,
+            &countersigned.signature,
+            acknowledgement,
+            &countersigned.payments,
+            receivers,
+        )?)
+    }
+
+    /// Drops the pending request after a refusal of its only delivery (S4).
+    pub fn refused(&mut self) -> Result<(), Refusal> {
+        self.persisted
+            .pending
+            .take()
+            .map(drop)
+            .ok_or(Refusal::NotPending)
+    }
+
+    /// Records the final post of `epoch` with matrix root `root` from an opening of this sender's
+    /// row, and resolves the pending request against it (S5). Posts must arrive in epoch order.
+    /// Returns `None` if no request is pending.
+    pub fn posted(
+        &mut self,
+        epoch: Epoch,
+        root: &H::Digest,
+        opening: &Opening<S::PublicKey, H::Digest, A>,
+    ) -> Result<Option<Outcome>, Refusal> {
+        let row = opening.verify_row::<H>(root, &self.account)?;
+        let posted = row.unwrap_or_else(|| Amounts::<S::PublicKey, A>::empty().root::<H>());
+        self.persisted.posted.insert(epoch, posted);
+        if self.persisted.pending.is_none() {
+            return Ok(None);
+        }
+        let proposed = self.proposed();
+        let settled = proposed
+            .iter()
+            .find(|(state, _, _)| state.epoch == epoch && Some(state.payments) == row)
+            .map(|(state, signature, payments)| Countersigned {
+                state: (*state).clone(),
+                signature: (*signature).clone(),
+                acknowledgement: None,
+                payments: (*payments).clone(),
+            });
+        let resolved = proposed.iter().all(|(state, _, _)| state.epoch <= epoch);
+        if let Some(countersigned) = settled {
+            self.persisted.countersigned.insert(epoch, countersigned);
+            self.persisted.pending = None;
+            return Ok(Some(Outcome::Settled));
+        }
+        if resolved {
+            self.persisted.pending = None;
+            return Ok(Some(Outcome::Dropped));
+        }
+        Ok(Some(Outcome::Pending))
+    }
+
+    /// Forgets the countersigned states and posted roots of epochs before `epoch`. The pending
+    /// request keeps the maps it extends in its states.
+    pub fn prune(&mut self, epoch: Epoch) {
+        self.persisted.countersigned = self.persisted.countersigned.split_off(&epoch);
+        self.persisted.posted = self.persisted.posted.split_off(&epoch);
+    }
+}

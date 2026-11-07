@@ -1,0 +1,113 @@
+//! Sharded admission and restarts of operators built from the helpers.
+
+use super::*;
+use commonware_clearing::bajillion::ForcedWithdrawal;
+use std::collections::HashMap;
+
+/// Two operators that restart from one operator's persisted state and each admit half the
+/// accounts produce rows and soft withdrawals that assemble into the same close, byte for byte,
+/// with the same flows, as one operator admitting everything.
+#[test]
+fn test_assembly_matches_monolithic_close() {
+    let users: Vec<u64> = (0..6).collect();
+    let mut replica = operator();
+    let funding: Vec<_> = users.iter().map(|index| (*index, 100)).collect();
+    fund(&mut replica, &funding);
+    let mut shards: Vec<_> = (0..2)
+        .map(|_| {
+            TestOperator::restart(
+                operator_key(),
+                namespace(),
+                LIMITS,
+                replica.persisted().clone(),
+            )
+        })
+        .collect();
+
+    // The same requests and soft withdrawals reach the single operator and the shard serving
+    // their account.
+    let mut senders: HashMap<_, _> = users.iter().map(|index| (*index, sender(*index))).collect();
+    for from in &users {
+        for offset in [1, 3] {
+            let to = (from + offset) % 6;
+            let sender = senders.get_mut(from).unwrap();
+            let request = sender.send(2, amounts(&[(to, 10 + from)]), false).unwrap();
+            let shard = &mut shards[(from % 2) as usize];
+            let acknowledgement = shard.accept(&request).unwrap();
+            replica.accept(&request).unwrap();
+            sender.acknowledged(&acknowledgement).unwrap();
+        }
+    }
+    let withdrawal = Withdrawal::sign(&user(2), &namespace(), 2, 15, 0);
+    shards[0].withdraw(withdrawal.clone()).unwrap();
+    replica.withdraw(withdrawal).unwrap();
+
+    // Both close epoch 2 identically.
+    let queue = Queue {
+        forced_withdrawals: vec![ForcedWithdrawal {
+            account: account(4),
+            amount: 5,
+        }],
+        ..deposits(2, &[(5, 7)])
+    };
+    let (assembled, flows) = replica.close(&queue, 1, 1).unwrap();
+    let (sharded, sharded_flows) = Close::assemble::<Sha256, _>(
+        &operator_key(),
+        &namespace(),
+        &queue,
+        1,
+        1,
+        shards.iter().flat_map(TestOperator::rows),
+        shards.iter().flat_map(|shard| shard.withdrawals().cloned()),
+    )
+    .unwrap();
+    assert_eq!(assembled.encode(), sharded.encode());
+    assert_eq!(flows, sharded_flows);
+}
+
+/// An operator restarted from what it persisted, its admissions and soft withdrawals of the open
+/// epoch included, closes the epoch exactly as the original. A restart after the close holds the
+/// close it released.
+#[test]
+fn test_restarted_operator_closes_like_the_original() {
+    let restart = |operator: &TestOperator| {
+        TestOperator::restart(
+            operator_key(),
+            namespace(),
+            LIMITS,
+            operator.persisted().clone(),
+        )
+    };
+    let mut operator = operator();
+    fund(&mut operator, &[(0, 100)]);
+    let mut alice = sender(0);
+    let request = alice.send(2, amounts(&[(1, 10)]), false).unwrap();
+    alice
+        .acknowledged(&operator.accept(&request).unwrap())
+        .unwrap();
+    close(&mut operator);
+
+    // In epoch 3, the operator admits a pipelined request on top of the map the close of epoch 2
+    // settled, and a soft withdrawal, persisting each before it answers.
+    let request = alice.send(3, amounts(&[(1, 5)]), true).unwrap();
+    let acknowledgement = operator.accept(&request).unwrap();
+    assert_eq!(alice.acknowledged(&acknowledgement).unwrap()[0].amount, 5);
+    let withdrawal = Withdrawal::sign(&user(1), &namespace(), 3, 4, 0);
+    operator.withdraw(withdrawal).unwrap();
+
+    // The restarted operator holds both from its records alone. It countersigns the request again
+    // as a retry, paying nothing twice, and closes the epoch as the original does.
+    let mut restarted = restart(&operator);
+    assert_eq!(restarted.epoch(), 3);
+    assert_eq!(restarted.payments(&account(0)), Some(&amounts(&[(1, 5)])));
+    assert_eq!(restarted.live(&account(0)), 85);
+    assert_eq!(restarted.accept(&request).unwrap(), acknowledgement);
+    assert_eq!(restarted.live(&account(0)), 85);
+    let released = close(&mut operator);
+    assert_eq!(close(&mut restarted), released);
+
+    // A restart after the close holds the close to release again.
+    let again = restart(&operator);
+    assert_eq!(again.persisted().released.as_ref(), Some(&released));
+    assert_eq!(again.persisted(), restarted.persisted());
+}

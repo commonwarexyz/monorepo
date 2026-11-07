@@ -1754,6 +1754,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-clearing"
+version = "2026.10.0"
+dependencies = [
+ "arbitrary",
+ "bytes",
+ "commonware-codec",
+ "commonware-conformance",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "rand_core 0.10.1",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "commonware-codec"
 version = "2026.10.0"
 dependencies = [

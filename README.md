@@ -14,6 +14,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [actor](./actor/README.md): Safely coordinate concurrent components.
 * [allocator](./allocator/README.md): Allocate and manage memory.
 * [broadcast](./broadcast/README.md): Disseminate data over a wide-area network.
+* [clearing](./clearing/README.md): Settle actions at scale.
 * [codec](./codec/README.md): Serialize structured data.
 * [coding](./coding/README.md): Encode data to enable recovery from a subset of fragments.
 * [collector](./collector/README.md): Collect responses to committable requests.
