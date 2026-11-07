@@ -14,7 +14,6 @@ use crate::{
     merkle::{Family, Location, Proof},
     qmdb::{
         any::{
-            ValueEncoding,
             db::Db,
             operation::{Operation, update},
             ordered::{Neighbors, find_next_key_ascending},
@@ -23,6 +22,7 @@ use crate::{
         chain::{self, Bounds, Commitment, Compatible},
         floor::{Action, Entry, Limits, Policy, Proportional, Walk},
         operation::{Key, Operation as OperationTrait},
+        value::ValueEncoding,
     },
 };
 use ahash::AHashSet;
@@ -3445,10 +3445,10 @@ pub(crate) mod tests {
                 },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
                 unordered::fixed::Db as UnorderedFixedDb,
-                value::FixedEncoding,
             },
             current,
             floor::{Bounded, Decision, Entry, Hold, Limits, Policy, Proportional},
+            value::FixedEncoding,
         },
         translator::OneCap,
     };

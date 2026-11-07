@@ -11,11 +11,9 @@ use crate::{
     merkle::{self, Location},
     qmdb::{
         Error,
-        any::{
-            ValueEncoding,
-            ordered::{Operation, Update},
-        },
+        any::ordered::{Operation, Update},
         operation::Key,
+        value::ValueEncoding,
     },
 };
 use commonware_codec::Codec;

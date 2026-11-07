@@ -13,7 +13,7 @@ use crate::{
     index::ordered::Index,
     journal::contiguous::fixed::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::{any::value::FixedEncoding, current},
+    qmdb::{current, value::FixedEncoding},
 };
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<

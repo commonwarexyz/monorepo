@@ -17,8 +17,7 @@
 //! from the operations. The canonical root is then computed from the ops root, the reconstructed
 //! grafted root, and any pending or partial chunk digests.
 //!
-//! The [Database]`::`[root()](crate::qmdb::sync::Database::root) implementation returns the **ops
-//! root** (not the canonical root) because that is what the sync engine verifies against.
+//! [`Database::ops_root`] returns the ops root used by the sync engine.
 //!
 //! For pruned databases (`range.start > 0`), grafted pinned nodes for the pruned region are read
 //! directly from the ops tree after it is built. This works because of the zero-chunk identity: for
@@ -276,8 +275,8 @@ where
 
     /// Returns the ops root (not the canonical root), since the sync engine verifies
     /// batches against the ops tree.
-    fn root(&self) -> Self::Digest {
-        self.any.root()
+    fn ops_root(&self) -> Self::Digest {
+        Self::ops_root(self)
     }
 }
 

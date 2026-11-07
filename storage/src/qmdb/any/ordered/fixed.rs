@@ -8,7 +8,10 @@ use crate::{
     index::ordered::Index,
     journal::contiguous::fixed::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::any::{self, ordered, value::FixedEncoding},
+    qmdb::{
+        any::{self, ordered},
+        value::FixedEncoding,
+    },
 };
 
 pub type Update<K, V> = ordered::Update<K, FixedEncoding<V>>;

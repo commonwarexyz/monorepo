@@ -13,7 +13,6 @@ use crate::{
     qmdb::{
         Error,
         any::{
-            ValueEncoding,
             operation::{Operation, Update, update},
             traits::{
                 BatchableDb, DbAny, MerkleizedBatch as MerkleizedBatchTrait,
@@ -22,6 +21,7 @@ use crate::{
         },
         floor::Policy,
         operation::Key,
+        value::ValueEncoding,
     },
 };
 use commonware_codec::Codec;

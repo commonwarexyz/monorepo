@@ -85,7 +85,7 @@ where
         // Sync from the oldest retained operation, below the floor, so the client also receives
         // the inactive first batch.
         let bounds = H::bounds(&target_db);
-        let target_root = H::db_root(&target_db);
+        let target_root = H::ops_root(&target_db);
 
         let target_db = Arc::new(target_db);
         let db_config = H::config(&format!("floor_sync_{}", context.next_u64()));
@@ -106,7 +106,7 @@ where
         };
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
-        assert_eq!(H::db_root(&synced_db), target_root);
+        assert_eq!(H::ops_root(&synced_db), target_root);
         assert_eq!(H::inactivity_floor(&synced_db), first_commit_end);
 
         // Keys from the second batch (after the floor) should be findable.
@@ -138,7 +138,7 @@ pub(crate) mod harnesses {
     use crate::{
         journal::contiguous::Mutable,
         merkle::{Family, mmb, mmr},
-        qmdb::any::value::ValueEncoding,
+        qmdb::value::ValueEncoding,
     };
     use commonware_codec::{EncodeShared, Read};
     use commonware_cryptography::Hasher as _;
@@ -306,7 +306,7 @@ pub(crate) mod harnesses {
             db.inactivity_floor()
         }
 
-        fn db_root(db: &Self::Db) -> sha256::Digest {
+        fn ops_root(db: &Self::Db) -> sha256::Digest {
             db.root()
         }
 
@@ -855,7 +855,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let local_start = bounds.start;
         let local_end = bounds.end;
         assert!(local_start > Location::new(0));
-        let sync_root = H::db_root(&db);
+        let sync_root = H::ops_root(&db);
 
         // Reopen the operation journal independently to probe the persisted Merkle boundary.
         drop(db);

@@ -15,7 +15,7 @@ use crate::{
     qmdb::{
         Error,
         any::{
-            self, ValueEncoding,
+            self,
             batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
             operation::{Operation, update},
         },
@@ -24,6 +24,7 @@ use crate::{
         current::{db::compute_ops_root_witness, grafting},
         floor::{Policy, Proportional},
         operation::Key,
+        value::ValueEncoding,
     },
 };
 use ahash::AHashMap;
@@ -1129,7 +1130,10 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
         self.inner.root()
     }
 
-    /// Return the [`Bounds`] of the batch.
+    /// Return the ops-level [`Bounds`] of the batch.
+    ///
+    /// All commitments (`base`, `db`, `tip`, and `ancestors`) contain ops roots. In particular,
+    /// `bounds().tip.root` equals [`Self::ops_root`], not [`Self::root`].
     pub fn bounds(&self) -> &Bounds<F, D> {
         self.inner.bounds()
     }
@@ -1420,7 +1424,7 @@ mod tests {
 
     #[test]
     fn chunk_overlay_pushes() {
-        use crate::qmdb::any::value::FixedEncoding;
+        use crate::qmdb::value::FixedEncoding;
         use commonware_utils::sequence::FixedBytes;
 
         type K = FixedBytes<4>;
@@ -1469,7 +1473,7 @@ mod tests {
 
     #[test]
     fn chunk_overlay_clears() {
-        use crate::qmdb::any::value::FixedEncoding;
+        use crate::qmdb::value::FixedEncoding;
         use commonware_utils::sequence::FixedBytes;
 
         type K = FixedBytes<4>;
@@ -1526,7 +1530,7 @@ mod tests {
     /// partial chunk data, not zero it out.
     #[test]
     fn chunk_overlay_preserves_partial_parent_chunk() {
-        use crate::qmdb::any::value::FixedEncoding;
+        use crate::qmdb::value::FixedEncoding;
         use commonware_utils::sequence::FixedBytes;
 
         type K = FixedBytes<4>;

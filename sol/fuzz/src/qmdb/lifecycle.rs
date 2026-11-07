@@ -13,7 +13,7 @@ use commonware_storage::{
     merkle::{Graftable, PendingChunk as _, mmb, mmr},
     qmdb::{
         self,
-        any::{ordered::fixed::Update, value::FixedEncoding},
+        any::ordered::fixed::Update,
         current::{
             ordered::{
                 fixed::{Config, Db},
@@ -21,6 +21,7 @@ use commonware_storage::{
             },
             proof::constant::OperationProof,
         },
+        value::FixedEncoding,
     },
     translator::OneCap,
 };

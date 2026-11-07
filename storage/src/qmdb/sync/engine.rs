@@ -736,7 +736,7 @@ where
         )
         .await?;
 
-        let got_root = database.root();
+        let got_root = database.ops_root();
         let expected_root = self.target.root;
         if got_root != expected_root {
             return Err(SyncError::Engine(EngineError::RootMismatch {
@@ -871,7 +871,7 @@ pub(crate) mod tests {
             Ok(Some(vec![]))
         }
 
-        fn root(&self) -> Self::Digest {
+        fn ops_root(&self) -> Self::Digest {
             sha256::Digest::from([0u8; 32])
         }
     }

@@ -29,10 +29,10 @@ use commonware_storage::{
             initial_root,
             operation::{Operation, Update},
             ordered, unordered,
-            value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
         },
         operation::Key,
         sync::{self, Target as AnySyncTarget},
+        value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
     },
     translator::Translator,
 };

@@ -1,17 +1,14 @@
 use crate::{
     merkle::Family,
     qmdb::{
-        any::{
-            VariableValue,
-            operation::{
-                COMMIT_CONTEXT, DELETE_CONTEXT, Operation, OperationCodec, UPDATE_CONTEXT, Update,
-                update,
-            },
-            value::VariableEncoding,
+        any::operation::{
+            COMMIT_CONTEXT, DELETE_CONTEXT, Operation, OperationCodec, UPDATE_CONTEXT, Update,
+            update,
         },
         operation::{
             Key, commit_variable_payload_size, read_commit_variable, write_commit_variable,
         },
+        value::{VariableEncoding, VariableValue},
     },
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};

@@ -315,9 +315,8 @@
 //! Pending and partial slots are independent. When both are present, pending hashes in before
 //! partial.
 //!
-//! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root). The ops root is
-//! returned by the `sync::Database` trait's `root()` method, since the sync engine verifies batches
-//! against the ops root, not the canonical root.
+//! The canonical root is returned by [`db::Db::root`]. State sync uses [`db::Db::ops_root`],
+//! also exposed by [`sync::Database::ops_root`](crate::qmdb::sync::Database::ops_root).
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
 //! verifying ops proofs directly should use [`crate::qmdb::ProofExt::verify`]. After sync, the
@@ -333,7 +332,7 @@ use crate::{
     merkle::{self, Location},
     qmdb::{
         any::{
-            self, Config as AnyConfig, ValueEncoding,
+            self, Config as AnyConfig,
             operation::{
                 Operation, Update,
                 update::{Ordered as OrderedUpdate, Unordered as UnorderedUpdate},
@@ -341,6 +340,7 @@ use crate::{
         },
         bitmap::Shared,
         operation::Key,
+        value::ValueEncoding,
     },
     translator::Translator,
 };
@@ -578,7 +578,6 @@ pub mod tests {
         qmdb::{
             ProofExt as _,
             any::{
-                ValueEncoding,
                 batch::Slot,
                 operation::update,
                 test::{
@@ -595,11 +594,11 @@ pub mod tests {
                     test_any_proportional_one_batch,
                 },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
-                value::{FixedEncoding, VariableEncoding},
             },
             chain::Bounds,
             floor::{Bounded, Hold},
             store::tests::{TestKey, TestValue},
+            value::{FixedEncoding, ValueEncoding, VariableEncoding},
         },
         translator::Translator,
     };
@@ -2025,7 +2024,7 @@ pub mod tests {
             // the grafting boundary must differ because the corresponding bitmap chunk is nonzero.
             let pinned_positions =
                 <mmb::Family as merkle::Family>::nodes_to_pin(end).collect::<Vec<_>>();
-            let raw_pinned = db.pinned_nodes_at(end).await.unwrap();
+            let raw_pinned = db.ops_pinned_nodes_at(end).await.unwrap();
             assert_eq!(pinned_positions.len(), raw_pinned.len());
             let mut checked_grafted_node = false;
             for (pos, raw_digest) in pinned_positions.into_iter().zip(raw_pinned) {
