@@ -1166,21 +1166,20 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
         self.inner.root()
     }
 
-    /// Return the cached witness binding [`Self::ops_root`] to [`Self::root`]. The witness stays
-    /// valid after the database advances or the batch becomes stale.
+    /// Return the witness binding [`Self::ops_root`] to [`Self::root`].
     pub const fn ops_root_witness(&self) -> &OpsRootWitness<F, D> {
         &self.ops_root_witness
     }
 
-    /// Return the bitmap pruning boundary when this batch was merkleized: chunks below it were
-    /// pruned.
+    /// Return the number of bitmap chunks pruned when this batch was merkleized.
     pub const fn pruned_chunks(&self) -> u64 {
         self.pruned_chunks
     }
 
-    /// Return every bitmap chunk this batch wrote over its parent, by ascending index and none
-    /// below [`Self::pruned_chunks`]. Applying a chain's chunks in order over its base reproduces
-    /// each batch's unpruned chunks. The result depends only on state the batch owns.
+    /// Return the bitmap chunks this batch wrote, ascending by index.
+    ///
+    /// No chunk is below [`Self::pruned_chunks`]. Replaying a chain's chunks in order reproduces
+    /// each batch's unpruned chunks.
     pub fn chunks(&self) -> Vec<(u64, [u8; N])> {
         // A `Base` bitmap has no overlay, so its batch wrote no chunks. The sort gives equal
         // results an equal order.
@@ -1197,9 +1196,10 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
         chunks
     }
 
-    /// Return every grafted node this batch appended or overwrote, by ascending operations-tree
-    /// position. Applying a chain's nodes in order over its base reproduces each batch's grafted
-    /// tree. The result depends only on state the batch owns.
+    /// Return the grafted nodes this batch appended or overwrote, ascending by operations-tree
+    /// position.
+    ///
+    /// Replaying a chain's nodes in order reproduces each batch's grafted tree.
     pub fn grafted_nodes(&self) -> Vec<(Position<F>, D)> {
         // The sort gives equal results an equal order.
         let mut nodes: Vec<(Position<F>, D)> = self
