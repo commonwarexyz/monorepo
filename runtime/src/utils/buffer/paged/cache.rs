@@ -31,6 +31,7 @@ use ahash::{AHashMap, AHashSet};
 use commonware_utils::{
     Widen, cache,
     futures::{Shared, WeakShared},
+    prefetch,
     sync::{Mutex, RwLock, RwLockWriteGuard},
 };
 use futures::{FutureExt, Stream, TryStreamExt as _, future::BoxFuture, stream::FuturesUnordered};
@@ -736,6 +737,28 @@ impl CacheRef {
         let mut unread = 0;
         for start in (0..ranges.len()).step_by(RESOLVE_CHUNK) {
             let end = ranges.len().min(start + RESOLVE_CHUNK);
+
+            // Hint each page's slot hint, then each hinted slot, before resolving any of them, so
+            // a chunk's dependent misses overlap instead of running one range at a time.
+            if prefetch::ENABLED && end - start > 1 {
+                let mut hinted = [0usize; RESOLVE_CHUNK];
+                let mut count = 0;
+                let mut previous_num = None;
+                for (_, offset) in &ranges[start..end] {
+                    let (page_num, _) = Cache::offset_to_page(page_size, *offset);
+                    if previous_num.replace(page_num) == Some(page_num) {
+                        continue;
+                    }
+                    let hint = page_cache.hint_index(blob_id, page_num);
+                    prefetch::prefetch(page_cache.hints.as_ptr().wrapping_add(hint));
+                    hinted[count] = hint;
+                    count += 1;
+                }
+                for &hint in &hinted[..count] {
+                    page_cache.cache.prefetch_slot(page_cache.hints[hint]);
+                }
+            }
+
             let mut srcs: [Option<&[u8]>; RESOLVE_CHUNK] = [None; RESOLVE_CHUNK];
             for (src, (buf, offset)) in srcs.iter_mut().zip(&ranges[start..end]) {
                 let (page_num, offset_in_page, remaining) = Cache::locate(page_size, *offset);
@@ -751,6 +774,9 @@ impl CacheRef {
                 };
                 let seg = std::cmp::min(buf.len(), remaining);
                 *src = page.map(|page| &page[offset_in_page..offset_in_page + seg]);
+                if let Some(src) = src {
+                    prefetch::prefetch(src.as_ptr());
+                }
             }
 
             // Copy the resolved pages, moving each range that keeps an unread suffix to the

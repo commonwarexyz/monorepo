@@ -177,6 +177,15 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         Some(&slot.value)
     }
 
+    /// Hints the CPU to load `slot`'s entry, so a later [Self::get_at] of it
+    /// does not wait on memory. Does nothing for a slot this cache does not have.
+    #[inline]
+    pub fn prefetch_slot(&self, slot: usize) {
+        if let Some(entry) = self.slots.get(slot) {
+            crate::prefetch::prefetch(entry);
+        }
+    }
+
     /// Returns a reference to the value in `slot` if that slot currently holds
     /// `key` as a live entry, recording use.
     ///
@@ -1148,6 +1157,17 @@ mod tests {
         assert!(cache.contains(&1));
         assert!(!cache.contains(&3));
         assert_eq!(cache.get(&3), None);
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn test_prefetch_slot_changes_nothing() {
+        let mut cache = Cache::new(NZUsize!(2));
+        let (slot, _) = cache.get_or_insert_mut(1u64, || 10u64);
+        cache.prefetch_slot(slot);
+        cache.prefetch_slot(usize::MAX);
+        assert_eq!(cache.get_at(slot, &1).copied(), Some(10));
+        assert_eq!(cache.len(), 1);
         cache.check_invariants();
     }
 
