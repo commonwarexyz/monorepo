@@ -1466,7 +1466,11 @@ where
         } = walked;
         let total_active_keys = self.base_active_keys as isize + active_keys_delta;
         assert!(total_active_keys >= 0, "active_keys underflow");
-        if total_active_keys == 0 {
+
+        // Whether the floor snapped to the tip without scanning; a snap's floor movement is
+        // excluded from the prefetch estimator sample.
+        let snapped = total_active_keys == 0;
+        if snapped {
             // DB is empty after this batch; raise floor to tip.
             floor = commit_loc;
             debug!(tip = ?floor, "db is empty, raising floor to tip");
@@ -1544,6 +1548,11 @@ where
                 tip: Commitment::new(commit_loc + 1, root),
                 ancestors,
                 inactivity_floor: floor,
+                scan_advance: if snapped {
+                    0
+                } else {
+                    (*floor).saturating_sub(*self.base_inactivity_floor_loc)
+                },
             },
         });
         Ok((batch, self.ancestors))

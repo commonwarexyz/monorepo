@@ -114,6 +114,9 @@ pub struct Bounds<F: Family, D: Digest> {
     pub ancestors: Vec<Commitment<F, D>>,
     /// Inactivity floor declared by this batch's commit.
     pub inactivity_floor: Location<F>,
+    /// Floor advance produced by this batch's own floor-raise scan, in operations. Zero
+    /// when the raise snapped to the tip without scanning (an emptied database).
+    pub scan_advance: u64,
 }
 
 impl<F: Family, D: Digest> Bounds<F, D> {
@@ -127,6 +130,7 @@ impl<F: Family, D: Digest> Bounds<F, D> {
             tip: state,
             ancestors: Vec::new(),
             inactivity_floor,
+            scan_advance: 0,
         }
     }
 
@@ -320,6 +324,7 @@ mod tests {
             tip: state(18, 18),
             ancestors: vec![state(16, 16), state(12, 12)],
             inactivity_floor: loc(14),
+            scan_advance: 0,
         };
 
         // Own tip, database boundary, and ancestor tips are readable.
@@ -382,6 +387,7 @@ mod tests {
             tip: state(14, 14),
             ancestors: vec![state(12, 12)],
             inactivity_floor: loc(11),
+            scan_advance: 0,
         };
         assert!(bounds.validate_apply_to(state(10, 1)).is_ok());
         assert!(bounds.validate_apply_to(state(12, 12)).is_ok());
