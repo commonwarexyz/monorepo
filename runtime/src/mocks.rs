@@ -12,9 +12,15 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
+use futures::{
+    StreamExt as _,
+    future::{self, Either},
+    stream,
+};
 use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
 use rand::{TryCryptoRng, TryRng};
 use std::{
+    collections::VecDeque,
     future::{Future, poll_fn},
     mem,
     sync::Arc,
@@ -576,6 +582,60 @@ mod read_gate;
 #[cfg(any(test, feature = "test-utils"))]
 pub use read_gate::{ReadGate, ReadGateBlob, ReadGateContext};
 
+/// Forwards [Spawner] to the wrapped context for test context wrappers with one extra field
+/// (named by the second argument), which spawned tasks inherit.
+macro_rules! forward_spawner {
+    ($wrapper:ident, $field:ident) => {
+        impl<E: Spawner> Spawner for $wrapper<E> {
+            fn shared(mut self, blocking: bool) -> Self {
+                self.inner = self.inner.shared(blocking);
+                self
+            }
+
+            fn dedicated(mut self) -> Self {
+                self.inner = self.inner.dedicated();
+                self
+            }
+
+            fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+            where
+                F: FnOnce(Self) -> Fut + Send + 'static,
+                Fut: Future<Output = T> + Send + 'static,
+                T: Send + 'static,
+            {
+                let $field = self.$field;
+                self.inner.spawn(move |inner| f(Self { inner, $field }))
+            }
+
+            async fn stop(
+                self,
+                value: i32,
+                timeout: Option<std::time::Duration>,
+            ) -> Result<(), Error> {
+                self.inner.stop(value, timeout).await
+            }
+
+            fn stopped(&self) -> Signal {
+                self.inner.stopped()
+            }
+        }
+    };
+}
+
+/// Forwards [crate::Storage::remove] and [crate::Storage::scan] to the wrapped context, inside the
+/// [crate::Storage] impl of a test context wrapper.
+macro_rules! forward_remove_and_scan {
+    () => {
+        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+            self.inner.remove(partition, name).await
+        }
+
+        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+            self.inner.scan(partition).await
+        }
+    };
+}
+
 /// Snapshot of the options observed by a [RecordingContext] or [RecordingBlob].
 #[cfg(any(test, feature = "test-utils"))]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -652,35 +712,7 @@ impl<E> RecordingContext<E> {
 forward_context!(RecordingContext, recordings);
 
 #[cfg(any(test, feature = "test-utils"))]
-impl<E: Spawner> Spawner for RecordingContext<E> {
-    fn shared(mut self, blocking: bool) -> Self {
-        self.inner = self.inner.shared(blocking);
-        self
-    }
-
-    fn dedicated(mut self) -> Self {
-        self.inner = self.inner.dedicated();
-        self
-    }
-
-    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> Fut + Send + 'static,
-        Fut: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        let recordings = self.recordings;
-        self.inner.spawn(move |inner| f(Self { inner, recordings }))
-    }
-
-    async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
-        self.inner.stop(value, timeout).await
-    }
-
-    fn stopped(&self) -> Signal {
-        self.inner.stopped()
-    }
-}
+forward_spawner!(RecordingContext, recordings);
 
 #[cfg(any(test, feature = "test-utils"))]
 impl<E: crate::Storage> crate::Storage for RecordingContext<E> {
@@ -703,13 +735,7 @@ impl<E: crate::Storage> crate::Storage for RecordingContext<E> {
         ))
     }
 
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.inner.remove(partition, name).await
-    }
-
-    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.inner.scan(partition).await
-    }
+    forward_remove_and_scan!();
 }
 
 /// Blob wrapper that records read and write options and the range count of each batched read,
@@ -866,6 +892,186 @@ impl<B: Blob> Blob for MigratingReadBlob<B> {
     }
 }
 
+/// An operation held at a gate armed by [Gates::arm] until explicitly released.
+pub struct Gated {
+    /// Lets the gated operation proceed.
+    pub release: oneshot::Sender<()>,
+
+    /// Resolves once the gated operation reaches the gate.
+    pub blocked: oneshot::Receiver<()>,
+}
+
+/// Coordinates one-shot gates for the operations a wrapper intercepts: blob reads for a
+/// [DelayedReadContext] or [DelayedReadBlob], and [crate::Storage::open_versioned] for a
+/// [DelayedOpenContext].
+#[derive(Clone, Default)]
+pub struct Gates {
+    waiters: Arc<Mutex<VecDeque<GateWaiter>>>,
+}
+
+impl Gates {
+    /// Blocks the next gated operation and returns handles for observing and releasing it.
+    pub fn arm(&self) -> Gated {
+        let (release, release_rx) = oneshot::channel();
+        let (entered, blocked) = oneshot::channel();
+        self.waiters.lock().push_back(GateWaiter {
+            entered,
+            release: release_rx,
+        });
+        Gated { release, blocked }
+    }
+
+    async fn wait(&self) -> Result<(), Error> {
+        let Some(waiter) = self.waiters.lock().pop_front() else {
+            return Ok(());
+        };
+        waiter.entered.send_lossy(());
+        waiter.release.await.map_err(|_| Error::Closed)
+    }
+}
+
+struct GateWaiter {
+    entered: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+/// Context wrapper that can gate the next [crate::Storage::open_versioned] call in tests.
+#[derive(Clone)]
+pub struct DelayedOpenContext<E> {
+    pub inner: E,
+    pub pending: Gates,
+}
+
+forward_context!(DelayedOpenContext, pending);
+
+forward_spawner!(DelayedOpenContext, pending);
+
+impl<E: crate::Storage> crate::Storage for DelayedOpenContext<E> {
+    type Blob = E::Blob;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
+        self.pending.wait().await?;
+        self.inner.open_versioned(partition, name, versions).await
+    }
+
+    forward_remove_and_scan!();
+}
+
+/// Context wrapper whose blobs can gate the next [Blob] read in tests.
+#[derive(Clone)]
+pub struct DelayedReadContext<E> {
+    pub inner: E,
+    pub pending: Gates,
+}
+
+forward_context!(DelayedReadContext, pending);
+
+forward_spawner!(DelayedReadContext, pending);
+
+impl<E: crate::Storage> crate::Storage for DelayedReadContext<E> {
+    type Blob = DelayedReadBlob<E::Blob>;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
+        let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        Ok((
+            DelayedReadBlob {
+                inner,
+                pending: self.pending.clone(),
+            },
+            len,
+            version,
+        ))
+    }
+
+    forward_remove_and_scan!();
+}
+
+/// Blob wrapper that can gate the next read before accessing the inner blob.
+///
+/// A batched read waits at one gate for all of its ranges, then reads them through the inner
+/// blob's batched path.
+#[derive(Clone)]
+pub struct DelayedReadBlob<B> {
+    inner: B,
+    pending: Gates,
+}
+
+impl<B: Blob> Blob for DelayedReadBlob<B> {
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.pending.wait().await?;
+        self.inner.read_at_buf(offset, len, bufs, options).await
+    }
+
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.pending.wait().await?;
+        self.inner.read_at(offset, len, options).await
+    }
+
+    fn read_many(
+        &self,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+        stream::once(self.pending.wait()).flat_map(move |gate| match gate {
+            Ok(()) => Either::Left(self.inner.read_many(ranges, options)),
+            Err(err) => Either::Right(stream::once(future::ready(Err(err)))),
+        })
+    }
+
+    async fn start_read_many(
+        &self,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> Handle<Vec<IoBufsMut>> {
+        if let Err(err) = self.pending.wait().await {
+            return Handle::ready(Err(err));
+        }
+        self.inner.start_read_many(ranges, options).await
+    }
+
+    async fn write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
+        self.inner.write_at(offset, bufs, options).await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        self.inner.start_sync().await
+    }
+}
+
 /// Context wrapper whose blobs defer [Blob::start_sync] and can gate blocking syncs in tests.
 #[derive(Clone)]
 pub struct DelayedSyncContext<E> {
@@ -875,35 +1081,7 @@ pub struct DelayedSyncContext<E> {
 
 forward_context!(DelayedSyncContext, pending);
 
-impl<E: Spawner> Spawner for DelayedSyncContext<E> {
-    fn shared(mut self, blocking: bool) -> Self {
-        self.inner = self.inner.shared(blocking);
-        self
-    }
-
-    fn dedicated(mut self) -> Self {
-        self.inner = self.inner.dedicated();
-        self
-    }
-
-    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> Fut + Send + 'static,
-        Fut: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        let pending = self.pending;
-        self.inner.spawn(move |inner| f(Self { inner, pending }))
-    }
-
-    async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
-        self.inner.stop(value, timeout).await
-    }
-
-    fn stopped(&self) -> Signal {
-        self.inner.stopped()
-    }
-}
+forward_spawner!(DelayedSyncContext, pending);
 
 impl<E: crate::Storage> crate::Storage for DelayedSyncContext<E> {
     type Blob = DelayedSyncBlob<E::Blob>;
@@ -925,13 +1103,7 @@ impl<E: crate::Storage> crate::Storage for DelayedSyncContext<E> {
         ))
     }
 
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.inner.remove(partition, name).await
-    }
-
-    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.inner.scan(partition).await
-    }
+    forward_remove_and_scan!();
 }
 
 /// Blob wrapper that parks each started sync and supports one-shot blocking sync tracking.
@@ -1264,13 +1436,7 @@ impl<E: crate::Storage> crate::Storage for WriteFaultContext<E> {
         ))
     }
 
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.inner.remove(partition, name).await
-    }
-
-    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.inner.scan(partition).await
-    }
+    forward_remove_and_scan!();
 }
 
 /// Blob wrapper that fails `write_at` while its [WriteFaults] is armed.
@@ -1353,13 +1519,7 @@ impl<E: crate::Storage> crate::Storage for SyncFaultContext<E> {
         ))
     }
 
-    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.inner.remove(partition, name).await
-    }
-
-    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        self.inner.scan(partition).await
-    }
+    forward_remove_and_scan!();
 }
 
 /// Blob wrapper that fails `sync` and `start_sync` when marked faulty.
@@ -1483,6 +1643,160 @@ mod tests {
                 writes: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn delayed_read_blob_forwards_read_options() {
+        deterministic::Runner::default().start(|context| async move {
+            let (inner, recordings) = RecordingContext::new(context);
+            let context = DelayedReadContext {
+                inner,
+                pending: Gates::default(),
+            };
+
+            assert_read_options_forwarded(&context, &recordings, "delayed_read").await;
+        });
+    }
+
+    #[test]
+    fn delayed_read_blob_forwards_resize_and_sync() {
+        deterministic::Runner::default().start(|context| async move {
+            let context = DelayedReadContext {
+                inner: context,
+                pending: Gates::default(),
+            };
+            let (blob, _) = context.open("delayed_read_sync", b"blob").await.unwrap();
+            blob.write_at(0, b"data", WriteOptions::default())
+                .await
+                .unwrap();
+            blob.resize(2).await.unwrap();
+            blob.sync().await.unwrap();
+            blob.start_sync().await.await.unwrap();
+            let read = blob.read_at(0, 2, ReadOptions::default()).await.unwrap();
+            assert_eq!(read.coalesce(), b"da");
+        });
+    }
+
+    #[test]
+    fn delayed_read_blob_gates_a_batched_read_once() {
+        deterministic::Runner::default().start(|context| async move {
+            let (inner, recordings) = RecordingContext::new(context);
+            let gates = Gates::default();
+            let context = DelayedReadContext {
+                inner,
+                pending: gates.clone(),
+            };
+            let (blob, _) = context.open("delayed_read_many", b"blob").await.unwrap();
+            blob.write_at(0, b"data", WriteOptions::default())
+                .await
+                .unwrap();
+            recordings.clear();
+
+            // One armed gate holds every range of a batched read before any reaches storage.
+            let Gated { release, blocked } = gates.arm();
+            let read = blob
+                .read_many(&[(0, 2), (2, 2)], ReadOptions::default())
+                .collect::<Vec<_>>();
+            let control = async {
+                blocked.await.unwrap();
+                assert_eq!(recordings.snapshot(), RecordingSnapshot::default());
+                release.send(()).unwrap();
+            };
+            let (mut reads, ()) = futures::join!(read, control);
+            reads.sort_by_key(|read| read.as_ref().map(|(index, _)| *index).ok());
+            let reads = reads
+                .into_iter()
+                .map(|read| read.map(|(_, bufs)| bufs.coalesce()))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(reads, [b"da".as_slice(), b"ta".as_slice()]);
+            assert_eq!(recordings.snapshot().batches, vec![2]);
+            recordings.clear();
+
+            // A started batch waits at the gate the same way.
+            let Gated { release, blocked } = gates.arm();
+            let read = async {
+                blob.start_read_many(&[(0, 4)], ReadOptions::default())
+                    .await
+                    .await
+            };
+            let control = async {
+                blocked.await.unwrap();
+                assert_eq!(recordings.snapshot(), RecordingSnapshot::default());
+                release.send(()).unwrap();
+            };
+            let (reads, ()) = futures::join!(read, control);
+            let mut reads = reads.unwrap().into_iter();
+            assert_eq!(reads.next().unwrap().coalesce(), b"data");
+            assert!(reads.next().is_none());
+            assert_eq!(recordings.snapshot().batches, vec![1]);
+
+            // Dropping the release fails the gated batch.
+            let Gated {
+                release,
+                blocked: _blocked,
+            } = gates.arm();
+            drop(release);
+            let reads = blob
+                .read_many(&[(0, 2), (2, 2)], ReadOptions::default())
+                .collect::<Vec<_>>()
+                .await;
+            assert!(matches!(reads.as_slice(), [Err(Error::Closed)]));
+        });
+    }
+
+    #[test]
+    fn delayed_open_context_gates_the_next_open() {
+        deterministic::Runner::default().start(|context| async move {
+            let gates = Gates::default();
+            let context = DelayedOpenContext {
+                inner: context,
+                pending: gates.clone(),
+            };
+
+            // An open with no armed gate proceeds at once.
+            drop(context.open("delayed_open", b"free").await.unwrap());
+
+            // An armed gate holds the next open until it is released.
+            let Gated { release, blocked } = gates.arm();
+            let handle = context.child("gated_open").spawn(|context| async move {
+                context
+                    .open("delayed_open", b"gated")
+                    .await
+                    .map(|(_, len)| len)
+            });
+            blocked.await.unwrap();
+            release.send(()).unwrap();
+            assert_eq!(handle.await.unwrap().unwrap(), 0);
+
+            // Dropping the release fails the gated open.
+            let Gated {
+                release,
+                blocked: _blocked,
+            } = gates.arm();
+            drop(release);
+            assert!(matches!(
+                context.open("delayed_open", b"closed").await,
+                Err(Error::Closed)
+            ));
+        });
+    }
+
+    #[test]
+    fn delayed_open_context_forwards_spawner_configuration() {
+        deterministic::Runner::default().start(|context| async move {
+            let context = DelayedOpenContext {
+                inner: context,
+                pending: Gates::default(),
+            };
+            let shared = context.child("shared").shared(true).spawn(|_| async { 1 });
+            let dedicated = context
+                .child("dedicated")
+                .dedicated()
+                .spawn(|_| async { 2 });
+            assert_eq!(shared.await.unwrap() + dedicated.await.unwrap(), 3);
+            context.stop(0, None).await.unwrap();
+        });
     }
 
     #[test]
