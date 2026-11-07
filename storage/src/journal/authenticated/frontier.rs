@@ -16,7 +16,7 @@ use commonware_utils::sequence::prefixed_u64::U64;
 const BOUNDARY: U64 = U64::new(0, 0);
 
 /// Key prefix of anchors, each keyed by its location.
-const ANCHOR: u8 = 1;
+const ANCHOR_PREFIX: u8 = 1;
 
 /// The most anchors a frontier keeps. Recording another drops the oldest.
 pub(crate) const MAX_ANCHORS: usize = 4;
@@ -53,7 +53,7 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
         let mut anchors: Vec<_> = self
             .metadata
             .keys()
-            .filter(|key| key.prefix() == ANCHOR)
+            .filter(|key| key.prefix() == ANCHOR_PREFIX)
             .filter_map(|key| self.metadata.get(key).cloned())
             .collect();
         anchors.sort_by_key(|(location, _)| *location);
@@ -65,19 +65,19 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
     pub(crate) async fn set(mut self, location: Location<F>, pins: Vec<D>) -> Result<Self, Error> {
         self.metadata.put(BOUNDARY, (location, pins));
         self.metadata
-            .retain(|key, (anchor, _)| key.prefix() != ANCHOR || *anchor > location);
+            .retain(|key, (anchor, _)| key.prefix() != ANCHOR_PREFIX || *anchor > location);
         self.metadata = self.metadata.sync().await?;
         Ok(self)
     }
 
     /// Like [Self::set], but drops every anchor.
-    pub(crate) async fn reset(
+    pub(crate) async fn set_without_anchors(
         mut self,
         location: Location<F>,
         pins: Vec<D>,
     ) -> Result<Self, Error> {
         self.metadata.put(BOUNDARY, (location, pins));
-        self.metadata.retain(|key, _| key.prefix() != ANCHOR);
+        self.metadata.retain(|key, _| key.prefix() != ANCHOR_PREFIX);
         self.metadata = self.metadata.sync().await?;
         Ok(self)
     }
@@ -90,13 +90,13 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
         pins: Vec<D>,
     ) -> Result<(Self, Handle<()>), Error> {
         self.metadata
-            .put(U64::new(ANCHOR, *location), (location, pins));
+            .put(U64::new(ANCHOR_PREFIX, *location), (location, pins));
         let anchors = self.anchors();
         for (oldest, _) in anchors
             .iter()
             .take(anchors.len().saturating_sub(MAX_ANCHORS))
         {
-            self.metadata.remove(&U64::new(ANCHOR, **oldest));
+            self.metadata.remove(&U64::new(ANCHOR_PREFIX, **oldest));
         }
         let (metadata, handle) = self.metadata.start_sync().await?;
         self.metadata = metadata;
@@ -107,7 +107,7 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
     pub(crate) async fn drop_anchors_after(mut self, location: Location<F>) -> Result<Self, Error> {
         let before = self.metadata.keys().count();
         self.metadata
-            .retain(|key, (anchor, _)| key.prefix() != ANCHOR || *anchor <= location);
+            .retain(|key, (anchor, _)| key.prefix() != ANCHOR_PREFIX || *anchor <= location);
         if self.metadata.keys().count() != before {
             self.metadata = self.metadata.sync().await?;
         }

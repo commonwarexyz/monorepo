@@ -349,7 +349,7 @@ where
         let limit = bitmap
             .as_ref()
             .map_or(floor, |bitmap| Location::new(bitmap.pruned_bits()));
-        pending.start_at(limit)?;
+        pending.replay_from_anchor(limit)?;
     }
 
     // Build the snapshot while the journal rebuilds its digests.

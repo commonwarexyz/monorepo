@@ -713,11 +713,12 @@ where
         self.sync_metadata().await
     }
 
-    /// Stage an anchor at the sync boundary, with the grafted tree's pinned nodes there, if it is
-    /// past the bitmap's start and the newest anchor. Drops the oldest past [MAX_ANCHORS]. Returns
-    /// the anchor's location in the log, which the log records as its own anchor. Also stages a
-    /// base of zero chunks if none is recorded.
-    fn stage_anchor(&mut self) -> Result<Option<Location<F>>, Error<F>> {
+    /// Stage what a sync records in the metadata. That is a base of zero chunks if none is
+    /// recorded, and an anchor at the sync boundary, with the grafted tree's pinned nodes there, if
+    /// it is past the bitmap's start and the newest anchor. Drops the oldest anchor past
+    /// [MAX_ANCHORS]. Returns the anchor's location in the log, if one was staged, for the log to
+    /// record as its own.
+    fn stage_sync_metadata(&mut self) -> Result<Option<Location<F>>, Error<F>> {
         // A database that never pruned records its base of zero chunks with its first sync.
         let base = U64::new(PRUNED_CHUNKS_PREFIX, 0);
         if self.metadata.get(&base).is_none() {
@@ -768,7 +769,7 @@ where
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         let (any, data) = self.any.start_sync_log().await?;
         self.any = any;
-        let Some(location) = self.stage_anchor()? else {
+        let Some(location) = self.stage_sync_metadata()? else {
             return Ok((self, data));
         };
         let (metadata, grafted) = self.metadata.start_sync().await?;
@@ -802,7 +803,7 @@ where
 
         // Record an anchor so that the next startup rebuilds the bitmap, grafted tree and log
         // digests from the sync boundary instead of the pruning base.
-        let anchor = self.stage_anchor()?;
+        let anchor = self.stage_sync_metadata()?;
         self.metadata = self.metadata.sync().await?;
         if let Some(location) = anchor {
             self.any.log = self.any.log.anchor(location).await?;

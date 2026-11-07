@@ -293,7 +293,7 @@ where
         let inactivity_floor_loc = crate::qmdb::validate_initialization(&pending, true)
             .await?
             .unwrap_or(Location::new(0));
-        pending.start_at(inactivity_floor_loc)?;
+        pending.replay_from_anchor(inactivity_floor_loc)?;
 
         // Rebuild the in-memory state the last commit defines, while the journal rebuilds its
         // digests. Its inactivity floor is where the snapshot replay starts, so keys set before

@@ -233,7 +233,7 @@ pub(crate) struct ChunkPlan {
     height: u32,
     /// The lowest height of a subtree's nodes that appending it reads. It is the resident height,
     /// or the subtree root's if lower.
-    low: u32,
+    min_height: u32,
 }
 
 impl ChunkPlan {
@@ -263,11 +263,11 @@ impl ChunkPlan {
     ) -> ChunkHasher<F, H> {
         let width = 1u64 << self.height;
         ChunkHasher {
-            whole: chunk.start.is_multiple_of(width) && chunk.end - chunk.start == width,
+            is_subtree: chunk.start.is_multiple_of(width) && chunk.end - chunk.start == width,
             leaves: Vec::with_capacity((chunk.end - chunk.start) as usize),
             chunk,
             height: self.height,
-            low: self.low,
+            min_height: self.min_height,
             hasher,
             encoded: Vec::new(),
         }
@@ -278,9 +278,9 @@ impl ChunkPlan {
 pub(crate) struct ChunkHasher<F: Family, H: Hasher<F>> {
     chunk: Range<u64>,
     /// Whether the chunk is a whole aligned subtree.
-    whole: bool,
+    is_subtree: bool,
     height: u32,
-    low: u32,
+    min_height: u32,
     hasher: H,
     leaves: Vec<H::Digest>,
     /// Scratch for each operation's encoding.
@@ -306,41 +306,41 @@ impl<F: Family, H: Hasher<F>> ChunkHasher<F, H> {
                 "replay ended before its range",
             ));
         }
-        if !self.whole {
+        if !self.is_subtree {
             return Ok(Chunk::Leaves {
                 start: self.chunk.start,
                 digests: self.leaves,
             });
         }
-        let (start, height, low) = (self.chunk.start, self.height, self.low);
+        let (start, height, min_height) = (self.chunk.start, self.height, self.min_height);
 
-        // The tree's peaks at the subtree's end that lie in it below `low`.
+        // The tree's peaks at the subtree's end that lie in it below `min_height`.
         let end = F::location_to_position(Location::new(self.chunk.end));
-        let wanted: Vec<_> = F::peaks(end)
-            .filter(|&(pos, h)| h < low && *F::leftmost_leaf(pos, h) >= start)
+        let low_peaks: Vec<_> = F::peaks(end)
+            .filter(|&(pos, h)| h < min_height && *F::leftmost_leaf(pos, h) >= start)
             .collect();
 
-        // Hash each height in place from the one below, keeping the rows from `low` up and the
-        // wanted peaks.
+        // Hash each height in place from the one below, keeping the rows from `min_height` up and
+        // the low peaks.
         let mut level = self.leaves;
-        let mut rows = Vec::with_capacity((2usize << height >> low) - 1);
-        let mut peaks = Vec::with_capacity(wanted.len());
+        let mut rows = Vec::with_capacity((2usize << height >> min_height) - 1);
+        let mut peaks = Vec::with_capacity(low_peaks.len());
         for h in 0..=height {
             if h > 0 {
                 hash_level(&self.hasher, &mut level, start, h);
             }
-            for &(pos, _) in wanted.iter().filter(|&&(_, peak)| peak == h) {
+            for &(pos, _) in low_peaks.iter().filter(|&&(_, peak)| peak == h) {
                 let index = (*F::leftmost_leaf(pos, h) - start) >> h;
                 peaks.push((pos, level[index as usize]));
             }
-            if h >= low {
+            if h >= min_height {
                 rows.extend_from_slice(&level);
             }
         }
         Ok(Chunk::Subtree(SubtreeNodes {
             start,
             height,
-            low,
+            min_height,
             rows,
             peaks,
         }))
@@ -387,10 +387,10 @@ pub(crate) struct SubtreeNodes<F: Family, D> {
     start: u64,
     height: u32,
     /// The lowest height in `rows`.
-    low: u32,
-    /// Every node from height `low` up to the root, one height after another.
+    min_height: u32,
+    /// Every node from height `min_height` up to the root, one height after another.
     rows: Vec<D>,
-    /// The tree's peaks at the subtree's end that lie in it below `low`.
+    /// The tree's peaks at the subtree's end that lie in it below `min_height`.
     peaks: Vec<(Position<F>, D)>,
 }
 
@@ -407,9 +407,9 @@ impl<F: Family, D: Digest> SubtreeNodes<F, D> {
         h: u32,
     ) -> Result<D, merkle::Error<F>> {
         let inside = h <= self.height && leaf >= self.start && leaf - self.start < 1 << self.height;
-        if inside && h >= self.low {
+        if inside && h >= self.min_height {
             let width = 2u64 << self.height;
-            let slot = (width >> self.low) - (width >> h) + ((leaf - self.start) >> h);
+            let slot = (width >> self.min_height) - (width >> h) + ((leaf - self.start) >> h);
             return Ok(self.rows[slot as usize]);
         }
         let pos = F::subtree_root_position(Location::new(leaf), h);
@@ -435,11 +435,11 @@ impl<F: Family, D: Digest> SubtreeNodes<F, D> {
     }
 }
 
-/// A replay task's clone of the journal, and a clone of the replay's done sender that it drops
-/// only after the journal. Fields drop in declaration order.
-struct ChunkHold<C> {
+/// A replay task's clone of the journal, and its clone of the replay's `released` sender, which it
+/// drops only after the journal. Fields drop in declaration order.
+struct TaskJournal<C> {
     journal: Arc<C>,
-    _done: mpsc::Sender<()>,
+    _released: mpsc::Sender<()>,
 }
 
 /// The Merkle digests of an authenticated journal. Only `mem` is shared with batches.
@@ -630,7 +630,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         ChunkPlan {
             range: *self.leaves()..*end,
             height,
-            low: self.resident.height.min(height),
+            min_height: self.resident.height.min(height),
         }
     }
 
@@ -644,7 +644,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         H: Hasher<F, Digest = D> + 'static,
     {
         match chunk {
-            Chunk::Subtree(subtree) => self.append_subtree(hasher, &subtree),
+            Chunk::Subtree(subtree) => self.apply_subtree(hasher, &subtree),
             Chunk::Leaves { start, .. } if start != *self.leaves() => Err(
                 merkle::Error::DataCorrupted("chunk does not start at the end"),
             ),
@@ -657,8 +657,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     /// [CONCURRENT_CHUNKS] at once, and appended in order. Appending a whole subtree hashes only
     /// the nodes above its root.
     ///
-    /// Each task holds a clone of `done` until it drops its clone of `journal`, so once every
-    /// clone of `done` is dropped, no task still holds the journal, even after the replay is
+    /// Each task holds a clone of `released` until it drops its clone of `journal`, so once every
+    /// clone of `released` is dropped, no task still holds the journal, even after the replay is
     /// aborted or fails.
     pub(crate) async fn replay_subtrees<E, C, H>(
         mut self,
@@ -667,7 +667,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         hasher: &H,
         end: Location<F>,
         height: u32,
-        done: mpsc::Sender<()>,
+        released: mpsc::Sender<()>,
     ) -> Result<Self, super::Error<F>>
     where
         E: Spawner,
@@ -688,15 +688,15 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             let Some(chunk) = chunks.next() else {
                 return;
             };
-            let hold = ChunkHold {
+            let task_journal = TaskJournal {
                 journal: journal.clone(),
-                _done: done.clone(),
+                _released: released.clone(),
             };
             let chunk_hasher = plan.hasher(chunk.clone(), hasher.clone());
             let task = context
                 .child("replay_chunk")
                 .dedicated()
-                .spawn(move |_| Self::hash_chunk(hold, chunk, chunk_hasher, buffer));
+                .spawn(move |_| Self::hash_chunk(task_journal, chunk, chunk_hasher, buffer));
             pending.push_back(task.abort_on_drop());
         };
 
@@ -730,10 +730,10 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         Ok(self)
     }
 
-    /// Read the operations in `chunk` from the journal `hold` holds and hash them with `hasher`.
-    /// `hold` is taken whole, so its done sender lives until its journal is dropped.
+    /// Read the operations in `chunk` from `task_journal`'s journal and hash them with `hasher`.
+    /// `task_journal` is taken whole, so its `released` sender lives until its journal is dropped.
     async fn hash_chunk<C, H>(
-        hold: ChunkHold<C>,
+        task_journal: TaskJournal<C>,
         chunk: Range<u64>,
         mut hasher: ChunkHasher<F, H>,
         buffer: NonZeroUsize,
@@ -742,7 +742,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         C: Contiguous<Item: EncodeShared>,
         H: Hasher<F, Digest = D>,
     {
-        let stream = hold
+        let stream = task_journal
             .journal
             .replay(chunk, buffer, ReadOptions::DONT_CACHE)
             .await?;
@@ -757,7 +757,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
 
     /// Append the aligned subtree at the current size. Only the nodes the tree keeps are read:
     /// resident nodes and peaks born by the subtree's end, hashing the ones above its root.
-    fn append_subtree<H>(
+    fn apply_subtree<H>(
         mut self,
         hasher: &H,
         subtree: &SubtreeNodes<F, D>,
@@ -927,13 +927,13 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             return Ok(result);
         }
         let mut fills = stream::iter(fills)
-            .map(|(region, wanted)| async move {
+            .map(|(region, low_peaks)| async move {
                 let filled = self.fill_region(journal, hasher, region).await?;
-                Ok::<_, merkle::Error<F>>((filled, wanted))
+                Ok::<_, merkle::Error<F>>((filled, low_peaks))
             })
             .buffer_unordered(CONCURRENT_FILLS);
-        while let Some((filled, wanted)) = fills.try_next().await? {
-            for (index, slot) in wanted {
+        while let Some((filled, low_peaks)) = fills.try_next().await? {
+            for (index, slot) in low_peaks {
                 result[index] =
                     filled[slot].ok_or(merkle::Error::DataCorrupted("incomplete region fill"))?;
             }
@@ -1346,7 +1346,7 @@ mod tests {
                             .replay(&*ops, &hasher, Location::new(end), NZU64!(7))
                             .await
                             .unwrap();
-                        let (done, _done_rx) = mpsc::channel(1);
+                        let (released, _released_rx) = mpsc::channel(1);
                         let subtrees = open()
                             .replay_subtrees(
                                 context.child("replay"),
@@ -1354,7 +1354,7 @@ mod tests {
                                 &hasher,
                                 Location::new(end),
                                 subtree,
-                                done,
+                                released,
                             )
                             .await
                             .unwrap();

@@ -284,7 +284,7 @@ where
 
     /// Whether the frontier records `boundary`. It does not from [Self::from_components] until
     /// [Self::persist_boundary], and no anchor is recorded meanwhile.
-    pub(crate) recorded: bool,
+    pub(crate) boundary_recorded: bool,
 
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the Merkle structure.
@@ -673,7 +673,7 @@ where
             merkle,
             frontier,
             boundary: start,
-            recorded: false,
+            boundary_recorded: false,
             journal,
             hasher,
         })
@@ -684,8 +684,8 @@ where
     pub async fn persist_boundary(mut self) -> Result<Self, Error<F>> {
         let boundary = self.boundary;
         let pins = self.pinned_nodes_at(boundary).await?;
-        self.frontier = self.frontier.reset(boundary, pins).await?;
-        self.recorded = true;
+        self.frontier = self.frontier.set_without_anchors(boundary, pins).await?;
+        self.boundary_recorded = true;
         (self.journal, _) = self.journal.prune(*boundary).await?;
         Ok(self)
     }
@@ -711,7 +711,7 @@ where
             .last()
             .map_or(self.boundary, |(anchor, _)| *anchor);
         let floor = newest.max(self.boundary).max(self.merkle.bounds().start);
-        if !self.recorded || location <= floor || location > self.size() {
+        if !self.boundary_recorded || location <= floor || location > self.size() {
             return Ok((self, Handle::ready(Ok(()))));
         }
         let pins = self.pinned_nodes_at(location).await?;
@@ -904,7 +904,7 @@ where
     /// Replay the Merkle structure from the newest anchor after the pruning boundary and at or
     /// before both `limit` and the selected end, if there is one. Proofs of the operations before
     /// it are then unavailable until the pruning boundary passes it.
-    pub(crate) fn start_at(&mut self, limit: Location<F>) -> Result<(), Error<F>> {
+    pub(crate) fn replay_from_anchor(&mut self, limit: Location<F>) -> Result<(), Error<F>> {
         let limit = limit.min(Location::new(self.selected_end));
         let anchor = self
             .frontier
@@ -956,9 +956,9 @@ where
         let journal = Arc::new(Self::persist(self.journal, self.selected_end).await?);
 
         // A reader sharing this task would starve the replay until it finished. The replay's
-        // subtree tasks each hold a clone of `done` until they drop the journal, so `done_rx`
-        // closing means none of them holds it.
-        let (done, mut done_rx) = mpsc::channel::<()>(1);
+        // subtree tasks each hold a clone of `released` until they drop the journal, so
+        // `released_rx` closing means none of them holds it.
+        let (released, mut released_rx) = mpsc::channel::<()>(1);
         let replay = {
             let (journal, merkle, hasher) = (journal.clone(), self.merkle, self.hasher.clone());
             self.context
@@ -966,7 +966,7 @@ where
                 .spawn(move |context| async move {
                     let end = Location::new(journal.bounds().end);
                     let merkle = merkle
-                        .replay_subtrees(context, &journal, &hasher, end, SUBTREE_HEIGHT, done)
+                        .replay_subtrees(context, &journal, &hasher, end, SUBTREE_HEIGHT, released)
                         .await;
                     drop(journal);
                     merkle
@@ -979,7 +979,7 @@ where
                 // Release every replay clone of the journal, its subtree tasks' included, before
                 // returning.
                 replay.abort().await;
-                while done_rx.recv().await.is_some() {}
+                while released_rx.recv().await.is_some() {}
                 return Err(error);
             }
         };
@@ -987,7 +987,7 @@ where
         let merkle = match merkle.map_err(Error::from).and_then(|merkle| merkle) {
             Ok(merkle) => merkle,
             Err(error) => {
-                while done_rx.recv().await.is_some() {}
+                while released_rx.recv().await.is_some() {}
                 return Err(error.into());
             }
         };
@@ -1013,7 +1013,7 @@ where
     {
         let journal = Arc::new(Self::persist(self.journal, self.selected_end).await?);
         let end = Location::new(journal.bounds().end);
-        let (tx, mut rx) = mpsc::channel(CHUNKS_IN_FLIGHT);
+        let (tx, mut rx) = mpsc::channel(BUFFERED_CHUNKS);
         let sink = LeafSink {
             plan: self.merkle.chunk_plan(end, SUBTREE_HEIGHT),
             hasher: self.hasher.clone(),
@@ -1089,7 +1089,7 @@ where
             merkle,
             frontier,
             boundary,
-            recorded: true,
+            boundary_recorded: true,
             hasher,
         })
     }
@@ -1106,7 +1106,7 @@ const SUBTREE_HEIGHT: u32 = 17;
 const SUBTREE_HEIGHT: u32 = 4;
 
 /// Chunks a [LeafSink] buffers ahead of the Merkle structure appending them.
-const CHUNKS_IN_FLIGHT: usize = 8;
+const BUFFERED_CHUNKS: usize = 8;
 
 /// Where a reader that scans a recovering journal's operations sends them hashed, chunk by chunk,
 /// so the journal rebuilds its Merkle structure without reading them again. Only this crate
@@ -1164,7 +1164,7 @@ where
     ) -> Result<Self, Error<F>> {
         let mut recovery =
             Self::prepare(context, merkle_cfg, journal_cfg, None, predicate, bagging).await?;
-        recovery.start_at(Location::new(recovery.selected_end))?;
+        recovery.replay_from_anchor(Location::new(recovery.selected_end))?;
         recovery.finish().await
     }
 
@@ -1190,7 +1190,7 @@ where
             bagging,
         )
         .await?;
-        recovery.start_at(Location::new(recovery.selected_end))?;
+        recovery.replay_from_anchor(Location::new(recovery.selected_end))?;
         recovery.finish().await
     }
 

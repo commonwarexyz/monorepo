@@ -2013,7 +2013,7 @@ mod test {
             merkle,
             frontier,
             boundary,
-            recorded,
+            boundary_recorded,
             journal,
             hasher,
         } = log;
@@ -2021,7 +2021,7 @@ mod test {
             merkle,
             frontier,
             boundary,
-            recorded,
+            boundary_recorded,
             journal: Controlled {
                 inner: journal,
                 mode,

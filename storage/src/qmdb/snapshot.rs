@@ -291,31 +291,31 @@ const SNAPSHOT_DECODE_CHUNK: u64 = 1 << 17;
 const SNAPSHOT_DECODE_CHUNK: u64 = 64;
 
 /// What a parallel build's decode task does with each operation of its chunk besides routing it.
-trait ChunkTap<F: Family, Item>: Send + 'static {
+trait ChunkVisitor<F: Family, Item>: Send + 'static {
     /// The chunk's result, passed on in position order once the chunk is routed.
     type Output: Send + 'static;
 
-    fn push(&mut self, item: &Item);
+    fn visit(&mut self, item: &Item);
 
     fn finish(self) -> Result<Self::Output, merkle::Error<F>>;
 }
 
-impl<F: Family, Item> ChunkTap<F, Item> for () {
+impl<F: Family, Item> ChunkVisitor<F, Item> for () {
     type Output = ();
 
-    fn push(&mut self, _: &Item) {}
+    fn visit(&mut self, _: &Item) {}
 
     fn finish(self) -> Result<(), merkle::Error<F>> {
         Ok(())
     }
 }
 
-impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> ChunkTap<F, Item>
+impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> ChunkVisitor<F, Item>
     for ChunkHasher<F, H>
 {
     type Output = Chunk<F, H::Digest>;
 
-    fn push(&mut self, item: &Item) {
+    fn visit(&mut self, item: &Item) {
         Self::push(self, item);
     }
 
@@ -328,7 +328,7 @@ impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> ChunkTap<F, Item>
 /// those at or after the floor. They do nothing more, or hash them for the journal's Merkle
 /// structure.
 trait Scan<F: Family, Item>: Send + Sync {
-    type Tap: ChunkTap<F, Item>;
+    type Visitor: ChunkVisitor<F, Item>;
 
     /// Decode tasks the build needs at least.
     const MIN_DECODERS: usize;
@@ -339,20 +339,20 @@ trait Scan<F: Family, Item>: Send + Sync {
     /// How the decode tasks read the log.
     fn read_options(&self) -> ReadOptions;
 
-    fn tap(&self, chunk: Range<u64>) -> Self::Tap;
+    fn visitor(&self, chunk: Range<u64>) -> Self::Visitor;
 
     /// Pass a routed chunk's result on. Returns false to stop the build.
     fn send(
         &self,
-        output: <Self::Tap as ChunkTap<F, Item>>::Output,
+        output: <Self::Visitor as ChunkVisitor<F, Item>>::Output,
     ) -> impl Future<Output = bool> + Send;
 }
 
 /// A build that only routes, decoding from the floor.
-struct RouteOnly;
+struct IndexOnly;
 
-impl<F: Family, Item> Scan<F, Item> for RouteOnly {
-    type Tap = ();
+impl<F: Family, Item> Scan<F, Item> for IndexOnly {
+    type Visitor = ();
 
     const MIN_DECODERS: usize = 0;
 
@@ -367,7 +367,7 @@ impl<F: Family, Item> Scan<F, Item> for RouteOnly {
         ReadOptions::default()
     }
 
-    fn tap(&self, _: Range<u64>) {}
+    fn visitor(&self, _: Range<u64>) {}
 
     async fn send(&self, _: ()) -> bool {
         true
@@ -376,7 +376,7 @@ impl<F: Family, Item> Scan<F, Item> for RouteOnly {
 
 /// A build that also hashes every operation from the journal's boundary, in the journal's chunks.
 impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> Scan<F, Item> for LeafSink<F, H> {
-    type Tap = ChunkHasher<F, H>;
+    type Visitor = ChunkHasher<F, H>;
 
     // Hashing needs chunk boundaries, which only decode tasks keep.
     const MIN_DECODERS: usize = 1;
@@ -391,7 +391,7 @@ impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> Scan<F, Item> for Le
         ReadOptions::DONT_CACHE
     }
 
-    fn tap(&self, chunk: Range<u64>) -> ChunkHasher<F, H> {
+    fn visitor(&self, chunk: Range<u64>) -> ChunkHasher<F, H> {
         self.chunk_hasher(chunk)
     }
 
@@ -401,7 +401,7 @@ impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> Scan<F, Item> for Le
 }
 
 /// Replay `range` and send each worker's keyed operations at or after `floor` in log order, in
-/// batches of at most [SNAPSHOT_ROUTE_BATCH] operations. `tap` sees every replayed operation,
+/// batches of at most [SNAPSHOT_ROUTE_BATCH] operations. `visitor` sees every replayed operation,
 /// including those before `floor`.
 ///
 /// Stop if `send` returns false. The caller owns the receiving tasks and observes their errors when
@@ -412,13 +412,13 @@ async fn route_snapshot<F, C, T, Fut>(
     floor: u64,
     read_options: ReadOptions,
     routing: SnapshotRouting,
-    tap: &mut T,
+    visitor: &mut T,
     mut send: impl FnMut(usize, RoutedBatch<<C::Item as Operation<F>>::Key>) -> Fut + Send,
 ) -> Result<(), Error<F>>
 where
     F: Family,
     C: Contiguous<Item: Operation<F>>,
-    T: ChunkTap<F, C::Item>,
+    T: ChunkVisitor<F, C::Item>,
     Fut: Future<Output = bool> + Send,
 {
     let stream = log.replay(range, routing.init_buffer, read_options).await?;
@@ -428,7 +428,7 @@ where
         .collect();
     while let Some(batch) = stream.next().await {
         for (loc, op) in batch? {
-            tap.push(&op);
+            visitor.visit(&op);
             if loc < floor {
                 continue;
             }
@@ -767,7 +767,7 @@ where
                 return false;
             };
             let log = log.clone();
-            let mut tap = scan.tap(chunk.clone());
+            let mut visitor = scan.visitor(chunk.clone());
 
             // Each chunk's channel holds the whole chunk (full sub-batches plus a final partial
             // per worker), so every decoder can finish regardless of which chunk is being
@@ -785,11 +785,11 @@ where
                         floor,
                         read_options,
                         routing,
-                        &mut tap,
+                        &mut visitor,
                         |w, batch| async move { tx.send((w, batch)).await.is_ok() },
                     )
                     .await?;
-                    Ok::<_, Error<F>>(tap.finish()?)
+                    Ok::<_, Error<F>>(visitor.finish()?)
                 });
             pending.push_back((rx, handle.abort_on_drop()));
             true
@@ -977,7 +977,7 @@ where
         inactivity_floor_loc,
         log,
         init_buffer,
-        RouteOnly,
+        IndexOnly,
     )
     .await
 }
