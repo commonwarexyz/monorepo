@@ -122,14 +122,11 @@ pub(crate) mod test {
     pub(crate) fn create_test_config(seed: u64) -> VarConfig {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            merkle: crate::mmr::full::Config {
-                journal_partition: format!("journal-{seed}"),
+            merkle: crate::journal::authenticated::Config {
                 metadata_partition: format!("metadata-{seed}"),
-                items_per_blob: NZU64!(13),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{seed}"),
@@ -729,6 +726,7 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_prepared_staged_merkleize_retains_ancestors() {
         deterministic::Runner::default().start(|context| async move {
+            // Create an applied base for a speculative chain.
             let db = create_test_db(context.child("prepared")).await;
             let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
             let mut seed = db.new_batch();
@@ -738,6 +736,7 @@ pub(crate) mod test {
             let seed = seed.merkleize(&db).await.unwrap();
             let db = db.apply_batch(seed).await.unwrap();
 
+            // Keep one value only in the grandparent's diff so descendants must read that ancestor.
             let grandparent = db
                 .new_batch()
                 .write(key(0), Some(to_bytes(1_000)))
@@ -752,6 +751,8 @@ pub(crate) mod test {
                 .await
                 .unwrap();
             assert!(!parent.diff.iter().any(|(k, _)| *k == key(100)));
+
+            // Compute the reference root while the caller holds every ancestor handle.
             let expected_root = parent
                 .new_batch::<Sha256>()
                 .write(key(0), Some(to_bytes(3_000)))
@@ -761,6 +762,7 @@ pub(crate) mod test {
                 .unwrap()
                 .root();
 
+            // Stage an overwrite that reads its current value from the grandparent.
             let target = key(0);
             let (staged, values) = parent
                 .new_batch::<Sha256>()
@@ -768,6 +770,8 @@ pub(crate) mod test {
                 .await
                 .unwrap();
             assert_eq!(values, vec![Some(to_bytes(1_000))]);
+
+            // Check ancestor ownership after prefetch releases the caller's handles.
             let weak_grandparent = Arc::downgrade(&grandparent);
             let mut caller_ancestors = Some((grandparent, parent));
             let (prepared, updates) = staged
@@ -777,7 +781,7 @@ pub(crate) mod test {
                     &db,
                     &Proportional,
                     FnCandidates(|floor, tip, limit, out: &mut Vec<_>| {
-                        // Preparation must retain the chain before prefetch starts.
+                        // Release the caller's handles at the start of prefetch.
                         drop(caller_ancestors.take());
                         db.bitmap.as_ref().fill(floor, tip, limit, out)
                     }),
@@ -787,19 +791,19 @@ pub(crate) mod test {
             assert!(caller_ancestors.is_none());
             assert!(weak_grandparent.upgrade().is_some());
 
-            let (batch, retained_ancestors) = prepared
+            // The finished batch must retain inherited values without retaining ancestor handles.
+            let batch = prepared
                 .walk_floor_and_merkleize(updates, db.bitmap.as_ref(), &mut Proportional)
                 .await
                 .unwrap();
             assert_eq!(batch.root(), expected_root);
-            // Current's additional root computation needs this post-merkleization lifetime.
-            assert!(weak_grandparent.upgrade().is_some());
+            assert!(weak_grandparent.upgrade().is_none());
             assert_eq!(
                 batch.get(&key(100), &db).await.unwrap(),
                 Some(to_bytes(1_001))
             );
-            drop(retained_ancestors);
 
+            // Apply the completed chain and verify values from each generation.
             let db = db.apply_batch(batch).await.unwrap();
             for (k, value) in [(0, 3_000), (1, 2_000), (100, 1_001), (101, 3_001)] {
                 assert_eq!(db.get(&key(k)).await.unwrap(), Some(to_bytes(value)));
@@ -1071,26 +1075,22 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            merkle::{Family, Location, full::Merkle},
+            merkle::{Family, Location},
             qmdb::any::sync::tests::FromSyncTestable,
         };
-        use futures::future::join_all;
 
         impl<F: Family> FromSyncTestable
             for Db<F, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Sequential>
         {
-            type Merkle = Merkle<F, deterministic::Context, Digest, Sequential>;
+            type Frontier =
+                crate::journal::authenticated::Frontier<F, deterministic::Context, Digest>;
 
-            fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
-                (self.log.merkle, self.log.journal)
+            fn into_log_components(self) -> (Self::Frontier, Self::Journal) {
+                (self.log.frontier, self.log.journal)
             }
 
             async fn pinned_nodes_at(&self, loc: Location<F>) -> Vec<Digest> {
-                join_all(F::nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
-                    .await
-                    .into_iter()
-                    .map(|n| n.unwrap().unwrap())
-                    .collect()
+                self.log.pinned_nodes_at(loc).await.unwrap()
             }
         }
     }

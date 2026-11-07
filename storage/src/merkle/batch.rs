@@ -38,12 +38,11 @@
 //! [`Mem::apply_batch`] to replay uncommitted ancestors without requiring the
 //! ancestor batches to still be alive.
 //!
-//! A `Weak` pointer to the parent is kept for [`MerkleizedBatch::get_node`] lookups
-//! (used during a child's merkleize) and for walking the chain to collect ancestor
-//! batch data. Committed-and-dropped ancestors truncate the `Weak` walk, leaving their
-//! data in the committed [`Mem`]. Each retained record carries the size and peaks before
-//! and after its changes, so [`Mem::apply_batch`] can find the structure's state in the
-//! chain and replay only the records that follow it.
+//! [`MerkleizedBatch::get_node`] reads from the retained ancestor data. A `Weak` parent
+//! pointer supports collecting ancestor data for new descendants. Dropping a committed
+//! ancestor ends that walk, with its data available in the committed [`Mem`]. Each retained
+//! record carries the size and peaks before and after its changes, so [`Mem::apply_batch`]
+//! can find the structure's state in the chain and replay only the records that follow it.
 //!
 //! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc`
 //! (keeping it alive for the walk), and the `Weak` chain is walked to collect
@@ -60,11 +59,12 @@
 //!
 //! # Batch invalidation
 //!
-//! A batch becomes _invalid_ when an unapplied ancestor is dropped, or a sibling fork has been
-//! applied. Invalid batches must not be used, because their methods may return incorrect data or
-//! panic. [`Mem::apply_batch`] is the exception. It returns an error unless the structure is at
-//! a state the chain reached before the batch: the base of its oldest retained ancestor or the
-//! tip of one of them.
+//! Unapplied ancestor batches must stay alive while merkleizing descendants. Once merkleized,
+//! a batch retains the data needed for node reads and application even after its ancestors are
+//! dropped. Applying a sibling fork to the base invalidates the chain. Applying a descendant
+//! can invalidate a batch's proofs by overwriting nodes those proofs read from the base.
+//! [`Mem::apply_batch`] returns an error unless the structure is at a state the chain reached
+//! before the batch: the base of its oldest retained ancestor or the tip of one of them.
 //!
 //! Pruning the base after a batch has been merkleized does not invalidate it: prune and apply
 //! commute (see [`Mem::apply_batch`]). An unmerkleized batch still reads sibling digests from the
@@ -415,10 +415,13 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     ///
     /// # Panics
     ///
-    /// Panics if a node it reads is in neither the batch chain nor `base`. This happens when an
-    /// unapplied ancestor that appended the node has been dropped, or when `base` has been pruned
-    /// past a leaf this batch updates. The [module docs](crate::merkle::batch) describe both cases
-    /// under "Batch invalidation".
+    /// Panics if a node it reads is in neither the batch chain nor `base`. That happens when `base`
+    /// has been pruned past a leaf this batch updates, or when an unapplied ancestor was dropped
+    /// before the parent was merkleized and appended a node this batch reads, such as a peak of
+    /// its tip. A batch merkleized after an unapplied ancestor was dropped does not retain that
+    /// ancestor's records, so [`Mem::apply_batch`] rejects it unless the structure already holds
+    /// them. The [module docs](crate::merkle::batch) describe these cases under "Batch
+    /// invalidation".
     pub fn merkleize(
         mut self,
         base: &Mem<F, D>,
@@ -659,35 +662,24 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         self.ancestors.len()
     }
 
-    /// Resolve a node: own data -> Weak parent chain.
+    /// Resolve a node from this batch and its retained ancestor data, newest first.
     ///
-    /// Returns `None` for positions that only exist in the committed [`Mem`].
-    /// Callers that need committed data should fall back to [`Mem::get_node`]
-    /// (or use a layered adapter such as the one in `qmdb::current::batch`).
+    /// Returns `None` for positions that exist only in the committed [`Mem`]. Read those
+    /// positions with [`Mem::get_node`] or a reader that combines the batch and base.
     pub fn get_node(&self, pos: Position<F>) -> Option<D> {
         if pos >= self.size() {
             return None;
         }
 
-        // A batch's overwrites only hold positions below its parent's size.
-        if pos >= self.data.parent_size {
-            let i = (*pos - *self.data.parent_size) as usize;
-            return self.data.appended.get(i).copied();
-        }
-        if let Some(d) = self.data.overwrites.get(&pos) {
-            return Some(*d);
-        }
-        // Walk Weak parent chain.
-        let mut current = self.parent.as_ref().and_then(Weak::upgrade);
-        while let Some(batch) = current {
-            if pos >= batch.data.parent_size {
-                let i = (*pos - *batch.data.parent_size) as usize;
-                return batch.data.appended.get(i).copied();
+        // A record's overwrites only hold positions below its parent's size.
+        for data in core::iter::once(&self.data).chain(self.ancestors.iter().rev()) {
+            if pos >= data.parent_size {
+                let i = (*pos - *data.parent_size) as usize;
+                return data.appended.get(i).copied();
             }
-            if let Some(d) = batch.data.overwrites.get(&pos) {
+            if let Some(d) = data.overwrites.get(&pos) {
                 return Some(*d);
             }
-            current = batch.parent.as_ref().and_then(Weak::upgrade);
         }
         None
     }
@@ -747,8 +739,8 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
 
     /// Create a child batch on top of this merkleized batch.
     ///
-    /// The batch becomes invalid if any ancestor is dropped before being applied, or a sibling
-    /// fork has been applied.
+    /// The child must be merkleized before unapplied ancestor batches are dropped. Applying a
+    /// sibling fork to the base invalidates it.
     pub fn new_batch(self: &Arc<Self>) -> UnmerkleizedBatch<F, D, S> {
         UnmerkleizedBatch::new(Arc::clone(self))
     }
@@ -756,6 +748,30 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
     /// Number of nodes in the committed Mem when the batch chain was forked.
     pub const fn base_size(&self) -> Position<F> {
         self.base_size
+    }
+
+    /// The appended nodes of this batch and its retained ancestors that `mem` has not applied,
+    /// in root-to-tip order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Mem::validate_batch`], and [`Error::DataCorrupted`] if any of
+    /// those records overwrites a node.
+    #[cfg(feature = "std")]
+    pub(crate) fn unapplied<'a>(
+        &'a self,
+        mem: &Mem<F, D>,
+    ) -> Result<impl Iterator<Item = &'a [D]> + use<'a, F, D, S>, Error<F>> {
+        let start = mem.validate_batch(self)?;
+        let records = || {
+            self.ancestors[start..]
+                .iter()
+                .chain(core::iter::once(&self.data))
+        };
+        if records().any(|data| !data.overwrites.is_empty()) {
+            return Err(Error::DataCorrupted("batch overwrites nodes"));
+        }
+        Ok(records().map(|data| data.appended.as_slice()))
     }
 
     /// Return a reference to the batch's strategy.
@@ -1516,6 +1532,7 @@ mod tests {
     /// locates its appended nodes from its own parent size. Nodes that exist only in the committed
     /// base read as `None`.
     fn get_node_resolves_from_writing_batch<F: Family>() {
+        // Use distinct digests to identify which batch supplies each node above a committed base.
         let hasher: H = Standard::new(ForwardFold);
         let base = build_reference::<F>(&hasher, 10);
         let (x, y, z, w) = (
@@ -1559,11 +1576,11 @@ mod tests {
                 assert_eq!(batch.get_node(batch.size()), None);
             };
 
-        // An empty batch holds no nodes of its own, so every read walks its ancestors.
+        // An empty batch holds no nodes of its own, so every read uses retained ancestor records.
         let empty = b.new_batch().merkleize(&base, &hasher);
         check_ancestor_nodes(&empty);
 
-        // C returns its own leaf 9 and leaf 11 and reads other nodes through `empty`.
+        // C returns its own leaf 9 and leaf 11 and reads older nodes from retained records.
         let c = empty
             .new_batch()
             .update_leaf_digest(Location::new(9), z)
@@ -1574,6 +1591,23 @@ mod tests {
         assert_eq!(c.get_node(leaf_9), Some(z));
         assert_eq!(c.get_node(leaf_11), Some(w));
         check_ancestor_nodes(&c);
+
+        // Overwrite leaf 0 again, then give the last batch no nodes of its own.
+        let d = c
+            .new_batch()
+            .update_leaf_digest(Location::new(0), w)
+            .unwrap()
+            .merkleize(&base, &hasher);
+        let e = d.new_batch().merkleize(&base, &hasher);
+
+        // Drop every ancestor handle. The empty tip must retain the latest values from the chain.
+        drop((a, b, empty, c, d));
+        assert_eq!(e.get_node(leaf_0), Some(w));
+        assert_eq!(e.get_node(leaf_9), Some(z));
+        assert_eq!(e.get_node(leaf_10), Some(x));
+        assert_eq!(e.get_node(leaf_11), Some(w));
+        assert_eq!(e.get_node(leaf_5), None);
+        assert_eq!(e.get_node(e.size()), None);
     }
 
     #[test]

@@ -23,8 +23,11 @@ use commonware_runtime::{
     tokio::{Config, Context},
 };
 use commonware_storage::{
-    journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::{self, full},
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+    },
+    merkle,
     qmdb::{
         any::{
             traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
@@ -293,15 +296,12 @@ pub(crate) const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16_384);
 const SMALL_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32);
 const PARTITION: &str = "bench-merkleize";
 
-fn merkle_cfg(ctx: &impl Strategizer, pc: CacheRef) -> full::Config<Rayon> {
-    full::Config {
-        journal_partition: format!("journal-{PARTITION}"),
+fn merkle_cfg(ctx: &impl Strategizer) -> MerkleConfig<Rayon> {
+    MerkleConfig {
         metadata_partition: format!("metadata-{PARTITION}"),
-        items_per_blob: ITEMS_PER_BLOB,
-        write_buffer: WRITE_BUFFER_SIZE,
         replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),
-        page_cache: pc,
+        cache: Default::default(),
     }
 }
 
@@ -332,7 +332,7 @@ pub(crate) fn any_fix_cfg_with_cache(
     pc: CacheRef,
 ) -> AnyFixedConfig<EightCap, Rayon> {
     AnyFixedConfig {
-        merkle: merkle_cfg(ctx, pc.clone()),
+        merkle: merkle_cfg(ctx),
         log: fix_log_cfg(pc),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
@@ -346,7 +346,7 @@ fn any_var_cfg_with_cache(
     pc: CacheRef,
 ) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
     AnyVariableConfig {
-        merkle: merkle_cfg(ctx, pc.clone()),
+        merkle: merkle_cfg(ctx),
         log: var_log_cfg(pc),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
@@ -360,7 +360,7 @@ pub(crate) fn cur_fix_cfg_with_cache(
     pc: CacheRef,
 ) -> CurrentFixedConfig<EightCap, Rayon> {
     CurrentFixedConfig {
-        merkle: merkle_cfg(ctx, pc.clone()),
+        merkle: merkle_cfg(ctx),
         log: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
@@ -375,7 +375,7 @@ fn cur_var_cfg_with_cache(
     pc: CacheRef,
 ) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
     CurrentVariableConfig {
-        merkle: merkle_cfg(ctx, pc.clone()),
+        merkle: merkle_cfg(ctx),
         log: var_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,

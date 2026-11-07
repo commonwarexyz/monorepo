@@ -52,9 +52,10 @@ use crate::{
     Context,
     journal::{
         authenticated,
+        authenticated::Config as MerkleConfig,
         contiguous::{Contiguous, Mutable},
     },
-    merkle::{Family, Location, Proof, full::Config as MerkleConfig},
+    merkle::{Family, Location, Proof},
     qmdb::{
         Error, chain, metrics::Metrics, single_operation_root, sync::source, value::ValueEncoding,
     },
@@ -190,14 +191,17 @@ where
     {
         // Keyless restores commit fields without replaying a keyed snapshot, so its logical floor
         // may precede the retained operation prefix.
-        let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
+        let pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle,
             cfg.log,
             max_size,
-            false,
         )
         .await?;
+        let inactivity_floor_loc = crate::qmdb::validate_initialization(&pending, false)
+            .await?
+            .unwrap_or(Location::new(0));
+        let mut journal = pending.finish().await?;
         let metrics = Metrics::new(context);
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
@@ -207,21 +211,7 @@ where
             journal = journal.sync().await?;
         }
 
-        let (last_commit_loc, inactivity_floor_loc) = {
-            let bounds = journal.bounds();
-            let last_commit_loc = Location::new(
-                bounds
-                    .end
-                    .checked_sub(1)
-                    .expect("at least one commit should exist"),
-            );
-            let op = journal.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = op
-                .inactivity_floor()
-                .expect("last operation should be a commit with floor");
-            (last_commit_loc, inactivity_floor_loc)
-        };
-        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
+        let inactive_peaks = F::inactive_peaks(journal.size(), inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let db = Self {
@@ -403,11 +393,7 @@ where
 
     /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
-        self.journal
-            .merkle
-            .pinned_nodes_at(loc)
-            .await
-            .map_err(Into::into)
+        self.journal.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root.
@@ -455,8 +441,7 @@ where
     /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
     /// of the deferred durability work surface on the returned handle. A failed data sync also
     /// fails the next durability operation. A failed recovery-watermark sync is not observed by
-    /// [Self::commit], and a failed merkle-node sync may not be. Both resurface on the next
-    /// [Self::sync].
+    /// [Self::commit]. It resurfaces on the next [Self::sync].
     #[tracing::instrument(name = "qmdb.keyless.db.start_sync", level = "info", skip_all)]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         self.metrics.start_sync_calls.inc();

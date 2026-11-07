@@ -38,13 +38,7 @@ pub use proof::{
 pub use read::Readable;
 use thiserror::Error;
 
-/// Safe upper bound on the number of pinned nodes for any u64-backed Merkle family.
-///
-/// Pinned nodes are produced by [`Family::nodes_to_pin`], whose default
-/// implementation returns the peaks of the sub-structure at the prune
-/// location. A structure with `n` leaves has at most `popcount(n)` peaks, and
-/// since [`Location`] is backed by a `u64`, `n <= u64::MAX` yields at most 64
-/// peaks.
+/// Maximum number of peaks or canonical pinned nodes returned by a [`Family`].
 pub const MAX_PINNED_NODES: usize = 64;
 
 /// Defines the strategy used to fold peaks into the final root digest.
@@ -70,9 +64,16 @@ impl Bagging {
 
 /// Marker trait for Merkle-family data structures.
 ///
-/// Provides the per-family constants and conversion functions that differentiate
-/// MMR from MMB (or other future Merkle structures). Families capture structural topology
-/// only; bagging is owned by the [`hasher::Hasher`] instance and supplied by the consumer.
+/// Provides the per-family constants and conversions that distinguish MMR, MMB, and other
+/// Merkle structures. Families capture structural topology. Bagging is owned by the
+/// [`hasher::Hasher`] instance and supplied by the consumer.
+///
+/// At every valid size, the nodes at height `h` cover exactly the aligned leaf intervals
+/// `[k * 2^h, (k + 1) * 2^h)` for `k` in `0..n`, for some `n`. Nodes of a given height are
+/// appended in increasing `k` order. Nodes of different heights may be interleaved.
+///
+/// [`Self::peaks`] and [`Self::nodes_to_pin`] each return at most [`MAX_PINNED_NODES`]
+/// entries for every valid size or pruning location, including overridden pinned-node sets.
 pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
     /// Domain tag committed by every root of this family.
     ///
@@ -159,6 +160,26 @@ pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
     /// `size_for(N+1)`, where `N` is the given leaf count. These are the nodes created
     /// when the `N`-th leaf is appended.
     fn parent_heights(leaves: Location<Self>) -> impl Iterator<Item = u32>;
+
+    /// Return the position of the node at `height` whose leftmost leaf is at `leaf_start`.
+    ///
+    /// The node may not exist yet in a given structure (MMB delays merges). The returned position
+    /// is where it is appended once it does.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `height` is excessively large (e.g., `>= 63`), or if the resulting position
+    /// computation overflows the bounds of the underlying numeric types.
+    fn subtree_root_position(leaf_start: Location<Self>, height: u32) -> Position<Self>;
+
+    /// Return the location of the leftmost leaf covered by the node at `pos` with `height`. For a
+    /// leaf (height 0), returns its own location.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `height` is excessively large (e.g., `>= 63`), or if an invalid combination of
+    /// `pos` and `height` results in arithmetic underflow/overflow.
+    fn leftmost_leaf(pos: Position<Self>, height: u32) -> Location<Self>;
 
     /// Return the height of the node at `pos`.
     ///
@@ -271,32 +292,6 @@ pub trait Graftable: Family {
         chunk_idx: u64,
         grafting_height: u32,
     ) -> impl Iterator<Item = (Position<Self>, u32)> + Send;
-
-    /// Return the deterministic position of the node at `height` whose leftmost leaf is at
-    /// `leaf_start`.
-    ///
-    /// For some families, this position corresponds to a node that physically exists in any
-    /// structure containing those leaves. For others (e.g. MMB with delayed merging), it may be a
-    /// "virtual" position that no actual node occupies, but is still deterministic and unique for
-    /// the given leaf range and height.
-    ///
-    /// Used by grafting to map grafted-structure positions to ops-structure positions for domain
-    /// separation in hash pre-images.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `height` is excessively large (e.g., `>= 63`), or if the resulting position
-    /// computation overflows the bounds of the underlying numeric types.
-    fn subtree_root_position(leaf_start: Location<Self>, height: u32) -> Position<Self>;
-
-    /// Return the location of the leftmost leaf covered by the node at `pos` with `height`. For a
-    /// leaf (height 0), returns its own location.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `height` is excessively large (e.g., `>= 63`), or if an invalid combination of
-    /// `pos` and `height` results in arithmetic underflow/overflow.
-    fn leftmost_leaf(pos: Position<Self>, height: u32) -> Location<Self>;
 
     /// Return the minimum leaf count at which the node at `pos` with `height` exists in the
     /// structure.

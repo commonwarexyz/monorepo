@@ -27,14 +27,15 @@ use std::{collections::VecDeque, sync::Arc};
 /// activity status of the operation, and the second argument is the location of the operation it
 /// inactivates (if any). Returns the number of active keys in the db.
 ///
-/// `init_buffer` sizes the replay read buffer (in bytes). `cache_size` bounds a
-/// `(location -> key)` cache that lets collision resolution resolve candidates from memory
-/// instead of re-reading the log; `None` disables it.
+/// `init_buffer` sizes the replay read buffer (in bytes) and `read_options` sets how it reads.
+/// `cache_size` bounds a `(location -> key)` cache that lets collision resolution resolve
+/// candidates from memory instead of re-reading the log; `None` disables it.
 pub(crate) async fn build_snapshot_from_log<F, C, I, Fn>(
     inactivity_floor_loc: crate::merkle::Location<F>,
     reader: &C,
     snapshot: &mut I,
     init_buffer: NonZeroUsize,
+    read_options: ReadOptions,
     cache_size: Option<NonZeroUsize>,
     mut callback: Fn,
 ) -> Result<usize, Error<F>>
@@ -45,14 +46,8 @@ where
     Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
 {
     let bounds = reader.bounds();
-    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
-    // the init cache, not the OS cache, decides which probes hit.
     let stream = reader
-        .replay(
-            *inactivity_floor_loc..bounds.end,
-            init_buffer,
-            ReadOptions::DONT_CACHE,
-        )
+        .replay(*inactivity_floor_loc..bounds.end, init_buffer, read_options)
         .await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
@@ -307,10 +302,9 @@ where
     C: Contiguous<Item: Operation<F>>,
     Fut: Future<Output = bool> + Send,
 {
-    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
-    // the init cache, not the OS cache, decides which probes hit.
+    // The journal replays these operations too, so they stay in the OS page cache.
     let stream = log
-        .replay(range, routing.init_buffer, ReadOptions::DONT_CACHE)
+        .replay(range, routing.init_buffer, ReadOptions::default())
         .await?;
     pin_mut!(stream);
     let mut batches: Vec<RoutedBatch<_>> = (0..routing.workers)
@@ -446,6 +440,7 @@ where
         reader,
         snapshot,
         init_buffer,
+        ReadOptions::default(),
         cache_size,
         |is_active, old_loc| {
             activity.push(is_active);

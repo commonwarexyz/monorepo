@@ -376,8 +376,10 @@ mod tests {
         telemetry::metrics::count_running_tasks,
     };
     use commonware_storage::{
-        journal::contiguous::fixed::Config as FixedLogConfig,
-        mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
+        journal::{
+            authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedLogConfig,
+        },
+        mmr::{self, Location, Proof},
         qmdb::{any::unordered::fixed, sync},
         translator::TwoCap,
     };
@@ -574,14 +576,11 @@ mod tests {
     fn db_config(suffix: &str) -> fixed::Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
         fixed::Config {
-            merkle: MmrJournalConfig {
-                journal_partition: format!("{suffix}-mmr-journal"),
+            merkle: MerkleConfig {
                 metadata_partition: format!("{suffix}-mmr-metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: FixedLogConfig {
                 partition: format!("{suffix}-log-journal"),

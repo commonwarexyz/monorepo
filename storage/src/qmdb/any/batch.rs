@@ -520,22 +520,10 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
 }
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] collected during merkleize.
-pub(crate) type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
-
-/// Ancestors retained while a batch is merkleized, immediate parent first.
-pub(crate) type RetainedAncestors<F, D, U, S> = Vec<AncestorBatch<F, D, U, S>>;
+type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
 
 /// Result of merkleizing a batch.
 type MerkleizeResult<F, D, U, S> = Result<Arc<MerkleizedBatch<F, D, U, S>>, crate::qmdb::Error<F>>;
-
-/// Result of a prepared merkleization: the batch and the ancestors retained while building it.
-pub(crate) type RetainedMerkleizeResult<F, D, U, S> = Result<
-    (
-        Arc<MerkleizedBatch<F, D, U, S>>,
-        RetainedAncestors<F, D, U, S>,
-    ),
-    crate::qmdb::Error<F>,
->;
 
 /// Batch-infrastructure state used during merkleization.
 ///
@@ -1450,7 +1438,7 @@ where
         mut floor: Location<F>,
         metadata: Option<U::Value>,
         db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
-    ) -> RetainedMerkleizeResult<F, H::Digest, U, S>
+    ) -> MerkleizeResult<F, H::Digest, U, S>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -1546,7 +1534,7 @@ where
                 inactivity_floor: floor,
             },
         });
-        Ok((batch, self.ancestors))
+        Ok(batch)
     }
 }
 
@@ -1828,10 +1816,9 @@ where
         let (prepared, staged) = self
             .resolve_updates_prefetched(slots, unstaged, db, &*policy, fill)
             .await?;
-        let (batch, _retained_ancestors) = prepared
+        prepared
             .walk_floor_and_merkleize(staged, fill, policy)
-            .await?;
-        Ok(batch)
+            .await
     }
 
     /// Resolve the caller's slots and unstaged writes on the strategy pool while selecting and
@@ -2014,10 +2001,9 @@ where
         let fill: &Shared<N> = &db.bitmap;
         let (batch, staged) = self.resolve_updates(slots, unstaged, db.strategy());
         let prepared = batch.prepare(db)?;
-        let (batch, _retained_ancestors) = prepared
+        prepared
             .walk_floor_and_merkleize(staged, fill, policy)
-            .await?;
-        Ok(batch)
+            .await
     }
 }
 
@@ -2381,10 +2367,9 @@ where
     {
         let fill: &Shared<N> = &db.bitmap;
         let prepared = self.prepare(db)?;
-        let (batch, _retained_ancestors) = prepared
+        prepared
             .walk_floor_and_merkleize(Vec::new(), fill, policy)
-            .await?;
-        Ok(batch)
+            .await
     }
 }
 
@@ -2410,7 +2395,7 @@ where
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
         source: T,
         policy: &mut P,
-    ) -> RetainedMerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
     where
         P: Policy<F, K, V::Value>,
     {
@@ -2573,10 +2558,9 @@ where
     {
         let fill: &Shared<N> = &db.bitmap;
         let prepared = self.prepare(db)?;
-        let (batch, _retained_ancestors) = prepared
+        prepared
             .walk_floor_and_merkleize(Vec::new(), fill, policy)
-            .await?;
-        Ok(batch)
+            .await
     }
 }
 
@@ -2603,7 +2587,7 @@ where
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
         source: T,
         policy: &mut P,
-    ) -> RetainedMerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
     where
         P: Policy<F, K, V::Value>,
     {
@@ -3257,17 +3241,17 @@ where
     /// [`crate::qmdb::ProofExt::verify`]. Together with [`Self::pinned_nodes`] they verify via
     /// [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
-    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
-    /// which retains them at least until this batch's changes are flushed (by a commit or sync
-    /// after apply).
+    /// Nodes appended by unapplied ancestors come from the records this batch retained when it
+    /// was merkleized. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
+    /// changes are flushed (by a commit or sync after apply).
     ///
     /// # Errors
     ///
     /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain,
-    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
-    /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
-    /// operations (such as a batch from [`Db::to_batch`]).
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned, and
+    /// [`crate::merkle::Error::Empty`] if the batch has no operations (such as a batch from
+    /// [`Db::to_batch`]).
     pub fn proof<E, C, I, H, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -3290,16 +3274,15 @@ where
     /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
     /// nodes verify against [`Self::root`] via [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
-    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
-    /// which retains them at least until this batch's changes are flushed (by a commit or sync
-    /// after apply).
+    /// Nodes appended by unapplied ancestors come from the records this batch retained when it
+    /// was merkleized. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
+    /// changes are flushed (by a commit or sync after apply).
     ///
     /// # Errors
     ///
     /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain,
-    /// and [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to
-    /// a dropped unapplied ancestor.
+    /// and [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
     pub fn pinned_nodes<E, C, I, H, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -4798,6 +4781,7 @@ pub(crate) mod tests {
     #[test]
     fn proportional_floor_passes_trailing_superseded_candidates() {
         deterministic::Runner::default().start(|context| async move {
+            // Use a fresh database so the floor candidates have predictable operation locations.
             let config = fixed_db_config::<OneCap>("proportional-trailing");
             let db = AnyUnordered::init(context.child("db"), config, None)
                 .await
@@ -4823,7 +4807,7 @@ pub(crate) mod tests {
                 .write(keys[3], None)
                 .prepare(&db)
                 .unwrap();
-            let (merkleized, _) = prepared
+            let merkleized = prepared
                 .walk_floor_and_merkleize(
                     Vec::new(),
                     FnCandidates(|floor, tip: u64, limit, out: &mut Vec<_>| {
@@ -4851,6 +4835,7 @@ pub(crate) mod tests {
     #[test]
     fn eviction_before_predecessor_matches_across_rounds() {
         deterministic::Runner::default().start(|context| async move {
+            // Use ordered keys so evicting the middle key requires relinking its predecessor.
             let config = fixed_db_config::<OneCap>("eviction-rounds");
             let db = AnyOrdered::init(context.child("db"), config, None)
                 .await
@@ -4906,6 +4891,8 @@ pub(crate) mod tests {
                         |value| db.new_batch().write(a, Some(value)),
                     );
                     let mut prepared = batch.prepare(&db).unwrap();
+
+                    // Split after the evicted key so its predecessor is visited in another round.
                     if split {
                         prepared.prefetched = Some((
                             Round {
@@ -4915,7 +4902,9 @@ pub(crate) mod tests {
                             loc(3),
                         ));
                     }
-                    let (merkleized, _) = prepared
+
+                    // Candidate visits must retain their order across the prefetch boundary.
+                    let merkleized = prepared
                         .walk_floor_and_merkleize(Vec::new(), db.bitmap.as_ref(), &mut policy)
                         .await
                         .unwrap();
@@ -4923,6 +4912,8 @@ pub(crate) mod tests {
                     assert_eq!(policy.locations(), [loc(2), loc(3), loc(predecessor)]);
                     batches.push(merkleized);
                 }
+
+                // The batch's operations and root must be independent of round boundaries.
                 assert_same(&db, &batches[0], &batches[1]);
 
                 // After its write, if any, the batch deletes the evicted key and rewrites the
@@ -4949,6 +4940,8 @@ pub(crate) mod tests {
                 assert_eq!(merkleized.get_prev_key(&c, &db).await.unwrap(), Some(a));
                 applied = Some(merkleized);
             }
+
+            // The applied database must expose the repaired links and omit the evicted key.
             let db = db.apply_batch(applied.unwrap()).await.unwrap();
             assert_links(&db, &BTreeMap::from([(a, again), (c, c)]), &[b]).await;
             db.destroy().await.unwrap();

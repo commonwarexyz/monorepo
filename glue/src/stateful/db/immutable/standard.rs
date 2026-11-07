@@ -12,7 +12,7 @@ use crate::stateful::db::{
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, Spawner};
 use commonware_storage::{
     Context,
     journal::contiguous::{
@@ -270,7 +270,7 @@ where
 impl<F, E, K, V, H, T, S> ManagedDb<E> for fixed::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     K: Array,
     V: FixedValue,
     H: Hasher,
@@ -361,7 +361,7 @@ where
 impl<F, E, K, V, H, T, S> ManagedDb<E> for variable::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     K: Key,
     V: VariableValue,
     H: Hasher,
@@ -452,7 +452,7 @@ where
 impl<F, E, K, V, H, T, R, S> StateSyncDb<E, R> for fixed::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     K: Array,
     V: FixedValue,
     H: Hasher,
@@ -489,7 +489,7 @@ where
 impl<F, E, K, V, H, T, R, S> StateSyncDb<E, R> for variable::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     K: Key,
     V: VariableValue,
     H: Hasher,
@@ -532,8 +532,10 @@ mod tests {
         Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
-        journal::contiguous::fixed::Config as FixedJournalConfig,
-        merkle::{full::Config as MerkleConfig, mmr},
+        journal::{
+            authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedJournalConfig,
+        },
+        merkle::mmr,
         translator::TwoCap,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -545,13 +547,10 @@ mod tests {
         let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
         fixed::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("stateful-immutable-journal-{suffix}"),
                 metadata_partition: format!("stateful-immutable-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: FixedJournalConfig {
                 partition: format!("stateful-immutable-log-{suffix}"),

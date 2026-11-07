@@ -53,11 +53,11 @@
 //!   authenticated structure (see below).
 //!
 //! - **Graft roots**: The ops-tree root at the grafting height of each graftable bitmap chunk not
-//!   wholly below the inactivity floor, held in memory by chunk index. They survive journal
-//!   flushes, so merkleization recomputes a dirty chunk's grafted leaf without reading the ops
-//!   tree from storage. Startup and state sync rebuild them with the grafted tree, and a root is
-//!   released once the inactivity floor passes its chunk. With 32-byte chunks and 32-byte digests,
-//!   that is 32 bytes per 256 operations.
+//!   wholly below the inactivity floor, held in memory by chunk index whatever the ops tree's
+//!   resident height, so merkleization recomputes a dirty chunk's grafted leaf without reading the
+//!   ops tree from storage. Startup and state sync rebuild them with the grafted tree, and a root
+//!   is released once the inactivity floor passes its chunk. With 32-byte chunks and 32-byte
+//!   digests, that is 32 bytes per 256 operations.
 //!
 //! - **Bitmap metadata** (`Metadata`): Persists the pruning boundary and "pinned" digests needed to
 //!   restore the grafted tree after pruning old bitmap chunks.
@@ -328,8 +328,8 @@
 use crate::{
     Context,
     index::{Factory as IndexFactory, Ordered as OrderedIndex},
-    journal::authenticated,
-    merkle::{self, Location, full::Config as MerkleConfig},
+    journal::{authenticated, authenticated::Config as MerkleConfig},
+    merkle::{self, Location},
     qmdb::{
         any::{
             self, Config as AnyConfig,
@@ -529,7 +529,7 @@ where
     let (grafted_tree, graft_roots, root) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &pinned_nodes,
-        &any.log.merkle,
+        &any.log,
         any.inactivity_floor_loc,
         any.root(),
         &strategy,
@@ -663,9 +663,8 @@ pub mod tests {
                     let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                     for depth in [0u8, 1u8, 2u8] {
-                        // Hold every unapplied ancestor until the child is merkleized.
-                        // Speculative batch Merkle lookups walk weak parent links for in-memory
-                        // ancestor nodes.
+                        // Hold every unapplied ancestor until the child is merkleized, which
+                        // captures their operations and Merkle records.
                         let mut stack = Vec::new();
                         match depth {
                             0 => {}
@@ -865,13 +864,10 @@ pub mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
-                journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: crate::journal::authenticated::low_resident_height(),
             },
             log: FConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
@@ -904,13 +900,10 @@ pub mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
-                journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: crate::journal::authenticated::low_resident_height(),
             },
             log: VConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
@@ -2021,7 +2014,7 @@ pub mod tests {
                 <mmb::Family as merkle::Family>::location_to_position(end)
             );
 
-            let ops_pos = <mmb::Family as merkle::Graftable>::subtree_root_position(
+            let ops_pos = <mmb::Family as merkle::Family>::subtree_root_position(
                 Location::new(0),
                 grafting_height,
             );
@@ -2071,13 +2064,10 @@ pub mod tests {
             let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Config {
                 merkle: MerkleConfig {
-                    journal_partition: "forged-exclusion-journal".to_string(),
                     metadata_partition: "forged-exclusion-metadata".to_string(),
-                    items_per_blob: NZU64!(11),
-                    write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                     strategy: Sequential,
-                    page_cache: page_cache.clone(),
+                    cache: Default::default(),
                 },
                 log: VConfig {
                     partition: "forged-exclusion-log".to_string(),
@@ -3090,7 +3080,7 @@ pub mod tests {
             let youngest = pruned_chunks - 1;
             let pair_chunk = youngest & !1;
             let pair_start = pair_chunk << gh;
-            let pair_pos = <mmb::Family as merkle::Graftable>::subtree_root_position(
+            let pair_pos = <mmb::Family as merkle::Family>::subtree_root_position(
                 merkle::Location::<mmb::Family>::new(pair_start),
                 gh + 1,
             );

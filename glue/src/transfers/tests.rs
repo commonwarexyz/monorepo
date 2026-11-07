@@ -6,10 +6,13 @@ use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::{Sequential, mocks::explore};
 use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::{
-        fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{
+            fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+        },
     },
-    merkle::{full::Config as MerkleConfig, mmr},
+    merkle::mmr,
     qmdb::{
         any::{
             self,
@@ -744,13 +747,10 @@ fn any_config(suffix: &str) -> any::Config<TwoCap, FixedJournalConfig, Sequentia
     let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
     any::Config {
         merkle: MerkleConfig {
-            journal_partition: format!("transfers-journal-{suffix}"),
             metadata_partition: format!("transfers-metadata-{suffix}"),
-            items_per_blob: NZU64!(11),
-            write_buffer: NZUsize!(1024),
+            cache: Default::default(),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: page_cache.clone(),
         },
         log: FixedJournalConfig {
             partition: format!("transfers-log-{suffix}"),

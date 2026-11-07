@@ -1132,10 +1132,13 @@ mod tests {
         },
     };
     use commonware_storage::{
-        journal::contiguous::{
-            fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+        journal::{
+            authenticated::Config as MerkleConfig,
+            contiguous::{
+                fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+            },
         },
-        merkle::{full::Config as MerkleConfig, mmr},
+        merkle::mmr,
         qmdb::{
             any::unordered::fixed::Operation as FixedOperation,
             current::{
@@ -1211,13 +1214,10 @@ mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         CurrentConfig {
             merkle: MerkleConfig {
-                journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: FixedJournalConfig {
                 partition: format!("stateful-current-log-{suffix}"),
@@ -1240,13 +1240,10 @@ mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         CurrentConfig {
             merkle: MerkleConfig {
-                journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: VariableJournalConfig {
                 partition: format!("stateful-current-log-{suffix}"),
@@ -1695,7 +1692,6 @@ mod tests {
             config.log.page_cache = CacheRef::new(page_size, PAGE_CACHE_SIZE);
             config.log.write_buffer = NonZeroUsize::new(CAPACITY as usize * size).unwrap();
             config.log.items_per_blob = NZU64!(1000);
-            config.merkle.items_per_blob = NZU64!(1000);
             config
         }
 

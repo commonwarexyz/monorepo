@@ -28,7 +28,8 @@ pub type CompactConfig<S> = super::CompactConfig<(), S>;
 mod tests {
     use super::*;
     use crate::{
-        merkle::{Family, Location, full::Config as MmrConfig, mmb, mmr},
+        journal::{authenticated::Config as MerkleConfig, contiguous::Contiguous as _},
+        merkle::{Family, Location, mmb, mmr},
         qmdb::{
             Error,
             immutable::tests::{self, immutable_tests},
@@ -59,14 +60,11 @@ mod tests {
     fn config(suffix: &str) -> Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            merkle: MmrConfig {
-                journal_partition: format!("journal-{suffix}"),
+            merkle: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: crate::journal::authenticated::low_resident_height(),
             },
             log: JournalConfig {
                 items_per_blob: NZU64!(5),
@@ -78,6 +76,244 @@ mod tests {
             translator: TwoCap,
             init_buffer: NZUsize!(1 << 21),
         }
+    }
+
+    /// A prune records its frontier before removing obsolete blobs. If the removal fails, a
+    /// bounded open to a commit whose floor precedes the recorded boundary is rejected before it
+    /// discards any later operations.
+    async fn bounded_init_after_failed_prune<F: Family>(context: deterministic::Context) {
+        // Set one key at location 1 and append empty commits at 3, 4, and 5 that keep floor 1.
+        // The commit at 5 ends the bounded target size 6.
+        let cfg = config("bounded-failed-prune");
+        let mut db = Db::<F, _, Digest, Digest, Sha256, _, _>::init(
+            context.child("initial"),
+            cfg.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let key = Sha256::fill(1);
+        let value = Sha256::fill(2);
+        let batch = db
+            .new_batch()
+            .set(key, value)
+            .with_inactivity_floor(Location::new(1))
+            .merkleize(&db)
+            .await
+            .unwrap();
+        db = db.apply_batch(batch).await.unwrap();
+        for _ in 0..3 {
+            let batch = db
+                .new_batch()
+                .with_inactivity_floor(Location::new(1))
+                .merkleize(&db)
+                .await
+                .unwrap();
+            db = db.apply_batch(batch).await.unwrap();
+        }
+        let old_end = db.bounds().end;
+        assert_eq!(*old_end, 6);
+
+        // A later commit at 6 raises the floor to 6 and defines the latest state.
+        let batch = db
+            .new_batch()
+            .with_inactivity_floor(old_end)
+            .merkleize(&db)
+            .await
+            .unwrap();
+        db = db.apply_batch(batch).await.unwrap();
+        let latest_root = db.root();
+        let latest_end = db.bounds().end;
+
+        // The frontier becomes durable before the first obsolete blob is removed. Failing every
+        // removal leaves the frontier at boundary 5 while the blob holding operations 0 to 4
+        // stays on disk.
+        let faults = context.storage_fault_config();
+        faults.write().remove_rate = Some(probability!(1.0));
+        assert!(db.prune(Location::new(5)).await.is_err());
+        faults.write().remove_rate = None;
+
+        // The commit ending size 6 declares floor 1, which lies before the recorded boundary.
+        let result = Db::<F, _, Digest, Digest, Sha256, _, _>::init(
+            context.child("bounded"),
+            cfg.clone(),
+            Some(old_end),
+        )
+        .await;
+        assert!(matches!(result, Err(Error::HistoricalFloorPruned(size)) if size == old_end));
+
+        // The rejected open truncated nothing, so the latest state reopens intact. Its floor 6
+        // makes the key at location 1 inactive, so the snapshot omits it.
+        let db = Db::<F, _, Digest, Digest, Sha256, _, _>::init(context.child("latest"), cfg, None)
+            .await
+            .unwrap();
+        assert_eq!(db.bounds().end, latest_end);
+        assert_eq!(db.root(), latest_root);
+        assert_eq!(db.get(&key).await.unwrap(), None);
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_bounded_init_rejects_pruned_floor_before_truncation_mmr() {
+        // A failed blob removal still records the frontier, so a bounded open rejects older floors.
+        deterministic::Runner::default().start(bounded_init_after_failed_prune::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_bounded_init_rejects_pruned_floor_before_truncation_mmb() {
+        // A failed blob removal still records the frontier, so a bounded open rejects older floors.
+        deterministic::Runner::default().start(bounded_init_after_failed_prune::<mmb::Family>);
+    }
+
+    /// Operations a retained blob holds before the authenticated start are unreadable. A sync
+    /// (`from_sync`) or a bounded open whose selected commit declares a floor in that padding is
+    /// rejected.
+    async fn boundary_padding_is_unavailable<F: Family>(
+        context: deterministic::Context,
+        from_sync: bool,
+    ) {
+        // Append empty commits at 1 through 4, then set one key at location 5 with a commit at 6
+        // whose floor is 5. That commit ends the bounded target size 7, and its floor is the
+        // first operation of the second blob.
+        let cfg = config("bounded-boundary-blob");
+        let mut db = Db::<F, _, Digest, Digest, Sha256, _, _>::init(
+            context.child("initial"),
+            cfg.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        for _ in 0..4 {
+            let batch = db
+                .new_batch()
+                .with_inactivity_floor(Location::new(0))
+                .merkleize(&db)
+                .await
+                .unwrap();
+            db = db.apply_batch(batch).await.unwrap();
+        }
+        let key = Sha256::fill(1);
+        let value = Sha256::fill(2);
+        let batch = db
+            .new_batch()
+            .set(key, value)
+            .with_inactivity_floor(Location::new(5))
+            .merkleize(&db)
+            .await
+            .unwrap();
+        db = db.apply_batch(batch).await.unwrap();
+        let old_end = db.bounds().end;
+
+        // The latest commit at 7 keeps floor 5 for the sync case, so syncing to it must replay
+        // from operation 5. The bounded case raises the floor to 6, which leaves only the commit
+        // at 6 depending on operation 5.
+        let batch = db
+            .new_batch()
+            .with_inactivity_floor(Location::new(if from_sync { 5 } else { 6 }))
+            .merkleize(&db)
+            .await
+            .unwrap();
+        let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
+        let latest_root = db.root();
+        let latest_end = db.bounds().end;
+
+        // Take the durable operations and the pins at location 6 out of the database. Location 6
+        // falls inside the blob covering 5 to 9, so starting there retains operation 5 as padding.
+        let start = Location::new(6);
+        let pins = db.journal.pinned_nodes_at(start).await.unwrap();
+        let crate::journal::authenticated::Journal {
+            journal,
+            frontier,
+            hasher,
+            ..
+        } = db.journal;
+        drop(frontier);
+
+        // Syncing to 6..8 imports the operations at start 6. The target commit's floor 5 lies
+        // in the retained blob but before that start, so the snapshot replay finds it pruned.
+        if from_sync {
+            let result = <Db<F, _, Digest, Digest, Sha256, _, _> as crate::qmdb::sync::Database>::from_sync_result(
+                context.child("sync"),
+                cfg,
+                journal,
+                Some(pins),
+                commonware_utils::non_empty_range!(start, latest_end),
+                NZU64!(8),
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(Error::Journal(crate::journal::Error::ItemPruned(5)))
+            ));
+            return;
+        }
+
+        // A synced frontier can fall inside the oldest retained blob. Importing at start 6
+        // records that boundary while the backing journal keeps the blob from 5.
+        let journal =
+            crate::journal::authenticated::Journal::<F, _, _, Sha256, _>::from_components(
+                context.child("import"),
+                &cfg.merkle,
+                journal,
+                hasher,
+                start,
+                pins,
+                NZU64!(8),
+            )
+            .await
+            .unwrap()
+            .persist_boundary()
+            .await
+            .unwrap();
+        assert_eq!(journal.journal.bounds().start, 5);
+        assert_eq!(journal.bounds().start, *start);
+        drop(journal);
+
+        // The commit ending size 7 declares floor 5, which the retained blob holds but the
+        // authenticated journal does not.
+        let result = Db::<F, _, Digest, Digest, Sha256, _, _>::init(
+            context.child("bounded"),
+            cfg.clone(),
+            Some(old_end),
+        )
+        .await;
+        assert!(matches!(result, Err(Error::HistoricalFloorPruned(size)) if size == old_end));
+
+        // The rejected open truncated nothing, and the latest commit's floor 6 is readable.
+        let db = Db::<F, _, Digest, Digest, Sha256, _, _>::init(context.child("latest"), cfg, None)
+            .await
+            .unwrap();
+        assert_eq!(db.bounds().end, latest_end);
+        assert_eq!(db.root(), latest_root);
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_bounded_init_rejects_boundary_padding_mmr() {
+        // A bounded open rejects a selected floor held only as padding before the start.
+        deterministic::Runner::default()
+            .start(|context| boundary_padding_is_unavailable::<mmr::Family>(context, false));
+    }
+
+    #[test_traced]
+    fn test_bounded_init_rejects_boundary_padding_mmb() {
+        // A bounded open rejects a selected floor held only as padding before the start.
+        deterministic::Runner::default()
+            .start(|context| boundary_padding_is_unavailable::<mmb::Family>(context, false));
+    }
+
+    #[test_traced]
+    fn test_sync_rejects_boundary_padding_mmr() {
+        // A sync rejects a target floor held only as padding before the synced start.
+        deterministic::Runner::default()
+            .start(|context| boundary_padding_is_unavailable::<mmr::Family>(context, true));
+    }
+
+    #[test_traced]
+    fn test_sync_rejects_boundary_padding_mmb() {
+        // A sync rejects a target floor held only as padding before the synced start.
+        deterministic::Runner::default()
+            .start(|context| boundary_padding_is_unavailable::<mmb::Family>(context, true));
     }
 
     async fn open_db<F: Family>(
@@ -177,12 +413,20 @@ mod tests {
         suffix: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
+        open_delayed_db_with_blobs(context, suffix, pending, NZU64!(1000))
+    }
+
+    /// [open_delayed_db] with `items_per_blob` operations per blob.
+    fn open_delayed_db_with_blobs(
+        context: deterministic::Context,
+        suffix: &str,
+        pending: &PendingSyncs,
+        items_per_blob: std::num::NonZeroU64,
+    ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
         let mut cfg = config(suffix);
         let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
-        cfg.log.items_per_blob = NZU64!(1000);
-        cfg.log.page_cache = page_cache.clone();
-        cfg.merkle.items_per_blob = NZU64!(1000);
-        cfg.merkle.page_cache = page_cache;
+        cfg.log.items_per_blob = items_per_blob;
+        cfg.log.page_cache = page_cache;
         DelayedDb::init(
             DelayedSyncContext {
                 inner: context,
@@ -395,11 +639,19 @@ mod tests {
     fn test_fixed_start_sync_prune_waits() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(ctx.child("delayed"), "start-sync-prune", &pending);
+            let open = open_delayed_db_with_blobs(
+                ctx.child("delayed"),
+                "start-sync-prune",
+                &pending,
+                NZU64!(7),
+            );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            // Two batches: the second declares floor 2 so the prune below is non-trivial.
-            db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), Location::new(0)).await;
-            db = apply_set(db, Sha256::fill(3u8), Sha256::fill(4u8), Location::new(2)).await;
+            // Each batch raises the floor to its own key, so the prune below crosses a blob.
+            for i in 0..10u8 {
+                let floor = db.bounds().end;
+                let set = apply_set(db, Sha256::fill(i), Sha256::fill(i + 100), floor);
+                db = drive_pending_syncs(&pending, set).await;
+            }
 
             let starts_before = pending.starts();
             let handle;
@@ -409,10 +661,16 @@ mod tests {
             let floor = db.inactivity_floor();
             assert!(*floor > 0);
             let db = {
+                pending.arm();
                 let mut prune = std::pin::pin!(db.prune(floor));
                 assert!(
                     prune.as_mut().now_or_never().is_none(),
                     "prune proceeded while the started sync was pending"
+                );
+                assert_eq!(
+                    pending.calls(),
+                    0,
+                    "prune synced while the started sync was pending"
                 );
                 pending.unblock();
                 prune.await.unwrap()
@@ -586,7 +844,7 @@ mod tests {
         test_fixed_batch_chain => run_batch_chain, open;
         test_fixed_operations_match_applied_log => run_operations_match_applied_log, open;
         test_fixed_build_and_authenticate => run_build_and_authenticate, open;
-        test_fixed_recovery_from_failed_merkle_sync => run_recovery_from_failed_merkle_sync, open;
+        test_fixed_recovery_from_unsynced_commit => run_recovery_from_unsynced_commit, open;
         test_fixed_recovery_from_failed_log_sync => run_recovery_from_failed_log_sync, open;
         test_fixed_pruning => run_pruning, open;
         test_fixed_prune_beyond_floor => run_prune_beyond_floor, open;
@@ -730,7 +988,6 @@ mod tests {
                 NonZeroU16::new(<Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16)
                     .unwrap();
             let mut cfg = config("rebranch");
-            cfg.merkle.items_per_blob = NZU64!(100_000);
             cfg.log.items_per_blob = NZU64!(100_000);
             cfg.log.page_cache = CacheRef::new(page_size, PAGE_CACHE_SIZE);
             cfg
