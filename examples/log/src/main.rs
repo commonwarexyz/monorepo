@@ -180,7 +180,7 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         max_peers_per_set,
-        max_message_size(&[payload]),
+        max_message_size([payload]),
         MAILBOX_SIZE,
     );
 

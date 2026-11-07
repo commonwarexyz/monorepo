@@ -14,9 +14,8 @@ use commonware_storage::{
         any::{
             db::Db as AnyDb,
             ordered::{Operation, Update, fixed::Config},
-            traits::DbAny as _,
-            value::FixedEncoding,
         },
+        value::FixedEncoding,
     },
     translator::EightCap,
 };
@@ -99,7 +98,7 @@ async fn commit_pending<F: MerkleFamily>(
     pending_inserts: &mut HashMap<RawKey, RawValue>,
     pending_deletes: &mut HashSet<RawKey>,
 ) -> GenericDb<F> {
-    let inherited = db.inactivity_floor_loc();
+    let inherited = db.inactivity_floor();
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
@@ -120,7 +119,7 @@ async fn commit_pending<F: MerkleFamily>(
     *committed_state = policy.check_raw(
         committed_state.drain(),
         inherited,
-        db.inactivity_floor_loc(),
+        db.inactivity_floor(),
         db.bounds().end - 1,
     );
     db

@@ -87,7 +87,7 @@ where
                         cache.put(loc, op.into_key().expect("operation without key"));
                     }
                 }
-            } else if op.has_floor().is_some() {
+            } else if op.inactivity_floor().is_some() {
                 callback(loc == last_commit_loc, None);
             }
         }

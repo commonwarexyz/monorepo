@@ -2,10 +2,10 @@
 //!
 //! For variable-size values, use [super::variable] instead.
 
-use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
+use super::{Config as BaseConfig, operation::Operation as BaseOperation};
 use crate::{
     journal::contiguous::fixed::{self, Config as JournalConfig},
-    qmdb::any::value::FixedEncoding,
+    qmdb::value::FixedEncoding,
 };
 
 /// Type alias for a fixed-size operation.
@@ -13,7 +13,7 @@ pub type Operation<F, K, V> = BaseOperation<F, K, FixedEncoding<V>>;
 
 /// Type alias for the fixed-size immutable database.
 pub type Db<F, E, K, V, H, T, S> =
-    Immutable<F, E, K, FixedEncoding<V>, fixed::Journal<E, Operation<F, K, V>>, H, T, S>;
+    super::Db<F, E, K, FixedEncoding<V>, fixed::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the fixed-size compact immutable db.
 pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, FixedEncoding<V>, H, S>;
@@ -219,7 +219,7 @@ mod tests {
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::fill(1u8);
             let value0 = Sha256::fill(2u8);
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             db = apply_set(db, key0, value0, floor).await;
 
             let starts_before = pending.starts();
@@ -242,7 +242,7 @@ mod tests {
             assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
             let key1 = Sha256::fill(3u8);
             let value1 = Sha256::fill(4u8);
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             db = apply_set(db, key1, value1, floor).await;
             assert_eq!(
                 pending.completions(),
@@ -306,7 +306,7 @@ mod tests {
             let db = apply.await.unwrap();
             handle.await.unwrap();
             assert_eq!(db.root(), root);
-            assert_eq!(db.size(), Location::new(36));
+            assert_eq!(db.bounds().end, Location::new(36));
             let db = db.sync().await.unwrap();
             drop(db);
 
@@ -335,7 +335,7 @@ mod tests {
             let mut db = open_delayed_db(ctx.child("delayed"), "start-sync-fail", &pending)
                 .await
                 .unwrap();
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), floor).await;
 
             // Arm all future syncs to resolve to an injected error.
@@ -372,7 +372,7 @@ mod tests {
                 .unwrap();
             let key = Sha256::fill(1u8);
             let value = Sha256::fill(2u8);
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             db = apply_set(db, key, value, floor).await;
 
             let handle;
@@ -406,7 +406,7 @@ mod tests {
             (db, handle) = db.start_sync().await.unwrap();
             assert!(pending.starts() > starts_before);
 
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             assert!(*floor > 0);
             let db = {
                 let mut prune = std::pin::pin!(db.prune(floor));

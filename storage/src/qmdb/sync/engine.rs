@@ -97,12 +97,7 @@ where
                 op,
                 pinned_nodes,
             },
-        ) => proof.verify_with_pinned_nodes::<H, _>(
-            *start,
-            core::slice::from_ref(op),
-            pinned_nodes,
-            root,
-        ),
+        ) => proof.verify_with_pinned_nodes::<H, _>(*start, [op], pinned_nodes, root),
         _ => false,
     }
 }
@@ -286,7 +281,7 @@ where
         // reaches the target, try to recover the target's pinned nodes from local
         // Merkle state before asking peers for them. Partial journals resume without
         // probing completed database state.
-        let pinned_nodes = if journal_size == *config.target.range.end() {
+        let pinned_nodes = if journal_size == config.target.range.end() {
             DB::local_pinned_nodes(
                 config.context.child("local_pinned_nodes"),
                 &config.db_config,
@@ -387,7 +382,7 @@ where
         for _ in 0..num_requests {
             // Find the next gap in the sync range that needs to be fetched.
             let Some(gap_range) = crate::qmdb::sync::gaps::find_next(
-                Location::new(log_size)..self.target.range.end(),
+                log_size..self.target.range.end(),
                 self.fetched_operations.iter().map(|(&start, operations)| {
                     start..start.checked_add(operations.len() as u64).unwrap()
                 }),
@@ -481,7 +476,7 @@ where
     /// Record a progress snapshot in metrics.
     fn record_progress(&mut self) {
         self.metrics.record_target(*self.target.range.end());
-        self.metrics.record_synced(self.journal.size());
+        self.metrics.record_synced(*self.journal.size());
     }
 
     /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
@@ -543,7 +538,7 @@ where
             // Skip operations that are before the next location. The containment check when
             // selecting the range (`next_loc <= range_end`) guarantees at least one operation
             // at or after it, so the batch is never empty.
-            operations.drain(..(next_loc - *range_start_loc) as usize);
+            operations.drain(..(*next_loc - *range_start_loc) as usize);
             next_loc += operations.len() as u64;
             self.journal = self.journal.append(operations).await?;
         }
@@ -741,7 +736,7 @@ where
         )
         .await?;
 
-        let got_root = database.root();
+        let got_root = database.ops_root();
         let expected_root = self.target.root;
         if got_root != expected_root {
             return Err(SyncError::Engine(EngineError::RootMismatch {
@@ -830,8 +825,8 @@ pub(crate) mod tests {
             Ok(self)
         }
 
-        fn size(&self) -> u64 {
-            self.size
+        fn size(&self) -> Location<MmrFamily> {
+            Location::new(self.size)
         }
 
         async fn append(mut self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
@@ -876,7 +871,7 @@ pub(crate) mod tests {
             Ok(Some(vec![]))
         }
 
-        fn root(&self) -> Self::Digest {
+        fn ops_root(&self) -> Self::Digest {
             sha256::Digest::from([0u8; 32])
         }
     }
@@ -1037,7 +1032,7 @@ pub(crate) mod tests {
 
             // Applying moves the journal past the whole batch.
             let engine = engine.apply_operations().await.unwrap();
-            assert_eq!(engine.journal.size(), 9);
+            assert_eq!(engine.journal.size(), Location::new(9));
         });
     }
 
@@ -1275,7 +1270,7 @@ pub(crate) mod tests {
             // Applying drops the batch below the new lower bound and appends the operation of
             // the straddling batch at it.
             let engine = engine.apply_operations().await.unwrap();
-            assert_eq!(engine.journal.size(), 10);
+            assert_eq!(engine.journal.size(), Location::new(10));
             assert!(engine.fetched_operations.is_empty());
         });
     }

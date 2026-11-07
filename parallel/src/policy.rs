@@ -11,17 +11,17 @@
 //!
 //! # Serial budget
 //!
-//! A large serial run keeps the caller busy without help from the pool, so serial is seeded or
-//! probed only while its projected cost fits under [`SERIAL_SAMPLE_BUDGET_NS`]. The projection
-//! multiplies the chosen placement's estimated wall time by its planning parallelism.
+//! Wall time decides which path is faster, and busy time decides whether serial is affordable. A
+//! parallel run's busy time is the time its threads spend executing it and approximates the cost
+//! of the same run on one thread. A large serial run keeps the caller busy without help from the
+//! pool, so serial is seeded or probed only while the parallel busy-time estimate fits under
+//! [`SERIAL_SAMPLE_BUDGET_NS`], and preferred only while the serial estimate fits too.
 //!
-//! Preferring serial also requires the serial estimate to fit. Parallel samples keep refreshing the
-//! projection while serial is excluded, so a lower projection can make serial eligible again.
-//!
-//! A parallel sample includes queueing behind other work on a group, since the caller waits through
-//! it. Contention therefore steers callers toward serial. Once it lifts the projection past the
-//! budget, it gates serial out until the queue drains. One sample cannot separate queueing from a
-//! larger input in the same bucket, and the budget exists to catch the larger input.
+//! Parallel samples keep the busy-time estimate current. A shorter busy time can make serial
+//! eligible again, and one at or over the budget stops a stale serial estimate from winning after
+//! the input grows within its bucket. Queueing behind other work on a group lengthens a parallel run's wall
+//! time but not its busy time, so contention steers callers toward serial while it stays
+//! affordable.
 //!
 //! # Placement
 //!
@@ -31,7 +31,8 @@
 //!
 //! Each placement has its own serial-versus-parallel cadence. A confined caller compares serial
 //! against its own placement, and a caller with a choice compares against the preferred one. Both
-//! share each placement's estimate, so either kind of caller keeps it current for the other.
+//! share each placement's wall and busy estimates, so either kind of caller keeps them current for
+//! the other.
 //!
 //! ```text
 //!     caller with a choice                         confined caller
@@ -70,7 +71,12 @@
 //! in completion order.
 
 use dashmap::DashMap;
-use std::{panic::Location, sync::Arc, time::Duration};
+use std::{
+    ops::{Index, IndexMut},
+    panic::Location,
+    sync::Arc,
+    time::Duration,
+};
 
 /// Calls between samples of the preferred path, so its estimate does not go stale.
 const PREFERRED_SAMPLE_INTERVAL: u32 = 10;
@@ -86,8 +92,8 @@ const RESAMPLE_INTERVAL: u32 = 100;
 /// across thousands of calls. A parallel probe pays any pool queueing in full.
 const MAX_RESAMPLE_SHIFT: u32 = 5;
 
-/// The projected serial cost, in nanoseconds, under which serial is seeded or probed. Preferring
-/// serial also requires its wall-time estimate to fit.
+/// The estimated busy time of a parallel run, in nanoseconds, under which serial is seeded or
+/// probed. Preferring serial also requires the serial wall-time estimate to fit.
 const SERIAL_SAMPLE_BUDGET_NS: u64 = 10_000_000;
 
 /// The estimated job time, in nanoseconds, within which a spawned job may run inline on the caller.
@@ -137,13 +143,28 @@ pub(super) enum Placement {
     Local,
 }
 
-/// The placements a run's caller may use, each with the parallelism it plans with there.
+// Per-placement arrays, such as the estimates and cadences, index by placement.
+impl<T> Index<Placement> for [T; 2] {
+    type Output = T;
+
+    fn index(&self, placement: Placement) -> &T {
+        &self[placement as usize]
+    }
+}
+
+impl<T> IndexMut<Placement> for [T; 2] {
+    fn index_mut(&mut self, placement: Placement) -> &mut T {
+        &mut self[placement as usize]
+    }
+}
+
+/// The placements a run's caller may use.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Pools {
     /// Only this placement takes part in the decision.
-    Fixed(Placement, usize),
-    /// Wide or Local, with Local's planning parallelism.
-    Either(usize),
+    Fixed(Placement),
+    /// Wide or Local.
+    Either,
 }
 
 /// A population of spawning callers with its own execution cadence and overhead estimate. Every
@@ -221,34 +242,24 @@ impl Policy {
 
         // A caller decides between serial and the placement it would use, on that placement's
         // cadence. A caller with a choice of placements consults the placement first.
-        let local_parallelism = match pools {
-            Pools::Fixed(placement, pool_parallelism) => {
-                (plan.execution, plan.measure) = self
-                    .run_entries
-                    .entry(key)
-                    .or_default()
-                    .choose(placement, pool_parallelism);
-                if plan.execution == RunExecution::Parallel {
-                    plan.placement = placement;
-                }
-                return plan;
+        if let Pools::Fixed(placement) = pools {
+            (plan.execution, plan.measure) =
+                self.run_entries.entry(key).or_default().choose(placement);
+            if plan.execution == RunExecution::Parallel {
+                plan.placement = placement;
             }
-            Pools::Either(local_parallelism) => local_parallelism,
-        };
+            return plan;
+        }
 
         // A placement seed or probe takes the call as a timed parallel run without arbitrating
         // either execution cadence, so the probes never displace each other's boundary.
         let mut entry = self.run_entries.entry(key).or_default();
         let preferred = entry.placement.preferred();
-        let preferred_parallelism = match preferred {
-            Placement::Wide => parallelism,
-            Placement::Local => local_parallelism,
-        };
         let serial_ns = entry.serial_ns.get();
-        let rival_ns = entry.serial_rival_ns(preferred, preferred_parallelism);
+        let rival_ns = entry.serial_rival_ns(preferred);
         let (placement, _) = entry.placement.choose(rival_ns);
         if placement == preferred {
-            (plan.execution, plan.measure) = entry.choose(preferred, preferred_parallelism);
+            (plan.execution, plan.measure) = entry.choose(preferred);
             if plan.execution != RunExecution::Parallel {
                 return plan;
             }
@@ -256,7 +267,7 @@ impl Policy {
             // Until serial is measured, a placement's first sample leaves its serial
             // comparison due.
             if serial_ns.is_none() && entry.placement.estimate(placement).is_none() {
-                entry.cadences[placement as usize].saturate();
+                entry.cadences[placement].saturate();
             }
             (plan.execution, plan.measure) = (RunExecution::Parallel, true);
         }
@@ -264,7 +275,7 @@ impl Policy {
         plan
     }
 
-    /// Records the wall time of a run that followed `plan`.
+    /// Records a run that followed `plan`. A serial run records only its wall time.
     pub(super) fn record_run(
         &self,
         caller: &'static Location<'static>,
@@ -272,7 +283,7 @@ impl Policy {
         work: usize,
         parallelism: usize,
         plan: RunPlan,
-        elapsed: Duration,
+        sample: RunSample,
     ) {
         if parallelism <= 1 {
             return;
@@ -280,8 +291,11 @@ impl Policy {
         let key = Key::new(caller, len, work, parallelism);
         let mut entry = self.run_entries.entry(key).or_default();
         match plan.execution {
-            RunExecution::Serial => entry.serial_ns.record(nanos(elapsed)),
-            RunExecution::Parallel => entry.placement.record(plan.placement, nanos(elapsed)),
+            RunExecution::Serial => entry.serial_ns.record(nanos(sample.wall)),
+            RunExecution::Parallel => {
+                entry.placement.record(plan.placement, nanos(sample.wall));
+                entry.busy_ns[plan.placement].record(nanos(sample.busy));
+            }
         }
     }
 
@@ -535,6 +549,26 @@ impl Policy {
             .get(&key)
             .map(|e| (e.serial_ns.get(), e.parallel_ns()))
     }
+
+    /// The Wide and Local busy-time estimates, in nanoseconds, of the run entry for this call
+    /// site, or `None` when the entry does not exist. A placement's estimate is `None` until a
+    /// parallel run is recorded there.
+    #[cfg(test)]
+    pub(super) fn run_busy_estimates(
+        &self,
+        caller: &'static Location<'static>,
+        len: usize,
+        work: usize,
+        parallelism: usize,
+    ) -> Option<(Option<u64>, Option<u64>)> {
+        let key = Key::new(caller, len, work, parallelism);
+        self.run_entries.get(&key).map(|entry| {
+            (
+                entry.busy_ns[Placement::Wide].get(),
+                entry.busy_ns[Placement::Local].get(),
+            )
+        })
+    }
 }
 
 /// Identifies a stream of similar calls.
@@ -566,7 +600,7 @@ impl Key {
     }
 }
 
-/// An empty, seeded, or live wall-clock estimate in nanoseconds.
+/// An empty, seeded, or live time estimate in nanoseconds.
 #[derive(Clone, Copy, Debug, Default)]
 enum Estimate {
     #[default]
@@ -708,6 +742,9 @@ struct RunEntry {
     /// probe of the slower placement never raises the estimate it compares against. A confined
     /// caller compares serial against the placement it is confined to.
     placement: Choice,
+    /// The busy-time estimate of parallel runs on each placement, indexed by placement. A caller
+    /// gates serial on the busy time of the placement it would use.
+    busy_ns: [Estimate; 2],
     /// The cadences on which serial is arbitrated against each placement, indexed by placement.
     /// Every caller on one cadence compares serial against the same placement, so each probe lands
     /// on a caller that can act on it.
@@ -715,11 +752,6 @@ struct RunEntry {
 }
 
 impl RunEntry {
-    /// Projects the serial cost from the placement's wall time and planning parallelism.
-    fn projected_serial(parallel_ns: u64, parallelism: usize) -> u64 {
-        parallel_ns.saturating_mul(u64::try_from(parallelism).unwrap_or(u64::MAX))
-    }
-
     /// Returns the preferred placement's wall time, or `None` until Wide is measured. A caller with
     /// a choice decides on this estimate.
     #[cfg(test)]
@@ -727,18 +759,22 @@ impl RunEntry {
         self.placement.estimate(self.placement.preferred())
     }
 
-    /// The estimate of `placement` and the serial cost projected at its planning parallelism,
-    /// or `None` until that placement is measured.
-    fn estimates(&self, placement: Placement, parallelism: usize) -> Option<(u64, u64)> {
-        let parallel_ns = self.placement.estimate(placement)?;
-        let projected_ns = Self::projected_serial(parallel_ns, parallelism);
-        Some((parallel_ns, projected_ns))
+    /// The wall-time and busy-time estimates of `placement`, or `None` until both are measured.
+    fn estimates(&self, placement: Placement) -> Option<(u64, u64)> {
+        match (
+            self.placement.estimate(placement),
+            self.busy_ns[placement].get(),
+        ) {
+            (Some(parallel_ns), Some(busy_ns)) => Some((parallel_ns, busy_ns)),
+            _ => None,
+        }
     }
 
     /// Prefers the path with the lower wall-time estimate, allowing serial only when its estimate
-    /// and projected cost fit under the budget. Ties favor serial to use fewer workers.
-    const fn preferred(serial_ns: u64, parallel_ns: u64, projected_ns: u64) -> RunExecution {
-        if projected_ns >= SERIAL_SAMPLE_BUDGET_NS
+    /// and the parallel busy-time estimate fit under the budget. Ties favor serial to use fewer
+    /// workers.
+    const fn preferred(serial_ns: u64, parallel_ns: u64, busy_ns: u64) -> RunExecution {
+        if busy_ns >= SERIAL_SAMPLE_BUDGET_NS
             || serial_ns >= SERIAL_SAMPLE_BUDGET_NS
             || parallel_ns < serial_ns
         {
@@ -750,37 +786,36 @@ impl RunEntry {
 
     /// Returns the serial wall-time estimate while serial is preferred over `placement`, or `None`
     /// otherwise, since a path that is not preferred must not pace the placements' probes.
-    fn serial_rival_ns(&self, placement: Placement, parallelism: usize) -> Option<u64> {
+    fn serial_rival_ns(&self, placement: Placement) -> Option<u64> {
         let serial_ns = self.serial_ns.get()?;
-        let (parallel_ns, projected_ns) = self.estimates(placement, parallelism)?;
-        (Self::preferred(serial_ns, parallel_ns, projected_ns) == RunExecution::Serial)
+        let (parallel_ns, busy_ns) = self.estimates(placement)?;
+        (Self::preferred(serial_ns, parallel_ns, busy_ns) == RunExecution::Serial)
             .then_some(serial_ns)
     }
 
     /// Returns the path to run, serial or `placement`, and whether the caller should time it and
-    /// report the elapsed time to [`Policy::record_run`]. The decision is made on that
-    /// placement's cadence.
-    fn choose(&mut self, placement: Placement, parallelism: usize) -> (RunExecution, bool) {
+    /// record it with [`Policy::record_run`]. The decision is made on that placement's cadence.
+    fn choose(&mut self, placement: Placement) -> (RunExecution, bool) {
         let serial_ns = self.serial_ns;
-        let estimates = self.estimates(placement, parallelism);
-        let cadence = &mut self.cadences[placement as usize];
+        let estimates = self.estimates(placement);
+        let cadence = &mut self.cadences[placement];
 
         // Seed this placement's estimate with its first call. Until serial is measured, saturating
         // the placement's cadence keeps it due for an immediate boundary. Its next call then offers
-        // the serial seed as soon as the parallel estimate lands (when the projection allows).
+        // the serial seed as soon as the parallel estimates land (when the busy time allows).
         //
         // Once serial is measured, the seed leaves the cadence fresh, since the boundary could only
         // probe a path that is already priced.
-        let Some((parallel_ns, projected_ns)) = estimates else {
+        let Some((parallel_ns, busy_ns)) = estimates else {
             if serial_ns.get().is_none() {
                 cadence.saturate();
             }
             return (RunExecution::Parallel, true);
         };
 
-        // Serial is eligible only while the projection is below the budget. Periodic parallel
-        // samples refresh the projection, so a lower cost can make serial eligible again.
-        let can_sample_serial = projected_ns < SERIAL_SAMPLE_BUDGET_NS;
+        // Serial is eligible only while the parallel busy time is below the budget. Periodic
+        // parallel samples refresh it, so a shorter busy time can make serial eligible again.
+        let can_sample_serial = busy_ns < SERIAL_SAMPLE_BUDGET_NS;
 
         // Until serial is sampled, parallel is preferred by default and each boundary doubles as
         // the seed slot. The tie adds no gap, and each boundary confirms parallel like any held
@@ -792,7 +827,7 @@ impl RunEntry {
                 parallel_ns,
                 parallel_ns,
             ),
-            |serial_ns| match Self::preferred(serial_ns, parallel_ns, projected_ns) {
+            |serial_ns| match Self::preferred(serial_ns, parallel_ns, busy_ns) {
                 RunExecution::Serial => (
                     RunExecution::Serial,
                     RunExecution::Parallel,
@@ -808,21 +843,12 @@ impl RunEntry {
             },
         );
 
-        // Exactly one caller crosses the boundary, and a serial seed whose sample never lands
-        // is simply offered again at the next boundary. A serial seed or probe must fit the
-        // live projection. A parallel probe is always allowed: it pays the true parallel wall
-        // (including any pool queueing), which the capped interval amortizes.
+        // Exactly one caller crosses the boundary, and a serial seed whose sample never lands is
+        // offered again at the next boundary. Only an eligible serial path is seeded or probed. A
+        // parallel probe is always allowed, since the capped interval amortizes its cost even when
+        // it queues on the pool.
         let probe_allowed = preferred == RunExecution::Serial || can_sample_serial;
         cadence.arbitrate(preferred, loser, winner_ns, loser_ns, probe_allowed)
-    }
-
-    /// Records a serial run, or a Wide parallel run.
-    #[cfg(test)]
-    fn record(&mut self, execution: RunExecution, elapsed: Duration) {
-        match execution {
-            RunExecution::Serial => self.serial_ns.record(nanos(elapsed)),
-            RunExecution::Parallel => self.placement.record(Placement::Wide, nanos(elapsed)),
-        }
     }
 }
 
@@ -835,6 +861,15 @@ pub(super) struct RunPlan {
     pub(super) placement: Placement,
     /// Whether the run is timed and recorded with [`Policy::record_run`].
     pub(super) measure: bool,
+}
+
+/// The timing of a measured run.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RunSample {
+    /// The wall time of the run.
+    pub(super) wall: Duration,
+    /// The time the run's threads spent executing it. A serial run's busy time is its wall time.
+    pub(super) busy: Duration,
 }
 
 /// A duration as a nanosecond sample, saturating at `u64::MAX`.
@@ -1029,24 +1064,65 @@ const fn len_bucket(len: usize) -> u8 {
 mod tests {
     use super::{
         Cadence, Choice, MAX_RESAMPLE_SHIFT, PREFERRED_SAMPLE_INTERVAL, Placement, Policy, Pools,
-        RESAMPLE_INTERVAL, RunEntry, RunExecution, RunPlan, SPAWN_INLINE_BUDGET_NS, SpawnEntry,
-        SpawnExecution, SpawnPlan, Spawner,
+        RESAMPLE_INTERVAL, RunEntry, RunExecution, RunPlan, RunSample, SPAWN_INLINE_BUDGET_NS,
+        SpawnEntry, SpawnExecution, SpawnPlan, Spawner, nanos,
     };
     use commonware_utils::Widen;
     use std::{cell::Cell, panic::Location, time::Duration};
 
+    /// The strategy parallelism the tests plan with.
     const PARALLELISM: usize = 4;
 
-    /// The placements of a caller outside the strategy's pool, with a two-worker local group.
-    const EITHER: Pools = Pools::Either(2);
+    /// The busy time of a run that keeps [`PARALLELISM`] workers busy for `wall`, whatever
+    /// parallelism its key carries.
+    fn perfect_busy(wall: Duration) -> Duration {
+        wall * PARALLELISM as u32
+    }
 
-    /// The placements of a caller confined to `placement`, with the strategy's parallelism on the
-    /// whole pool and two workers on a local group.
-    const fn confined(placement: Placement) -> Pools {
-        match placement {
-            Placement::Wide => Pools::Fixed(Placement::Wide, PARALLELISM),
-            Placement::Local => Pools::Fixed(Placement::Local, 2),
+    impl Policy {
+        /// Records a run that followed `plan` with wall time `wall`, taking a parallel run's busy
+        /// time from [`perfect_busy`].
+        fn record_perfect_run(
+            &self,
+            caller: &'static Location<'static>,
+            len: usize,
+            work: usize,
+            parallelism: usize,
+            plan: RunPlan,
+            wall: Duration,
+        ) {
+            let sample = RunSample {
+                wall,
+                busy: perfect_busy(wall),
+            };
+            self.record_run(caller, len, work, parallelism, plan, sample);
         }
+    }
+
+    impl RunEntry {
+        /// Records a serial run, or a Wide parallel run with its busy time from [`perfect_busy`].
+        pub(super) fn record(&mut self, execution: RunExecution, elapsed: Duration) {
+            match execution {
+                RunExecution::Serial => self.serial_ns.record(nanos(elapsed)),
+                RunExecution::Parallel => {
+                    self.record_parallel(Placement::Wide, elapsed, perfect_busy(elapsed))
+                }
+            }
+        }
+
+        /// Records a parallel run on `placement` with wall time `elapsed` and busy time `busy`.
+        fn record_parallel(&mut self, placement: Placement, elapsed: Duration, busy: Duration) {
+            self.placement.record(placement, nanos(elapsed));
+            self.busy_ns[placement].record(nanos(busy));
+        }
+    }
+
+    /// The placements of a caller outside the strategy's pool.
+    const EITHER: Pools = Pools::Either;
+
+    /// The placements of a caller confined to `placement`.
+    const fn confined(placement: Placement) -> Pools {
+        Pools::Fixed(placement)
     }
 
     /// The placement other than `placement`.
@@ -1068,19 +1144,17 @@ mod tests {
         }
     }
 
-    /// Chooses for `entry` on its preferred placement's cadence at [`PARALLELISM`].
+    /// Chooses for `entry` on its preferred placement's cadence.
     fn choose(entry: &mut RunEntry) -> (RunExecution, bool) {
-        entry.choose(entry.placement.preferred(), PARALLELISM)
+        entry.choose(entry.placement.preferred())
     }
 
-    /// The path `entry` prefers between serial and its preferred placement, projecting serial from
-    /// that placement at [`PARALLELISM`].
+    /// The path `entry` prefers between serial and its preferred placement.
     fn preferred(entry: &RunEntry) -> RunExecution {
-        let parallel_ns = entry.parallel_ns().unwrap();
         RunEntry::preferred(
             entry.serial_ns.get().unwrap(),
-            parallel_ns,
-            RunEntry::projected_serial(parallel_ns, PARALLELISM),
+            entry.parallel_ns().unwrap(),
+            entry.busy_ns[entry.placement.preferred()].get().unwrap(),
         )
     }
 
@@ -1091,7 +1165,7 @@ mod tests {
         assert_eq!(choose(&mut entry), (RunExecution::Parallel, true));
         entry.record(RunExecution::Parallel, Duration::from_micros(100));
 
-        // The projection fits the budget, so the serial seed is offered on the very next
+        // The busy time fits the budget, so the serial seed is offered on the very next
         // call rather than after a full interval.
         assert_eq!(choose(&mut entry), (RunExecution::Serial, true));
         entry.record(RunExecution::Serial, Duration::from_micros(95));
@@ -1107,14 +1181,14 @@ mod tests {
     }
 
     #[test]
-    fn defers_serial_seed_when_projection_exceeds_budget() {
+    fn defers_serial_seed_when_busy_time_exceeds_budget() {
         let mut entry = RunEntry::default();
 
         assert_eq!(choose(&mut entry), (RunExecution::Parallel, true));
         entry.record(RunExecution::Parallel, Duration::from_millis(10));
 
-        // The projection (10ms x 4) is over budget, so the immediate boundary refreshes
-        // parallel instead of seeding serial and the cadence resets to a full interval.
+        // The busy time (10ms on each of 4 workers) is over budget, so the immediate boundary
+        // refreshes parallel instead of seeding serial and the cadence resets to a full interval.
         assert_eq!(choose(&mut entry), (RunExecution::Parallel, true));
         assert!(entry.serial_ns.get().is_none());
         for i in 1..RESAMPLE_INTERVAL {
@@ -1126,9 +1200,9 @@ mod tests {
     }
 
     #[test]
-    fn never_seeds_serial_when_projection_exceeds_budget() {
-        // A serial pass could cost up to parallel * parallelism. When that projection exceeds
-        // the budget, the policy biases to parallel without ever paying a serial sample.
+    fn never_seeds_serial_when_busy_time_exceeds_budget() {
+        // A serial pass costs about the parallel run's busy time. When that exceeds the budget,
+        // the policy biases to parallel without ever paying a serial sample.
         let mut entry = RunEntry::default();
 
         entry.record(RunExecution::Parallel, Duration::from_millis(10));
@@ -1144,16 +1218,17 @@ mod tests {
 
     #[test]
     fn never_runs_serial_on_big_work() {
-        // A 25ms parallel estimate on 12 workers projects well over the serial budget.
+        // A 25ms parallel run on 12 workers is busy for well over the serial budget.
         // Repeated calls at that cost must never run serial.
         let mut entry = RunEntry::default();
-        entry.record(RunExecution::Parallel, Duration::from_millis(25));
+        let (wall, busy) = (Duration::from_millis(25), Duration::from_millis(300));
+        entry.record_parallel(Placement::Wide, wall, busy);
 
         for _ in 0..10_000 {
-            let (execution, measure) = entry.choose(entry.placement.preferred(), 12);
+            let (execution, measure) = choose(&mut entry);
             assert_eq!(execution, RunExecution::Parallel);
             if measure {
-                entry.record(RunExecution::Parallel, Duration::from_millis(25));
+                entry.record_parallel(Placement::Wide, wall, busy);
             }
         }
         assert!(entry.serial_ns.get().is_none());
@@ -1163,7 +1238,7 @@ mod tests {
     fn big_serial_estimate_biases_parallel() {
         // Both estimates exceed the budget and serial nominally wins the comparison, but the
         // policy only arbitrates small cases. Big work runs parallel outright, and the serial
-        // probe stays suppressed because the projection is over budget too.
+        // probe stays suppressed because the parallel busy time is over budget too.
         let mut entry = RunEntry::default();
         entry.record(RunExecution::Parallel, Duration::from_millis(30));
         entry.record(RunExecution::Serial, Duration::from_millis(12));
@@ -1175,18 +1250,113 @@ mod tests {
     }
 
     #[test]
-    fn projection_gates_preferred_serial() {
-        // A workload grew within its bucket: parallel is now 25ms on a 12-thread pool
-        // (projection 300ms, well over budget), but a stale serial estimate from a smaller
-        // input claims 8ms. The live projection must keep serial from running.
+    fn busy_gates_preferred_serial() {
+        // A workload grew within its bucket. Parallel takes 25ms on 12 workers (300ms busy, well
+        // over budget), but a stale serial estimate from a smaller input claims 8ms. The live
+        // busy-time estimate must keep serial from running.
         let mut entry = RunEntry::default();
-        entry.record(RunExecution::Parallel, Duration::from_millis(25));
+        entry.record_parallel(
+            Placement::Wide,
+            Duration::from_millis(25),
+            Duration::from_millis(300),
+        );
         entry.record(RunExecution::Serial, Duration::from_millis(8));
 
         for _ in 0..(2 * RESAMPLE_INTERVAL) {
-            let (execution, _) = entry.choose(entry.placement.preferred(), 12);
+            let (execution, _) = choose(&mut entry);
             assert_eq!(execution, RunExecution::Parallel);
         }
+    }
+
+    /// Recording a serial run leaves the parallel busy-time estimate that gates serial untouched.
+    #[test]
+    fn serial_runs_leave_the_busy_estimate_untouched() {
+        // Record runs with explicit wall and busy times, and read back the Wide busy-time estimate.
+        let policy = Policy::default();
+        let location = Location::caller();
+        let plan = |execution| RunPlan {
+            execution,
+            placement: Placement::Wide,
+            measure: true,
+        };
+        let record = |execution, wall: u64, busy: u64| {
+            let sample = RunSample {
+                wall: Duration::from_millis(wall),
+                busy: Duration::from_millis(busy),
+            };
+            policy.record_run(location, 10, 10, PARALLELISM, plan(execution), sample);
+        };
+        let busy = || {
+            policy
+                .run_busy_estimates(location, 10, 10, PARALLELISM)
+                .and_then(|(wide, _)| wide)
+        };
+
+        // A serial run alone leaves no busy-time estimate.
+        record(RunExecution::Serial, 5, 5);
+        assert_eq!(busy(), None);
+
+        // A later serial run leaves the parallel run's 3ms busy time in place, and the Wide run
+        // leaves the Local estimate empty.
+        record(RunExecution::Parallel, 1, 3);
+        record(RunExecution::Serial, 50, 50);
+        assert_eq!(busy(), Some(3_000_000));
+        let local = policy
+            .run_busy_estimates(location, 10, 10, PARALLELISM)
+            .and_then(|(_, local)| local);
+        assert_eq!(local, None);
+    }
+
+    /// Each placement gates serial on the busy time of its own runs, independently of the other
+    /// placement.
+    #[test]
+    fn placements_gate_serial_on_their_own_busy_time() {
+        // Wide runs are busy for 300ms, Local runs for 6ms, and serial beats Local's 8ms wall time.
+        let mut entry = RunEntry::default();
+        entry.record_parallel(
+            Placement::Wide,
+            Duration::from_millis(25),
+            Duration::from_millis(300),
+        );
+        entry.record_parallel(
+            Placement::Local,
+            Duration::from_millis(8),
+            Duration::from_millis(6),
+        );
+        entry.record(RunExecution::Serial, Duration::from_millis(5));
+
+        // Serial rivals and wins against Local, while Wide's busy time keeps it out.
+        assert_eq!(entry.serial_rival_ns(Placement::Local), Some(5_000_000));
+        assert_eq!(entry.serial_rival_ns(Placement::Wide), None);
+        assert_eq!(entry.choose(Placement::Local).0, RunExecution::Serial);
+        assert_eq!(entry.choose(Placement::Wide).0, RunExecution::Parallel);
+    }
+
+    /// Queueing that lifts a parallel run's wall time to 25ms leaves its 2ms busy time within the
+    /// budget, so a faster 5ms serial path is seeded at once and then preferred.
+    #[test]
+    fn queueing_does_not_gate_serial() {
+        // Parallel seeds with a queued run, serial seeds on the next call, and serial is preferred.
+        let mut entry = RunEntry::default();
+        assert_eq!(choose(&mut entry), (RunExecution::Parallel, true));
+        entry.record_parallel(
+            Placement::Wide,
+            Duration::from_millis(25),
+            Duration::from_millis(2),
+        );
+        assert_eq!(choose(&mut entry), (RunExecution::Serial, true));
+        entry.record(RunExecution::Serial, Duration::from_millis(5));
+        assert_eq!(preferred(&entry), RunExecution::Serial);
+
+        // Parallel is five times slower, so serial runs until the boundary `RESAMPLE_INTERVAL << 4`
+        // calls later.
+        for i in 1..(RESAMPLE_INTERVAL << 4) {
+            assert_eq!(
+                choose(&mut entry),
+                (RunExecution::Serial, i % PREFERRED_SAMPLE_INTERVAL == 0)
+            );
+        }
+        assert_eq!(choose(&mut entry), (RunExecution::Parallel, true));
     }
 
     #[test]
@@ -1221,14 +1391,14 @@ mod tests {
 
     #[test]
     fn pre_seed_parallel_samples_blend() {
-        // Before serial is seeded there is no loser: parallel samples smooth into the EWMA,
-        // so a single outlier (a contended call) cannot swing the projection that gates
-        // serial sampling.
+        // Before serial is seeded there is no loser. Parallel samples smooth into the EWMA, so a
+        // single outlier (a contended call) cannot swing either estimate.
         let mut entry = RunEntry::default();
         entry.record(RunExecution::Parallel, Duration::from_millis(10));
         entry.record(RunExecution::Parallel, Duration::from_millis(20));
 
         assert_eq!(entry.parallel_ns(), Some(12_000_000));
+        assert_eq!(entry.busy_ns[Placement::Wide].get(), Some(48_000_000));
     }
 
     #[test]
@@ -1271,9 +1441,9 @@ mod tests {
     }
 
     #[test]
-    fn seeds_serial_once_projection_shrinks_into_budget() {
-        // The projection is live: a key that starts over budget seeds serial at the first
-        // boundary after refreshes shrink the parallel estimate into the budget.
+    fn seeds_serial_once_busy_time_shrinks_into_budget() {
+        // The busy-time estimate is live, so a key that starts over budget seeds serial at the
+        // first boundary after refreshes shrink it into the budget.
         let mut entry = RunEntry::default();
         entry.record(RunExecution::Parallel, Duration::from_millis(10));
 
@@ -1354,8 +1524,8 @@ mod tests {
     /// bring it under serial, and the preference flips.
     #[test]
     fn recovers_from_stale_estimate() {
-        // An established parallel estimate of 2ms favors serial at 1ms. The projection remains
-        // under budget (2ms x 4 = 8ms), so probes can discover parallel's current cost of 0.5ms.
+        // An established parallel estimate of 2ms favors serial at 1ms. The 8ms busy time fits
+        // the budget, so probes can discover parallel's current cost of 0.5ms.
         let mut entry = RunEntry::default();
         for _ in 0..2 {
             entry.record(RunExecution::Parallel, Duration::from_millis(2));
@@ -1428,10 +1598,10 @@ mod tests {
         assert_eq!(choose(&mut entry).0, RunExecution::Parallel);
     }
 
+    /// Serial is probed at the capped interval while the parallel busy time fits the budget, even
+    /// when its own estimate is over the budget, so a stale estimate can recover.
     #[test]
-    fn probes_big_serial_when_projection_is_affordable() {
-        // A stale serial estimate above the budget must remain discoverable, so the probe gate
-        // reads the live projection.
+    fn probes_big_serial_when_busy_time_is_affordable() {
         let mut entry = RunEntry::default();
         for _ in 0..2 {
             entry.record(RunExecution::Parallel, Duration::from_micros(500));
@@ -1449,8 +1619,69 @@ mod tests {
         }
         assert_eq!(choose(&mut entry), (RunExecution::Serial, true));
 
+        // The probe's sample blends into the stale estimate, closing a fifth of the gap.
         entry.record(RunExecution::Serial, Duration::from_micros(300));
         assert_eq!(entry.serial_ns.get(), Some(12_060_000));
+    }
+
+    /// Work that grows within its bucket until serial exceeds the budget, and later settles where
+    /// serial is affordable and faster, has serial probed within one capped interval and preferred
+    /// again by the next. No busy level recorded while the work was grown may suppress the probes.
+    #[test]
+    fn serial_is_rediscovered_after_growth_settles() {
+        let policy = Policy::default();
+        let location = Location::caller();
+        let ms = Duration::from_millis;
+        let us = Duration::from_micros;
+        let interval = RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT;
+        let run = |serial: Duration, parallel: Duration, busy: Duration| {
+            let plan = policy.choose_run(location, 10, 10, PARALLELISM, confined(Placement::Wide));
+            if plan.measure {
+                let sample = match plan.execution {
+                    RunExecution::Serial => RunSample {
+                        wall: serial,
+                        busy: serial,
+                    },
+                    RunExecution::Parallel => RunSample {
+                        wall: parallel,
+                        busy,
+                    },
+                };
+                policy.record_run(location, 10, 10, PARALLELISM, plan, sample);
+            }
+            plan.execution
+        };
+
+        // Serial at 5ms is preferred over parallel at 25ms wall and 2ms busy.
+        for _ in 0..(2 * PREFERRED_SAMPLE_INTERVAL) {
+            run(ms(5), ms(25), ms(2));
+        }
+        assert_eq!(run(ms(5), ms(25), ms(2)), RunExecution::Serial);
+
+        // The work grows: serial reads 11.5ms, and the preference flips one parallel sample before
+        // the next boundary, so the first probe of serial sees a busy estimate refreshed once. The
+        // grown work persists through the later probes.
+        for _ in 0..interval {
+            run(us(11_500), ms(25), us(4_600));
+        }
+        assert_eq!(run(us(11_500), ms(25), us(4_600)), RunExecution::Parallel);
+
+        // The work settles where serial takes 7ms and parallel is busy for 2.8ms.
+        let settled: Vec<_> = (0..(2 * interval))
+            .map(|_| run(ms(7), ms(25), us(2_800)))
+            .collect();
+        let probe = settled
+            .iter()
+            .position(|&execution| execution == RunExecution::Serial);
+        assert!(
+            probe.is_some_and(|call| call < interval as usize),
+            "serial must be probed within one capped interval once affordable"
+        );
+        assert_eq!(
+            settled.last(),
+            Some(&RunExecution::Serial),
+            "serial must be preferred again"
+        );
     }
 
     /// The established serial estimate stays above parallel after one unusually fast sample.
@@ -2203,7 +2434,7 @@ mod tests {
         };
         let call = || policy.choose_run(location, 10, 10, PARALLELISM, EITHER);
         let record = |plan, millis| {
-            policy.record_run(
+            policy.record_perfect_run(
                 location,
                 10,
                 10,
@@ -2213,7 +2444,7 @@ mod tests {
             );
         };
 
-        // The projections exceed the serial budget, so no call offers serial.
+        // The parallel busy time exceeds the serial budget, so no call offers serial.
         let seed = call();
         assert_eq!(seed, plan(Placement::Wide));
         record(seed, 8);
@@ -2238,7 +2469,7 @@ mod tests {
     ) -> (RunExecution, Placement) {
         let plan = policy.choose_run(location, 10, 10, PARALLELISM, pools);
         if plan.measure {
-            policy.record_run(
+            policy.record_perfect_run(
                 location,
                 10,
                 10,
@@ -2386,7 +2617,7 @@ mod tests {
                 placement,
                 measure: true,
             };
-            policy.record_run(
+            policy.record_perfect_run(
                 location,
                 10,
                 10,
@@ -2430,14 +2661,11 @@ mod tests {
         assert_eq!(parallel_local, calls - wide_probes - serial_runs);
     }
 
-    /// A Local sample is projected onto a serial run with the local group's parallelism, so a
-    /// narrow group under a wide strategy still lets serial be sampled. An affordable, faster
-    /// serial path must also slow the probes of the Wide placement.
-    ///
-    /// A 200us run on a 2-worker group projects to 400us and fits the budget, while the
-    /// strategy's 64-way parallelism would project 12.8ms and never sample serial.
+    /// The serial budget applies to busy time whatever the strategy's parallelism, so a 200us Local
+    /// run busy for 800us lets serial be sampled under a 64-worker strategy. A faster serial path
+    /// must also slow the Wide probes.
     #[test]
-    fn local_projection_uses_group_parallelism() {
+    fn busy_budget_ignores_strategy_parallelism() {
         for pools in [EITHER, confined(Placement::Local)] {
             let policy = Policy::default();
             let location = Location::caller();
@@ -2454,7 +2682,7 @@ mod tests {
                     (RunExecution::Parallel, Placement::Local) => Duration::from_micros(200),
                     (RunExecution::Parallel, Placement::Wide) => Duration::from_micros(300),
                 };
-                policy.record_run(location, 10, 10, parallelism, plan, wall);
+                policy.record_perfect_run(location, 10, 10, parallelism, plan, wall);
                 if plan.execution == RunExecution::Serial {
                     serial_runs += 1;
                 } else if plan.placement == Placement::Wide {
@@ -2463,7 +2691,7 @@ mod tests {
             }
             assert!(
                 serial_runs > 0,
-                "{pools:?}: serial must be sampled once the local projection fits"
+                "{pools:?}: serial must be sampled once the busy time fits"
             );
             assert!(
                 wide_runs <= 2,
@@ -2472,52 +2700,51 @@ mod tests {
         }
     }
 
-    /// Expensive Local runs keep serial over budget. When the same work becomes cheaper, timed
-    /// parallel runs must bring the projection down and permit a serial sample.
+    /// Expensive Local runs keep the busy time over budget. When the same work becomes cheaper,
+    /// timed parallel runs must bring the busy-time estimate down and permit a serial sample.
     #[test]
-    fn local_projection_tracks_recent_runs() {
+    fn local_busy_time_tracks_recent_runs() {
         let policy = Policy::default();
         let location = Location::caller();
-        let parallelism = 64;
-        let pools = Pools::Fixed(Placement::Local, 2);
+        let pools = confined(Placement::Local);
 
-        // Expensive Local runs keep the serial projection over the budget.
+        // Expensive Local runs keep the busy time over the budget.
         for _ in 0..4 * RESAMPLE_INTERVAL {
-            let plan = policy.choose_run(location, 10, 10, parallelism, pools);
+            let plan = policy.choose_run(location, 10, 10, PARALLELISM, pools);
             assert_eq!(
                 plan.execution,
                 RunExecution::Parallel,
-                "serial must not run while the local projection exceeds the budget"
+                "serial must not run while the busy time exceeds the budget"
             );
             if plan.measure {
-                policy.record_run(
+                policy.record_perfect_run(
                     location,
                     10,
                     10,
-                    parallelism,
+                    PARALLELISM,
                     plan,
                     Duration::from_millis(8),
                 );
             }
         }
 
-        // Once the same work turns cheap, the timed runs lower the projection and serial gets
-        // sampled.
+        // Once the same work turns cheap, the timed runs lower the busy-time estimate and serial
+        // gets sampled.
         let mut serial_runs = 0;
         for _ in 0..4 * RESAMPLE_INTERVAL {
-            let plan = policy.choose_run(location, 10, 10, parallelism, pools);
+            let plan = policy.choose_run(location, 10, 10, PARALLELISM, pools);
             if plan.measure {
                 let wall = match plan.execution {
                     RunExecution::Serial => Duration::from_micros(150),
                     RunExecution::Parallel => Duration::from_micros(200),
                 };
-                policy.record_run(location, 10, 10, parallelism, plan, wall);
+                policy.record_perfect_run(location, 10, 10, PARALLELISM, plan, wall);
             }
             serial_runs += usize::from(plan.execution == RunExecution::Serial);
         }
         assert!(
             serial_runs > 0,
-            "serial must be sampled once the local projection fits the budget"
+            "serial must be sampled once the busy time fits the budget"
         );
     }
 
@@ -2534,7 +2761,7 @@ mod tests {
                 placement,
                 measure: true,
             };
-            policy.record_run(
+            policy.record_perfect_run(
                 location,
                 10,
                 10,
@@ -2913,9 +3140,9 @@ mod tests {
         }
     }
 
-    /// Serial is at least sixty times faster than either placement, but serial projected from the
-    /// preferred placement exceeds the budget. Serial therefore never runs, and the preferred
-    /// placement is the only path the other placement races.
+    /// Serial is at least sixty times faster than either placement, but the parallel busy time
+    /// exceeds the budget. Serial therefore never runs, and the preferred placement is the only
+    /// path the other placement races.
     ///
     /// The placements are within a whole multiple of each other, so the other placement's first
     /// probe comes after one plain resample interval, and later ones back off only with
@@ -2960,17 +3187,16 @@ mod tests {
         }
     }
 
-    /// The entry prefers the other placement and serial beats the caller's placement, but serial
-    /// projected from that placement's estimate at its parallelism exceeds the budget the policy
-    /// arbitrates within. A confined caller therefore stays on its placement, where the policy
-    /// leaves big work, and never samples serial.
+    /// A confined caller whose placement is busy past the budget stays parallel and never samples
+    /// serial, even when serial is faster and the preferred other placement fits the budget.
     #[test]
     fn confined_calls_keep_big_work_parallel() {
         for pool in [Placement::Wide, Placement::Local] {
             let policy = Policy::default();
             let location = Location::caller();
 
-            // Seed the ordering with the caller's placement projecting past the budget.
+            // Seed the ordering with the caller's placement busy past the budget and the other
+            // placement within it.
             record_samples(
                 &policy,
                 location,
@@ -3036,9 +3262,9 @@ mod tests {
         }
     }
 
-    /// A worker confined to a local group uses only Local for parallel runs and plans with the
-    /// group's width, although a caller with a choice would seed Wide first. Its parallel samples
-    /// train only the Local estimate, so the first caller with a choice still seeds Wide.
+    /// A worker confined to a local group uses only Local for parallel runs, although a caller with
+    /// a choice would seed Wide first. Its parallel samples train only the Local estimate, so the
+    /// first caller with a choice still seeds Wide.
     #[test]
     fn confined_calls_leave_choice_untouched() {
         let policy = Policy::default();
@@ -3055,7 +3281,7 @@ mod tests {
                 measure: true,
             }
         );
-        policy.record_run(
+        policy.record_perfect_run(
             location,
             10,
             10,
@@ -3119,7 +3345,7 @@ mod tests {
             let plan = policy.choose_run(location, 10, 10, PARALLELISM, pools);
             if plan.measure {
                 let elapsed = wall(plan.execution, plan.placement);
-                policy.record_run(location, 10, 10, PARALLELISM, plan, elapsed);
+                policy.record_perfect_run(location, 10, 10, PARALLELISM, plan, elapsed);
             }
             plan
         };
@@ -3202,7 +3428,7 @@ mod tests {
                 placement,
                 measure: true,
             };
-            policy.record_run(
+            policy.record_perfect_run(
                 location,
                 10,
                 10,
@@ -3234,16 +3460,15 @@ mod tests {
         );
     }
 
-    /// Serial projects over the budget, so it never runs, and every call is parallel and advances a
-    /// cadence. Only timed Local runs refresh the Local estimate. Whatever rhythm the confined
-    /// callers keep with the caller that has a choice, Local's run cadence must keep timing that
-    /// caller's Local runs, so the estimate follows Local when it slows down.
+    /// The busy time exceeds the budget, so every call is parallel and advances a cadence. Whatever
+    /// rhythm confined callers keep with the caller that has a choice, Local's cadence must keep
+    /// timing that caller's Local runs, so the Local estimate follows Local when it slows down.
     #[test]
     fn interleaved_callers_refresh_local_estimate() {
         let wall = |slow: bool| {
             move |execution, placement| match (execution, placement) {
                 (RunExecution::Serial, _) => {
-                    panic!("the projected serial cost must fit the budget before serial runs")
+                    panic!("the parallel busy time must fit the budget before serial runs")
                 }
                 (RunExecution::Parallel, Placement::Local) => {
                     Duration::from_micros(if slow { 8_000 } else { 6_000 })
@@ -3267,7 +3492,7 @@ mod tests {
                     placement,
                     measure: true,
                 };
-                policy.record_run(
+                policy.record_perfect_run(
                     location,
                     10,
                     10,

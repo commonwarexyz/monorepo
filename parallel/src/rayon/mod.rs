@@ -77,6 +77,9 @@
 //!   available.
 //! - Added group eligibility, wake propagation, and placement-restoration tests, plus Loom
 //!   models of the wake protocol.
+//! - Added a busy-time meter for measured runs. Stack jobs run in their creator's context, and
+//!   hand-offs, scheduler waits, yields, and detached jobs run in none. Busy-time tests read a
+//!   virtual clock.
 //!
 //! [rayon-core]: https://crates.io/crates/rayon-core/1.13.0
 //! [rayon]: https://crates.io/crates/rayon/1.12.0
@@ -88,6 +91,7 @@ mod broadcast;
 mod job;
 mod join;
 mod latch;
+mod meter;
 mod registry;
 mod sleep;
 mod sort;
@@ -99,6 +103,8 @@ mod unwind;
 #[cfg(all(test, feature = "loom"))]
 mod wake_loom_tests;
 
+#[cfg(test)]
+pub(crate) use self::meter::TestClock;
 #[cfg(any(test, all(target_os = "linux", not(miri))))]
 pub(crate) use self::thread_pool::current_thread_index;
 #[cfg(test)]
@@ -107,10 +113,20 @@ pub use self::thread_pool::{ThreadPool, Yield};
 pub(crate) use self::{
     bridge::{fold_init, map_collect_vec, map_init_collect_vec, try_fold, try_map_collect_vec},
     join::join,
+    meter::{Clock, Parked, Waiting, charge, is_waiting, measure_with, unparked},
     registry::Placement,
     sort::{par_mergesort, par_quicksort},
 };
 pub(crate) use sleep::THREADS_MAX;
+
+/// Busy-waits for `duration`, so a job holds its thread without sleeping.
+#[cfg(test)]
+pub(crate) fn spin(duration: std::time::Duration) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < duration {
+        std::hint::spin_loop();
+    }
+}
 
 /// Returns the number of workers eligible to run the calling worker's current job.
 ///

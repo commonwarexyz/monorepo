@@ -17,15 +17,13 @@ use commonware_storage::{
     merkle::{Location, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof, mmb, mmr},
     qmdb::{
         ProofExt as _,
-        any::{
-            unordered::{Update, fixed::Operation},
-            value::FixedEncoding,
-        },
+        any::unordered::{Update, fixed::Operation},
         current::{
             batch::MerkleizedBatch,
             unordered::{db::Db, proof::constant::KeyValueProof},
         },
         keyless,
+        value::FixedEncoding,
     },
 };
 use commonware_utils::iter::zip_eq;
@@ -454,7 +452,7 @@ impl<P: PublicKey, D: Digest, A: Amount> Checked<P, D, A> {
             matrix: self.matrix.root(),
             balances: batch.root(),
             payouts: Payouts {
-                size: *appends.size(),
+                size: *appends.bounds().tip.size,
                 root: appends.root(),
             },
             deposits: self.deposits,

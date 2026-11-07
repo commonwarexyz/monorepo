@@ -3,7 +3,7 @@
 use super::Placement;
 use crate::rayon::{
     ThreadPool, ThreadPoolBuilder, WorkerPosition, Yield, join, placement_width,
-    sleep::with_sleep_notification, thread_pool::Worker, yield_now,
+    sleep::with_sleep_notification, spin, thread_pool::Worker, yield_now,
 };
 use commonware_utils::{NZUsize, TestRng, Widen, sync::Mutex};
 use rand::RngExt as _;
@@ -65,14 +65,6 @@ fn wait_until_asleep(pool: &ThreadPool) {
     wait_until("every worker sleeps", || {
         pool.sleeping_workers() == pool.current_num_threads()
     });
-}
-
-/// Busy-waits for `duration`, so a job holds its worker without sleeping.
-fn spin(duration: Duration) {
-    let start = Instant::now();
-    while start.elapsed() < duration {
-        std::hint::spin_loop();
-    }
 }
 
 /// Runs `leaf` on every index of `range` through a tree of joins.

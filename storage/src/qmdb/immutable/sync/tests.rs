@@ -79,12 +79,12 @@ where
         .await;
         let target_db = H::commit(target_db).await;
 
-        assert_eq!(H::inactivity_floor_loc(&target_db), first_commit_end);
+        assert_eq!(H::inactivity_floor(&target_db), first_commit_end);
 
         // Sync from the oldest retained operation, below the floor, so the client also receives
         // the inactive first batch.
         let bounds = H::bounds(&target_db);
-        let target_root = H::db_root(&target_db);
+        let target_root = H::ops_root(&target_db);
 
         let target_db = Arc::new(target_db);
         let db_config = H::config(&format!("floor_sync_{}", context.next_u64()));
@@ -105,8 +105,8 @@ where
         };
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
-        assert_eq!(H::db_root(&synced_db), target_root);
-        assert_eq!(H::inactivity_floor_loc(&synced_db), first_commit_end);
+        assert_eq!(H::ops_root(&synced_db), target_root);
+        assert_eq!(H::inactivity_floor(&synced_db), first_commit_end);
 
         // Keys from the second batch (after the floor) should be findable.
         for op in &late_ops {
@@ -137,7 +137,7 @@ pub(crate) mod harnesses {
     use crate::{
         journal::contiguous::Mutable,
         merkle::{Family, mmb, mmr},
-        qmdb::any::value::ValueEncoding,
+        qmdb::value::ValueEncoding,
     };
     use commonware_codec::{EncodeShared, Read};
     use commonware_cryptography::Hasher as _;
@@ -204,7 +204,7 @@ pub(crate) mod harnesses {
     where
         VariableDb<F>: qmdb::sync::Database,
     {
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         variable_apply_ops_with_floor::<F>(db, ops, metadata, floor).await
     }
 
@@ -304,11 +304,11 @@ pub(crate) mod harnesses {
             db.sync_boundary()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> Location<Self::Family> {
+            db.inactivity_floor()
         }
 
-        fn db_root(db: &Self::Db) -> sha256::Digest {
+        fn ops_root(db: &Self::Db) -> sha256::Digest {
             db.root()
         }
 
@@ -406,16 +406,8 @@ pub(crate) mod harnesses {
         Sha256,
         Sequential,
     >;
-    type FullDb<F, V, C> = immutable::Immutable<
-        F,
-        deterministic::Context,
-        sha256::Digest,
-        V,
-        C,
-        Sha256,
-        TwoCap,
-        Sequential,
-    >;
+    type FullDb<F, V, C> =
+        immutable::Db<F, deterministic::Context, sha256::Digest, V, C, Sha256, TwoCap, Sequential>;
     type CompactDb<F, V> =
         immutable::CompactDb<F, deterministic::Context, sha256::Digest, V, Sha256, Sequential>;
     type BaseOperation<F, V> = immutable::Operation<F, sha256::Digest, V>;
@@ -669,8 +661,8 @@ pub(crate) mod harnesses {
             db.size()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<F> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> Location<F> {
+            db.inactivity_floor()
         }
 
         fn metadata(db: &Self::Db) -> Option<Self::Value> {
@@ -787,8 +779,8 @@ pub(crate) mod harnesses {
             db.size()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<F> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> Location<F> {
+            db.inactivity_floor()
         }
 
         fn metadata(db: &Self::Db) -> Option<Self::Value> {
@@ -871,7 +863,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let local_start = bounds.start;
         let local_end = bounds.end;
         assert!(local_start > Location::new(0));
-        let sync_root = H::db_root(&db);
+        let sync_root = H::ops_root(&db);
 
         // Reopen the operation journal independently to probe the persisted Merkle boundary.
         drop(db);

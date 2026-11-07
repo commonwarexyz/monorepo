@@ -953,16 +953,11 @@ mod tests {
                     dummy_consumer(),
                     producer,
                 );
-                mailbox.fetch_all(
-                    [1, 2]
-                        .into_iter()
-                        .map(|subscriber| Fetch {
-                            key: key.clone(),
-                            subscriber: SubscriberTag(subscriber),
-                            span: tracing::Span::none(),
-                        })
-                        .collect(),
-                );
+                mailbox.fetch_all([1, 2].into_iter().map(|subscriber| Fetch {
+                    key: key.clone(),
+                    subscriber: SubscriberTag(subscriber),
+                    span: tracing::Span::none(),
+                }));
                 let (delivered, _, mut verdict) = deliveries.recv().await.unwrap();
                 assert_eq!(delivered.key, key);
                 assert_eq!(delivered.subscribers.len().get(), 2);
@@ -971,16 +966,11 @@ mod tests {
                 // An accepted response can be judged again by a late subscriber,
                 // but that local verdict must never earn another source observation.
                 if previously_accepted {
-                    mailbox.fetch_all(
-                        [3, 4]
-                            .into_iter()
-                            .map(|subscriber| Fetch {
-                                key: key.clone(),
-                                subscriber: SubscriberTag(subscriber),
-                                span: tracing::Span::none(),
-                            })
-                            .collect(),
-                    );
+                    mailbox.fetch_all([3, 4].into_iter().map(|subscriber| Fetch {
+                        key: key.clone(),
+                        subscriber: SubscriberTag(subscriber),
+                        span: tracing::Span::none(),
+                    }));
                     context.sleep(Duration::from_millis(10)).await;
                     verdict
                         .send(Outcome::Resolved(Resolution::Complete))
@@ -1439,8 +1429,7 @@ mod tests {
                         key: key.clone(),
                         subscriber,
                         span: tracing::Span::none(),
-                    })
-                    .collect(),
+                    }),
             );
             let expected = Delivery {
                 key: key.clone(),
@@ -2892,7 +2881,7 @@ mod tests {
             // - key1 targeted to peer 2 (has data) -> should succeed from target
             // - key2 targeted to peer 4 (has data) -> should succeed from target
             // - key3 no targeting -> fetched from any peer (peer 3 has it)
-            mailbox1.fetch_all_targeted(vec![
+            mailbox1.fetch_all_targeted([
                 (key1.clone(), non_empty_vec![peers[1].clone()]), // peer 2 has key1
                 (key2.clone(), non_empty_vec![peers[3].clone()]), // peer 4 has key2
             ]);
@@ -3382,16 +3371,13 @@ mod tests {
                     }
                 );
                 assert_eq!(value, first_response);
-                mailbox.fetch_all(
-                    [SubscriberTag(50), SubscriberTag(51)]
-                        .into_iter()
-                        .map(|subscriber| Fetch {
-                            key: key.clone(),
-                            subscriber,
-                            span: tracing::Span::none(),
-                        })
-                        .collect(),
-                );
+                mailbox.fetch_all([SubscriberTag(50), SubscriberTag(51)].into_iter().map(
+                    |subscriber| Fetch {
+                        key: key.clone(),
+                        subscriber,
+                        span: tracing::Span::none(),
+                    },
+                ));
                 context.sleep(Duration::from_millis(100)).await;
                 assert_eq!(observer.remaining(&key), vec![second_response.clone()]);
                 verdict

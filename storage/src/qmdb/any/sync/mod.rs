@@ -171,7 +171,7 @@ where
         .await
     }
 
-    fn root(&self) -> Self::Digest {
+    fn ops_root(&self) -> Self::Digest {
         Self::root(self)
     }
 }

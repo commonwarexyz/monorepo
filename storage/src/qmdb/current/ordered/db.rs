@@ -11,11 +11,9 @@ use crate::{
     merkle::{self, Location},
     qmdb::{
         Error,
-        any::{
-            ValueEncoding,
-            ordered::{Operation, Update},
-        },
+        any::ordered::{Operation, Update},
         operation::Key,
+        value::ValueEncoding,
     },
 };
 use commonware_codec::Codec;
@@ -64,6 +62,12 @@ where
     /// The query key need not be active. This lookup does not wrap around to the last key.
     pub async fn get_prev_key(&self, key: &K) -> Result<Option<K>, Error<F>> {
         self.any.get_prev_key(key).await
+    }
+
+    /// Returns the value of `key` and the next active key, wrapping from the last key to the first,
+    /// or `None` if `key` is not active.
+    pub async fn get_with_next_key(&self, key: &K) -> Result<Option<(V::Value, K)>, Error<F>> {
+        self.any.get_with_next_key(key).await
     }
 
     /// Streams active (key, value) pairs in ascending key order within `range`.

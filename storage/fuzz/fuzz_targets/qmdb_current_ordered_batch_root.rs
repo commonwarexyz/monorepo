@@ -8,11 +8,12 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::{ordered::Update, traits::DbAny as _, value::FixedEncoding as FixedEncodingGeneric},
+        any::ordered::Update,
         current::{
             batch::{MerkleizedBatch, UnmerkleizedBatch},
             ordered::fixed::{Config, Db as CurrentDb},
         },
+        value::FixedEncoding as FixedEncodingGeneric,
     },
     translator::OneCap,
 };
@@ -271,7 +272,7 @@ async fn assert_recovers<F: Graftable>(
     let db = db.commit().await.unwrap();
     assert_matches_model(&db, model).await;
     let roots = (db.root(), db.ops_root());
-    let floor = db.inactivity_floor_loc();
+    let floor = db.inactivity_floor();
     drop(db);
 
     let db: Db<F> = Db::init(context.child("reopened"), test_config(name), None)
@@ -282,11 +283,7 @@ async fn assert_recovers<F: Graftable>(
         roots,
         "roots changed across reopen"
     );
-    assert_eq!(
-        db.inactivity_floor_loc(),
-        floor,
-        "floor changed across reopen"
-    );
+    assert_eq!(db.inactivity_floor(), floor, "floor changed across reopen");
     assert_matches_model(&db, model).await;
     db.destroy().await.unwrap();
 }
@@ -312,7 +309,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
             );
             model.insert(key_from_seed(write.key), value_from_bytes(write.value));
         }
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         let (initial, _) = merkleize(&db, batch, floor, &input.initial_plan, &mut model).await;
         assert_batch_neighbors(&db, &initial, &model).await;
         let db = db.apply_batch(initial).await.unwrap();
@@ -325,7 +322,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 // with a colliding committed sibling is the advisory's trigger.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
-                let floor = db.inactivity_floor_loc();
+                let floor = db.inactivity_floor();
                 let (parent, _) =
                     merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 assert_batch_neighbors(&db, &parent, &model).await;
@@ -380,7 +377,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 // ancestor walk against a committed-only reference.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
-                let floor = db.inactivity_floor_loc();
+                let floor = db.inactivity_floor();
                 let (parent, _) =
                     merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 assert_batch_neighbors(&db, &parent, &model).await;
@@ -438,7 +435,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 // re-deletes and re-creates the same colliding keys.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
-                let floor = db.inactivity_floor_loc();
+                let floor = db.inactivity_floor();
                 let (a, _) = merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 assert_batch_neighbors(&db, &a, &model).await;
                 let batch = apply_mutations(a.new_batch::<Sha256>(), &input.child);

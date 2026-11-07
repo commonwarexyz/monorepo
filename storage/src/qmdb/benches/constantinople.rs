@@ -335,9 +335,9 @@ macro_rules! run_pipeline {
             let chunk_len = keys.len().div_ceil(read_chunks);
             let mut chunks = keys.chunks(chunk_len);
             let first = chunks.next().expect("reads must be non-empty");
-            let (mut values, mut staged) = b.stage(first, &db).await.unwrap();
+            let (mut staged, mut values) = b.stage(first, &db).await.unwrap();
             for chunk in chunks {
-                let (_, more, next) = staged.expand(chunk, &db).await.unwrap();
+                let (next, _, more) = staged.expand(chunk, &db).await.unwrap();
                 values.extend(more);
                 staged = next;
             }

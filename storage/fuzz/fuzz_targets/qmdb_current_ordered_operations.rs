@@ -8,8 +8,8 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::{traits::DbAny as _, value::FixedEncoding},
         current::ordered::fixed::{Config, Db as CurrentDb},
+        value::FixedEncoding,
     },
     translator::TwoCap,
 };
@@ -121,7 +121,7 @@ async fn commit_pending<F: Graftable>(
     pending_inserts: &mut HashMap<RawKey, RawValue>,
     pending_deletes: &mut HashSet<RawKey>,
 ) -> Db<F> {
-    let inherited = db.inactivity_floor_loc();
+    let inherited = db.inactivity_floor();
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
@@ -142,7 +142,7 @@ async fn commit_pending<F: Graftable>(
     *committed_state = policy.check_raw(
         committed_state.drain(),
         inherited,
-        db.inactivity_floor_loc(),
+        db.inactivity_floor(),
         db.bounds().end - 1,
     );
     db
