@@ -1590,6 +1590,18 @@ where
     Ok(Some(tree.pinned_nodes_at(journal, hasher, location).await?))
 }
 
+/// Durably drop every anchor of the authenticated journal whose frontier `config` names. A state
+/// sync does this before it opens the journal, since it may then truncate the local operations and
+/// append others, which anchors recorded over the local operations would no longer describe.
+pub(crate) async fn drop_anchors<F: Family, E: Context, D: Digest, S: Strategy>(
+    context: E,
+    config: &Config<S>,
+) -> Result<(), Error<F>> {
+    let frontier = Frontier::<F, E, D>::open(context, config.metadata_partition.clone()).await?;
+    frontier.drop_anchors().await?;
+    Ok(())
+}
+
 /// Recover the portion useful for state sync, or reset an unusable local range.
 pub(crate) async fn init_sync<E: Context, J: Backing<E>>(
     context: E,

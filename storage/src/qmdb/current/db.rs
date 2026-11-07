@@ -154,7 +154,7 @@ const PRUNED_CHUNKS_PREFIX: u8 = 1;
 /// Prefix used for the metadata keys of anchors: chunk counts the bitmap and grafted tree can be
 /// rebuilt from instead of the pruning base, each keyed by its count, holding the grafted tree's
 /// pinned digests there.
-const ANCHOR_PREFIX: u8 = 2;
+pub(super) const ANCHOR_PREFIX: u8 = 2;
 
 /// `(position, digest)` pairs for a grafted tree's pinned nodes, in `Family::nodes_to_pin` order.
 type GraftedPinnedNodes<F, D> = Vec<(Position<F>, D)>;
@@ -1364,6 +1364,27 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
     anchors.sort_by_key(|(chunks, _)| *chunks);
 
     Ok((metadata, (pruned_chunks, pinned_nodes), anchors))
+}
+
+/// Durably drop every anchor in the grafted metadata in `partition`.
+pub(super) async fn drop_grafted_anchors<F: merkle::Graftable, E: Context>(
+    context: E,
+    partition: &str,
+) -> Result<(), Error<F>> {
+    let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+        context,
+        MConfig {
+            partition: partition.into(),
+            codec_config: ((0..).into(), ()),
+        },
+    )
+    .await?;
+    let before = metadata.keys().count();
+    metadata.retain(|key, _| key.prefix() != ANCHOR_PREFIX);
+    if metadata.keys().count() != before {
+        metadata.sync().await?;
+    }
+    Ok(())
 }
 
 /// Durably drop the anchors in the grafted metadata past `floor`, whose bitmaps the operations

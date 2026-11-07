@@ -268,7 +268,9 @@ where
             }));
         }
 
-        // Recover the operation prefix that can resume this target.
+        // Recover the operation prefix that can resume this target, after dropping the anchors
+        // recorded over local operations the sync journal may replace.
+        DB::drop_anchors(config.context.child("drop_anchors"), &config.db_config).await?;
         let journal = <DB::Journal as Journal<DB::Family>>::new(
             config.context.child("journal"),
             config.db_config.journal_config(),
@@ -788,6 +790,7 @@ pub(crate) mod tests {
     struct TestConfig {
         journal_size: u64,
         pinned_node_probes: Arc<AtomicUsize>,
+        anchor_drops: Arc<AtomicUsize>,
     }
 
     impl crate::qmdb::sync::DatabaseConfig for TestConfig {
@@ -861,6 +864,14 @@ pub(crate) mod tests {
             Ok(self)
         }
 
+        async fn drop_anchors(
+            _context: Self::Context,
+            config: &Self::Config,
+        ) -> Result<(), qmdb::Error<Self::Family>> {
+            config.anchor_drops.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
         async fn local_pinned_nodes(
             _context: Self::Context,
             config: &Self::Config,
@@ -918,6 +929,7 @@ pub(crate) mod tests {
             db_config: TestConfig {
                 journal_size,
                 pinned_node_probes,
+                anchor_drops: Arc::new(AtomicUsize::new(0)),
             },
             update_rx: None,
             finish_rx: None,
@@ -1272,6 +1284,18 @@ pub(crate) mod tests {
             let engine = engine.apply_operations().await.unwrap();
             assert_eq!(engine.journal.size(), Location::new(10));
             assert!(engine.fetched_operations.is_empty());
+        });
+    }
+
+    /// Opening a sync drops the database's anchors, which the sync journal may invalidate.
+    #[test]
+    fn new_drops_anchors() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = test_engine_config(context, 7, Arc::new(AtomicUsize::new(0)));
+            let anchor_drops = config.db_config.anchor_drops.clone();
+            Engine::new(config).await.unwrap();
+
+            assert_eq!(anchor_drops.load(Ordering::SeqCst), 1);
         });
     }
 

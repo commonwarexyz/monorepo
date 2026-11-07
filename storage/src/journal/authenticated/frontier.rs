@@ -103,6 +103,16 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
         Ok((self, handle))
     }
 
+    /// Durably drop every anchor.
+    pub(crate) async fn drop_anchors(mut self) -> Result<Self, Error> {
+        let before = self.metadata.keys().count();
+        self.metadata.retain(|key, _| key.prefix() != ANCHOR_PREFIX);
+        if self.metadata.keys().count() != before {
+            self.metadata = self.metadata.sync().await?;
+        }
+        Ok(self)
+    }
+
     /// Durably drop the anchors after `location`.
     pub(crate) async fn drop_anchors_after(mut self, location: Location<F>) -> Result<Self, Error> {
         let before = self.metadata.keys().count();

@@ -252,6 +252,19 @@ where
         Ok(self)
     }
 
+    async fn drop_anchors(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> Result<(), qmdb::Error<F>> {
+        authenticated::drop_anchors::<F, _, H::Digest, S>(context.child("log"), &config.merkle)
+            .await?;
+        db::drop_grafted_anchors::<F, _>(
+            context.child("grafted"),
+            &config.grafted_metadata_partition,
+        )
+        .await
+    }
+
     async fn local_pinned_nodes(
         context: Self::Context,
         config: &Self::Config,
