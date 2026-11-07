@@ -80,56 +80,50 @@ where
     }
 }
 
-/// The payout log's root and size after one close, with the sum of that close's payouts.
+/// The payout log's root and size after one close.
 ///
 /// Each posted close appends its payouts to the [PayoutLog](super::PayoutLog) in account order,
 /// then a commit. `size` counts every operation in the log, its initial commit included, so the
 /// close's commit sits at `size - 1`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Payouts<D: Digest, A: Amount> {
+pub struct Payouts<D: Digest> {
     /// Root of the payout log after the close's payouts and commit.
     pub root: D,
     /// Number of operations in the payout log after the close's payouts and commit.
     pub size: u64,
-    /// Sum of the close's payouts.
-    pub total: A,
 }
 
-impl<D: Digest, A: Amount> Write for Payouts<D, A> {
+impl<D: Digest> Write for Payouts<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.root.write(buf);
         self.size.write(buf);
-        self.total.write(buf);
     }
 }
 
-impl<D: Digest, A: Amount> FixedSize for Payouts<D, A> {
-    const SIZE: usize = D::SIZE + u64::SIZE + A::SIZE;
+impl<D: Digest> FixedSize for Payouts<D> {
+    const SIZE: usize = D::SIZE + u64::SIZE;
 }
 
-impl<D: Digest, A: Amount> Read for Payouts<D, A> {
+impl<D: Digest> Read for Payouts<D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self {
             root: D::read(buf)?,
             size: u64::read(buf)?,
-            total: A::read(buf)?,
         })
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D: Digest, A: Amount> arbitrary::Arbitrary<'_> for Payouts<D, A>
+impl<D: Digest> arbitrary::Arbitrary<'_> for Payouts<D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
-    A: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             root: u.arbitrary()?,
             size: u.arbitrary()?,
-            total: u.arbitrary()?,
         })
     }
 }
@@ -146,11 +140,11 @@ where
 ///     use commonware_cryptography::impl_certificate_ed25519;
 ///     use commonware_utils::N3f1;
 ///
-///     impl_certificate_ed25519!(&'a Summary<D, u64>, Namespace, N3f1);
+///     impl_certificate_ed25519!(&'a Summary<D>, Namespace, N3f1);
 /// }
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Summary<D: Digest, A: Amount> {
+pub struct Summary<D: Digest> {
     /// Epoch the close finalizes.
     pub epoch: Epoch,
     /// Digest of the summary of the previous close.
@@ -159,19 +153,19 @@ pub struct Summary<D: Digest, A: Amount> {
     pub matrix: D,
     /// Root of the balances after the close.
     pub balances: D,
-    /// Payout log root and size after the close, and the sum of its payouts.
-    pub payouts: Payouts<D, A>,
+    /// Payout log root and size after the close.
+    pub payouts: Payouts<D>,
     /// The queued deposits the close processes.
     pub deposits: Processed<D>,
     /// The queued forced withdrawals the close processes.
     pub forced_withdrawals: Processed<D>,
 }
 
-impl<D: Digest, A: Amount> Summary<D, A> {
+impl<D: Digest> Summary<D> {
     /// Returns the summary of the state before the first close, with balances committed by
-    /// `balances` and accounts of type `P`. Both running hashes start at all zeros, and the payout
-    /// log holds only its initial commit.
-    pub fn genesis<H: Hasher<Digest = D>, P: PublicKey>(balances: D) -> Self {
+    /// `balances`, accounts of type `P`, and amounts of type `A`. Both running hashes start at all
+    /// zeros, and the payout log holds only its initial commit.
+    pub fn genesis<H: Hasher<Digest = D>, P: PublicKey, A: Amount>(balances: D) -> Self {
         // An empty payment matrix commits to a tree without leaves.
         let empty = Builder::<H>::new(0).build().root();
         let start = Processed {
@@ -186,7 +180,6 @@ impl<D: Digest, A: Amount> Summary<D, A> {
             payouts: Payouts {
                 root: keyless::initial_root::<mmr::Family, FixedEncoding<Payout<P, A>>, H>(),
                 size: 1,
-                total: A::ZERO,
             },
             deposits: start,
             forced_withdrawals: start,
@@ -205,7 +198,7 @@ impl<D: Digest, A: Amount> Summary<D, A> {
     /// Returns WrongEpoch unless the summary is for `epoch`, WrongParent unless it names `parent`,
     /// InvalidCount unless each count is in its range, and InvalidCertificate unless `certificate`
     /// verifies. The certificate is checked last, and it alone vouches for the roots, the payouts
-    /// size and total, and the running hashes.
+    /// size, and the running hashes.
     #[allow(clippy::too_many_arguments)]
     pub fn verify<V, R>(
         &self,
@@ -242,7 +235,7 @@ impl<D: Digest, A: Amount> Summary<D, A> {
     }
 }
 
-impl<D: Digest, A: Amount> Write for Summary<D, A> {
+impl<D: Digest> Write for Summary<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.epoch.write(buf);
         self.parent.write(buf);
@@ -254,12 +247,11 @@ impl<D: Digest, A: Amount> Write for Summary<D, A> {
     }
 }
 
-impl<D: Digest, A: Amount> FixedSize for Summary<D, A> {
-    const SIZE: usize =
-        Epoch::SIZE + 3 * D::SIZE + Payouts::<D, A>::SIZE + 2 * Processed::<D>::SIZE;
+impl<D: Digest> FixedSize for Summary<D> {
+    const SIZE: usize = Epoch::SIZE + 3 * D::SIZE + Payouts::<D>::SIZE + 2 * Processed::<D>::SIZE;
 }
 
-impl<D: Digest, A: Amount> Read for Summary<D, A> {
+impl<D: Digest> Read for Summary<D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -276,10 +268,9 @@ impl<D: Digest, A: Amount> Read for Summary<D, A> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D: Digest, A: Amount> arbitrary::Arbitrary<'_> for Summary<D, A>
+impl<D: Digest> arbitrary::Arbitrary<'_> for Summary<D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
-    A: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -294,7 +285,7 @@ where
     }
 }
 
-impl<D: Digest, A: Amount> certificate::Subject for &Summary<D, A> {
+impl<D: Digest> certificate::Subject for &Summary<D> {
     type Namespace = Namespace;
 
     fn namespace<'a>(&self, derived: &'a Self::Namespace) -> &'a [u8] {
@@ -321,11 +312,9 @@ mod tests {
     };
     use commonware_utils::test_rng;
 
-    type TestSummary = Summary<Digest, u64>;
-
     /// Returns the summary before the first close, on top of balances with a fixed root.
-    fn genesis() -> TestSummary {
-        Summary::genesis::<Sha256, PublicKey>(Sha256::hash(&[b"balances"]))
+    fn genesis() -> Summary<Digest> {
+        Summary::genesis::<Sha256, PublicKey, u64>(Sha256::hash(&[b"balances"]))
     }
 
     /// The genesis summary records the empty matrix and a payout log holding only its initial
@@ -342,11 +331,7 @@ mod tests {
         );
         let log =
             keyless::initial_root::<mmr::Family, FixedEncoding<Payout<PublicKey, u64>>, Sha256>();
-        let expected = Payouts {
-            root: log,
-            size: 1,
-            total: 0,
-        };
+        let expected = Payouts { root: log, size: 1 };
         assert_eq!(genesis.payouts, expected);
         assert_eq!(Summary::decode(genesis.encode()).unwrap(), genesis);
 
@@ -380,13 +365,6 @@ mod tests {
             Summary {
                 payouts: Payouts {
                     size: 2,
-                    ..genesis.payouts
-                },
-                ..genesis
-            },
-            Summary {
-                payouts: Payouts {
-                    total: 1,
                     ..genesis.payouts
                 },
                 ..genesis
@@ -481,7 +459,7 @@ mod tests {
 
     /// The posted summary must follow the ledger's last post and process its queues within their
     /// bounds, with a certificate over it. The certificate is checked only once everything else
-    /// holds, and it covers the payouts root, size, and total.
+    /// holds, and it covers the payouts root and size.
     #[test]
     fn test_verify_checks_every_field_before_the_certificate() {
         let fixture = ed25519::certificate::mocks::fixture(
@@ -501,7 +479,6 @@ mod tests {
             payouts: Payouts {
                 root: Sha256::hash(&[b"payouts"]),
                 size: 3,
-                total: 3,
             },
             deposits: Processed {
                 count: 2,
@@ -515,18 +492,21 @@ mod tests {
         let certificate = certify(&fixture.schemes, &summary);
         let other = certify(&fixture.schemes, &genesis);
         let mut rng = test_rng();
-        let mut verify =
-            |summary: &TestSummary, certificate, parent: &Digest, deposits, forced_withdrawals| {
-                summary.verify(
-                    &mut rng,
-                    &fixture.verifier,
-                    certificate,
-                    1,
-                    parent,
-                    deposits,
-                    forced_withdrawals,
-                )
-            };
+        let mut verify = |summary: &Summary<Digest>,
+                          certificate,
+                          parent: &Digest,
+                          deposits,
+                          forced_withdrawals| {
+            summary.verify(
+                &mut rng,
+                &fixture.verifier,
+                certificate,
+                1,
+                parent,
+                deposits,
+                forced_withdrawals,
+            )
+        };
 
         // Each count may lie anywhere from the queue's required count to its length.
         for (deposits, forced_withdrawals) in [(0..=2, 1..=1), (2..=5, 0..=3)] {
@@ -565,7 +545,7 @@ mod tests {
             }
         }
 
-        // A summary that differs in its payouts root, size, or total is not certified.
+        // A summary that differs in its payouts root or size is not certified.
         let changed = [
             Payouts {
                 root: Sha256::hash(&[b"other"]),
@@ -573,10 +553,6 @@ mod tests {
             },
             Payouts {
                 size: 4,
-                ..summary.payouts
-            },
-            Payouts {
-                total: 4,
                 ..summary.payouts
             },
         ];
@@ -600,8 +576,8 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Processed<Digest>>,
-            CodecConformance<Payouts<Digest, u64>>,
-            CodecConformance<Summary<Digest, u64>>,
+            CodecConformance<Payouts<Digest>>,
+            CodecConformance<Summary<Digest>>,
         }
     }
 }

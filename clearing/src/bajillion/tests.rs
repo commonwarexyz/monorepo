@@ -34,7 +34,7 @@ pub(crate) mod scheme {
     use commonware_cryptography::impl_certificate_ed25519;
     use commonware_utils::N3f1;
 
-    impl_certificate_ed25519!(&'a Summary<D, u64>, Namespace, N3f1);
+    impl_certificate_ed25519!(&'a Summary<D>, Namespace, N3f1);
 }
 
 pub(crate) type TestClose = Close<PublicKey, PublicKey, u64>;
@@ -283,7 +283,7 @@ pub(crate) async fn open(context: deterministic::Context, name: &str) -> Store {
 /// `balances`.
 pub(crate) fn genesis(balances: Digest) -> TestCheckpoint {
     Checkpoint {
-        summary: Summary::genesis::<Sha256, PublicKey>(balances),
+        summary: Summary::genesis::<Sha256, PublicKey, u64>(balances),
         matrix: Matrix::empty::<Sha256>(),
     }
 }
@@ -318,10 +318,7 @@ pub(crate) async fn post<I: Unordered<Value = Location<mmb::Family>> + 'static>(
 }
 
 /// Certifies `summary` with every scheme's signature.
-pub(crate) fn certify(
-    schemes: &[scheme::Scheme],
-    summary: &Summary<Digest, u64>,
-) -> TestCertificate {
+pub(crate) fn certify(schemes: &[scheme::Scheme], summary: &Summary<Digest>) -> TestCertificate {
     let attestations: Vec<_> = schemes
         .iter()
         .map(|scheme| scheme.sign::<Digest>(summary).unwrap())
@@ -357,7 +354,7 @@ fn test_port_vector() {
     deterministic::Runner::default().start(|context| async move {
         // The empty balances database and payout log, and the summary before the first close.
         let store = open(context, "vector").await;
-        let genesis = Summary::<_, u64>::genesis::<Sha256, PublicKey>(store.balances.root());
+        let genesis = Summary::genesis::<Sha256, PublicKey, u64>(store.balances.root());
         assert_eq!(
             hex(store.balances.root()),
             "4e051a8ba89ab421a291d4b906848b2e0f80402175824a056cc3cc00efc4cc65"
@@ -370,7 +367,7 @@ fn test_port_vector() {
         );
         assert_eq!(
             hex(genesis.digest::<Sha256>()),
-            "bfa350cab8bebecba9facf16a86cb3cbd6d462d1ad1cd873eac5d8aa823583bc"
+            "59346ef22d7fce9413f4e420f27e2f80a674e49694360a79995de4ab94785c87"
         );
 
         // The deposit queue's running hash after bob's deposit, chained from genesis.

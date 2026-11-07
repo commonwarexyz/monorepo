@@ -139,8 +139,8 @@ fn test_ledger_rejects_closes_deferring_required_requests() {
     });
 }
 
-/// The ledger posts only a certified summary of the close it expects, following the last post,
-/// within its queues and the funds it holds.
+/// The ledger posts only a certified summary of the close it expects, following the last post and
+/// within its queues.
 #[test]
 fn test_ledger_posts_only_certified_successors() {
     deterministic::Runner::default().start(|mut context| async move {
@@ -198,19 +198,7 @@ fn test_ledger_posts_only_certified_successors() {
             ));
         }
 
-        // The payouts total must stay within the funds held, and the payouts size must count the
-        // close's commit.
-        let wrong = Summary {
-            payouts: Payouts {
-                total: 11,
-                ..summary.payouts
-            },
-            ..summary
-        };
-        assert!(matches!(
-            ledger.post(&mut context, &wrong, &certify(schemes, &wrong)),
-            Err(Refusal::Custody)
-        ));
+        // The payouts size must count the close's commit.
         let wrong = Summary {
             payouts: Payouts {
                 size: 0,
@@ -323,7 +311,7 @@ fn test_challenges_need_a_contradicted_receipt() {
 }
 
 /// After a halt, each account claims its balance as of the last post once, proven against that
-/// post's balances root, and its unprocessed deposits once.
+/// post's balances root. The deposits no close processed are paid to it once.
 #[test]
 fn test_halted_ledger_pays_balance_and_deposit_claims() {
     deterministic::Runner::default().start(|mut context| async move {
@@ -365,7 +353,7 @@ fn test_halted_ledger_pays_balance_and_deposit_claims() {
         ));
 
         // Each account claims its balance at the last posted close once, proven against that
-        // close's balances root, and its unprocessed deposits once.
+        // close's balances root. The deposits no close processed are paid to it once.
         assert!(matches!(
             ledger.claim(&account(1), Some(&alice_proof)),
             Err(Refusal::InvalidProof)
@@ -419,7 +407,6 @@ fn test_payouts_are_withdrawn_once_before_or_after_a_halt() {
         let proposals = deployment.verify(&close).await;
         deployment.post(&mut context, proposals).await;
         assert_eq!(deployment.ledger.custody(), 20);
-        assert_eq!(deployment.ledger.payable(), 10);
 
         // The close owes nothing to an account it did not pay out.
         let validator = &deployment.validators[0];
@@ -450,6 +437,7 @@ fn test_payouts_are_withdrawn_once_before_or_after_a_halt() {
             Err(Refusal::InvalidProof)
         ));
         assert_eq!(ledger.withdraw_payout(&alice).unwrap(), (account(0), 4));
+        assert_eq!(ledger.custody(), 16);
         assert!(matches!(
             ledger.withdraw_payout(&alice),
             Err(Refusal::Withdrawn)
@@ -463,7 +451,6 @@ fn test_payouts_are_withdrawn_once_before_or_after_a_halt() {
             Err(Refusal::Withdrawn)
         ));
         assert_eq!(ledger.custody(), 10);
-        assert_eq!(ledger.payable(), 0);
     });
 }
 
@@ -561,7 +548,8 @@ fn test_withdrawn_ranges_stay_compact() {
             }
 
             // After each withdrawal the ranges stay apart and number at most one more than the
-            // payouts outstanding. The last leaves one range over the whole log.
+            // payouts outstanding. The last leaves one range over the whole log, and the funds held
+            // are then the deposits less every payout.
             let mut outstanding = proofs.len();
             let check = |ranges: Vec<(u64, u64)>, outstanding: usize| {
                 assert!(ranges.len() <= outstanding + 1, "{order}: {ranges:?}");
@@ -576,12 +564,16 @@ fn test_withdrawn_ranges_stay_compact() {
                 check(deployment.ledger.ranges(), outstanding);
             }
             assert_eq!(deployment.ledger.ranges(), vec![(0, size)], "{order}");
-            assert_eq!(deployment.ledger.payable(), 0);
+            let funded: u64 = funded.iter().map(|(_, amount)| amount).sum();
+            assert_eq!(
+                deployment.ledger.custody(),
+                funded - 3 * proofs.len() as u64
+            );
         });
     }
 }
 
-/// Owed payouts stay in custody, so they count toward the largest amount the ledger may hold. A
+/// Unpaid payouts stay in custody, so they count toward the largest amount the ledger may hold. A
 /// deposit that would take the funds held past it is refused until the payouts are withdrawn.
 #[test]
 fn test_owed_payouts_count_toward_the_custody_bound() {
@@ -594,7 +586,6 @@ fn test_owed_payouts_count_toward_the_custody_bound() {
         let close = close_epoch(&mut deployment.operator, &queue, 0, 1);
         let proposals = deployment.verify(&close).await;
         deployment.post(&mut context, proposals).await;
-        assert_eq!(deployment.ledger.payable(), 10);
         assert_eq!(deployment.ledger.custody(), u64::MAX - 1);
         let proof = deployment.validators[0]
             .prove_payout(2, &account(0))
@@ -602,8 +593,7 @@ fn test_owed_payouts_count_toward_the_custody_bound() {
             .unwrap()
             .unwrap();
 
-        // The liability and the unprocessed deposits leave room for 11 more, but the owed payout
-        // takes 10 of it.
+        // Alice's balance alone leaves room for 11 more, but her unpaid payout of 10 is still held.
         let ledger = &mut deployment.ledger;
         assert!(matches!(
             ledger.deposit(account(1), 2),

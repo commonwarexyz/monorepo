@@ -63,7 +63,7 @@ mod scheme {
     use commonware_cryptography::impl_certificate_ed25519;
     use commonware_utils::N3f1;
 
-    impl_certificate_ed25519!(&'a Summary<D, u64>, Namespace, N3f1);
+    impl_certificate_ed25519!(&'a Summary<D>, Namespace, N3f1);
 }
 
 type TestOperator = Operator<PublicKey, PrivateKey, Sha256, u64>;
@@ -224,8 +224,8 @@ fn chain<R: Encode>(hash: Digest, requests: &[R]) -> Digest {
 /// Checks that each running hash in `summary` extends the one in `parent` over the requests its
 /// close processed from `queue`.
 fn assert_chained(
-    parent: &Summary<Digest, u64>,
-    summary: &Summary<Digest, u64>,
+    parent: &Summary<Digest>,
+    summary: &Summary<Digest>,
     queue: &Queue<PublicKey, u64>,
 ) {
     let count = |count: u64| usize::try_from(count).expect("a count within the queue must fit");
@@ -288,11 +288,10 @@ fn config_for<O: commonware_cryptography::PublicKey>(
 }
 
 /// Certifies `summary` with every scheme's signature, as validators that did not check it would.
-fn certify<C, A>(schemes: &[C], summary: &Summary<Digest, A>) -> C::Certificate
+fn certify<C>(schemes: &[C], summary: &Summary<Digest>) -> C::Certificate
 where
     C: certificate::Scheme
-        + for<'a> certificate::Verifier<Subject<'a, Digest> = &'a Summary<Digest, A>>,
-    A: Amount,
+        + for<'a> certificate::Verifier<Subject<'a, Digest> = &'a Summary<Digest>>,
 {
     let attestations: Vec<_> = schemes
         .iter()
@@ -344,7 +343,7 @@ where
     P: commonware_cryptography::PublicKey,
     K: Signer,
     C: certificate::Scheme
-        + for<'a> certificate::Verifier<Subject<'a, Digest> = &'a Summary<Digest, A>>,
+        + for<'a> certificate::Verifier<Subject<'a, Digest> = &'a Summary<Digest>>,
     A: Amount,
 {
     /// Starts a deployment whose operator signs with `operator` and whose validators sign with
@@ -383,7 +382,8 @@ where
     }
 
     /// Checks that the operator and every validator hold each balance, and that the ledger holds
-    /// exactly those balances and the deposits no close processed.
+    /// exactly those balances and the deposits no close processed. Every posted payout must already
+    /// be withdrawn, as [close](Self::close) does.
     async fn check_balances(&self, balances: &[(P, A)]) {
         for (account, expected) in balances {
             assert_eq!(self.operator.balance(account), *expected);
@@ -437,7 +437,7 @@ where
         &mut self,
         context: &mut deterministic::Context,
         proposals: Vec<Proposal<P, Sha256, Sequential, A>>,
-    ) -> Summary<Digest, A> {
+    ) -> Summary<Digest> {
         let certificate = self.certify(&proposals);
         let summary = *proposals[0].summary();
         self.ledger.post(context, &summary, &certificate).unwrap();
@@ -453,7 +453,7 @@ where
     async fn close(
         &mut self,
         context: &mut deterministic::Context,
-    ) -> (Close<P, K::PublicKey, A>, Summary<Digest, A>) {
+    ) -> (Close<P, K::PublicKey, A>, Summary<Digest>) {
         let queue = self.ledger.queue();
         let (close, _) = self
             .operator

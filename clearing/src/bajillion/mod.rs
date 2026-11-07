@@ -361,27 +361,25 @@
 //! proposal's summary and its certificate.
 //!
 //! Every payout joins one [PayoutLog] and keeps its index there for good. [Checked::settle] stages
-//! the close's batch with [Payout::stage], and the summary records the payouts total and the log's
-//! root and size after the batch. With p the parent's payouts size and s the close's, the payouts
-//! take the indices [p, s - 1) in account order and the commit takes s - 1 ([Proposal::payouts]). A
+//! the close's batch with [Payout::stage], and the summary records the log's root and size after
+//! the batch. With p the parent's payouts size and s the close's, the close's payouts take the
+//! indices [p, s - 1) in account order and its commit takes s - 1 ([Proposal::payouts]). A
 //! validator can find an account's payout of a close by binary search over [p, s - 1) and prove it
 //! with the log's proof of that one operation ([PayoutProof]).
 //!
 //! ```text
 //!   Summary(e)
-//!   +-------+--------+--------+----------+---------------------+--------------+--------------+
-//!   | epoch | parent | matrix | balances |       payouts       |   deposits   |    forced    |
-//!   |       |        |        |          |                     |              | withdrawals  |
-//!   |       |        |        |          | root | size | total | count | hash | count | hash |
-//!   +-------+--------+--------+----------+------+------+-------+-------+------+-------+------+
-//!               |        |         |         |      |      |              |               |
-//!               v        |         |         |      |      |              '-------+-------'
-//!        H(Summary(e-1)) |         |         |      |      |                      v
-//!                        |         |         |      |      |   hash in Summary(e-1), extended by
-//!                        |         |         |      |      |   H(hash || request) for each request
-//!                        |         |         |      |      |   the close processes, in queue order
-//!                        |         |         |      |      '--> sum of the close's payouts
-//!                        |         |         '------+--> root and size of PayoutLog after the
+//!   +-------+--------+--------+----------+-------------+--------------+--------------------+
+//!   | epoch | parent | matrix | balances |   payouts   |   deposits   | forced withdrawals |
+//!   |       |        |        |          | root | size | count | hash |  count   |  hash   |
+//!   +-------+--------+--------+----------+------+------+-------+------+----------+---------+
+//!               |        |         |        |       |             |                   |
+//!               v        |         |        |       |             '---------+---------'
+//!        H(Summary(e-1)) |         |        |       |                       v
+//!                        |         |        |       |      hash in Summary(e-1), extended by
+//!                        |         |        |       |      H(hash || request) for each request
+//!                        |         |        |       |      the close processes, in queue order
+//!                        |         |        '-------+--> root and size of PayoutLog after the
 //!                        |         |                     close's payouts and commit
 //!                        |         '--> root of Balances, keyed by account
 //!                        v
@@ -491,31 +489,30 @@
 //!                           +------------------------------+
 //!                           +------------------------------+
 //!   Summary payouts ------->| payouts root and size        |
-//!   PayoutProof ----------->| owed payouts                 |-- withdraw --> account
-//!                           | claimed ranges [0,2) [3,5)   |
+//!   PayoutProof ----------->| claimed ranges [0,2) [3,5)   |-- withdraw --> account
 //!                           +------------------------------+
 //! ```
 //!
-//! The funds the ledger holds have three parts. The liability is the sum of balances as of the last
-//! post, the unprocessed deposits are the sum of those queued, and the owed payouts are the posted
-//! payouts not yet withdrawn.
+//! The funds the ledger holds back the balances as of the last post, the deposits still queued, and
+//! the posted payouts not yet paid. The ledger counts the funds held as one amount. The last posted
+//! roots, the queued deposits, and the claimed ranges determine how much backs each part.
 //!
 //! ```text
 //!                0                                                               largest amount
 //!   funds held   |================================|=================|=============|...........|
-//!                            liability                 unprocessed        owed         room
-//!                    balances at the last post          deposits         payouts
+//!                         balances at the               deposits        payouts        room
+//!                            last post                still queued    not yet paid
 //! ```
 //!
-//! A post only moves funds between the three parts. Funds enter only by deposit and leave only by
-//! withdrawal or claim, so bounding deposits bounds the funds held.
+//! A post moves no funds and changes only what they back. Funds enter only by deposit and leave
+//! only by withdrawal or claim, so bounding deposits bounds the funds held.
 //!
 //! ```text
-//!   deposit --> unprocessed -- post --> liability -- post --> owed -- withdraw --> account
-//!               deposits      processed              payouts  payouts
-//!                   |                       |
-//!                   |                       '-- claim with proof, after halt --> account
-//!                   '-- claim, after halt --> account
+//!   deposit --> queued   --- post --> balances --- post --> unpaid  -- withdraw --> account
+//!               deposits   processed               payouts  payouts
+//!                  |                      |
+//!                  |                      '-- claim with proof, after halt --> account
+//!                  '-- claim, after halt --> account
 //! ```
 //!
 //! - **L1.** Start with the digest of [Summary::genesis] over the root of an empty [Balances]
@@ -530,29 +527,26 @@
 //!
 //! - **L3.** Refuse a deposit that would take the funds held past the largest amount. Otherwise a
 //!   close can credit a balance past the largest amount, and validators reject it with
-//!   [Error::Overflow], or the ledger's sum of owed payouts overflows. When the excess comes from
-//!   its rows or a required deposit, no acceptable close exists, as in O3.
+//!   [Error::Overflow]. When the excess comes from its rows or a required deposit, no acceptable
+//!   close exists, as in O3.
 //!
 //! - **L4.** Queue a forced withdrawal only on a request its account authenticated. Otherwise
 //!   anyone can force an account's balance out and learn the amount.
 //!
 //! - **L5.** Post only before a halt, and only a summary [Summary::verify] accepts for the expected
 //!   epoch, the last post's digest, and each queue's range from its required count to its length.
-//!   The summary's payouts total must be at most the liability plus the deposits processed.
 //!   Otherwise a summary honest validators did not certify can post.
 //!
 //!   In one state change, a post drops the processed requests and sets each required count to what
-//!   remains queued. It moves the deposits processed from the unprocessed deposits into the
-//!   liability, and the payouts total from the liability into the owed payouts. It adds the commit
-//!   position, the payouts size less one, to the claimed ranges. It records the summary's matrix
-//!   root, balances root, payouts root and size, and digest, and transfers nothing. A lower
-//!   required count lets closes defer a forced withdrawal forever, and a transfer that can fail
-//!   inside a post blocks every later post.
+//!   remains queued. It adds the commit position (the payouts size less one) to the claimed ranges.
+//!   It records the summary's matrix root, balances root, payouts root and size, and digest. It
+//!   transfers nothing. A lower required count lets closes defer a forced withdrawal forever, and a
+//!   transfer that can fail inside a post blocks every later post.
 //!
 //! - **L6.** Pay a payout, before or after a halt, only if [PayoutProof::verify] accepts its proof
 //!   under the last posted payouts root and no claimed range covers its index. In one state change,
-//!   add the index to the claimed ranges, take its amount from the owed payouts, and pay it to its
-//!   account's destination (L10). Otherwise a payout is paid twice or never.
+//!   add the index to the claimed ranges and pay the payout to its account's destination (L10).
+//!   Otherwise a payout is paid twice or never.
 //!
 //! - **L7.** Before a halt, halt on a challenge that [Challenge::verify] accepts against a posted
 //!   epoch and its matrix root, and keep every posted matrix root. Otherwise receivers lose their
@@ -560,14 +554,14 @@
 //!
 //! - **L8.** Once halted, by a valid challenge or the deployment's own policy, post nothing and
 //!   take no deposit or forced withdrawal. Make each queued deposit claimable by its account, and
-//!   drop the queued forced withdrawals and the required counts. Owed payouts stay claimable under
-//!   the last posted payouts root. Otherwise a post after the halt changes the balances accounts
-//!   claim against.
+//!   drop the queued forced withdrawals and the required counts. Unpaid payouts stay claimable
+//!   under the last posted payouts root. Otherwise a post after the halt changes the balances
+//!   accounts claim against.
 //!
 //! - **L9.** After a halt, pay each account its balance at most once, only if
-//!   [BalanceProof::verify] accepts its proof under the last posted balances root and the balance
-//!   is at most the remaining liability. Pay its claimable deposits at most once. Otherwise an
-//!   account claims twice or claims a balance it does not have.
+//!   [BalanceProof::verify] accepts its proof under the last posted balances root. Pay its
+//!   claimable deposits at most once. Otherwise an account claims twice or claims a balance it does
+//!   not have.
 //!
 //! - **L10.** Send every transfer of L6 and L9 to a destination the account fixed through a request
 //!   it authenticated, or one derived from its key, never one the caller chooses. Otherwise anyone
@@ -577,8 +571,8 @@
 //! - **L11.** Make every check depend only on the ledger's state and the call's inputs. Otherwise
 //!   two replicas of the ledger diverge.
 //!
-//! After a halt, each account claims its balance, its unprocessed deposits, and its payouts. The
-//! balance and payout claims need proofs, and a validator supplies them.
+//! After a halt, each account claims its balance, the deposits no close processed, and its payouts.
+//! The balance and payout claims need proofs, and a validator supplies them.
 //!
 //! ```text
 //!   validator --balance proof--> account --claim(proof)--> ledger --> balance as of the last post
@@ -646,9 +640,9 @@
 //!    the receipt's entry proves under the state's payments root at its position.
 //!
 //! 7. **Summaries.** A [Summary] encodes as epoch, parent, matrix, balances, and its [Payouts] as
-//!    root, size, and total, then the count and running hash of the deposits and of the forced
-//!    withdrawals. Its digest is the hash of that encoding, and the certificate covers the encoding
-//!    in [Namespace::summary]. A running hash extends its parent's by `H(hash || request)` for each
+//!    root and size, then the count and running hash of the deposits and of the forced withdrawals.
+//!    Its digest is the hash of that encoding, and the certificate covers the encoding in
+//!    [Namespace::summary]. A running hash extends its parent's by `H(hash || request)` for each
 //!    request the close processes in queue order. A request encodes as its account then its amount.
 //!    The ledger takes the running hashes as certified and does not recompute them.
 //!

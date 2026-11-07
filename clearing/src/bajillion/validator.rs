@@ -273,7 +273,7 @@ where
 #[derive(Clone, Debug)]
 pub struct Checkpoint<P: PublicKey, D: Digest, A: Amount> {
     /// The close's summary.
-    pub summary: Summary<D, A>,
+    pub summary: Summary<D>,
     /// The close's payment matrix.
     pub matrix: Matrix<P, D, A>,
 }
@@ -419,8 +419,8 @@ impl<P: PublicKey, D: Digest, A: Amount> Checked<P, D, A> {
     /// signatures again.
     ///
     /// Returns InvalidCheckpoint unless `balances` is at the parent's balances root and `log` at
-    /// its payouts root, Overdraft if a balance goes negative, Overflow if a balance or the payouts
-    /// total does not fit, and Storage or Log if a database fails.
+    /// its payouts root, Overdraft if a balance goes negative, Overflow if a balance does not fit,
+    /// and Storage or Log if a database fails.
     pub async fn settle<E, H, I, S>(
         &self,
         balances: &Balances<E, P, H, I, S, A>,
@@ -442,7 +442,6 @@ impl<P: PublicKey, D: Digest, A: Amount> Checked<P, D, A> {
                 .into_iter()
                 .map(|balance| balance.unwrap_or(A::ZERO)),
         )?;
-        let total = settlement.payouts.total().ok_or(Error::Overflow)?;
         let mut batch = balances.new_batch().with_metadata(A::ZERO);
         for (account, balance) in settlement.balances {
             batch = batch.write(account, (balance != A::ZERO).then_some(balance));
@@ -457,7 +456,6 @@ impl<P: PublicKey, D: Digest, A: Amount> Checked<P, D, A> {
             payouts: Payouts {
                 root: appends.root(),
                 size: *appends.size(),
-                total,
             },
             deposits: self.deposits,
             forced_withdrawals: self.forced_withdrawals,
@@ -478,7 +476,7 @@ impl<P: PublicKey, D: Digest, A: Amount> Checked<P, D, A> {
 /// balances and the payout log.
 pub struct Proposal<P: PublicKey, H: Hasher, S: Strategy, A: Amount> {
     /// Summary to certify.
-    summary: Summary<H::Digest, A>,
+    summary: Summary<H::Digest>,
     /// Payment matrix of the close.
     matrix: Matrix<P, H::Digest, A>,
     /// Payouts the close appends to the payout log.
@@ -495,7 +493,7 @@ pub struct Proposal<P: PublicKey, H: Hasher, S: Strategy, A: Amount> {
 
 impl<P: PublicKey, H: Hasher, S: Strategy, A: Amount> Proposal<P, H, S, A> {
     /// Returns the summary to certify.
-    pub const fn summary(&self) -> &Summary<H::Digest, A> {
+    pub const fn summary(&self) -> &Summary<H::Digest> {
         &self.summary
     }
 
@@ -813,8 +811,8 @@ mod tests {
     }
 
     /// A posted close appends exactly its payouts to the payout log, in account order from the
-    /// parent's payouts size up to its commit, and the summary records their total. Settling
-    /// refuses a log not at the parent's payouts root.
+    /// parent's payouts size up to its commit. Settling refuses a log not at the parent's payouts
+    /// root.
     #[test]
     fn test_settle_appends_the_payouts_in_account_order() {
         deterministic::Runner::default().start(|context| async move {
@@ -832,7 +830,6 @@ mod tests {
             let expected = amounts(&[(0, 4), (2, 30)]);
             assert_eq!(proposal.payouts(), &expected);
             let payouts = proposal.summary().payouts;
-            assert_eq!(payouts.total, 34);
             assert_eq!(payouts.size, parent.summary.payouts.size + 3);
             let posted = proposal.summary().digest::<Sha256>();
             let (store, first) = store.apply(proposal, &posted).await.unwrap();
@@ -859,7 +856,6 @@ mod tests {
             let idle = store.settle(&checked).await.unwrap();
             assert!(idle.payouts().is_empty());
             assert_eq!(idle.summary().payouts.size, payouts.size + 1);
-            assert_eq!(idle.summary().payouts.total, 0);
 
             // A log at another root refuses the close, even with the balances at the parent's.
             let other = open(context.child("other"), "other").await;
@@ -1131,22 +1127,6 @@ mod tests {
                 assert_eq!(retried.summary(), fresh.summary());
                 assert_eq!(retried.payouts(), fresh.payouts());
             }
-        });
-    }
-
-    /// Each payout fits, but a close whose payouts total does not fit cannot settle, because the
-    /// summary records that total.
-    #[test]
-    fn test_settle_refuses_a_payout_total_that_does_not_fit() {
-        deterministic::Runner::default().start(|context| async move {
-            let store = open(context.child("opened"), "total").await;
-            let parent = genesis(store.balances.root());
-
-            // Alice and bob each deposit and then withdraw everything, so the close pays both.
-            let queued = queue(1, &[(0, u64::MAX), (1, 1)], &[(0, u64::MAX), (1, 1)]);
-            let close = sign_close(&operator_key(), 1, Vec::new(), Vec::new(), 2, 2);
-            let checked = check(close, &parent, &queued).unwrap();
-            assert!(matches!(store.settle(&checked).await, Err(Error::Overflow)));
         });
     }
 

@@ -123,7 +123,7 @@ where
         context: &E,
         config: &Config<O, T, S>,
         opened: u64,
-        summary: &Summary<H::Digest, A>,
+        summary: &Summary<H::Digest>,
     ) -> Result<PayoutLog<E, P, H, S, A>, Error> {
         let context = context.child("payouts").with_attribute("opened", opened);
         let size = Some(Location::new(summary.payouts.size));
@@ -165,7 +165,7 @@ where
         let parent = parent
             .or_else(|| {
                 (!applied).then(|| Checkpoint {
-                    summary: Summary::genesis::<H, P>(root),
+                    summary: Summary::genesis::<H, P, A>(root),
                     matrix: Matrix::empty::<H>(),
                 })
             })
@@ -182,7 +182,7 @@ where
         })
     }
 
-    fn summary_of(record: &Record) -> Summary<H::Digest, A> {
+    fn summary_of(record: &Record) -> Summary<H::Digest> {
         Summary::decode(record.summary.clone()).expect("a persisted summary must decode")
     }
 
@@ -209,7 +209,7 @@ where
     }
 
     /// Returns the summary of the last close applied.
-    pub const fn summary(&self) -> &Summary<H::Digest, A> {
+    pub const fn summary(&self) -> &Summary<H::Digest> {
         &self.parent.summary
     }
 
@@ -271,11 +271,7 @@ where
         let summary = Self::summary_of(record);
         let start = match self.persisted.attested.get(&summary.parent) {
             Some(parent) => Self::summary_of(parent).payouts.size,
-            None if epoch == 1 => {
-                Summary::<H::Digest, A>::genesis::<H, P>(H::Digest::EMPTY)
-                    .payouts
-                    .size
-            }
+            None if epoch == 1 => Summary::genesis::<H, P, A>(H::Digest::EMPTY).payouts.size,
             None => return Err(Error::InvalidCheckpoint),
         };
         let log = self.payout_log();

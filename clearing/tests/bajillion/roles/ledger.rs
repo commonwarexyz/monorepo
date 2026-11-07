@@ -45,7 +45,8 @@ impl From<Error> for Refusal {
     }
 }
 
-/// A ledger following L1-L11 that tracks paid payouts by ranges of payout log indices.
+/// A ledger following L1-L11 that counts the funds it holds as one amount and tracks paid payouts
+/// by ranges of payout log indices.
 ///
 /// Every transfer goes to the account it pays (L10). The amount returned by a payout withdrawal
 /// or a claim stands for that transfer.
@@ -66,10 +67,8 @@ pub struct Ledger<P: PublicKey, O: PublicKey, V: Verifier, H: Hasher, A: Amount>
     size: u64,
     /// Matrix root of each posted close, in epoch order.
     matrices: Vec<H::Digest>,
-    /// Sum of the balances as of the last post.
-    liability: A,
-    /// Sum of the deposits that no close processed and no claim paid out.
-    unprocessed: A,
+    /// Funds the ledger holds. A deposit adds to them and every transfer takes from them.
+    held: A,
     /// Queued deposits, oldest first.
     deposits: VecDeque<Deposit<P, A>>,
     /// Number of queued deposits the next close must process.
@@ -81,13 +80,11 @@ pub struct Ledger<P: PublicKey, O: PublicKey, V: Verifier, H: Hasher, A: Amount>
     /// Payout log indices that hold a commit or a paid payout, as ranges from start to exclusive
     /// end. No two ranges overlap or touch.
     ranges: BTreeMap<u64, u64>,
-    /// Sum of the owed payouts not yet withdrawn.
-    payable: A,
     /// Why the ledger halted, if it has.
     halt: Option<Halt>,
     /// Accounts that claimed their balance after the halt.
     claimed: HashSet<P>,
-    /// Unprocessed deposits each account can still claim after the halt.
+    /// Deposits no close processed that each account can still claim after the halt.
     claimable: HashMap<P, A>,
 }
 
@@ -95,14 +92,14 @@ impl<P, O, V, H, A> Ledger<P, O, V, H, A>
 where
     P: PublicKey,
     O: PublicKey,
-    V: for<'a> Verifier<Subject<'a, H::Digest> = &'a Summary<H::Digest, A>>,
+    V: for<'a> Verifier<Subject<'a, H::Digest> = &'a Summary<H::Digest>>,
     H: Hasher,
     A: Amount,
 {
     /// Returns a ledger whose validators start from the empty balances database with root
     /// `balances` (L1).
     pub fn new(namespace: Namespace, operator: O, verifier: V, balances: H::Digest) -> Self {
-        let genesis = Summary::<H::Digest, A>::genesis::<H, P>(balances);
+        let genesis = Summary::genesis::<H, P, A>(balances);
         Self {
             namespace,
             operator,
@@ -112,14 +109,12 @@ where
             log: genesis.payouts.root,
             size: genesis.payouts.size,
             matrices: Vec::new(),
-            liability: A::ZERO,
-            unprocessed: A::ZERO,
+            held: A::ZERO,
             deposits: VecDeque::new(),
             required_deposits: 0,
             forced_withdrawals: VecDeque::new(),
             required_forced_withdrawals: 0,
             ranges: BTreeMap::from([(0, genesis.payouts.size)]),
-            payable: A::ZERO,
             halt: None,
             claimed: HashSet::new(),
             claimable: HashMap::new(),
@@ -156,23 +151,10 @@ where
             .collect()
     }
 
-    /// Returns the sum of the owed payouts not yet withdrawn.
-    pub const fn payable(&self) -> A {
-        self.payable
-    }
-
-    /// Returns the funds held. They are the liability, the unprocessed deposits, and the owed
-    /// payouts not yet withdrawn.
-    pub fn custody(&self) -> A {
-        self.held()
-            .expect("the funds held must fit an amount, because deposits are bounded by it")
-    }
-
-    /// Returns the funds held, or `None` if they exceed the largest amount.
-    fn held(&self) -> Option<A> {
-        self.liability
-            .checked_add(self.unprocessed)?
-            .checked_add(self.payable)
+    /// Returns the funds held. They back the unclaimed balances as of the last post, the unclaimed
+    /// deposits no close processed, and the posted payouts not yet paid.
+    pub const fn custody(&self) -> A {
+        self.held
     }
 
     /// Returns why the ledger halted, if it has.
@@ -192,7 +174,7 @@ where
     }
 
     /// Takes custody of a deposit and queues it (L2). It refuses a deposit that would take the
-    /// funds held, owed payouts included, past the largest amount (L3).
+    /// funds held past the largest amount (L3).
     pub fn deposit(&mut self, account: P, amount: A) -> Result<(), Refusal> {
         if self.halt.is_some() {
             return Err(Refusal::Halted);
@@ -200,13 +182,7 @@ where
         if amount == A::ZERO {
             return Err(Error::ZeroAmount.into());
         }
-        self.held()
-            .and_then(|held| held.checked_add(amount))
-            .ok_or(Refusal::Custody)?;
-        self.unprocessed = self
-            .unprocessed
-            .checked_add(amount)
-            .expect("unprocessed deposits must not exceed the funds held");
+        self.held = self.held.checked_add(amount).ok_or(Refusal::Custody)?;
         self.deposits.push_back(Deposit { account, amount });
         Ok(())
     }
@@ -224,11 +200,12 @@ where
         Ok(())
     }
 
-    /// Posts a certified summary of the close it expects, and owes its payouts (L5).
+    /// Posts a certified summary of the close it expects (L5). The post transfers nothing, and the
+    /// close's payouts become withdrawable.
     pub fn post<R: CryptoRng>(
         &mut self,
         rng: &mut R,
-        summary: &Summary<H::Digest, A>,
+        summary: &Summary<H::Digest>,
         certificate: &V::Certificate,
     ) -> Result<(), Refusal> {
         if self.halt.is_some() {
@@ -247,19 +224,6 @@ where
             usize::try_from(summary.deposits.count).expect("a count within the queue must fit");
         let forced_withdrawals = usize::try_from(summary.forced_withdrawals.count)
             .expect("a count within the queue must fit");
-        let deposited = self
-            .deposits
-            .iter()
-            .take(deposits)
-            .try_fold(A::ZERO, |total, deposit| total.checked_add(deposit.amount))
-            .expect("processed deposits must not exceed the unprocessed deposits");
-        let paid = summary.payouts.total;
-        let liability = self
-            .liability
-            .checked_add(deposited)
-            .expect("processed deposits must fit next to the liability")
-            .checked_sub(paid)
-            .ok_or(Refusal::Custody)?;
         let commit = summary
             .payouts
             .size
@@ -270,15 +234,6 @@ where
         self.forced_withdrawals.drain(..forced_withdrawals);
         self.required_deposits = self.deposits.len();
         self.required_forced_withdrawals = self.forced_withdrawals.len();
-        self.liability = liability;
-        self.unprocessed = self
-            .unprocessed
-            .checked_sub(deposited)
-            .expect("processed deposits must not exceed the unprocessed deposits");
-        self.payable = self
-            .payable
-            .checked_add(paid)
-            .expect("owed payouts must not exceed the funds held");
         self.fold(commit);
         self.log = summary.payouts.root;
         self.size = summary.payouts.size;
@@ -300,14 +255,16 @@ where
         if self.covers(proof.index) {
             return Err(Refusal::Withdrawn);
         }
-        let payable = self
-            .payable
-            .checked_sub(proof.payout.amount)
-            .ok_or(Refusal::Custody)?;
-
+        self.transfer(proof.payout.amount)?;
         self.fold(proof.index);
-        self.payable = payable;
         Ok((proof.payout.account.clone(), proof.payout.amount))
+    }
+
+    /// Takes `amount` from the funds held for a transfer. If the ledger holds less, the chain would
+    /// refuse the transfer, so this returns Custody and changes nothing.
+    fn transfer(&mut self, amount: A) -> Result<(), Refusal> {
+        self.held = self.held.checked_sub(amount).ok_or(Refusal::Custody)?;
+        Ok(())
     }
 
     /// Returns whether a range covers `index`.
@@ -389,22 +346,13 @@ where
         if balance == A::ZERO && deposits == A::ZERO {
             return Err(Refusal::NothingToClaim);
         }
-        let liability = self
-            .liability
-            .checked_sub(balance)
-            .ok_or(Refusal::Custody)?;
+        let paid = balance.checked_add(deposits).ok_or(Refusal::Custody)?;
 
+        self.transfer(paid)?;
         if balance != A::ZERO {
             self.claimed.insert(account.clone());
         }
         self.claimable.remove(account);
-        self.liability = liability;
-        self.unprocessed = self
-            .unprocessed
-            .checked_sub(deposits)
-            .expect("claimable deposits must not exceed the unprocessed deposits");
-        Ok(balance
-            .checked_add(deposits)
-            .expect("a claim must not exceed the funds held"))
+        Ok(paid)
     }
 }
