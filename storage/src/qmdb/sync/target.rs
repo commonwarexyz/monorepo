@@ -112,6 +112,13 @@ pub struct CompactTarget<F: Family, D: Digest> {
     pub size: Location<F>,
 }
 
+impl<F: Family, D: Digest> CompactTarget<F, D> {
+    /// Create a compact-storage sync target.
+    pub const fn new(root: D, size: Location<F>) -> Self {
+        Self { root, size }
+    }
+}
+
 impl<F: Family, D: Digest> TryFrom<&CompactTarget<F, D>> for Target<F, D> {
     type Error = EngineError<F, D>;
 
@@ -293,10 +300,10 @@ mod tests {
 
     #[test]
     fn test_compact_target_serialization() {
-        let target = CompactTarget::<MmrFamily, sha256::Digest> {
-            root: sha256::Digest::from([42; 32]),
-            size: Location::new(100),
-        };
+        let target = CompactTarget::<MmrFamily, sha256::Digest>::new(
+            sha256::Digest::from([42; 32]),
+            Location::new(100),
+        );
 
         let mut buffer = Vec::new();
         target.write(&mut buffer);
