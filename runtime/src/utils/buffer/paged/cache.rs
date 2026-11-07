@@ -144,8 +144,9 @@ type BatchFuture = BoxFuture<'static, Result<(), Error>>;
 /// A handle to a [BatchFuture] that any of the batch's readers can drive.
 type BatchDriver = Shared<BatchFuture>;
 
-/// Caches a page a [Batch] read, as `(cache, blob id, page, page number)`.
-type Insert = fn(&mut Cache, u64, &[u8], u64);
+/// Caches a page a [Batch] read, as `(cache, blob id, page, page number)`, returning the buffer it
+/// displaced (see [Cache::insert]).
+type Insert = fn(&mut Cache, u64, IoBufMut, u64) -> Option<IoBufMut>;
 
 /// A page delivered to a reader, as its tag and either its logical bytes or why it failed
 /// validation.
@@ -246,6 +247,11 @@ impl Batch {
         index: usize,
         result: Result<IoBuf, Error>,
     ) -> Result<(), Error> {
+        // Copy the page before taking the write lock, so readers wait only for its insertion.
+        let page = result
+            .as_ref()
+            .ok()
+            .map(|page| IoBufMut::from(page.as_ref()));
         let mut cache = cache.write();
         let mut state = self.state.lock();
         let BatchState {
@@ -254,10 +260,10 @@ impl Batch {
         let Some(joiners) = joiners[index].take() else {
             return Err(Error::ReadFailed);
         };
-        if let Ok(page) = &result {
-            (self.insert)(&mut cache, self.blob_id, page.as_ref(), self.pages[index]);
-        }
+        let displaced =
+            page.and_then(|page| (self.insert)(&mut cache, self.blob_id, page, self.pages[index]));
         drop(cache);
+        drop(displaced);
         for (tag, reader) in joiners {
             if let Some(inbox) = &mut inboxes[reader] {
                 inbox.push_back((tag, result.clone()));
@@ -891,7 +897,7 @@ impl CacheRef {
                 let (physical, pieces): (Vec<_>, Vec<_>) = unread.into_iter().unzip();
                 let pages = pieces.iter().map(|pieces| pieces[0].0).collect();
                 let (batch, driver) =
-                    self.start_batch(&mut cache, blob, blob_id, pages, physical, Cache::cache);
+                    self.start_batch(&mut cache, blob, blob_id, pages, physical, Cache::insert);
                 reads.push(BatchRead::starting(batch, driver, pieces));
             }
         }
@@ -1010,7 +1016,7 @@ impl CacheRef {
                     blob_id,
                     pages,
                     physical,
-                    Cache::cache_expected,
+                    Cache::insert_expected,
                 );
                 (Subscription::starting(batch, driver.clone()), driver)
             })
@@ -1033,17 +1039,26 @@ impl CacheRef {
                 pin!(futures::stream::select(fetches, joined).ready_chunks(MISSES_PER_LOCK));
             let mut result = Ok(());
             while let Some(pages) = joins.next().await {
-                let mut cache = self.cache.write();
+                // Copy the pages before taking the write lock, so readers wait only for their
+                // insertion, and drop the buffers they displace after releasing it.
+                let mut copied = Vec::with_capacity(pages.len());
                 for page in pages {
                     match page {
                         Ok((page_num, page)) => {
-                            if !cache.cache.expect(&(blob_id, page_num)) {
-                                cache.cache_expected(blob_id, page.as_ref(), page_num);
-                            }
+                            copied.push((page_num, IoBufMut::from(page.as_ref())));
                         }
                         Err(err) => result = result.and(Err(err)),
                     }
                 }
+                let mut displaced = Vec::new();
+                let mut cache = self.cache.write();
+                for (page_num, page) in copied {
+                    if !cache.cache.expect(&(blob_id, page_num)) {
+                        displaced.extend(cache.insert_expected(blob_id, page, page_num));
+                    }
+                }
+                drop(cache);
+                drop(displaced);
             }
             result
         };
@@ -1158,11 +1173,16 @@ impl CacheRef {
                             // before we cache the successful result below. Only when every waiter
                             // cancels can the last guard remove the entry and let a later reader
                             // start a new generation.
+                            let page = result
+                                .as_ref()
+                                .ok()
+                                .map(|page| IoBufMut::from(page.as_ref()));
                             let mut cache = cache.write();
-                            if let Ok(page) = &result {
-                                cache.cache(blob_id, page.as_ref(), page_num);
-                            }
+                            let displaced =
+                                page.and_then(|page| cache.insert(blob_id, page, page_num));
                             let _ = cache.page_fetches.remove(&key);
+                            drop(cache);
+                            drop(displaced);
                             result
                         };
 
@@ -1293,18 +1313,38 @@ impl Cache {
         self.hints[hint] = slot;
     }
 
-    /// Like [Self::cache], for a page read ahead of its first request, which enters the cache as
-    /// an expected entry (see [cache::Cache::get_or_insert_mut_expected]).
-    #[commonware_macros::stability(ALPHA)]
-    fn cache_expected(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
+    /// Like [Self::cache], but moves the already-filled `page` into its slot instead of copying it,
+    /// so a caller can fill the page before taking the cache lock. Returns the buffer the page
+    /// displaced, for the caller to drop after releasing the lock.
+    fn insert(&mut self, blob_id: u64, page: IoBufMut, page_num: u64) -> Option<IoBufMut> {
         let page_size: usize = self.page_size.widen();
         assert_eq!(page.len(), page_size);
-        let (slot, buf) = self
-            .cache
-            .get_or_insert_mut_expected((blob_id, page_num), || IoBufMut::zeroed(page_size));
-        buf.as_mut().copy_from_slice(page);
+        let mut page = Some(page);
+        let (slot, buf) = self.cache.get_or_insert_mut((blob_id, page_num), || {
+            page.take().expect("a new entry takes the page")
+        });
+        let displaced = page.map(|page| core::mem::replace(buf, page));
         let hint = self.hint_index(blob_id, page_num);
         self.hints[hint] = slot;
+        displaced
+    }
+
+    /// Like [Self::insert], for a page read ahead of its first request, which enters the cache as
+    /// an expected entry (see [cache::Cache::get_or_insert_mut_expected]).
+    #[commonware_macros::stability(ALPHA)]
+    fn insert_expected(&mut self, blob_id: u64, page: IoBufMut, page_num: u64) -> Option<IoBufMut> {
+        let page_size: usize = self.page_size.widen();
+        assert_eq!(page.len(), page_size);
+        let mut page = Some(page);
+        let (slot, buf) = self
+            .cache
+            .get_or_insert_mut_expected((blob_id, page_num), || {
+                page.take().expect("a new entry takes the page")
+            });
+        let displaced = page.map(|page| core::mem::replace(buf, page));
+        let hint = self.hint_index(blob_id, page_num);
+        self.hints[hint] = slot;
+        displaced
     }
 
     /// The hint slot for `(blob_id, page_num)`: the page number offset by a per-blob salt,
@@ -3380,7 +3420,7 @@ mod tests {
 
             // A batch of page 0 outlives its driver, as when a read holding it already has its
             // pages but every handle on the driver is dropped.
-            let batch = Arc::new(Batch::new(0, vec![0], Cache::cache));
+            let batch = Arc::new(Batch::new(0, vec![0], Cache::insert));
             let driver: BatchDriver = Shared::new(pending::<Result<(), Error>>().boxed());
             cache_ref.cache.write().batches.register(&batch, &driver);
             drop(driver);
@@ -4300,6 +4340,31 @@ mod tests {
             assert!(matches!(joined.await, Err(Error::ReadFailed)));
             assert_eq!(reads.load(Ordering::Relaxed), 2);
         });
+    }
+
+    #[test_traced]
+    fn test_insert_returns_displaced_buffer() {
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(1));
+        let blob_id = cache_ref.next_id();
+        let width = PAGE_SIZE.get() as usize;
+        let mut cache = cache_ref.cache.write();
+
+        // A slot the cache prepared with a buffer hands that unused buffer back.
+        let page = IoBufMut::from(vec![1; width].as_slice());
+        if let Some(prepared) = cache.insert(blob_id, page, 0) {
+            assert!(prepared.as_ref().iter().all(|&b| b == 0));
+        }
+
+        // A full cache reuses the evicted page's slot, and its buffer comes back to the caller.
+        let page = IoBufMut::from(vec![2; width].as_slice());
+        let displaced = cache.insert(blob_id, page, 1);
+        assert_eq!(
+            displaced.map(|buf| buf.as_ref().to_vec()),
+            Some(vec![1; width])
+        );
+        let mut out = vec![0; width];
+        assert_eq!(cache.read_at(blob_id, &mut out, PAGE_SIZE_U64), width);
+        assert_eq!(out, vec![2; width]);
     }
 
     #[test_traced]
