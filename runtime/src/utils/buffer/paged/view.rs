@@ -325,12 +325,7 @@ impl<B: Blob> View<'_, B> {
             return Vec::new();
         }
 
-        let mut cache_ranges = split_read_ranges(buf, ranges(), self.tail_offset, self.tail);
-        if cache_ranges.is_empty() {
-            return Vec::new();
-        }
-        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
-        map_misses(cache_ranges, |idx| (offsets[idx], item_size.get()))
+        self.try_read_slots_sync(buf, ranges(), |idx| (offsets[idx], item_size.get()))
     }
 
     /// Like [`Self::try_read_many_sync_into`], but for variable-length ranges: `buf` holds one
@@ -345,15 +340,47 @@ impl<B: Blob> View<'_, B> {
             return Vec::new();
         }
 
-        let mut cache_ranges =
-            split_read_ranges(buf, ranges.iter().copied(), self.tail_offset, self.tail);
+        self.try_read_slots_sync(buf, ranges.iter().copied(), |idx| ranges[idx])
+    }
+
+    /// Serve non-empty, validated `ranges` from the in-memory tail and the page cache. `buf` holds
+    /// one slot per range, back to back, and `slot(i)` returns range `i`. Returns the indices of
+    /// ranges that require a blob read. Batches of at most [STACK_RANGES] ranges keep their
+    /// slots on the stack.
+    fn try_read_slots_sync(
+        &self,
+        buf: &mut [u8],
+        ranges: impl ExactSizeIterator<Item = (u64, usize)>,
+        slot: impl FnMut(usize) -> (u64, usize),
+    ) -> Vec<usize> {
+        if ranges.len() <= STACK_RANGES {
+            let mut stack: [(&mut [u8], u64); STACK_RANGES] =
+                core::array::from_fn(|_| (<&mut [u8]>::default(), 0));
+            let mut count = 0;
+            split_read_ranges_with(buf, ranges, self.tail_offset, self.tail, |dest, offset| {
+                stack[count] = (dest, offset);
+                count += 1;
+            });
+            if count == 0 {
+                return Vec::new();
+            }
+            let unread = self
+                .cache_ref
+                .read_cached_slice(self.id, &mut stack[..count]);
+            return map_misses(stack[..unread].iter().map(|&(_, offset)| offset), slot);
+        }
+
+        let mut cache_ranges = split_read_ranges(buf, ranges, self.tail_offset, self.tail);
         if cache_ranges.is_empty() {
             return Vec::new();
         }
         self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
-        map_misses(cache_ranges, |idx| ranges[idx])
+        map_misses(cache_ranges.iter().map(|&(_, offset)| offset), slot)
     }
 }
+
+/// Most ranges a synchronous read keeps on the stack. Larger batches allocate their slots.
+const STACK_RANGES: usize = 32;
 
 /// Partition a batch of variable-length range reads into bytes copied from the in-memory tail
 /// and ranges that need cache/blob reads.
@@ -367,12 +394,27 @@ impl<B: Blob> View<'_, B> {
 /// returned as `(dest_slice, offset)` pairs for cache/blob reads. `split_at_mut` gives each range a
 /// disjoint output slot, so returned slices never alias.
 fn split_read_ranges<'a>(
-    mut buf: &'a mut [u8],
+    buf: &'a mut [u8],
     ranges: impl ExactSizeIterator<Item = (u64, usize)>,
     tail_offset: u64,
     tail: Tail<'_>,
 ) -> Vec<(&'a mut [u8], u64)> {
     let mut cache_ranges = Vec::with_capacity(ranges.len());
+    split_read_ranges_with(buf, ranges, tail_offset, tail, |dest, offset| {
+        cache_ranges.push((dest, offset));
+    });
+    cache_ranges
+}
+
+/// Like [split_read_ranges], but passes each `(dest_slice, offset)` pair to `push` instead of
+/// collecting them.
+fn split_read_ranges_with<'a>(
+    mut buf: &'a mut [u8],
+    ranges: impl Iterator<Item = (u64, usize)>,
+    tail_offset: u64,
+    tail: Tail<'_>,
+    mut push: impl FnMut(&'a mut [u8], u64),
+) {
     let mut cursor = tail.cursor();
     for (offset, len) in ranges {
         let (slot, rest) = buf.split_at_mut(len);
@@ -383,7 +425,7 @@ fn split_read_ranges<'a>(
         let end = offset + len as u64;
         if end <= tail_offset {
             // Entirely below the tail bytes, so this needs a cache/blob read.
-            cache_ranges.push((slot, offset));
+            push(slot, offset);
         } else if offset >= tail_offset {
             // Entirely within the tail bytes.
             let src = (offset - tail_offset) as usize;
@@ -394,22 +436,22 @@ fn split_read_ranges<'a>(
             let prefix_len = (tail_offset - offset) as usize;
             let (prefix, suffix) = slot.split_at_mut(prefix_len);
             cursor.copy_into(0, suffix);
-            cache_ranges.push((prefix, offset));
+            push(prefix, offset);
         }
     }
-    cache_ranges
 }
 
-/// Map unread suffixes back to their originating slot indices. Each suffix starts inside its
-/// slot's `(offset, len)` range, and both lists are sorted. Zero-length slots never miss but may
-/// share an offset with the slot that follows them, so they are skipped.
+/// Map unread suffixes, given by their starting offsets, back to their originating slot indices.
+/// Each suffix starts inside its slot's `(offset, len)` range, and both lists are sorted.
+/// Zero-length slots never miss but may share an offset with the slot that follows them, so they
+/// are skipped.
 fn map_misses(
-    missed: Vec<(&mut [u8], u64)>,
+    unread: impl ExactSizeIterator<Item = u64>,
     mut slot: impl FnMut(usize) -> (u64, usize),
 ) -> Vec<usize> {
-    let mut misses = Vec::with_capacity(missed.len());
+    let mut misses = Vec::with_capacity(unread.len());
     let mut idx = 0;
-    for (_, offset) in missed {
+    for offset in unread {
         loop {
             let (slot_offset, slot_len) = slot(idx);
             if offset >= slot_offset && offset - slot_offset < slot_len as u64 {
@@ -425,13 +467,67 @@ fn map_misses(
 
 #[cfg(test)]
 mod tests {
-    use super::map_misses;
+    use super::{STACK_RANGES, map_misses};
     use crate::{Runner as _, Storage as _, buffer::paged::Writer, deterministic};
     use commonware_utils::{NZU16, NZUsize};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103);
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+
+    /// Synchronous batches at and past the stack limit serve cached ranges and report every
+    /// range the cache cannot serve.
+    #[test]
+    fn test_sync_batches_on_stack_and_heap() {
+        deterministic::Runner::default().start(|context| async move {
+            let cache = super::CacheRef::new(PAGE_SIZE, NZUsize!(64));
+            let (blob, size) = context.open("test_partition", b"batches").await.unwrap();
+            let page = PAGE_SIZE.get() as usize;
+            let mut writer = Writer::new(blob, size, page * 4, cache.clone())
+                .await
+                .unwrap();
+            let data: Vec<_> = (0..page * 40).map(|i| (i % 251) as u8).collect();
+            (writer, _) = writer.append(&data).await.unwrap();
+            writer = writer.sync().await.unwrap();
+
+            for count in [STACK_RANGES, STACK_RANGES + 1, 3 * STACK_RANGES] {
+                let ranges: Vec<(u64, usize)> = (0..count).map(|i| ((i * 11) as u64, 7)).collect();
+                let expected: Vec<_> = ranges
+                    .iter()
+                    .flat_map(|&(offset, len)| {
+                        data[offset as usize..offset as usize + len].iter().copied()
+                    })
+                    .collect();
+                let mut buf = vec![0; expected.len()];
+                assert!(
+                    writer
+                        .try_read_ranges_sync_into(&mut buf, &ranges)
+                        .is_empty()
+                );
+                assert_eq!(buf, expected);
+
+                let offsets: Vec<u64> = ranges.iter().map(|&(offset, _)| offset).collect();
+                let mut items = vec![0; expected.len()];
+                assert!(
+                    writer
+                        .try_read_many_sync_into(&mut items, &offsets, NZUsize!(7))
+                        .is_empty()
+                );
+                assert_eq!(items, expected);
+            }
+
+            // With nothing cached, every range is reported by its index.
+            cache.clear();
+            for count in [STACK_RANGES, STACK_RANGES + 1, 3 * STACK_RANGES] {
+                let ranges: Vec<(u64, usize)> = (0..count).map(|i| ((i * 11) as u64, 7)).collect();
+                let mut buf = vec![0; count * 7];
+                assert_eq!(
+                    writer.try_read_ranges_sync_into(&mut buf, &ranges),
+                    (0..count).collect::<Vec<_>>()
+                );
+            }
+        });
+    }
 
     #[test]
     fn test_reads_cross_buffer_chunks_and_cache() {
@@ -600,15 +696,11 @@ mod tests {
             (18, 5),
             (u64::MAX - 4, 4),
         ];
-        let mut suffix_a = [0; 2];
-        let mut suffix_b = [0; 5];
-        let mut suffix_c = [0; 1];
-        let missed = vec![
-            (suffix_a.as_mut_slice(), 16),
-            (suffix_b.as_mut_slice(), 18),
-            (suffix_c.as_mut_slice(), u64::MAX - 1),
-        ];
-        assert_eq!(map_misses(missed, |idx| slots[idx]), vec![2, 4, 5]);
+        let unread = [16, 18, u64::MAX - 1];
+        assert_eq!(
+            map_misses(unread.into_iter(), |idx| slots[idx]),
+            vec![2, 4, 5]
+        );
     }
 
     /// A read straddling the persisted prefix and the in-memory tail is served synchronously once
