@@ -642,7 +642,7 @@ where
     let last_commit_op = Op::decode_cfg(witness.op_bytes.clone(), commit_codec_config)
         .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
     let inactivity_floor_loc = last_commit_op
-        .has_floor()
+        .inactivity_floor()
         .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
     validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
 

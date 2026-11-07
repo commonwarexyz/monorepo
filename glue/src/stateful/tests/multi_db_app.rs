@@ -468,7 +468,7 @@ impl EngineDefinition for MultiDbEngine {
             .max(immutable::fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE);
         let qmdb =
             qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(SYNC_BATCH_SIZE, op);
-        max_message_size(&[
+        max_message_size([
             simplex::max_payload_size::<MockScheme<ed25519::PublicKey>, sha256::Digest>(
                 participants,
             ),

@@ -265,8 +265,8 @@ fn check<H: Hasher>(mode: Mode, encoded: &[u8]) -> bool {
             else {
                 return false;
             };
-            let elements: Vec<_> = positions.into_iter().zip(elements).collect();
-            proof.verify_multi_inclusion::<H>(&elements, &root).is_ok()
+            let elements = positions.into_iter().zip(elements);
+            proof.verify_multi_inclusion::<H>(elements, &root).is_ok()
         }
     }
 }

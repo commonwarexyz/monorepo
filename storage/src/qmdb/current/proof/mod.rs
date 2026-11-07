@@ -392,25 +392,27 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
     /// Reconstruct the canonical current root, optionally collecting the positioned digests
     /// required to compute the peaks covering the proven range.
-    fn reconstruct_root<H, O>(
+    fn reconstruct_root<'a, H, O>(
         &self,
         start_loc: Location<F>,
-        ops: &[O],
+        ops: impl IntoIterator<Item = &'a O, IntoIter: ExactSizeIterator>,
         chunks: &[impl AsRef<[u8]>],
         chunk_size: usize,
         collected: Option<&mut Vec<(Position<F>, D)>>,
     ) -> Result<D, merkle::Error<F>>
     where
         H: Hasher<Digest = D>,
-        O: Encode,
+        O: Encode + 'a,
     {
+        let ops = ops.into_iter();
+        let ops_len = ops.len();
         let chunk_bits = chunk_bits(chunk_size).map_err(|_| merkle::Error::InvalidProof)?;
-        if ops.is_empty() || chunks.is_empty() {
+        if ops_len == 0 || chunks.is_empty() {
             debug!("verification failed, empty input");
             return Err(merkle::Error::InvalidProof);
         }
         // Compute the (non-inclusive) end location of the range.
-        let Some(end_loc) = start_loc.checked_add(ops.len() as u64) else {
+        let Some(end_loc) = start_loc.checked_add(ops_len as u64) else {
             debug!("verification failed, end_loc overflow");
             return Err(merkle::Error::InvalidProof);
         };
@@ -444,7 +446,6 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         let next_bit = *leaves % chunk_bits;
         let has_partial_chunk = next_bit != 0;
 
-        let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let grafting_height = chunk_bits.trailing_zeros();
 
@@ -523,10 +524,13 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             }
         }
 
+        // Reconstruction queries the length again, so count the operations it consumes and
+        // require the count the chunks were checked against.
+        let mut consumed = 0usize;
         let merkle_root = match self.proof.reconstruct_root_inner(
             &grafting_verifier,
             start_loc,
-            &elements,
+            ops.inspect(|_| consumed += 1).map(|op| op.encode()),
             collected,
         ) {
             Ok(root) => root,
@@ -535,6 +539,10 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
                 return Err(merkle::Error::InvalidProof);
             }
         };
+        if consumed != ops_len {
+            debug!("verification failed, operation count changed");
+            return Err(merkle::Error::InvalidProof);
+        }
 
         let partial =
             has_partial_chunk.then(|| (next_bit, self.partial_chunk_digest.as_ref().unwrap()));
@@ -548,10 +556,13 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
     /// the db with the provided root, and having the activity status described by `chunks`.
-    pub fn verify<H: Hasher<Digest = D>, O: Encode, const N: usize>(
+    ///
+    /// `ops` must yield consecutive operations from `start_loc`, and a `len()` that differs from
+    /// the number yielded is rejected.
+    pub fn verify<'a, H: Hasher<Digest = D>, O: Encode + 'a, const N: usize>(
         &self,
         start_loc: Location<F>,
-        ops: &[O],
+        ops: impl IntoIterator<Item = &'a O, IntoIter: ExactSizeIterator>,
         chunks: &[[u8; N]],
         root: &D,
     ) -> bool {
@@ -567,10 +578,10 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
     ///
     /// This verifies the same proof and wire encoding as [Self::verify], accepting arrays,
     /// byte slices, or owned byte buffers without copying their contents.
-    pub fn verify_with_chunk_size<H: Hasher<Digest = D>, O: Encode>(
+    pub fn verify_with_chunk_size<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
         &self,
         start_loc: Location<F>,
-        ops: &[O],
+        ops: impl IntoIterator<Item = &'a O, IntoIter: ExactSizeIterator>,
         chunks: &[impl AsRef<[u8]>],
         chunk_size: usize,
         root: &D,
@@ -588,10 +599,10 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
     ///
     /// Returns [merkle::Error::RootMismatch] if the proof reconstructs a root other than `root`,
     /// or [merkle::Error::InvalidProof] if the proof or its inputs are malformed.
-    pub fn verify_and_extract_digests<H: Hasher<Digest = D>, O: Encode, const N: usize>(
+    pub fn verify_and_extract_digests<'a, H: Hasher<Digest = D>, O: Encode + 'a, const N: usize>(
         &self,
         start_loc: Location<F>,
-        ops: &[O],
+        ops: impl IntoIterator<Item = &'a O, IntoIter: ExactSizeIterator>,
         chunks: &[[u8; N]],
         root: &D,
     ) -> Result<qmdb::verify::ExtractedDigests<F, H>, merkle::Error<F>> {
@@ -605,10 +616,10 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
     ///
     /// Returns [merkle::Error::RootMismatch] if the proof reconstructs a root other than `root`,
     /// or [merkle::Error::InvalidProof] if the proof, its inputs, or `chunk_size` are malformed.
-    pub fn verify_and_extract_digests_with_chunk_size<H: Hasher<Digest = D>, O: Encode>(
+    pub fn verify_and_extract_digests_with_chunk_size<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
         &self,
         start_loc: Location<F>,
-        ops: &[O],
+        ops: impl IntoIterator<Item = &'a O, IntoIter: ExactSizeIterator>,
         chunks: &[impl AsRef<[u8]>],
         chunk_size: usize,
         root: &D,

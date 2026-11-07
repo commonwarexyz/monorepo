@@ -650,7 +650,7 @@ macro_rules! impl_test_db {
                 keys: &[&Key],
                 settle: impl FnOnce(Vec<Option<$account>>) -> Result<Vec<Slot<$account>>, E> + Send,
             ) -> Result<Self::Merkleized, E> {
-                let (reads, staged) = self.new_batch().stage(keys, self).await.unwrap();
+                let (staged, reads) = self.new_batch().stage(keys, self).await.unwrap();
                 let slots = settle(reads)?;
                 Ok(staged
                     .merkleize(slots, Vec::new(), self)
@@ -1330,13 +1330,13 @@ fn selection_reads_later_rounds_through_expand() {
         let mut selection = Selection::new();
         let touched = selection.touch(&rounds[0]);
         let keys: Vec<&Key> = selection.keys()[touched].iter().collect();
-        let (reads, mut staged) = proposer.new_batch().stage(&keys, &proposer).await.unwrap();
+        let (mut staged, reads) = proposer.new_batch().stage(&keys, &proposer).await.unwrap();
         selection.register(reads);
         let mut accepted = selection.apply(&rounds[0]);
         for round in &rounds[1..] {
             let touched = selection.touch(round);
             let keys: Vec<&Key> = selection.keys()[touched.clone()].iter().collect();
-            let (range, reads, expanded) = staged.expand(&keys, &proposer).await.unwrap();
+            let (expanded, range, reads) = staged.expand(&keys, &proposer).await.unwrap();
             assert_eq!(range, touched);
             selection.register(reads);
             accepted.extend(selection.apply(round));
@@ -2062,7 +2062,7 @@ macro_rules! impl_stateful_db {
             {
                 let plan = Plan::new(transfers, &Sequential)?;
                 let keys: Vec<&Key> = plan.keys().iter().collect();
-                let (reads, staged) = self.new_batches().await.stage(&keys).await.unwrap();
+                let (staged, reads) = self.new_batches().await.stage(&keys).await.unwrap();
                 let slots = plan.settle(&reads, &Sequential)?;
                 Ok(staged.merkleize(slots, Vec::new()).await.unwrap())
             }
@@ -2075,7 +2075,7 @@ macro_rules! impl_stateful_db {
                 let mut selection = Selection::new();
                 let touched = selection.touch(&rounds[0]);
                 let keys: Vec<&Key> = selection.keys()[touched].iter().collect();
-                let (reads, mut staged) = self.new_batches().await.stage(&keys).await.unwrap();
+                let (mut staged, reads) = self.new_batches().await.stage(&keys).await.unwrap();
                 selection.register(reads);
                 let mut accepted = selection.apply(&rounds[0]);
 
@@ -2084,7 +2084,7 @@ macro_rules! impl_stateful_db {
                 for round in &rounds[1..] {
                     let touched = selection.touch(round);
                     let keys: Vec<&Key> = selection.keys()[touched.clone()].iter().collect();
-                    let (range, reads, expanded) = staged.expand(&keys).await.unwrap();
+                    let (expanded, range, reads) = staged.expand(&keys).await.unwrap();
                     assert_eq!(
                         range, touched,
                         "expand must stage new keys where touch placed them"

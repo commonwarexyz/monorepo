@@ -199,7 +199,7 @@ where
         C: Mutable<Item = Operation<F, V>>,
     {
         self.parent.as_ref().map_or_else(
-            || db.inactivity_floor_loc(),
+            || db.inactivity_floor(),
             |parent| parent.bounds.inactivity_floor,
         )
     }

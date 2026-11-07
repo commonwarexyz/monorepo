@@ -18,6 +18,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::iter::zip_eq;
+use core::borrow::Borrow;
 use std::{
     collections::BTreeMap,
     iter,
@@ -174,7 +175,7 @@ where
         T: Translator,
     {
         self.parent.as_ref().map_or_else(
-            || db.inactivity_floor_loc(),
+            || db.inactivity_floor(),
             |parent| parent.bounds.inactivity_floor,
         )
     }
@@ -251,7 +252,7 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, T>(
         &self,
-        keys: &[&K],
+        keys: &[impl Borrow<K> + Sync],
         db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
@@ -271,8 +272,9 @@ where
         let mut db_keys = Vec::new();
 
         for (i, key) in keys.iter().enumerate() {
+            let key = key.borrow();
             // Check local mutations.
-            if let Some(value) = self.mutations.get(*key) {
+            if let Some(value) = self.mutations.get(key) {
                 results.push(Some(value.clone()));
                 continue;
             }
@@ -281,7 +283,7 @@ where
             if let Some(entry) = self.parent.as_ref().and_then(|parent| {
                 parent
                     .read_diffs(db.bounds().end)
-                    .find_map(|diff| lookup_active(diff, *key, floor))
+                    .find_map(|diff| lookup_active(diff, key, floor))
             }) {
                 results.push(Some(entry.value.clone()));
                 continue;
@@ -289,7 +291,7 @@ where
 
             // Need DB fallthrough.
             db_indices.push(i);
-            db_keys.push(*key);
+            db_keys.push(key);
             results.push(None);
         }
 
@@ -546,7 +548,7 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, H, T>(
         &self,
-        keys: &[&K],
+        keys: &[impl Borrow<K> + Sync],
         db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
@@ -567,9 +569,10 @@ where
         let mut db_keys = Vec::new();
 
         for (i, key) in keys.iter().enumerate() {
+            let key = key.borrow();
             if let Some(entry) = self
                 .read_diffs(db.bounds().end)
-                .find_map(|diff| lookup_active(diff, *key, floor))
+                .find_map(|diff| lookup_active(diff, key, floor))
             {
                 results.push(Some(entry.value.clone()));
                 continue;
@@ -577,7 +580,7 @@ where
 
             // Need DB fallthrough.
             db_indices.push(i);
-            db_keys.push(*key);
+            db_keys.push(key);
             results.push(None);
         }
 

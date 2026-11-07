@@ -111,7 +111,7 @@ pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 /// Returns the P2P `max_message_size` that admits every payload a validator's components send.
 pub fn max_message_size() -> u32 {
     let participants = MAX_PARTICIPANTS.get();
-    commonware_p2p::max_message_size(&[
+    commonware_p2p::max_message_size([
         orchestrator::max_payload_size::<Scheme, sha256::Digest>(participants),
         marshal::max_payload_size::<Standard<Block>, Scheme>(participants, &()),
         probe::max_payload_size::<Standard<Block>, Scheme>(participants, &()),

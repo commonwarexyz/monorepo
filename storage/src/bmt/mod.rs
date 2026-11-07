@@ -53,12 +53,16 @@ use commonware_codec::{
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Sequential;
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
+use core::borrow::Borrow;
 use thiserror::Error;
 
 /// There should never be more than 32 sibling levels in a proof. Because
 /// [Proof::leaf_count] is a `u32`, a tree can have at most `u32::MAX` leaves,
 /// which requires at most `u32::BITS` sibling hashes per proven item.
 pub const MAX_LEVELS: usize = u32::BITS as usize;
+
+// Cap eager reservations from iterator hints. Larger batches grow as needed.
+const MAX_INITIAL_CAPACITY: usize = 16 * 1024;
 
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
 #[derive(Error, Debug)]
@@ -637,11 +641,31 @@ impl<D: Digest> Proof<D> {
     /// computation, so any modification to it will cause verification to fail.
     pub fn verify_multi_inclusion<H: Hasher<Digest = D>>(
         &self,
-        elements: &[(u32, D)],
+        elements: impl IntoIterator<Item: Borrow<(u32, D)>>,
         root: &D,
     ) -> Result<(), Error> {
+        // 1. Check that positions are strictly ascending and in range
+        let elements = elements.into_iter();
+        let mut current: Vec<(u32, D)> =
+            Vec::with_capacity(elements.size_hint().0.min(MAX_INITIAL_CAPACITY));
+        for element in elements {
+            let &(position, leaf) = element.borrow();
+            if position >= self.leaf_count {
+                return Err(Error::InvalidPosition(position));
+            }
+            match current.last() {
+                Some(&(previous, _)) if position == previous => {
+                    return Err(Error::DuplicatePosition(position));
+                }
+                Some(&(previous, _)) if position < previous => {
+                    return Err(Error::UnsortedPosition(position));
+                }
+                _ => current.push((position, leaf)),
+            }
+        }
+
         // Handle empty case
-        if elements.is_empty() {
+        if current.is_empty() {
             if self.leaf_count == 0 && self.siblings.is_empty() {
                 // Compute finalized empty root: H(0 || empty_tree_root)
                 let empty_tree_root = H::hash(&[]);
@@ -655,40 +679,19 @@ impl<D: Digest> Proof<D> {
             return Err(Error::NoLeaves);
         }
 
-        // 1. Check that positions are strictly ascending and in range
-        let mut previous = None;
-        for &(position, _) in elements {
-            if position >= self.leaf_count {
-                return Err(Error::InvalidPosition(position));
-            }
-            match previous {
-                Some(previous) if position == previous => {
-                    return Err(Error::DuplicatePosition(position));
-                }
-                Some(previous) if position < previous => {
-                    return Err(Error::UnsortedPosition(position));
-                }
-                _ => previous = Some(position),
-            }
-        }
-
-        // 2. Hash the position-prefixed leaves, two at a time via `hash_pair`
-        let mut current: Vec<(u32, D)> = Vec::with_capacity(elements.len());
-        let (leaf_chunks, leaf_remainder) = elements.as_chunks::<2>();
-        for chunk in leaf_chunks {
-            let (pos_a, leaf_a) = &chunk[0];
-            let (pos_b, leaf_b) = &chunk[1];
+        // 2. Hash the position-prefixed leaves in place, two at a time via `hash_pair`
+        let (pairs, remainder) = current.as_chunks_mut::<2>();
+        for [(pos_a, leaf_a), (pos_b, leaf_b)] in pairs {
             let (digest_a, digest_b) = H::hash_pair(
                 &[&pos_a.to_be_bytes(), leaf_a.as_ref()],
                 &[&pos_b.to_be_bytes(), leaf_b.as_ref()],
                 &Sequential,
             );
-            current.push((*pos_a, digest_a));
-            current.push((*pos_b, digest_b));
+            *leaf_a = digest_a;
+            *leaf_b = digest_b;
         }
-        for (position, leaf) in leaf_remainder {
-            let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
-            current.push((*position, digest));
+        if let [(position, leaf)] = remainder {
+            *leaf = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
         }
 
         // 3. Iterate up the tree
@@ -785,23 +788,27 @@ impl<D: Digest> Proof<D> {
     /// in a Binary Merkle Tree with `root`.
     ///
     /// This is a convenience method for verifying range proofs. The leaves must be
-    /// in order starting from `position`.
+    /// in order starting from `position`, and a `len()` that differs from the number
+    /// yielded is rejected.
     ///
     /// The `leaf_count` stored in the proof is incorporated into the finalized root
     /// computation, so any modification to it will cause verification to fail.
     pub fn verify_range_inclusion<H: Hasher<Digest = D>>(
         &self,
         position: u32,
-        leaves: &[D],
+        leaves: impl IntoIterator<Item: Borrow<D>, IntoIter: ExactSizeIterator>,
         root: &D,
     ) -> Result<(), Error> {
+        let leaves = leaves.into_iter();
+        let reported = leaves.len();
+
         // For empty trees, only position 0 with empty leaves is valid
-        if leaves.is_empty() && position != 0 {
+        if reported == 0 && position != 0 {
             return Err(Error::InvalidPosition(position));
         }
-        if !leaves.is_empty() {
+        if reported != 0 {
             let leaves_len =
-                u32::try_from(leaves.len()).map_err(|_| Error::InvalidPosition(position))?;
+                u32::try_from(reported).map_err(|_| Error::InvalidPosition(position))?;
             let end = position
                 .checked_add(leaves_len - 1)
                 .ok_or(Error::InvalidPosition(position))?;
@@ -810,13 +817,22 @@ impl<D: Digest> Proof<D> {
             }
         }
 
-        // Convert to format expected by verify_multi_inclusion
-        let elements: Vec<(u32, D)> = leaves
-            .iter()
-            .enumerate()
-            .map(|(i, leaf)| (position + i as u32, *leaf))
-            .collect();
-        self.verify_multi_inclusion::<H>(&elements, root)
+        // Pair each position with its leaf, and reject leaves that do not match the reported
+        // length the range was checked against.
+        let mut yielded = 0usize;
+        let elements = leaves.enumerate().map(|(i, leaf)| {
+            yielded += 1;
+            (position + i as u32, *leaf.borrow())
+        });
+        self.verify_multi_inclusion::<H>(elements, root)?;
+        if yielded != reported {
+            // Name the first missing or extra leaf. It is at most one past the checked range,
+            // which ends below `leaf_count`, so this cannot overflow.
+            return Err(Error::InvalidPosition(
+                position + yielded.min(reported) as u32,
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1147,6 +1163,72 @@ mod tests {
                 .verify_range_inclusion::<Sha256>(2, range_leaves, &root)
                 .is_ok()
         );
+    }
+
+    /// Leaves whose reported length differs from the number they yield.
+    struct Misreported<I> {
+        inner: I,
+        len: usize,
+    }
+
+    impl<I: Iterator> Iterator for Misreported<I> {
+        type Item = I::Item;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.inner.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (self.len, Some(self.len))
+        }
+    }
+
+    impl<I: Iterator> ExactSizeIterator for Misreported<I> {}
+
+    #[test]
+    fn test_range_proof_iterator_length() {
+        let digests: Vec<Digest> = (0..8u32)
+            .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+            .collect();
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+        let range_proof = tree.range_proof(2, 5).unwrap();
+
+        // Owned leaves verify like borrowed ones.
+        let leaves = digests[2..6].iter().copied();
+        assert!(
+            range_proof
+                .verify_range_inclusion::<Sha256>(2, leaves, &root)
+                .is_ok()
+        );
+
+        // Reject missing leaves.
+        let leaves = Misreported {
+            inner: digests[2..5].iter().copied(),
+            len: 4,
+        };
+        assert!(
+            range_proof
+                .verify_range_inclusion::<Sha256>(2, leaves, &root)
+                .is_err()
+        );
+
+        // Reject valid leaves with incorrect length metadata. These cases isolate the check
+        // against the number actually consumed, which names the first extra or missing leaf.
+        for (reported, position) in [(3, 5), (5, 6)] {
+            let leaves = Misreported {
+                inner: digests[2..6].iter().copied(),
+                len: reported,
+            };
+            assert!(matches!(
+                range_proof.verify_range_inclusion::<Sha256>(2, leaves, &root),
+                Err(Error::InvalidPosition(p)) if p == position
+            ));
+        }
     }
 
     #[test]
@@ -1767,13 +1849,10 @@ mod tests {
         let positions = [0, 3, 5];
         let multi_proof = tree.multi_proof(positions).unwrap();
 
-        let elements: Vec<(u32, Digest)> = positions
-            .iter()
-            .map(|&p| (p, digests[p as usize]))
-            .collect();
+        let elements = positions.into_iter().map(|p| (p, digests[p as usize]));
         assert!(
             multi_proof
-                .verify_multi_inclusion::<Sha256>(&elements, &root)
+                .verify_multi_inclusion::<Sha256>(elements, &root)
                 .is_ok()
         );
     }
@@ -2469,6 +2548,13 @@ mod tests {
                 .verify_multi_inclusion::<Sha256>(&invalid_elements, &root)
                 .is_err()
         );
+        for count in [1, usize::MAX] {
+            let elements = core::iter::repeat_n((100, digests[0]), count);
+            assert!(matches!(
+                multi_proof.verify_multi_inclusion::<Sha256>(elements, &root),
+                Err(Error::InvalidPosition(100)),
+            ));
+        }
     }
 
     #[test]

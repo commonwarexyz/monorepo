@@ -44,7 +44,7 @@
 //!     let k = Digest::random(&mut ctx);
 //!     let v = Digest::random(&mut ctx);
 //!     let metadata = Some(Digest::random(&mut ctx));
-//!     let batch = db.new_batch().update(k, v).with_metadata(metadata).finalize();
+//!     let batch = db.new_batch().write(k, Some(v)).with_metadata(metadata).finalize();
 //!     let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
 //!
 //!     // Fetch the value
@@ -52,7 +52,7 @@
 //!     assert_eq!(fetched_value.unwrap(), v);
 //!
 //!     // Delete the key's value
-//!     let batch = db.new_batch().delete(k).finalize();
+//!     let batch = db.new_batch().write(k, None).finalize();
 //!     let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
 //!
 //!     // Fetch the value
@@ -68,10 +68,10 @@
 //! // Apply a batch and commit it, then build a child batch from the newly published state
 //! // and apply it. Each mutation takes the database and returns it, so committing and
 //! // building run in sequence on the threaded handle.
-//! let batch = db.new_batch().update(key_a, value_a).finalize();
+//! let batch = db.new_batch().write(key_a, Some(value_a)).finalize();
 //! let db = db.apply_batch(batch).await?.commit().await?;
 //!
-//! let child = db.new_batch().update(key_b, value_b).finalize();
+//! let child = db.new_batch().write(key_b, Some(value_b)).finalize();
 //! let db = db.apply_batch(child).await?.commit().await?;
 //! ```
 
@@ -102,8 +102,8 @@ use crate::{
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
 use commonware_runtime::{Handle, ReadOptions};
-use commonware_utils::{Widen, bitmap};
-use core::num::NonZeroUsize;
+use commonware_utils::{Widen, bitmap, iter::zip_eq};
+use core::{borrow::Borrow, num::NonZeroUsize};
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 
@@ -198,15 +198,33 @@ where
         self.db.get(key).await
     }
 
-    /// Update the value of `key` in the batch.
-    pub fn update(mut self, key: K, value: V) -> Self {
-        self.diff.insert(key, Some(value));
-        self
+    /// Batch read multiple keys, taking each from the batch if it modified the key and from the
+    /// store otherwise.
+    ///
+    /// Accepts slices of owned or borrowed keys and returns results in input order.
+    pub async fn get_many(&self, keys: &[impl Borrow<K> + Sync]) -> Result<Vec<Option<V>>, Error> {
+        let unmodified: Vec<&K> = keys
+            .iter()
+            .map(Borrow::borrow)
+            .filter(|key| !self.diff.contains_key(*key))
+            .collect();
+        let mut stored = self.db.get_many(&unmodified).await?.into_iter();
+        Ok(keys
+            .iter()
+            .map(|key| {
+                self.diff
+                    .get(key.borrow())
+                    .cloned()
+                    .unwrap_or_else(|| stored.next().expect("one stored value per unmodified key"))
+            })
+            .collect())
     }
 
-    /// Delete the value of `key` in the batch.
-    pub fn delete(mut self, key: K) -> Self {
-        self.diff.insert(key, None);
+    /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
+    ///
+    /// If the same key is written multiple times within a batch, the last value wins.
+    pub fn write(mut self, key: K, value: Option<V>) -> Self {
+        self.diff.insert(key, value);
         self
     }
 }
@@ -262,7 +280,7 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
             .field("bounds", &self.bounds())
-            .field("inactivity_floor_loc", &self.inactivity_floor_loc())
+            .field("inactivity_floor", &self.inactivity_floor())
             .finish_non_exhaustive()
     }
 }
@@ -287,6 +305,53 @@ where
         }
 
         Ok(None)
+    }
+
+    /// Batch read multiple keys.
+    ///
+    /// Accepts slices of owned or borrowed keys and returns results in input order.
+    pub async fn get_many(&self, keys: &[impl Borrow<K> + Sync]) -> Result<Vec<Option<V>>, Error> {
+        // Read every location the index reports for any key in one batched read.
+        let mut candidates: Vec<(Location, usize)> = keys
+            .iter()
+            .enumerate()
+            .flat_map(|(index, key)| {
+                self.snapshot
+                    .get(key.borrow())
+                    .map(move |&loc| (loc, index))
+            })
+            .collect();
+        candidates.sort();
+        let mut locs: Vec<u64> = candidates.iter().map(|&(loc, _)| *loc).collect();
+        locs.dedup();
+        let ops = self.log.read_many(&locs).await.map_err(|e| match e {
+            crate::journal::Error::ItemPruned(pos) => Error::OperationPruned(Location::new(pos)),
+            e => Error::Journal(e),
+        })?;
+
+        let mut values = vec![None; keys.len()];
+        for (op, group) in zip_eq(ops, candidates.chunk_by(|a, b| a.0 == b.0)) {
+            let Operation::Update(Update(k, v)) = op else {
+                unreachable!(
+                    "location ({}) does not reference update operation",
+                    group[0].0
+                );
+            };
+            // Clone for earlier matching slots and move the decoded value into the last.
+            let mut pending = None;
+            for &(_, index) in group {
+                if &k != keys[index].borrow() {
+                    continue;
+                }
+                if let Some(previous) = pending.replace(index) {
+                    values[previous] = Some(v.clone());
+                }
+            }
+            if let Some(last) = pending {
+                values[last] = Some(v);
+            }
+        }
+        Ok(values)
     }
 
     /// Returns a new empty batch of changes.
@@ -319,7 +384,7 @@ where
 
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
-    pub const fn inactivity_floor_loc(&self) -> Location {
+    pub const fn inactivity_floor(&self) -> Location {
         self.inactivity_floor_loc
     }
 
@@ -437,7 +502,7 @@ where
         let init_buffer = cfg.init_buffer;
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
         let op = log.read(*last_commit_loc).await?;
-        let inactivity_floor_loc = op.has_floor().expect("last op should be a commit");
+        let inactivity_floor_loc = op.inactivity_floor().expect("last op should be a commit");
 
         // Seed the bitmap so its pruned prefix matches the retained log boundary. Operations
         // below the inactivity floor are inactive.
@@ -855,17 +920,17 @@ mod test {
                 let c = Blake3::hash(&[b"c"]);
                 let batch = db
                     .new_batch()
-                    .update(a, vec![1])
-                    .update(b, vec![2])
+                    .write(a, Some(vec![1]))
+                    .write(b, Some(vec![2]))
                     .with_metadata(Some(vec![10]))
                     .finalize();
                 let db = db.apply_batch(batch).await.unwrap();
                 let first_size = db.bounds().end;
                 let batch = db
                     .new_batch()
-                    .update(a, vec![3])
-                    .delete(b)
-                    .update(c, vec![4])
+                    .write(a, Some(vec![3]))
+                    .write(b, None)
+                    .write(c, Some(vec![4]))
                     .with_metadata(Some(vec![20]))
                     .finalize();
                 let db = db.apply_batch(batch).await.unwrap();
@@ -914,8 +979,8 @@ mod test {
                 assert_eq!(db.get(&c).await.unwrap(), (!old).then(|| vec![4]));
                 let batch = db
                     .new_batch()
-                    .update(a, vec![5])
-                    .update(c, vec![6])
+                    .write(a, Some(vec![5]))
+                    .write(c, Some(vec![6]))
                     .finalize();
                 let db = db.apply_batch(batch).await.unwrap();
                 let appended_size = db.bounds().end;
@@ -969,11 +1034,11 @@ mod test {
                 (db, _) = apply_entries(db, (0..KEYS).map(|i| (key(i), Some(vec![value])))).await;
             }
             let target = db.bounds().end;
-            let target_floor = db.inactivity_floor_loc();
+            let target_floor = db.inactivity_floor();
             let prune_loc = target_floor + KEYS / 2;
             assert!(prune_loc < target);
             let mut value = 2;
-            while db.inactivity_floor_loc() < prune_loc {
+            while db.inactivity_floor() < prune_loc {
                 value += 1;
                 assert!(value <= 10);
                 (db, _) = apply_entries(db, (0..KEYS).map(|i| (key(i), Some(vec![value])))).await;
@@ -1206,7 +1271,7 @@ mod test {
             (db, handle) = db.start_sync().await.unwrap();
             assert!(pending.starts() > starts_before);
 
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             assert!(*floor > 0);
             let db = {
                 let mut prune = std::pin::pin!(db.prune(floor));
@@ -1229,9 +1294,9 @@ mod test {
             let db = create_test_store(context.child("store").with_attribute("index", 0)).await;
             assert_eq!(db.bounds().end, 1);
             assert_eq!(db.log.bounds().start, 0);
-            assert_eq!(db.inactivity_floor_loc(), 0);
+            assert_eq!(db.inactivity_floor(), 0);
             assert!(db.get_metadata().await.unwrap().is_none());
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             let db = db.prune(floor).await.unwrap();
             assert!(matches!(
                 db.prune(Location::new(1)).await,
@@ -1262,7 +1327,7 @@ mod test {
             assert_eq!(range.end, 2);
             let db = db.commit().await.unwrap();
             assert_eq!(db.bounds().end, 2);
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             let db = db.prune(floor).await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
 
@@ -1332,7 +1397,7 @@ mod test {
             let metadata = vec![99, 100];
             let batch = db
                 .new_batch()
-                .update(key, value.clone())
+                .write(key, Some(value.clone()))
                 .with_metadata(Some(metadata.clone()))
                 .finalize();
             let applied_start = db.bounds().end;
@@ -1423,7 +1488,7 @@ mod test {
 
             // Re-open the store, prune it, then ensure it replays the log correctly.
             let db = create_test_store(ctx.child("store").with_attribute("index", 1)).await;
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             let db = db.prune(floor).await.unwrap();
 
             let iter = db.snapshot.get(&k);
@@ -1493,7 +1558,7 @@ mod test {
             let bucket: Vec<_> = db.snapshot.get(&keys[0]).map(|loc| **loc).collect();
             let expected: Vec<_> = std::iter::once(count + 1).chain(2..=count).collect();
             assert_eq!(bucket, expected);
-            assert_eq!(*db.inactivity_floor_loc(), 2);
+            assert_eq!(*db.inactivity_floor(), 2);
 
             // The walk has one entry per rewrite plus one for the previous commit, and every
             // update it reaches lies below the batch.
@@ -1505,7 +1570,7 @@ mod test {
             let (db, _) = apply_entries(db, writes).await;
             let reads = counter(&context, "log_items_read_total") - before;
             assert_eq!(reads, bucket_reads + walk_reads);
-            assert_eq!(*db.inactivity_floor_loc(), floor);
+            assert_eq!(*db.inactivity_floor(), floor);
             assert_eq!(db.active_keys, count as usize);
             for (i, key) in keys.iter().enumerate() {
                 let value = if positions.contains(&i) {
@@ -1554,6 +1619,95 @@ mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
 
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// `get_many` matches `get` for each key, in input order, across keys that share an index
+    /// bucket, deleted and absent keys, and repeated keys. A batch's `get_many` reads its own
+    /// writes first.
+    #[test_traced("DEBUG")]
+    fn test_store_get_many() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut ctx| async move {
+            let db = create_test_store(ctx.child("store")).await;
+            let (k1, v1) = (Digest::random(&mut ctx), vec![1]);
+            let (mut k2, v2) = (Digest::random(&mut ctx), vec![2]);
+            k2.0[0..2].copy_from_slice(&k1.0[0..2]);
+            let (k3, v3) = (Digest::random(&mut ctx), vec![3]);
+            let (k4, v4) = (Digest::random(&mut ctx), vec![4]);
+
+            let (db, _) = apply_entries(
+                db,
+                [
+                    (k1, Some(v1.clone())),
+                    (k2, Some(v2.clone())),
+                    (k3, Some(v3)),
+                ],
+            )
+            .await;
+            let (db, _) = apply_entries(db, [(k3, None)]).await;
+
+            let keys = [k2, k4, k1, k3, k2];
+            assert!(db.get_many(&keys[..0]).await.unwrap().is_empty());
+            let values = db.get_many(&keys).await.unwrap();
+            assert_eq!(db.get_many(&keys.each_ref()).await.unwrap(), values);
+            assert_eq!(
+                values,
+                [Some(v2.clone()), None, Some(v1), None, Some(v2.clone())]
+            );
+            for (key, value) in keys.iter().zip(&values) {
+                assert_eq!(&db.get(key).await.unwrap(), value);
+            }
+
+            let batch = db.new_batch().write(k1, None).write(k4, Some(v4.clone()));
+            let keys = [k1, k2, k4];
+            assert!(batch.get_many(&keys[..0]).await.unwrap().is_empty());
+            let values = batch.get_many(&keys).await.unwrap();
+            assert_eq!(batch.get_many(&keys.each_ref()).await.unwrap(), values);
+            assert_eq!(values, [None, Some(v2), Some(v4)]);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Decoded values move to their final matching slot, cloning only for earlier duplicates.
+    #[test_traced("DEBUG")]
+    fn test_store_get_many_moves_values() {
+        deterministic::Runner::default().start(|context| async move {
+            let colliding = |i| colliding_digest(0xAA, i);
+            let other = colliding_digest(0xBB, 0);
+            let db = open(context.child("store"), "get-many-moves").await;
+            let seed = [colliding(0), colliding(1), colliding(2), other]
+                .into_iter()
+                .zip(0u8..)
+                .map(|(key, tag)| (key, Some(CountedValue::new(tag))));
+            let (db, _) = apply(db, seed, &mut Hold).await;
+
+            let keys = [
+                colliding(1),
+                colliding(3),
+                other,
+                colliding(0),
+                colliding(1),
+                colliding(1),
+            ];
+            let values = db.get_many(&keys).await.unwrap();
+            let observed: Vec<_> = values
+                .iter()
+                .map(|value| value.as_ref().map(|value| (value.0, value.clones())))
+                .collect();
+            assert_eq!(
+                observed,
+                [
+                    Some((1, 2)),
+                    None,
+                    Some((3, 0)),
+                    Some((0, 0)),
+                    Some((1, 2)),
+                    Some((1, 2))
+                ]
+            );
             db.destroy().await.unwrap();
         });
     }
@@ -1690,7 +1844,7 @@ mod test {
         }
         assert_eq!(live.keys().copied().collect::<BTreeSet<_>>(), expected);
         assert_eq!(live.len(), db.active_keys);
-        assert_bound(db.inactivity_floor_loc(), db.bounds().end, live);
+        assert_bound(db.inactivity_floor(), db.bounds().end, live);
         db
     }
 
@@ -1775,7 +1929,7 @@ mod test {
                 // Seed 20 keys in key order at 1..21. The previous commit's entry moves the first
                 // update to 21, and the commit lies at 22.
                 let (db, _) = apply(db, seed.clone(), &mut Proportional).await;
-                assert_eq!((*db.inactivity_floor_loc(), *db.bounds().end), (2, 23));
+                assert_eq!((*db.inactivity_floor(), *db.bounds().end), (2, 23));
                 db
             };
 
@@ -1790,7 +1944,7 @@ mod test {
                 apply(db, writes.clone(), &mut Proportional).await
             };
             assert_eq!(*r.start..*r.end, range);
-            assert_eq!(*db.inactivity_floor_loc(), floor);
+            assert_eq!(*db.inactivity_floor(), floor);
 
             // The batch appends its writes in key order, the updates its walk moves with their
             // latest values, and its commit.
@@ -1889,7 +2043,7 @@ mod test {
                 for i in 0u64..ELEMENTS {
                     let k = Blake3::hash(&[&i.to_be_bytes()]);
                     let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
-                    batch = batch.update(k, v);
+                    batch = batch.write(k, Some(v));
                 }
 
                 // Drop the batch without applying it. This simulates a failure before apply.
@@ -1936,7 +2090,7 @@ mod test {
             assert_eq!(db.bounds().end, final_count);
             assert_eq!(db.inactivity_floor_loc, final_floor);
 
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             let db = db.prune(floor).await.unwrap();
             assert_eq!(db.log.bounds().start, *final_floor - *final_floor % 7);
             assert_eq!(db.snapshot.items(), 857);
@@ -1964,12 +2118,12 @@ mod test {
             let (db, _) = apply_entries(db, [(key1, Some(value1.clone()))]).await;
             let db = db.commit().await.unwrap();
             let committed_end = db.bounds().end;
-            let committed_floor = db.inactivity_floor_loc();
+            let committed_floor = db.inactivity_floor();
             drop(db);
 
             let db = create_test_store(context.child("store").with_attribute("index", 1)).await;
             assert_eq!(db.bounds().end, committed_end);
-            assert_eq!(db.inactivity_floor_loc(), committed_floor);
+            assert_eq!(db.inactivity_floor(), committed_floor);
             assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
             assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
 
@@ -1997,7 +2151,7 @@ mod test {
             assert!(result.unwrap().is_none());
 
             // Insert a key-value pair
-            let batch = batch.update(key, value.clone());
+            let batch = batch.write(key, Some(value.clone()));
 
             assert_eq!(db.bounds().end, 1); // The batch is not applied yet
             assert_eq!(db.inactivity_floor_loc, 0);
@@ -2020,7 +2174,7 @@ mod test {
             let metadata = vec![99, 100];
             let batch = db
                 .new_batch()
-                .update(key, value.clone())
+                .write(key, Some(value.clone()))
                 .with_metadata(Some(metadata.clone()))
                 .finalize();
             let applied_start = db.bounds().end;
@@ -2083,8 +2237,8 @@ mod test {
             let long = b"key-extended".to_vec();
             let batch = db
                 .new_batch()
-                .update(short.clone(), vec![1])
-                .update(long.clone(), vec![2])
+                .write(short.clone(), Some(vec![1]))
+                .write(long.clone(), Some(vec![2]))
                 .finalize();
             let db = db.apply_batch(batch).await.unwrap();
             let db = db.commit().await.unwrap();
@@ -2170,7 +2324,7 @@ mod test {
             let db = open(context.child("store"), "hold").await;
             let seed = seed(4);
             let (db, _) = apply(db, seed.clone(), &mut Hold).await;
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
 
             // Hold the floor for a batch that updates, deletes, and creates keys.
             let created = digest(4);
@@ -2182,7 +2336,7 @@ mod test {
             let (db, _) = apply(db, writes, &mut Hold).await;
 
             // The writes apply and the untouched keys keep their values.
-            assert_eq!(db.inactivity_floor_loc(), floor);
+            assert_eq!(db.inactivity_floor(), floor);
             let expected = [
                 (seed[0].0, Some(digest(200))),
                 (seed[1].0, None),
@@ -2198,7 +2352,7 @@ mod test {
             let deletes = [seed[0].0, seed[2].0, seed[3].0, created].map(|key| (key, None));
             let (db, _) = apply(db, deletes, &mut Hold).await;
             assert!(db.is_empty());
-            assert_eq!(db.inactivity_floor_loc(), db.bounds().end - 1);
+            assert_eq!(db.inactivity_floor(), db.bounds().end - 1);
             db.destroy().await.unwrap();
         });
     }
@@ -2223,13 +2377,13 @@ mod test {
             // The batch appends only its commit and moves the floor to the stopped update's
             // location.
             assert_eq!(*range.start..*range.end, 6..7);
-            assert_eq!(db.inactivity_floor_loc(), first);
+            assert_eq!(db.inactivity_floor(), first);
 
             // A policy of the next batch decides the stopped update without spending a skip.
             let mut policy = Script::new(1, 0, keep);
             let (db, _) = apply(db, [], &mut policy).await;
             assert_eq!(policy.visited, [(first, key, value)]);
-            assert_eq!(*db.inactivity_floor_loc(), 2);
+            assert_eq!(*db.inactivity_floor(), 2);
             for (key, value) in seed {
                 assert_eq!(db.get(&key).await.unwrap(), value);
             }
@@ -2322,7 +2476,7 @@ mod test {
             });
             let (db, range) = apply(db, [], &mut policy).await;
             assert_eq!(policy.locations(), [1, 2, 3].map(Location::new));
-            assert_eq!(db.inactivity_floor_loc(), tip);
+            assert_eq!(db.inactivity_floor(), tip);
 
             // The replacement takes the second update's place among the moves to the tip.
             assert_eq!(*range.start..*range.end, 5..9);
@@ -2424,7 +2578,7 @@ mod test {
             };
             let (db, range) = apply(db, [(digest(0), Some(value))], &mut policy).await;
             assert_eq!(*range.start..*range.end, 1..3);
-            assert_eq!(*db.inactivity_floor_loc(), 0);
+            assert_eq!(*db.inactivity_floor(), 0);
             assert_eq!(witness.clones(), 1);
 
             // The batch appends only its write and its commit.
@@ -2485,7 +2639,7 @@ mod test {
 
             // No skip remains for the batch's delete at 8, so the floor stops there, one short of
             // the tip the writes reached.
-            assert_eq!(*db.inactivity_floor_loc(), 8);
+            assert_eq!(*db.inactivity_floor(), 8);
             let expected = [
                 seed[0],
                 (seed[1].0, Some(digest(201))),
@@ -2499,10 +2653,10 @@ mod test {
 
             // The state survives commit and reopen.
             let db = db.commit().await.unwrap();
-            let (size, floor) = (db.bounds().end, db.inactivity_floor_loc());
+            let (size, floor) = (db.bounds().end, db.inactivity_floor());
             drop(db);
             let db: PolicyStore<sha256::Digest> = open(child(1), "recover").await;
-            assert_eq!((db.bounds().end, db.inactivity_floor_loc()), (size, floor));
+            assert_eq!((db.bounds().end, db.inactivity_floor()), (size, floor));
             for (key, value) in expected {
                 assert_eq!(db.get(&key).await.unwrap(), value);
             }
@@ -2511,7 +2665,7 @@ mod test {
             let db = db.prune(floor).await.unwrap();
             drop(db);
             let db: PolicyStore<sha256::Digest> = open(child(2), "recover").await;
-            assert_eq!((db.bounds().end, db.inactivity_floor_loc()), (size, floor));
+            assert_eq!((db.bounds().end, db.inactivity_floor()), (size, floor));
             for (key, value) in expected {
                 assert_eq!(db.get(&key).await.unwrap(), value);
             }
@@ -2590,7 +2744,7 @@ mod test {
                         decided,
                         "entries={entries} skips={skips}"
                     );
-                    assert_eq!(*db.inactivity_floor_loc(), floor);
+                    assert_eq!(*db.inactivity_floor(), floor);
                     db.destroy().await.unwrap();
                 }
             }
@@ -2654,7 +2808,7 @@ mod test {
                         trial += 1;
                         let (db, _) = apply(db, seed.clone(), &mut Hold).await;
                         let (db, _) = apply(db, updates.clone(), &mut Hold).await;
-                        assert_eq!((*db.inactivity_floor_loc(), *db.bounds().end), (0, 12));
+                        assert_eq!((*db.inactivity_floor(), *db.bounds().end), (0, 12));
 
                         // The floor and the decided updates match [`walk_model`].
                         let (expected, decisions) =
@@ -2668,7 +2822,7 @@ mod test {
                         let limits =
                             format!("writes={} entries={entries} skips={skips}", writes.len());
                         assert_eq!(policy.visited, decided, "{limits}");
-                        assert_eq!(*db.inactivity_floor_loc(), expected, "{limits}");
+                        assert_eq!(*db.inactivity_floor(), expected, "{limits}");
 
                         // Each decided update moves to the tip with its value after the writes
                         // and before the commit.
@@ -2735,7 +2889,7 @@ mod test {
                 .map(|(loc, i)| (Location::new(loc), key(i), written(i)))
                 .collect();
             assert_eq!(policy.visited, visited);
-            assert_eq!(*db.inactivity_floor_loc(), 10);
+            assert_eq!(*db.inactivity_floor(), 10);
 
             // The decisions follow the writes in decision order. The stopped update stays at 10.
             assert_eq!(*range.start..*range.end, 6..16);
@@ -2767,7 +2921,7 @@ mod test {
             let db = db.commit().await.unwrap();
             drop(db);
             let db: PolicyStore<sha256::Digest> = open(child(1), "own").await;
-            assert_eq!((*db.bounds().end, *db.inactivity_floor_loc()), (16, 10));
+            assert_eq!((*db.bounds().end, *db.inactivity_floor()), (16, 10));
             for (key, value) in values {
                 assert_eq!(db.get(&key).await.unwrap(), value);
             }
@@ -2775,7 +2929,7 @@ mod test {
             let mut policy = Script::new(1, 0, keep);
             let (db, _) = apply(db, [], &mut policy).await;
             assert_eq!(policy.visited, [(Location::new(10), key(5), written(5))]);
-            assert_eq!(*db.inactivity_floor_loc(), 11);
+            assert_eq!(*db.inactivity_floor(), 11);
             db.destroy().await.unwrap();
         });
     }
@@ -2826,7 +2980,7 @@ mod test {
         let ops = db.log.read_many(&positions).await.unwrap();
         let mut live = BTreeMap::new();
         replay(&mut live, Location::new(bounds.start), &ops);
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         assert!(
             live.values().all(|loc| *loc >= floor),
             "a live update lies below the floor {floor}",
@@ -2939,7 +3093,7 @@ mod test {
                 assert_state(&db, &expected).await;
 
                 if round % 10 == 9 {
-                    let floor = db.inactivity_floor_loc();
+                    let floor = db.inactivity_floor();
                     db = db.prune(floor).await.unwrap();
                     assert_state(&db, &expected).await;
                 }
@@ -2978,12 +3132,12 @@ mod test {
                 skips: u64::MAX,
             };
             let (db, _) = apply(db, [], &mut policy).await;
-            assert_eq!((*db.inactivity_floor_loc(), *db.bounds().end), (603, 904));
+            assert_eq!((*db.inactivity_floor(), *db.bounds().end), (603, 904));
 
             // Pruning to the floor retains the log section starting at 602 and drops the bitmap's
             // first 512-bit chunk.
             let db = db.commit().await.unwrap();
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             let db = db.prune(floor).await.unwrap();
             assert_eq!(db.log.bounds().start, 602);
             assert_eq!(db.bitmap.pruned_bits(), 512);
