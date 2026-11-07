@@ -419,8 +419,8 @@ fn test_applied_close_is_durable() {
 }
 
 /// A validator that crashes after its payout log commits a posted close, but before its balances
-/// apply it, restarts with the log one close ahead. It reopens the log at the size its balances'
-/// close certifies, replays the close, and proves the payout the close owes.
+/// apply it, restarts with the log one close ahead. It reopens the log at the payouts size its
+/// balances' close certifies, replays the close, and proves the payout the close owes.
 #[test]
 fn test_validator_realigns_its_payout_log_after_a_crash() {
     deterministic::Runner::default().start(|mut context| async move {

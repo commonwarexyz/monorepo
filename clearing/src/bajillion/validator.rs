@@ -56,7 +56,7 @@ type Batch<P, D, S, A> = MerkleizedBatch<mmb::Family, D, Update<P, FixedEncoding
 /// The validators' payout log, an append-only log of every payout since genesis.
 ///
 /// Each posted close appends its payouts in account order and then a commit ([Payout::stage]).
-/// Its root and size after each posted close are the payouts root and size that close's summary
+/// Its size and root after each posted close are the payouts size and root that close's summary
 /// certifies, and each payout keeps its index for good.
 pub type PayoutLog<E, P, H, S, A> = keyless::fixed::Db<mmr::Family, E, Payout<P, A>, H, S>;
 
@@ -405,9 +405,9 @@ pub struct Checked<P: PublicKey, D: Digest, A: Amount> {
     flows: Flows<P, A>,
     /// Payouts root of the parent close.
     log: D,
-    /// The queued deposits the close processes.
+    /// The deposits the close processes, as their count and the queue's running hash.
     deposits: Processed<D>,
-    /// The queued forced withdrawals the close processes.
+    /// The forced withdrawals the close processes, as their count and the queue's running hash.
     forced_withdrawals: Processed<D>,
 }
 
@@ -454,8 +454,8 @@ impl<P: PublicKey, D: Digest, A: Amount> Checked<P, D, A> {
             matrix: self.matrix.root(),
             balances: batch.root(),
             payouts: Payouts {
-                root: appends.root(),
                 size: *appends.size(),
+                root: appends.root(),
             },
             deposits: self.deposits,
             forced_withdrawals: self.forced_withdrawals,
@@ -982,7 +982,8 @@ mod tests {
 
     /// Apply makes the payout log durable before it changes the balances. A validator stopped
     /// before the balances commit reopens with the log at the new close and the balances at the old
-    /// one. A bounded reopen of the log at the size the balances' close certifies realigns them.
+    /// one. A bounded reopen of the log at the payouts size the balances' close certifies realigns
+    /// them.
     #[test]
     fn test_apply_makes_the_log_durable_first() {
         deterministic::Runner::default().start(|context| async move {
@@ -1003,8 +1004,8 @@ mod tests {
             assert_eq!(crashed.balances.root(), first.summary.balances);
             assert_eq!(crashed.log.root(), second.summary.payouts.root);
 
-            // The balances hold the close of epoch 1, so the log reopens at that close's size and
-            // the close of epoch 2 applies again as it did.
+            // The balances hold the close of epoch 1, so the log reopens at that close's payouts
+            // size and the close of epoch 2 applies again as it did.
             let Store { balances, log } = crashed;
             drop(log);
             let size = Some(first.summary.payouts.size);
@@ -1273,7 +1274,7 @@ mod tests {
 
     /// Databases that applied a close that did not post rewind by reopening at the last posted
     /// close's commit, while the balances retain that commit's inactivity floor. The payout log
-    /// rewinds to the size that close certifies.
+    /// rewinds to the payouts size that close certifies.
     #[test]
     fn test_bounded_reopen_rewinds_to_a_posted_close() {
         deterministic::Runner::default().start(|context| async move {
@@ -1323,7 +1324,7 @@ mod tests {
 
     /// Balances pruned to their sync boundary reopen at an earlier posted close only while that
     /// close's inactivity floor is retained. The payout log is never pruned, so it always reopens
-    /// at the size that close certifies.
+    /// at the payouts size that close certifies.
     #[test]
     fn test_bounded_reopen_fails_once_the_floor_is_pruned() {
         deterministic::Runner::default().start(|context| async move {

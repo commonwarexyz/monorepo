@@ -361,7 +361,7 @@
 //! proposal's summary and its certificate.
 //!
 //! Every payout joins one [PayoutLog] and keeps its index there for good. [Checked::settle] stages
-//! the close's batch with [Payout::stage], and the summary records the log's root and size after
+//! the close's batch with [Payout::stage], and the summary records the log's size and root after
 //! the batch. With p the parent's payouts size and s the close's, the close's payouts take the
 //! indices [p, s - 1) in account order and its commit takes s - 1 ([Proposal::payouts]). A
 //! validator can find an account's payout of a close by binary search over [p, s - 1) and prove it
@@ -371,15 +371,17 @@
 //!   Summary(e)
 //!   +-------+--------+--------+----------+-------------+--------------+--------------------+
 //!   | epoch | parent | matrix | balances |   payouts   |   deposits   | forced withdrawals |
-//!   |       |        |        |          | root | size | count | hash |  count   |  hash   |
+//!   |       |        |        |          | size | root | count | hash |  count   |  hash   |
 //!   +-------+--------+--------+----------+------+------+-------+------+----------+---------+
-//!               |        |         |        |       |             |                   |
-//!               v        |         |        |       |             '---------+---------'
-//!        H(Summary(e-1)) |         |        |       |                       v
-//!                        |         |        |       |      hash in Summary(e-1), extended by
-//!                        |         |        |       |      H(hash || request) for each request
-//!                        |         |        |       |      the close processes, in queue order
-//!                        |         |        '-------+--> root and size of PayoutLog after the
+//!               |        |         |        |       |      |      |        |          |
+//!               v        |         |        |       |      '--+---'        '----+-----'
+//!        H(Summary(e-1)) |         |        |       |         '--------+--------'
+//!                        |         |        |       |                  v
+//!                        |         |        |       |      count of requests the close processes
+//!                        |         |        |       |      and hash in Summary(e-1) extended by
+//!                        |         |        |       |      H(hash || request) for each of them,
+//!                        |         |        |       |      in queue order
+//!                        |         |        '-------+--> size and root of PayoutLog after the
 //!                        |         |                     close's payouts and commit
 //!                        |         '--> root of Balances, keyed by account
 //!                        v
@@ -488,7 +490,7 @@
 //!                           | halted or not                |
 //!                           +------------------------------+
 //!                           +------------------------------+
-//!   Summary payouts ------->| payouts root and size        |
+//!   Summary payouts ------->| payouts root                 |
 //!   PayoutProof ----------->| claimed ranges [0,2) [3,5)   |-- withdraw --> account
 //!                           +------------------------------+
 //! ```
@@ -539,9 +541,9 @@
 //!
 //!   In one state change, a post drops the processed requests and sets each required count to what
 //!   remains queued. It adds the commit position (the payouts size less one) to the claimed ranges.
-//!   It records the summary's matrix root, balances root, payouts root and size, and digest. It
-//!   transfers nothing. A lower required count lets closes defer a forced withdrawal forever, and a
-//!   transfer that can fail inside a post blocks every later post.
+//!   It records the summary's matrix root, balances root, payouts root, and digest. It transfers
+//!   nothing. A lower required count lets closes defer a forced withdrawal forever, and a transfer
+//!   that can fail inside a post blocks every later post.
 //!
 //! - **L6.** Pay a payout, before or after a halt, only if [PayoutProof::verify] accepts its proof
 //!   under the last posted payouts root and no claimed range covers its index. In one state change,
@@ -614,13 +616,14 @@
 //!
 //! 1. **Integers.** Fixed-width integers (every epoch, count, and built-in amount) encode
 //!    big-endian, and lengths encode as varints. Public keys and digests encode as their raw bytes.
-//!    The genesis summary's parent and both of its running hashes are all zeros.
+//!    The genesis summary's parent and both of its running hashes are all zeros, and both of its
+//!    counts are zero.
 //!
 //! 2. **Trees.** Payment maps and the matrix commit with the binary Merkle tree of
 //!    [commonware_storage::bmt]. A leaf is hashed with its big-endian `u32` position, each level
 //!    hashes pairs and duplicates an unpaired last node, and the root is
-//!    `H(leaf_count || tree_root)`. An empty tree holds the single node `H()`, so its root is
-//!    `H(0u32 || H())`.
+//!    `H(leaf_count || tree_root)` with the leaf count as a big-endian `u32`. An empty tree holds
+//!    the single node `H()`, so its root is `H(0u32 || H())`.
 //!
 //! 3. **Leaves.** A map entry is `H(account || amount)`, and a matrix row is
 //!    `H(sender || payments root)`. Entries are strictly increasing by account.
@@ -639,20 +642,21 @@
 //!    sender signs it in [Namespace::state] and the operator in [Namespace::acknowledgement], and
 //!    the receipt's entry proves under the state's payments root at its position.
 //!
-//! 7. **Summaries.** A [Summary] encodes as epoch, parent, matrix, balances, and its [Payouts] as
-//!    root and size, then the count and running hash of the deposits and of the forced withdrawals.
+//! 7. **Summaries.** A [Summary] encodes as epoch, parent, matrix, balances, the payouts size and
+//!    root, the deposits count and running hash, and the forced withdrawals count and running hash.
 //!    Its digest is the hash of that encoding, and the certificate covers the encoding in
 //!    [Namespace::summary]. A running hash extends its parent's by `H(hash || request)` for each
 //!    request the close processes in queue order. A request encodes as its account then its amount.
 //!    The ledger takes the running hashes as certified and does not recompute them.
 //!
-//! 8. **Counts.** Each count lies between its queue's required count and its length.
+//! 8. **Counts.** A summary's count for each queue lies between that queue's required count and its
+//!    length.
 //!
 //! 9. **The empty roots.** A deployment reads the empty balances root from an empty [Balances]
 //!    database. It depends on the hasher, account type, and amount type, because the database pads
 //!    its fixed-size operations to the key and value widths. An empty [PayoutLog] holds one commit
 //!    with no metadata and an inactivity floor of zero, so its size is 1. [Summary::genesis]
-//!    records its root.
+//!    records its size and root.
 //!
 //! 10. **Balance proofs.** [BalanceProof::verify] is the key-value proof of QMDB's current
 //!     database, an operation proof under the canonical root together with its bitmap chunk. It is
@@ -661,9 +665,9 @@
 //! 11. **Payout proofs.** [PayoutProof::verify] is the range proof of QMDB's keyless database for
 //!     one operation, over the Merkle Mountain Range of [commonware_storage::merkle::mmr]. A leaf
 //!     is `H(position || operation)`, with the operation's node position in the range as a
-//!     big-endian `u64`. That position differs from the operation's index. The proof rebuilds the
-//!     root from that leaf and the log's size. The floor stays zero, so the root has no inactive
-//!     peaks.
+//!     big-endian `u64`. That position differs from the operation's index. The proof carries the
+//!     log's size and rebuilds the root from that leaf and that size. The floor stays zero, so the
+//!     root has no inactive peaks.
 //!
 //!     Every operation encodes to the payout's width plus 10 bytes. An appended payout encodes as
 //!     tag 1, its account, its amount, and zeros to that size. A commit encodes as tag 0, a zero

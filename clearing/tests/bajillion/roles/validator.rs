@@ -114,9 +114,9 @@ where
         Ok(Database::init(context, config.balances.clone(), None).await?)
     }
 
-    /// Opens the payout log at the close of `summary` (V2). The log is durable before the balances
-    /// change, so it is at or past the close the balances hold, and the bounded reopen discards
-    /// any later close.
+    /// Opens the payout log at `summary`'s payouts size (V2). The log is durable before the
+    /// balances change, so it is at or past the close the balances hold, and the bounded reopen
+    /// discards any later close.
     ///
     /// Returns InvalidCheckpoint unless the log then has `summary`'s payouts root.
     async fn log(

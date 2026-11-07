@@ -367,7 +367,7 @@ fn test_port_vector() {
         );
         assert_eq!(
             hex(genesis.digest::<Sha256>()),
-            "59346ef22d7fce9413f4e420f27e2f80a674e49694360a79995de4ab94785c87"
+            "44b050ae27384265b1e8c2750395dfe42ea3309302d55c7d31877dc9debbfd2c"
         );
 
         // The deposit queue's running hash after bob's deposit, chained from genesis.

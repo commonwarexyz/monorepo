@@ -63,8 +63,6 @@ pub struct Ledger<P: PublicKey, O: PublicKey, V: Verifier, H: Hasher, A: Amount>
     balances: H::Digest,
     /// Payouts root of the last posted summary.
     log: H::Digest,
-    /// Payouts size of the last posted summary.
-    size: u64,
     /// Matrix root of each posted close, in epoch order.
     matrices: Vec<H::Digest>,
     /// Funds the ledger holds. A deposit adds to them and every transfer takes from them.
@@ -107,7 +105,6 @@ where
             parent: genesis.digest::<H>(),
             balances,
             log: genesis.payouts.root,
-            size: genesis.payouts.size,
             matrices: Vec::new(),
             held: A::ZERO,
             deposits: VecDeque::new(),
@@ -236,7 +233,6 @@ where
         self.required_forced_withdrawals = self.forced_withdrawals.len();
         self.fold(commit);
         self.log = summary.payouts.root;
-        self.size = summary.payouts.size;
         self.matrices.push(summary.matrix);
         self.balances = summary.balances;
         self.parent = summary.digest::<H>();

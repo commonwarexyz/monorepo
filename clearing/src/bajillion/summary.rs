@@ -16,21 +16,23 @@ use commonware_storage::{
 use core::ops::RangeInclusive;
 use rand_core::CryptoRng;
 
-/// The requests of one ledger queue that a close processes.
+/// A ledger queue's requests that one close processes, as their count and the queue's running hash.
 ///
-/// A close processes the oldest `count` requests still queued. `hash` is the queue's running hash
-/// after them. It extends the parent summary's hash by `H(hash || request)` for each request's
-/// encoding in queue order, so it names every request the queue has processed since genesis.
+/// A close processes the oldest requests still queued, and `count` is the number this one close
+/// processes. `hash` is the queue's running hash after them. It extends the parent summary's hash
+/// by `H(hash || request)` for each request's encoding in queue order, so it covers every request
+/// the queue has processed since genesis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Processed<D: Digest> {
     /// Number of queued requests the close processes.
     pub count: u64,
-    /// Running hash of the queue after the requests the close processes.
+    /// Running hash of the queue after the close, over every request the queue has processed.
     pub hash: D,
 }
 
 impl<D: Digest> Processed<D> {
-    /// Returns the record of a close that processes `requests` after the close recorded by `self`.
+    /// Returns the record of a close that processes `requests` after the close `self` records. Its
+    /// count is the length of `requests`, and its hash extends `self`'s hash over them.
     pub(crate) fn next<H: Hasher<Digest = D>, R: Write + FixedSize>(&self, requests: &[R]) -> Self {
         let mut encoded = Vec::with_capacity(R::SIZE);
         let hash = requests.iter().fold(self.hash, |hash, request| {
@@ -80,28 +82,29 @@ where
     }
 }
 
-/// The payout log's root and size after one close.
+/// The payout log after one close, as its size and root.
 ///
 /// Each posted close appends its payouts to the [PayoutLog](super::PayoutLog) in account order,
-/// then a commit. `size` counts every operation in the log, its initial commit included, so the
-/// close's commit sits at `size - 1`.
+/// then a commit. `size` is the number of operations in the log after the close. It counts the
+/// initial commit and the payouts and commit of every close since genesis, so the close's commit
+/// sits at `size - 1`. `root` is the log's root after the close.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Payouts<D: Digest> {
-    /// Root of the payout log after the close's payouts and commit.
-    pub root: D,
-    /// Number of operations in the payout log after the close's payouts and commit.
+    /// Number of operations in the payout log after the close, its initial commit included.
     pub size: u64,
+    /// Root of the payout log after the close.
+    pub root: D,
 }
 
 impl<D: Digest> Write for Payouts<D> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.root.write(buf);
         self.size.write(buf);
+        self.root.write(buf);
     }
 }
 
 impl<D: Digest> FixedSize for Payouts<D> {
-    const SIZE: usize = D::SIZE + u64::SIZE;
+    const SIZE: usize = u64::SIZE + D::SIZE;
 }
 
 impl<D: Digest> Read for Payouts<D> {
@@ -109,8 +112,8 @@ impl<D: Digest> Read for Payouts<D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self {
-            root: D::read(buf)?,
             size: u64::read(buf)?,
+            root: D::read(buf)?,
         })
     }
 }
@@ -122,8 +125,8 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            root: u.arbitrary()?,
             size: u.arbitrary()?,
+            root: u.arbitrary()?,
         })
     }
 }
@@ -153,11 +156,11 @@ pub struct Summary<D: Digest> {
     pub matrix: D,
     /// Root of the balances after the close.
     pub balances: D,
-    /// Payout log root and size after the close.
+    /// The payout log after the close, as its size and root.
     pub payouts: Payouts<D>,
-    /// The queued deposits the close processes.
+    /// The deposits the close processes, as their count and the queue's running hash.
     pub deposits: Processed<D>,
-    /// The queued forced withdrawals the close processes.
+    /// The forced withdrawals the close processes, as their count and the queue's running hash.
     pub forced_withdrawals: Processed<D>,
 }
 
@@ -178,8 +181,8 @@ impl<D: Digest> Summary<D> {
             matrix: empty,
             balances,
             payouts: Payouts {
-                root: keyless::initial_root::<mmr::Family, FixedEncoding<Payout<P, A>>, H>(),
                 size: 1,
+                root: keyless::initial_root::<mmr::Family, FixedEncoding<Payout<P, A>>, H>(),
             },
             deposits: start,
             forced_withdrawals: start,
@@ -197,8 +200,8 @@ impl<D: Digest> Summary<D> {
     ///
     /// Returns WrongEpoch unless the summary is for `epoch`, WrongParent unless it names `parent`,
     /// InvalidCount unless each count is in its range, and InvalidCertificate unless `certificate`
-    /// verifies. The certificate is checked last, and it alone vouches for the roots, the payouts
-    /// size, and the running hashes.
+    /// verifies. The certificate is checked last, and it alone vouches for the matrix and balances
+    /// roots, the payouts size and root, and the running hashes.
     #[allow(clippy::too_many_arguments)]
     pub fn verify<V, R>(
         &self,
@@ -331,7 +334,7 @@ mod tests {
         );
         let log =
             keyless::initial_root::<mmr::Family, FixedEncoding<Payout<PublicKey, u64>>, Sha256>();
-        let expected = Payouts { root: log, size: 1 };
+        let expected = Payouts { size: 1, root: log };
         assert_eq!(genesis.payouts, expected);
         assert_eq!(Summary::decode(genesis.encode()).unwrap(), genesis);
 
@@ -357,14 +360,14 @@ mod tests {
             },
             Summary {
                 payouts: Payouts {
-                    root: other,
+                    size: 2,
                     ..genesis.payouts
                 },
                 ..genesis
             },
             Summary {
                 payouts: Payouts {
-                    size: 2,
+                    root: other,
                     ..genesis.payouts
                 },
                 ..genesis
@@ -459,7 +462,7 @@ mod tests {
 
     /// The posted summary must follow the ledger's last post and process its queues within their
     /// bounds, with a certificate over it. The certificate is checked only once everything else
-    /// holds, and it covers the payouts root and size.
+    /// holds, and it covers the payouts size and root.
     #[test]
     fn test_verify_checks_every_field_before_the_certificate() {
         let fixture = ed25519::certificate::mocks::fixture(
@@ -477,8 +480,8 @@ mod tests {
             matrix: Sha256::hash(&[b"matrix"]),
             balances: Sha256::hash(&[b"after"]),
             payouts: Payouts {
-                root: Sha256::hash(&[b"payouts"]),
                 size: 3,
+                root: Sha256::hash(&[b"payouts"]),
             },
             deposits: Processed {
                 count: 2,
@@ -545,14 +548,14 @@ mod tests {
             }
         }
 
-        // A summary that differs in its payouts root or size is not certified.
+        // A summary that differs in its payouts size or root is not certified.
         let changed = [
             Payouts {
-                root: Sha256::hash(&[b"other"]),
+                size: 4,
                 ..summary.payouts
             },
             Payouts {
-                size: 4,
+                root: Sha256::hash(&[b"other"]),
                 ..summary.payouts
             },
         ];
