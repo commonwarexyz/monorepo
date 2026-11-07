@@ -842,6 +842,51 @@ mod tests {
         assert!(matches!(decoded, Container::Run(_)));
     }
 
+    /// A sparse bitmap container with set bits from its first word to its last encodes as an
+    /// array holding every set value.
+    #[test]
+    fn test_encode_sparse_bitmap_container_spanning_first_to_last_word() {
+        // Bits in the first word, at both ends of the interior words, and at both ends of the
+        // last word, so each term of the iterator's size hint counts a value.
+        let values = [0, 64, 1000, 65471, 65472, u16::MAX];
+        let mut bitmap = Bitmap::new();
+        for value in values {
+            bitmap.insert(value);
+        }
+
+        // The array write path takes its length prefix from the iterator's `len()`.
+        let container = Container::Bitmap(Box::new(bitmap));
+        let encoded = container.encode();
+
+        // Decoding rejects leftover or missing bytes, so a miscounted prefix fails here, and the
+        // array holds exactly the inserted values.
+        let decoded = Container::decode_cfg(encoded, &()).unwrap();
+        assert!(matches!(decoded, Container::Array(_)));
+        assert_eq!(decoded.iter().collect::<Vec<_>>(), values);
+    }
+
+    /// A sparse run container whose last run ends at `u16::MAX` encodes as an array holding
+    /// every value, including the last.
+    #[test]
+    fn test_encode_sparse_run_container_ending_at_max() {
+        // Runs at both ends of the value space, the last ending at `u16::MAX`.
+        let values = [0, 2, u16::MAX - 1, u16::MAX];
+        let mut run = Run::new();
+        for value in values {
+            run.insert(value);
+        }
+
+        // The array write path takes its length prefix from the iterator's `len()`.
+        let container = Container::Run(run);
+        let encoded = container.encode();
+
+        // Decoding rejects leftover or missing bytes, so a miscounted prefix fails here, and the
+        // array holds exactly the inserted values.
+        let decoded = Container::decode_cfg(encoded, &()).unwrap();
+        assert!(matches!(decoded, Container::Array(_)));
+        assert_eq!(decoded.iter().collect::<Vec<_>>(), values);
+    }
+
     #[test]
     fn test_decode_normalization_is_idempotent_after_run_to_bitmap() {
         let mut run = Run::new();
