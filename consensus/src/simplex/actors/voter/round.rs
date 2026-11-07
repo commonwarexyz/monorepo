@@ -3,9 +3,9 @@ use crate::{
     simplex::{
         actors::span::ViewSpan,
         metrics::TimeoutReason,
-        types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
+        types::{Artifact, Finalization, Notarization, Nullification, Proposal},
     },
-    types::{Participant, Round as Rnd, View},
+    types::{Attributable, Participant, Round as Rnd, View},
 };
 use commonware_cryptography::{Digest, PublicKey, certificate::Scheme};
 use commonware_runtime::telemetry::traces::TracedExt as _;

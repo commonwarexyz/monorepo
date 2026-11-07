@@ -9,11 +9,11 @@ use crate::{
         actors::span::ViewSpan,
         scheme::Scheme,
         types::{
-            Activity, Attributable, Certificate, ConflictingFinalize, ConflictingNotarize, Kind,
-            NullifyFinalize, Proposal, Vote,
+            Activity, Certificate, ConflictingFinalize, ConflictingNotarize, Kind, NullifyFinalize,
+            Proposal, Vote,
         },
     },
-    types::{Participant, Round as Rnd},
+    types::{Attributable, Participant, Round as Rnd},
 };
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
