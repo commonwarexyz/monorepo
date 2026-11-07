@@ -994,10 +994,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE.get() as u64;
 
     /// Convert an item count to a byte length, failing on overflow.
-    fn items_to_bytes(items: u64) -> Result<u64, Error> {
-        items
-            .checked_mul(Self::CHUNK_SIZE_U64)
-            .ok_or(Error::OffsetOverflow)
+    const fn items_to_bytes(items: u64) -> Result<u64, Error> {
+        // An eager `ok_or` would build and drop an unused error on every call.
+        let Some(bytes) = items.checked_mul(Self::CHUNK_SIZE_U64) else {
+            return Err(Error::OffsetOverflow);
+        };
+        Ok(bytes)
     }
 
     /// Construct a journal from recovered blobs.

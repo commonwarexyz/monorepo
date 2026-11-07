@@ -198,9 +198,10 @@ fn validate_read_ranges(
         expected_len = expected_len
             .checked_add(len)
             .expect("buf must hold one slot per range totaling its length");
-        let end = offset
-            .checked_add(len as u64)
-            .ok_or(Error::OffsetOverflow)?;
+        // An eager `ok_or` would build and drop an unused error for every range.
+        let Some(end) = offset.checked_add(len as u64) else {
+            return Err(Error::OffsetOverflow);
+        };
         if let Some(previous_end) = previous_end {
             assert!(
                 offset >= previous_end,
