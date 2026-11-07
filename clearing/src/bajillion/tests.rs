@@ -24,7 +24,7 @@ use commonware_storage::{
 use commonware_utils::{NZU16, NZU64, NZUsize, non_empty};
 
 /// Namespace of the deployment under test.
-pub(crate) const NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_TEST";
+pub(crate) const NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_BAJILLION_TEST";
 
 /// Validators certify summaries with Ed25519 signatures from at least `2f + 1` of `3f + 1`.
 // The macro gates its fixture on a `mocks` feature that this crate does not define.
@@ -414,11 +414,11 @@ fn test_port_vector() {
                 "0000000000000001edd0f6de342a1e6a7236d6244f23d83eedfcecd059a386c8",
                 "5055701498e7703316004c952b79b61f079ea03f168e671ba4ef1b92b99f648b",
                 "947f1d130bdbf77dd4f280154cb1f1ecee668774e73759cdff911f869b36bb77",
-                "a89b2e1d91166e63c1847d31231c26d301edd7ff4d776d9e115410c9447fd87e",
-                "44181812bf2fe6d16321b1e1d35e4691af2bc3b2e61a91e126f7e138d54d6d8e",
-                "b9c65084d8de3b0eaffcbe13e4e9e111597ea5a4609fb65ed24968e7c67dd646",
-                "6ae1022eaa1b5ed1d040ab5b3ec8b00f2c1da82c7fa14fd3a75b653928a4c68a",
-                "a3d03178e63eb805478b8e507e0bb2b18c0f9e0824769e8562d10df9abe2e774",
+                "a89b2e1d91166e63f3a702485e545330ff175028de6ebf13eb6d26206e9f9197",
+                "b921356a0ba71203c9aa2291e5add7d3b7c73857894f99e31e210a03cd3c15a0",
+                "0eba08c03fdff20fb8c05e67fbb03bd0bbc88c2e51683e9b7cb260bf4550c9b7",
+                "c34bb2c8b649ca6988d0e278349baabbdd2a1198645179ff95503ccbdf54815d",
+                "1644f4ed9e157c0b478b8e507e0bb2b18c0f9e0824769e8562d10df9abe2e774",
                 "896f82b4b440526600000000000000050000000000000002014b496c9d7a3218",
                 "e471ff8ecd0f2eb2c0e482a17687241dbac72334d783f33b47",
             )

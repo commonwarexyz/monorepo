@@ -46,7 +46,7 @@ use roles::{
 };
 
 /// Namespace of the deployment under test.
-const NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_TEST";
+const NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_BAJILLION_TEST";
 
 /// Limits of the closes operators build, beyond any test's activity unless it sets its own.
 const LIMITS: Limits = Limits {

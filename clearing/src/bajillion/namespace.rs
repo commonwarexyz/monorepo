@@ -4,19 +4,19 @@ use commonware_cryptography::certificate;
 use commonware_utils::union_unique;
 
 /// Suffix of the namespace in which senders sign their states.
-const STATE: &[u8] = b"_COMMONWARE_CLEARING_STATE";
+const STATE: &[u8] = b"_COMMONWARE_CLEARING_BAJILLION_STATE";
 
 /// Suffix of the namespace in which the operator countersigns states.
-const ACKNOWLEDGEMENT: &[u8] = b"_COMMONWARE_CLEARING_ACKNOWLEDGEMENT";
+const ACKNOWLEDGEMENT: &[u8] = b"_COMMONWARE_CLEARING_BAJILLION_ACKNOWLEDGEMENT";
 
 /// Suffix of the namespace in which accounts sign soft withdrawals.
-const WITHDRAWAL: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL";
+const WITHDRAWAL: &[u8] = b"_COMMONWARE_CLEARING_BAJILLION_WITHDRAWAL";
 
 /// Suffix of the namespace in which the operator signs closes.
-const CLOSE: &[u8] = b"_COMMONWARE_CLEARING_CLOSE";
+const CLOSE: &[u8] = b"_COMMONWARE_CLEARING_BAJILLION_CLOSE";
 
 /// Suffix of the namespace in which validators certify summaries.
-const SUMMARY: &[u8] = b"_COMMONWARE_CLEARING_SUMMARY";
+const SUMMARY: &[u8] = b"_COMMONWARE_CLEARING_BAJILLION_SUMMARY";
 
 /// Signature namespaces of one deployment.
 ///

@@ -620,7 +620,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey, Signature},
     };
 
-    const NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_CLOSE_TEST";
+    const NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_BAJILLION_CLOSE_TEST";
 
     const LIMITS: Limits = Limits {
         rows: 4,
