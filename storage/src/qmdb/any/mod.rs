@@ -2719,8 +2719,7 @@ pub(crate) mod test {
             .chain(deletes.iter().map(|key| (*key, None)))
             .collect();
         let keys: Vec<&Digest> = changes.iter().map(|(key, _)| key).collect();
-        let writes: Vec<&Digest> = creates.iter().chain(&updates).collect();
-        let deletes: Vec<&Digest> = deletes.iter().collect();
+        let (writes, deletes) = keys.split_at(creates.len() + updates.len());
         let misses = || counter(&context, "log_journal_cache_misses_total");
 
         // With only the keys prefetched, relinking reads cold neighbors.
@@ -2733,7 +2732,7 @@ pub(crate) mod test {
         // With the neighbors prefetched too, merkleizing reads nothing from storage.
         cache.clear();
         db.prefetch(&keys).await;
-        prefetch_neighbors(&db, &writes, &deletes).await;
+        prefetch_neighbors(&db, writes, deletes).await;
         let before = misses();
         drop(hold_batch(&db, db.new_batch(), &changes).await);
         assert_eq!(misses(), before, "a prefetched batch must not miss");
@@ -2821,9 +2820,7 @@ pub(crate) mod test {
                         context.child("test"),
                         db,
                         cache,
-                        |db: &$db, writes: &[&Digest], deletes: &[&Digest]| {
-                            db.prefetch_neighbors(writes, deletes)
-                        },
+                        <$db>::prefetch_neighbors,
                     )
                     .await;
                 });

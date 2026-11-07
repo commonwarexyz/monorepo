@@ -2422,9 +2422,7 @@ pub mod tests {
                 context.child("test"),
                 db,
                 cache,
-                |db: &OrderedVariableP2Db, writes: &[&Digest], deletes: &[&Digest]| {
-                    db.prefetch_neighbors(writes, deletes)
-                },
+                OrderedVariableP2Db::prefetch_neighbors,
             )
             .await;
         });
