@@ -1427,7 +1427,7 @@ mod tests {
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, bitmap::Prunable as BitMap};
     use std::{
-        collections::{BTreeMap, BTreeSet},
+        collections::BTreeMap,
         future::Future as _,
         task::Context as TaskContext,
         time::{Duration, Instant},
@@ -2203,11 +2203,9 @@ mod tests {
         keys: Range<u64>,
         round: u64,
     ) -> UnmerkleizedBatch<F, Sha256, TestUpdate, N, Sequential> {
+        let value = Sha256::hash(&[&round.to_be_bytes()]);
         for key in keys {
-            batch = batch.write(
-                Sha256::hash(&[&key.to_be_bytes()]),
-                Some(Sha256::hash(&[&round.to_be_bytes()])),
-            );
+            batch = batch.write(Sha256::hash(&[&key.to_be_bytes()]), Some(value));
         }
         batch
     }
@@ -2236,20 +2234,14 @@ mod tests {
             .unwrap();
         let parent_writes = Writes::of(&parent);
         let child_writes = Writes::of(&child);
-        let parent_positions: BTreeSet<_> =
-            parent_writes.nodes.iter().map(|(pos, _)| *pos).collect();
-        assert!(
-            child_writes
+        let parent_wrote = |pos: &Position<F>| {
+            parent_writes
                 .nodes
-                .iter()
-                .any(|(pos, _)| parent_positions.contains(pos))
-        );
-        assert!(
-            child_writes
-                .nodes
-                .iter()
-                .any(|(pos, _)| !parent_positions.contains(pos))
-        );
+                .binary_search_by_key(pos, |&(p, _)| p)
+                .is_ok()
+        };
+        assert!(child_writes.nodes.iter().any(|(pos, _)| parent_wrote(pos)));
+        assert!(child_writes.nodes.iter().any(|(pos, _)| !parent_wrote(pos)));
 
         // Writes cover only their own batch: an empty child of the written parent writes the one
         // chunk its commit lands in.
