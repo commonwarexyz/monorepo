@@ -435,6 +435,14 @@ mod tests {
             let decoded = TestLookup::decode(lookup.encode()).unwrap();
             assert_eq!(decoded, lookup);
         }
+
+        // The opening of an empty list round-trips, and a tag naming neither variant is refused.
+        let (entries, tree) = list(0);
+        let lookup = TestLookup::new(&entries, &tree, &5);
+        assert_eq!(TestLookup::decode(lookup.encode()).unwrap(), lookup);
+        let mut mistagged = lookup.encode().to_vec();
+        mistagged[0] = 2;
+        assert!(TestLookup::decode(mistagged).is_err());
     }
 
     #[cfg(feature = "arbitrary")]

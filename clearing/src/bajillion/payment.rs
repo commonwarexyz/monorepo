@@ -1154,11 +1154,12 @@ mod tests {
             opening: matrix.open(&sender, &receipt.receiver),
         };
 
-        // A receipt the close credits in part contradicts it.
+        // A receipt the close credits in part contradicts it, and the challenge round-trips.
         let valid = challenge(&receipt, &underpaying);
         valid
             .verify::<Sha256>(&namespace, &operator, 2, &underpaying.root())
             .unwrap();
+        assert_eq!(Challenge::decode(valid.encode()).unwrap(), valid);
 
         // Another epoch's close is never the receipt's.
         assert!(matches!(

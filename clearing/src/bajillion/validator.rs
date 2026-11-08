@@ -1435,6 +1435,15 @@ mod tests {
                 assert!(!forged.verify::<Sha256>(&root));
             }
 
+            // The root binds the log's size and its count of inactive peaks, so a proof claiming
+            // another size or another count of inactive peaks does not verify either.
+            let mut resized = valid.clone();
+            resized.proof.leaves = Location::new(*valid.proof.leaves + 1);
+            assert!(!resized.verify::<Sha256>(&root));
+            let mut inactive = valid.clone();
+            inactive.proof.inactive_peaks = 1;
+            assert!(!inactive.verify::<Sha256>(&root));
+
             // The commit position does not verify as a payout.
             let commit = first.summary.payouts.size - 1;
             let (proof, logged) = prove(&store.log, commit).await;

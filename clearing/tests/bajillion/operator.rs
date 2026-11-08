@@ -1,7 +1,7 @@
 //! Sharded admission and restarts of operators built from the helpers.
 
 use super::*;
-use commonware_clearing::bajillion::ForcedWithdrawal;
+use commonware_clearing::bajillion::{Flow, ForcedWithdrawal};
 use std::collections::HashMap;
 
 /// Two operators that restart from one operator's persisted state and each admit half the
@@ -64,6 +64,63 @@ fn test_assembly_matches_monolithic_close() {
     .unwrap();
     assert_eq!(assembled.encode(), sharded.encode());
     assert_eq!(flows, sharded_flows);
+}
+
+/// Flows routed to the shard serving each account and applied there in epoch order (O8) give the
+/// balances the operator holds, however the closes' flows arrive. Bob's forced withdrawal of
+/// epoch 2 and his deposit of epoch 3 do not commute, so applying them out of order leaves him
+/// the wrong balance.
+#[test]
+fn test_flows_apply_per_account_in_epoch_order() {
+    let mut operator = operator();
+    fund(&mut operator, &[(0, 100), (1, 100)]);
+    let mut alice = sender(0);
+
+    // In epoch 2 alice pays bob 30 and bob forces out more than he holds. In epoch 3 he deposits
+    // 40. After both closes the operator holds 70 for alice and 40 for bob.
+    let request = alice.send(2, amounts(&[(1, 30)]), false).unwrap();
+    alice
+        .acknowledged(&operator.accept(&request).unwrap())
+        .unwrap();
+    let forcing = Queue {
+        forced_withdrawals: vec![ForcedWithdrawal {
+            account: account(1),
+            amount: 150,
+        }],
+        ..deposits(2, &[])
+    };
+    let (second, second_flows) = operator.close(&forcing, 0, 1).unwrap();
+    let (third, third_flows) = operator.close(&deposits(3, &[(1, 40)]), 1, 0).unwrap();
+    assert_eq!((second.epoch(), third.epoch()), (2, 3));
+    assert_eq!(operator.balance(&account(0)), 70);
+    assert_eq!(operator.balance(&account(1)), 40);
+
+    // Epoch 3's flows reach the shards before epoch 2's.
+    let mut delivered: HashMap<_, Vec<_>> = HashMap::new();
+    for (account, flow) in third_flows.into_iter().chain(second_flows) {
+        delivered.entry(account).or_default().push(flow);
+    }
+    let apply = |flows: &[Flow<u64>], balance: u64| {
+        flows
+            .iter()
+            .fold(balance, |balance, flow| flow.settle(balance).unwrap().0)
+    };
+
+    // Applied in epoch order, each account's flows give the operator's balance. Applied as
+    // delivered, bob's withdrawal takes his deposit too, and he keeps 20 while the operator holds
+    // 40 for him.
+    let (alice, bob) = (account(0), account(1));
+    for (holder, flows) in &delivered {
+        let mut ordered = flows.clone();
+        ordered.sort_by_key(Flow::epoch);
+        let funded = if *holder == alice || *holder == bob {
+            100
+        } else {
+            0
+        };
+        assert_eq!(apply(&ordered, funded), operator.balance(holder));
+    }
+    assert_eq!(apply(&delivered[&bob], 100), 20);
 }
 
 /// An operator restarted from what it persisted, its admissions and soft withdrawals of the open

@@ -288,6 +288,7 @@ mod tests {
         let matrix = matrix(&rows);
         let root = matrix.root();
         assert_eq!(matrix.len(), 3);
+        assert!(!matrix.is_empty());
 
         for sender in &keys {
             let payments = rows
@@ -311,6 +312,7 @@ mod tests {
         }
 
         let empty = Matrix::<PublicKey, Digest, u64>::empty::<Sha256>();
+        assert!(empty.is_empty());
         let opening = empty.open(&keys[0], &keys[1]);
         assert_eq!(
             opening

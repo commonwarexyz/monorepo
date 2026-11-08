@@ -232,6 +232,47 @@ fn test_withdrawals_pay_up_to_the_balance() {
     });
 }
 
+/// Validators refuse a close that overdrafts an account (O3). Alice's soft withdrawal of epoch 2
+/// empties her balance. An operator that countersigned her payment in epoch 3 before fixing that
+/// withdrawal has no acceptable close of epoch 3 holding her row.
+#[test]
+fn test_validators_refuse_a_close_that_overdrafts() {
+    deterministic::Runner::default().start(|mut context| async move {
+        let mut deployment = TestDeployment::new(&context, "overdraft", 1).await;
+        deployment.ledger.deposit(account(0), 100).unwrap();
+        deployment.close(&mut context).await;
+
+        // The close of epoch 2 pays alice's whole balance out through a soft withdrawal.
+        let withdrawal = Withdrawal::sign(&user(0), &namespace(), 2, 100, 0);
+        let queue = deployment.ledger.queue();
+        let emptying = forge(&operator_key(), &queue, 0, 0, Vec::new(), vec![withdrawal]);
+        let proposals = deployment.verify(&emptying).await;
+        assert_eq!(proposals[0].payouts(), &amounts(&[(0, 100)]));
+        deployment.post(&mut context, proposals).await;
+        assert_eq!(
+            deployment.validators[0].balance(&account(0)).await.unwrap(),
+            0
+        );
+
+        // A close of epoch 3 settling alice's payment of 100 to bob overdrafts her balance, so
+        // the validator refuses it and stays at the close of epoch 2.
+        let paying = row(0, 3, amounts(&[(1, 100)]), &Amounts::empty());
+        let queue = deployment.ledger.queue();
+        let overdrafting = forge(&operator_key(), &queue, 0, 0, vec![paying], Vec::new());
+        let validator = &mut deployment.validators[0];
+        assert!(matches!(
+            validator.verify(overdrafting, &queue).await,
+            Err(Error::Overdraft)
+        ));
+        assert_eq!(validator.summary().epoch, 2);
+
+        // The same validator then settles a close of epoch 3 without her row.
+        let affordable = forge(&operator_key(), &queue, 0, 0, Vec::new(), Vec::new());
+        let proposals = deployment.verify(&affordable).await;
+        assert_eq!(deployment.post(&mut context, proposals).await.epoch, 3);
+    });
+}
+
 /// A close settles credits and debits whose sums exceed the largest amount, as long as every
 /// final balance fits.
 #[test]

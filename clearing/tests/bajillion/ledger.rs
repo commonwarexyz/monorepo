@@ -401,6 +401,96 @@ fn test_halted_ledger_pays_balance_and_deposit_claims() {
     });
 }
 
+/// Across epochs of payments, deposits, and withdrawals, the ledger's custody equals the balances
+/// of the last post plus the deposits still queued and the payouts not yet paid. After a halt,
+/// claims of the balances and queued deposits, with withdrawals of the payouts still owed, take
+/// all of it.
+#[test]
+fn test_custody_backs_balances_deposits_and_payouts() {
+    deterministic::Runner::default().start(|mut context| async move {
+        const USERS: u64 = 4;
+        let mut deployment = TestDeployment::new(&context, "custody", 1).await;
+        for index in 0..USERS {
+            deployment.ledger.deposit(account(index), 100).unwrap();
+        }
+        deployment.close(&mut context).await;
+        let mut senders: Vec<_> = (0..USERS).map(sender).collect();
+        let mut owed = Vec::new();
+
+        for epoch in 2..=5 {
+            // Each user pays the next one. One user asks the operator for a soft withdrawal,
+            // another forces a withdrawal through the ledger, and a third deposits.
+            for from in 0..USERS {
+                let to = (from + 1) % USERS;
+                let sender = &mut senders[from as usize];
+                let request = sender
+                    .send(epoch, amounts(&[(to, 5 + epoch)]), false)
+                    .unwrap();
+                let acknowledgement = deployment.operator.accept(&request).unwrap();
+                sender.acknowledged(&acknowledgement).unwrap();
+            }
+            let (soft, forced, depositing) =
+                (epoch % USERS, (epoch + 1) % USERS, (epoch + 2) % USERS);
+            let withdrawal = Withdrawal::sign(&user(soft), &namespace(), epoch, 12, 0);
+            deployment.operator.withdraw(withdrawal).unwrap();
+            deployment.ledger.withdraw(account(forced), 9).unwrap();
+            deployment.ledger.deposit(account(depositing), 20).unwrap();
+
+            // The close processes the queued deposit and forced withdrawal. The payouts of even
+            // epochs are withdrawn at once, and those of odd epochs stay owed.
+            let queue = deployment.ledger.queue();
+            let close = close_epoch(&mut deployment.operator, &queue, 1, 1);
+            let proposals = deployment.verify(&close).await;
+            let payouts = proposals[0].payouts().clone();
+            deployment.post(&mut context, proposals).await;
+            if epoch % 2 == 0 {
+                deployment.withdraw_payouts(epoch, &payouts).await;
+            } else {
+                owed.push((epoch, payouts));
+            }
+
+            // The close leaves no deposit queued, so the funds held are the posted balances plus
+            // the payouts still owed.
+            let mut backed: u64 = owed
+                .iter()
+                .map(|(_, payouts)| payouts.total().unwrap())
+                .sum();
+            for index in 0..USERS {
+                backed += deployment.validators[0]
+                    .balance(&account(index))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(deployment.ledger.custody(), backed);
+        }
+
+        // A deposit and a forced withdrawal queue after the last post. The halt drops the forced
+        // withdrawal, and claims of every balance and of the queued deposit, with withdrawals of
+        // the owed payouts, empty the custody.
+        deployment.ledger.deposit(account(0), 15).unwrap();
+        deployment.ledger.withdraw(account(1), 50).unwrap();
+        let held = deployment.ledger.custody();
+        deployment.ledger.halt();
+        let mut claimed = 0;
+        for index in 0..USERS {
+            let proof = deployment.validators[0]
+                .prove(&account(index))
+                .await
+                .unwrap();
+            claimed += deployment
+                .ledger
+                .claim(&account(index), proof.as_ref())
+                .unwrap();
+        }
+        for (epoch, payouts) in &owed {
+            deployment.withdraw_payouts(*epoch, payouts).await;
+            claimed += payouts.total().unwrap();
+        }
+        assert_eq!(claimed, held);
+        assert_eq!(deployment.ledger.custody(), 0);
+    });
+}
+
 /// A post transfers nothing. Each payout stays in custody until its account withdraws it with a
 /// proof, or claims it after a halt, and it is paid once.
 #[test]

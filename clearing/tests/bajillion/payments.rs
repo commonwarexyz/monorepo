@@ -407,6 +407,66 @@ fn test_posted_earlier_map_does_not_settle_request() {
     assert_eq!(alice.payments(2), Some(&amounts(&[(1, 5)])));
 }
 
+/// A refusal of a pipelined request in its own epoch does not retire its state for the next
+/// epoch (S4). Once the close settles the map that state builds on, a replayed copy is admitted
+/// if the sender can afford it. A request for another batch then fails, and a request for the
+/// same batch repeats the admitted state, so the batch pays once.
+#[test]
+fn test_replayed_pipelined_request_settles_at_most_once() {
+    let mut operator = operator();
+    fund(&mut operator, &[(0, 10)]);
+    let mut alice = sender(0);
+
+    // Alice pays bob her whole balance, then asks to pay carol 5, pipelined. The operator refuses
+    // the request, and alice drops it as if it had been delivered once.
+    let paid = alice.send(2, amounts(&[(1, 10)]), false).unwrap();
+    alice
+        .acknowledged(&operator.accept(&paid).unwrap())
+        .unwrap();
+    let refused = alice.send(2, amounts(&[(2, 5)]), true).unwrap();
+    assert!(matches!(
+        operator.accept(&refused),
+        Err(Operator::InsufficientBalance)
+    ));
+    alice.refused().unwrap();
+
+    // The close of epoch 2 settles her payment to bob and processes a deposit of 5 to her.
+    operator.close(&deposits(2, &[(0, 5)]), 1, 0).unwrap();
+    assert_eq!(operator.balance(&account(0)), 5);
+
+    // A replayed copy reaches the operator in epoch 3. Its state for epoch 3 builds on the row
+    // the close settled and its batch fits her balance, so the operator admits it. Alice has no
+    // pending request, so she cannot record its acknowledgement.
+    let replayed = operator.accept(&refused).unwrap();
+    assert_eq!(operator.payments(&account(0)), Some(&amounts(&[(2, 5)])));
+    assert!(matches!(
+        alice.acknowledged(&replayed),
+        Err(Sending::NotPending)
+    ));
+
+    // A request of hers for another batch does not extend the admitted state and is refused.
+    let other = alice.send(3, amounts(&[(3, 1)]), false).unwrap();
+    assert!(matches!(
+        operator.accept(&other),
+        Err(Operator::Error(Error::InvalidSignature))
+    ));
+    alice.refused().unwrap();
+
+    // A request for the same batch signs the admitted state, so the operator countersigns it
+    // again. Alice's record then holds the map the close of epoch 3 settles, and carol is paid
+    // once.
+    let again = alice.send(3, amounts(&[(2, 5)]), false).unwrap();
+    let acknowledgement = operator.accept(&again).unwrap();
+    assert_eq!(acknowledgement, replayed);
+    alice.acknowledged(&acknowledgement).unwrap();
+    assert_eq!(alice.payments(3), Some(&amounts(&[(2, 5)])));
+    let closed = close(&mut operator);
+    assert_eq!(closed.rows().len(), 1);
+    assert_eq!(closed.rows()[0].payments, amounts(&[(2, 5)]));
+    assert_eq!(operator.balance(&account(0)), 0);
+    assert_eq!(operator.balance(&account(2)), 5);
+}
+
 /// A posted row settles a pipelined request only if it matches the request's state for the row's
 /// epoch. The state for the next epoch pays only the batch, so a close of the request's own epoch
 /// that settles an earlier map equal to the batch leaves it pending, and the next close settles it.
