@@ -942,18 +942,17 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             let Some(blob) = self.data.get(blob_num) else {
                 continue;
             };
+
             // Frames of consecutive positions are byte-adjacent, so each run of them is read as
             // one range, which leaves the buffer laid out as reading them one by one would. If any
             // range misses, read the group frame by frame instead, so a partly cached run still
-            // serves its cached frames.
+            // serves its cached frames. Either way, misses are reported per frame.
             let mut ranges: Vec<(u64, usize)> = Vec::with_capacity(group.len());
-            let mut range_of: Vec<usize> = Vec::with_capacity(group.len());
             for &(_, offset, len) in group {
                 match ranges.last_mut() {
                     Some((start, total)) if *start + *total as u64 == offset => *total += len,
                     _ => ranges.push((offset, len)),
                 }
-                range_of.push(ranges.len() - 1);
             }
             let Some(total) = read_buffer_len(ranges.iter().map(|&(_, len)| len)) else {
                 continue;
@@ -963,18 +962,16 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             if !missed.is_empty() && ranges.len() < group.len() {
                 ranges.clear();
                 ranges.extend(group.iter().map(|&(_, offset, len)| (offset, len)));
-                range_of.clear();
-                range_of.extend(0..group.len());
                 missed = blob.try_read_ranges_sync_into(&mut buf, &ranges);
             }
             with_bytes(&mut buf, |bytes| {
                 let mut missed = missed.into_iter().peekable();
                 let mut local = 0usize;
-                for (&range_idx, &(idx, offset, len)) in range_of.iter().zip(group) {
+                for (range_idx, &(idx, offset, len)) in group.iter().enumerate() {
                     let start = local;
                     local += len;
-                    while missed.next_if(|&missed| missed < range_idx).is_some() {}
                     if missed.peek() == Some(&range_idx) {
+                        missed.next();
                         continue;
                     }
 

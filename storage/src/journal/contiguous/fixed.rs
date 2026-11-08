@@ -1889,7 +1889,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     /// The byte ranges, within their blob, holding `group`'s items, given the blob's first
     /// position: one range per run of consecutive positions, which are stored back to back.
     fn byte_runs(group: &[u64], first: u64) -> Result<Vec<(u64, usize)>, Error> {
-        let mut runs = Vec::new();
+        let mut runs = Vec::with_capacity(group.len());
         for run in group.chunk_by(|&a, &b| a.checked_add(1) == Some(b)) {
             let offset = Inner::<E, A>::items_to_bytes(run[0] - first)?;
             runs.push((offset, run.len() * A::SIZE));
