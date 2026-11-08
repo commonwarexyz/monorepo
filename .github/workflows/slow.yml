@@ -99,6 +99,7 @@ jobs:
       matrix:
         include:
           - fuzz_dir: broadcast/fuzz
+          - fuzz_dir: clearing/fuzz
           - fuzz_dir: codec/fuzz
           - fuzz_dir: coding/fuzz
           - fuzz_dir: collector/fuzz

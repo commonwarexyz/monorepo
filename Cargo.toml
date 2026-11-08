@@ -39,6 +39,7 @@ members = [
 
     # Fuzz builds
     "broadcast/fuzz",
+    "clearing/fuzz",
     "codec/fuzz",
     "coding/fuzz",
     "collector/fuzz",

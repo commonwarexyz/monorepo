@@ -1773,6 +1773,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-clearing-fuzz"
+version = "2026.10.0"
+dependencies = [
+ "arbitrary",
+ "commonware-clearing",
+ "commonware-codec",
+ "commonware-cryptography",
+ "libfuzzer-sys",
+]
+
+[[package]]
 name = "commonware-codec"
 version = "2026.10.0"
 dependencies = [
