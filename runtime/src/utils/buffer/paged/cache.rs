@@ -3854,13 +3854,16 @@ mod tests {
         assert!(buf1.iter().all(|b| *b == 0));
     }
 
-    /// Ranges sharing pages across several resolution chunks are served, and the ranges left
-    /// unread keep their order.
+    /// Ranges sharing pages across several resolution chunks are served, including pages whose
+    /// ranges straddle a chunk boundary and a short last chunk, and the ranges left unread keep
+    /// their order.
     #[test_traced]
     fn test_read_cached_many_across_chunks() {
+        const PER_PAGE: usize = 5;
+        const { assert!(!RESOLVE_CHUNK.is_multiple_of(PER_PAGE)) };
         for page_size in [NZU16!(1024), NZU16!(100)] {
             let width = page_size.get() as usize;
-            let pages = RESOLVE_CHUNK as u64;
+            let pages = RESOLVE_CHUNK as u64 + 1;
             let cache_ref = CacheRef::new(page_size, NZUsize!(64));
             let blob_id = cache_ref.next_id();
             let byte = |page: u64, at: usize| (page as usize * 7 + at) as u8;
@@ -3874,12 +3877,17 @@ mod tests {
                 }
             }
 
-            // Read four short ranges from each page, more than three chunks in all.
-            let len = width / 8;
+            // Read five short ranges from each page, more than three chunks in all. Five does not
+            // divide the chunk size, so some pages' ranges straddle a chunk boundary, and the last
+            // chunk is short.
+            let len = width / (2 * PER_PAGE);
             let offsets: Vec<u64> = (0..pages)
-                .flat_map(|page| (0..4).map(move |i| page * width as u64 + (i * 2 * len) as u64))
+                .flat_map(|page| {
+                    (0..PER_PAGE).map(move |i| page * width as u64 + (i * 2 * len) as u64)
+                })
                 .collect();
             assert!(offsets.len() > 3 * RESOLVE_CHUNK);
+            assert!(!offsets.len().is_multiple_of(RESOLVE_CHUNK));
             let mut bufs = vec![vec![0u8; len]; offsets.len()];
             let mut ranges: Vec<(&mut [u8], u64)> = bufs
                 .iter_mut()
