@@ -78,11 +78,9 @@ pub(crate) fn leaf<H: Hasher, P: PublicKey, A: Amount>(account: &P, amount: A) -
 
 /// Nonzero amounts per account, sorted by account.
 ///
-/// Payment maps, request batches, and the payouts of a close are all [Amounts]. A payment map or
-/// request batch is committed by the root of a binary Merkle tree whose leaves are the `(account,
-/// amount)` entries in account order. The root also binds the number of entries, so a [Lookup] of
-/// two adjacent entries proves that an account between them has no amount. A close's payouts are
-/// appended to the payout log ([Payout::stage](super::Payout::stage)).
+/// Their root ([Amounts::root]) is that of a binary Merkle tree whose leaves are the `(account,
+/// amount)` entries in account order. It also binds the number of entries, so a [Lookup] of two
+/// adjacent entries proves that an account between them has no amount.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Amounts<P: PublicKey, A: Amount> {
     entries: Vec<(P, A)>,
@@ -104,15 +102,18 @@ impl<P: PublicKey, A: Amount> Amounts<P, A> {
 
     /// Collects `entries` in account order.
     ///
-    /// Returns an error if an amount is zero, an account appears more than once, or there are more
-    /// than `u32::MAX` entries.
+    /// Returns [Error::ZeroAmount] if an amount is zero, [Error::Duplicate] if an account appears
+    /// more than once, and [Error::TooManyEntries] if there are more than `u32::MAX` entries.
     pub fn new(entries: impl IntoIterator<Item = (P, A)>) -> Result<Self, Error> {
         let mut entries: Vec<_> = entries.into_iter().collect();
         entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
         Self::from_sorted(entries)
     }
 
-    /// Wraps entries that must be strictly increasing by account with nonzero amounts.
+    /// Wraps `entries` already in account order.
+    ///
+    /// Returns [Error::ZeroAmount] if an amount is zero, [Error::Duplicate] if the accounts are not
+    /// strictly increasing, and [Error::TooManyEntries] if there are more than `u32::MAX` entries.
     pub(crate) fn from_sorted(entries: Vec<(P, A)>) -> Result<Self, Error> {
         if entries.len() > u32::MAX as usize {
             return Err(Error::TooManyEntries);
@@ -158,7 +159,7 @@ impl<P: PublicKey, A: Amount> Amounts<P, A> {
 
     /// Returns the amounts with `other` added entry by entry.
     ///
-    /// Returns an error if a sum overflows.
+    /// Returns [Error::Overflow] if a sum overflows.
     pub fn combine(&self, other: &Self) -> Result<Self, Error> {
         let mut entries = Vec::with_capacity(self.entries.len() + other.entries.len());
         let mut left = self.entries.iter().peekable();
@@ -261,18 +262,13 @@ pub(crate) fn arbitrary_nonempty<P, A>(
 ) -> arbitrary::Result<Amounts<P, A>>
 where
     P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
-    A: Amount + From<u64> + for<'a> arbitrary::Arbitrary<'a>,
+    A: Amount + for<'a> arbitrary::Arbitrary<'a>,
 {
-    let receiver = u.arbitrary()?;
-    let amount: A = u.arbitrary()?;
-    let amount = if amount == A::ZERO {
-        A::from(1)
-    } else {
-        amount
-    };
-    u.arbitrary::<Amounts<P, A>>()?
-        .combine(&Amounts::new([(receiver, amount)]).expect("amount must be nonzero"))
-        .map_err(|_| arbitrary::Error::IncorrectFormat)
+    let amounts = u.arbitrary::<Amounts<P, A>>()?;
+    if amounts.is_empty() {
+        return Err(arbitrary::Error::IncorrectFormat);
+    }
+    Ok(amounts)
 }
 
 #[cfg(test)]

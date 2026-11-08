@@ -1,7 +1,4 @@
 //! Balances and payouts that a close settles.
-//!
-//! The operator and validators settle each account with the same rule ([Flow::settle]), so an
-//! operator that applies the flows of each posted close knows the balances validators hold.
 
 use super::{Amount, Amounts, Deposit, Epoch, Error, ForcedWithdrawal, Withdrawal};
 use bytes::BufMut;
@@ -99,8 +96,7 @@ where
 /// Funds moving into and out of one account in the close of an epoch.
 ///
 /// Each part is an exact sum, so it may exceed the largest amount even when the balance it settles
-/// fits. [Close::assemble](super::Close::assemble) computes the flow of every account a close
-/// touches, and [Flow::settle] applies one to the account's balance.
+/// fits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Flow<A: Amount> {
     /// Epoch of the close.
@@ -321,17 +317,15 @@ fn add<P: PublicKey, A: Amount>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bajillion::tests::account;
     use commonware_codec::{DecodeExt as _, Encode as _};
-    use commonware_cryptography::{
-        Signer as _,
-        ed25519::{PrivateKey, PublicKey},
-    };
+    use commonware_cryptography::ed25519::PublicKey;
 
     #[test]
     fn test_flows_round_trip_beyond_the_largest_amount() {
         // Alice pays herself and bob the largest amount each and deposits it too, so her credits
         // and debits each exceed the largest amount while her balance does not change.
-        let [alice, bob] = [0, 1].map(|seed| PrivateKey::from_seed(seed).public_key());
+        let [alice, bob] = [account(0), account(1)];
         let payments = Amounts::new([(alice.clone(), u64::MAX), (bob.clone(), u64::MAX)]).unwrap();
         let deposit = Deposit {
             account: alice.clone(),
@@ -362,7 +356,7 @@ mod tests {
     fn test_payout_is_capped_by_the_balance_beyond_the_largest_amount() {
         // Alice holds 10 and is forced to withdraw the largest amount and 3 more in one close, so
         // her requested total exceeds the largest amount while its low part is only 2.
-        let alice = PrivateKey::from_seed(0).public_key();
+        let alice = account(0);
         let forced = [u64::MAX, 3].map(|amount| ForcedWithdrawal {
             account: alice.clone(),
             amount,

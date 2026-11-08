@@ -14,7 +14,7 @@ documentation = "https://docs.rs/commonware-clearing"
 workspace = true
 
 [dependencies]
-arbitrary = { workspace = true, optional = true, features = ["derive"] }
+arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
 commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std"] }
@@ -23,7 +23,7 @@ commonware-parallel = { workspace = true, features = ["std"] }
 commonware-storage = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
 rand_core.workspace = true
-thiserror = { workspace = true, features = ["std"] }
+thiserror.workspace = true
 
 [dev-dependencies]
 commonware-conformance.workspace = true

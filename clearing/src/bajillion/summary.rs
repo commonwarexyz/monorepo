@@ -1,6 +1,6 @@
 //! Summaries of closes, certified by validators and posted to the ledger.
 
-use super::{Amount, Epoch, Error, Namespace, Payout};
+use super::{Amount, Epoch, Error, Namespace, Payout, matrix};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, Encode, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{
@@ -9,7 +9,6 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use commonware_storage::{
-    bmt::Builder,
     merkle::mmr,
     qmdb::{keyless, value::FixedEncoding},
 };
@@ -21,10 +20,8 @@ use rand_core::CryptoRng;
 
 /// A ledger queue's requests that one close processes, as their count and the queue's running hash.
 ///
-/// A close processes the oldest requests still queued, and `count` is the number this one close
-/// processes. `hash` is the queue's running hash after them. It extends the parent summary's hash
-/// by `H(hash || request)` for each request's encoding in queue order, so it covers every request
-/// the queue has processed since genesis.
+/// `hash` extends the parent summary's hash by `H(hash || request)` for each request's encoding in
+/// queue order, so it covers every request the queue has processed since genesis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Processed<D: Digest> {
     /// Number of queued requests the close processes.
@@ -137,10 +134,10 @@ where
 /// The effects of one close, as certified by validators and posted to the ledger.
 ///
 /// A summary's digest ([Digestible]) is what the next summary names as its parent, so the hasher
-/// `H` is part of the type. Validators certify summaries with a scheme the deployment builds from
-/// the certificate macros of `commonware_cryptography`, naming the hasher along with the signature
-/// scheme and its fault model. For example, for SHA-256 and Ed25519 with up to `f` Byzantine
-/// validators out of `3f + 1`:
+/// `H` is part of the type. A certificate scheme over summaries comes from the certificate macros
+/// of `commonware_cryptography` and names the hasher along with the signature scheme and its fault
+/// model. For example, for SHA-256 and Ed25519 with up to `f` Byzantine validators out of
+/// `3f + 1`:
 ///
 /// ```
 /// mod scheme {
@@ -173,8 +170,6 @@ impl<H: Hasher> Summary<H> {
     /// `balances`, accounts of type `P`, and amounts of type `A`. Both running hashes start at all
     /// zeros, and the payout log holds only its initial commit.
     pub fn genesis<P: PublicKey, A: Amount>(balances: H::Digest) -> Self {
-        // An empty payment matrix commits to a tree without leaves.
-        let empty = Builder::<H>::new(0).build().root();
         let start = Processed {
             count: 0,
             hash: H::Digest::EMPTY,
@@ -182,7 +177,7 @@ impl<H: Hasher> Summary<H> {
         Self {
             epoch: 0,
             parent: H::Digest::EMPTY,
-            matrix: empty,
+            matrix: matrix::root::<H, P>(core::iter::empty()),
             balances,
             payouts: Payouts {
                 size: 1,
@@ -513,8 +508,9 @@ mod tests {
     /// holds, and it covers the payouts size and root.
     #[test]
     fn test_verify_checks_every_field_before_the_certificate() {
+        let mut rng = test_rng();
         let fixture = ed25519::certificate::mocks::fixture(
-            &mut test_rng(),
+            &mut rng,
             NAMESPACE,
             4,
             scheme::Scheme::signer,
@@ -542,7 +538,6 @@ mod tests {
         };
         let certificate = certify(&fixture.schemes, &summary);
         let other = certify(&fixture.schemes, &genesis);
-        let mut rng = test_rng();
         let mut verify = |summary: &Summary<Sha256>,
                           certificate,
                           parent: &Digest,

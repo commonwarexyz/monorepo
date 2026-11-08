@@ -4,7 +4,7 @@ hash = "29e0dd6ffa29d78b9696ddb44b358a3af89db75f00422922b0ca6136eb1d580e"
 
 ["commonware_clearing::bajillion::close::tests::conformance::CodecConformance<Close<PublicKey,PublicKey,u64>>"]
 n_cases = 65536
-hash = "9070fe339e9e7dd930cef8af46ea9c7c74150dc5f6f3fdc124ef1278548eac92"
+hash = "f87d0aeb5989609fcf7b69e4e7426a1d3b758efc1938555602cbfe1b95b42ca4"
 
 ["commonware_clearing::bajillion::close::tests::conformance::CodecConformance<Deposit<PublicKey,u64>>"]
 n_cases = 65536
@@ -16,7 +16,7 @@ hash = "cbe1b1f8a2196482589b54359cfbdbac386e6fcaedd286739d7ac9daa5de150b"
 
 ["commonware_clearing::bajillion::close::tests::conformance::CodecConformance<Row<PublicKey,u64>>"]
 n_cases = 65536
-hash = "a2efef6abd01090e3f8dd126166270809540c0c8b3c0444f1d6a6a733271626b"
+hash = "cd04b5287fcb7ff3f69407dff0bf2ddf4a67ef2541ae5eec90f3f3fba057eddf"
 
 ["commonware_clearing::bajillion::close::tests::conformance::CodecConformance<Withdrawal<PublicKey,u64>>"]
 n_cases = 65536
@@ -40,7 +40,7 @@ hash = "c2527b5097ee91124f705f4f799e37d27d5a6933f96df3a139f76ed59333ff00"
 
 ["commonware_clearing::bajillion::payment::tests::conformance::CodecConformance<Request<PublicKey,Digest,u64>>"]
 n_cases = 65536
-hash = "70900f0c3ef9cbbe28dfb286e7618f5126574301855b734210360c790af68956"
+hash = "78a617a32bcf7242b03be1483f3cdb0593b8be56228e9343626d0f0f4e35e685"
 
 ["commonware_clearing::bajillion::payment::tests::conformance::CodecConformance<State<PublicKey,Digest>>"]
 n_cases = 65536

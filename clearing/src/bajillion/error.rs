@@ -51,8 +51,7 @@ pub enum Error {
     /// A close leaves a balance negative.
     #[error("negative balance")]
     Overdraft,
-    /// A checkpoint, balances database, or proposal does not match the posted close it is used
-    /// with.
+    /// A checkpoint, proposal, balances database, or payout log does not match its posted close.
     #[error("invalid checkpoint")]
     InvalidCheckpoint,
     /// The balances database failed.

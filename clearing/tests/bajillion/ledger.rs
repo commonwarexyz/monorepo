@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::roles::ledger::{Halt, Refusal};
-use commonware_clearing::bajillion::{Challenge, Error, Matrix, Processed};
+use commonware_clearing::bajillion::{Challenge, Error, Matrix, PayoutProof, Processed};
 use commonware_cryptography::Digest as _;
 use commonware_runtime::Runner as _;
 
@@ -605,10 +605,25 @@ fn test_payout_proofs_follow_the_last_post() {
 /// the ranges collapse to one range over the whole log.
 #[test]
 fn test_withdrawn_ranges_stay_compact() {
-    for order in ["alternating", "reversed", "strided"] {
+    const USERS: u64 = 9;
+    type Reorder = fn(&mut Vec<PayoutProof<PublicKey, Digest, u64>>);
+    let orders: [(&str, Reorder); 3] = [
+        ("alternating", |proofs| {
+            proofs.sort_by_key(|proof| (proof.index % 2 == 0, proof.index))
+        }),
+        ("reversed", |proofs| proofs.reverse()),
+        ("strided", |proofs| {
+            // A stride coprime with the number of payouts visits each once.
+            let sorted = proofs.clone();
+            for (position, proof) in proofs.iter_mut().enumerate() {
+                *proof = sorted[position * 4 % sorted.len()].clone();
+            }
+        }),
+    ];
+    for (order, reorder) in orders {
         deterministic::Runner::default().start(|mut context| async move {
             let mut deployment = TestDeployment::new(&context, "ranges", 1).await;
-            let funded: Vec<_> = (0..9).map(|index| (index, 10 + index)).collect();
+            let funded: Vec<_> = (0..USERS).map(|index| (index, 10 + index)).collect();
             for (index, amount) in &funded {
                 deployment.ledger.deposit(account(*index), *amount).unwrap();
             }
@@ -616,7 +631,7 @@ fn test_withdrawn_ranges_stay_compact() {
 
             // Two closes pay out every account, the first five and then the other four.
             let mut owed = Vec::new();
-            for accounts in [0..5, 5..9] {
+            for accounts in [0..5, 5..USERS] {
                 for index in accounts.clone() {
                     deployment.ledger.withdraw(account(index), 3).unwrap();
                 }
@@ -642,18 +657,7 @@ fn test_withdrawn_ranges_stay_compact() {
                 );
             }
             proofs.sort_by_key(|proof| proof.index);
-            match order {
-                "alternating" => proofs.sort_by_key(|proof| (proof.index % 2 == 0, proof.index)),
-                "reversed" => proofs.reverse(),
-                "strided" => {
-                    // A stride coprime with the 9 payouts visits each once.
-                    let sorted = proofs.clone();
-                    for (position, proof) in proofs.iter_mut().enumerate() {
-                        *proof = sorted[position * 4 % sorted.len()].clone();
-                    }
-                }
-                _ => unreachable!("order must be alternating, reversed, or strided"),
-            }
+            reorder(&mut proofs);
 
             // After each withdrawal the ranges stay apart and number at most one more than the
             // payouts outstanding. The last leaves one range over the whole log, and the funds held

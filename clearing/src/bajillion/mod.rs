@@ -717,7 +717,8 @@ pub use payment::{Admission, Challenge, Receipt, Request, State, States, Verifie
 pub use settlement::Flow;
 pub use summary::{Payouts, Processed, Summary};
 pub use validator::{
-    BalanceProof, Balances, Checked, Checkpoint, Payout, PayoutLog, PayoutProof, Proposal,
+    BalanceProof, Balances, Checked, Checkpoint, Payout, PayoutBatch, PayoutLog, PayoutProof,
+    Proposal,
 };
 
 /// An epoch number. Epochs start at one, and epoch zero names the state before the first close.

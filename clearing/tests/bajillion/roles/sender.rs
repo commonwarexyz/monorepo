@@ -139,27 +139,32 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
             .unwrap_or_else(|| Amounts::<S::PublicKey, A>::empty().root::<H>())
     }
 
-    /// Returns each state of the pending request with the sender's signature over it and the map
-    /// it commits to.
-    #[allow(clippy::type_complexity)]
-    fn proposed(
-        &self,
-    ) -> Vec<(
-        &State<S::PublicKey, H::Digest>,
-        &S::Signature,
-        &Amounts<S::PublicKey, A>,
-    )> {
+    /// Returns each state of the pending request as a [Countersigned] without an acknowledgement.
+    fn proposed(&self) -> Vec<Countersigned<S::PublicKey, O, H::Digest, A>> {
         let Some((request, states)) = &self.persisted.pending else {
             return Vec::new();
         };
+        let countersigned =
+            |state: &State<_, _>, signature: &S::Signature, payments: &Amounts<_, _>| {
+                Countersigned {
+                    state: state.clone(),
+                    signature: signature.clone(),
+                    acknowledgement: None,
+                    payments: payments.clone(),
+                }
+            };
         let pipelined = states
             .pipelined
             .as_ref()
             .zip(request.pipelined.as_ref())
-            .map(|(state, (_, signature))| (state, signature, &states.batch));
-        core::iter::once((&states.state, &request.signature, &states.payments))
-            .chain(pipelined)
-            .collect()
+            .map(|(state, (_, signature))| countersigned(state, signature, &states.batch));
+        core::iter::once(countersigned(
+            &states.state,
+            &request.signature,
+            &states.payments,
+        ))
+        .chain(pipelined)
+        .collect()
     }
 
     /// Signs a request paying `batch` in `epoch` on top of the countersigned map of that epoch,
@@ -221,14 +226,16 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
         let countersigned = self
             .proposed()
             .into_iter()
-            .find(|(state, _, _)| {
-                state.verify_acknowledgement(&self.namespace, &self.operator, acknowledgement)
+            .find(|proposed| {
+                proposed.state.verify_acknowledgement(
+                    &self.namespace,
+                    &self.operator,
+                    acknowledgement,
+                )
             })
-            .map(|(state, signature, payments)| Countersigned {
-                state: state.clone(),
-                signature: signature.clone(),
+            .map(|proposed| Countersigned {
                 acknowledgement: Some(acknowledgement.clone()),
-                payments: payments.clone(),
+                ..proposed
             })
             .ok_or(Refusal::InvalidAcknowledgement)?;
 
@@ -297,14 +304,11 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
         let proposed = self.proposed();
         let settled = proposed
             .iter()
-            .find(|(state, _, _)| state.epoch == epoch && Some(state.payments) == row)
-            .map(|(state, signature, payments)| Countersigned {
-                state: (*state).clone(),
-                signature: (*signature).clone(),
-                acknowledgement: None,
-                payments: (*payments).clone(),
-            });
-        let resolved = proposed.iter().all(|(state, _, _)| state.epoch <= epoch);
+            .find(|proposed| proposed.state.epoch == epoch && Some(proposed.state.payments) == row)
+            .cloned();
+        let resolved = proposed
+            .iter()
+            .all(|proposed| proposed.state.epoch <= epoch);
         if let Some(countersigned) = settled {
             self.persisted.countersigned.insert(epoch, countersigned);
             self.persisted.pending = None;

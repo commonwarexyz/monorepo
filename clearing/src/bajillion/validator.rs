@@ -75,7 +75,7 @@ pub struct Payout<P: PublicKey, A: Amount> {
 impl<P: PublicKey, A: Amount> Payout<P, A> {
     /// Stages the payout log's batch for one posted close. It appends `payouts` in account order,
     /// then a commit with no metadata that keeps the inactivity floor at zero, so no payout is
-    /// ever pruned. Validators and any replica of the log stage exactly this batch.
+    /// ever pruned.
     ///
     /// Returns [Error::Log] if the log fails, for example because it already raised its floor.
     pub async fn stage<E, H, S>(
@@ -136,12 +136,11 @@ where
 
 /// Proof of an account's balance under a balances root.
 ///
-/// A deployment builds one from the [Balances] database's `key_value_proof`, and a zero balance has
-/// none. A proof reveals the account's balance to whoever receives it.
+/// A proof reveals the balance, and verifies only for a positive one, because [Balances] holds no
+/// zero balance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BalanceProof<D: Digest, A: Amount> {
-    /// The account's balance. A proof verifies only for a positive balance, because validators
-    /// store no zero balance.
+    /// The account's balance.
     pub balance: A,
     /// Opening of the balance under the balances root.
     pub proof: KeyValueProof<mmb::Family, D, CHUNK>,
@@ -186,17 +185,19 @@ where
     A: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            balance: u.arbitrary()?,
-            proof: u.arbitrary()?,
-        })
+        let balance = u.arbitrary()?;
+        let mut proof: KeyValueProof<mmb::Family, D, CHUNK> = u.arbitrary()?;
+        proof
+            .proof
+            .range_proof
+            .proof
+            .digests
+            .truncate(MAX_PROOF_DIGESTS_PER_ELEMENT);
+        Ok(Self { balance, proof })
     }
 }
 
 /// Proof that the payout log holds a payout at an index.
-///
-/// A validator builds one from the [PayoutLog]'s proof of the one operation at `index`. A
-/// withdrawal or claim proves its payout under the last posted payouts root.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PayoutProof<P: PublicKey, D: Digest, A: Amount> {
     /// Index of the payout in the log.
@@ -254,15 +255,19 @@ where
     A: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let index = u.arbitrary()?;
+        let payout = u.arbitrary()?;
+        let mut proof: Proof<mmr::Family, D> = u.arbitrary()?;
+        proof.digests.truncate(MAX_PROOF_DIGESTS_PER_ELEMENT);
         Ok(Self {
-            index: u.arbitrary()?,
-            payout: u.arbitrary()?,
-            proof: u.arbitrary()?,
+            index,
+            payout,
+            proof,
         })
     }
 }
 
-/// The summary of a posted close and that close's matrix, both needed to check its successor.
+/// The summary and payment matrix of a posted close.
 ///
 /// Before the first close, it is [Summary::genesis] of the empty balances database's root with
 /// [Matrix::empty].
@@ -294,9 +299,8 @@ impl<P: PublicKey, H: Hasher, A: Amount> Debug for Checkpoint<P, H, A> {
 
 impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
     /// Checks the close as the successor of the posted close `parent` against the ledger's `queue`.
-    /// It reads no storage, checks the operator's signature before any user's, and parallelizes the
-    /// checks with `strategy`. It chains each queue's running hash from `parent`'s summary over the
-    /// prefix of `queue` that the close's counts select.
+    /// It checks the operator's signature before any user's, and chains each queue's running hash
+    /// from `parent`'s summary over the prefix of `queue` that the close's counts select.
     ///
     /// Returns [Error::InvalidCheckpoint] if `parent`'s matrix is not its summary's,
     /// [Error::WrongEpoch] unless the close, `queue`, and every soft withdrawal are for the next
@@ -324,11 +328,11 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
             forced_withdrawals,
             signature,
         } = self;
-        let found = [closed, queue.epoch]
+        if let Some(found) = [closed, queue.epoch]
             .into_iter()
             .chain(withdrawals.iter().map(|withdrawal| withdrawal.epoch))
-            .find(|found| *found != epoch);
-        if let Some(found) = found {
+            .find(|&other| other != epoch)
+        {
             return Err(Error::WrongEpoch {
                 expected: epoch,
                 found,
@@ -424,8 +428,7 @@ impl<P: PublicKey, H: Hasher, A: Amount> Checked<P, H, A> {
     /// Settles the close on top of `balances` and `log` and stages a batch on each. The balances
     /// batch writes exactly the balances that change, with a zero balance written as a delete, and
     /// commits with metadata zero, so a balances database with no metadata has applied no close.
-    /// The log batch is the one [Payout::stage] builds from the close's payouts. Settling borrows
-    /// the close, so a failed settle can be retried without checking the signatures again.
+    /// The log batch is the one [Payout::stage] builds from the close's payouts.
     ///
     /// Returns [Error::InvalidCheckpoint] unless `balances` is at the parent's balances root and
     /// `log` at its payouts root, [Error::Overdraft] if a balance goes negative, [Error::Overflow]
@@ -522,8 +525,8 @@ impl<P: PublicKey, H: Hasher, S: Strategy, A: Amount> Proposal<P, H, S, A> {
     /// Returns [Error::InvalidCheckpoint], before touching either database, if `posted` is not this
     /// summary's digest, `balances` is not at the parent's balances root, or `log` is not at the
     /// parent's payouts root. Returns [Error::Balances] or [Error::Log] if a batch does not apply
-    /// or the log does not commit. Any error drops both handles, and the deployment reopens them as
-    /// after a restart (V2).
+    /// or the log does not commit. An error drops both handles, and they must be reopened as after
+    /// a restart (V2).
     #[allow(clippy::type_complexity)]
     #[boxed]
     pub async fn apply<E, I>(
@@ -565,9 +568,9 @@ mod tests {
     use crate::bajillion::{
         Withdrawal,
         tests::{
-            Store, TestBalances, TestCheckpoint, TestClose, TestDb, TestLog, TestProposal, account,
-            amounts, chain, check, config, empty_root, genesis, namespace, open, open_log,
-            operator_key, post, queue, row, sign_close, user,
+            Store, TestBalances, TestCheckpoint, TestClose, TestDb, TestLog, TestProposal,
+            TestQueue, account, amounts, chain, check, config, empty_root, genesis, namespace,
+            open, open_log, operator_key, post, queue, row, sign_close, user,
         },
     };
     use commonware_codec::{DecodeExt as _, Encode as _};
@@ -575,9 +578,8 @@ mod tests {
         Digest as _, Sha256, Signer as _, ed25519::PublicKey, sha256::Digest,
     };
     use commonware_runtime::{
-        Runner as _, Supervisor as _,
+        Metrics as _, Runner as _, Supervisor as _,
         deterministic::{self, FaultConfig},
-        telemetry::metrics::MetricsExt as _,
     };
     use commonware_storage::{
         index::partitioned::unordered::Index as Partitioned,
@@ -585,8 +587,6 @@ mod tests {
         translator::{EightCap, OneCap},
     };
     use commonware_utils::{NZU64, NZUsize, Probability};
-
-    type TestQueue = Queue<PublicKey, u64>;
 
     /// Returns the checkpoint `proposal`'s close leaves once it posts.
     fn checkpoint(proposal: &TestProposal) -> TestCheckpoint {
@@ -638,13 +638,6 @@ mod tests {
             roots.push(store.balances.root());
         }
         (store, parent, roots)
-    }
-
-    /// Returns the roots of `store`'s balances database and payout log.
-    fn roots<I: Unordered<Value = Location<mmb::Family>> + 'static>(
-        store: &Store<I>,
-    ) -> (Digest, Digest) {
-        (store.balances.root(), store.log.root())
     }
 
     /// Returns the proof of the one operation at `index` in `log` under its current root.
@@ -895,27 +888,27 @@ mod tests {
 
             // A proposal that did not post is refused before either database changes.
             let posted = second.summary().digest();
-            let before = roots(&store);
+            let before = store.roots();
             assert!(matches!(
                 store.apply(first, &posted).await,
                 Err(Error::InvalidCheckpoint)
             ));
             let store = reopen("refused").await;
-            assert_eq!(roots(&store), before);
+            assert_eq!(store.roots(), before);
 
             // The posted one applies once. A second copy of it is stale on top of it, and the
             // refusal leaves the committed roots.
             let (store, applied) = store.apply(second, &posted).await.unwrap();
             let store = store.commit().await;
             let after = (applied.summary.balances, applied.summary.payouts.root);
-            assert_eq!(roots(&store), after);
+            assert_eq!(store.roots(), after);
             assert_eq!(store.balances.get(&account(1)).await.unwrap(), Some(20));
             assert!(matches!(
                 store.apply(duplicate, &posted).await,
                 Err(Error::InvalidCheckpoint)
             ));
             let store = reopen("stale").await;
-            assert_eq!(roots(&store), after);
+            assert_eq!(store.roots(), after);
 
             // The other candidate does not settle on it.
             let close = sign_close(&operator, 1, Vec::new(), Vec::new(), 1, 1);
@@ -943,7 +936,7 @@ mod tests {
             let elsewhere = reopen("elsewhere", "elsewhere").await;
             let (elsewhere, _) = post(elsewhere, &parent, close, &queued).await;
             let elsewhere = elsewhere.commit().await;
-            let (at_parent, moved) = (roots(&here), roots(&elsewhere));
+            let (at_parent, moved) = (here.roots(), elsewhere.roots());
 
             // The posted digest is not the proposal's.
             let proposal = here.settle(&checked).await.unwrap();
@@ -952,7 +945,7 @@ mod tests {
                 Err(Error::InvalidCheckpoint)
             ));
             let here = reopen("digest", "here").await;
-            assert_eq!(roots(&here), at_parent);
+            assert_eq!(here.roots(), at_parent);
 
             // The balances are elsewhere, so the log beside them must not advance.
             let proposal = here.settle(&checked).await.unwrap();
@@ -966,8 +959,8 @@ mod tests {
                 reopen("balances", "here").await,
                 reopen("balances_elsewhere", "elsewhere").await,
             );
-            assert_eq!(roots(&here), at_parent);
-            assert_eq!(roots(&elsewhere), moved);
+            assert_eq!(here.roots(), at_parent);
+            assert_eq!(elsewhere.roots(), moved);
 
             // The log is elsewhere.
             let proposal = here.settle(&checked).await.unwrap();
@@ -980,8 +973,8 @@ mod tests {
                 reopen("log", "here").await,
                 reopen("log_elsewhere", "elsewhere").await,
             );
-            assert_eq!(roots(&here), at_parent);
-            assert_eq!(roots(&elsewhere), moved);
+            assert_eq!(here.roots(), at_parent);
+            assert_eq!(elsewhere.roots(), moved);
         });
     }
 
@@ -1019,16 +1012,16 @@ mod tests {
             let (store, again) = post(Store { balances, log }, &first, close, &queued).await;
             assert_eq!(again.summary, second.summary);
             assert_eq!(
-                roots(&store),
+                store.roots(),
                 (second.summary.balances, second.summary.payouts.root)
             );
         });
     }
 
-    /// When the payout log cannot be made durable, apply fails before it applies anything to the
-    /// balances.
+    /// Settling stages a batch without applying it. When the payout log then cannot be made
+    /// durable, apply fails, and the databases reopen at the parent as after a restart (V2).
     #[test]
-    fn test_apply_writes_no_balance_before_the_log_is_durable() {
+    fn test_apply_fails_when_the_log_is_not_durable() {
         deterministic::Runner::default().start(|context| async move {
             let operator = operator_key();
             let store = open(context.child("opened"), "ordered").await;
@@ -1038,13 +1031,13 @@ mod tests {
             let checked = check(close, &parent, &queued).unwrap();
             let proposal = store.settle(&checked).await.unwrap();
             let posted = proposal.summary().digest();
-            let applied = context
-                .child("opened")
-                .child("balances")
-                .counter("apply_batch_calls", "Number of apply-batch calls");
-            assert_eq!(applied.metric().get(), 0);
+            assert!(
+                context
+                    .encode()
+                    .contains("opened_balances_apply_batch_calls_total 0")
+            );
 
-            // Every sync fails, so the log's commit fails.
+            // Every sync fails, so the log's commit fails and apply drops both handles.
             *context.storage_fault_config().write() = FaultConfig {
                 sync_rate: Some(Probability::new(1, 1).unwrap()),
                 ..Default::default()
@@ -1053,7 +1046,13 @@ mod tests {
                 store.apply(proposal, &posted).await,
                 Err(Error::Log(_))
             ));
-            assert_eq!(applied.metric().get(), 0);
+            *context.storage_fault_config().write() = FaultConfig::default();
+            let store = open(context.child("reopened"), "ordered").await;
+            assert_eq!(
+                store.roots(),
+                (parent.summary.balances, parent.summary.payouts.root)
+            );
+            assert!(store.balances.get_metadata().await.unwrap().is_none());
         });
     }
 
@@ -1103,8 +1102,8 @@ mod tests {
         });
     }
 
-    /// Settling borrows the checked close, so a refused or repeated settle leaves it usable, and
-    /// every settle of it on the same databases stages the same writes.
+    /// A refused or repeated settle leaves the checked close usable, and every settle of it on the
+    /// same databases stages the same writes.
     #[test]
     fn test_settle_can_be_retried() {
         deterministic::Runner::default().start(|context| async move {
@@ -1315,7 +1314,7 @@ mod tests {
             .await;
             let store = Store { balances, log };
             assert_eq!(
-                roots(&store),
+                store.roots(),
                 (parent.summary.balances, parent.summary.payouts.root)
             );
             let (store, rewound_parent, rewound) = replay(store, parent, &closes[3..]).await;
@@ -1362,7 +1361,7 @@ mod tests {
                         let log = open_log(context.child("rewound"), "pruned", size).await;
                         let earlier = Store { balances, log };
                         assert_eq!(
-                            roots(&earlier),
+                            earlier.roots(),
                             (previous.summary.balances, previous.summary.payouts.root)
                         );
                         (store, _) = post(earlier, &previous, close, &queue).await;
@@ -1378,7 +1377,7 @@ mod tests {
                     }
                 }
                 assert_eq!(
-                    roots(&store),
+                    store.roots(),
                     (parent.summary.balances, parent.summary.payouts.root)
                 );
             }

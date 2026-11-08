@@ -1,8 +1,7 @@
 //! Checking closes, applying posted closes, and resuming validators.
 
 use super::*;
-use commonware_clearing::bajillion::{BalanceProof, Error, ForcedWithdrawal, Payout, PayoutLog};
-use commonware_codec::DecodeExt as _;
+use commonware_clearing::bajillion::{Error, ForcedWithdrawal, Payout, PayoutLog};
 use commonware_runtime::{Runner as _, deterministic::FaultConfig};
 use commonware_utils::Probability;
 
@@ -40,7 +39,6 @@ fn test_validators_agree_on_closes() {
                 let proof = validator.prove(&account(index)).await.unwrap();
                 match proof {
                     Some(proof) => {
-                        assert_eq!(BalanceProof::decode(proof.encode()).unwrap(), proof);
                         assert_eq!(proof.balance, expected);
                         assert!(proof.verify::<Sha256, _>(&second.balances, &account(index)));
                         assert!(!proof.verify::<Sha256, _>(&second.balances, &account(3)));

@@ -10,9 +10,7 @@ use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
 /// An account's signed request to withdraw up to `amount` through the operator in the close of
 /// `epoch`.
 ///
-/// `tag` tells apart otherwise identical requests. A close identifies a request by its signed part
-/// ([Withdrawal::request]), not by its signature, so an operator collecting requests keys them the
-/// same way.
+/// A close identifies a request by its signed part ([Withdrawal::request]), not by its signature.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Withdrawal<P: PublicKey, A: Amount> {
     /// Epoch whose close may pay the withdrawal.
@@ -80,8 +78,7 @@ impl<P: PublicKey, A: Amount> Withdrawal<P, A> {
             )
     }
 
-    /// Returns the signed part of the request. A close orders its withdrawals by it and holds at
-    /// most one withdrawal per signed part.
+    /// Returns the signed part of the request.
     pub const fn request(&self) -> (Epoch, &P, A, u64) {
         (self.epoch, &self.account, self.amount, self.tag)
     }
@@ -224,8 +221,8 @@ where
 
 /// Returns `count` as a number of queued requests.
 ///
-/// Returns an error unless `required <= count <= queued`.
-fn processed(required: usize, queued: usize, count: u64) -> Result<usize, Error> {
+/// Returns [Error::InvalidCount] unless `required <= count <= queued`.
+fn bounded(required: usize, queued: usize, count: u64) -> Result<usize, Error> {
     usize::try_from(count)
         .ok()
         .filter(|count| (required..=queued).contains(count))
@@ -250,19 +247,16 @@ pub struct Queue<P: PublicKey, A: Amount> {
     pub epoch: Epoch,
     /// Unprocessed deposits, oldest first.
     pub deposits: Vec<Deposit<P, A>>,
-    /// Number of deposits the next close must process. They are the deposits still queued when the
-    /// previous close posted.
+    /// Number of deposits the next close must process.
     pub required_deposits: usize,
     /// Unprocessed forced withdrawals, oldest first.
     pub forced_withdrawals: Vec<ForcedWithdrawal<P, A>>,
-    /// Number of forced withdrawals the next close must process. They are the forced withdrawals
-    /// still queued when the previous close posted.
+    /// Number of forced withdrawals the next close must process.
     pub required_forced_withdrawals: usize,
 }
 
 impl<P: PublicKey, A: Amount> Queue<P, A> {
-    /// Returns the oldest `deposits` deposits and `forced_withdrawals` forced withdrawals, the
-    /// requests a close with these counts processes.
+    /// Returns the oldest `deposits` deposits and `forced_withdrawals` forced withdrawals.
     ///
     /// Returns [Error::InvalidCount] unless each count lies between its queue's required count and
     /// length.
@@ -272,8 +266,8 @@ impl<P: PublicKey, A: Amount> Queue<P, A> {
         deposits: u64,
         forced_withdrawals: u64,
     ) -> Result<(&[Deposit<P, A>], &[ForcedWithdrawal<P, A>]), Error> {
-        let deposits = processed(self.required_deposits, self.deposits.len(), deposits)?;
-        let forced_withdrawals = processed(
+        let deposits = bounded(self.required_deposits, self.deposits.len(), deposits)?;
+        let forced_withdrawals = bounded(
             self.required_forced_withdrawals,
             self.forced_withdrawals.len(),
             forced_withdrawals,
@@ -328,7 +322,7 @@ impl<P: PublicKey, A: Amount> arbitrary::Arbitrary<'_> for Row<P, A>
 where
     P: for<'a> arbitrary::Arbitrary<'a>,
     P::Signature: for<'a> arbitrary::Arbitrary<'a>,
-    A: From<u64> + for<'a> arbitrary::Arbitrary<'a>,
+    A: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let payments = super::amounts::arbitrary_nonempty(u)?;
@@ -342,8 +336,7 @@ where
 
 /// Bounds on the size of a [Close].
 ///
-/// Validators decode a close with their limits, so the operator keeps each epoch's senders,
-/// receivers per sender, and soft withdrawals within them.
+/// Decoding rejects a close that exceeds them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Maximum number of senders.
@@ -429,9 +422,9 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
     /// withdrawals, in any order, processing the oldest `deposits` deposits and
     /// `forced_withdrawals` forced withdrawals. Returns it with each touched account's flow.
     ///
-    /// Assembly recomputes every root and checks neither signatures nor the validators' [Limits].
-    /// Returns [Error::InvalidCount] if a count is out of bounds, [Error::NoReceivers] if a row
-    /// pays no receiver, [Error::WrongEpoch] if a soft withdrawal is for another epoch, and
+    /// Assembly recomputes every root and checks neither signatures nor [Limits]. Returns
+    /// [Error::InvalidCount] if a count is out of bounds, [Error::NoReceivers] if a row pays no
+    /// receiver, [Error::WrongEpoch] if a soft withdrawal is for another epoch, and
     /// [Error::Duplicate] if an account has two rows or a withdrawal request repeats.
     #[allow(clippy::type_complexity)]
     pub fn assemble<H, S>(
@@ -476,21 +469,50 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
             queued_deposits,
             queued_forced_withdrawals,
         )?;
+        let close = Self::sign::<H, S>(
+            signer,
+            namespace,
+            epoch,
+            rows,
+            withdrawals,
+            deposits,
+            forced_withdrawals,
+        );
+        Ok((close, flows.into_flows()))
+    }
+
+    /// Signs the close of `epoch` over rows and withdrawals already in their canonical order.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless the rows and withdrawals are strictly increasing.
+    pub(crate) fn sign<H, S>(
+        signer: &S,
+        namespace: &Namespace,
+        epoch: Epoch,
+        rows: Vec<Row<P, A>>,
+        withdrawals: Vec<Withdrawal<P, A>>,
+        deposits: u64,
+        forced_withdrawals: u64,
+    ) -> Self
+    where
+        H: Hasher,
+        S: Signer<PublicKey = O, Signature = O::Signature>,
+    {
         let roots: Vec<_> = rows.iter().map(|row| row.payments.root::<H>()).collect();
         let root = matrix::root::<H, P>(rows.iter().map(|row| &row.account).zip(&roots));
         let signature = signer.sign(
             &namespace.close,
             &Self::message(epoch, &root, &withdrawals, deposits, forced_withdrawals),
         );
-        let close = Self::new(
+        Self::new(
             epoch,
             rows,
             withdrawals,
             deposits,
             forced_withdrawals,
             signature,
-        );
-        Ok((close, flows.into_flows()))
+        )
     }
 
     /// Returns the epoch closed.
@@ -593,7 +615,7 @@ where
     P: for<'a> arbitrary::Arbitrary<'a>,
     P::Signature: for<'a> arbitrary::Arbitrary<'a>,
     O::Signature: for<'a> arbitrary::Arbitrary<'a>,
-    A: From<u64> + for<'a> arbitrary::Arbitrary<'a>,
+    A: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let mut rows: Vec<Row<P, A>> = u.arbitrary()?;
@@ -616,7 +638,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bajillion::tests::{TestClose, namespace};
+    use crate::bajillion::tests::{
+        TestClose, account, namespace, operator_key, queue, user, users,
+    };
     use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
     use commonware_cryptography::{
         Sha256, Verifier as _,
@@ -628,13 +652,6 @@ mod tests {
         receivers: 4,
         withdrawals: 4,
     };
-
-    /// Returns `count` signers sorted by public key.
-    fn signers(count: u64) -> Vec<PrivateKey> {
-        let mut signers: Vec<_> = (0..count).map(PrivateKey::from_seed).collect();
-        signers.sort_by_key(|signer| signer.public_key());
-        signers
-    }
 
     fn row(signer: &PrivateKey, receiver: &PrivateKey) -> Row<PublicKey, u64> {
         Row {
@@ -652,16 +669,14 @@ mod tests {
         withdrawals.write(&mut encoded);
         2u64.write(&mut encoded);
         3u64.write(&mut encoded);
-        PrivateKey::from_seed(9)
-            .sign(b"close", b"close")
-            .write(&mut encoded);
+        operator_key().sign(b"close", b"close").write(&mut encoded);
         encoded
     }
 
     #[test]
     fn test_withdrawal_signature() {
         let namespace = namespace();
-        let signer = PrivateKey::from_seed(0);
+        let signer = user(0);
         let withdrawal = Withdrawal::<_, u64>::sign(&signer, &namespace, 3, 10, 7);
         assert_eq!(withdrawal.account, signer.public_key());
         assert!(withdrawal.verify(&namespace));
@@ -682,7 +697,7 @@ mod tests {
                 ..withdrawal.clone()
             },
             Withdrawal {
-                account: PrivateKey::from_seed(1).public_key(),
+                account: account(1),
                 ..withdrawal
             },
         ] {
@@ -696,7 +711,7 @@ mod tests {
     #[test]
     fn test_decode_rejects_non_canonical_close() {
         let namespace = namespace();
-        let signers = signers(3);
+        let signers = users(3);
         let rows = [row(&signers[0], &signers[2]), row(&signers[1], &signers[2])];
         let withdrawal = Withdrawal::sign(&signers[0], &namespace, 1, 5, 0);
 
@@ -760,7 +775,7 @@ mod tests {
 
     #[test]
     fn test_queue_prefix() {
-        let signers = signers(1);
+        let signers = users(1);
         let account = signers[0].public_key();
         let queue: Queue<_, u64> = Queue {
             epoch: 1,
@@ -793,7 +808,7 @@ mod tests {
     #[test]
     fn test_withdrawal_message_is_what_the_account_signs() {
         let namespace = namespace();
-        let signer = PrivateKey::from_seed(0);
+        let signer = user(0);
         let withdrawal = Withdrawal::<_, u64>::sign(&signer, &namespace, 3, 10, 7);
         let message = Withdrawal::<PublicKey, u64>::message(3, &signer.public_key(), 10, 7);
         assert_eq!(
@@ -804,7 +819,7 @@ mod tests {
 
     #[test]
     fn test_queued_requests_have_fixed_encodings() {
-        let account = PrivateKey::from_seed(0).public_key();
+        let account = account(0);
         let deposit = Deposit::<_, u64> {
             account: account.clone(),
             amount: 7,
@@ -819,13 +834,12 @@ mod tests {
         assert_eq!(ForcedWithdrawal::decode(forced.encode()).unwrap(), forced);
     }
 
-    /// Assembly orders rows and withdrawals itself, recomputes every root, and signs the close
-    /// validators check.
+    /// Assembly orders rows and withdrawals itself, recomputes every root, and signs the close.
     #[test]
     fn test_assembly_is_independent_of_order() {
         let namespace = namespace();
-        let operator = PrivateKey::from_seed(9);
-        let signers = signers(3);
+        let operator = operator_key();
+        let signers = users(3);
         let rows = [row(&signers[0], &signers[2]), row(&signers[1], &signers[2])];
         let withdrawals = [
             Withdrawal::sign(&signers[0], &namespace, 1, 5, 0),
@@ -884,17 +898,11 @@ mod tests {
     #[test]
     fn test_assembly_refuses_repeats_and_counts() {
         let namespace = namespace();
-        let operator = PrivateKey::from_seed(9);
-        let signers = signers(3);
-        let queue = Queue::<PublicKey, u64> {
-            epoch: 1,
-            deposits: vec![Deposit {
-                account: signers[2].public_key(),
-                amount: 4,
-            }],
+        let operator = operator_key();
+        let signers = users(3);
+        let queue = Queue {
             required_deposits: 1,
-            forced_withdrawals: Vec::new(),
-            required_forced_withdrawals: 0,
+            ..queue(1, &[(2, 4)], &[])
         };
         let assemble = |deposits, rows: Vec<_>, withdrawals: Vec<_>| {
             TestClose::assemble::<Sha256, _>(
@@ -940,15 +948,9 @@ mod tests {
     #[test]
     fn test_assembly_refuses_rows_and_withdrawals_validators_reject() {
         let namespace = namespace();
-        let operator = PrivateKey::from_seed(9);
-        let signers = signers(3);
-        let queue = Queue::<PublicKey, u64> {
-            epoch: 1,
-            deposits: Vec::new(),
-            required_deposits: 0,
-            forced_withdrawals: Vec::new(),
-            required_forced_withdrawals: 0,
-        };
+        let operator = operator_key();
+        let signers = users(3);
+        let queue = queue(1, &[], &[]);
         let assemble = |rows: Vec<_>, withdrawals: Vec<_>| {
             TestClose::assemble::<Sha256, _>(&operator, &namespace, &queue, rows, withdrawals, 0, 0)
         };

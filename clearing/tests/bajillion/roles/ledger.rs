@@ -97,7 +97,7 @@ where
     H: Hasher,
     A: Amount,
 {
-    /// Returns a ledger whose validators start from the empty balances database with root
+    /// Returns a ledger whose last post is the genesis summary over the empty balances root
     /// `balances` (L1).
     pub fn new(namespace: Namespace, operator: O, verifier: V, balances: H::Digest) -> Self {
         let genesis = Summary::<H>::genesis::<P, A>(balances);
@@ -260,8 +260,8 @@ where
         Ok((proof.payout.account.clone(), proof.payout.amount))
     }
 
-    /// Takes `amount` from the funds held for a transfer. If the ledger holds less, the chain would
-    /// refuse the transfer, so this returns Custody and changes nothing.
+    /// Takes `amount` from the funds held for a transfer, or returns [Refusal::Custody] and changes
+    /// nothing if the ledger holds less.
     fn transfer(&mut self, amount: A) -> Result<(), Refusal> {
         self.held = self.held.checked_sub(amount).ok_or(Refusal::Custody)?;
         Ok(())

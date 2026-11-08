@@ -51,8 +51,8 @@ struct Record {
 /// What a validator persists besides its databases. It holds every close the validator attested, by
 /// the digest of its summary, written before the attestation is released (V4).
 ///
-/// A restart recovers from it and the ledger's last posted digest alone, and the validator serves
-/// earlier posted closes from it (V6).
+/// With the ledger's last posted digest, it suffices to recover after a restart and to serve
+/// earlier posted closes (V6).
 #[derive(Clone, Debug)]
 pub struct Persisted<D: Digest> {
     attested: HashMap<D, Record>,
@@ -120,7 +120,7 @@ where
     /// balances change, so it is at or past the close the balances hold, and the bounded reopen
     /// discards any later close.
     ///
-    /// Returns InvalidCheckpoint unless the log then has `summary`'s payouts root.
+    /// Returns [Error::InvalidCheckpoint] unless the log then has `summary`'s payouts root.
     async fn log(
         context: &E,
         config: &Config<O, T, S>,
@@ -139,11 +139,9 @@ where
     /// Opens the databases and resumes from what the validator persisted (V2). `posted` is the
     /// digest of the ledger's last post, or `None` before the first.
     ///
-    /// The validator walks the persisted summaries back from `posted` along their parents, and
-    /// resumes from the first one with the balances database's root. A close that did not post is
-    /// off that chain, so it is never chosen even when it shares the root. A balances database with
-    /// no commit metadata has applied no close and starts from genesis. The payout log then reopens
-    /// at that summary's payouts size.
+    /// It resumes from the persisted summary on the chain ending at `posted` whose balances root
+    /// the database holds, or from genesis if the database has applied no close. A close that did
+    /// not post is off that chain, so it is never chosen even when it shares the root.
     pub async fn init(
         context: E,
         config: Config<O, T, S>,
@@ -390,7 +388,7 @@ where
     /// `posted`, from the persisted closes and the requests they process alone (V4, V5). Returns
     /// how many it applied.
     ///
-    /// Returns InvalidCheckpoint if a posted close in between was not persisted.
+    /// Returns [Error::InvalidCheckpoint] if a posted close in between was not persisted.
     pub async fn catch_up(&mut self, posted: &H::Digest) -> Result<usize, Error> {
         // Collect the persisted closes from the ledger's last post back to the last close applied.
         let applied = self.parent.summary.digest();

@@ -1,8 +1,7 @@
 //! End-to-end tests of Bajillion, run against reference implementations of its five roles.
 //!
-//! The crate prescribes what independent parties must compute identically and leaves each role's
-//! state to the deployment. The roles here are built from the crate's public API alone. They show
-//! that a deployment can build every role, and each keeps that role's obligations.
+//! The roles here are built from the crate's public API alone. They show that a deployment can
+//! build every role, and each keeps that role's obligations.
 
 mod roles {
     pub mod ledger;
@@ -48,14 +47,14 @@ use roles::{
 /// Namespace of the deployment under test.
 const NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_BAJILLION_TEST";
 
-/// Limits of the closes operators build, beyond any test's activity unless it sets its own.
+/// Close limits large enough not to constrain any test that uses them.
 const LIMITS: Limits = Limits {
     rows: 1_024,
     receivers: 1_024,
     withdrawals: 1_024,
 };
 
-/// Validators certify summaries with Ed25519 signatures from at least `2f + 1` of `3f + 1`.
+/// Ed25519 certificates over summaries from at least `2f + 1` of `3f + 1` validators.
 // The macro gates its fixture on a `mocks` feature that this crate does not define.
 #[allow(unexpected_cfgs)]
 mod scheme {
@@ -216,8 +215,7 @@ fn forge(
     .0
 }
 
-/// Returns `hash` extended by `H(hash || request)` for each of `requests`. An auditor holding the
-/// requests recomputes a running hash this way.
+/// Returns `hash` extended by `H(hash || request)` for each of `requests`.
 fn chain<R: Encode>(hash: Digest, requests: &[R]) -> Digest {
     requests.iter().fold(hash, |hash, request| {
         Sha256::hash(&[hash.as_ref(), request.encode().as_ref()])
@@ -231,9 +229,9 @@ fn assert_chained(
     summary: &Summary<Sha256>,
     queue: &Queue<PublicKey, u64>,
 ) {
-    let prefix = |count: u64| usize::try_from(count).expect("a count within the queue must fit");
-    let deposits = &queue.deposits[..prefix(summary.deposits.count)];
-    let forced = &queue.forced_withdrawals[..prefix(summary.forced_withdrawals.count)];
+    let (deposits, forced) = queue
+        .prefix(summary.deposits.count, summary.forced_withdrawals.count)
+        .unwrap();
     assert_eq!(summary.deposits.hash, chain(parent.deposits.hash, deposits));
     assert_eq!(
         summary.forced_withdrawals.hash,
@@ -386,7 +384,7 @@ where
 
     /// Checks that the operator and every validator hold each balance, and that the ledger holds
     /// exactly those balances and the deposits no close processed. Every posted payout must already
-    /// be withdrawn, as [close](Self::close) does.
+    /// be withdrawn.
     async fn check_balances(&self, balances: &[(P, A)]) {
         for (account, expected) in balances {
             assert_eq!(self.operator.balance(account), *expected);

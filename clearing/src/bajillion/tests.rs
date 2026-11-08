@@ -1,9 +1,9 @@
-//! Helpers shared by the unit tests, and the vector a port of the ledger checks itself against.
+//! Helpers shared by the unit tests, and the conformance vector for ports of the ledger.
 
 use super::{
-    Amounts, Balances, Checked, Checkpoint, Close, Deposit, Epoch, ForcedWithdrawal, Matrix,
+    Amounts, Balances, Checked, Checkpoint, Close, Deposit, Epoch, Error, ForcedWithdrawal, Matrix,
     Namespace, Payout, PayoutLog, PayoutProof, Proposal, Queue, Receipt, Request, Row, State,
-    Summary, Withdrawal, matrix,
+    Summary, Withdrawal,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
@@ -27,7 +27,7 @@ use commonware_utils::{NZU16, NZU64, NZUsize, non_empty};
 /// Namespace of the deployment under test.
 pub(crate) const NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_BAJILLION_TEST";
 
-/// Validators certify summaries with Ed25519 signatures from at least `2f + 1` of `3f + 1`.
+/// Ed25519 certificates over summaries from at least `2f + 1` of `3f + 1` validators.
 // The macro gates its fixture on a `mocks` feature that this crate does not define.
 #[allow(unexpected_cfgs)]
 pub(crate) mod scheme {
@@ -39,6 +39,7 @@ pub(crate) mod scheme {
 }
 
 pub(crate) type TestClose = Close<PublicKey, PublicKey, u64>;
+pub(crate) type TestQueue = Queue<PublicKey, u64>;
 pub(crate) type TestCheckpoint = Checkpoint<PublicKey, Sha256, u64>;
 type TestChecked = Checked<PublicKey, Sha256, u64>;
 pub(crate) type TestProposal = Proposal<PublicKey, Sha256, Sequential, u64>;
@@ -63,7 +64,7 @@ pub(crate) struct Store<
 
 impl<I: Unordered<Value = Location<mmb::Family>> + 'static> Store<I> {
     /// Settles `checked` on both databases.
-    pub(crate) async fn settle(&self, checked: &TestChecked) -> Result<TestProposal, super::Error> {
+    pub(crate) async fn settle(&self, checked: &TestChecked) -> Result<TestProposal, Error> {
         checked.settle(&self.balances, &self.log).await
     }
 
@@ -72,7 +73,7 @@ impl<I: Unordered<Value = Location<mmb::Family>> + 'static> Store<I> {
         self,
         proposal: TestProposal,
         posted: &Digest,
-    ) -> Result<(Self, TestCheckpoint), super::Error> {
+    ) -> Result<(Self, TestCheckpoint), Error> {
         let (balances, log, checkpoint) = proposal.apply(self.balances, self.log, posted).await?;
         Ok((Self { balances, log }, checkpoint))
     }
@@ -83,6 +84,11 @@ impl<I: Unordered<Value = Location<mmb::Family>> + 'static> Store<I> {
             balances: self.balances.commit().await.unwrap(),
             log: self.log,
         }
+    }
+
+    /// Returns the roots of the balances database and the payout log.
+    pub(crate) fn roots(&self) -> (Digest, Digest) {
+        (self.balances.root(), self.log.root())
     }
 }
 
@@ -101,11 +107,16 @@ pub(crate) fn account(index: u64) -> PublicKey {
     user(index).public_key()
 }
 
+/// Returns the signing keys of users `0..count`, in increasing order of their accounts.
+pub(crate) fn users(count: u64) -> Vec<PrivateKey> {
+    let mut users: Vec<_> = (0..count).map(user).collect();
+    users.sort_by_key(PrivateKey::public_key);
+    users
+}
+
 /// Returns the accounts of users `0..count` in increasing order.
 pub(crate) fn accounts(count: u64) -> Vec<PublicKey> {
-    let mut accounts: Vec<_> = (0..count).map(account).collect();
-    accounts.sort();
-    accounts
+    users(count).iter().map(PrivateKey::public_key).collect()
 }
 
 /// Returns the operator's signing key.
@@ -161,32 +172,20 @@ pub(crate) fn sign_close(
 ) -> TestClose {
     rows.sort_by(|a, b| a.account.cmp(&b.account));
     withdrawals.sort_by(|a, b| a.request().cmp(&b.request()));
-    let roots: Vec<_> = rows
-        .iter()
-        .map(|row| row.payments.root::<Sha256>())
-        .collect();
-    let root = matrix::root::<Sha256, _>(rows.iter().map(|row| &row.account).zip(&roots));
-    let signature = operator.sign(
-        &namespace().close,
-        &TestClose::message(epoch, &root, &withdrawals, deposits, forced_withdrawals),
-    );
-    Close::new(
+    Close::sign::<Sha256, _>(
+        operator,
+        &namespace(),
         epoch,
         rows,
         withdrawals,
         deposits,
         forced_withdrawals,
-        signature,
     )
 }
 
 /// Returns a queue for the close of `epoch` holding a deposit for each `(index, amount)` in
 /// `deposits` and a forced withdrawal for each in `forced`, none of which the close must process.
-pub(crate) fn queue(
-    epoch: Epoch,
-    deposits: &[(u64, u64)],
-    forced: &[(u64, u64)],
-) -> Queue<PublicKey, u64> {
+pub(crate) fn queue(epoch: Epoch, deposits: &[(u64, u64)], forced: &[(u64, u64)]) -> TestQueue {
     Queue {
         epoch,
         deposits: deposits
@@ -286,8 +285,8 @@ pub(crate) fn genesis(balances: Digest) -> TestCheckpoint {
 pub(crate) fn check(
     close: TestClose,
     parent: &TestCheckpoint,
-    queue: &Queue<PublicKey, u64>,
-) -> Result<TestChecked, super::Error> {
+    queue: &TestQueue,
+) -> Result<TestChecked, Error> {
     close.check::<Sha256, _>(
         &namespace(),
         &operator_key().public_key(),
@@ -322,8 +321,7 @@ pub(crate) fn certify(schemes: &[scheme::Scheme], summary: &Summary<Sha256>) -> 
         .unwrap()
 }
 
-/// Returns `hash` extended by `H(hash || request)` for each of `requests`. Tests check
-/// `Processed::next` against this independent fold.
+/// Returns `hash` extended by `H(hash || request)` for each of `requests`.
 pub(crate) fn chain<R: Encode>(hash: Digest, requests: &[R]) -> Digest {
     requests.iter().fold(hash, |hash, request| {
         Sha256::hash(&[hash.as_ref(), request.encode().as_ref()])

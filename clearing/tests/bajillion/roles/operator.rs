@@ -22,7 +22,7 @@ pub enum Refusal {
     Error(#[from] Error),
 }
 
-/// Per-account records that count their lookups, so a test can check that a call reads none.
+/// Per-account records that count their lookups.
 #[derive(Clone, Debug)]
 pub struct Records<K: Ord, V> {
     entries: BTreeMap<K, V>,
@@ -53,7 +53,7 @@ impl<K: Ord, V> Records<K, V> {
 }
 
 /// A sender's latest countersigned state in the current epoch, with its payment map and the
-/// sender's signature over it. Together they form the sender's row.
+/// sender's signature over it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Admitted<P: PublicKey, D: Digest, A: Amount> {
     /// The countersigned state.
@@ -84,8 +84,7 @@ pub struct Persisted<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
 
 /// An operator that serves every account and applies each close it assembles at once.
 ///
-/// Its balances follow the posted closes only if every close it assembles posts, so it suits a
-/// deployment whose validators accept its closes.
+/// Its balances follow the posted closes only if every close it assembles posts.
 pub struct Operator<P: PublicKey, K: Signer, H: Hasher, A: Amount> {
     signer: K,
     namespace: Namespace,

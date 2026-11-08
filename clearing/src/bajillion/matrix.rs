@@ -259,7 +259,7 @@ mod tests {
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::{Sha256, ed25519::PublicKey};
 
-    fn amounts(entries: &[(&PublicKey, u64)]) -> Amounts<PublicKey, u64> {
+    fn payments(entries: &[(&PublicKey, u64)]) -> Amounts<PublicKey, u64> {
         Amounts::new(
             entries
                 .iter()
@@ -283,9 +283,9 @@ mod tests {
     fn test_opens_every_pair() {
         let keys = accounts(6);
         let rows = [
-            (keys[1].clone(), amounts(&[(&keys[0], 5), (&keys[4], 7)])),
-            (keys[3].clone(), amounts(&[(&keys[1], 1)])),
-            (keys[4].clone(), amounts(&[(&keys[4], 2), (&keys[5], 3)])),
+            (keys[1].clone(), payments(&[(&keys[0], 5), (&keys[4], 7)])),
+            (keys[3].clone(), payments(&[(&keys[1], 1)])),
+            (keys[4].clone(), payments(&[(&keys[4], 2), (&keys[5], 3)])),
         ];
         let matrix = matrix(&rows);
         let root = matrix.root();
@@ -328,8 +328,8 @@ mod tests {
     fn test_rejects_inconsistent_openings() {
         let keys = accounts(4);
         let matrix = matrix(&[
-            (keys[1].clone(), amounts(&[(&keys[0], 5)])),
-            (keys[3].clone(), amounts(&[(&keys[0], 1)])),
+            (keys[1].clone(), payments(&[(&keys[0], 5)])),
+            (keys[3].clone(), payments(&[(&keys[0], 1)])),
         ]);
         let root = matrix.root();
 

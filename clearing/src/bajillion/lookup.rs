@@ -2,7 +2,7 @@
 
 use super::Error;
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::bmt::{Proof, Tree};
 
@@ -16,8 +16,8 @@ const NON_MEMBER: u8 = 1;
 /// a binary Merkle tree.
 ///
 /// The tree's root binds the number of entries, so an opening also proves whether an entry is the
-/// first or last. Whoever certifies a root must check that the list behind it is sorted, because an
-/// unsorted list can prove a present key absent.
+/// first or last. An opening is sound only under the root of a sorted list, because an unsorted
+/// list can prove a present key absent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Lookup<K, V, D: Digest> {
     /// The key is present.
@@ -159,7 +159,7 @@ impl<K: Write, V: Write, D: Digest> Write for Lookup<K, V, D> {
 
 impl<K: EncodeSize, V: EncodeSize, D: Digest> EncodeSize for Lookup<K, V, D> {
     fn encode_size(&self) -> usize {
-        MEMBER.encode_size()
+        u8::SIZE
             + match self {
                 Self::Member {
                     position,
@@ -202,8 +202,7 @@ impl<K: Read<Cfg = ()>, V: Read<Cfg = ()>, D: Digest> Read for Lookup<K, V, D> {
     }
 }
 
-/// Draws an arbitrary proof with at most four siblings. The crate's proof readers accept that
-/// many, while the storage crate's own impl draws any number.
+/// Draws an arbitrary proof with at most four siblings.
 #[cfg(feature = "arbitrary")]
 pub(crate) fn arbitrary_proof<'a, D>(
     u: &mut arbitrary::Unstructured<'a>,
@@ -356,6 +355,7 @@ mod tests {
         else {
             panic!("key must be absent");
         };
+        assert_eq!((lower.unwrap().0, upper.unwrap().0), (20, 30));
 
         // Neighbors must be present unless the key precedes or follows every entry, so a present
         // key cannot be proven absent with one neighbor and that neighbor's own proof.
@@ -414,8 +414,6 @@ mod tests {
         }
 
         // A present key cannot be proven absent with the neighbors of a nearby absent key.
-        let (lower_key, upper_key) = (lower.unwrap().0, upper.unwrap().0);
-        assert_eq!((lower_key, upper_key), (20, 30));
         let lookup = TestLookup::new(&entries, &tree, &5);
         assert!(matches!(
             verify(&lookup, 10, &root),

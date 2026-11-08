@@ -98,25 +98,10 @@ where
     }
 }
 
-/// Returns `payments` with `batch` added, and the root of the result.
-///
-/// Senders derive their states and operators admit them through this one function, so both compute
-/// the same map.
-fn extend<H: Hasher, P: PublicKey, A: Amount>(
-    payments: &Amounts<P, A>,
-    batch: &Amounts<P, A>,
-) -> Result<(Amounts<P, A>, H::Digest), Error> {
-    let extended = payments.combine(batch)?;
-    let root = extended.root::<H>();
-    Ok((extended, root))
-}
-
 /// A sender's request to pay a batch of receivers.
 ///
 /// It carries the roots its states claim, so the sender's signature verifies from the request
-/// alone, and [Verified::admit] then checks those roots against the operator's record. Each
-/// signature covers one state, and each state builds on the sender's row in the close before its
-/// epoch.
+/// alone. Each signature covers one state.
 ///
 /// ```text
 ///                     close(epoch - 1)     close(epoch)     close(epoch + 1)  signed by
@@ -148,7 +133,7 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
     /// Derives the states of `account`'s request to pay `batch` in `epoch`, where `payments` is its
     /// latest countersigned map of `epoch`. The state of `epoch` adds `batch` to `payments` on top
     /// of `previous`. If `pipelined`, the state of the next epoch pays only `batch` on top of
-    /// `payments`. Signs nothing and reads nothing.
+    /// `payments`.
     ///
     /// Returns [Error::NoReceivers] if `batch` is empty, and [Error::Overflow] if the next epoch or
     /// an amount overflows.
@@ -173,13 +158,13 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
         } else {
             None
         };
-        let (extended, root) = extend::<H, P, A>(payments, &batch)?;
+        let extended = payments.combine(&batch)?;
         Ok(States {
             batch,
             state: State {
                 epoch,
                 account,
-                payments: root,
+                payments: extended.root::<H>(),
                 previous: *previous,
             },
             payments: extended,
@@ -187,9 +172,8 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
         })
     }
 
-    /// Verifies the sender's signature over the state this request asks the operator to countersign
-    /// in `epoch`. That is the request's state of its own epoch, or its pipelined state of the
-    /// next. Reads no storage.
+    /// Verifies the sender's signature over the request's state for `epoch`, either its state of
+    /// its own epoch or its pipelined state of the next.
     ///
     /// Returns [Error::WrongEpoch] if the request has no state for `epoch`, [Error::NoReceivers] if
     /// the batch is empty, and [Error::InvalidSignature] if the signature does not verify.
@@ -214,25 +198,15 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
         if self.batch.is_empty() {
             return Err(Error::NoReceivers);
         }
-        let (state, signature) = match pipelined {
-            None => {
-                let state = State {
-                    epoch,
-                    account: self.account.clone(),
-                    payments: self.payments,
-                    previous: self.previous,
-                };
-                (state, &self.signature)
-            }
-            Some((previous, signature)) => {
-                let state = State {
-                    epoch,
-                    account: self.account.clone(),
-                    payments: self.batch.root::<H>(),
-                    previous: *previous,
-                };
-                (state, signature)
-            }
+        let (payments, previous, signature) = match pipelined {
+            None => (self.payments, self.previous, &self.signature),
+            Some((previous, signature)) => (self.batch.root::<H>(), *previous, signature),
+        };
+        let state = State {
+            epoch,
+            account: self.account.clone(),
+            payments,
+            previous,
         };
         if !state.verify(namespace, signature) {
             return Err(Error::InvalidSignature);
@@ -291,7 +265,7 @@ where
     P: for<'a> arbitrary::Arbitrary<'a>,
     P::Signature: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
-    A: From<u64> + for<'a> arbitrary::Arbitrary<'a>,
+    A: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let batch = super::amounts::arbitrary_nonempty(u)?;
@@ -309,9 +283,6 @@ where
 
 /// The states of one request, the batch it pays, and the payment map its state of the request's
 /// epoch commits to.
-///
-/// [Request::states] derives them, and [States::sign] or [States::request] turns them into the
-/// request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct States<P: PublicKey, D: Digest, A: Amount> {
     /// The batch the request pays.
@@ -372,8 +343,6 @@ impl<P: PublicKey, D: Digest, A: Amount> States<P, D, A> {
 }
 
 /// A request whose state for one epoch carries a valid sender signature.
-///
-/// [Verified::admit] is the only way from it to an [Admission].
 #[derive(Debug)]
 pub struct Verified<'a, P: PublicKey, D: Digest, A: Amount> {
     request: &'a Request<P, D, A>,
@@ -403,9 +372,10 @@ impl<P: PublicKey, D: Digest, A: Amount> Verified<'_, P, D, A> {
         }
         let empty = Amounts::empty();
         let payments = latest.map_or(&empty, |(_, payments)| payments);
-        let (extended, root) = extend::<H, P, A>(payments, &self.request.batch)
+        let extended = payments
+            .combine(&self.request.batch)
             .map_err(|_| Error::InvalidSignature)?;
-        if root != self.state.payments {
+        if extended.root::<H>() != self.state.payments {
             return Err(Error::InvalidSignature);
         }
         Ok(Admission::New {
@@ -422,8 +392,7 @@ pub enum Admission<P: PublicKey, D: Digest, A: Amount> {
     /// The request repeats the sender's latest countersigned state. Countersigning it again pays
     /// nothing twice.
     Retry(State<P, D>),
-    /// A new state extending the sender's latest map by the batch. With the map it commits to and
-    /// the sender's signature over it, it forms the sender's row in the close.
+    /// A new state extending the sender's latest map by the batch.
     New {
         /// The state to countersign.
         state: State<P, D>,
@@ -495,7 +464,7 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Receipt<P, O, D, A> {
     }
 
     /// Verifies that both signatures cover the state and that its payment map holds the receipt's
-    /// entry. Returns InvalidReceipt otherwise.
+    /// entry. Returns [Error::InvalidReceipt] otherwise.
     pub fn verify<H: Hasher<Digest = D>>(
         &self,
         namespace: &Namespace,
@@ -672,11 +641,7 @@ mod tests {
         tests::{account, amounts, empty_root, namespace, operator_key, user},
     };
     use commonware_codec::{Decode as _, DecodeExt as _};
-    use commonware_cryptography::{
-        Sha256,
-        ed25519::{PrivateKey, PublicKey},
-        sha256::Digest,
-    };
+    use commonware_cryptography::{Sha256, ed25519::PublicKey, sha256::Digest};
 
     type TestRequest = Request<PublicKey, Digest, u64>;
     type TestStates = States<PublicKey, Digest, u64>;
@@ -701,21 +666,19 @@ mod tests {
     }
 
     /// Returns a receipt from a payment map paying two receivers.
-    fn receipt() -> (Receipt<PublicKey, PublicKey, Digest, u64>, PublicKey) {
+    fn receipt() -> Receipt<PublicKey, PublicKey, Digest, u64> {
         let namespace = namespace();
-        let operator = operator_key();
         let states = states(&[(2, 4), (3, 5)], &Amounts::empty(), empty_root(), false);
-        let receipt = Receipt::<_, PublicKey, _, _>::issue::<Sha256>(
+        Receipt::<_, PublicKey, _, _>::issue::<Sha256>(
             &states.state,
             &states.state.sign(&user(0), &namespace),
-            &states.state.acknowledge(&operator, &namespace),
+            &states.state.acknowledge(&operator_key(), &namespace),
             &states.payments,
             [account(3)],
         )
         .unwrap()
         .pop()
-        .unwrap();
-        (receipt, operator.public_key())
+        .unwrap()
     }
 
     /// A request signed from its states verifies in each epoch it has a state for, and the operator
@@ -776,7 +739,7 @@ mod tests {
 
                 // In the next epoch, a pipelined request pays only its batch on top of the map
                 // the close of its epoch settles. The admission carries the signature over the
-                // pipelined state, the one the sender's row in the next close needs.
+                // pipelined state.
                 let next = request.verify::<Sha256>(&namespace, 3);
                 let Some(state) = &states.pipelined else {
                     assert!(matches!(
@@ -1015,7 +978,8 @@ mod tests {
     #[test]
     fn test_issued_receipts_verify() {
         let namespace = namespace();
-        let (receipt, operator) = receipt();
+        let receipt = receipt();
+        let operator = operator_key().public_key();
         receipt.verify::<Sha256>(&namespace, &operator).unwrap();
         assert_eq!(receipt.amount, 5);
         assert_eq!(
@@ -1053,8 +1017,9 @@ mod tests {
     #[test]
     fn test_receipt_rejects_tampering() {
         let namespace = namespace();
-        let (receipt, operator) = receipt();
-        let other = PrivateKey::from_seed(9).public_key();
+        let receipt = receipt();
+        let operator = operator_key().public_key();
+        let other = account(9);
         let mut state = receipt.state.clone();
         state.epoch += 1;
         let tampered = vec![
@@ -1103,8 +1068,9 @@ mod tests {
     fn test_receipt_needs_the_sender_signature() {
         // Everything but the sender's signature is valid.
         let namespace = namespace();
-        let (mut receipt, operator) = receipt();
-        receipt.signature = receipt.state.sign(&PrivateKey::from_seed(9), &namespace);
+        let mut receipt = receipt();
+        let operator = operator_key().public_key();
+        receipt.signature = receipt.state.sign(&user(9), &namespace);
         assert!(receipt.state.verify_acknowledgement(
             &namespace,
             &operator,
@@ -1121,7 +1087,7 @@ mod tests {
         // The operator's countersignature never verifies as the sender's signature, even when the
         // operator signs with the sender's key.
         let namespace = namespace();
-        let (receipt, _) = receipt();
+        let receipt = receipt();
         let countersignature = receipt.state.acknowledge(&user(0), &namespace);
         assert!(!receipt.state.verify(&namespace, &countersignature));
         assert!(receipt.state.verify(&namespace, &receipt.signature));
@@ -1132,7 +1098,8 @@ mod tests {
     #[test]
     fn test_challenge_checks_the_close_before_the_signatures() {
         let namespace = namespace();
-        let (receipt, operator) = receipt();
+        let receipt = receipt();
+        let operator = operator_key().public_key();
         let sender = receipt.state.account.clone();
         let matrix_of = |payments: Amounts<PublicKey, u64>| {
             let root = payments.root::<Sha256>();

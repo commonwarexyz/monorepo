@@ -334,7 +334,7 @@ mod schemes {
         secp256r1::{self, standard},
     };
 
-    /// Validators certify summaries with secp256r1 signatures from at least `2f + 1` of `3f + 1`.
+    /// secp256r1 certificates over summaries from at least `2f + 1` of `3f + 1` validators.
     // The macro gates its fixture on a `mocks` feature that this crate does not define.
     #[allow(unexpected_cfgs)]
     mod scheme {

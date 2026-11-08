@@ -215,7 +215,10 @@ fn test_operator_acknowledges_retried_requests_once() {
 
     // An earlier request is neither acknowledged nor paid again once a later one extended the
     // map.
-    assert!(operator.accept(&first).is_err());
+    assert!(matches!(
+        operator.accept(&first),
+        Err(Admitting::Error(Error::InvalidSignature))
+    ));
     assert_eq!(operator.payments(&account(0)), Some(&amounts(&[(1, 100)])));
     assert_eq!(operator.live(&account(0)), 0);
 }
