@@ -248,46 +248,85 @@ impl Buf for Copying<'_> {}
 /// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Viewing<'a> {
+    /// The input, whose allocation retained fields share.
     bytes: &'a Bytes,
-    pos: usize,
+    /// The unread part of `bytes`.
+    rest: &'a [u8],
 }
 
 impl<'a> Viewing<'a> {
     /// Starts an independent cursor at the beginning of `bytes`.
-    pub const fn new(bytes: &'a Bytes) -> Self {
-        Self { bytes, pos: 0 }
+    #[inline]
+    pub fn new(bytes: &'a Bytes) -> Self {
+        Self { bytes, rest: bytes }
+    }
+
+    /// Splits off a cursor over the next `len` bytes and advances this one past them.
+    ///
+    /// Retained fields decoded through either cursor share the input allocation, so a sequence of
+    /// frames can be decoded one bounded cursor at a time without cloning the input handle.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bytes::Bytes;
+    /// use commonware_codec::{Decode, Viewing};
+    ///
+    /// let frames = Bytes::from_static(b"\x02hi\x05hello");
+    /// let mut input = Viewing::new(&frames);
+    /// let first = Bytes::decode_cfg(input.split_to(3), &(..).into()).unwrap();
+    /// let second = Bytes::decode_cfg(input, &(..).into()).unwrap();
+    /// assert_eq!(first, b"hi"[..]);
+    /// assert_eq!(second, b"hello"[..]);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if fewer than `len` bytes remain.
+    #[inline]
+    pub fn split_to(&mut self, len: usize) -> Self {
+        assert!(
+            len <= self.rest.len(),
+            "length must not exceed the remaining bytes"
+        );
+        let (head, rest) = self.rest.split_at(len);
+        self.rest = rest;
+        Self {
+            bytes: self.bytes,
+            rest: head,
+        }
     }
 }
 
 impl bytes::Buf for Viewing<'_> {
     #[inline]
     fn remaining(&self) -> usize {
-        self.bytes.len() - self.pos
+        self.rest.len()
     }
 
     #[inline]
     fn chunk(&self) -> &[u8] {
-        &self.bytes[self.pos..]
+        self.rest
     }
 
     #[inline]
     fn advance(&mut self, cnt: usize) {
         assert!(
-            cnt <= self.remaining(),
+            cnt <= self.rest.len(),
             "advance must not exceed the remaining bytes"
         );
-        self.pos += cnt;
+        self.rest = &self.rest[cnt..];
+    }
+
+    #[inline]
+    fn copy_to_slice(&mut self, dst: &mut [u8]) {
+        self.rest.copy_to_slice(dst);
     }
 
     #[inline]
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
-        assert!(
-            len <= self.remaining(),
-            "length must not exceed the remaining bytes"
-        );
-        let bytes = self.bytes.slice(self.pos..self.pos + len);
-        self.pos += len;
-        bytes
+        let taken = self.split_to(len);
+        self.bytes.slice_ref(taken.rest)
     }
 }
 
@@ -553,6 +592,32 @@ mod tests {
         assert_eq!(second, b"world"[..]);
     }
 
+    /// Split cursors bound decoding to their frame, and retained fields from either side share
+    /// storage and outlive the source handle.
+    #[test]
+    fn test_viewing_split_to() {
+        let (first, second) = {
+            let encoded = Bytes::copy_from_slice(b"\x05hello\x05world");
+            let mut input = Viewing::new(&encoded);
+            let mut overlong = input;
+            assert!(Bytes::decode_cfg(overlong.split_to(7), &(..).into()).is_err());
+
+            let frame = input.split_to(6);
+            assert_eq!(frame.remaining(), 6);
+            assert_eq!(input.remaining(), 6);
+            let first = Bytes::decode_cfg(frame, &(..).into()).unwrap();
+            assert_eq!(first.as_ptr(), encoded[1..].as_ptr());
+
+            let second = Bytes::decode_cfg(input.split_to(6), &(..).into()).unwrap();
+            assert_eq!(second.as_ptr(), encoded[7..].as_ptr());
+            assert!(!input.has_remaining());
+            assert!(input.split_to(0).chunk().is_empty());
+            (first, second)
+        };
+        assert_eq!(first, b"hello"[..]);
+        assert_eq!(second, b"world"[..]);
+    }
+
     /// Empty ranges are valid both within the input and at its end.
     #[test]
     fn test_viewing_empty_ranges() {
@@ -602,5 +667,15 @@ mod tests {
         let mut input = Viewing::new(&encoded);
         input.advance(1);
         input.copy_to_bytes(usize::MAX);
+    }
+
+    /// Oversized splits are rejected.
+    #[test]
+    #[should_panic(expected = "length must not exceed the remaining bytes")]
+    fn test_viewing_split_past_end() {
+        let encoded = Bytes::from_static(b"a");
+        let mut input = Viewing::new(&encoded);
+        input.advance(1);
+        input.split_to(1);
     }
 }
