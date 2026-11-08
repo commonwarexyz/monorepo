@@ -524,18 +524,18 @@ where
     )
     .await?;
 
-    // Rebuild the grafted tree, graft roots, and canonical root from the persisted pins and
+    // Rebuild the grafted tree, graft roots, and ops root witness from the persisted pins and
     // selected operation tree.
-    let (grafted_tree, graft_roots, root) = db::rebuild_grafted_tree::<F, H, S, N>(
+    let (grafted_tree, graft_roots, ops_root_witness) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
         any.inactivity_floor_loc,
-        any.root(),
         &strategy,
     )
     .await?;
 
+    let root = ops_root_witness.root::<H>(&any.root());
     let metrics = Metrics::new(context);
     let db = db::Db {
         any,
@@ -544,6 +544,7 @@ where
         metadata,
         strategy,
         root,
+        ops_root_witness,
         metrics,
         #[cfg(test)]
         halt_before_prune_log: false,
@@ -2003,7 +2004,7 @@ pub mod tests {
             assert!(partial.iter().any(|byte| *byte != 0));
 
             // Tie the extracted bytes to the digests authenticated by the existing root witness.
-            let witness = db.ops_root_witness().await.unwrap();
+            let witness = db.ops_root_witness();
             assert_eq!(
                 witness.pending_chunk_digest,
                 Some(Sha256::hash(&[pending.as_slice()]))
