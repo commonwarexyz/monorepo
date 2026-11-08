@@ -295,10 +295,10 @@ impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Operator<P, K, H, A> {
             &self.signer,
             &self.namespace,
             queue,
-            deposits,
-            forced_withdrawals,
             self.rows(),
             self.withdrawals().cloned(),
+            deposits,
+            forced_withdrawals,
         )?;
 
         // Every flow settles before anything changes, so a refusal leaves the operator unchanged.

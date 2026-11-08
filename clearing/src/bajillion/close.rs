@@ -437,10 +437,10 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
         signer: &S,
         namespace: &Namespace,
         queue: &Queue<P, A>,
-        deposits: u64,
-        forced_withdrawals: u64,
         rows: impl IntoIterator<Item = Row<P, A>>,
         withdrawals: impl IntoIterator<Item = Withdrawal<P, A>>,
+        deposits: u64,
+        forced_withdrawals: u64,
     ) -> Result<(Self, Vec<(P, Flow<A>)>), Error>
     where
         H: Hasher,
@@ -859,10 +859,10 @@ mod tests {
                 &operator,
                 &namespace,
                 &queue,
-                1,
-                0,
                 rows,
                 withdrawals,
+                1,
+                0,
             )
             .unwrap()
         };
@@ -922,10 +922,10 @@ mod tests {
                 &operator,
                 &namespace,
                 &queue,
-                deposits,
-                0,
                 rows,
                 withdrawals,
+                deposits,
+                0,
             )
         };
 
@@ -975,10 +975,10 @@ mod tests {
                 &operator,
                 &namespace,
                 &queue,
-                0,
-                0,
                 rows,
                 withdrawals,
+                0,
+                0,
             )
         };
 

@@ -169,7 +169,7 @@ impl<P: PublicKey, D: Digest, A: Amount> Opening<P, D, A> {
     ) -> Result<Option<D>, Error> {
         let row = self
             .row
-            .verify::<H>(sender, root, |sender, payments| {
+            .verify::<H>(root, sender, |sender, payments| {
                 leaf::<H, P>(sender, payments)
             })?
             .copied();
@@ -192,7 +192,7 @@ impl<P: PublicKey, D: Digest, A: Amount> Opening<P, D, A> {
         else {
             return Ok(A::ZERO);
         };
-        let amount = entry.verify::<H>(receiver, &payments, |receiver, amount| {
+        let amount = entry.verify::<H>(&payments, receiver, |receiver, amount| {
             amounts::leaf::<H, P, A>(receiver, *amount)
         })?;
         Ok(amount.copied().unwrap_or(A::ZERO))

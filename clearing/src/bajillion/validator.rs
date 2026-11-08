@@ -373,9 +373,9 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
         Ok(Checked {
             epoch,
             parent: parent.summary.digest::<H>(),
-            base: parent.summary.balances,
             matrix,
             flows,
+            base: parent.summary.balances,
             log: parent.summary.payouts.root,
             deposits: parent.summary.deposits.next::<H, _>(queued_deposits),
             forced_withdrawals: parent
@@ -392,12 +392,12 @@ pub struct Checked<P: PublicKey, D: Digest, A: Amount> {
     epoch: Epoch,
     /// Digest of the parent close's summary.
     parent: D,
-    /// Balances root of the parent close.
-    base: D,
     /// Payment matrix of the close.
     matrix: Matrix<P, D, A>,
     /// Flow of every account the close touches.
     flows: Flows<P, A>,
+    /// Balances root of the parent close.
+    base: D,
     /// Payouts root of the parent close.
     log: D,
     /// The deposits the close processes, as their count and the queue's running hash.
@@ -659,7 +659,7 @@ mod tests {
             let parent = genesis(store.balances.root());
             let (store, parent) = post(store, &parent, funded, &queue(1, &[(0, 10)], &[])).await;
             let queued = queue(2, &[(1, 5)], &[(0, 1)]);
-            let valid = row(0, 2, amounts(&[(1, 10)]), empty_root());
+            let valid = row(2, 0, amounts(&[(1, 10)]), empty_root());
 
             // A close of the next epoch processing the queue is valid.
             let close = sign_close(&operator, 2, vec![valid.clone()], Vec::new(), 1, 1);
@@ -708,7 +708,7 @@ mod tests {
 
             // The signature also covers every row and soft withdrawal, so adding one its account
             // signed breaks it.
-            let mut rows = vec![valid.clone(), row(1, 2, amounts(&[(0, 1)]), empty_root())];
+            let mut rows = vec![valid.clone(), row(2, 1, amounts(&[(0, 1)]), empty_root())];
             rows.sort_by(|a, b| a.account.cmp(&b.account));
             let withdrawals = vec![Withdrawal::sign(&user(0), &namespace(), 2, 1, 0)];
             for (rows, withdrawals) in [(rows, Vec::new()), (vec![valid.clone()], withdrawals)] {
@@ -736,9 +736,9 @@ mod tests {
             // Every sender must sign its row for this epoch on top of its row in the parent close.
             let mut altered = valid.clone();
             altered.payments = amounts(&[(1, 9)]);
-            let stale = row(0, 1, amounts(&[(1, 10)]), empty_root());
+            let stale = row(1, 0, amounts(&[(1, 10)]), empty_root());
             let elsewhere = amounts(&[(1, 1)]).root::<Sha256>();
-            let unanchored = row(0, 2, amounts(&[(1, 10)]), elsewhere);
+            let unanchored = row(2, 0, amounts(&[(1, 10)]), elsewhere);
             for row in [altered, stale, unanchored] {
                 let close = sign_close(&operator, 2, vec![row], Vec::new(), 1, 1);
                 assert!(matches!(
@@ -766,7 +766,7 @@ mod tests {
             ));
 
             // No balance may go negative, even when the sender signed the payment.
-            let overdraft = row(1, 2, amounts(&[(0, 6)]), empty_root());
+            let overdraft = row(2, 1, amounts(&[(0, 6)]), empty_root());
             let close = sign_close(&operator, 2, vec![overdraft], Vec::new(), 1, 1);
             let checked = check(close, &parent, &queued).unwrap();
             assert!(matches!(
@@ -776,18 +776,18 @@ mod tests {
 
             // A sender's next row builds on the map the posted close settled for it, not on the
             // empty map.
-            let paying = row(0, 2, amounts(&[(1, 5)]), empty_root());
+            let paying = row(2, 0, amounts(&[(1, 5)]), empty_root());
             let close = sign_close(&operator, 2, vec![paying], Vec::new(), 1, 1);
             let (store, parent) = post(store, &parent, close, &queued).await;
             let next = queue(3, &[], &[]);
-            let unanchored = row(0, 3, amounts(&[(1, 1)]), empty_root());
+            let unanchored = row(3, 0, amounts(&[(1, 1)]), empty_root());
             let close = sign_close(&operator, 3, vec![unanchored], Vec::new(), 0, 0);
             assert!(matches!(
                 check(close, &parent, &next),
                 Err(Error::InvalidSignature)
             ));
             let settled = amounts(&[(1, 5)]).root::<Sha256>();
-            let anchored = row(0, 3, amounts(&[(1, 1)]), settled);
+            let anchored = row(3, 0, amounts(&[(1, 1)]), settled);
             let close = sign_close(&operator, 3, vec![anchored], Vec::new(), 0, 0);
             let checked = check(close, &parent, &next).unwrap();
             store.settle(&checked).await.unwrap();
@@ -1061,7 +1061,7 @@ mod tests {
             // Alice also pays herself in the second candidate, so it writes the same balances and
             // payouts as the first under another matrix.
             let candidate = |rows| sign_close(&operator, 1, rows, Vec::new(), 1, 1);
-            let alike = vec![row(0, 1, amounts(&[(0, 5)]), empty_root())];
+            let alike = vec![row(1, 0, amounts(&[(0, 5)]), empty_root())];
             let checked = check(candidate(alike), &parent, &queued).unwrap();
             let proposal = posted.settle(&checked).await.unwrap();
             let (posted, applied) = post(posted, &parent, candidate(Vec::new()), &queued).await;
@@ -1107,7 +1107,7 @@ mod tests {
 
             // Databases at another root refuse the close, and the right ones settle it as a fresh
             // check would, as often as asked.
-            let paying = row(0, 2, amounts(&[(1, 3)]), empty_root());
+            let paying = row(2, 0, amounts(&[(1, 3)]), empty_root());
             let close = sign_close(&operator, 2, vec![paying], Vec::new(), 0, 1);
             let next = queue(2, &[], &[(1, 4)]);
             let checked = check(close.clone(), &parent, &next).unwrap();
@@ -1204,7 +1204,7 @@ mod tests {
             // but no balance, so it stages the same balances root as an empty close.
             let next = queue(3, &[], &[]);
             let idle = sign_close(&operator, 3, Vec::new(), Vec::new(), 0, 0);
-            let paying = vec![row(0, 3, amounts(&[(0, 5)]), empty_root())];
+            let paying = vec![row(3, 0, amounts(&[(0, 5)]), empty_root())];
             let paying = sign_close(&operator, 3, paying, Vec::new(), 0, 0);
             let paying = twice
                 .settle(&check(paying, &parent, &next).unwrap())

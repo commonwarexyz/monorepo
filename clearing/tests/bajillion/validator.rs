@@ -80,10 +80,10 @@ fn test_pipelined_request_settles_at_most_once() {
         let close = forge(
             &operator_key(),
             &queue,
-            0,
-            0,
             vec![pipelined.clone()],
             Vec::new(),
+            0,
+            0,
         );
         assert!(matches!(
             deployment.validators[0].verify(close, &queue).await,
@@ -120,8 +120,8 @@ fn test_validator_resumes_from_its_records() {
         // The validator attests a candidate for epoch 1 in which alice also pays herself. It
         // writes the same balance as the operator's close, and the operator's close posts.
         let queue = deployment.ledger.queue();
-        let paying = vec![row(0, 1, amounts(&[(0, 5)]), &Amounts::empty())];
-        let candidate = forge(&operator_key(), &queue, 1, 0, paying, Vec::new());
+        let paying = vec![row(1, 0, amounts(&[(0, 5)]), &Amounts::empty())];
+        let candidate = forge(&operator_key(), &queue, paying, Vec::new(), 1, 0);
         let candidate = deployment.verify(&candidate).await.remove(0);
         let (_, first) = deployment.close(&mut context).await;
         assert_eq!(candidate.summary().balances, first.balances);
@@ -245,7 +245,7 @@ fn test_validators_refuse_a_close_that_overdrafts() {
         // The close of epoch 2 pays alice's whole balance out through a soft withdrawal.
         let withdrawal = Withdrawal::sign(&user(0), &namespace(), 2, 100, 0);
         let queue = deployment.ledger.queue();
-        let emptying = forge(&operator_key(), &queue, 0, 0, Vec::new(), vec![withdrawal]);
+        let emptying = forge(&operator_key(), &queue, Vec::new(), vec![withdrawal], 0, 0);
         let proposals = deployment.verify(&emptying).await;
         assert_eq!(proposals[0].payouts(), &amounts(&[(0, 100)]));
         deployment.post(&mut context, proposals).await;
@@ -256,9 +256,9 @@ fn test_validators_refuse_a_close_that_overdrafts() {
 
         // A close of epoch 3 settling alice's payment of 100 to bob overdrafts her balance, so
         // the validator refuses it and stays at the close of epoch 2.
-        let paying = row(0, 3, amounts(&[(1, 100)]), &Amounts::empty());
+        let paying = row(3, 0, amounts(&[(1, 100)]), &Amounts::empty());
         let queue = deployment.ledger.queue();
-        let overdrafting = forge(&operator_key(), &queue, 0, 0, vec![paying], Vec::new());
+        let overdrafting = forge(&operator_key(), &queue, vec![paying], Vec::new(), 0, 0);
         let validator = &mut deployment.validators[0];
         assert!(matches!(
             validator.verify(overdrafting, &queue).await,
@@ -267,7 +267,7 @@ fn test_validators_refuse_a_close_that_overdrafts() {
         assert_eq!(validator.summary().epoch, 2);
 
         // The same validator then settles a close of epoch 3 without her row.
-        let affordable = forge(&operator_key(), &queue, 0, 0, Vec::new(), Vec::new());
+        let affordable = forge(&operator_key(), &queue, Vec::new(), Vec::new(), 0, 0);
         let proposals = deployment.verify(&affordable).await;
         assert_eq!(deployment.post(&mut context, proposals).await.epoch, 3);
     });
@@ -286,11 +286,11 @@ fn test_close_settles_gross_flows_beyond_the_largest_amount() {
         // epoch's receipt. Her credits and debits each exceed `u64::MAX`, but no balance does.
         let empty = Amounts::empty();
         let rows = vec![
-            row(0, 2, amounts(&[(0, u64::MAX), (1, u64::MAX)]), &empty),
-            row(1, 2, amounts(&[(0, u64::MAX)]), &empty),
+            row(2, 0, amounts(&[(0, u64::MAX), (1, u64::MAX)]), &empty),
+            row(2, 1, amounts(&[(0, u64::MAX)]), &empty),
         ];
         let queue = deployment.ledger.queue();
-        let close = forge(&operator_key(), &queue, 0, 0, rows, Vec::new());
+        let close = forge(&operator_key(), &queue, rows, Vec::new(), 0, 0);
         let proposals = deployment.verify(&close).await;
         assert!(proposals[0].payouts().is_empty());
         deployment.post(&mut context, proposals).await;
@@ -307,13 +307,13 @@ fn test_close_settles_gross_flows_beyond_the_largest_amount() {
             forced_withdrawals: vec![withdrawal.clone(), withdrawal],
             ..deposits(3, &[])
         };
-        let close = forge(&operator_key(), &queue, 0, 2, Vec::new(), Vec::new());
+        let close = forge(&operator_key(), &queue, Vec::new(), Vec::new(), 0, 2);
         let proposal = validator.verify(close, &queue).await.unwrap();
         assert_eq!(proposal.payouts(), &amounts(&[(0, u64::MAX)]));
 
         // A balance above `u64::MAX` does not settle.
         let queue = deposits(3, &[(0, 1)]);
-        let close = forge(&operator_key(), &queue, 1, 0, Vec::new(), Vec::new());
+        let close = forge(&operator_key(), &queue, Vec::new(), Vec::new(), 1, 0);
         assert!(matches!(
             validator.verify(close, &queue).await,
             Err(Error::Overflow)

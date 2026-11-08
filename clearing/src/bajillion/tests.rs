@@ -123,8 +123,8 @@ pub(crate) fn empty_root() -> Digest {
 /// Returns the row user `sender` signs for `payments` in `epoch` on top of the map with root
 /// `previous`.
 pub(crate) fn row(
-    sender: u64,
     epoch: Epoch,
+    sender: u64,
     payments: Amounts<PublicKey, u64>,
     previous: Digest,
 ) -> Row<PublicKey, u64> {
@@ -377,8 +377,8 @@ fn test_port_vector() {
         // Bob's receipt, with alice's signature and the operator's countersignature.
         let namespace = namespace();
         let states = Request::states::<Sha256>(
-            account(0),
             1,
+            account(0),
             amounts(&[(1, 5), (2, 7)]),
             &Amounts::empty(),
             &empty_root(),
@@ -418,7 +418,7 @@ fn test_port_vector() {
         let close = sign_close(
             &operator_key(),
             1,
-            vec![row(0, 1, states.payments, empty_root())],
+            vec![row(1, 0, states.payments, empty_root())],
             Vec::new(),
             1,
             0,

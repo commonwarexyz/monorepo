@@ -56,10 +56,10 @@ fn test_assembly_matches_monolithic_close() {
         &operator_key(),
         &namespace(),
         &queue,
-        1,
-        1,
         shards.iter().flat_map(TestOperator::rows),
         shards.iter().flat_map(|shard| shard.withdrawals().cloned()),
+        1,
+        1,
     )
     .unwrap();
     assert_eq!(assembled.encode(), sharded.encode());

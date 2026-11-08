@@ -101,15 +101,15 @@ fn operator_key() -> PrivateKey {
 
 /// Returns user `index` sending through the deployment's operator.
 fn sender(index: u64) -> TestSender {
-    Sender::new(user(index), operator_key().public_key(), namespace())
+    Sender::new(user(index), namespace(), operator_key().public_key())
 }
 
 /// Returns user `index` receiving while the ledger expects the close of `next`.
 fn receiver(index: u64, next: Epoch) -> TestReceiver {
     Receiver::new(
         account(index),
-        operator_key().public_key(),
         namespace(),
+        operator_key().public_key(),
         next,
     )
 }
@@ -174,8 +174,8 @@ fn deposits(epoch: Epoch, entries: &[(u64, u64)]) -> Queue<PublicKey, u64> {
 
 /// Returns the row user `sender` signs for `payments` in `epoch` on top of `previous`.
 fn row(
-    sender: u64,
     epoch: Epoch,
+    sender: u64,
     payments: Amounts<PublicKey, u64>,
     previous: &Amounts<PublicKey, u64>,
 ) -> Row<PublicKey, u64> {
@@ -198,19 +198,19 @@ fn row(
 fn forge(
     signer: &PrivateKey,
     queue: &Queue<PublicKey, u64>,
-    deposits: u64,
-    forced_withdrawals: u64,
     rows: Vec<Row<PublicKey, u64>>,
     withdrawals: Vec<Withdrawal<PublicKey, u64>>,
+    deposits: u64,
+    forced_withdrawals: u64,
 ) -> TestClose {
     Close::assemble::<Sha256, _>(
         signer,
         &namespace(),
         queue,
-        deposits,
-        forced_withdrawals,
         rows,
         withdrawals,
+        deposits,
+        forced_withdrawals,
     )
     .unwrap()
     .0

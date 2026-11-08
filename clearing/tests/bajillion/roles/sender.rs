@@ -70,34 +70,34 @@ pub struct Persisted<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
 pub struct Sender<S: Signer, O: PublicKey, H: Hasher, A: Amount> {
     signer: S,
     account: S::PublicKey,
-    operator: O,
     namespace: Namespace,
+    operator: O,
     persisted: Persisted<S::PublicKey, O, H::Digest, A>,
 }
 
 impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
     /// Returns a sender with no countersigned state and no pending request.
-    pub fn new(signer: S, operator: O, namespace: Namespace) -> Self {
+    pub fn new(signer: S, namespace: Namespace, operator: O) -> Self {
         let persisted = Persisted {
             countersigned: BTreeMap::new(),
             posted: BTreeMap::new(),
             pending: None,
         };
-        Self::restart(signer, operator, namespace, persisted)
+        Self::restart(signer, namespace, operator, persisted)
     }
 
     /// Returns a sender resuming from what it persisted.
     pub fn restart(
         signer: S,
-        operator: O,
         namespace: Namespace,
+        operator: O,
         persisted: Persisted<S::PublicKey, O, H::Digest, A>,
     ) -> Self {
         Self {
             account: signer.public_key(),
             signer,
-            operator,
             namespace,
+            operator,
             persisted,
         }
     }
@@ -186,8 +186,8 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
         let empty = Amounts::empty();
         let payments = self.payments(epoch).unwrap_or(&empty);
         let states = Request::states::<H>(
-            self.account.clone(),
             epoch,
+            self.account.clone(),
             batch,
             payments,
             &self.previous(epoch),

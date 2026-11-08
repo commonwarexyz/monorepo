@@ -131,8 +131,8 @@ fn test_operator_refuses_states_the_sender_did_not_sign() {
     ));
     let mut other = TestSender::new(
         user(0),
-        operator_key().public_key(),
         Namespace::new(b"other"),
+        operator_key().public_key(),
     );
     let request = other.send(2, amounts(&[(2, 1)]), false).unwrap();
     assert!(matches!(
@@ -646,8 +646,8 @@ fn test_sender_restarts_from_its_records() {
     let restart = |sender: &TestSender| {
         TestSender::restart(
             user(0),
-            operator_key().public_key(),
             namespace(),
+            operator_key().public_key(),
             sender.persisted().clone(),
         )
     };
@@ -709,8 +709,8 @@ fn test_receiver_rejects_receipts_it_cannot_rely_on() {
     ));
     let mut misled = TestReceiver::new(
         account(1),
-        PrivateKey::from_seed(1_001).public_key(),
         namespace(),
+        PrivateKey::from_seed(1_001).public_key(),
         2,
     );
     assert!(matches!(
@@ -784,8 +784,8 @@ fn test_resumed_receiver_keeps_its_strongest_receipts_and_halt() {
     let resume = |index, next, halted, receipts: Vec<_>| {
         TestReceiver::resume(
             account(index),
-            operator_key().public_key(),
             namespace(),
+            operator_key().public_key(),
             next,
             halted,
             receipts,
@@ -827,10 +827,10 @@ fn test_posted_close_needs_a_valid_opening() {
     let populated = forge(
         &operator_key(),
         &queue,
-        0,
-        0,
-        vec![row(0, 1, amounts(&[(1, 7)]), &Amounts::empty())],
+        vec![row(1, 0, amounts(&[(1, 7)]), &Amounts::empty())],
         Vec::new(),
+        0,
+        0,
     )
     .matrix::<Sha256>();
     let empty = Matrix::<PublicKey, Digest, u64>::empty::<Sha256>();

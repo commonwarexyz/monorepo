@@ -80,8 +80,8 @@ impl<K: Ord + Clone, V: Clone, D: Digest> Lookup<K, V, D> {
     /// Returns the value bound to `key`, or `None` if the opening proves it absent.
     pub(crate) fn verify<H: Hasher<Digest = D>>(
         &self,
-        key: &K,
         root: &D,
+        key: &K,
         leaf: impl Fn(&K, &V) -> D,
     ) -> Result<Option<&V>, Error> {
         match self {
@@ -260,7 +260,7 @@ mod tests {
 
     fn verify(lookup: &TestLookup, key: u64, root: &Digest) -> Result<Option<u64>, Error> {
         lookup
-            .verify::<Sha256>(&key, root, leaf)
+            .verify::<Sha256>(root, &key, leaf)
             .map(|value| value.copied())
     }
 

@@ -36,8 +36,8 @@ type Receipts<P, O, D, A> = BTreeMap<Epoch, BTreeMap<P, Receipt<P, O, D, A>>>;
 /// posted close.
 pub struct Receiver<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> {
     account: P,
-    operator: O,
     namespace: Namespace,
+    operator: O,
     next: Epoch,
     halted: bool,
     receipts: Receipts<P, O, H::Digest, A>,
@@ -45,11 +45,11 @@ pub struct Receiver<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> {
 
 impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
     /// Returns a receiver while the ledger expects the close of `next`.
-    pub const fn new(account: P, operator: O, namespace: Namespace, next: Epoch) -> Self {
+    pub const fn new(account: P, namespace: Namespace, operator: O, next: Epoch) -> Self {
         Self {
             account,
-            operator,
             namespace,
+            operator,
             next,
             halted: false,
             receipts: BTreeMap::new(),
@@ -60,13 +60,13 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
     /// order.
     pub fn resume(
         account: P,
-        operator: O,
         namespace: Namespace,
+        operator: O,
         next: Epoch,
         halted: bool,
         receipts: impl IntoIterator<Item = Receipt<P, O, H::Digest, A>>,
     ) -> Result<Self, Refusal> {
-        let mut receiver = Self::new(account, operator, namespace, next);
+        let mut receiver = Self::new(account, namespace, operator, next);
         receiver.halted = halted;
         for receipt in receipts {
             receiver.verify(&receipt)?;

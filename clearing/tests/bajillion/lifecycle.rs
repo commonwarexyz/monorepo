@@ -135,7 +135,7 @@ fn test_omitted_payment_halts_ledger() {
         // ...but closes the epoch without it. Nothing else about the close is wrong, so validators
         // certify it and it posts.
         let queue = deployment.ledger.queue();
-        let omitting = forge(&operator_key(), &queue, 0, 0, Vec::new(), Vec::new());
+        let omitting = forge(&operator_key(), &queue, Vec::new(), Vec::new(), 0, 0);
         let proposals = deployment.verify(&omitting).await;
         let summary = deployment.post(&mut context, proposals).await;
         bob.posted(2);
@@ -219,14 +219,14 @@ fn test_late_challenge_halts_after_later_closes() {
             signature: paid.signature.clone(),
         };
         let queue = deployment.ledger.queue();
-        let omitting = forge(&operator_key(), &queue, 0, 0, vec![carol_row], Vec::new());
+        let omitting = forge(&operator_key(), &queue, vec![carol_row], Vec::new(), 0, 0);
         let proposals = deployment.verify(&omitting).await;
         let omitted = deployment.post(&mut context, proposals).await;
         bob.posted(2);
         deployment.ledger.deposit(account(2), 50).unwrap();
-        let rows = vec![row(0, 3, amounts(&[(1, 30)]), &Amounts::empty())];
+        let rows = vec![row(3, 0, amounts(&[(1, 30)]), &Amounts::empty())];
         let queue = deployment.ledger.queue();
-        let next = forge(&operator_key(), &queue, 1, 0, rows, Vec::new());
+        let next = forge(&operator_key(), &queue, rows, Vec::new(), 1, 0);
         let proposals = deployment.verify(&next).await;
         let latest = deployment.post(&mut context, proposals).await;
         bob.posted(3);
@@ -295,7 +295,7 @@ fn test_partial_credit_halts_ledger() {
             signature: first.signature,
         };
         let queue = deployment.ledger.queue();
-        let underpaying = forge(&operator_key(), &queue, 0, 0, vec![earlier], Vec::new());
+        let underpaying = forge(&operator_key(), &queue, vec![earlier], Vec::new(), 0, 0);
         let proposals = deployment.verify(&underpaying).await;
         let summary = deployment.post(&mut context, proposals).await;
         bob.posted(2);
@@ -379,11 +379,11 @@ mod schemes {
             // A user pays another and withdraws part of its balance through the operator, and the
             // receiver withdraws part of the payment through the ledger in the same epoch.
             let mut alice =
-                Sender::<_, _, Sha256, u128>::new(users[0].clone(), key.public_key(), namespace());
+                Sender::<_, _, Sha256, u128>::new(users[0].clone(), namespace(), key.public_key());
             let mut bob = Receiver::<User, _, Sha256, u128>::new(
                 users[1].public_key(),
-                key.public_key(),
                 namespace(),
+                key.public_key(),
                 2,
             );
             let batch = Amounts::new([(users[1].public_key(), 2 * UNIT + 1)]).unwrap();

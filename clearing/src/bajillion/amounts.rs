@@ -407,7 +407,7 @@ mod tests {
         for key in &keys {
             let lookup = amounts.lookup(&tree, key);
             let value = lookup
-                .verify::<Sha256>(key, &root, |key, amount| leaf::<Sha256, _, _>(key, *amount))
+                .verify::<Sha256>(&root, key, |key, amount| leaf::<Sha256, _, _>(key, *amount))
                 .unwrap()
                 .copied();
             assert_eq!(value.unwrap_or(0), amounts.get(key));

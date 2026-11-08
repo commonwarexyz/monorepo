@@ -126,10 +126,10 @@ fn extend<H: Hasher, P: PublicKey, A: Amount>(
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request<P: PublicKey, D: Digest, A: Amount> {
-    /// Account paying.
-    pub account: P,
     /// Epoch the request is for.
     pub epoch: Epoch,
+    /// Account paying.
+    pub account: P,
     /// Amount paid to each receiver.
     pub batch: Amounts<P, A>,
     /// Root of the sender's payment map in `epoch` with the batch added.
@@ -153,8 +153,8 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
     /// Returns NoReceivers if `batch` is empty, and Overflow if the next epoch or an amount
     /// overflows.
     pub fn states<H: Hasher<Digest = D>>(
-        account: P,
         epoch: Epoch,
+        account: P,
         batch: Amounts<P, A>,
         payments: &Amounts<P, A>,
         previous: &D,
@@ -247,8 +247,8 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
 
 impl<P: PublicKey, D: Digest, A: Amount> Write for Request<P, D, A> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.account.write(buf);
         self.epoch.write(buf);
+        self.account.write(buf);
         self.batch.write(buf);
         self.payments.write(buf);
         self.previous.write(buf);
@@ -259,8 +259,8 @@ impl<P: PublicKey, D: Digest, A: Amount> Write for Request<P, D, A> {
 
 impl<P: PublicKey, D: Digest, A: Amount> EncodeSize for Request<P, D, A> {
     fn encode_size(&self) -> usize {
-        P::SIZE
-            + Epoch::SIZE
+        Epoch::SIZE
+            + P::SIZE
             + self.batch.encode_size()
             + 2 * D::SIZE
             + P::Signature::SIZE
@@ -274,8 +274,8 @@ impl<P: PublicKey, D: Digest, A: Amount> Read for Request<P, D, A> {
 
     fn read_cfg(buf: &mut impl Buf, receivers: &usize) -> Result<Self, CodecError> {
         Ok(Self {
-            account: P::read(buf)?,
             epoch: Epoch::read(buf)?,
+            account: P::read(buf)?,
             batch: Amounts::read_cfg(buf, &RangeCfg::new(1..=*receivers))?,
             payments: D::read(buf)?,
             previous: D::read(buf)?,
@@ -300,8 +300,8 @@ where
             .combine(&Amounts::new([(receiver, amount)]).expect("amount must be nonzero"))
             .map_err(|_| arbitrary::Error::IncorrectFormat)?;
         Ok(Self {
-            account: u.arbitrary()?,
             epoch: u.arbitrary()?,
+            account: u.arbitrary()?,
             batch,
             payments: u.arbitrary()?,
             previous: u.arbitrary()?,
@@ -347,8 +347,8 @@ impl<P: PublicKey, D: Digest, A: Amount> States<P, D, A> {
             "a pipelined signature must be given exactly when the states are pipelined"
         );
         Request {
-            account: self.state.account.clone(),
             epoch: self.state.epoch,
+            account: self.state.account.clone(),
             batch: self.batch.clone(),
             payments: self.state.payments,
             previous: self.state.previous,
@@ -699,8 +699,8 @@ mod tests {
         pipelined: bool,
     ) -> TestStates {
         TestRequest::states::<Sha256>(
-            account(0),
             2,
+            account(0),
             amounts(batch),
             payments,
             &previous,
@@ -858,8 +858,8 @@ mod tests {
     fn test_states_refuse_unpayable_batches() {
         assert!(matches!(
             TestRequest::states::<Sha256>(
-                account(0),
                 2,
+                account(0),
                 Amounts::empty(),
                 &Amounts::empty(),
                 &empty_root(),
@@ -869,8 +869,8 @@ mod tests {
         ));
         assert!(matches!(
             TestRequest::states::<Sha256>(
-                account(0),
                 Epoch::MAX,
+                account(0),
                 amounts(&[(1, 1)]),
                 &Amounts::empty(),
                 &empty_root(),
@@ -880,8 +880,8 @@ mod tests {
         ));
         assert!(matches!(
             TestRequest::states::<Sha256>(
-                account(0),
                 2,
+                account(0),
                 amounts(&[(1, 1)]),
                 &amounts(&[(1, u64::MAX)]),
                 &empty_root(),
