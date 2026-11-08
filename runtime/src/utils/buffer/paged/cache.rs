@@ -714,8 +714,8 @@ impl CacheRef {
     ///
     /// Each element of `ranges` is `(dest_slice, logical_offset)`. Fully-cached ranges have
     /// their data written to the destination slice and are removed from `ranges`. Entries left
-    /// in `ranges` start at the first missing byte, with any cached prefix already copied into
-    /// the destination and excluded from the remaining slice.
+    /// in `ranges` keep their order and start at the first missing byte, with any cached prefix
+    /// already copied into the destination and excluded from the remaining slice.
     pub(super) fn read_cached_many(&self, blob_id: u64, ranges: &mut Vec<(&mut [u8], u64)>) {
         let page_cache = self.cache.read();
         let page_size = page_cache.page_size;
@@ -725,11 +725,9 @@ impl CacheRef {
         // stalling each lookup behind the previous range's copy. Ranges arrive in offset order,
         // so consecutive ranges on one page share its lookup.
         let mut previous = None;
-        let mut unread = 0;
-        for start in (0..ranges.len()).step_by(RESOLVE_CHUNK) {
-            let end = ranges.len().min(start + RESOLVE_CHUNK);
-            let mut srcs: [Option<&[u8]>; RESOLVE_CHUNK] = [None; RESOLVE_CHUNK];
-            for (src, (buf, offset)) in srcs.iter_mut().zip(&ranges[start..end]) {
+        let mut srcs: [Option<&[u8]>; RESOLVE_CHUNK] = [None; RESOLVE_CHUNK];
+        for chunk in ranges.chunks_mut(RESOLVE_CHUNK) {
+            for (src, (buf, offset)) in srcs.iter_mut().zip(chunk.iter()) {
                 let (page_num, offset_in_page, remaining) = Cache::locate(page_size, *offset);
                 let page = match previous {
                     Some((previous_num, page)) if previous_num == page_num => page,
@@ -745,35 +743,28 @@ impl CacheRef {
                 *src = page.map(|page| &page[offset_in_page..offset_in_page + seg]);
             }
 
-            // Copy the resolved pages, moving each range that keeps an unread suffix to the
-            // front, in order.
-            for (index, src) in (start..end).zip(srcs) {
-                let (buf, offset) = &mut ranges[index];
-                if buf.is_empty() {
+            // Copy the resolved pages. A fully read range is left empty.
+            for (src, (buf, offset)) in srcs.iter().zip(chunk) {
+                let Some(src) = *src else {
                     continue;
-                }
-                if let Some(src) = src {
-                    buf[..src.len()].copy_from_slice(src);
-                    let mut done = src.len();
-                    while done < buf.len() {
-                        let count =
-                            page_cache.read_at(blob_id, &mut buf[done..], *offset + done as u64);
-                        if count == 0 {
-                            break;
-                        }
-                        done += count;
+                };
+                buf[..src.len()].copy_from_slice(src);
+                let mut done = src.len();
+                while done < buf.len() {
+                    let count =
+                        page_cache.read_at(blob_id, &mut buf[done..], *offset + done as u64);
+                    if count == 0 {
+                        break;
                     }
-                    if done == buf.len() {
-                        continue;
-                    }
-                    *offset += done as u64;
-                    *buf = std::mem::take(buf).split_at_mut(done).1;
+                    done += count;
                 }
-                ranges.swap(unread, index);
-                unread += 1;
+                *offset += done as u64;
+                *buf = std::mem::take(buf).split_at_mut(done).1;
             }
         }
-        ranges.truncate(unread);
+
+        // Drop the fully read ranges, keeping the rest in order.
+        ranges.retain(|(buf, _)| !buf.is_empty());
     }
 
     /// Complete the unread suffix of a cache probe. The first page is rechecked under the write
