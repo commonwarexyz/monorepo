@@ -1145,7 +1145,7 @@ mod tests {
         let sender = receipt.state.account.clone();
         let matrix_of = |payments: Amounts<PublicKey, u64>| {
             let root = payments.root::<Sha256>();
-            Matrix::<_, Digest, _>::from_sorted::<Sha256>(vec![(sender.clone(), payments, root)])
+            Matrix::<_, Sha256, _>::from_sorted(vec![(sender.clone(), payments, root)])
         };
         let underpaying = matrix_of(amounts(&[(3, 4)]));
         let paying = matrix_of(amounts(&[(3, 5)]));

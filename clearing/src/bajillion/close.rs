@@ -523,8 +523,8 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
     }
 
     /// Returns the payment matrix the close settles.
-    pub fn matrix<H: Hasher>(&self) -> Matrix<P, H::Digest, A> {
-        Matrix::from_sorted::<H>(
+    pub fn matrix<H: Hasher>(&self) -> Matrix<P, H, A> {
+        Matrix::from_sorted(
             self.rows
                 .iter()
                 .map(|row| {

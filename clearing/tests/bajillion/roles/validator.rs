@@ -181,7 +181,7 @@ where
             .or_else(|| {
                 (!applied).then(|| Checkpoint {
                     summary: Summary::<H>::genesis::<P, A>(root),
-                    matrix: Matrix::empty::<H>(),
+                    matrix: Matrix::empty(),
                 })
             })
             .ok_or(Error::InvalidCheckpoint)?;
@@ -233,7 +233,7 @@ where
     }
 
     /// Returns the matrix of the last close applied.
-    pub const fn matrix(&self) -> &Matrix<P, H::Digest, A> {
+    pub const fn matrix(&self) -> &Matrix<P, H, A> {
         &self.parent.matrix
     }
 

@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(genesis.balances, Sha256::hash(&[b"balances"]));
         assert_eq!(
             genesis.matrix,
-            Matrix::<PublicKey, Digest, u64>::empty::<Sha256>().root()
+            Matrix::<PublicKey, Sha256, u64>::empty().root()
         );
         let log =
             keyless::initial_root::<mmr::Family, FixedEncoding<Payout<PublicKey, u64>>, Sha256>();

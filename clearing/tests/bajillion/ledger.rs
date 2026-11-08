@@ -125,7 +125,7 @@ fn test_ledger_rejects_closes_deferring_required_requests() {
             let deferring = Summary {
                 epoch: 3,
                 parent: *deployment.ledger.parent(),
-                matrix: Matrix::<PublicKey, Digest, u64>::empty::<Sha256>().root(),
+                matrix: Matrix::<PublicKey, Sha256, u64>::empty().root(),
                 balances: *deployment.ledger.balances(),
                 payouts: deployment.validators[0].summary().payouts,
                 deposits: Processed {

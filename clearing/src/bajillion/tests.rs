@@ -153,7 +153,7 @@ pub(crate) fn sign_close(
 ) -> TestClose {
     rows.sort_by(|a, b| a.account.cmp(&b.account));
     withdrawals.sort_by(|a, b| a.request().cmp(&b.request()));
-    let root = Matrix::from_sorted::<Sha256>(
+    let root = Matrix::<_, Sha256, _>::from_sorted(
         rows.iter()
             .map(|row| {
                 (
@@ -277,7 +277,7 @@ pub(crate) async fn open(context: deterministic::Context, name: &str) -> Store {
 pub(crate) fn genesis(balances: Digest) -> TestCheckpoint {
     Checkpoint {
         summary: Summary::<Sha256>::genesis::<PublicKey, u64>(balances),
-        matrix: Matrix::empty::<Sha256>(),
+        matrix: Matrix::empty(),
     }
 }
 

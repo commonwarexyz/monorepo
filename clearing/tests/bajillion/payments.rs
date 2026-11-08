@@ -739,7 +739,7 @@ fn test_receiver_rejects_receipts_it_cannot_rely_on() {
     ));
 
     // Bob audits epoch 2 only once he records that its close posted.
-    let empty = Matrix::<PublicKey, Digest, u64>::empty::<Sha256>();
+    let empty = Matrix::<PublicKey, Sha256, u64>::empty();
     let opening = empty.open(&account(0), &account(1));
     assert!(matches!(
         bob.audit(2, &empty.root(), &account(0), &opening),
@@ -833,7 +833,7 @@ fn test_posted_close_needs_a_valid_opening() {
         0,
     )
     .matrix::<Sha256>();
-    let empty = Matrix::<PublicKey, Digest, u64>::empty::<Sha256>();
+    let empty = Matrix::<PublicKey, Sha256, u64>::empty();
     let opening = populated.open(&account(0), &account(1));
     assert!(matches!(
         alice.posted(1, &empty.root(), &opening),

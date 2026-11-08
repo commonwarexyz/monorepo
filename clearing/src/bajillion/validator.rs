@@ -270,7 +270,7 @@ pub struct Checkpoint<P: PublicKey, H: Hasher, A: Amount> {
     /// The close's summary.
     pub summary: Summary<H>,
     /// The close's payment matrix.
-    pub matrix: Matrix<P, H::Digest, A>,
+    pub matrix: Matrix<P, H, A>,
 }
 
 /// The hasher is a type parameter only, so the derived traits would bound it.
@@ -345,7 +345,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
             })
             .into_iter()
             .unzip();
-        let matrix = Matrix::from_sorted::<H>(rows);
+        let matrix = Matrix::from_sorted(rows);
         let message = Self::message(
             epoch,
             &matrix.root(),
@@ -412,7 +412,7 @@ pub struct Checked<P: PublicKey, H: Hasher, A: Amount> {
     /// Digest of the parent close's summary.
     parent: H::Digest,
     /// Payment matrix of the close.
-    matrix: Matrix<P, H::Digest, A>,
+    matrix: Matrix<P, H, A>,
     /// Flow of every account the close touches.
     flows: Flows<P, A>,
     /// Balances root of the parent close.
@@ -491,7 +491,7 @@ pub struct Proposal<P: PublicKey, H: Hasher, S: Strategy, A: Amount> {
     /// Summary to certify.
     summary: Summary<H>,
     /// Payment matrix of the close.
-    matrix: Matrix<P, H::Digest, A>,
+    matrix: Matrix<P, H, A>,
     /// Payouts the close appends to the payout log.
     payouts: Amounts<P, A>,
     /// Balances root of the parent close. The writes apply on top of it.
@@ -511,7 +511,7 @@ impl<P: PublicKey, H: Hasher, S: Strategy, A: Amount> Proposal<P, H, S, A> {
     }
 
     /// Returns the payment matrix the close settles.
-    pub const fn matrix(&self) -> &Matrix<P, H::Digest, A> {
+    pub const fn matrix(&self) -> &Matrix<P, H, A> {
         &self.matrix
     }
 
@@ -812,7 +812,7 @@ mod tests {
 
             // A checkpoint whose matrix is not the one its summary commits to is refused.
             let mismatched = Checkpoint {
-                matrix: Matrix::empty::<Sha256>(),
+                matrix: Matrix::empty(),
                 ..parent
             };
             let close = sign_close(&operator, 3, Vec::new(), Vec::new(), 0, 0);
