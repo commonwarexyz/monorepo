@@ -133,6 +133,10 @@ impl Drop for PageFetchGuard<'_> {
 /// before this read registers its batch, so overlapping reads can read such a page more than once.
 const MISSES_PER_LOCK: usize = 64;
 
+/// Ranges [CacheRef::read_cached_many] resolves before copying any of them. Their resolved pages
+/// are held on the stack, and each chunk's lookups can overlap their memory latency.
+const RESOLVE_CHUNK: usize = 32;
+
 /// The read of a [Batch]. It fails if the read fails or does not yield every page exactly once.
 type BatchFuture = BoxFuture<'static, Result<(), Error>>;
 
@@ -716,44 +720,60 @@ impl CacheRef {
         let page_cache = self.cache.read();
         let page_size = page_cache.page_size;
 
-        // Resolve every range's first page before copying any data. The lookups are
+        // Resolve a chunk of ranges' first pages before copying any of them. The lookups are
         // independent, so batching them lets the core overlap their memory latency instead of
-        // stalling each lookup behind the previous range's copy.
-        let mut srcs: Vec<Option<&[u8]>> = Vec::with_capacity(ranges.len());
-        for (buf, offset) in ranges.iter() {
-            let (page_num, offset_in_page, remaining) = Cache::locate(page_size, *offset);
-            let seg = std::cmp::min(buf.len(), remaining);
-            srcs.push(
-                page_cache
-                    .get_page(blob_id, page_num)
-                    .map(|page| &page.as_ref()[offset_in_page..offset_in_page + seg]),
-            );
-        }
-
-        // Copy resolved pages, dropping fully-cached ranges and retaining only unread suffixes.
-        let mut next = 0;
-        ranges.retain_mut(|(buf, offset)| {
-            let src = srcs[next];
-            next += 1;
-            if buf.is_empty() {
-                return false;
+        // stalling each lookup behind the previous range's copy. Ranges arrive in offset order,
+        // so consecutive ranges on one page share its lookup.
+        let mut previous = None;
+        let mut unread = 0;
+        for start in (0..ranges.len()).step_by(RESOLVE_CHUNK) {
+            let end = ranges.len().min(start + RESOLVE_CHUNK);
+            let mut srcs: [Option<&[u8]>; RESOLVE_CHUNK] = [None; RESOLVE_CHUNK];
+            for (src, (buf, offset)) in srcs.iter_mut().zip(&ranges[start..end]) {
+                let (page_num, offset_in_page, remaining) = Cache::locate(page_size, *offset);
+                let page = match previous {
+                    Some((previous_num, page)) if previous_num == page_num => page,
+                    _ => {
+                        let page = page_cache
+                            .get_page(blob_id, page_num)
+                            .map(|page| page.as_ref());
+                        previous = Some((page_num, page));
+                        page
+                    }
+                };
+                let seg = std::cmp::min(buf.len(), remaining);
+                *src = page.map(|page| &page[offset_in_page..offset_in_page + seg]);
             }
-            let Some(src) = src else {
-                return true;
-            };
-            buf[..src.len()].copy_from_slice(src);
-            let mut done = src.len();
-            while done < buf.len() {
-                let count = page_cache.read_at(blob_id, &mut buf[done..], *offset + done as u64);
-                if count == 0 {
+
+            // Copy the resolved pages, moving each range that keeps an unread suffix to the
+            // front, in order.
+            for (index, src) in (start..end).zip(srcs) {
+                let (buf, offset) = &mut ranges[index];
+                if buf.is_empty() {
+                    continue;
+                }
+                if let Some(src) = src {
+                    buf[..src.len()].copy_from_slice(src);
+                    let mut done = src.len();
+                    while done < buf.len() {
+                        let count =
+                            page_cache.read_at(blob_id, &mut buf[done..], *offset + done as u64);
+                        if count == 0 {
+                            break;
+                        }
+                        done += count;
+                    }
+                    if done == buf.len() {
+                        continue;
+                    }
                     *offset += done as u64;
                     *buf = std::mem::take(buf).split_at_mut(done).1;
-                    return true;
                 }
-                done += count;
+                ranges.swap(unread, index);
+                unread += 1;
             }
-            false
-        });
+        }
+        ranges.truncate(unread);
     }
 
     /// Complete the unread suffix of a cache probe. The first page is rechecked under the write
@@ -3841,6 +3861,61 @@ mod tests {
         assert!(buf2 == page2);
         // Missed page's buffer should be untouched (still zeroed).
         assert!(buf1.iter().all(|b| *b == 0));
+    }
+
+    /// Ranges sharing pages across several resolution chunks are served, and the ranges left
+    /// unread keep their order.
+    #[test_traced]
+    fn test_read_cached_many_across_chunks() {
+        for page_size in [NZU16!(1024), NZU16!(100)] {
+            let width = page_size.get() as usize;
+            let pages = RESOLVE_CHUNK as u64;
+            let cache_ref = CacheRef::new(page_size, NZUsize!(64));
+            let blob_id = cache_ref.next_id();
+            let byte = |page: u64, at: usize| (page as usize * 7 + at) as u8;
+
+            // Cache every page but each third one.
+            {
+                let mut cache = cache_ref.cache.write();
+                for page in (0..pages).filter(|page| page % 3 != 1) {
+                    let bytes: Vec<u8> = (0..width).map(|at| byte(page, at)).collect();
+                    cache.cache(blob_id, &bytes, page);
+                }
+            }
+
+            // Read four short ranges from each page, more than three chunks in all.
+            let len = width / 8;
+            let offsets: Vec<u64> = (0..pages)
+                .flat_map(|page| (0..4).map(move |i| page * width as u64 + (i * 2 * len) as u64))
+                .collect();
+            assert!(offsets.len() > 3 * RESOLVE_CHUNK);
+            let mut bufs = vec![vec![0u8; len]; offsets.len()];
+            let mut ranges: Vec<(&mut [u8], u64)> = bufs
+                .iter_mut()
+                .zip(&offsets)
+                .map(|(buf, &offset)| (buf.as_mut_slice(), offset))
+                .collect();
+            cache_ref.read_cached_many(blob_id, &mut ranges);
+
+            let unread: Vec<u64> = ranges.iter().map(|(_, offset)| *offset).collect();
+            let missing: Vec<u64> = offsets
+                .iter()
+                .copied()
+                .filter(|offset| offset / width as u64 % 3 == 1)
+                .collect();
+            assert_eq!(unread, missing);
+            drop(ranges);
+            for (buf, &offset) in bufs.iter().zip(&offsets) {
+                let page = offset / width as u64;
+                if page % 3 == 1 {
+                    assert!(buf.iter().all(|&b| b == 0));
+                    continue;
+                }
+                let at = (offset % width as u64) as usize;
+                let expected: Vec<u8> = (at..at + len).map(|at| byte(page, at)).collect();
+                assert_eq!(buf, &expected);
+            }
+        }
     }
 
     #[test_traced]
