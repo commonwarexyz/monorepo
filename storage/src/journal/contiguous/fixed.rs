@@ -2042,17 +2042,18 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
 
             // Read each run of consecutive items as one range. If any range misses, read the
             // group item by item instead, so a partly cached run still serves its cached items.
+            // Either way, misses are reported per item.
             let Ok(runs) = Self::byte_runs(group, first) else {
                 continue;
             };
-            let misses = if blob.try_read_ranges_sync_into(buf, &runs).is_empty() {
-                Vec::new()
-            } else {
+            let mut misses = blob.try_read_ranges_sync_into(buf, &runs);
+            if !misses.is_empty() && runs.len() < group.len() {
                 let Ok(blob_offsets) = Self::byte_offsets(group, first) else {
                     continue;
                 };
-                blob.try_read_many_sync_into(buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE)
-            };
+                misses =
+                    blob.try_read_many_sync_into(buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE);
+            }
             let mut misses = misses.into_iter().peekable();
             #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
             for (idx, slice) in buf.chunks_exact(A::SIZE).enumerate() {
@@ -2512,18 +2513,20 @@ mod tests {
             let journal = journal.sync().await.unwrap();
 
             // Only the page holding item 0 is cached, so a run of consecutive items is partly
-            // cached. Probing the run serves exactly the items probing each alone serves.
+            // cached. Probing the run, or scattered items with no runs, serves exactly the items
+            // probing each alone serves.
             cache.clear();
             assert_eq!(journal.read(0).await.unwrap(), test_digest(0));
-            let positions: Vec<u64> = (0..40).collect();
-            let batched = journal.try_read_many_sync(&positions);
-            let alone: Vec<_> = positions
-                .iter()
-                .map(|&pos| journal.try_read_many_sync(&[pos]).remove(0))
-                .collect();
-            assert_eq!(batched, alone);
-            assert_eq!(batched[0], Some(test_digest(0)));
-            assert!(batched.iter().any(Option::is_none));
+            for positions in [(0..40).collect::<Vec<u64>>(), (0..40).step_by(2).collect()] {
+                let batched = journal.try_read_many_sync(&positions);
+                let alone: Vec<_> = positions
+                    .iter()
+                    .map(|&pos| journal.try_read_many_sync(&[pos]).remove(0))
+                    .collect();
+                assert_eq!(batched, alone);
+                assert_eq!(batched[0], Some(test_digest(0)));
+                assert!(batched.iter().any(Option::is_none));
+            }
 
             journal.destroy().await.unwrap();
         });

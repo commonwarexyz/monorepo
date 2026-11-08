@@ -946,17 +946,18 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             // Frames of consecutive positions are byte-adjacent, so each run of them is read as
             // one range, which leaves the buffer laid out as reading them one by one would. If any
             // range misses, read the group frame by frame instead, so a partly cached run still
-            // serves its cached frames. Either way, misses are reported per frame.
+            // serves its cached frames. Either way, misses are reported per frame. Bounding the
+            // total first also bounds every merged length.
+            let Some(total) = read_buffer_len(group.iter().map(|&(_, _, len)| len)) else {
+                continue;
+            };
             let mut ranges: Vec<(u64, usize)> = Vec::with_capacity(group.len());
             for &(_, offset, len) in group {
                 match ranges.last_mut() {
-                    Some((start, total)) if *start + *total as u64 == offset => *total += len,
+                    Some((start, merged)) if *start + *merged as u64 == offset => *merged += len,
                     _ => ranges.push((offset, len)),
                 }
             }
-            let Some(total) = read_buffer_len(ranges.iter().map(|&(_, len)| len)) else {
-                continue;
-            };
             buf.resize(total, 0);
             let mut missed = blob.try_read_ranges_sync_into(&mut buf, &ranges);
             if !missed.is_empty() && ranges.len() < group.len() {
