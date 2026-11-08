@@ -150,8 +150,8 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
     /// of `previous`. If `pipelined`, the state of the next epoch pays only `batch` on top of
     /// `payments`. Signs nothing and reads nothing.
     ///
-    /// Returns NoReceivers if `batch` is empty, and Overflow if the next epoch or an amount
-    /// overflows.
+    /// Returns [Error::NoReceivers] if `batch` is empty, and [Error::Overflow] if the next epoch or
+    /// an amount overflows.
     pub fn states<H: Hasher<Digest = D>>(
         epoch: Epoch,
         account: P,
@@ -191,8 +191,8 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
     /// in `epoch`. That is the request's state of its own epoch, or its pipelined state of the
     /// next. Reads no storage.
     ///
-    /// Returns WrongEpoch if the request has no state for `epoch`, NoReceivers if the batch is
-    /// empty, and InvalidSignature if the signature does not verify.
+    /// Returns [Error::WrongEpoch] if the request has no state for `epoch`, [Error::NoReceivers] if
+    /// the batch is empty, and [Error::InvalidSignature] if the signature does not verify.
     pub fn verify<H: Hasher<Digest = D>>(
         &self,
         namespace: &Namespace,
@@ -294,11 +294,7 @@ where
     A: From<u64> + for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let receiver = u.arbitrary()?;
-        let amount = super::amounts::arbitrary_nonzero(u)?;
-        let batch = Amounts::<P, A>::arbitrary(u)?
-            .combine(&Amounts::new([(receiver, amount)]).expect("amount must be nonzero"))
-            .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+        let batch = super::amounts::arbitrary_nonempty(u)?;
         Ok(Self {
             epoch: u.arbitrary()?,
             account: u.arbitrary()?,
@@ -390,9 +386,9 @@ impl<P: PublicKey, D: Digest, A: Amount> Verified<'_, P, D, A> {
     /// sender's latest countersigned state in the state's epoch with its map, if any. `previous` is
     /// the root of the sender's row in the close of the epoch before, or the empty map's root.
     ///
-    /// Returns Retry if the state is `latest`'s, and New if it pays `latest`'s map plus the batch
-    /// on top of `previous`. Returns InvalidSignature otherwise, including for a batch that
-    /// overflows the map.
+    /// Returns [Admission::Retry] if the state is `latest`'s, and [Admission::New] if it pays
+    /// `latest`'s map plus the batch on top of `previous`. Returns [Error::InvalidSignature]
+    /// otherwise, including for a batch that overflows the map.
     #[allow(clippy::type_complexity)]
     pub fn admit<H: Hasher<Digest = D>>(
         self,
@@ -466,8 +462,8 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Receipt<P, O, D, A> {
     /// the operator's `acknowledgement` countersigning it, and `payments`, the map it commits to.
     /// The receipts verify exactly when both signatures do.
     ///
-    /// Returns InvalidReceipt if `payments` does not commit to `state` or holds no amount for a
-    /// receiver.
+    /// Returns [Error::InvalidReceipt] if `payments` does not commit to `state` or holds no amount
+    /// for a receiver.
     pub fn issue<H: Hasher<Digest = D>>(
         state: &State<P, D>,
         signature: &P::Signature,
@@ -573,7 +569,6 @@ where
     A: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let siblings = u.int_in_range(0..=4)?;
         Ok(Self {
             state: u.arbitrary()?,
             signature: u.arbitrary()?,
@@ -581,12 +576,7 @@ where
             receiver: u.arbitrary()?,
             amount: u.arbitrary()?,
             position: u.arbitrary()?,
-            proof: Proof {
-                leaf_count: u.arbitrary()?,
-                siblings: (0..siblings)
-                    .map(|_| u.arbitrary())
-                    .collect::<arbitrary::Result<_>>()?,
-            },
+            proof: super::lookup::arbitrary_proof(u)?,
         })
     }
 }
@@ -604,9 +594,10 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Challenge<P, O, D, A> {
     /// Checks that the posted close of `epoch` with payment matrix root `matrix` credits the
     /// receipt's receiver less from its sender than the receipt promises.
     ///
-    /// Returns WrongEpoch unless the receipt is for `epoch`, InvalidOpening unless the opening
-    /// verifies, NoContradiction unless the close credits less, and InvalidReceipt unless the
-    /// receipt verifies. The receipt's signatures are checked last.
+    /// Returns [Error::WrongEpoch] unless the receipt is for `epoch`, [Error::InvalidOpening]
+    /// unless the opening verifies, [Error::NoContradiction] unless the close credits less, and
+    /// [Error::InvalidReceipt] unless the receipt verifies. The receipt's signatures are checked
+    /// last.
     pub fn verify<H: Hasher<Digest = D>>(
         &self,
         namespace: &Namespace,

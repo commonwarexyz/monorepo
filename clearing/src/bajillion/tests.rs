@@ -3,7 +3,7 @@
 use super::{
     Amounts, Balances, Checked, Checkpoint, Close, Deposit, Epoch, ForcedWithdrawal, Matrix,
     Namespace, Payout, PayoutLog, PayoutProof, Proposal, Queue, Receipt, Request, Row, State,
-    Summary, Withdrawal,
+    Summary, Withdrawal, matrix,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
@@ -12,6 +12,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
 };
+use commonware_formatting::hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
@@ -39,9 +40,9 @@ pub(crate) mod scheme {
 
 pub(crate) type TestClose = Close<PublicKey, PublicKey, u64>;
 pub(crate) type TestCheckpoint = Checkpoint<PublicKey, Sha256, u64>;
-pub(crate) type TestChecked = Checked<PublicKey, Sha256, u64>;
+type TestChecked = Checked<PublicKey, Sha256, u64>;
 pub(crate) type TestProposal = Proposal<PublicKey, Sha256, Sequential, u64>;
-pub(crate) type TestCertificate = <scheme::Scheme as certificate::Verifier>::Certificate;
+type TestCertificate = <scheme::Scheme as certificate::Verifier>::Certificate;
 
 /// A balances database over the unordered index `I`.
 pub(crate) type TestDb<I> = Balances<deterministic::Context, PublicKey, Sha256, I, Sequential, u64>;
@@ -100,6 +101,13 @@ pub(crate) fn account(index: u64) -> PublicKey {
     user(index).public_key()
 }
 
+/// Returns the accounts of users `0..count` in increasing order.
+pub(crate) fn accounts(count: u64) -> Vec<PublicKey> {
+    let mut accounts: Vec<_> = (0..count).map(account).collect();
+    accounts.sort();
+    accounts
+}
+
 /// Returns the operator's signing key.
 pub(crate) fn operator_key() -> PrivateKey {
     PrivateKey::from_seed(1_000)
@@ -153,18 +161,11 @@ pub(crate) fn sign_close(
 ) -> TestClose {
     rows.sort_by(|a, b| a.account.cmp(&b.account));
     withdrawals.sort_by(|a, b| a.request().cmp(&b.request()));
-    let root = Matrix::<_, Sha256, _>::from_sorted(
-        rows.iter()
-            .map(|row| {
-                (
-                    row.account.clone(),
-                    row.payments.clone(),
-                    row.payments.root::<Sha256>(),
-                )
-            })
-            .collect(),
-    )
-    .root();
+    let roots: Vec<_> = rows
+        .iter()
+        .map(|row| row.payments.root::<Sha256>())
+        .collect();
+    let root = matrix::root::<Sha256, _>(rows.iter().map(|row| &row.account).zip(&roots));
     let signature = operator.sign(
         &namespace().close,
         &TestClose::message(epoch, &root, &withdrawals, deposits, forced_withdrawals),
@@ -329,15 +330,6 @@ pub(crate) fn chain<R: Encode>(hash: Digest, requests: &[R]) -> Digest {
     })
 }
 
-/// Returns `bytes` in lowercase hex.
-fn hex(bytes: impl AsRef<[u8]>) -> String {
-    bytes
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 /// Pins what a port of the ledger must reproduce bit for bit, for SHA-256, Ed25519 keys, and `u64`
 /// amounts. It also pins a deposit running hash that a port of the validators must reproduce. Alice
 /// pays bob 5 and carol 7 in epoch 1, and the close of epoch 1 settles her map and processes bob's
@@ -349,17 +341,17 @@ fn test_port_vector() {
         let store = open(context, "vector").await;
         let genesis = Summary::<Sha256>::genesis::<PublicKey, u64>(store.balances.root());
         assert_eq!(
-            hex(store.balances.root()),
+            hex(store.balances.root().as_ref()),
             "4e051a8ba89ab421a291d4b906848b2e0f80402175824a056cc3cc00efc4cc65"
         );
         assert_eq!(genesis.payouts.root, store.log.root());
         assert_eq!(*store.log.bounds().end, genesis.payouts.size);
         assert_eq!(
-            hex(store.log.root()),
+            hex(store.log.root().as_ref()),
             "97f9a47536a9ff3eda91ef4e53351d365e104280df46dbcc5dddc7adfabcef2c"
         );
         assert_eq!(
-            hex(genesis.digest()),
+            hex(genesis.digest().as_ref()),
             "44b050ae27384265b1e8c2750395dfe42ea3309302d55c7d31877dc9debbfd2c"
         );
 
@@ -370,7 +362,7 @@ fn test_port_vector() {
         };
         let deposits = genesis.deposits.next::<Sha256, _>(&[deposit]);
         assert_eq!(
-            hex(deposits.hash),
+            hex(deposits.hash.as_ref()),
             "e3a81ed35a6c131dc7ea391436b14bc6bc9882a0cf7d815fbd936179601427b4"
         );
 
@@ -399,7 +391,7 @@ fn test_port_vector() {
             .verify::<Sha256>(&namespace, &operator_key().public_key())
             .unwrap();
         assert_eq!(
-            hex(receipt.encode()),
+            hex(receipt.encode().as_ref()),
             concat!(
                 "0000000000000001edd0f6de342a1e6a7236d6244f23d83eedfcecd059a386c8",
                 "5055701498e7703316004c952b79b61f079ea03f168e671ba4ef1b92b99f648b",
@@ -440,11 +432,11 @@ fn test_port_vector() {
             0
         );
         assert_eq!(
-            hex(root),
+            hex(root.as_ref()),
             "bb7e4f8026a16dea4b1b699ee9a17fa361272f269a044f0532c3fae7729b059c"
         );
         assert_eq!(
-            hex(member.encode()),
+            hex(member.encode().as_ref()),
             concat!(
                 "000000000016004c952b79b61f079ea03f168e671ba4ef1b92b99f648b947f1d",
                 "130bdbf77d0000000100010000000000000000000000000500000002014b496c",
@@ -452,7 +444,7 @@ fn test_port_vector() {
             )
         );
         assert_eq!(
-            hex(absent.encode()),
+            hex(absent.encode().as_ref()),
             concat!(
                 "000000000016004c952b79b61f079ea03f168e671ba4ef1b92b99f648b947f1d",
                 "130bdbf77d0000000100010100000002015925ba86e2189444a6c3b437b25d2e",
@@ -480,11 +472,11 @@ fn test_port_vector() {
         assert!(proof.verify::<Sha256>(&root));
         assert_eq!(size, 4);
         assert_eq!(
-            hex(root),
+            hex(root.as_ref()),
             "51b5519948527b730a86197f813f51283fa3545ca2b6c74ca20596b4f4461fec"
         );
         assert_eq!(
-            hex(proof.encode()),
+            hex(proof.encode().as_ref()),
             concat!(
                 "0000000000000001478b8e507e0bb2b18c0f9e0824769e8562d10df9abe2e774",
                 "896f82b4b4405266000000000000000304000266b4a8b2a17f0463f7427c0239",

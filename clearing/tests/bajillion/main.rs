@@ -25,7 +25,7 @@ use commonware_clearing::bajillion::{
 use commonware_codec::Encode;
 use commonware_cryptography::{
     Digestible, Hasher as _, Sha256, Signer, certificate,
-    ed25519::{PrivateKey, PublicKey},
+    ed25519::{PrivateKey, PublicKey, certificate::mocks},
     sha256::Digest,
 };
 use commonware_parallel::Sequential;
@@ -36,7 +36,7 @@ use commonware_storage::{
     qmdb::{current::unordered::fixed, keyless},
     translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, non_empty};
+use commonware_utils::{NZU16, NZU64, NZUsize, non_empty, test_rng};
 use roles::{
     ledger::Ledger,
     operator::Operator,
@@ -231,9 +231,9 @@ fn assert_chained(
     summary: &Summary<Sha256>,
     queue: &Queue<PublicKey, u64>,
 ) {
-    let count = |count: u64| usize::try_from(count).expect("a count within the queue must fit");
-    let deposits = &queue.deposits[..count(summary.deposits.count)];
-    let forced = &queue.forced_withdrawals[..count(summary.forced_withdrawals.count)];
+    let prefix = |count: u64| usize::try_from(count).expect("a count within the queue must fit");
+    let deposits = &queue.deposits[..prefix(summary.deposits.count)];
+    let forced = &queue.forced_withdrawals[..prefix(summary.forced_withdrawals.count)];
     assert_eq!(summary.deposits.hash, chain(parent.deposits.hash, deposits));
     assert_eq!(
         summary.forced_withdrawals.hash,
@@ -322,8 +322,8 @@ struct Deployment<
 /// Returns the signing schemes of `validators` validators and the verifier of their
 /// certificates. Every call returns the same keys.
 fn committee(validators: u32) -> (Vec<scheme::Scheme>, scheme::Scheme) {
-    let fixture = commonware_cryptography::ed25519::certificate::mocks::fixture(
-        &mut commonware_utils::test_rng(),
+    let fixture = mocks::fixture(
+        &mut test_rng(),
         NAMESPACE,
         validators,
         scheme::Scheme::signer,

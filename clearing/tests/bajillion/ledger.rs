@@ -645,13 +645,14 @@ fn test_withdrawn_ranges_stay_compact() {
             match order {
                 "alternating" => proofs.sort_by_key(|proof| (proof.index % 2 == 0, proof.index)),
                 "reversed" => proofs.reverse(),
-                _ => {
+                "strided" => {
                     // A stride coprime with the 9 payouts visits each once.
                     let sorted = proofs.clone();
                     for (position, proof) in proofs.iter_mut().enumerate() {
                         *proof = sorted[position * 4 % sorted.len()].clone();
                     }
                 }
+                _ => unreachable!("order must be alternating, reversed, or strided"),
             }
 
             // After each withdrawal the ranges stay apart and number at most one more than the

@@ -7,26 +7,26 @@ use commonware_cryptography::{Hasher, PublicKey};
 use std::collections::BTreeMap;
 
 /// Why the receiver refused a receipt or an audit.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Refusal {
     /// The receipt pays another account.
+    #[error("the receipt pays another account")]
     WrongReceiver,
     /// The receipt promises no more than one already held.
+    #[error("the receipt promises no more than one already held")]
     NotIncreasing,
     /// The close of the receipt's epoch already posted.
+    #[error("the close of the receipt's epoch already posted")]
     Closed,
     /// The ledger halted.
+    #[error("the ledger halted")]
     Halted,
     /// The close of the audited epoch has not posted.
+    #[error("the close of the audited epoch has not posted")]
     NotClosed,
     /// A helper refused it.
-    Error(Error),
-}
-
-impl From<Error> for Refusal {
-    fn from(error: Error) -> Self {
-        Self::Error(error)
-    }
+    #[error(transparent)]
+    Error(#[from] Error),
 }
 
 /// The largest receipt held per epoch and sender.

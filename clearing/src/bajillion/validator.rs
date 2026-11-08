@@ -60,7 +60,7 @@ type Batch<P, D, S, A> = MerkleizedBatch<mmb::Family, D, Update<P, FixedEncoding
 pub type PayoutLog<E, P, H, S, A> = keyless::fixed::Db<mmr::Family, E, Payout<P, A>, H, S>;
 
 /// A batch of payouts and a commit staged on the payout log.
-type PayoutBatch<P, D, S, A> =
+pub type PayoutBatch<P, D, S, A> =
     keyless::batch::MerkleizedBatch<mmr::Family, D, FixedEncoding<Payout<P, A>>, S>;
 
 /// A payout a posted close owes an account.
@@ -77,7 +77,7 @@ impl<P: PublicKey, A: Amount> Payout<P, A> {
     /// then a commit with no metadata that keeps the inactivity floor at zero, so no payout is
     /// ever pruned. Validators and any replica of the log stage exactly this batch.
     ///
-    /// Returns Log if the log fails, for example because it already raised its floor.
+    /// Returns [Error::Log] if the log fails, for example because it already raised its floor.
     pub async fn stage<E, H, S>(
         log: &PayoutLog<E, P, H, S, A>,
         payouts: &Amounts<P, A>,
@@ -273,7 +273,7 @@ pub struct Checkpoint<P: PublicKey, H: Hasher, A: Amount> {
     pub matrix: Matrix<P, H, A>,
 }
 
-/// The hasher is a type parameter only, so the derived traits would bound it.
+// The hasher is a type parameter only, so the derived traits would bound it.
 impl<P: PublicKey, H: Hasher, A: Amount> Clone for Checkpoint<P, H, A> {
     fn clone(&self) -> Self {
         Self {
@@ -298,11 +298,12 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
     /// checks with `strategy`. It chains each queue's running hash from `parent`'s summary over the
     /// prefix of `queue` that the close's counts select.
     ///
-    /// Returns InvalidCheckpoint if `parent`'s matrix is not its summary's, WrongEpoch unless the
-    /// close, `queue`, and every soft withdrawal are for the next epoch, InvalidCount unless each
-    /// count is within `queue`'s bounds, InvalidOperatorSignature unless the operator signed the
-    /// close, InvalidSignature unless every row's state builds on its row in `parent` and every
-    /// soft withdrawal verifies, and Overflow if the next epoch does not fit.
+    /// Returns [Error::InvalidCheckpoint] if `parent`'s matrix is not its summary's,
+    /// [Error::WrongEpoch] unless the close, `queue`, and every soft withdrawal are for the next
+    /// epoch, [Error::InvalidCount] unless each count is within `queue`'s bounds,
+    /// [Error::InvalidOperatorSignature] unless the operator signed the close,
+    /// [Error::InvalidSignature] unless every row's state builds on its row in `parent` and every
+    /// soft withdrawal verifies, and [Error::Overflow] if the next epoch does not fit.
     pub fn check<H: Hasher, S: Strategy>(
         self,
         namespace: &Namespace,
@@ -391,11 +392,9 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
         )?;
         Ok(Checked {
             epoch,
-            parent: parent.summary.digest(),
+            parent: parent.summary,
             matrix,
             flows,
-            base: parent.summary.balances,
-            log: parent.summary.payouts.root,
             deposits: parent.summary.deposits.next::<H, _>(queued_deposits),
             forced_withdrawals: parent
                 .summary
@@ -409,16 +408,12 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
 pub struct Checked<P: PublicKey, H: Hasher, A: Amount> {
     /// Epoch of the close.
     epoch: Epoch,
-    /// Digest of the parent close's summary.
-    parent: H::Digest,
+    /// Summary of the parent close.
+    parent: Summary<H>,
     /// Payment matrix of the close.
     matrix: Matrix<P, H, A>,
     /// Flow of every account the close touches.
     flows: Flows<P, A>,
-    /// Balances root of the parent close.
-    base: H::Digest,
-    /// Payouts root of the parent close.
-    log: H::Digest,
     /// The deposits the close processes, as their count and the queue's running hash.
     deposits: Processed<H::Digest>,
     /// The forced withdrawals the close processes, as their count and the queue's running hash.
@@ -427,14 +422,14 @@ pub struct Checked<P: PublicKey, H: Hasher, A: Amount> {
 
 impl<P: PublicKey, H: Hasher, A: Amount> Checked<P, H, A> {
     /// Settles the close on top of `balances` and `log` and stages a batch on each. The balances
-    /// batch has metadata zero and writes exactly the balances that change, with a zero balance
-    /// written as a delete. The log batch is the one [Payout::stage] builds from the close's
-    /// payouts. Settling borrows the close, so a failed settle can be retried without checking the
-    /// signatures again.
+    /// batch writes exactly the balances that change, with a zero balance written as a delete, and
+    /// commits with metadata zero, so a balances database with no metadata has applied no close.
+    /// The log batch is the one [Payout::stage] builds from the close's payouts. Settling borrows
+    /// the close, so a failed settle can be retried without checking the signatures again.
     ///
-    /// Returns InvalidCheckpoint unless `balances` is at the parent's balances root and `log` at
-    /// its payouts root, Overdraft if a balance goes negative, Overflow if a balance does not fit,
-    /// and Storage or Log if a database fails.
+    /// Returns [Error::InvalidCheckpoint] unless `balances` is at the parent's balances root and
+    /// `log` at its payouts root, [Error::Overdraft] if a balance goes negative, [Error::Overflow]
+    /// if a balance does not fit, and [Error::Balances] or [Error::Log] if a database fails.
     pub async fn settle<E, I, S>(
         &self,
         balances: &Balances<E, P, H, I, S, A>,
@@ -445,7 +440,7 @@ impl<P: PublicKey, H: Hasher, A: Amount> Checked<P, H, A> {
         I: Unordered<Value = Location<mmb::Family>> + 'static,
         S: Strategy,
     {
-        if balances.root() != self.base || log.root() != self.log {
+        if balances.root() != self.parent.balances || log.root() != self.parent.payouts.root {
             return Err(Error::InvalidCheckpoint);
         }
         let accounts: Vec<&P> = self.flows.accounts().collect();
@@ -463,7 +458,7 @@ impl<P: PublicKey, H: Hasher, A: Amount> Checked<P, H, A> {
         let appends = Payout::stage(log, &settlement.payouts).await?;
         let summary = Summary {
             epoch: self.epoch,
-            parent: self.parent,
+            parent: self.parent.digest(),
             matrix: self.matrix.root(),
             balances: batch.root(),
             payouts: Payouts {
@@ -475,11 +470,10 @@ impl<P: PublicKey, H: Hasher, A: Amount> Checked<P, H, A> {
         };
         Ok(Proposal {
             summary,
+            parent: self.parent,
             matrix: self.matrix.clone(),
             payouts: settlement.payouts,
-            base: self.base,
             batch,
-            log: self.log,
             appends,
         })
     }
@@ -490,16 +484,14 @@ impl<P: PublicKey, H: Hasher, A: Amount> Checked<P, H, A> {
 pub struct Proposal<P: PublicKey, H: Hasher, S: Strategy, A: Amount> {
     /// Summary to certify.
     summary: Summary<H>,
+    /// Summary of the parent close. Both batches apply on top of its roots.
+    parent: Summary<H>,
     /// Payment matrix of the close.
     matrix: Matrix<P, H, A>,
     /// Payouts the close appends to the payout log.
     payouts: Amounts<P, A>,
-    /// Balances root of the parent close. The writes apply on top of it.
-    base: H::Digest,
     /// The balance writes.
     batch: Arc<Batch<P, H::Digest, S, A>>,
-    /// Payouts root of the parent close. The appends apply on top of it.
-    log: H::Digest,
     /// The payouts and commit appended to the payout log.
     appends: Arc<PayoutBatch<P, H::Digest, S, A>>,
 }
@@ -527,11 +519,11 @@ impl<P: PublicKey, H: Hasher, S: Strategy, A: Amount> Proposal<P, H, S, A> {
     /// durable before the balances change, so after any crash the log is at or past the close the
     /// balances hold. The balance writes are not yet durable.
     ///
-    /// Returns InvalidCheckpoint, before touching either database, if `posted` is not this
+    /// Returns [Error::InvalidCheckpoint], before touching either database, if `posted` is not this
     /// summary's digest, `balances` is not at the parent's balances root, or `log` is not at the
-    /// parent's payouts root. Returns Storage or Log if a batch does not apply or the log does not
-    /// commit. Any error drops both handles, and the deployment reopens them as after a restart
-    /// (V2).
+    /// parent's payouts root. Returns [Error::Balances] or [Error::Log] if a batch does not apply
+    /// or the log does not commit. Any error drops both handles, and the deployment reopens them as
+    /// after a restart (V2).
     #[allow(clippy::type_complexity)]
     #[boxed]
     pub async fn apply<E, I>(
@@ -552,8 +544,8 @@ impl<P: PublicKey, H: Hasher, S: Strategy, A: Amount> Proposal<P, H, S, A> {
         I: Unordered<Value = Location<mmb::Family>> + 'static,
     {
         if *posted != self.summary.digest()
-            || balances.root() != self.base
-            || log.root() != self.log
+            || balances.root() != self.parent.balances
+            || log.root() != self.parent.payouts.root
         {
             return Err(Error::InvalidCheckpoint);
         }
@@ -1524,9 +1516,8 @@ mod tests {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::super::*;
+        use super::*;
         use commonware_codec::conformance::CodecConformance;
-        use commonware_cryptography::{ed25519::PublicKey, sha256::Digest};
 
         commonware_conformance::conformance_tests! {
             CodecConformance<BalanceProof<Digest, u64>>,

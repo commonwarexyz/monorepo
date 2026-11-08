@@ -121,7 +121,7 @@ fn test_omitted_payment_halts_ledger() {
         deployment.ledger.deposit(account(1), 100).unwrap();
         deployment.close(&mut context).await;
 
-        // The operator preconfirms a payment to bob...
+        // The operator preconfirms a payment to bob.
         let mut alice = sender(0);
         let mut bob = receiver(1, 2);
         let request = alice.send(2, amounts(&[(1, 30)]), false).unwrap();
@@ -132,7 +132,7 @@ fn test_omitted_payment_halts_ledger() {
             .unwrap();
         bob.receive(receipt).unwrap();
 
-        // ...but closes the epoch without it. Nothing else about the close is wrong, so validators
+        // It then closes the epoch without it. Nothing else about the close is wrong, so validators
         // certify it and it posts.
         let queue = deployment.ledger.queue();
         let omitting = forge(&operator_key(), &queue, Vec::new(), Vec::new(), 0, 0);
@@ -328,13 +328,16 @@ mod schemes {
 
     use super::*;
     use commonware_clearing::bajillion::BalanceProof;
-    use commonware_codec::{DecodeExt as _, Encode as _};
-    use commonware_cryptography::{bls12381, secp256r1::standard};
+    use commonware_codec::DecodeExt as _;
+    use commonware_cryptography::{
+        bls12381,
+        secp256r1::{self, standard},
+    };
 
     /// Validators certify summaries with secp256r1 signatures from at least `2f + 1` of `3f + 1`.
     // The macro gates its fixture on a `mocks` feature that this crate does not define.
     #[allow(unexpected_cfgs)]
-    mod certificate {
+    mod scheme {
         use commonware_clearing::bajillion::{Namespace, Summary};
         use commonware_cryptography::{Sha256, impl_certificate_secp256r1};
         use commonware_utils::N3f1;
@@ -343,7 +346,7 @@ mod schemes {
     }
 
     type User = standard::PublicKey;
-    type Scheme = certificate::Scheme<PublicKey>;
+    type Scheme = scheme::Scheme<PublicKey>;
 
     /// One more than `u64::MAX`.
     const UNIT: u128 = 1 << 64;
@@ -355,8 +358,8 @@ mod schemes {
         deterministic::Runner::default().start(|mut context| async move {
             let users: Vec<_> = (0..3).map(standard::PrivateKey::from_seed).collect();
             let key = bls12381::PrivateKey::from_seed(0);
-            let fixture = commonware_cryptography::secp256r1::certificate::mocks::fixture(
-                &mut context,
+            let fixture = secp256r1::certificate::mocks::fixture(
+                &mut test_rng(),
                 NAMESPACE,
                 4,
                 Scheme::signer,

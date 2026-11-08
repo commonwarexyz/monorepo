@@ -20,30 +20,32 @@ pub enum Halt {
 }
 
 /// Why the ledger refused a call.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Refusal {
     /// The ledger halted.
+    #[error("the ledger halted")]
     Halted,
     /// The ledger has not halted.
+    #[error("the ledger has not halted")]
     NotHalted,
     /// The account has nothing left to claim.
+    #[error("the account has nothing left to claim")]
     NothingToClaim,
     /// The call would take more than the ledger holds or can hold.
+    #[error("the call would take more than the ledger holds or can hold")]
     Custody,
     /// No close of the challenged epoch has posted.
+    #[error("no close of the challenged epoch has posted")]
     NotPosted,
     /// The payout at the proven index was already paid.
+    #[error("the payout at the proven index was already paid")]
     Withdrawn,
     /// The balance or payout proof does not verify under the last posted root.
+    #[error("the balance or payout proof does not verify under the last posted root")]
     InvalidProof,
     /// A helper refused it.
-    Error(Error),
-}
-
-impl From<Error> for Refusal {
-    fn from(error: Error) -> Self {
-        Self::Error(error)
-    }
+    #[error(transparent)]
+    Error(#[from] Error),
 }
 
 /// A ledger following L1-L11 that counts the funds it holds as one amount and tracks paid payouts

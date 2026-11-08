@@ -132,8 +132,8 @@ impl<A: Amount> Flow<A> {
     /// Settles the flow on the account's `previous` balance and returns the balance left and the
     /// payout. The payout is the lesser of the settled balance and the amount requested.
     ///
-    /// Returns Overdraft if the settled balance is negative, and Overflow if it exceeds the largest
-    /// amount.
+    /// Returns [Error::Overdraft] if the settled balance is negative, and [Error::Overflow] if it
+    /// exceeds the largest amount.
     pub fn settle(&self, previous: A) -> Result<(A, A), Error> {
         let settled = Total::new(previous)
             .add(self.credit)?
@@ -242,22 +242,18 @@ impl<P: PublicKey, A: Amount> Flows<P, A> {
                 amount,
             )?;
         }
-        for withdrawal in forced_withdrawals {
-            let amount = Total::new(withdrawal.amount);
+        let forced = forced_withdrawals
+            .iter()
+            .map(|withdrawal| (&withdrawal.account, withdrawal.amount));
+        let soft = withdrawals
+            .iter()
+            .map(|withdrawal| (&withdrawal.account, withdrawal.amount));
+        for (account, amount) in forced.chain(soft) {
+            let amount = Total::new(amount);
             add(
                 &mut flows,
                 epoch,
-                &withdrawal.account,
-                |flow| &mut flow.withdraw,
-                amount,
-            )?;
-        }
-        for withdrawal in withdrawals {
-            let amount = Total::new(withdrawal.amount);
-            add(
-                &mut flows,
-                epoch,
-                &withdrawal.account,
+                account,
                 |flow| &mut flow.withdraw,
                 amount,
             )?;
@@ -379,7 +375,7 @@ mod tests {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::super::*;
+        use super::*;
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {

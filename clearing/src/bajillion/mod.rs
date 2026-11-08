@@ -702,9 +702,10 @@ mod namespace;
 mod payment;
 mod settlement;
 mod summary;
+mod validator;
+
 #[cfg(test)]
 mod tests;
-mod validator;
 
 pub use amounts::{Amount, Amounts};
 pub use close::{Close, Deposit, ForcedWithdrawal, Limits, Queue, Row, Withdrawal};

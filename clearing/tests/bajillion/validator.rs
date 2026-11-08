@@ -1,9 +1,8 @@
 //! Checking closes, applying posted closes, and resuming validators.
 
 use super::*;
-use crate::roles::validator::Persisted;
 use commonware_clearing::bajillion::{BalanceProof, Error, ForcedWithdrawal, Payout, PayoutLog};
-use commonware_codec::{DecodeExt as _, Encode as _};
+use commonware_codec::DecodeExt as _;
 use commonware_runtime::{Runner as _, deterministic::FaultConfig};
 use commonware_utils::Probability;
 

@@ -15,7 +15,7 @@ pub enum Error {
     ZeroAmount,
     /// An account or a soft withdrawal request appears more than once.
     #[error("account or withdrawal request appears more than once")]
-    DuplicateAccount,
+    Duplicate,
     /// Amounts have more entries than a tree can commit to.
     #[error("too many entries")]
     TooManyEntries,
@@ -56,8 +56,8 @@ pub enum Error {
     #[error("invalid checkpoint")]
     InvalidCheckpoint,
     /// The balances database failed.
-    #[error("storage: {0}")]
-    Storage(#[from] qmdb::Error<mmb::Family>),
+    #[error("balances: {0}")]
+    Balances(#[from] qmdb::Error<mmb::Family>),
     /// The payout log failed.
     #[error("payout log: {0}")]
     Log(#[from] qmdb::Error<mmr::Family>),

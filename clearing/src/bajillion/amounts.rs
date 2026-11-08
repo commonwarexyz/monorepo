@@ -7,7 +7,7 @@ use commonware_codec::{
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_storage::bmt::{Builder, Tree};
-use core::{fmt::Debug, hash::Hash};
+use core::{cmp::Ordering, fmt::Debug, hash::Hash};
 
 /// An unsigned integer amount of funds.
 ///
@@ -121,7 +121,7 @@ impl<P: PublicKey, A: Amount> Amounts<P, A> {
             return Err(Error::ZeroAmount);
         }
         if entries.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
-            return Err(Error::DuplicateAccount);
+            return Err(Error::Duplicate);
         }
         Ok(Self { entries })
     }
@@ -169,9 +169,9 @@ impl<P: PublicKey, A: Amount> Amounts<P, A> {
                 (Some(_), None) => left.next().cloned(),
                 (None, Some(_)) => right.next().cloned(),
                 (Some((a, x)), Some((b, y))) => match a.cmp(b) {
-                    core::cmp::Ordering::Less => left.next().cloned(),
-                    core::cmp::Ordering::Greater => right.next().cloned(),
-                    core::cmp::Ordering::Equal => {
+                    Ordering::Less => left.next().cloned(),
+                    Ordering::Greater => right.next().cloned(),
+                    Ordering::Equal => {
                         let sum = x.checked_add(*y).ok_or(Error::Overflow)?;
                         let account = a.clone();
                         left.next();
@@ -254,43 +254,39 @@ where
     }
 }
 
-/// Draws an arbitrary nonzero amount.
+/// Draws arbitrary amounts that pay at least one account.
 #[cfg(feature = "arbitrary")]
-pub(crate) fn arbitrary_nonzero<A>(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<A>
+pub(crate) fn arbitrary_nonempty<P, A>(
+    u: &mut arbitrary::Unstructured<'_>,
+) -> arbitrary::Result<Amounts<P, A>>
 where
+    P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
     A: Amount + From<u64> + for<'a> arbitrary::Arbitrary<'a>,
 {
+    let receiver = u.arbitrary()?;
     let amount: A = u.arbitrary()?;
-    Ok(if amount == A::ZERO {
+    let amount = if amount == A::ZERO {
         A::from(1)
     } else {
         amount
-    })
+    };
+    u.arbitrary::<Amounts<P, A>>()?
+        .combine(&Amounts::new([(receiver, amount)]).expect("amount must be nonzero"))
+        .map_err(|_| arbitrary::Error::IncorrectFormat)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bajillion::tests::accounts;
     use commonware_codec::{Decode as _, Encode as _};
-    use commonware_cryptography::{
-        Sha256, Signer as _,
-        ed25519::{PrivateKey, PublicKey},
-    };
+    use commonware_cryptography::{Sha256, ed25519::PublicKey};
 
     type TestAmounts = Amounts<PublicKey, u64>;
 
-    /// Returns `count` public keys in increasing order.
-    fn keys(count: u64) -> Vec<PublicKey> {
-        let mut keys: Vec<_> = (0..count)
-            .map(|seed| PrivateKey::from_seed(seed).public_key())
-            .collect();
-        keys.sort();
-        keys
-    }
-
     #[test]
     fn test_new_sorts_entries() {
-        let keys = keys(4);
+        let keys = accounts(4);
         let amounts = TestAmounts::new([
             (keys[2].clone(), 3),
             (keys[0].clone(), 1),
@@ -317,21 +313,21 @@ mod tests {
 
     #[test]
     fn test_new_rejects_invalid_entries() {
-        let keys = keys(2);
+        let keys = accounts(2);
         assert!(matches!(
             TestAmounts::new([(keys[0].clone(), 0)]),
             Err(Error::ZeroAmount)
         ));
         assert!(matches!(
             TestAmounts::new([(keys[0].clone(), 1), (keys[0].clone(), 2)]),
-            Err(Error::DuplicateAccount)
+            Err(Error::Duplicate)
         ));
         assert!(TestAmounts::new([]).unwrap().is_empty());
     }
 
     #[test]
     fn test_combine() {
-        let keys = keys(3);
+        let keys = accounts(3);
         let left = TestAmounts::new([(keys[0].clone(), 1), (keys[1].clone(), 2)]).unwrap();
         let right = TestAmounts::new([(keys[1].clone(), 3), (keys[2].clone(), 4)]).unwrap();
         let combined = left.combine(&right).unwrap();
@@ -356,7 +352,7 @@ mod tests {
 
     #[test]
     fn test_leaf_hashes_account_and_big_endian_amount() {
-        let key = &keys(1)[0];
+        let key = &accounts(1)[0];
         assert_eq!(
             leaf::<Sha256, _, u64>(key, 5),
             Sha256::hash(&[key.as_ref(), &5u64.to_be_bytes()])
@@ -369,7 +365,7 @@ mod tests {
 
     #[test]
     fn test_root_commits_to_entries() {
-        let keys = keys(2);
+        let keys = accounts(2);
         let empty = TestAmounts::empty();
         assert_eq!(
             empty.root::<Sha256>(),
@@ -400,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_lookup() {
-        let keys = keys(5);
+        let keys = accounts(5);
         let amounts = TestAmounts::new([(keys[1].clone(), 10), (keys[3].clone(), 30)]).unwrap();
         let root = amounts.root::<Sha256>();
         let tree = amounts.tree::<Sha256>();
@@ -416,7 +412,7 @@ mod tests {
 
     #[test]
     fn test_decode_rejects_non_canonical_entries() {
-        let keys = keys(2);
+        let keys = accounts(2);
         let range = RangeCfg::new(..=8);
         for entries in [
             vec![(keys[1].clone(), 1u64), (keys[0].clone(), 1)],

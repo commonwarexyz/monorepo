@@ -46,7 +46,7 @@ impl<K: Ord + Clone, V: Clone, D: Digest> Lookup<K, V, D> {
     /// Opens `key` in `entries`. The entries must be strictly increasing by key and committed by
     /// `tree`.
     pub(crate) fn new(entries: &[(K, V)], tree: &Tree<D>, key: &K) -> Self {
-        let proof = |start: usize, end: usize| {
+        let open = |start: usize, end: usize| {
             tree.range_proof(start as u32, end as u32)
                 .expect("entries must be committed by the tree")
         };
@@ -54,16 +54,16 @@ impl<K: Ord + Clone, V: Clone, D: Digest> Lookup<K, V, D> {
             Ok(position) => Self::Member {
                 position: position as u32,
                 value: entries[position].1.clone(),
-                proof: proof(position, position),
+                proof: open(position, position),
             },
             Err(position) => {
                 let lower = position.checked_sub(1).map(|index| entries[index].clone());
                 let upper = entries.get(position).cloned();
                 let proof = match (&lower, &upper) {
                     (None, None) => Proof::default(),
-                    (Some(_), Some(_)) => proof(position - 1, position),
-                    (Some(_), None) => proof(position - 1, position - 1),
-                    (None, Some(_)) => proof(position, position),
+                    (Some(_), Some(_)) => open(position - 1, position),
+                    (Some(_), None) => open(position - 1, position - 1),
+                    (None, Some(_)) => open(position, position),
                 };
                 Self::NonMember {
                     position: position as u32,
@@ -202,6 +202,24 @@ impl<K: Read<Cfg = ()>, V: Read<Cfg = ()>, D: Digest> Read for Lookup<K, V, D> {
     }
 }
 
+/// Draws an arbitrary proof with at most four siblings. The crate's proof readers accept that
+/// many, while the storage crate's own impl draws any number.
+#[cfg(feature = "arbitrary")]
+pub(crate) fn arbitrary_proof<'a, D>(
+    u: &mut arbitrary::Unstructured<'a>,
+) -> arbitrary::Result<Proof<D>>
+where
+    D: Digest + arbitrary::Arbitrary<'a>,
+{
+    let siblings = u.int_in_range(0..=4)?;
+    Ok(Proof {
+        leaf_count: u.arbitrary()?,
+        siblings: (0..siblings)
+            .map(|_| u.arbitrary())
+            .collect::<arbitrary::Result<_>>()?,
+    })
+}
+
 #[cfg(feature = "arbitrary")]
 impl<'a, K, V, D> arbitrary::Arbitrary<'a> for Lookup<K, V, D>
 where
@@ -211,13 +229,7 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let position = u.arbitrary()?;
-        let siblings = u.int_in_range(0..=4)?;
-        let proof = Proof {
-            leaf_count: u.arbitrary()?,
-            siblings: (0..siblings)
-                .map(|_| u.arbitrary())
-                .collect::<arbitrary::Result<_>>()?,
-        };
+        let proof = arbitrary_proof(u)?;
         if u.arbitrary()? {
             Ok(Self::Member {
                 position,

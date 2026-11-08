@@ -9,20 +9,17 @@ use core::cell::Cell;
 use std::collections::BTreeMap;
 
 /// Why the operator refused a request or a soft withdrawal.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Refusal {
     /// Admitting it would take the close past the operator's limits.
+    #[error("admitting it would take the close past the operator's limits")]
     Full,
     /// The batch exceeds what the sender can still spend in the epoch.
+    #[error("the batch exceeds what the sender can still spend in the epoch")]
     InsufficientBalance,
     /// A helper refused it.
-    Error(Error),
-}
-
-impl From<Error> for Refusal {
-    fn from(error: Error) -> Self {
-        Self::Error(error)
-    }
+    #[error(transparent)]
+    Error(#[from] Error),
 }
 
 /// Per-account records that count their lookups, so a test can check that a call reads none.
@@ -59,8 +56,11 @@ impl<K: Ord, V> Records<K, V> {
 /// sender's signature over it. Together they form the sender's row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Admitted<P: PublicKey, D: Digest, A: Amount> {
+    /// The countersigned state.
     pub state: State<P, D>,
+    /// The payment map the state commits to.
     pub payments: Amounts<P, A>,
+    /// The sender's signature over the state.
     pub signature: P::Signature,
 }
 

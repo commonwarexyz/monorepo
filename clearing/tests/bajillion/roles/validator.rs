@@ -6,7 +6,7 @@ use commonware_clearing::bajillion::{
     Amount, BalanceProof, Balances, Checkpoint, Close, Deposit, Epoch, Error, ForcedWithdrawal,
     Limits, Matrix, Namespace, Opening, PayoutLog, PayoutProof, Proposal, Queue, Summary,
 };
-use commonware_codec::{Decode as _, DecodeExt as _, Encode as _, RangeCfg, Write as _};
+use commonware_codec::{Decode as _, DecodeExt as _, Encode as _, RangeCfg};
 use commonware_cryptography::{Digest, Digestible, Hasher, PublicKey};
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
@@ -64,13 +64,6 @@ impl<D: Digest> Default for Persisted<D> {
             attested: HashMap::new(),
         }
     }
-}
-
-/// Encodes queued requests as a validator persists them.
-fn encode<T: commonware_codec::Write>(requests: &[T]) -> Bytes {
-    let mut encoded = Vec::new();
-    requests.write(&mut encoded);
-    Bytes::from(encoded)
 }
 
 /// A validator holding the balances database, the payout log, what it persisted, and the checkpoint
@@ -329,7 +322,7 @@ where
         queue: &Queue<P, A>,
     ) -> Result<Proposal<P, H, S, A>, Error> {
         let encoded = close.encode();
-        let counts = (close.deposits(), close.forced_withdrawals());
+        let (deposited, forced) = (close.deposits(), close.forced_withdrawals());
         let checked = close.check::<H, S>(
             &self.config.namespace,
             &self.config.operator,
@@ -341,11 +334,11 @@ where
 
         // The close, the requests it processes, and its summary are persisted before the
         // attestation is released (V4).
-        let (deposits, forced_withdrawals) = queue.prefix(counts.0, counts.1)?;
+        let (deposits, forced_withdrawals) = queue.prefix(deposited, forced)?;
         let record = Record {
             close: encoded,
-            deposits: encode(deposits),
-            forced_withdrawals: encode(forced_withdrawals),
+            deposits: deposits.encode(),
+            forced_withdrawals: forced_withdrawals.encode(),
             summary: proposal.summary().encode(),
         };
         self.persisted

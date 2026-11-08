@@ -2,8 +2,7 @@
 //!
 //! # Status
 //!
-//! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability)
-//! for details.
+//! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",

@@ -264,7 +264,8 @@ impl<P: PublicKey, A: Amount> Queue<P, A> {
     /// Returns the oldest `deposits` deposits and `forced_withdrawals` forced withdrawals, the
     /// requests a close with these counts processes.
     ///
-    /// Returns InvalidCount unless each count lies between its queue's required count and length.
+    /// Returns [Error::InvalidCount] unless each count lies between its queue's required count and
+    /// length.
     #[allow(clippy::type_complexity)]
     pub fn prefix(
         &self,
@@ -330,11 +331,7 @@ where
     A: From<u64> + for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let receiver = u.arbitrary()?;
-        let amount = super::amounts::arbitrary_nonzero(u)?;
-        let payments = Amounts::<P, A>::arbitrary(u)?
-            .combine(&Amounts::new([(receiver, amount)]).expect("amount must be nonzero"))
-            .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+        let payments = super::amounts::arbitrary_nonempty(u)?;
         Ok(Self {
             account: u.arbitrary()?,
             payments,
@@ -373,6 +370,10 @@ pub struct Close<P: PublicKey, O: PublicKey, A: Amount> {
 
 impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
     /// Returns a close of rows and withdrawals already in their canonical order.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless the rows and withdrawals are strictly increasing.
     pub(crate) fn new(
         epoch: Epoch,
         rows: Vec<Row<P, A>>,
@@ -429,9 +430,9 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
     /// `forced_withdrawals` forced withdrawals. Returns it with each touched account's flow.
     ///
     /// Assembly recomputes every root and checks neither signatures nor the validators' [Limits].
-    /// Returns InvalidCount if a count is out of bounds, NoReceivers if a row pays no receiver,
-    /// WrongEpoch if a soft withdrawal is for another epoch, and DuplicateAccount if an account has
-    /// two rows or a withdrawal request repeats.
+    /// Returns [Error::InvalidCount] if a count is out of bounds, [Error::NoReceivers] if a row
+    /// pays no receiver, [Error::WrongEpoch] if a soft withdrawal is for another epoch, and
+    /// [Error::Duplicate] if an account has two rows or a withdrawal request repeats.
     #[allow(clippy::type_complexity)]
     pub fn assemble<H, S>(
         signer: &S,
@@ -466,7 +467,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
         rows.sort_unstable_by(|a, b| a.account.cmp(&b.account));
         withdrawals.sort_unstable_by(|a, b| a.request().cmp(&b.request()));
         if !Self::is_canonical(&rows, &withdrawals) {
-            return Err(Error::DuplicateAccount);
+            return Err(Error::Duplicate);
         }
         let flows = Flows::new(
             epoch,
@@ -615,13 +616,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bajillion::tests::{TestClose, namespace};
     use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
     use commonware_cryptography::{
         Sha256, Verifier as _,
-        ed25519::{PrivateKey, PublicKey, Signature},
+        ed25519::{PrivateKey, PublicKey},
     };
-
-    const NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_BAJILLION_CLOSE_TEST";
 
     const LIMITS: Limits = Limits {
         rows: 4,
@@ -660,7 +660,7 @@ mod tests {
 
     #[test]
     fn test_withdrawal_signature() {
-        let namespace = Namespace::new(NAMESPACE);
+        let namespace = namespace();
         let signer = PrivateKey::from_seed(0);
         let withdrawal = Withdrawal::<_, u64>::sign(&signer, &namespace, 3, 10, 7);
         assert_eq!(withdrawal.account, signer.public_key());
@@ -695,15 +695,14 @@ mod tests {
 
     #[test]
     fn test_decode_rejects_non_canonical_close() {
-        let namespace = Namespace::new(NAMESPACE);
+        let namespace = namespace();
         let signers = signers(3);
         let rows = [row(&signers[0], &signers[2]), row(&signers[1], &signers[2])];
         let withdrawal = Withdrawal::sign(&signers[0], &namespace, 1, 5, 0);
 
         // A canonical close decodes with its rows, withdrawals, and counts, and encodes back.
         let canonical = encode(&rows, std::slice::from_ref(&withdrawal));
-        let close =
-            Close::<PublicKey, PublicKey, u64>::decode_cfg(canonical.clone(), &LIMITS).unwrap();
+        let close = TestClose::decode_cfg(canonical.clone(), &LIMITS).unwrap();
         assert_eq!(close.rows(), &rows);
         assert_eq!(close.withdrawals(), std::slice::from_ref(&withdrawal));
         assert_eq!((close.deposits(), close.forced_withdrawals()), (2, 3));
@@ -713,9 +712,7 @@ mod tests {
         let reversed = [rows[1].clone(), rows[0].clone()];
         let repeated = [rows[0].clone(), rows[0].clone()];
         for rows in [&reversed[..], &repeated[..]] {
-            assert!(
-                Close::<PublicKey, PublicKey, u64>::decode_cfg(encode(rows, &[]), &LIMITS).is_err()
-            );
+            assert!(TestClose::decode_cfg(encode(rows, &[]), &LIMITS).is_err());
         }
 
         // A row must pay someone.
@@ -723,22 +720,14 @@ mod tests {
             payments: Amounts::empty(),
             ..rows[0].clone()
         };
-        assert!(
-            Close::<PublicKey, PublicKey, u64>::decode_cfg(encode(&[empty], &[]), &LIMITS).is_err()
-        );
+        assert!(TestClose::decode_cfg(encode(&[empty], &[]), &LIMITS).is_err());
 
         // The same request cannot appear twice, even under different signatures.
         let resigned = Withdrawal {
-            signature: Signature::decode(signers[1].sign(b"other", b"other").encode()).unwrap(),
+            signature: signers[1].sign(b"other", b"other"),
             ..withdrawal.clone()
         };
-        assert!(
-            Close::<PublicKey, PublicKey, u64>::decode_cfg(
-                encode(&rows, &[withdrawal, resigned]),
-                &LIMITS
-            )
-            .is_err()
-        );
+        assert!(TestClose::decode_cfg(encode(&rows, &[withdrawal, resigned]), &LIMITS).is_err());
 
         // Rows, receivers per row, and withdrawals are each bounded.
         let paying_two = Row {
@@ -747,7 +736,7 @@ mod tests {
             ..rows[0].clone()
         };
         let wide = encode(&[paying_two], &[]);
-        assert!(Close::<PublicKey, PublicKey, u64>::decode_cfg(wide.clone(), &LIMITS).is_ok());
+        assert!(TestClose::decode_cfg(wide.clone(), &LIMITS).is_ok());
         for (limits, encoded) in [
             (Limits { rows: 1, ..LIMITS }, &canonical),
             (
@@ -765,9 +754,7 @@ mod tests {
                 &canonical,
             ),
         ] {
-            assert!(
-                Close::<PublicKey, PublicKey, u64>::decode_cfg(encoded.clone(), &limits).is_err()
-            );
+            assert!(TestClose::decode_cfg(encoded.clone(), &limits).is_err());
         }
     }
 
@@ -805,7 +792,7 @@ mod tests {
 
     #[test]
     fn test_withdrawal_message_is_what_the_account_signs() {
-        let namespace = Namespace::new(NAMESPACE);
+        let namespace = namespace();
         let signer = PrivateKey::from_seed(0);
         let withdrawal = Withdrawal::<_, u64>::sign(&signer, &namespace, 3, 10, 7);
         let message = Withdrawal::<PublicKey, u64>::message(3, &signer.public_key(), 10, 7);
@@ -836,7 +823,7 @@ mod tests {
     /// validators check.
     #[test]
     fn test_assembly_is_independent_of_order() {
-        let namespace = Namespace::new(NAMESPACE);
+        let namespace = namespace();
         let operator = PrivateKey::from_seed(9);
         let signers = signers(3);
         let rows = [row(&signers[0], &signers[2]), row(&signers[1], &signers[2])];
@@ -855,16 +842,8 @@ mod tests {
             required_forced_withdrawals: 0,
         };
         let assemble = |rows: Vec<Row<PublicKey, u64>>, withdrawals: Vec<_>| {
-            Close::<PublicKey, PublicKey, u64>::assemble::<Sha256, _>(
-                &operator,
-                &namespace,
-                &queue,
-                rows,
-                withdrawals,
-                1,
-                0,
-            )
-            .unwrap()
+            TestClose::assemble::<Sha256, _>(&operator, &namespace, &queue, rows, withdrawals, 1, 0)
+                .unwrap()
         };
         let (close, flows) = assemble(rows.to_vec(), withdrawals.to_vec());
         let reversed = assemble(
@@ -877,7 +856,7 @@ mod tests {
 
         // The operator's signature covers the matrix root of the rows, and the flows sum every
         // account's part of the close.
-        let message = Close::<PublicKey, PublicKey, u64>::message(
+        let message = TestClose::message(
             1,
             &close.matrix::<Sha256>().root(),
             close.withdrawals(),
@@ -904,7 +883,7 @@ mod tests {
 
     #[test]
     fn test_assembly_refuses_repeats_and_counts() {
-        let namespace = Namespace::new(NAMESPACE);
+        let namespace = namespace();
         let operator = PrivateKey::from_seed(9);
         let signers = signers(3);
         let queue = Queue::<PublicKey, u64> {
@@ -918,7 +897,7 @@ mod tests {
             required_forced_withdrawals: 0,
         };
         let assemble = |deposits, rows: Vec<_>, withdrawals: Vec<_>| {
-            Close::<PublicKey, PublicKey, u64>::assemble::<Sha256, _>(
+            TestClose::assemble::<Sha256, _>(
                 &operator,
                 &namespace,
                 &queue,
@@ -936,16 +915,16 @@ mod tests {
         let rows = vec![row(&signers[0], &signers[2]), repeated];
         assert!(matches!(
             assemble(1, rows, Vec::new()),
-            Err(Error::DuplicateAccount)
+            Err(Error::Duplicate)
         ));
         let withdrawal = Withdrawal::sign(&signers[0], &namespace, 1, 5, 0);
         let resigned = Withdrawal {
-            signature: Signature::decode(signers[1].sign(b"other", b"other").encode()).unwrap(),
+            signature: signers[1].sign(b"other", b"other"),
             ..withdrawal.clone()
         };
         assert!(matches!(
             assemble(1, Vec::new(), vec![withdrawal.clone(), resigned]),
-            Err(Error::DuplicateAccount)
+            Err(Error::Duplicate)
         ));
 
         // The close processes at least the required requests and at most those queued.
@@ -960,7 +939,7 @@ mod tests {
 
     #[test]
     fn test_assembly_refuses_rows_and_withdrawals_validators_reject() {
-        let namespace = Namespace::new(NAMESPACE);
+        let namespace = namespace();
         let operator = PrivateKey::from_seed(9);
         let signers = signers(3);
         let queue = Queue::<PublicKey, u64> {
@@ -971,15 +950,7 @@ mod tests {
             required_forced_withdrawals: 0,
         };
         let assemble = |rows: Vec<_>, withdrawals: Vec<_>| {
-            Close::<PublicKey, PublicKey, u64>::assemble::<Sha256, _>(
-                &operator,
-                &namespace,
-                &queue,
-                rows,
-                withdrawals,
-                0,
-                0,
-            )
+            TestClose::assemble::<Sha256, _>(&operator, &namespace, &queue, rows, withdrawals, 0, 0)
         };
 
         // Every row pays a receiver, and every soft withdrawal is for the close's epoch.

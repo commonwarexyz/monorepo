@@ -8,26 +8,26 @@ use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
 use std::collections::BTreeMap;
 
 /// Why the sender refused to act.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Refusal {
     /// A request is still pending.
+    #[error("a request is still pending")]
     Pending,
     /// No request is pending.
+    #[error("no request is pending")]
     NotPending,
     /// The sender holds a countersigned map of a later epoch.
+    #[error("the sender holds a countersigned map of a later epoch")]
     LaterEpoch,
     /// The acknowledgement countersigns none of the pending request's states.
+    #[error("the acknowledgement countersigns none of the pending request's states")]
     InvalidAcknowledgement,
     /// The sender holds no acknowledged state of the epoch.
+    #[error("the sender holds no acknowledged state of the epoch")]
     NotAcknowledged,
     /// A helper refused it.
-    Error(Error),
-}
-
-impl From<Error> for Refusal {
-    fn from(error: Error) -> Self {
-        Self::Error(error)
-    }
+    #[error(transparent)]
+    Error(#[from] Error),
 }
 
 /// What a posted close did with the pending request.
@@ -45,9 +45,13 @@ pub enum Outcome {
 /// sender received it, and the payment map the state commits to (S2, S3).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Countersigned<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
+    /// The countersigned state.
     pub state: State<P, D>,
+    /// The sender's signature over the state.
     pub signature: P::Signature,
+    /// The operator's countersignature, if the sender received it.
     pub acknowledgement: Option<O::Signature>,
+    /// The payment map the state commits to.
     pub payments: Amounts<P, A>,
 }
 

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::roles::{
-    operator::Refusal as Operator,
+    operator::Refusal as Admitting,
     receiver::Refusal as Receiving,
     sender::{Outcome, Refusal as Sending},
 };
@@ -71,7 +71,7 @@ fn test_operator_refuses_overdrafts() {
     let request = alice.send(2, amounts(&[(1, 3)]), false).unwrap();
     assert!(matches!(
         operator.accept(&request),
-        Err(Operator::InsufficientBalance)
+        Err(Admitting::InsufficientBalance)
     ));
     alice.refused().unwrap();
     assert!(alice.pending().is_none());
@@ -86,7 +86,7 @@ fn test_operator_refuses_overdrafts() {
     let request = bob.send(2, amounts(&[(2, 1)]), false).unwrap();
     assert!(matches!(
         operator.accept(&request),
-        Err(Operator::InsufficientBalance)
+        Err(Admitting::InsufficientBalance)
     ));
     bob.refused().unwrap();
     close(&mut operator);
@@ -108,7 +108,7 @@ fn test_operator_refuses_states_the_sender_did_not_sign() {
         let request = sender(0).send(epoch, amounts(&[(2, 1)]), false).unwrap();
         assert!(matches!(
             operator.accept(&request),
-            Err(Operator::Error(Error::WrongEpoch {
+            Err(Admitting::Error(Error::WrongEpoch {
                 expected: 2,
                 found
             })) if found == epoch
@@ -121,13 +121,13 @@ fn test_operator_refuses_states_the_sender_did_not_sign() {
     tampered.batch = amounts(&[(2, 2)]);
     assert!(matches!(
         operator.accept(&tampered),
-        Err(Operator::Error(Error::InvalidSignature))
+        Err(Admitting::Error(Error::InvalidSignature))
     ));
     let mut tampered = request;
     tampered.account = account(1);
     assert!(matches!(
         operator.accept(&tampered),
-        Err(Operator::Error(Error::InvalidSignature))
+        Err(Admitting::Error(Error::InvalidSignature))
     ));
     let mut other = TestSender::new(
         user(0),
@@ -137,7 +137,7 @@ fn test_operator_refuses_states_the_sender_did_not_sign() {
     let request = other.send(2, amounts(&[(2, 1)]), false).unwrap();
     assert!(matches!(
         operator.accept(&request),
-        Err(Operator::Error(Error::InvalidSignature))
+        Err(Admitting::Error(Error::InvalidSignature))
     ));
 
     // The state must extend the map the last close settled for the sender. A sender that lost
@@ -151,7 +151,7 @@ fn test_operator_refuses_states_the_sender_did_not_sign() {
     let request = sender(0).send(3, amounts(&[(2, 1)]), false).unwrap();
     assert!(matches!(
         operator.accept(&request),
-        Err(Operator::Error(Error::InvalidSignature))
+        Err(Admitting::Error(Error::InvalidSignature))
     ));
     let request = alice.send(3, amounts(&[(2, 1)]), false).unwrap();
     alice
@@ -183,7 +183,7 @@ fn test_operator_refuses_requests_that_pay_no_receiver() {
     };
     assert!(matches!(
         operator.accept(&request),
-        Err(Operator::Error(Error::NoReceivers))
+        Err(Admitting::Error(Error::NoReceivers))
     ));
     assert!(operator.payments(&account(1)).is_none());
 }
@@ -322,7 +322,7 @@ fn test_pipelined_request_settles_in_the_next_epoch() {
     close(&mut operator);
     assert!(matches!(
         operator.accept(&request),
-        Err(Operator::Error(Error::InvalidSignature))
+        Err(Admitting::Error(Error::InvalidSignature))
     ));
 }
 
@@ -426,7 +426,7 @@ fn test_replayed_pipelined_request_settles_at_most_once() {
     let refused = alice.send(2, amounts(&[(2, 5)]), true).unwrap();
     assert!(matches!(
         operator.accept(&refused),
-        Err(Operator::InsufficientBalance)
+        Err(Admitting::InsufficientBalance)
     ));
     alice.refused().unwrap();
 
@@ -448,7 +448,7 @@ fn test_replayed_pipelined_request_settles_at_most_once() {
     let other = alice.send(3, amounts(&[(3, 1)]), false).unwrap();
     assert!(matches!(
         operator.accept(&other),
-        Err(Operator::Error(Error::InvalidSignature))
+        Err(Admitting::Error(Error::InvalidSignature))
     ));
     alice.refused().unwrap();
 
@@ -527,10 +527,10 @@ fn test_operator_admits_within_its_limits() {
 
     // A third sender, or a third receiver in alice's map, would not fit the close.
     let request = carol.send(2, amounts(&[(0, 5)]), false).unwrap();
-    assert!(matches!(operator.accept(&request), Err(Operator::Full)));
+    assert!(matches!(operator.accept(&request), Err(Admitting::Full)));
     carol.refused().unwrap();
     let request = alice.send(2, amounts(&[(3, 1)]), false).unwrap();
-    assert!(matches!(operator.accept(&request), Err(Operator::Full)));
+    assert!(matches!(operator.accept(&request), Err(Admitting::Full)));
     alice.refused().unwrap();
 
     // A request the account did not sign is refused as unsigned even when it would not fit, so
@@ -541,7 +541,7 @@ fn test_operator_admits_within_its_limits() {
         request.account = account(owner);
         assert!(matches!(
             operator.accept(&request),
-            Err(Operator::Error(Error::InvalidSignature))
+            Err(Admitting::Error(Error::InvalidSignature))
         ));
         impostor.refused().unwrap();
     }
@@ -558,7 +558,7 @@ fn test_operator_admits_within_its_limits() {
     forged.account = account(1);
     assert!(matches!(
         operator.withdraw(forged.clone()),
-        Err(Operator::Error(Error::InvalidSignature))
+        Err(Admitting::Error(Error::InvalidSignature))
     ));
 
     // A soft withdrawal of another epoch is refused with room left, so it never reaches a close
@@ -567,7 +567,7 @@ fn test_operator_admits_within_its_limits() {
         let stale = Withdrawal::sign(&user(0), &namespace(), epoch, 10, 0);
         assert!(matches!(
             operator.withdraw(stale),
-            Err(Operator::Error(Error::WrongEpoch { expected: 2, found })) if found == epoch
+            Err(Admitting::Error(Error::WrongEpoch { expected: 2, found })) if found == epoch
         ));
     }
 
@@ -576,10 +576,10 @@ fn test_operator_admits_within_its_limits() {
     let withdrawal = Withdrawal::sign(&user(0), &namespace(), 2, 10, 0);
     operator.withdraw(withdrawal.clone()).unwrap();
     let other = Withdrawal::sign(&user(1), &namespace(), 2, 10, 0);
-    assert!(matches!(operator.withdraw(other), Err(Operator::Full)));
+    assert!(matches!(operator.withdraw(other), Err(Admitting::Full)));
     assert!(matches!(
         operator.withdraw(forged),
-        Err(Operator::Error(Error::InvalidSignature))
+        Err(Admitting::Error(Error::InvalidSignature))
     ));
     operator.withdraw(withdrawal).unwrap();
 
@@ -603,7 +603,7 @@ fn test_unsigned_requests_are_refused_before_any_read() {
         let reads = operator.reads();
         assert!(matches!(
             operator.accept(&request),
-            Err(Operator::Error(Error::InvalidSignature))
+            Err(Admitting::Error(Error::InvalidSignature))
         ));
         assert_eq!(operator.reads(), reads);
     };
@@ -653,8 +653,7 @@ fn test_sender_restarts_from_its_records() {
     };
     let mut operator = operator();
     fund(&mut operator, &[(0, 100)]);
-    let alice = sender(0);
-    let mut alice = alice;
+    let mut alice = sender(0);
 
     // The request is persisted before it is sent.
     let request = alice.send(2, amounts(&[(1, 10), (2, 5)]), false).unwrap();

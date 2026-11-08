@@ -51,7 +51,7 @@ struct Inner<P: PublicKey, H: Hasher, A: Amount> {
     tree: Tree<H::Digest>,
 }
 
-/// The hasher is a type parameter only, so the derived traits would bound it.
+// The hasher is a type parameter only, so the derived traits would bound it.
 impl<P: PublicKey, H: Hasher, A: Amount> Clone for Matrix<P, H, A> {
     fn clone(&self) -> Self {
         Self {
@@ -255,20 +255,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bajillion::tests::accounts;
     use commonware_codec::{DecodeExt as _, Encode as _};
-    use commonware_cryptography::{
-        Sha256, Signer as _,
-        ed25519::{PrivateKey, PublicKey},
-    };
-
-    /// Returns `count` public keys in increasing order.
-    fn keys(count: u64) -> Vec<PublicKey> {
-        let mut keys: Vec<_> = (0..count)
-            .map(|seed| PrivateKey::from_seed(seed).public_key())
-            .collect();
-        keys.sort();
-        keys
-    }
+    use commonware_cryptography::{Sha256, ed25519::PublicKey};
 
     fn amounts(entries: &[(&PublicKey, u64)]) -> Amounts<PublicKey, u64> {
         Amounts::new(
@@ -292,7 +281,7 @@ mod tests {
 
     #[test]
     fn test_opens_every_pair() {
-        let keys = keys(6);
+        let keys = accounts(6);
         let rows = [
             (keys[1].clone(), amounts(&[(&keys[0], 5), (&keys[4], 7)])),
             (keys[3].clone(), amounts(&[(&keys[1], 1)])),
@@ -337,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_rejects_inconsistent_openings() {
-        let keys = keys(4);
+        let keys = accounts(4);
         let matrix = matrix(&[
             (keys[1].clone(), amounts(&[(&keys[0], 5)])),
             (keys[3].clone(), amounts(&[(&keys[0], 1)])),

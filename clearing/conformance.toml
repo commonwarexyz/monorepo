@@ -32,11 +32,11 @@ hash = "8ee7ea413ea0a3a4db9a5e9fd53d9e8f5644f75599c660f7010b30addb6c9b77"
 
 ["commonware_clearing::bajillion::payment::tests::conformance::CodecConformance<Challenge<PublicKey,PublicKey,Digest,u64>>"]
 n_cases = 65536
-hash = "fc1580660be4e885201af2a366741ed4aee78869ffcf9e8114986729976365ae"
+hash = "5e4d00422eb2b0f2ac3867fb9b2a19563bfe040abf505c1526e6f980d1fbd77f"
 
 ["commonware_clearing::bajillion::payment::tests::conformance::CodecConformance<Receipt<PublicKey,PublicKey,Digest,u64>>"]
 n_cases = 65536
-hash = "839369f9c429e2fddb8e41810dee2da3a896a7dee1f942b4c63292615482eed2"
+hash = "c2527b5097ee91124f705f4f799e37d27d5a6933f96df3a139f76ed59333ff00"
 
 ["commonware_clearing::bajillion::payment::tests::conformance::CodecConformance<Request<PublicKey,Digest,u64>>"]
 n_cases = 65536

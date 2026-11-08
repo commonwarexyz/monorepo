@@ -10,11 +10,13 @@ use std::collections::HashMap;
 #[test]
 fn test_assembly_matches_monolithic_close() {
     // Two shards restart from the state the funded single operator persisted for epoch 2.
-    let users: Vec<u64> = (0..6).collect();
+    const USERS: u64 = 6;
+    const SHARDS: u64 = 2;
+    let users: Vec<u64> = (0..USERS).collect();
     let mut replica = operator();
     let funding: Vec<_> = users.iter().map(|index| (*index, 100)).collect();
     fund(&mut replica, &funding);
-    let mut shards: Vec<_> = (0..2)
+    let mut shards: Vec<_> = (0..SHARDS)
         .map(|_| {
             TestOperator::restart(
                 operator_key(),
@@ -30,10 +32,10 @@ fn test_assembly_matches_monolithic_close() {
     let mut senders: HashMap<_, _> = users.iter().map(|index| (*index, sender(*index))).collect();
     for from in &users {
         for offset in [1, 3] {
-            let to = (from + offset) % 6;
+            let to = (from + offset) % USERS;
             let sender = senders.get_mut(from).unwrap();
             let request = sender.send(2, amounts(&[(to, 10 + from)]), false).unwrap();
-            let shard = &mut shards[(from % 2) as usize];
+            let shard = &mut shards[(from % SHARDS) as usize];
             let acknowledgement = shard.accept(&request).unwrap();
             replica.accept(&request).unwrap();
             sender.acknowledged(&acknowledgement).unwrap();

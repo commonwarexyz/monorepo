@@ -197,10 +197,11 @@ impl<H: Hasher> Summary<H> {
     /// post this summary under `certificate`. `deposits` and `forced_withdrawals` each range from
     /// the queue's required count to its length.
     ///
-    /// Returns WrongEpoch unless the summary is for `epoch`, WrongParent unless it names `parent`,
-    /// InvalidCount unless each count is in its range, and InvalidCertificate unless `certificate`
-    /// verifies. The certificate is checked last, and it alone vouches for the matrix and balances
-    /// roots, the payouts size and root, and the running hashes.
+    /// Returns [Error::WrongEpoch] unless the summary is for `epoch`, [Error::WrongParent] unless
+    /// it names `parent`, [Error::InvalidCount] unless each count is in its range, and
+    /// [Error::InvalidCertificate] unless `certificate` verifies. The certificate is checked last,
+    /// and it alone vouches for the matrix and balances roots, the payouts size and root, and the
+    /// running hashes.
     #[allow(clippy::too_many_arguments)]
     pub fn verify<V, R>(
         &self,
@@ -237,8 +238,7 @@ impl<H: Hasher> Summary<H> {
     }
 }
 
-/// The hasher is a type parameter only, so the derived traits would bound it. Summaries are plain
-/// records of digests and counts, and these impls say so.
+// The hasher is a type parameter only, so the derived traits would bound it.
 impl<H: Hasher> Clone for Summary<H> {
     fn clone(&self) -> Self {
         *self
