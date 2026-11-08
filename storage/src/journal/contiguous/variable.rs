@@ -5454,8 +5454,7 @@ mod tests {
             (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
             journal = journal.sync().await.unwrap();
 
-            let reader;
-            (journal, reader) = journal.snapshot().await.unwrap();
+            let (journal, reader) = journal.snapshot().await.unwrap();
             cache.clear();
             assert_eq!(reader.read(0).await.unwrap(), items[0]);
             let positions: Vec<u64> = (0..30).collect();
