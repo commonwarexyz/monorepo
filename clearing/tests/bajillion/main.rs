@@ -24,7 +24,7 @@ use commonware_clearing::bajillion::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    Hasher as _, Sha256, Signer, certificate,
+    Digestible, Hasher as _, Sha256, Signer, certificate,
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
 };
@@ -60,10 +60,10 @@ const LIMITS: Limits = Limits {
 #[allow(unexpected_cfgs)]
 mod scheme {
     use commonware_clearing::bajillion::{Namespace, Summary};
-    use commonware_cryptography::impl_certificate_ed25519;
+    use commonware_cryptography::{Sha256, impl_certificate_ed25519};
     use commonware_utils::N3f1;
 
-    impl_certificate_ed25519!(&'a Summary<D>, Namespace, N3f1);
+    impl_certificate_ed25519!(&'a Summary<Sha256>, Namespace, N3f1);
 }
 
 type TestOperator = Operator<PublicKey, PrivateKey, Sha256, u64>;
@@ -227,8 +227,8 @@ fn chain<R: Encode>(hash: Digest, requests: &[R]) -> Digest {
 /// Checks that each running hash in `summary` extends the one in `parent` over the requests its
 /// close processed from `queue`.
 fn assert_chained(
-    parent: &Summary<Digest>,
-    summary: &Summary<Digest>,
+    parent: &Summary<Sha256>,
+    summary: &Summary<Sha256>,
     queue: &Queue<PublicKey, u64>,
 ) {
     let count = |count: u64| usize::try_from(count).expect("a count within the queue must fit");
@@ -291,10 +291,10 @@ fn config_for<O: commonware_cryptography::PublicKey>(
 }
 
 /// Certifies `summary` with every scheme's signature, as validators that did not check it would.
-fn certify<C>(schemes: &[C], summary: &Summary<Digest>) -> C::Certificate
+fn certify<C>(schemes: &[C], summary: &Summary<Sha256>) -> C::Certificate
 where
     C: certificate::Scheme
-        + for<'a> certificate::Verifier<Subject<'a, Digest> = &'a Summary<Digest>>,
+        + for<'a> certificate::Verifier<Subject<'a, Digest> = &'a Summary<Sha256>>,
 {
     let attestations: Vec<_> = schemes
         .iter()
@@ -346,7 +346,7 @@ where
     P: commonware_cryptography::PublicKey,
     K: Signer,
     C: certificate::Scheme
-        + for<'a> certificate::Verifier<Subject<'a, Digest> = &'a Summary<Digest>>,
+        + for<'a> certificate::Verifier<Subject<'a, Digest> = &'a Summary<Sha256>>,
     A: Amount,
 {
     /// Starts a deployment whose operator signs with `operator` and whose validators sign with
@@ -440,11 +440,11 @@ where
         &mut self,
         context: &mut deterministic::Context,
         proposals: Vec<Proposal<P, Sha256, Sequential, A>>,
-    ) -> Summary<Digest> {
+    ) -> Summary<Sha256> {
         let certificate = self.certify(&proposals);
         let summary = *proposals[0].summary();
         self.ledger.post(context, &summary, &certificate).unwrap();
-        let posted = summary.digest::<Sha256>();
+        let posted = summary.digest();
         for (validator, proposal) in self.validators.iter_mut().zip(proposals) {
             validator.apply(proposal, &posted).await.unwrap();
         }
@@ -456,7 +456,7 @@ where
     async fn close(
         &mut self,
         context: &mut deterministic::Context,
-    ) -> (Close<P, K::PublicKey, A>, Summary<Digest>) {
+    ) -> (Close<P, K::PublicKey, A>, Summary<Sha256>) {
         let queue = self.ledger.queue();
         let (close, _) = self
             .operator

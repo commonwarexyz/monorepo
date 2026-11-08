@@ -58,7 +58,7 @@ hash = "fcda6805c83838ea1ab6cfce7b83d873807fed26614f19a0efd9d8ef3ee32483"
 n_cases = 65536
 hash = "fcda6805c83838ea1ab6cfce7b83d873807fed26614f19a0efd9d8ef3ee32483"
 
-["commonware_clearing::bajillion::summary::tests::conformance::CodecConformance<Summary<Digest>>"]
+["commonware_clearing::bajillion::summary::tests::conformance::CodecConformance<Summary<Sha256>>"]
 n_cases = 65536
 hash = "ef873d732c64aec1ce2f77d9e06b6b824b23d75d4652b1ba7be944e5eb96fe9d"
 

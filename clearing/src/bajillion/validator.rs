@@ -7,7 +7,7 @@ use super::{
 };
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_cryptography::{Digest, Hasher, PublicKey};
+use commonware_cryptography::{Digest, Digestible, Hasher, PublicKey};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_storage::{
@@ -27,6 +27,7 @@ use commonware_storage::{
     },
 };
 use commonware_utils::iter::zip_eq;
+use core::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
 /// Bytes per chunk of the balances database's activity bitmap.
@@ -265,12 +266,30 @@ where
 ///
 /// Before the first close, it is [Summary::genesis] of the empty balances database's root with
 /// [Matrix::empty].
-#[derive(Clone, Debug)]
-pub struct Checkpoint<P: PublicKey, D: Digest, A: Amount> {
+pub struct Checkpoint<P: PublicKey, H: Hasher, A: Amount> {
     /// The close's summary.
-    pub summary: Summary<D>,
+    pub summary: Summary<H>,
     /// The close's payment matrix.
-    pub matrix: Matrix<P, D, A>,
+    pub matrix: Matrix<P, H::Digest, A>,
+}
+
+/// The hasher is a type parameter only, so the derived traits would bound it.
+impl<P: PublicKey, H: Hasher, A: Amount> Clone for Checkpoint<P, H, A> {
+    fn clone(&self) -> Self {
+        Self {
+            summary: self.summary,
+            matrix: self.matrix.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, H: Hasher, A: Amount> Debug for Checkpoint<P, H, A> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Checkpoint")
+            .field("summary", &self.summary)
+            .field("matrix", &self.matrix)
+            .finish()
+    }
 }
 
 impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
@@ -289,9 +308,9 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
         namespace: &Namespace,
         operator: &O,
         strategy: &S,
-        parent: &Checkpoint<P, H::Digest, A>,
+        parent: &Checkpoint<P, H, A>,
         queue: &Queue<P, A>,
-    ) -> Result<Checked<P, H::Digest, A>, Error> {
+    ) -> Result<Checked<P, H, A>, Error> {
         if parent.matrix.root() != parent.summary.matrix {
             return Err(Error::InvalidCheckpoint);
         }
@@ -372,7 +391,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
         )?;
         Ok(Checked {
             epoch,
-            parent: parent.summary.digest::<H>(),
+            parent: parent.summary.digest(),
             matrix,
             flows,
             base: parent.summary.balances,
@@ -387,26 +406,26 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
 }
 
 /// A close whose epoch, counts, and signatures checked, awaiting settlement on the balances.
-pub struct Checked<P: PublicKey, D: Digest, A: Amount> {
+pub struct Checked<P: PublicKey, H: Hasher, A: Amount> {
     /// Epoch of the close.
     epoch: Epoch,
     /// Digest of the parent close's summary.
-    parent: D,
+    parent: H::Digest,
     /// Payment matrix of the close.
-    matrix: Matrix<P, D, A>,
+    matrix: Matrix<P, H::Digest, A>,
     /// Flow of every account the close touches.
     flows: Flows<P, A>,
     /// Balances root of the parent close.
-    base: D,
+    base: H::Digest,
     /// Payouts root of the parent close.
-    log: D,
+    log: H::Digest,
     /// The deposits the close processes, as their count and the queue's running hash.
-    deposits: Processed<D>,
+    deposits: Processed<H::Digest>,
     /// The forced withdrawals the close processes, as their count and the queue's running hash.
-    forced_withdrawals: Processed<D>,
+    forced_withdrawals: Processed<H::Digest>,
 }
 
-impl<P: PublicKey, D: Digest, A: Amount> Checked<P, D, A> {
+impl<P: PublicKey, H: Hasher, A: Amount> Checked<P, H, A> {
     /// Settles the close on top of `balances` and `log` and stages a batch on each. The balances
     /// batch has metadata zero and writes exactly the balances that change, with a zero balance
     /// written as a delete. The log batch is the one [Payout::stage] builds from the close's
@@ -416,14 +435,13 @@ impl<P: PublicKey, D: Digest, A: Amount> Checked<P, D, A> {
     /// Returns InvalidCheckpoint unless `balances` is at the parent's balances root and `log` at
     /// its payouts root, Overdraft if a balance goes negative, Overflow if a balance does not fit,
     /// and Storage or Log if a database fails.
-    pub async fn settle<E, H, I, S>(
+    pub async fn settle<E, I, S>(
         &self,
         balances: &Balances<E, P, H, I, S, A>,
         log: &PayoutLog<E, P, H, S, A>,
     ) -> Result<Proposal<P, H, S, A>, Error>
     where
         E: Context,
-        H: Hasher<Digest = D>,
         I: Unordered<Value = Location<mmb::Family>> + 'static,
         S: Strategy,
     {
@@ -471,7 +489,7 @@ impl<P: PublicKey, D: Digest, A: Amount> Checked<P, D, A> {
 /// balances and the payout log.
 pub struct Proposal<P: PublicKey, H: Hasher, S: Strategy, A: Amount> {
     /// Summary to certify.
-    summary: Summary<H::Digest>,
+    summary: Summary<H>,
     /// Payment matrix of the close.
     matrix: Matrix<P, H::Digest, A>,
     /// Payouts the close appends to the payout log.
@@ -488,7 +506,7 @@ pub struct Proposal<P: PublicKey, H: Hasher, S: Strategy, A: Amount> {
 
 impl<P: PublicKey, H: Hasher, S: Strategy, A: Amount> Proposal<P, H, S, A> {
     /// Returns the summary to certify.
-    pub const fn summary(&self) -> &Summary<H::Digest> {
+    pub const fn summary(&self) -> &Summary<H> {
         &self.summary
     }
 
@@ -525,7 +543,7 @@ impl<P: PublicKey, H: Hasher, S: Strategy, A: Amount> Proposal<P, H, S, A> {
         (
             Balances<E, P, H, I, S, A>,
             PayoutLog<E, P, H, S, A>,
-            Checkpoint<P, H::Digest, A>,
+            Checkpoint<P, H, A>,
         ),
         Error,
     >
@@ -533,7 +551,7 @@ impl<P: PublicKey, H: Hasher, S: Strategy, A: Amount> Proposal<P, H, S, A> {
         E: Context,
         I: Unordered<Value = Location<mmb::Family>> + 'static,
     {
-        if *posted != self.summary.digest::<H>()
+        if *posted != self.summary.digest()
             || balances.root() != self.base
             || log.root() != self.log
         {
@@ -826,7 +844,7 @@ mod tests {
             assert_eq!(proposal.payouts(), &expected);
             let payouts = proposal.summary().payouts;
             assert_eq!(payouts.size, parent.summary.payouts.size + 3);
-            let posted = proposal.summary().digest::<Sha256>();
+            let posted = proposal.summary().digest();
             let (store, first) = store.apply(proposal, &posted).await.unwrap();
             assert_eq!(store.log.root(), payouts.root);
             assert_eq!(*store.log.bounds().end, payouts.size);
@@ -884,7 +902,7 @@ mod tests {
             assert_eq!(duplicate.summary(), second.summary());
 
             // A proposal that did not post is refused before either database changes.
-            let posted = second.summary().digest::<Sha256>();
+            let posted = second.summary().digest();
             let before = roots(&store);
             assert!(matches!(
                 store.apply(first, &posted).await,
@@ -946,7 +964,7 @@ mod tests {
 
             // The balances are elsewhere, so the log beside them must not advance.
             let proposal = here.settle(&checked).await.unwrap();
-            let posted = proposal.summary().digest::<Sha256>();
+            let posted = proposal.summary().digest();
             assert!(matches!(
                 proposal.apply(elsewhere.balances, here.log, &posted).await,
                 Err(Error::InvalidCheckpoint)
@@ -1027,7 +1045,7 @@ mod tests {
             let close = sign_close(&operator, 1, Vec::new(), Vec::new(), 1, 1);
             let checked = check(close, &parent, &queued).unwrap();
             let proposal = store.settle(&checked).await.unwrap();
-            let posted = proposal.summary().digest::<Sha256>();
+            let posted = proposal.summary().digest();
             let applied = context
                 .child("opened")
                 .child("balances")

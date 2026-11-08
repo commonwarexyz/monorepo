@@ -7,7 +7,7 @@ use super::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    Hasher as _, Sha256, Signer as _,
+    Digestible, Hasher as _, Sha256, Signer as _,
     certificate::{self, Scheme as _},
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
@@ -31,15 +31,15 @@ pub(crate) const NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_BAJILLION_TEST";
 #[allow(unexpected_cfgs)]
 pub(crate) mod scheme {
     use crate::bajillion::{Namespace, Summary};
-    use commonware_cryptography::impl_certificate_ed25519;
+    use commonware_cryptography::{Sha256, impl_certificate_ed25519};
     use commonware_utils::N3f1;
 
-    impl_certificate_ed25519!(&'a Summary<D>, Namespace, N3f1);
+    impl_certificate_ed25519!(&'a Summary<Sha256>, Namespace, N3f1);
 }
 
 pub(crate) type TestClose = Close<PublicKey, PublicKey, u64>;
-pub(crate) type TestCheckpoint = Checkpoint<PublicKey, Digest, u64>;
-pub(crate) type TestChecked = Checked<PublicKey, Digest, u64>;
+pub(crate) type TestCheckpoint = Checkpoint<PublicKey, Sha256, u64>;
+pub(crate) type TestChecked = Checked<PublicKey, Sha256, u64>;
 pub(crate) type TestProposal = Proposal<PublicKey, Sha256, Sequential, u64>;
 pub(crate) type TestCertificate = <scheme::Scheme as certificate::Verifier>::Certificate;
 
@@ -276,7 +276,7 @@ pub(crate) async fn open(context: deterministic::Context, name: &str) -> Store {
 /// `balances`.
 pub(crate) fn genesis(balances: Digest) -> TestCheckpoint {
     Checkpoint {
-        summary: Summary::genesis::<Sha256, PublicKey, u64>(balances),
+        summary: Summary::<Sha256>::genesis::<PublicKey, u64>(balances),
         matrix: Matrix::empty::<Sha256>(),
     }
 }
@@ -306,12 +306,12 @@ pub(crate) async fn post<I: Unordered<Value = Location<mmb::Family>> + 'static>(
 ) -> (Store<I>, TestCheckpoint) {
     let checked = check(close, parent, queue).unwrap();
     let proposal = store.settle(&checked).await.unwrap();
-    let posted = proposal.summary().digest::<Sha256>();
+    let posted = proposal.summary().digest();
     store.apply(proposal, &posted).await.unwrap()
 }
 
 /// Certifies `summary` with every scheme's signature.
-pub(crate) fn certify(schemes: &[scheme::Scheme], summary: &Summary<Digest>) -> TestCertificate {
+pub(crate) fn certify(schemes: &[scheme::Scheme], summary: &Summary<Sha256>) -> TestCertificate {
     let attestations: Vec<_> = schemes
         .iter()
         .map(|scheme| scheme.sign::<Digest>(summary).unwrap())
@@ -347,7 +347,7 @@ fn test_port_vector() {
     deterministic::Runner::default().start(|context| async move {
         // The empty balances database and payout log, and the summary before the first close.
         let store = open(context, "vector").await;
-        let genesis = Summary::genesis::<Sha256, PublicKey, u64>(store.balances.root());
+        let genesis = Summary::<Sha256>::genesis::<PublicKey, u64>(store.balances.root());
         assert_eq!(
             hex(store.balances.root()),
             "4e051a8ba89ab421a291d4b906848b2e0f80402175824a056cc3cc00efc4cc65"
@@ -359,7 +359,7 @@ fn test_port_vector() {
             "97f9a47536a9ff3eda91ef4e53351d365e104280df46dbcc5dddc7adfabcef2c"
         );
         assert_eq!(
-            hex(genesis.digest::<Sha256>()),
+            hex(genesis.digest()),
             "44b050ae27384265b1e8c2750395dfe42ea3309302d55c7d31877dc9debbfd2c"
         );
 

@@ -28,9 +28,9 @@ fn test_validators_agree_on_closes() {
             .acknowledged(&deployment.operator.accept(&request).unwrap())
             .unwrap();
         let (close, second) = deployment.close(&mut context).await;
-        assert_eq!(second.parent, first.digest::<Sha256>());
+        assert_eq!(second.parent, first.digest());
         assert_eq!(second.matrix, close.matrix::<Sha256>().root());
-        assert_eq!(deployment.ledger.parent(), &second.digest::<Sha256>());
+        assert_eq!(deployment.ledger.parent(), &second.digest());
 
         // Every validator holds the operator's view of the balances and can prove it.
         for validator in &deployment.validators {
@@ -378,7 +378,7 @@ fn test_validator_recovers_from_interrupted_apply() {
                     sync_rate: Some(Probability::new(1 + seed % 3, 4).unwrap()),
                     ..Default::default()
                 };
-                let posted = proposal.summary().digest::<Sha256>();
+                let posted = proposal.summary().digest();
                 drop(validator.apply(proposal, &posted).await);
                 let TestDeployment {
                     operator,
@@ -406,7 +406,7 @@ fn test_validator_recovers_from_interrupted_apply() {
             let behind = validator.summary().epoch == 1;
             let replayed = validator.catch_up(&posted).await.unwrap();
             assert_eq!(replayed, usize::from(behind));
-            assert_eq!(validator.summary().digest::<Sha256>(), posted);
+            assert_eq!(validator.summary().digest(), posted);
             check_epoch_2(&validator).await;
 
             // After the close of epoch 3 posts, the validator still opens alice's payment to bob
@@ -445,7 +445,7 @@ fn test_applied_close_is_durable() {
     let (state, checkpoint) =
         deterministic::Runner::default().start_and_recover(|mut context| async move {
             let (deployment, mut validator, proposal) = interrupted(&mut context, "durable").await;
-            let posted = proposal.summary().digest::<Sha256>();
+            let posted = proposal.summary().digest();
             validator.apply(proposal, &posted).await.unwrap();
             (validator.persisted().clone(), *deployment.ledger.parent())
         });
@@ -459,7 +459,7 @@ fn test_applied_close_is_durable() {
         )
         .await
         .unwrap();
-        assert_eq!(validator.summary().digest::<Sha256>(), posted);
+        assert_eq!(validator.summary().digest(), posted);
         assert_eq!(validator.catch_up(&posted).await.unwrap(), 0);
         check_epoch_2(&validator).await;
     });

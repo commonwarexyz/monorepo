@@ -336,10 +336,10 @@ mod schemes {
     #[allow(unexpected_cfgs)]
     mod certificate {
         use commonware_clearing::bajillion::{Namespace, Summary};
-        use commonware_cryptography::impl_certificate_secp256r1;
+        use commonware_cryptography::{Sha256, impl_certificate_secp256r1};
         use commonware_utils::N3f1;
 
-        impl_certificate_secp256r1!(&'a Summary<D>, Namespace, N3f1);
+        impl_certificate_secp256r1!(&'a Summary<Sha256>, Namespace, N3f1);
     }
 
     type User = standard::PublicKey;

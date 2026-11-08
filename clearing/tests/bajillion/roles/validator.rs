@@ -7,7 +7,7 @@ use commonware_clearing::bajillion::{
     Limits, Matrix, Namespace, Opening, PayoutLog, PayoutProof, Proposal, Queue, Summary,
 };
 use commonware_codec::{Decode as _, DecodeExt as _, Encode as _, RangeCfg, Write as _};
-use commonware_cryptography::{Digest, Hasher, PublicKey};
+use commonware_cryptography::{Digest, Digestible, Hasher, PublicKey};
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
 use commonware_storage::{
@@ -100,7 +100,7 @@ where
     /// Closes the validator attested (V4).
     persisted: Persisted<H::Digest>,
     /// Checkpoint of the last close applied.
-    parent: Checkpoint<P, H::Digest, A>,
+    parent: Checkpoint<P, H, A>,
 }
 
 impl<E, P, O, H, T, S, A> Validator<E, P, O, H, T, S, A>
@@ -132,7 +132,7 @@ where
         context: &E,
         config: &Config<O, T, S>,
         opened: u64,
-        summary: &Summary<H::Digest>,
+        summary: &Summary<H>,
     ) -> Result<PayoutLog<E, P, H, S, A>, Error> {
         let context = context.child("payouts").with_attribute("opened", opened);
         let size = Some(Location::new(summary.payouts.size));
@@ -180,7 +180,7 @@ where
         let parent = parent
             .or_else(|| {
                 (!applied).then(|| Checkpoint {
-                    summary: Summary::genesis::<H, P, A>(root),
+                    summary: Summary::<H>::genesis::<P, A>(root),
                     matrix: Matrix::empty::<H>(),
                 })
             })
@@ -198,7 +198,7 @@ where
     }
 
     /// Decodes the summary of `record`.
-    fn summary_of(record: &Record) -> Summary<H::Digest> {
+    fn summary_of(record: &Record) -> Summary<H> {
         Summary::decode(record.summary.clone()).expect("a persisted summary must decode")
     }
 
@@ -228,7 +228,7 @@ where
     }
 
     /// Returns the summary of the last close applied.
-    pub const fn summary(&self) -> &Summary<H::Digest> {
+    pub const fn summary(&self) -> &Summary<H> {
         &self.parent.summary
     }
 
@@ -255,7 +255,7 @@ where
     /// Returns the persisted record of the posted close of `epoch`, at or before the last close
     /// applied.
     fn record(&self, epoch: Epoch) -> Option<&Record> {
-        let mut digest = self.parent.summary.digest::<H>();
+        let mut digest = self.parent.summary.digest();
         while let Some(record) = self.persisted.attested.get(&digest) {
             let summary = Self::summary_of(record);
             if summary.epoch == epoch {
@@ -293,7 +293,7 @@ where
         // genesis summary.
         let start = match self.persisted.attested.get(&summary.parent) {
             Some(parent) => Self::summary_of(parent).payouts.size,
-            None if epoch == 1 => Summary::genesis::<H, P, A>(H::Digest::EMPTY).payouts.size,
+            None if epoch == 1 => Summary::<H>::genesis::<P, A>(H::Digest::EMPTY).payouts.size,
             None => return Err(Error::InvalidCheckpoint),
         };
         let log = self.payout_log();
@@ -350,7 +350,7 @@ where
         };
         self.persisted
             .attested
-            .insert(proposal.summary().digest::<H>(), record);
+            .insert(proposal.summary().digest(), record);
         Ok(proposal)
     }
 
@@ -400,7 +400,7 @@ where
     /// Returns InvalidCheckpoint if a posted close in between was not persisted.
     pub async fn catch_up(&mut self, posted: &H::Digest) -> Result<usize, Error> {
         // Collect the persisted closes from the ledger's last post back to the last close applied.
-        let applied = self.parent.summary.digest::<H>();
+        let applied = self.parent.summary.digest();
         let mut missing = Vec::new();
         let mut digest = *posted;
         while digest != applied {

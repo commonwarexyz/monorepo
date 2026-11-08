@@ -5,7 +5,7 @@ use commonware_clearing::bajillion::{
     Amount, BalanceProof, Challenge, Deposit, Epoch, Error, ForcedWithdrawal, Namespace,
     PayoutProof, Queue, Summary,
 };
-use commonware_cryptography::{Hasher, PublicKey, certificate::Verifier};
+use commonware_cryptography::{Digestible, Hasher, PublicKey, certificate::Verifier};
 use rand_core::CryptoRng;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -91,19 +91,19 @@ impl<P, O, V, H, A> Ledger<P, O, V, H, A>
 where
     P: PublicKey,
     O: PublicKey,
-    V: for<'a> Verifier<Subject<'a, H::Digest> = &'a Summary<H::Digest>>,
+    V: for<'a> Verifier<Subject<'a, H::Digest> = &'a Summary<H>>,
     H: Hasher,
     A: Amount,
 {
     /// Returns a ledger whose validators start from the empty balances database with root
     /// `balances` (L1).
     pub fn new(namespace: Namespace, operator: O, verifier: V, balances: H::Digest) -> Self {
-        let genesis = Summary::genesis::<H, P, A>(balances);
+        let genesis = Summary::<H>::genesis::<P, A>(balances);
         Self {
             namespace,
             operator,
             verifier,
-            parent: genesis.digest::<H>(),
+            parent: genesis.digest(),
             balances,
             log: genesis.payouts.root,
             matrices: Vec::new(),
@@ -203,7 +203,7 @@ where
     pub fn post<R: CryptoRng>(
         &mut self,
         rng: &mut R,
-        summary: &Summary<H::Digest>,
+        summary: &Summary<H>,
         certificate: &V::Certificate,
     ) -> Result<(), Refusal> {
         if self.halt.is_some() {
@@ -237,7 +237,7 @@ where
         self.log = summary.payouts.root;
         self.matrices.push(summary.matrix);
         self.balances = summary.balances;
-        self.parent = summary.digest::<H>();
+        self.parent = summary.digest();
         Ok(())
     }
 

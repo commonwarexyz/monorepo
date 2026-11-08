@@ -4,7 +4,7 @@ use super::{Amount, Epoch, Error, Namespace, Payout};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, Encode, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{
-    Digest, Hasher, PublicKey,
+    Digest, Digestible, Hasher, PublicKey,
     certificate::{self, Verifier},
 };
 use commonware_parallel::Sequential;
@@ -13,7 +13,10 @@ use commonware_storage::{
     merkle::mmr,
     qmdb::{keyless, value::FixedEncoding},
 };
-use core::ops::RangeInclusive;
+use core::{
+    fmt::{self, Debug, Formatter},
+    ops::RangeInclusive,
+};
 use rand_core::CryptoRng;
 
 /// A ledger queue's requests that one close processes, as their count and the queue's running hash.
@@ -133,51 +136,52 @@ where
 
 /// The effects of one close, as certified by validators and posted to the ledger.
 ///
-/// Validators certify summaries with a scheme the deployment builds from the certificate macros of
-/// `commonware_cryptography`. The deployment chooses the signature scheme and its fault model. For
-/// example, for Ed25519 with up to `f` Byzantine validators out of `3f + 1`:
+/// A summary's digest ([Digestible]) is what the next summary names as its parent, so the hasher
+/// `H` is part of the type. Validators certify summaries with a scheme the deployment builds from
+/// the certificate macros of `commonware_cryptography`, naming the hasher along with the signature
+/// scheme and its fault model. For example, for SHA-256 and Ed25519 with up to `f` Byzantine
+/// validators out of `3f + 1`:
 ///
 /// ```
 /// mod scheme {
 ///     use commonware_clearing::bajillion::{Namespace, Summary};
-///     use commonware_cryptography::impl_certificate_ed25519;
+///     use commonware_cryptography::{Sha256, impl_certificate_ed25519};
 ///     use commonware_utils::N3f1;
 ///
-///     impl_certificate_ed25519!(&'a Summary<D>, Namespace, N3f1);
+///     impl_certificate_ed25519!(&'a Summary<Sha256>, Namespace, N3f1);
 /// }
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Summary<D: Digest> {
+pub struct Summary<H: Hasher> {
     /// Epoch the close finalizes.
     pub epoch: Epoch,
     /// Digest of the summary of the previous close.
-    pub parent: D,
+    pub parent: H::Digest,
     /// Root of the payment matrix the close settles.
-    pub matrix: D,
+    pub matrix: H::Digest,
     /// Root of the balances after the close.
-    pub balances: D,
+    pub balances: H::Digest,
     /// The payout log after the close, as its size and root.
-    pub payouts: Payouts<D>,
+    pub payouts: Payouts<H::Digest>,
     /// The deposits the close processes, as their count and the queue's running hash.
-    pub deposits: Processed<D>,
+    pub deposits: Processed<H::Digest>,
     /// The forced withdrawals the close processes, as their count and the queue's running hash.
-    pub forced_withdrawals: Processed<D>,
+    pub forced_withdrawals: Processed<H::Digest>,
 }
 
-impl<D: Digest> Summary<D> {
+impl<H: Hasher> Summary<H> {
     /// Returns the summary of the state before the first close, with balances committed by
     /// `balances`, accounts of type `P`, and amounts of type `A`. Both running hashes start at all
     /// zeros, and the payout log holds only its initial commit.
-    pub fn genesis<H: Hasher<Digest = D>, P: PublicKey, A: Amount>(balances: D) -> Self {
+    pub fn genesis<P: PublicKey, A: Amount>(balances: H::Digest) -> Self {
         // An empty payment matrix commits to a tree without leaves.
         let empty = Builder::<H>::new(0).build().root();
         let start = Processed {
             count: 0,
-            hash: D::EMPTY,
+            hash: H::Digest::EMPTY,
         };
         Self {
             epoch: 0,
-            parent: D::EMPTY,
+            parent: H::Digest::EMPTY,
             matrix: empty,
             balances,
             payouts: Payouts {
@@ -187,11 +191,6 @@ impl<D: Digest> Summary<D> {
             deposits: start,
             forced_withdrawals: start,
         }
-    }
-
-    /// Returns the digest the next summary names as its parent.
-    pub fn digest<H: Hasher<Digest = D>>(&self) -> D {
-        H::hash(&[&self.encode()])
     }
 
     /// Checks that a ledger expecting the close of `epoch` after the post with digest `parent` may
@@ -209,12 +208,12 @@ impl<D: Digest> Summary<D> {
         verifier: &V,
         certificate: &V::Certificate,
         epoch: Epoch,
-        parent: &D,
+        parent: &H::Digest,
         deposits: RangeInclusive<u64>,
         forced_withdrawals: RangeInclusive<u64>,
     ) -> Result<(), Error>
     where
-        V: for<'a> Verifier<Subject<'a, D> = &'a Self>,
+        V: for<'a> Verifier<Subject<'a, H::Digest> = &'a Self>,
         R: CryptoRng,
     {
         if self.epoch != epoch {
@@ -231,14 +230,60 @@ impl<D: Digest> Summary<D> {
         {
             return Err(Error::InvalidCount);
         }
-        if !verifier.verify_certificate::<_, D>(rng, self, certificate, &Sequential) {
+        if !verifier.verify_certificate::<_, H::Digest>(rng, self, certificate, &Sequential) {
             return Err(Error::InvalidCertificate);
         }
         Ok(())
     }
 }
 
-impl<D: Digest> Write for Summary<D> {
+/// The hasher is a type parameter only, so the derived traits would bound it. Summaries are plain
+/// records of digests and counts, and these impls say so.
+impl<H: Hasher> Clone for Summary<H> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<H: Hasher> Copy for Summary<H> {}
+
+impl<H: Hasher> Debug for Summary<H> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Summary")
+            .field("epoch", &self.epoch)
+            .field("parent", &self.parent)
+            .field("matrix", &self.matrix)
+            .field("balances", &self.balances)
+            .field("payouts", &self.payouts)
+            .field("deposits", &self.deposits)
+            .field("forced_withdrawals", &self.forced_withdrawals)
+            .finish()
+    }
+}
+
+impl<H: Hasher> PartialEq for Summary<H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.epoch == other.epoch
+            && self.parent == other.parent
+            && self.matrix == other.matrix
+            && self.balances == other.balances
+            && self.payouts == other.payouts
+            && self.deposits == other.deposits
+            && self.forced_withdrawals == other.forced_withdrawals
+    }
+}
+
+impl<H: Hasher> Eq for Summary<H> {}
+
+impl<H: Hasher> Digestible for Summary<H> {
+    type Digest = H::Digest;
+
+    fn digest(&self) -> H::Digest {
+        H::hash(&[&self.encode()])
+    }
+}
+
+impl<H: Hasher> Write for Summary<H> {
     fn write(&self, buf: &mut impl BufMut) {
         self.epoch.write(buf);
         self.parent.write(buf);
@@ -250,19 +295,22 @@ impl<D: Digest> Write for Summary<D> {
     }
 }
 
-impl<D: Digest> FixedSize for Summary<D> {
-    const SIZE: usize = Epoch::SIZE + 3 * D::SIZE + Payouts::<D>::SIZE + 2 * Processed::<D>::SIZE;
+impl<H: Hasher> FixedSize for Summary<H> {
+    const SIZE: usize = Epoch::SIZE
+        + 3 * H::Digest::SIZE
+        + Payouts::<H::Digest>::SIZE
+        + 2 * Processed::<H::Digest>::SIZE;
 }
 
-impl<D: Digest> Read for Summary<D> {
+impl<H: Hasher> Read for Summary<H> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self {
             epoch: Epoch::read(buf)?,
-            parent: D::read(buf)?,
-            matrix: D::read(buf)?,
-            balances: D::read(buf)?,
+            parent: H::Digest::read(buf)?,
+            matrix: H::Digest::read(buf)?,
+            balances: H::Digest::read(buf)?,
             payouts: Payouts::read(buf)?,
             deposits: Processed::read(buf)?,
             forced_withdrawals: Processed::read(buf)?,
@@ -271,9 +319,9 @@ impl<D: Digest> Read for Summary<D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for Summary<D>
+impl<H: Hasher> arbitrary::Arbitrary<'_> for Summary<H>
 where
-    D: for<'a> arbitrary::Arbitrary<'a>,
+    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -288,7 +336,7 @@ where
     }
 }
 
-impl<D: Digest> certificate::Subject for &Summary<D> {
+impl<H: Hasher> certificate::Subject for &Summary<H> {
     type Namespace = Namespace;
 
     fn namespace<'a>(&self, derived: &'a Self::Namespace) -> &'a [u8] {
@@ -316,8 +364,8 @@ mod tests {
     use commonware_utils::test_rng;
 
     /// Returns the summary before the first close, on top of balances with a fixed root.
-    fn genesis() -> Summary<Digest> {
-        Summary::genesis::<Sha256, PublicKey, u64>(Sha256::hash(&[b"balances"]))
+    fn genesis() -> Summary<Sha256> {
+        Summary::<Sha256>::genesis::<PublicKey, u64>(Sha256::hash(&[b"balances"]))
     }
 
     /// The genesis summary records the empty matrix and a payout log holding only its initial
@@ -340,7 +388,7 @@ mod tests {
 
         // Every field changes the digest and decodes back unchanged.
         let other = Sha256::hash(&[b"other"]);
-        let digest = genesis.digest::<Sha256>();
+        let digest = genesis.digest();
         for changed in [
             Summary {
                 epoch: 1,
@@ -401,7 +449,7 @@ mod tests {
                 ..genesis
             },
         ] {
-            assert_ne!(changed.digest::<Sha256>(), digest);
+            assert_ne!(changed.digest(), digest);
             assert_eq!(Summary::decode(changed.encode()).unwrap(), changed);
         }
     }
@@ -473,7 +521,7 @@ mod tests {
             scheme::Scheme::verifier,
         );
         let genesis = genesis();
-        let parent = genesis.digest::<Sha256>();
+        let parent = genesis.digest();
         let summary = Summary {
             epoch: 1,
             parent,
@@ -495,7 +543,7 @@ mod tests {
         let certificate = certify(&fixture.schemes, &summary);
         let other = certify(&fixture.schemes, &genesis);
         let mut rng = test_rng();
-        let mut verify = |summary: &Summary<Digest>,
+        let mut verify = |summary: &Summary<Sha256>,
                           certificate,
                           parent: &Digest,
                           deposits,
@@ -580,7 +628,7 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<Processed<Digest>>,
             CodecConformance<Payouts<Digest>>,
-            CodecConformance<Summary<Digest>>,
+            CodecConformance<Summary<Sha256>>,
         }
     }
 }

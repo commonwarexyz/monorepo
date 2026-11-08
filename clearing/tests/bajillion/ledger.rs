@@ -756,10 +756,7 @@ mod reorg {
                 .unwrap();
             let validator = &mut deployment.validators[0];
             let proposal = proposals.into_iter().next().unwrap();
-            validator
-                .apply(proposal, &summary.digest::<Sha256>())
-                .await
-                .unwrap();
+            validator.apply(proposal, &summary.digest()).await.unwrap();
             assert_eq!(validator.balance(&account(0)).await.unwrap(), 100);
             assert_eq!(validator.balance(&account(1)).await.unwrap(), 0);
             assert_eq!(canonical.custody(), 5);
