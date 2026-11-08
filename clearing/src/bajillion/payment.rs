@@ -164,13 +164,12 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
             return Err(Error::NoReceivers);
         }
         let pipelined = if pipelined {
-            let state = State {
+            Some(State {
                 epoch: epoch.checked_add(1).ok_or(Error::Overflow)?,
                 account: account.clone(),
                 payments: batch.root::<H>(),
                 previous: payments.root::<H>(),
-            };
-            Some((state, batch.clone()))
+            })
         } else {
             None
         };
@@ -312,7 +311,8 @@ where
     }
 }
 
-/// The states of one request, each with the payment map it commits to, and the batch it pays.
+/// The states of one request, the batch it pays, and the payment map its state of the request's
+/// epoch commits to.
 ///
 /// [Request::states] derives them, and [States::sign] or [States::request] turns them into the
 /// request.
@@ -324,9 +324,8 @@ pub struct States<P: PublicKey, D: Digest, A: Amount> {
     pub state: State<P, D>,
     /// The payment map `state` commits to, the sender's map with the batch added.
     pub payments: Amounts<P, A>,
-    /// For a pipelined request, the state for the next epoch and the map it commits to. That map is
-    /// the batch.
-    pub pipelined: Option<(State<P, D>, Amounts<P, A>)>,
+    /// For a pipelined request, the state for the next epoch. It commits to `batch` alone.
+    pub pipelined: Option<State<P, D>>,
 }
 
 impl<P: PublicKey, D: Digest, A: Amount> States<P, D, A> {
@@ -358,7 +357,7 @@ impl<P: PublicKey, D: Digest, A: Amount> States<P, D, A> {
                 .pipelined
                 .as_ref()
                 .zip(pipelined)
-                .map(|((state, _), signature)| (state.previous, signature)),
+                .map(|(state, signature)| (state.previous, signature)),
         }
     }
 
@@ -371,7 +370,7 @@ impl<P: PublicKey, D: Digest, A: Amount> States<P, D, A> {
         let pipelined = self
             .pipelined
             .as_ref()
-            .map(|(state, _)| state.sign(signer, namespace));
+            .map(|state| state.sign(signer, namespace));
         self.request(self.state.sign(signer, namespace), pipelined)
     }
 }
@@ -439,45 +438,6 @@ pub enum Admission<P: PublicKey, D: Digest, A: Amount> {
     },
 }
 
-/// The operator's countersignature over a sender's state.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Acknowledgement<O: PublicKey> {
-    /// The operator's signature over the state.
-    pub signature: O::Signature,
-}
-
-impl<O: PublicKey> Write for Acknowledgement<O> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.signature.write(buf);
-    }
-}
-
-impl<O: PublicKey> FixedSize for Acknowledgement<O> {
-    const SIZE: usize = O::Signature::SIZE;
-}
-
-impl<O: PublicKey> Read for Acknowledgement<O> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Ok(Self {
-            signature: O::Signature::read(buf)?,
-        })
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<O: PublicKey> arbitrary::Arbitrary<'_> for Acknowledgement<O>
-where
-    O::Signature: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            signature: u.arbitrary()?,
-        })
-    }
-}
-
 /// A preconfirmation that `state`'s sender paid `receiver` a cumulative `amount` in the state's
 /// epoch.
 ///
@@ -503,15 +463,15 @@ pub struct Receipt<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
 
 impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Receipt<P, O, D, A> {
     /// Returns a receipt for each of `receivers` from `state`, the sender's `signature` over it,
-    /// the operator's `acknowledgement` of it, and `payments`, the map it commits to. The receipts
-    /// verify exactly when both signatures do.
+    /// the operator's `acknowledgement` countersigning it, and `payments`, the map it commits to.
+    /// The receipts verify exactly when both signatures do.
     ///
     /// Returns InvalidReceipt if `payments` does not commit to `state` or holds no amount for a
     /// receiver.
     pub fn issue<H: Hasher<Digest = D>>(
         state: &State<P, D>,
         signature: &P::Signature,
-        acknowledgement: &Acknowledgement<O>,
+        acknowledgement: &O::Signature,
         payments: &Amounts<P, A>,
         receivers: impl IntoIterator<Item = P>,
     ) -> Result<Vec<Self>, Error> {
@@ -526,7 +486,7 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Receipt<P, O, D, A> {
                 Ok(Self {
                     state: state.clone(),
                     signature: signature.clone(),
-                    acknowledgement: acknowledgement.signature.clone(),
+                    acknowledgement: acknowledgement.clone(),
                     amount: payments.get(&receiver),
                     receiver,
                     position,
@@ -754,13 +714,10 @@ mod tests {
         let namespace = namespace();
         let operator = operator_key();
         let states = states(&[(2, 4), (3, 5)], &Amounts::empty(), empty_root(), false);
-        let acknowledgement = Acknowledgement::<PublicKey> {
-            signature: states.state.acknowledge(&operator, &namespace),
-        };
-        let receipt = Receipt::issue::<Sha256>(
+        let receipt = Receipt::<_, PublicKey, _, _>::issue::<Sha256>(
             &states.state,
             &states.state.sign(&user(0), &namespace),
-            &acknowledgement,
+            &states.state.acknowledge(&operator, &namespace),
             &states.payments,
             [account(3)],
         )
@@ -830,7 +787,7 @@ mod tests {
                 // the close of its epoch settles. The admission carries the signature over the
                 // pipelined state, the one the sender's row in the next close needs.
                 let next = request.verify::<Sha256>(&namespace, 3);
-                let Some((state, batch)) = &states.pipelined else {
+                let Some(state) = &states.pipelined else {
                     assert!(matches!(
                         next,
                         Err(Error::WrongEpoch {
@@ -851,7 +808,7 @@ mod tests {
                     admission,
                     Admission::New {
                         state: state.clone(),
-                        payments: batch.clone(),
+                        payments: states.batch.clone(),
                         signature,
                     }
                 );
@@ -881,7 +838,7 @@ mod tests {
             let next = states
                 .pipelined
                 .as_ref()
-                .map(|(state, _)| signer.sign(&namespace.state, &state.encode()));
+                .map(|state| signer.sign(&namespace.state, &state.encode()));
             assert_eq!(
                 states.request(signature, next),
                 states.sign(&signer, &namespace)
@@ -1081,9 +1038,7 @@ mod tests {
         let namespace = namespace();
         let states = states(&[(2, 4), (3, 5)], &Amounts::empty(), empty_root(), false);
         let signature = states.state.sign(&user(0), &namespace);
-        let acknowledgement = Acknowledgement::<PublicKey> {
-            signature: states.state.acknowledge(&operator_key(), &namespace),
-        };
+        let acknowledgement = states.state.acknowledge(&operator_key(), &namespace);
         let issue = |payments: &Amounts<PublicKey, u64>, receiver| {
             Receipt::<_, PublicKey, _, _>::issue::<Sha256>(
                 &states.state,
@@ -1256,7 +1211,6 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<State<PublicKey, Digest>>,
             CodecConformance<Request<PublicKey, Digest, u64>>,
-            CodecConformance<Acknowledgement<PublicKey>>,
             CodecConformance<Receipt<PublicKey, PublicKey, Digest, u64>>,
             CodecConformance<Challenge<PublicKey, PublicKey, Digest, u64>>,
         }

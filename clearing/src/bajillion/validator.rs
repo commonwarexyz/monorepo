@@ -212,13 +212,10 @@ impl<P: PublicKey, D: Digest, A: Amount> PayoutProof<P, D, A> {
     /// An index no log can hold returns false. A commit never verifies as a payout, because the log
     /// encodes commits with another tag.
     pub fn verify<H: Hasher<Digest = D>>(&self, root: &D) -> bool {
-        let index = Location::<mmr::Family>::new(self.index);
-        if !index.is_valid_index() {
-            return false;
-        }
         let operation =
             keyless::fixed::Operation::<mmr::Family, Payout<P, A>>::Append(self.payout.clone());
-        self.proof.verify::<H, _>(index, &[operation], root)
+        self.proof
+            .verify::<H, _>(Location::new(self.index), &[operation], root)
     }
 }
 
@@ -286,7 +283,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
     /// close, `queue`, and every soft withdrawal are for the next epoch, InvalidCount unless each
     /// count is within `queue`'s bounds, InvalidOperatorSignature unless the operator signed the
     /// close, InvalidSignature unless every row's state builds on its row in `parent` and every
-    /// soft withdrawal verifies, and Overflow if the next epoch or a flow does not fit.
+    /// soft withdrawal verifies, and Overflow if the next epoch does not fit.
     pub fn check<H: Hasher, S: Strategy>(
         self,
         namespace: &Namespace,

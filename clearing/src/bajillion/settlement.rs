@@ -15,7 +15,7 @@ use std::collections::HashMap;
 /// An exact sum of amounts that may exceed the largest amount.
 ///
 /// The sum is `low` plus `carries` times one more than the largest amount, so a close settles
-/// whenever its final balances fit, however large its gross flows.
+/// whenever every balance it settles fits before its payout, however large its gross flows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Total<A: Amount> {
     low: A,
@@ -98,9 +98,9 @@ where
 
 /// Funds moving into and out of one account in the close of an epoch.
 ///
-/// Each part is an exact sum, so it may exceed the largest amount even when the balance the close
-/// leaves fits. [Close::assemble](super::Close::assemble) computes the flow of every account a
-/// close touches, and [Flow::settle] applies one to the account's balance.
+/// Each part is an exact sum, so it may exceed the largest amount even when the balance it settles
+/// fits. [Close::assemble](super::Close::assemble) computes the flow of every account a close
+/// touches, and [Flow::settle] applies one to the account's balance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Flow<A: Amount> {
     /// Epoch of the close.

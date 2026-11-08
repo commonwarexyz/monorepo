@@ -13,8 +13,8 @@ pub enum Error {
     /// An amount is zero.
     #[error("amount is zero")]
     ZeroAmount,
-    /// An account appears more than once.
-    #[error("account appears more than once")]
+    /// An account or a soft withdrawal request appears more than once.
+    #[error("account or withdrawal request appears more than once")]
     DuplicateAccount,
     /// Amounts have more entries than a tree can commit to.
     #[error("too many entries")]

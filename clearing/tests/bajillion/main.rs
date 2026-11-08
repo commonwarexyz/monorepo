@@ -79,6 +79,7 @@ type TestDeployment = Deployment<PublicKey, PrivateKey, scheme::Scheme, u64>;
 type DeployedValidator<P, O, A> =
     Validator<deterministic::Context, P, O, Sha256, EightCap, Sequential, A>;
 
+/// Returns the signature namespaces of the deployment under test.
 fn namespace() -> Namespace {
     Namespace::new(NAMESPACE)
 }
@@ -98,6 +99,7 @@ fn operator_key() -> PrivateKey {
     PrivateKey::from_seed(1_000)
 }
 
+/// Returns user `index` sending through the deployment's operator.
 fn sender(index: u64) -> TestSender {
     Sender::new(user(index), operator_key().public_key(), namespace())
 }
@@ -191,7 +193,8 @@ fn row(
 }
 
 /// Returns a close of `queue`'s epoch with the given rows and soft withdrawals, signed by
-/// `signer` whatever they hold, as a faulty operator could.
+/// `signer` without checking their signatures or the validators' limits, as a faulty operator
+/// could.
 fn forge(
     signer: &PrivateKey,
     queue: &Queue<PublicKey, u64>,

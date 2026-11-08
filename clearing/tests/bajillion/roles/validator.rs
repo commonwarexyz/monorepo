@@ -26,7 +26,9 @@ type Database<E, P, H, T, S, A> = Balances<E, P, H, Index<T, Location<mmb::Famil
 /// Configuration of a [Validator].
 #[derive(Clone)]
 pub struct Config<O: PublicKey, T: Translator, S: Strategy> {
+    /// Signature namespaces of the deployment.
     pub namespace: Namespace,
+    /// Key the operator signs closes with.
     pub operator: O,
     /// Limits the validator decodes closes with (V7).
     pub limits: Limits,
@@ -83,15 +85,21 @@ where
     S: Strategy,
     A: Amount,
 {
+    /// Runtime context the databases open under.
     context: E,
+    /// Configuration the validator opened with.
     config: Config<O, T, S>,
+    /// Number of reopens after a refusal. It labels the context of each database handle.
     opened: u64,
 
-    /// Absent once a storage failure left the databases unusable until a restart.
+    /// Balances database, absent once a storage failure left it unusable until a restart.
     balances: Option<Database<E, P, H, T, S, A>>,
+    /// Payout log, absent once a storage failure left it unusable until a restart.
     log: Option<PayoutLog<E, P, H, S, A>>,
 
+    /// Closes the validator attested (V4).
     persisted: Persisted<H::Digest>,
+    /// Checkpoint of the last close applied.
     parent: Checkpoint<P, H::Digest, A>,
 }
 
@@ -105,6 +113,7 @@ where
     S: Strategy,
     A: Amount,
 {
+    /// Opens the balances database under a context labeled with the reopen count `opened`.
     async fn database(
         context: &E,
         config: &Config<O, T, S>,
@@ -151,6 +160,9 @@ where
         let balances = Self::database(&context, &config, 0).await?;
         let applied = balances.get_metadata().await?.is_some();
         let root = balances.root();
+
+        // Walk the persisted summaries back from the last post to the first whose balances root
+        // the database holds.
         let mut parent = None;
         let mut digest = posted.copied();
         while let Some(record) = digest.and_then(|digest| persisted.attested.get(&digest)) {
@@ -162,6 +174,9 @@ where
             }
             digest = Some(summary.parent);
         }
+
+        // Only a database that applied no close falls back to genesis, and the payout log reopens
+        // at the chosen summary's payouts size.
         let parent = parent
             .or_else(|| {
                 (!applied).then(|| Checkpoint {
@@ -182,21 +197,25 @@ where
         })
     }
 
+    /// Decodes the summary of `record`.
     fn summary_of(record: &Record) -> Summary<H::Digest> {
         Summary::decode(record.summary.clone()).expect("a persisted summary must decode")
     }
 
+    /// Decodes the close of `record` with the validator's limits.
     fn close_of(config: &Config<O, T, S>, record: &Record) -> Close<P, O, A> {
         Close::decode_cfg(record.close.clone(), &config.limits)
             .expect("a persisted close must decode with the validator's limits")
     }
 
+    /// Returns the balances database.
     const fn balances(&self) -> &Database<E, P, H, T, S, A> {
         self.balances
             .as_ref()
             .expect("a validator whose storage failed must restart")
     }
 
+    /// Returns the payout log.
     const fn payout_log(&self) -> &PayoutLog<E, P, H, S, A> {
         self.log
             .as_ref()
@@ -269,6 +288,9 @@ where
             return Ok(None);
         };
         let summary = Self::summary_of(record);
+
+        // The close's payouts start at its parent's payouts size. The parent of epoch 1 is the
+        // genesis summary.
         let start = match self.persisted.attested.get(&summary.parent) {
             Some(parent) => Self::summary_of(parent).payouts.size,
             None if epoch == 1 => Summary::genesis::<H, P, A>(H::Digest::EMPTY).payouts.size,
@@ -316,6 +338,9 @@ where
             queue,
         )?;
         let proposal = checked.settle(self.balances(), self.payout_log()).await?;
+
+        // The close, the requests it processes, and its summary are persisted before the
+        // attestation is released (V4).
         let (deposits, forced_withdrawals) = queue.prefix(counts.0, counts.1)?;
         let record = Record {
             close: encoded,
@@ -357,6 +382,9 @@ where
                 return Err(error);
             }
         };
+
+        // The log is durable once the close applies, so committing the balances makes the close
+        // durable. The balances then prune their history up to the sync boundary.
         let balances = balances.commit().await?;
         let boundary = balances.sync_boundary();
         self.balances = Some(balances.prune(boundary).await?);
@@ -371,6 +399,7 @@ where
     ///
     /// Returns InvalidCheckpoint if a posted close in between was not persisted.
     pub async fn catch_up(&mut self, posted: &H::Digest) -> Result<usize, Error> {
+        // Collect the persisted closes from the ledger's last post back to the last close applied.
         let applied = self.parent.summary.digest::<H>();
         let mut missing = Vec::new();
         let mut digest = *posted;

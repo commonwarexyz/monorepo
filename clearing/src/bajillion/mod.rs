@@ -178,7 +178,10 @@
 //!   still settles, or to extend its map until a post resolves the epoch.
 //!
 //! - **S4.** Treat a refusal as final only for a request delivered once, with no copy in flight.
-//!   Otherwise an earlier copy may have been admitted, and the record diverges as in S1.
+//!   Otherwise an earlier copy may have been admitted, and the record diverges as in S1. A refused
+//!   pipelined request's state for the next epoch can still be admitted from a replayed copy until
+//!   the post of the request's epoch settles a map other than the one that state builds on, with
+//!   the same outcome.
 //!
 //! - **S5.** Resolve a pending request against each post from its epoch on, in epoch order, before
 //!   dropping it or building on a posted row root. The request settled in epoch `e` if it has a
@@ -215,8 +218,8 @@
 //! compare against as arguments.
 //!
 //! The ledger fixes which queued requests the close of epoch e must process only when the post of
-//! e-1 is final. The operator then cuts epoch e. It fixes the epoch's rows, assembles its close,
-//! and opens e+1 at once. Validators certify close(e) while the operator admits e+1.
+//! e-1 is final. The operator then cuts epoch e. It fixes the epoch's rows, opens e+1, and
+//! assembles close(e). Validators certify close(e) while the operator admits e+1.
 //!
 //! ```text
 //!   admit      |============ e ===========|=========== e+1 ==========|=========== e+2 ==========>
@@ -266,6 +269,11 @@
 //!                                  '--- flows, by account, after post(e) ---'
 //! ```
 //!
+//! Each shard cuts on its own. It fixes its accounts' rows and soft withdrawals of e by refusing
+//! more, and opens e+1 for them once close(e)'s forced withdrawals are fixed, without waiting for
+//! the other shards or for assembly. A request that reaches a shard after its cut is verified for
+//! e+1 as O6 says.
+//!
 //! The operator's obligations follow. Breaking O1 or O6 costs the operator or its senders, and
 //! breaking any other halts the ledger or gets a close rejected.
 //!
@@ -281,9 +289,11 @@
 //! - **O3.** Countersign a new state only if its batch fits the sender's spendable balance, its
 //!   balance as of the last close applied less what unapplied closes may take and what it paid in
 //!   the epoch. Fix which forced withdrawals close(e) processes before countersigning anything of
-//!   e+1, and lift a deduction only by applying that account's flow. Otherwise a close overdrafts,
-//!   and no acceptable close exists for its countersigned rows. Omitting a row lets its receiver's
-//!   challenge halt the ledger, and posting no close leaves the halt to the deployment's policy.
+//!   e+1, and an account's soft withdrawals of e before countersigning any of its states of e+1.
+//!   Lift each account's deductions for close(e) only when applying close(e)'s flows, even for an
+//!   account the close leaves without a flow. Otherwise a close overdrafts, and no acceptable close
+//!   exists for its countersigned rows. Omitting a row lets its receiver's challenge halt the
+//!   ledger, and posting no close leaves the halt to the deployment's policy.
 //!
 //! - **O4.** Pass [Verified::admit] the root of the sender's row in the close of the epoch before
 //!   as `previous`, or the empty map's root if it has no row. Otherwise the operator countersigns
@@ -301,14 +311,18 @@
 //!   request.
 //!
 //! - **O7.** Persist each [Admission::New] state with its map and the sender's signature before
-//!   releasing its acknowledgement, each close with its counts before releasing it, and the
-//!   balances with the epoch of the last flows applied. Otherwise a crash loses a preconfirmed
-//!   payment, a released close, or which flows were applied.
+//!   releasing its acknowledgement, and the forced withdrawals close(e) processes before
+//!   countersigning anything of e+1. Persist each close with its flows before releasing it, and
+//!   each balance with the epoch of the last flow applied to it. Otherwise a crash loses a
+//!   preconfirmed payment, the deductions e+1 was admitted against, a released close or the flows
+//!   it settles, or which flows were applied.
 //!
 //! - **O8.** Release one close per epoch, and assemble it again, with the same rows, only after
 //!   validators reject it. Apply the flows of the close that posts exactly once each, in epoch
-//!   order ([Flow::epoch]). Otherwise the operator's balances part from the validators', and it
-//!   admits payments a later close cannot settle.
+//!   order ([Flow::epoch]). Start on close(e)'s flows only once every flow of close(e-1) is
+//!   applied, because a flow carries only its own epoch and cannot show whether its account still
+//!   awaits a flow of an earlier close. Otherwise the operator's balances part from the
+//!   validators', and it admits payments a later close cannot settle.
 //!
 //! # Receivers
 //!
@@ -438,9 +452,9 @@
 //!   returned. After a restart, take the persisted summary on the chain ending at the ledger's last
 //!   posted digest whose balances root is the balances database's, with that close's matrix
 //!   ([Close::matrix]). Use [Summary::genesis] with [Matrix::empty] only for a balances database
-//!   that never committed a batch. Reopen the payout log at that summary's payouts size and require
-//!   its payouts root. Otherwise the validator's attestation matches no honest validator's, or
-//!   [Checked::settle] refuses every close.
+//!   that holds no close and is still at the empty root. Reopen the payout log at that summary's
+//!   payouts size and require its payouts root. Otherwise the validator's attestation matches no
+//!   honest validator's, or [Checked::settle] refuses every close.
 //!
 //! - **V3.** Pass [Close::check] the ledger's queues as final ledger state holds them while the
 //!   ledger expects the close. Queues grow only at their tail, so read them again at a later final
@@ -522,10 +536,12 @@
 //!   of zero, and no funds. Otherwise the first summary validators certify names a parent the
 //!   ledger refuses.
 //!
-//! - **L2.** A deposit takes custody of its amount before it is queued. Deposits and forced
-//!   withdrawals join the tail of their queue, only before a halt and only with nonzero amounts,
-//!   and leave it only as L5 and L8 say. Otherwise a deposit credits funds the ledger does not
-//!   hold, or validators and the ledger read different requests for the same counts.
+//! - **L2.** A deposit takes custody of its amount before it is queued, and names an account that
+//!   decodes as a key of the deployment's scheme. Deposits and forced withdrawals join the tail of
+//!   their queue, only before a halt and only with nonzero amounts, and leave it only as L5 and L8
+//!   say. Otherwise a deposit credits funds the ledger does not hold, validators cannot read the
+//!   queue and no close can process it, or validators and the ledger read different requests for
+//!   the same counts.
 //!
 //! - **L3.** Refuse a deposit that would take the funds held past the largest amount. Otherwise a
 //!   close can credit a balance past the largest amount, and validators reject it with
@@ -591,7 +607,8 @@
 //! Ranges never overlap or touch. Every commit is covered, so once every payout is paid the ranges
 //! collapse to the one range [0, s) for the last posted payouts size s. Each gap between two ranges
 //! holds at least one unpaid payout, so with U payouts unpaid at most U + 1 ranges remain in any
-//! order of payment.
+//! order of payment. A port may keep the paid indices in any form that answers whether an index is
+//! covered, such as a flag per index or ranges found through a caller-supplied hint.
 //!
 //! ```text
 //!   log index     0   1   2   3   4   5   6
@@ -620,13 +637,14 @@
 //!    counts are zero.
 //!
 //! 2. **Trees.** Payment maps and the matrix commit with the binary Merkle tree of
-//!    [commonware_storage::bmt]. A leaf is hashed with its big-endian `u32` position, each level
-//!    hashes pairs and duplicates an unpaired last node, and the root is
-//!    `H(leaf_count || tree_root)` with the leaf count as a big-endian `u32`. An empty tree holds
-//!    the single node `H()`, so its root is `H(0u32 || H())`.
+//!    [commonware_storage::bmt]. A leaf is hashed as `H(position || leaf)` with its position as a
+//!    big-endian `u32`, each level hashes pairs as `H(left || right)` and duplicates an unpaired
+//!    last node, and the root is `H(leaf_count || tree_root)` with the leaf count as a big-endian
+//!    `u32`. An empty tree holds the single node `H()`, so its root is `H(0u32 || H())`.
 //!
 //! 3. **Leaves.** A map entry is `H(account || amount)`, and a matrix row is
-//!    `H(sender || payments root)`. Entries are strictly increasing by account.
+//!    `H(sender || payments root)`. Entries are strictly increasing in the account type's order.
+//!    For the schemes of this workspace, that is the byte order of the key.
 //!
 //! 4. **Openings.** A member [Lookup] proves one leaf. A non-member lookup proves the neighbors at
 //!    `position - 1` and `position`, with the key strictly between them, and a missing neighbor
@@ -659,8 +677,8 @@
 //!    records its size and root.
 //!
 //! 10. **Balance proofs.** [BalanceProof::verify] is the key-value proof of QMDB's current
-//!     database, an operation proof under the canonical root together with its bitmap chunk. It is
-//!     the largest part of a port.
+//!     database, an operation proof under the canonical root together with its bitmap chunk of 32
+//!     bytes. It is the largest part of a port.
 //!
 //! 11. **Payout proofs.** [PayoutProof::verify] is the range proof of QMDB's keyless database for
 //!     one operation, over the Merkle Mountain Range of [commonware_storage::merkle::mmr]. A leaf
@@ -694,9 +712,7 @@ pub use error::Error;
 pub use lookup::Lookup;
 pub use matrix::{Matrix, Opening};
 pub use namespace::Namespace;
-pub use payment::{
-    Acknowledgement, Admission, Challenge, Receipt, Request, State, States, Verified,
-};
+pub use payment::{Admission, Challenge, Receipt, Request, State, States, Verified};
 pub use settlement::Flow;
 pub use summary::{Payouts, Processed, Summary};
 pub use validator::{

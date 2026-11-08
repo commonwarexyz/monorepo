@@ -1,9 +1,9 @@
 //! Helpers shared by the unit tests, and the vector a port of the ledger checks itself against.
 
 use super::{
-    Acknowledgement, Amounts, Balances, Checked, Checkpoint, Close, Deposit, Epoch,
-    ForcedWithdrawal, Matrix, Namespace, Payout, PayoutLog, PayoutProof, Proposal, Queue, Receipt,
-    Request, Row, State, Summary, Withdrawal,
+    Amounts, Balances, Checked, Checkpoint, Close, Deposit, Epoch, ForcedWithdrawal, Matrix,
+    Namespace, Payout, PayoutLog, PayoutProof, Proposal, Queue, Receipt, Request, Row, State,
+    Summary, Withdrawal,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
@@ -85,6 +85,7 @@ impl<I: Unordered<Value = Location<mmb::Family>> + 'static> Store<I> {
     }
 }
 
+/// Returns the signature namespaces of the deployment under test.
 pub(crate) fn namespace() -> Namespace {
     Namespace::new(NAMESPACE)
 }
@@ -140,8 +141,8 @@ pub(crate) fn row(
     }
 }
 
-/// Signs a close of `rows` and `withdrawals` in any order as `operator`, without checking any of
-/// its contents.
+/// Signs a close of `rows` and `withdrawals`, given in any order, as `operator`, without checking
+/// any of its contents.
 pub(crate) fn sign_close(
     operator: &PrivateKey,
     epoch: Epoch,
@@ -206,26 +207,35 @@ pub(crate) fn queue(
     }
 }
 
+/// Returns the configurations of a database's merkle and log journals in partitions named after
+/// `name`, sharing one page cache.
+fn journals(name: &str) -> (MerkleConfig<Sequential>, JournalConfig) {
+    let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
+    let merkle = MerkleConfig {
+        journal_partition: format!("{name}-merkle-journal"),
+        metadata_partition: format!("{name}-merkle-metadata"),
+        items_per_blob: NZU64!(7),
+        write_buffer: NZUsize!(1024),
+        replay_buffer: NZUsize!(1024),
+        strategy: Sequential,
+        page_cache: page_cache.clone(),
+    };
+    let log = JournalConfig {
+        partition: format!("{name}-log"),
+        items_per_blob: NZU64!(7),
+        page_cache,
+        write_buffer: NZUsize!(1024),
+        replay_buffer: NZUsize!(1024),
+    };
+    (merkle, log)
+}
+
 /// Returns the configuration of a balances database in partitions named after `name`.
 pub(crate) fn config<T: Translator>(name: &str, translator: T) -> fixed::Config<T, Sequential> {
-    let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
+    let (merkle, log) = journals(name);
     fixed::Config {
-        merkle: MerkleConfig {
-            journal_partition: format!("{name}-merkle-journal"),
-            metadata_partition: format!("{name}-merkle-metadata"),
-            items_per_blob: NZU64!(7),
-            write_buffer: NZUsize!(1024),
-            replay_buffer: NZUsize!(1024),
-            strategy: Sequential,
-            page_cache: page_cache.clone(),
-        },
-        log: JournalConfig {
-            partition: format!("{name}-log"),
-            items_per_blob: NZU64!(7),
-            page_cache,
-            write_buffer: NZUsize!(1024),
-            replay_buffer: NZUsize!(1024),
-        },
+        merkle,
+        log,
         grafted_metadata_partition: format!("{name}-grafted-metadata"),
         translator,
         init_cache: None,
@@ -236,25 +246,8 @@ pub(crate) fn config<T: Translator>(name: &str, translator: T) -> fixed::Config<
 
 /// Returns the configuration of a payout log in partitions named after `name`.
 fn log_config(name: &str) -> keyless::fixed::Config<Sequential> {
-    let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
-    keyless::fixed::Config {
-        merkle: MerkleConfig {
-            journal_partition: format!("{name}-payouts-merkle-journal"),
-            metadata_partition: format!("{name}-payouts-merkle-metadata"),
-            items_per_blob: NZU64!(7),
-            write_buffer: NZUsize!(1024),
-            replay_buffer: NZUsize!(1024),
-            strategy: Sequential,
-            page_cache: page_cache.clone(),
-        },
-        log: JournalConfig {
-            partition: format!("{name}-payouts-log"),
-            items_per_blob: NZU64!(7),
-            page_cache,
-            write_buffer: NZUsize!(1024),
-            replay_buffer: NZUsize!(1024),
-        },
-    }
+    let (merkle, log) = journals(&format!("{name}-payouts"));
+    keyless::fixed::Config { merkle, log }
 }
 
 /// Opens the payout log in partitions named after `name`, at its latest commit with at most
@@ -392,13 +385,10 @@ fn test_port_vector() {
             false,
         )
         .unwrap();
-        let acknowledgement = Acknowledgement {
-            signature: states.state.acknowledge(&operator_key(), &namespace),
-        };
         let receipt = Receipt::<_, PublicKey, _, _>::issue::<Sha256>(
             &states.state,
             &states.state.sign(&user(0), &namespace),
-            &acknowledgement,
+            &states.state.acknowledge(&operator_key(), &namespace),
             &states.payments,
             [account(1)],
         )

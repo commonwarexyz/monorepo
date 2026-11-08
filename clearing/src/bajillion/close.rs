@@ -10,8 +10,9 @@ use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
 /// An account's signed request to withdraw up to `amount` through the operator in the close of
 /// `epoch`.
 ///
-/// `tag` tells apart otherwise identical requests, and the signature is not part of a request's
-/// identity.
+/// `tag` tells apart otherwise identical requests. A close identifies a request by its signed part
+/// ([Withdrawal::request]), not by its signature, so an operator collecting requests keys them the
+/// same way.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Withdrawal<P: PublicKey, A: Amount> {
     /// Epoch whose close may pay the withdrawal.
@@ -79,9 +80,9 @@ impl<P: PublicKey, A: Amount> Withdrawal<P, A> {
             )
     }
 
-    /// Returns the signed part of the request. It identifies the request and orders requests in a
-    /// close.
-    pub(crate) const fn request(&self) -> (Epoch, &P, A, u64) {
+    /// Returns the signed part of the request. A close orders its withdrawals by it and holds at
+    /// most one withdrawal per signed part.
+    pub const fn request(&self) -> (Epoch, &P, A, u64) {
         (self.epoch, &self.account, self.amount, self.tag)
     }
 }
@@ -429,8 +430,8 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
     ///
     /// Assembly recomputes every root and checks neither signatures nor the validators' [Limits].
     /// Returns InvalidCount if a count is out of bounds, NoReceivers if a row pays no receiver,
-    /// WrongEpoch if a soft withdrawal is for another epoch, DuplicateAccount if an account has two
-    /// rows or a withdrawal request repeats, and Overflow if a flow does not fit.
+    /// WrongEpoch if a soft withdrawal is for another epoch, and DuplicateAccount if an account has
+    /// two rows or a withdrawal request repeats.
     #[allow(clippy::type_complexity)]
     pub fn assemble<H, S>(
         signer: &S,
@@ -643,13 +644,14 @@ mod tests {
         }
     }
 
+    /// Encodes a close of epoch 1 processing two deposits and three forced withdrawals.
     fn encode(rows: &[Row<PublicKey, u64>], withdrawals: &[Withdrawal<PublicKey, u64>]) -> Vec<u8> {
         let mut encoded = Vec::new();
         1u64.write(&mut encoded);
         rows.write(&mut encoded);
         withdrawals.write(&mut encoded);
-        0u64.write(&mut encoded);
-        0u64.write(&mut encoded);
+        2u64.write(&mut encoded);
+        3u64.write(&mut encoded);
         PrivateKey::from_seed(9)
             .sign(b"close", b"close")
             .write(&mut encoded);
@@ -698,10 +700,13 @@ mod tests {
         let rows = [row(&signers[0], &signers[2]), row(&signers[1], &signers[2])];
         let withdrawal = Withdrawal::sign(&signers[0], &namespace, 1, 5, 0);
 
+        // A canonical close decodes with its rows, withdrawals, and counts, and encodes back.
         let canonical = encode(&rows, std::slice::from_ref(&withdrawal));
         let close =
             Close::<PublicKey, PublicKey, u64>::decode_cfg(canonical.clone(), &LIMITS).unwrap();
         assert_eq!(close.rows(), &rows);
+        assert_eq!(close.withdrawals(), std::slice::from_ref(&withdrawal));
+        assert_eq!((close.deposits(), close.forced_withdrawals()), (2, 3));
         assert_eq!(close.encode().as_ref(), canonical);
 
         // Rows must be strictly increasing by account.
@@ -735,9 +740,35 @@ mod tests {
             .is_err()
         );
 
-        // Sizes are bounded.
-        let limits = Limits { rows: 1, ..LIMITS };
-        assert!(Close::<PublicKey, PublicKey, u64>::decode_cfg(canonical, &limits).is_err());
+        // Rows, receivers per row, and withdrawals are each bounded.
+        let paying_two = Row {
+            payments: Amounts::new([(signers[1].public_key(), 1), (signers[2].public_key(), 1)])
+                .unwrap(),
+            ..rows[0].clone()
+        };
+        let wide = encode(&[paying_two], &[]);
+        assert!(Close::<PublicKey, PublicKey, u64>::decode_cfg(wide.clone(), &LIMITS).is_ok());
+        for (limits, encoded) in [
+            (Limits { rows: 1, ..LIMITS }, &canonical),
+            (
+                Limits {
+                    receivers: 1,
+                    ..LIMITS
+                },
+                &wide,
+            ),
+            (
+                Limits {
+                    withdrawals: 0,
+                    ..LIMITS
+                },
+                &canonical,
+            ),
+        ] {
+            assert!(
+                Close::<PublicKey, PublicKey, u64>::decode_cfg(encoded.clone(), &limits).is_err()
+            );
+        }
     }
 
     #[test]

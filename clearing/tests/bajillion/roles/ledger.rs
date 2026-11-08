@@ -12,7 +12,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 /// Why the ledger halted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Halt {
-    /// A challenge showed that the posted close of `epoch` omitted a preconfirmed payment.
+    /// A challenge showed that the posted close of `epoch` credits a receiver less than a receipt
+    /// promised.
     Challenge { epoch: Epoch },
     /// The deployment's own policy halted it.
     Fault,
@@ -217,16 +218,17 @@ where
             self.required_deposits as u64..=self.deposits.len() as u64,
             self.required_forced_withdrawals as u64..=self.forced_withdrawals.len() as u64,
         )?;
+
+        // The counts lie within the queues, and the certificate vouches that the payouts size
+        // counts this close's commit, so the commit position is the size less one.
         let deposits =
             usize::try_from(summary.deposits.count).expect("a count within the queue must fit");
         let forced_withdrawals = usize::try_from(summary.forced_withdrawals.count)
             .expect("a count within the queue must fit");
-        let commit = summary
-            .payouts
-            .size
-            .checked_sub(1)
-            .ok_or(Error::InvalidCheckpoint)?;
+        let commit = summary.payouts.size - 1;
 
+        // One state change drops the processed requests, requires the rest, claims the commit
+        // position, and records the summary (L5).
         self.deposits.drain(..deposits);
         self.forced_withdrawals.drain(..forced_withdrawals);
         self.required_deposits = self.deposits.len();

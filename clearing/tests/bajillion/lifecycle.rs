@@ -14,6 +14,9 @@ fn test_epochs_settle_payments_and_withdrawals() {
         let mut deployment = TestDeployment::new(&context, "epochs", 4).await;
         let mut senders: Vec<_> = (0..USERS).map(sender).collect();
         let mut receivers: Vec<_> = (0..USERS).map(|index| receiver(index, 1)).collect();
+
+        // Every user deposits 1,000. After the funding close, the operator, validators, and
+        // ledger agree on every balance.
         for index in 0..USERS {
             deployment.ledger.deposit(account(index), 1_000).unwrap();
         }
@@ -63,6 +66,8 @@ fn test_epochs_settle_payments_and_withdrawals() {
             expected[forced as usize] -= 15;
             expected[deposited as usize] += 40;
 
+            // The close processes the deposit and the forced withdrawal, and appends the payouts
+            // of both withdrawals and its commit to the payout log.
             let queue = deployment.ledger.queue();
             let (close, summary) = deployment.close(&mut context).await;
             assert_eq!(summary.epoch, epoch);
@@ -110,6 +115,8 @@ fn test_epochs_settle_payments_and_withdrawals() {
 fn test_omitted_payment_halts_ledger() {
     deterministic::Runner::default().start(|mut context| async move {
         let mut deployment = TestDeployment::new(&context, "omitted", 4).await;
+
+        // Alice and bob are funded in epoch 1.
         deployment.ledger.deposit(account(0), 100).unwrap();
         deployment.ledger.deposit(account(1), 100).unwrap();
         deployment.close(&mut context).await;
@@ -181,6 +188,9 @@ fn test_omitted_payment_halts_ledger() {
 fn test_late_challenge_halts_after_later_closes() {
     deterministic::Runner::default().start(|mut context| async move {
         let mut deployment = TestDeployment::new(&context, "late", 4).await;
+
+        // After a funding close, alice pays bob 30 and carol pays bob 10 in epoch 2, and bob
+        // holds alice's receipt.
         deployment.ledger.deposit(account(0), 100).unwrap();
         deployment.ledger.deposit(account(3), 100).unwrap();
         deployment.close(&mut context).await;
@@ -254,8 +264,8 @@ fn test_late_challenge_halts_after_later_closes() {
     });
 }
 
-/// A posted close that settles an earlier state than a receipt's credits less than it promised,
-/// and the receiver's challenge halts the ledger.
+/// A posted close that settles a state earlier than the one a receipt carries credits the receiver
+/// less than the receipt promised, so the receiver's challenge halts the ledger.
 #[test]
 fn test_partial_credit_halts_ledger() {
     deterministic::Runner::default().start(|mut context| async move {

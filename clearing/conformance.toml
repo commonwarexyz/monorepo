@@ -30,10 +30,6 @@ hash = "84eb966d8d32e03a554c415c8a5ae82f4e7e53c17e4c33e7abed0746fd515ea2"
 n_cases = 65536
 hash = "8ee7ea413ea0a3a4db9a5e9fd53d9e8f5644f75599c660f7010b30addb6c9b77"
 
-["commonware_clearing::bajillion::payment::tests::conformance::CodecConformance<Acknowledgement<PublicKey>>"]
-n_cases = 65536
-hash = "0cbb8c8644dffe0be78d1307fb5034dd804921d66799c1aaec3d335b44e9616c"
-
 ["commonware_clearing::bajillion::payment::tests::conformance::CodecConformance<Challenge<PublicKey,PublicKey,Digest,u64>>"]
 n_cases = 65536
 hash = "fc1580660be4e885201af2a366741ed4aee78869ffcf9e8114986729976365ae"

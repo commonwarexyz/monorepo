@@ -62,6 +62,8 @@ fn test_operator_refuses_overdrafts() {
     fund(&mut operator, &[(0, 10)]);
     let mut alice = sender(0);
 
+    // Alice spends her 10 in two requests. A request beyond what remains is refused, and she
+    // drops it.
     let request = alice.send(2, amounts(&[(1, 8)]), false).unwrap();
     alice
         .acknowledged(&operator.accept(&request).unwrap())
@@ -222,6 +224,7 @@ fn test_operator_acknowledges_retried_requests_once() {
 /// a countersigned map in.
 #[test]
 fn test_sender_rules() {
+    // An empty batch is refused, and no request is pending to drop.
     let mut alice = sender(0);
     assert!(matches!(
         alice.send(1, Amounts::empty(), false),
@@ -262,6 +265,8 @@ fn test_sender_rejects_foreign_acknowledgements() {
     fund(&mut operator, &[(0, 10), (1, 10)]);
     let mut alice = sender(0);
     let mut bob = sender(1);
+
+    // An acknowledgement of bob's state does not count for alice's request.
     let request = alice.send(2, amounts(&[(2, 1)]), false).unwrap();
     let bobs = operator
         .accept(&bob.send(2, amounts(&[(2, 1)]), false).unwrap())
@@ -279,6 +284,8 @@ fn test_sender_rejects_foreign_acknowledgements() {
         alice.acknowledged(&forged),
         Err(Sending::InvalidAcknowledgement)
     ));
+
+    // The operator's own acknowledgement records the map once.
     let acknowledgement = operator.accept(&request).unwrap();
     assert_eq!(alice.acknowledged(&acknowledgement).unwrap().len(), 1);
     assert!(matches!(
@@ -326,7 +333,8 @@ fn test_posted_close_resolves_pending_requests() {
     let mut operator = operator();
     fund(&mut operator, &[(0, 100)]);
 
-    // The operator settled the request, but its acknowledgement was lost.
+    // The operator admitted the request and the close settles it, but its acknowledgement was
+    // lost.
     let mut alice = sender(0);
     let request = alice.send(2, amounts(&[(1, 10)]), false).unwrap();
     operator.accept(&request).unwrap();
@@ -359,6 +367,9 @@ fn test_posted_close_resolves_pending_requests() {
         Some(Outcome::Pending)
     );
     assert_eq!(alice.pending(), Some(&request));
+
+    // The operator admits it in epoch 5, and the sender takes the post only with an opening under
+    // the posted root.
     operator.accept(&request).unwrap();
     let posted = close(&mut operator);
     let (root, opening) = open_row(&posted, 0);
@@ -396,9 +407,9 @@ fn test_posted_earlier_map_does_not_settle_request() {
     assert_eq!(alice.payments(2), Some(&amounts(&[(1, 5)])));
 }
 
-/// A pipelined request settles only in an epoch it has a state for. Its state for the next epoch
-/// pays only its batch, so the close of its own epoch settling an earlier map equal to that batch
-/// does not settle it, and the next close does.
+/// A posted row settles a pipelined request only if it matches the request's state for the row's
+/// epoch. The state for the next epoch pays only the batch, so a close of the request's own epoch
+/// that settles an earlier map equal to the batch leaves it pending, and the next close settles it.
 #[test]
 fn test_pipelined_state_settles_only_in_its_own_epoch() {
     let mut operator = operator();
@@ -482,8 +493,7 @@ fn test_operator_admits_within_its_limits() {
         .unwrap();
     operator.accept(&retried).unwrap();
 
-    // One soft withdrawal fills the epoch's, and collecting it again has no effect. A
-    // withdrawal the account did not sign is refused as unsigned, with room left or not.
+    // A withdrawal the account did not sign is refused as unsigned while room is left.
     let mut forged = Withdrawal::sign(&user(9), &namespace(), 2, 10, 0);
     forged.account = account(1);
     assert!(matches!(
@@ -500,6 +510,9 @@ fn test_operator_admits_within_its_limits() {
             Err(Operator::Error(Error::WrongEpoch { expected: 2, found })) if found == epoch
         ));
     }
+
+    // One soft withdrawal fills the epoch's, so another account's is refused as full. The forged
+    // one is still refused as unsigned, and collecting the admitted one again has no effect.
     let withdrawal = Withdrawal::sign(&user(0), &namespace(), 2, 10, 0);
     operator.withdraw(withdrawal.clone()).unwrap();
     let other = Withdrawal::sign(&user(1), &namespace(), 2, 10, 0);
@@ -607,6 +620,7 @@ fn test_sender_restarts_from_its_records() {
 /// posted, before a halt, and only if it raises the amount held.
 #[test]
 fn test_receiver_rejects_receipts_it_cannot_rely_on() {
+    // Alice pays bob 10 and carol 5 in one request.
     let mut operator = operator();
     fund(&mut operator, &[(0, 100)]);
     let mut alice = sender(0);
@@ -620,6 +634,8 @@ fn test_receiver_rejects_receipts_it_cannot_rely_on() {
         (receipts[1].clone(), receipts[0].clone())
     };
 
+    // Bob refuses carol's receipt and a raised amount, and a receiver expecting another operator
+    // refuses his. He relies on his own once, and refuses it again as not increasing.
     let mut bob = receiver(1, 2);
     assert!(matches!(
         bob.receive(for_carol.clone()),

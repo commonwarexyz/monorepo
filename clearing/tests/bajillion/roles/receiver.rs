@@ -29,6 +29,7 @@ impl From<Error> for Refusal {
     }
 }
 
+/// The largest receipt held per epoch and sender.
 type Receipts<P, O, D, A> = BTreeMap<Epoch, BTreeMap<P, Receipt<P, O, D, A>>>;
 
 /// A receiver keeping the largest receipt per epoch and sender until it audits that epoch's
@@ -76,6 +77,7 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
         Ok(receiver)
     }
 
+    /// Returns the receiving account.
     pub const fn account(&self) -> &P {
         &self.account
     }
@@ -88,6 +90,7 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
             .map_or(A::ZERO, |receipt| receipt.amount)
     }
 
+    /// Returns the receipts held for `epoch`, one per sender.
     pub fn receipts(&self, epoch: Epoch) -> impl Iterator<Item = &Receipt<P, O, H::Digest, A>> {
         self.receipts
             .get(&epoch)
@@ -95,6 +98,7 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
             .flat_map(BTreeMap::values)
     }
 
+    /// Checks that `receipt` pays this account and that [Receipt::verify] accepts it (R1).
     fn verify(&self, receipt: &Receipt<P, O, H::Digest, A>) -> Result<(), Refusal> {
         if receipt.receiver != self.account {
             return Err(Refusal::WrongReceiver);
@@ -102,6 +106,7 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
         Ok(receipt.verify::<H>(&self.namespace, &self.operator)?)
     }
 
+    /// Holds `receipt` in place of any earlier one from its sender in its epoch.
     fn insert(&mut self, receipt: Receipt<P, O, H::Digest, A>) {
         self.receipts
             .entry(receipt.state.epoch)
@@ -134,6 +139,7 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
         self.next = self.next.max(epoch.saturating_add(1));
     }
 
+    /// Records that the ledger halted, after which no receipt is accepted.
     pub const fn halt(&mut self) {
         self.halted = true;
     }

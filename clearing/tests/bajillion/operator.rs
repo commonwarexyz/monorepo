@@ -9,6 +9,7 @@ use std::collections::HashMap;
 /// with the same flows, as one operator admitting everything.
 #[test]
 fn test_assembly_matches_monolithic_close() {
+    // Two shards restart from the state the funded single operator persisted for epoch 2.
     let users: Vec<u64> = (0..6).collect();
     let mut replica = operator();
     let funding: Vec<_> = users.iter().map(|index| (*index, 100)).collect();
@@ -78,6 +79,8 @@ fn test_restarted_operator_closes_like_the_original() {
             operator.persisted().clone(),
         )
     };
+
+    // Alice pays bob 10 in epoch 2, and the operator closes it.
     let mut operator = operator();
     fund(&mut operator, &[(0, 100)]);
     let mut alice = sender(0);
@@ -87,8 +90,9 @@ fn test_restarted_operator_closes_like_the_original() {
         .unwrap();
     close(&mut operator);
 
-    // In epoch 3, the operator admits a pipelined request on top of the map the close of epoch 2
-    // settled, and a soft withdrawal, persisting each before it answers.
+    // In epoch 3, the operator admits the epoch 3 state of a pipelined request on top of the row
+    // the close of epoch 2 settled for alice, and a soft withdrawal, persisting each before it
+    // answers.
     let request = alice.send(3, amounts(&[(1, 5)]), true).unwrap();
     let acknowledgement = operator.accept(&request).unwrap();
     assert_eq!(alice.acknowledged(&acknowledgement).unwrap()[0].amount, 5);

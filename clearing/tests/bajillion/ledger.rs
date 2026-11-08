@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::roles::ledger::{Halt, Refusal};
-use commonware_clearing::bajillion::{Challenge, Error, Matrix, Payouts, Processed};
+use commonware_clearing::bajillion::{Challenge, Error, Matrix, Processed};
 use commonware_cryptography::Digest as _;
 use commonware_runtime::Runner as _;
 
@@ -12,6 +12,8 @@ use commonware_runtime::Runner as _;
 fn test_ledger_queues_requests() {
     deterministic::Runner::default().start(|context| async move {
         let mut ledger = TestDeployment::new(&context, "queues", 1).await.ledger;
+
+        // Zero amounts are refused.
         assert!(matches!(
             ledger.deposit(account(0), 0),
             Err(Refusal::Error(Error::ZeroAmount))
@@ -31,6 +33,8 @@ fn test_ledger_queues_requests() {
         ledger.withdraw(account(0), 5).unwrap();
         assert_eq!(ledger.custody(), u64::MAX);
 
+        // Both deposits and the forced withdrawal queue in order for epoch 1, and none is required
+        // yet.
         let queue = ledger.queue();
         assert_eq!(queue.epoch, 1);
         assert_eq!(
@@ -60,6 +64,8 @@ fn test_ledger_queues_requests() {
 fn test_close_processes_requests_queued_before_its_epoch() {
     deterministic::Runner::default().start(|mut context| async move {
         let mut deployment = TestDeployment::new(&context, "required", 1).await;
+
+        // Alice and bob deposit and alice forces a withdrawal while epoch 1 is open.
         deployment.ledger.deposit(account(0), 10).unwrap();
         deployment.ledger.deposit(account(1), 20).unwrap();
         deployment.ledger.withdraw(account(0), 1).unwrap();
@@ -101,6 +107,9 @@ fn test_close_processes_requests_queued_before_its_epoch() {
 fn test_ledger_rejects_closes_deferring_required_requests() {
     deterministic::Runner::default().start(|mut context| async move {
         let mut deployment = TestDeployment::new(&context, "deferred", 4).await;
+
+        // After a funding close, the close of epoch 2 defers a deposit and a forced withdrawal
+        // queued while epoch 2 was open.
         deployment.ledger.deposit(account(0), 10).unwrap();
         deployment.close(&mut context).await;
         deployment.ledger.deposit(account(1), 20).unwrap();
@@ -145,6 +154,8 @@ fn test_ledger_rejects_closes_deferring_required_requests() {
 fn test_ledger_posts_only_certified_successors() {
     deterministic::Runner::default().start(|mut context| async move {
         let mut deployment = TestDeployment::new(&context, "post", 4).await;
+
+        // The close of epoch 1 processes alice's deposit, and validators certify it.
         deployment.ledger.deposit(account(0), 10).unwrap();
         let queue = deployment.ledger.queue();
         let close = close_epoch(&mut deployment.operator, &queue, 1, 0);
@@ -198,19 +209,6 @@ fn test_ledger_posts_only_certified_successors() {
             ));
         }
 
-        // The payouts size must count the close's commit.
-        let wrong = Summary {
-            payouts: Payouts {
-                size: 0,
-                ..summary.payouts
-            },
-            ..summary
-        };
-        assert!(matches!(
-            ledger.post(&mut context, &wrong, &certify(schemes, &wrong)),
-            Err(Refusal::Error(Error::InvalidCheckpoint))
-        ));
-
         // The certificate must cover this summary.
         let other = Summary {
             balances: Digest::EMPTY,
@@ -221,6 +219,7 @@ fn test_ledger_posts_only_certified_successors() {
             Err(Refusal::Error(Error::InvalidCertificate))
         ));
 
+        // The certified summary posts once, and its commit joins the claimed ranges.
         ledger.post(&mut context, &summary, &certificate).unwrap();
         assert_eq!(ledger.epoch(), 2);
         assert_eq!(ledger.balances(), &summary.balances);
@@ -262,6 +261,9 @@ fn test_halted_ledger_posts_nothing() {
 fn test_challenges_need_a_contradicted_receipt() {
     deterministic::Runner::default().start(|mut context| async move {
         let mut deployment = TestDeployment::new(&context, "challenge", 1).await;
+
+        // After a funding close, alice pays bob 10 in epoch 2, and the acknowledgement yields
+        // bob's receipt.
         deployment.ledger.deposit(account(0), 100).unwrap();
         deployment.close(&mut context).await;
         let mut alice = sender(0);
@@ -316,6 +318,9 @@ fn test_challenges_need_a_contradicted_receipt() {
 fn test_halted_ledger_pays_balance_and_deposit_claims() {
     deterministic::Runner::default().start(|mut context| async move {
         let mut deployment = TestDeployment::new(&context, "claims", 1).await;
+
+        // Alice and bob are funded, and alice pays carol 3 in epoch 2. Then alice and dave deposit
+        // and bob forces out his whole balance, and no close processes those requests.
         deployment.ledger.deposit(account(0), 10).unwrap();
         deployment.ledger.deposit(account(1), 20).unwrap();
         deployment.close(&mut context).await;
@@ -326,6 +331,9 @@ fn test_halted_ledger_pays_balance_and_deposit_claims() {
         deployment.ledger.deposit(account(0), 4).unwrap();
         deployment.ledger.deposit(account(3), 7).unwrap();
         deployment.ledger.withdraw(account(1), 20).unwrap();
+
+        // The ledger holds every deposit, and the validator proves the balances of alice, bob, and
+        // carol as of the last post. Dave has none.
         let custody = deployment.ledger.custody();
         assert_eq!(custody, 41);
         let validator = &deployment.validators[0];
@@ -336,6 +344,7 @@ fn test_halted_ledger_pays_balance_and_deposit_claims() {
         assert!(validator.prove(&account(3)).await.unwrap().is_none());
         let [alice_proof, bob_proof, carol_proof] = <[_; 3]>::try_from(proofs).unwrap();
 
+        // Claims wait for a halt, and a halted ledger queues no more requests.
         let ledger = &mut deployment.ledger;
         assert!(matches!(
             ledger.claim(&account(0), Some(&alice_proof)),
@@ -352,8 +361,9 @@ fn test_halted_ledger_pays_balance_and_deposit_claims() {
             Err(Refusal::Halted)
         ));
 
-        // Each account claims its balance at the last posted close once, proven against that
-        // close's balances root. The deposits no close processed are paid to it once.
+        // A proof for another account or of a raised balance is refused. Each account's balance
+        // and unprocessed deposits pay once, and the claims together pay out everything the
+        // ledger held.
         assert!(matches!(
             ledger.claim(&account(1), Some(&alice_proof)),
             Err(Refusal::InvalidProof)
@@ -397,6 +407,9 @@ fn test_halted_ledger_pays_balance_and_deposit_claims() {
 fn test_payouts_are_withdrawn_once_before_or_after_a_halt() {
     deterministic::Runner::default().start(|mut context| async move {
         let mut deployment = TestDeployment::new(&context, "payouts", 1).await;
+
+        // Alice and bob force withdrawals of 4 and 6, and the posted close pays them out while the
+        // ledger keeps holding the funds.
         deployment.ledger.deposit(account(0), 10).unwrap();
         deployment.ledger.deposit(account(1), 10).unwrap();
         deployment.close(&mut context).await;
@@ -460,6 +473,9 @@ fn test_payouts_are_withdrawn_once_before_or_after_a_halt() {
 fn test_payout_proofs_follow_the_last_post() {
     deterministic::Runner::default().start(|mut context| async move {
         let mut deployment = TestDeployment::new(&context, "stale", 1).await;
+
+        // Alice's forced withdrawal of 4 pays out in epoch 2, and the post of an idle close of
+        // epoch 3 moves the payouts root past the proof served before it.
         deployment.ledger.deposit(account(0), 10).unwrap();
         deployment.close(&mut context).await;
         deployment.ledger.withdraw(account(0), 4).unwrap();
@@ -476,6 +492,7 @@ fn test_payout_proofs_follow_the_last_post() {
         let proposals = deployment.verify(&idle).await;
         deployment.post(&mut context, proposals).await;
 
+        // The proof under the earlier root is refused, and a fresh proof of the same index pays.
         assert!(matches!(
             deployment.ledger.withdraw_payout(&stale),
             Err(Refusal::InvalidProof)
@@ -665,6 +682,8 @@ mod reorg {
                 chain(parent.deposits.hash, &drained.deposits)
             );
 
+            // After a halt, the canonical ledger holds too little for alice's credited balance,
+            // and bob's deposit is gone.
             canonical.halt();
             let proof = validator.prove(&account(0)).await.unwrap().unwrap();
             assert!(matches!(

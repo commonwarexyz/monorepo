@@ -12,12 +12,16 @@ use commonware_utils::Probability;
 fn test_validators_agree_on_closes() {
     deterministic::Runner::default().start(|mut context| async move {
         let mut deployment = TestDeployment::new(&context, "agree", 4).await;
+
+        // The funding close processes both deposits.
         deployment.ledger.deposit(account(0), 100).unwrap();
         deployment.ledger.deposit(account(1), 50).unwrap();
         let (_, first) = deployment.close(&mut context).await;
         assert_eq!(first.epoch, 1);
         assert_eq!(first.deposits.count, 2);
 
+        // Alice pays bob 30 and carol 20, and the close of epoch 2 follows the first and commits
+        // to its matrix.
         let mut alice = sender(0);
         let request = alice.send(2, amounts(&[(1, 30), (2, 20)]), false).unwrap();
         alice
@@ -59,7 +63,7 @@ fn test_pipelined_request_settles_at_most_once() {
         deployment.ledger.deposit(account(0), 100).unwrap();
         deployment.close(&mut context).await;
 
-        // The operator settles the request's state for epoch 2.
+        // The close of epoch 2 settles the request's state for epoch 2.
         let mut alice = sender(0);
         let request = alice.send(2, amounts(&[(1, 10)]), true).unwrap();
         deployment.operator.accept(&request).unwrap();
@@ -166,7 +170,7 @@ fn test_validator_resumes_from_its_records() {
         assert_eq!(validator.summary(), &second);
         assert_eq!(validator.catch_up(&posted).await.unwrap(), 0);
 
-        // A database that applied nothing starts from genesis, whatever was persisted.
+        // A database that applied nothing starts from genesis, even after the ledger has posted.
         let fresh = TestValidator::init(
             context.child("fresh"),
             config("resume-fresh"),
@@ -204,6 +208,8 @@ fn test_withdrawals_pay_up_to_the_balance() {
         let request = carol.send(2, amounts(&[(1, 5)]), false).unwrap();
         deployment.operator.accept(&request).unwrap();
 
+        // The close processes both forced withdrawals and all three soft ones, and the payouts
+        // stay in custody until withdrawn.
         let custody = deployment.ledger.custody();
         let queue = deployment.ledger.queue();
         let close = close_epoch(&mut deployment.operator, &queue, 0, 2);
@@ -274,10 +280,10 @@ fn test_close_settles_gross_flows_beyond_the_largest_amount() {
     });
 }
 
-/// Starts a deployment named `name` with one validator, posts a funding close, queues a deposit
-/// and a forced withdrawal of 1 by alice, and posts the close of epoch 2. That close pays bob and
-/// processes both requests. Returns the deployment with its validator taken out, the validator,
-/// and its proposal for epoch 2. The ledger posted it, but the validator has not applied it.
+/// Starts a deployment named `name` with one validator and posts a funding close. Alice then pays
+/// bob 4, carol deposits 5, and alice forces out 1, and the ledger posts the close of epoch 2 that
+/// processes both requests. Returns the deployment without its validator, the validator, and the
+/// validator's unapplied proposal for epoch 2.
 async fn interrupted(
     context: &mut deterministic::Context,
     name: &str,

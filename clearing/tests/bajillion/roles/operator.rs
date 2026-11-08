@@ -1,8 +1,8 @@
 //! A reference operator that admits payments and soft withdrawals and closes each epoch.
 
 use commonware_clearing::bajillion::{
-    Acknowledgement, Admission, Amount, Amounts, Close, Epoch, Error, Flow, Limits, Namespace,
-    Queue, Request, Row, State, Withdrawal,
+    Admission, Amount, Amounts, Close, Epoch, Error, Flow, Limits, Namespace, Queue, Request, Row,
+    State, Withdrawal,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
 use core::cell::Cell;
@@ -122,10 +122,12 @@ impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Operator<P, K, H, A> {
         }
     }
 
+    /// Returns what the operator persisted.
     pub const fn persisted(&self) -> &Persisted<P, K::PublicKey, H::Digest, A> {
         &self.persisted
     }
 
+    /// Returns the epoch the operator admits in.
     pub const fn epoch(&self) -> Epoch {
         self.persisted.epoch
     }
@@ -191,13 +193,13 @@ impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Operator<P, K, H, A> {
     /// A retry of the latest countersigned state is countersigned again and pays nothing twice. A
     /// new state is admitted only within the limits and the sender's live balance, and persisted
     /// before its acknowledgement is released.
-    pub fn accept(
-        &mut self,
-        request: &Request<P, H::Digest, A>,
-    ) -> Result<Acknowledgement<K::PublicKey>, Refusal> {
+    pub fn accept(&mut self, request: &Request<P, H::Digest, A>) -> Result<K::Signature, Refusal> {
         // The signature is checked before any record of the sender is looked up, so a forged
         // request causes no read and is refused alike whatever the account holds or paid.
         let verified = request.verify::<H>(&self.namespace, self.persisted.epoch)?;
+
+        // The state must repeat or extend the sender's latest admission in the epoch, on top of
+        // its row root in the close of the epoch before or the empty map's root (O2, O4).
         let empty = Amounts::<P, A>::empty().root::<H>();
         let previous = self
             .persisted
@@ -216,6 +218,8 @@ impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Operator<P, K, H, A> {
                 payments,
                 signature,
             } => {
+                // A new state must fit the close's limits and the sender's live balance (O3, O5),
+                // and it is recorded before its acknowledgement is released (O7).
                 if (latest.is_none() && self.persisted.admitted.entries.len() >= self.limits.rows)
                     || payments.len() > self.limits.receivers
                 {
@@ -237,9 +241,7 @@ impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Operator<P, K, H, A> {
                 state
             }
         };
-        Ok(Acknowledgement {
-            signature: state.acknowledge(&self.signer, &self.namespace),
-        })
+        Ok(state.acknowledge(&self.signer, &self.namespace))
     }
 
     /// Collects a soft withdrawal for the current epoch. Collecting one again has no effect.
@@ -255,6 +257,8 @@ impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Operator<P, K, H, A> {
         if !withdrawal.verify(&self.namespace) {
             return Err(Error::InvalidSignature.into());
         }
+
+        // A request already collected stays as it is, and a new one must fit the limits (O5).
         let request = (
             withdrawal.account.clone(),
             withdrawal.amount,
@@ -296,6 +300,8 @@ impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Operator<P, K, H, A> {
             self.rows(),
             self.withdrawals().cloned(),
         )?;
+
+        // Every flow settles before anything changes, so a refusal leaves the operator unchanged.
         let settled = flows
             .iter()
             .map(|(account, flow)| {
