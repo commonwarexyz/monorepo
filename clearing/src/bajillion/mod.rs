@@ -794,7 +794,7 @@ pub use payment::{
     States, Verified,
 };
 pub use settlement::{Flow, FlowError};
-pub use summary::{Log, Processed, Summary, SummaryError};
+pub use summary::{Processed, Summary, SummaryError};
 pub use validator::{
     ApplyError, BalanceProof, Balances, CheckError, Checked, Checkpoint, Payout, PayoutBatch,
     PayoutProof, Payouts, Proposal, SettleError,

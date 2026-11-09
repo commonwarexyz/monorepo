@@ -229,7 +229,7 @@ fn test_ledger_posts_only_certified_successors() {
         assert_eq!(ledger.epoch(), 2);
         assert_eq!(ledger.balances(), &summary.balances);
         assert_eq!(ledger.matrix(1), Some(&summary.matrix));
-        assert_eq!(ledger.ranges(), vec![(0, summary.payouts.size)]);
+        assert_eq!(ledger.ranges(), vec![(0, *summary.payouts.size)]);
         assert!(matches!(
             ledger.post(&mut context, &summary, &certificate),
             Err(Refusal::Summary(SummaryError::WrongEpoch {
@@ -645,7 +645,7 @@ fn test_withdrawn_ranges_stay_compact() {
                 let summary = deployment.post(&mut context, proposals).await;
                 owed.extend(accounts.map(|index| (summary.epoch, account(index))));
             }
-            let size = deployment.validators[0].summary().payouts.size;
+            let size = *deployment.validators[0].summary().payouts.size;
 
             // Prove every payout, then order the proofs for this run.
             let mut proofs = Vec::new();

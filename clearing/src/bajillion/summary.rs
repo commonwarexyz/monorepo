@@ -9,8 +9,8 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use commonware_storage::{
-    merkle::mmr,
-    qmdb::{keyless, value::FixedEncoding},
+    merkle::{Location, mmr},
+    qmdb::{chain::Commitment, keyless, value::FixedEncoding},
 };
 use commonware_utils::Widen;
 use core::{
@@ -84,55 +84,6 @@ where
     }
 }
 
-/// The payout log after one close, as its size and root.
-///
-/// Each posted close appends its payouts to the [Payouts](super::Payouts) database in account
-/// order, then a commit. `size` is the number of operations in the log after the close. It counts
-/// the initial commit and the payouts and commit of every close since genesis, so the close's
-/// commit sits at `size - 1`. `root` is the log's root after the close.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Log<D: Digest> {
-    /// Number of operations in the payout log after the close, its initial commit included.
-    pub size: u64,
-    /// Root of the payout log after the close.
-    pub root: D,
-}
-
-impl<D: Digest> Write for Log<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.size.write(buf);
-        self.root.write(buf);
-    }
-}
-
-impl<D: Digest> FixedSize for Log<D> {
-    const SIZE: usize = u64::SIZE + D::SIZE;
-}
-
-impl<D: Digest> Read for Log<D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Ok(Self {
-            size: u64::read(buf)?,
-            root: D::read(buf)?,
-        })
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for Log<D>
-where
-    D: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            size: u.arbitrary()?,
-            root: u.arbitrary()?,
-        })
-    }
-}
-
 /// Why the ledger refuses a post.
 #[derive(Debug, Error)]
 pub enum SummaryError {
@@ -181,8 +132,10 @@ pub struct Summary<H: Hasher> {
     pub matrix: H::Digest,
     /// Root of the balances after the close.
     pub balances: H::Digest,
-    /// The payout log after the close, as its size and root.
-    pub payouts: Log<H::Digest>,
+    /// The payout log after the close, as its size and root. Each posted close appends its payouts
+    /// to the [Payouts](super::Payouts) database in account order, then a commit, and the size
+    /// counts the initial commit, so the close's commit sits at `size - 1`.
+    pub payouts: Commitment<mmr::Family, H::Digest>,
     /// The deposits the close processes, as their count and the queue's running hash.
     pub deposits: Processed<H::Digest>,
     /// The forced withdrawals the close processes, as their count and the queue's running hash.
@@ -203,8 +156,8 @@ impl<H: Hasher> Summary<H> {
             parent: H::Digest::EMPTY,
             matrix: matrix::root::<H, P>(core::iter::empty()),
             balances,
-            payouts: Log {
-                size: 1,
+            payouts: Commitment {
+                size: Location::new(1),
                 root: keyless::initial_root::<mmr::Family, FixedEncoding<Payout<P, A>>, H>(),
             },
             deposits: start,
@@ -305,29 +258,40 @@ impl<H: Hasher> Write for Summary<H> {
         self.parent.write(buf);
         self.matrix.write(buf);
         self.balances.write(buf);
-        self.payouts.write(buf);
+        self.payouts.size.as_u64().write(buf);
+        self.payouts.root.write(buf);
         self.deposits.write(buf);
         self.forced_withdrawals.write(buf);
     }
 }
 
 impl<H: Hasher> FixedSize for Summary<H> {
-    const SIZE: usize = Epoch::SIZE
-        + 3 * H::Digest::SIZE
-        + Log::<H::Digest>::SIZE
-        + 2 * Processed::<H::Digest>::SIZE;
+    const SIZE: usize =
+        Epoch::SIZE + u64::SIZE + 4 * H::Digest::SIZE + 2 * Processed::<H::Digest>::SIZE;
 }
 
 impl<H: Hasher> Read for Summary<H> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let epoch = Epoch::read(buf)?;
+        let parent = H::Digest::read(buf)?;
+        let matrix = H::Digest::read(buf)?;
+        let balances = H::Digest::read(buf)?;
+        let size = Location::new(u64::read(buf)?);
+        if !size.is_valid() {
+            return Err(CodecError::Invalid(
+                "clearing::bajillion::Summary",
+                "payouts size exceeds the log's capacity",
+            ));
+        }
+        let root = H::Digest::read(buf)?;
         Ok(Self {
-            epoch: Epoch::read(buf)?,
-            parent: H::Digest::read(buf)?,
-            matrix: H::Digest::read(buf)?,
-            balances: H::Digest::read(buf)?,
-            payouts: Log::read(buf)?,
+            epoch,
+            parent,
+            matrix,
+            balances,
+            payouts: Commitment { size, root },
             deposits: Processed::read(buf)?,
             forced_withdrawals: Processed::read(buf)?,
         })
@@ -345,7 +309,10 @@ where
             parent: u.arbitrary()?,
             matrix: u.arbitrary()?,
             balances: u.arbitrary()?,
-            payouts: u.arbitrary()?,
+            payouts: Commitment {
+                size: u.arbitrary()?,
+                root: u.arbitrary()?,
+            },
             deposits: u.arbitrary()?,
             forced_withdrawals: u.arbitrary()?,
         })
@@ -371,7 +338,7 @@ mod tests {
         Deposit, ForcedWithdrawal, Matrix,
         tests::{NAMESPACE, account, certify, chain, scheme},
     };
-    use commonware_codec::DecodeExt as _;
+    use commonware_codec::{Copying, DecodeExt as _};
     use commonware_cryptography::{
         Digest as _, Sha256,
         ed25519::{self, PublicKey},
@@ -398,7 +365,10 @@ mod tests {
         );
         let log =
             keyless::initial_root::<mmr::Family, FixedEncoding<Payout<PublicKey, u64>>, Sha256>();
-        let expected = Log { size: 1, root: log };
+        let expected = Commitment {
+            size: Location::new(1),
+            root: log,
+        };
         assert_eq!(genesis.payouts, expected);
         assert_eq!(Summary::decode(genesis.encode()).unwrap(), genesis);
 
@@ -423,14 +393,14 @@ mod tests {
                 ..genesis
             },
             Summary {
-                payouts: Log {
-                    size: 2,
+                payouts: Commitment {
+                    size: Location::new(2),
                     ..genesis.payouts
                 },
                 ..genesis
             },
             Summary {
-                payouts: Log {
+                payouts: Commitment {
                     root: other,
                     ..genesis.payouts
                 },
@@ -468,6 +438,15 @@ mod tests {
             assert_ne!(changed.digest(), digest);
             assert_eq!(Summary::decode(changed.encode()).unwrap(), changed);
         }
+
+        // A payouts size the log cannot reach does not decode.
+        let mut encoded = genesis.encode().to_vec();
+        let size = Epoch::SIZE + 3 * Digest::SIZE;
+        encoded[size..size + u64::SIZE].copy_from_slice(&u64::MAX.to_be_bytes());
+        assert!(matches!(
+            Summary::<Sha256>::decode(Copying(&encoded)),
+            Err(CodecError::Invalid("clearing::bajillion::Summary", _))
+        ));
     }
 
     /// Both running hashes start at all zeros. Each extends its parent's by `H(hash || request)`
@@ -544,8 +523,8 @@ mod tests {
             parent,
             matrix: Sha256::hash(&[b"matrix"]),
             balances: Sha256::hash(&[b"after"]),
-            payouts: Log {
-                size: 3,
+            payouts: Commitment {
+                size: Location::new(3),
                 root: Sha256::hash(&[b"payouts"]),
             },
             deposits: Processed {
@@ -614,11 +593,11 @@ mod tests {
 
         // A summary that differs in its payouts size or root is not certified.
         let changed = [
-            Log {
-                size: 4,
+            Commitment {
+                size: Location::new(4),
                 ..summary.payouts
             },
-            Log {
+            Commitment {
                 root: Sha256::hash(&[b"other"]),
                 ..summary.payouts
             },
@@ -643,7 +622,6 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Processed<Digest>>,
-            CodecConformance<Log<Digest>>,
             CodecConformance<Summary<Sha256>>,
         }
     }

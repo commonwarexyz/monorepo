@@ -2,8 +2,8 @@
 //! closes.
 
 use super::{
-    Amount, Amounts, Close, Epoch, FlowError, Log, Matrix, Namespace, Processed, Queue, State,
-    Summary, settlement::Flows,
+    Amount, Amounts, Close, Epoch, FlowError, Matrix, Namespace, Processed, Queue, State, Summary,
+    settlement::Flows,
 };
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
@@ -519,10 +519,7 @@ impl<P: PublicKey, H: Hasher, A: Amount> Checked<P, H, A> {
             parent: self.parent.digest(),
             matrix: self.matrix.root(),
             balances: batch.root(),
-            payouts: Log {
-                size: *appends.bounds().tip.size,
-                root: appends.root(),
-            },
+            payouts: appends.bounds().tip,
             deposits: self.deposits,
             forced_withdrawals: self.forced_withdrawals,
         };
@@ -876,16 +873,16 @@ mod tests {
             let proposal = store.settle(&checked).await.unwrap();
             let expected = amounts(&[(0, 4), (2, 30)]);
             assert_eq!(proposal.payouts(), &expected);
-            let payouts = proposal.summary().payouts;
-            assert_eq!(payouts.size, parent.summary.payouts.size + 3);
+            let summary = *proposal.summary();
+            assert_eq!(summary.payouts.size, parent.summary.payouts.size + 3);
             let posted = proposal.summary().digest();
             let (store, first) = store.apply(proposal, &posted).await.unwrap();
-            assert_eq!(store.log.root(), payouts.root);
-            assert_eq!(*store.log.bounds().end, payouts.size);
+            assert_eq!(store.log.root(), summary.payouts.root);
+            assert_eq!(store.log.bounds().end, summary.payouts.size);
 
             // The payouts take the indices from the parent's payouts size in account order, and the
             // commit follows them.
-            let start = parent.summary.payouts.size;
+            let start = *parent.summary.payouts.size;
             for (index, (account, amount)) in (start..).zip(expected.iter()) {
                 let payout = store.log.get(Location::new(index)).await.unwrap();
                 let expected = Payout {
@@ -894,7 +891,7 @@ mod tests {
                 };
                 assert_eq!(payout, Some(expected));
             }
-            let commit = Location::new(payouts.size - 1);
+            let commit = summary.payouts.size - 1;
             assert_eq!(store.log.get(commit).await.unwrap(), None);
 
             // A close with no payouts appends only its commit.
@@ -902,7 +899,7 @@ mod tests {
             let checked = check(close, &first, &queue(2, &[], &[])).unwrap();
             let idle = store.settle(&checked).await.unwrap();
             assert!(idle.payouts().is_empty());
-            assert_eq!(idle.summary().payouts.size, payouts.size + 1);
+            assert_eq!(idle.summary().payouts.size, summary.payouts.size + 1);
 
             // A log at another root refuses the close, even with the balances at the parent's.
             let other = open(context.child("other"), "other").await;
@@ -1063,7 +1060,7 @@ mod tests {
             // validator that committed after every close.
             let Store { balances, log } = crashed;
             drop(log);
-            let size = Some(applied[held].summary.payouts.size);
+            let size = Some(*applied[held].summary.payouts.size);
             let log = open_log(context.child("rewound"), "ahead", size).await;
             assert_eq!(log.root(), applied[held].summary.payouts.root);
             let (store, rewound_parent, rewound) = replay(
@@ -1140,7 +1137,14 @@ mod tests {
             let (posted, applied) = post(posted, &parent, candidate(Vec::new()), &queued).await;
             assert_ne!(proposal.summary(), &applied.summary);
             assert_eq!(proposal.summary().balances, applied.summary.balances);
-            assert_eq!(proposal.summary().payouts, applied.summary.payouts);
+            assert_eq!(
+                proposal.summary().payouts.size,
+                applied.summary.payouts.size
+            );
+            assert_eq!(
+                proposal.summary().payouts.root,
+                applied.summary.payouts.root
+            );
 
             // The successor of the candidate settles on the posted databases, but not on balances
             // that applied a close with other writes or none, nor beside a log at another root.
@@ -1340,7 +1344,7 @@ mod tests {
             let log = open_log(
                 context.child("rewound_log"),
                 "rewind",
-                Some(parent.summary.payouts.size),
+                Some(*parent.summary.payouts.size),
             )
             .await;
             let store = Store { balances, log };
@@ -1388,7 +1392,7 @@ mod tests {
                     Ok(balances) => {
                         rewound += 1;
                         drop(log);
-                        let size = Some(previous.summary.payouts.size);
+                        let size = Some(*previous.summary.payouts.size);
                         let log = open_log(context.child("rewound"), "pruned", size).await;
                         let earlier = Store { balances, log };
                         assert_eq!(
@@ -1485,7 +1489,7 @@ mod tests {
             assert!(!inactive.verify::<Sha256>(&root));
 
             // The commit position does not verify as a payout.
-            let commit = first.summary.payouts.size - 1;
+            let commit = *first.summary.payouts.size - 1;
             let (proof, logged) = prove(&store.log, commit).await;
             assert_eq!(logged, None);
             let at_commit = PayoutProof {

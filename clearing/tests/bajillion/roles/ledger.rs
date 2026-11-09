@@ -157,7 +157,7 @@ where
             required_deposits: 0,
             forced_withdrawals: VecDeque::new(),
             required_forced_withdrawals: 0,
-            ranges: BTreeMap::from([(0, genesis.payouts.size)]),
+            ranges: BTreeMap::from([(0, *genesis.payouts.size)]),
             halt: None,
             claimed: BTreeSet::new(),
             claimable: BTreeMap::new(),
@@ -283,7 +283,7 @@ where
             usize::try_from(summary.deposits.count).expect("a count within the queue must fit");
         let forced_withdrawals = usize::try_from(summary.forced_withdrawals.count)
             .expect("a count within the queue must fit");
-        let commit = summary.payouts.size - 1;
+        let commit = *summary.payouts.size - 1;
 
         // One state change claims the commit position, drops the processed requests, requires
         // the rest, and records the summary (L5).

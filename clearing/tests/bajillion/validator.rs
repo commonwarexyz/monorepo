@@ -6,7 +6,6 @@ use commonware_clearing::bajillion::{
     CheckError, FlowError, ForcedWithdrawal, Payout, Payouts, SettleError,
 };
 use commonware_runtime::{Runner as _, deterministic::FaultConfig};
-use commonware_storage::merkle::Location;
 use commonware_utils::Probability;
 
 /// Validators agree on every close, and each holds the operator's balances and proves them.
@@ -564,7 +563,7 @@ fn test_validator_refuses_a_log_behind_its_balances() {
         let truncated = Payouts::<_, PublicKey, Sha256, Sequential, u64>::init(
             context.child("truncated"),
             kept.payouts.clone(),
-            Some(Location::new(first.payouts.size)),
+            Some(first.payouts.size),
         )
         .await
         .unwrap();

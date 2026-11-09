@@ -136,7 +136,7 @@ where
         config: &Config<O, T, S>,
         summary: &Summary<H>,
     ) -> Result<Payouts<E, P, H, S, A>, Refusal> {
-        let size = Some(Location::new(summary.payouts.size));
+        let size = Some(summary.payouts.size);
         let log = Payouts::init(context.child("payouts"), config.payouts.clone(), size).await?;
         if log.root() != summary.payouts.root {
             return Err(Refusal::InvalidCheckpoint);
@@ -290,12 +290,12 @@ where
         // The close's payouts start at its parent's payouts size. The parent of epoch 1 is the
         // genesis summary.
         let start = match self.persisted.attested.get(&summary.parent) {
-            Some(parent) => Self::summary_of(parent).payouts.size,
-            None if epoch == 1 => Summary::<H>::genesis::<P, A>(H::Digest::EMPTY).payouts.size,
+            Some(parent) => *Self::summary_of(parent).payouts.size,
+            None if epoch == 1 => *Summary::<H>::genesis::<P, A>(H::Digest::EMPTY).payouts.size,
             None => return Err(Refusal::InvalidCheckpoint),
         };
         let log = self.payout_log();
-        let (mut low, mut high) = (start, summary.payouts.size - 1);
+        let (mut low, mut high) = (start, *summary.payouts.size - 1);
         while low < high {
             let index = low + (high - low) / 2;
             let payout = log
