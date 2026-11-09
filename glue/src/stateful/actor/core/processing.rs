@@ -330,6 +330,7 @@ where
                     context,
                     ancestry,
                     upstream,
+                    body,
                     proposal,
                 })) => {
                     let process = match &proposal {
@@ -348,6 +349,7 @@ where
                             context,
                             ancestry,
                             input,
+                            body,
                             proposal,
                         )
                         .instrument(process);
@@ -612,6 +614,7 @@ mod tests {
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
+            _body: BodySink,
         ) -> Handoff<Proposed<Self, deterministic::Context>> {
             self.hold_proposal().await;
             Handoff::Wait
@@ -623,6 +626,7 @@ mod tests {
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
+            _body: BodySink,
         ) -> Option<Proposed<Self, deterministic::Context>> {
             self.hold_proposal().await;
             None
@@ -699,6 +703,7 @@ mod tests {
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
+            _body: BodySink,
         ) -> Option<Proposed<Self, deterministic::Context>> {
             panic!("read-gated application proposal is not used")
         }
@@ -809,8 +814,9 @@ mod tests {
             ancestry: impl Ancestry<Self::Block>,
             batches: TestUnmerkleized,
             input: Input<Self::Input, Self::Provider>,
+            body: BodySink,
         ) -> Handoff<Proposed<Self, deterministic::Context>> {
-            self.propose(context, ancestry, batches, input)
+            self.propose(context, ancestry, batches, input, body)
                 .await
                 .map_or(Handoff::Wait, Handoff::Vote)
         }
@@ -821,6 +827,7 @@ mod tests {
             ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
+            _body: BodySink,
         ) -> Option<Proposed<Self, deterministic::Context>> {
             let gate = self.proposal_gate.lock().take();
             if let Some(mut gate) = gate {

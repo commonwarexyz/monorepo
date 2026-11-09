@@ -981,6 +981,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
+        body: BodySink,
     ) -> Option<Proposed<Self, deterministic::Context>> {
         let gate = self.propose_gate.lock().take();
         if let Some(mut gate) = gate {
@@ -993,6 +994,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
             ancestry,
             batches,
             input,
+            body,
         )
         .await?;
         Some(Proposed {
