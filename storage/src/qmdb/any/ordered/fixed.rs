@@ -132,7 +132,7 @@ pub(crate) mod test {
     };
 
     /// A generic type alias for an Any database parameterized by merkle family.
-    type AnyTestGeneric<F> = crate::qmdb::any::db::Db<
+    type AnyTestGeneric<F> = crate::qmdb::any::Db<
         F,
         deterministic::Context,
         Journal<

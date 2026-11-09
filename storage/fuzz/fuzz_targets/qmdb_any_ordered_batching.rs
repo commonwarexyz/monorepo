@@ -13,7 +13,7 @@ use commonware_storage::{
     merkle::{Family as MerkleFamily, Location, mmb, mmr},
     qmdb::{
         any::{
-            db::Db as AnyDb,
+            Db as AnyDb,
             ordered::{Operation, Update, fixed::Config},
         },
         value::FixedEncoding,

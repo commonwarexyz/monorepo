@@ -37,7 +37,7 @@ use commonware_storage::{
         },
         immutable::fixed::{Config as ImmutableFixedConfig, Db as IFixed},
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
-        store::db::{Config as StoreConfig, Db as Store},
+        store::{Config as StoreConfig, Db as Store},
     },
     translator::EightCap,
 };

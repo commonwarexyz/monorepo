@@ -148,8 +148,10 @@ use std::sync::Arc;
 use tracing::warn;
 
 pub mod batch;
-pub mod db;
+mod db;
+pub use db::Db;
 pub mod operation;
+pub use operation::{COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT};
 pub mod ordered;
 pub(crate) mod sync;
 #[cfg(any(test, feature = "test-traits"))]
@@ -271,7 +273,7 @@ pub(crate) struct BitmapBoundaries {
     pub(crate) anchors: Vec<BitmapBoundary>,
 }
 
-/// Like [`db::Db::init`], but for `current::Db`, whose bitmap starts at one of `bitmap`'s
+/// Like [`Db::init`], but for `current::Db`, whose bitmap starts at one of `bitmap`'s
 /// boundaries: the newest anchor the selected commit can be rebuilt from, else the base. The
 /// journal replays from its newest anchor at or before that boundary. Without `bitmap`, the bitmap
 /// starts empty.
@@ -5161,7 +5163,7 @@ pub(crate) mod test {
     }
 
     impl<F, C, I, U, const N: usize, S> Changes<F>
-        for crate::qmdb::current::db::Db<F, Context, C, I, Sha256, U, N, S>
+        for crate::qmdb::current::Db<F, Context, C, I, Sha256, U, N, S>
     where
         F: crate::merkle::Graftable,
         C: Mutable<Item = Operation<F, U>>,

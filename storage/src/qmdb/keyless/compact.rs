@@ -362,7 +362,10 @@ where
             bounds: chain::Bounds {
                 base: self.base,
                 db: boundary,
-                tip: Commitment::new(total_size, root),
+                tip: Commitment {
+                    size: total_size,
+                    root,
+                },
                 ancestors,
                 inactivity_floor,
             },
@@ -497,7 +500,10 @@ where
 
     /// The [`Commitment`] for the database's current state.
     pub(crate) const fn commitment(&self) -> chain::Commitment<F, H::Digest> {
-        chain::Commitment::new(self.size(), self.root())
+        chain::Commitment {
+            size: self.size(),
+            root: self.root(),
+        }
     }
 
     /// Create a new speculative batch of operations with this database as its parent.

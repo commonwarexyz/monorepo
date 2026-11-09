@@ -24,8 +24,8 @@ use commonware_storage::{
     qmdb::{
         Error,
         any::{
+            Db,
             batch::{MerkleizedBatch, Slot, Staged, UnmerkleizedBatch},
-            db::Db,
             initial_root,
             operation::{Operation, Update},
             ordered, unordered,
@@ -503,10 +503,10 @@ where
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        AnySyncTarget::new(
-            initial_root::<F, unordered::Update<K, FixedEncoding<V>>, H>(),
-            non_empty_range!(Location::new(0), Location::new(1)),
-        )
+        AnySyncTarget {
+            root: initial_root::<F, unordered::Update<K, FixedEncoding<V>>, H>(),
+            range: non_empty_range!(Location::new(0), Location::new(1)),
+        }
     }
 
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
@@ -537,10 +537,10 @@ where
 
     fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
-        AnySyncTarget::new(
-            self.root(),
-            non_empty_range!(self.sync_boundary(), bounds.end),
-        )
+        AnySyncTarget {
+            root: self.root(),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
+        }
     }
 }
 
@@ -606,10 +606,10 @@ where
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        AnySyncTarget::new(
-            initial_root::<F, unordered::Update<K, VariableEncoding<V>>, H>(),
-            non_empty_range!(Location::new(0), Location::new(1)),
-        )
+        AnySyncTarget {
+            root: initial_root::<F, unordered::Update<K, VariableEncoding<V>>, H>(),
+            range: non_empty_range!(Location::new(0), Location::new(1)),
+        }
     }
 
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
@@ -640,10 +640,10 @@ where
 
     fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
-        AnySyncTarget::new(
-            self.root(),
-            non_empty_range!(self.sync_boundary(), bounds.end),
-        )
+        AnySyncTarget {
+            root: self.root(),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
+        }
     }
 }
 

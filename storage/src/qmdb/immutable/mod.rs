@@ -115,7 +115,7 @@ pub use compact::{
     Config as CompactConfig, Db as CompactDb, MerkleizedBatch as CompactMerkleizedBatch,
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
-pub use operation::Operation;
+pub use operation::{COMMIT_CONTEXT, Operation, SET_CONTEXT};
 
 /// Build the snapshot by replaying the log from `inactivity_floor_loc`, inserting the location of
 /// every retained [Operation::Set]. Assumes the log is not pruned beyond the inactivity floor.
@@ -674,7 +674,10 @@ where
 
     /// The [`Commitment`](chain::Commitment) for the database's current state.
     pub(crate) fn commitment(&self) -> chain::Commitment<F, H::Digest> {
-        chain::Commitment::new(self.bounds().end, self.root)
+        chain::Commitment {
+            size: self.bounds().end,
+            root: self.root,
+        }
     }
 
     /// Create a new speculative batch of operations with this database as its parent.

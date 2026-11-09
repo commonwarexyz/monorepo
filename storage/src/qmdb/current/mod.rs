@@ -34,7 +34,7 @@
 //!
 //! # Data structures
 //!
-//! A Current database ([db::Db]) wraps an Any database and adds:
+//! A Current database ([Db]) wraps an Any database and adds:
 //!
 //! - **Status bitmap** ([BitMap](commonware_utils::bitmap::Prunable)): One bit per operation in the log. Bit _i_ is 1 if operation _i_
 //!   is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N` bytes (i.e. `N *
@@ -265,7 +265,7 @@
 //! individual height-`gh` peaks for each chunk in the pair, and those map to grafted _leaves_
 //! (height 0 in the grafted tree), which are not pinned peaks.
 //!
-//! To avoid this, [`Db::prune`](db::Db::prune) defers bitmap pruning for chunks whose chunk-pair
+//! To avoid this, [`Db::prune`] defers bitmap pruning for chunks whose chunk-pair
 //! parent has not yet been born in the ops tree (see `Db::sync_boundary`). Once the parent is born,
 //! every ops peak within the pruned region is at height `gh+1` or above, and maps to a pinned peak
 //! or an ancestor of pinned peaks that can be reconstructed by hashing children (see
@@ -315,8 +315,8 @@
 //! Pending and partial slots are independent. When both are present, pending hashes in before
 //! partial.
 //!
-//! The canonical root is returned by [`db::Db::root`]. State sync uses [`db::Db::ops_root`],
-//! also exposed by [`sync::Database::ops_root`](crate::qmdb::sync::Database::ops_root).
+//! The canonical root is returned by [`Db::root`]. State sync uses [`Db::ops_root`], also
+//! exposed by [`sync::Database::ops_root`](crate::qmdb::sync::Database::ops_root).
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
 //! verifying ops proofs directly should use [`crate::qmdb::ProofExt::verify`]. After sync, the
@@ -353,7 +353,8 @@ use core::num::NonZeroUsize;
 use std::sync::Arc;
 
 pub mod batch;
-pub mod db;
+mod db;
+pub use db::Db;
 pub mod grafting;
 
 pub mod ordered;

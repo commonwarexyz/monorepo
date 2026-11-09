@@ -235,7 +235,7 @@ pub struct Db<
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value. Owns the activity-status bitmap (`any.bitmap`) that this layer reads to
     /// install grafted-tree updates and serve proofs.
-    pub(super) any: any::db::Db<F, E, C, I, H, U, N, S>,
+    pub(super) any: any::Db<F, E, C, I, H, U, N, S>,
 
     /// Each leaf corresponds to a complete bitmap chunk at the grafting height.
     /// See the [grafted leaf formula](super) in the module documentation.
@@ -757,7 +757,7 @@ where
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
     /// plus a best-effort attempt to bound the recovery needed on startup. A new sync waits for
     /// the prior sync before starting. Failures surface as described on
-    /// [`any::Db::start_sync`](crate::qmdb::any::db::Db::start_sync).
+    /// [`any::Db::start_sync`](crate::qmdb::any::Db::start_sync).
     #[tracing::instrument(name = "qmdb.current.db.start_sync", level = "info", skip_all)]
     #[boxed]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {

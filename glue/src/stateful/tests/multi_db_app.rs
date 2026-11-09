@@ -381,7 +381,10 @@ impl<E: Spawner + StorageContext> Application<E> for App {
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         (
-            Target::new(block.root_a, block.range_a.clone()),
+            Target {
+                root: block.root_a,
+                range: block.range_a.clone(),
+            },
             CompactTarget {
                 root: block.root_b,
                 size: block.range_b.end(),
