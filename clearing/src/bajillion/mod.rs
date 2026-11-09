@@ -636,69 +636,139 @@
 //! An implementation must compute the same digests, roots, and verification results as the crate
 //! for every post, challenge, and claim. The rules below fix those computations, and a test vector
 //! in the crate pins their results for one deployment, so an implementation checks itself against
-//! the crate before it holds funds.
+//! the crate before it holds funds. The diagrams give widths in bytes, with `P`, `A`, and `D` the
+//! widths of a public key, an amount, and a digest.
 //!
 //! 1. **Integers.** Fixed-width integers (every epoch, count, and built-in amount) encode
-//!    big-endian, and lengths encode as varints. Public keys and digests encode as their raw bytes.
-//!    The genesis summary's parent and both of its running hashes are all zeros, and both of its
-//!    counts are zero.
+//!    big-endian. Lengths encode as the varints of [commonware_codec::varint], the canonical
+//!    unsigned LEB128 of protocol buffers, in at most five bytes because the codec bounds every
+//!    length to `u32`. Public keys and digests encode as their raw bytes.
 //!
 //! 2. **Trees.** Payment maps and the matrix commit with the binary Merkle tree of
-//!    [commonware_storage::bmt]. A leaf is hashed as `H(position || leaf)` with its position as a
-//!    big-endian `u32`, each level hashes pairs as `H(left || right)` and duplicates an unpaired
-//!    last node, and the root is `H(leaf_count || tree_root)` with the leaf count as a big-endian
-//!    `u32`. An empty tree holds the single node `H()`, so its root is `H(0u32 || H())`.
+//!    [commonware_storage::bmt] over the digests of their entries. Entries are strictly increasing
+//!    in the account type's order. For the schemes of this workspace, that is the byte order of the
+//!    key. An empty tree holds the single node `H()`, so its root is `H(0u32 || H())`.
 //!
-//! 3. **Leaves.** A map entry is `H(account || amount)`, and a matrix row is
-//!    `H(sender || payments root)`. Entries are strictly increasing in the account type's order.
-//!    For the schemes of this workspace, that is the byte order of the key.
+//!    ```text
+//!    payment map entry                 matrix row
+//!    +-------------+------------+      +------------+-------------------+
+//!    | account (P) | amount (A) |      | sender (P) | payments root (D) |
+//!    +-------------+------------+      +------------+-------------------+
 //!
-//! 4. **Openings.** A member [Lookup] proves one leaf. A non-member lookup proves the neighbors at
+//!    leaf at position i             node                     root
+//!    +-------+------------------+   +----------+-----------+   +----------------+---------+
+//!    | i (4) | entry digest (D) |   | left (D) | right (D) |   | leaf count (4) | top (D) |
+//!    +-------+------------------+   +----------+-----------+   +----------------+---------+
+//!
+//!                    root = H(3 || t)
+//!                            |
+//!                      t = H(a || b)
+//!                     /            \
+//!            a = H(l0 || l1)    b = H(l2 || l2)      the unpaired last node pairs with itself
+//!             /          \           |
+//!            l0          l1         l2               li = H(i || ei), ei the digest of entry i
+//!    ```
+//!
+//! 3. **Openings.** A member [Lookup] proves one leaf. A non-member lookup proves the neighbors at
 //!    `position - 1` and `position`, with the key strictly between them, and a missing neighbor
 //!    means the key precedes the first entry or follows the last. An [Opening] verifies the row
 //!    under the matrix root, then the entry under the row's root, and has an entry exactly when the
 //!    row exists.
 //!
-//! 5. **Signatures.** Each scheme's verification defines its framing. An Ed25519 signature covers
-//!    the namespace's varint length, the namespace, and the message, and each [Namespace] field is
-//!    itself that framing of the deployment's namespace and a fixed suffix.
+//!    ```text
+//!    position    0     1     2     3        key               position   leaves proved
+//!    entries    e0    e1    e2    e3        e1, a member          1       1
+//!                         ^                 k, e1 < k < e2        2       1 and 2
+//!                         k                 k > e3                4       3
+//!    ```
 //!
-//! 6. **Receipts.** A [State] encodes as epoch, account, payments root, and previous root. The
-//!    sender signs it in [Namespace::state] and the operator in [Namespace::acknowledgement], and
-//!    the receipt's entry proves under the state's payments root at its position.
+//! 4. **Signatures.** Each scheme's verification defines its framing, and the schemes of this
+//!    workspace sign the bytes below. Each [Namespace] field frames the deployment's namespace the
+//!    same way before its suffix.
 //!
-//! 7. **Summaries.** A [Summary] encodes as epoch, parent, matrix, balances, the payouts size and
-//!    root, the deposits count and running hash, and the forced withdrawals count and running hash.
-//!    Its digest is the hash of that encoding, and the certificate covers the encoding in
-//!    [Namespace::summary]. A running hash extends its parent's by `H(hash || request)` for each
-//!    request the close processes in queue order. A request encodes as its account then its amount.
-//!    The ledger takes the running hashes as certified and does not recompute them.
+//!    ```text
+//!    signed bytes, for message m in namespace n
+//!    +-----------------+---+---+
+//!    | len(n) (varint) | n | m |
+//!    +-----------------+---+---+
 //!
-//! 8. **Counts.** A summary's count for each queue lies between that queue's required count and its
+//!    Namespace field, for the deployment's namespace d and suffix s
+//!    +-----------------+---+----------------------------------+
+//!    | len(d) (varint) | d | _COMMONWARE_CLEARING_BAJILLION_s |
+//!    +-----------------+---+----------------------------------+
+//!    s = STATE, ACKNOWLEDGEMENT, WITHDRAWAL, CLOSE, or SUMMARY
+//!    ```
+//!
+//! 5. **Receipts.** The sender signs a [State] in [Namespace::state] and the operator in
+//!    [Namespace::acknowledgement], and the receipt's entry proves under the state's payments root
+//!    at its position.
+//!
+//!    ```text
+//!    State
+//!    +-----------+-------------+--------------+--------------+
+//!    | epoch (8) | account (P) | payments (D) | previous (D) |
+//!    +-----------+-------------+--------------+--------------+
+//!    ```
+//!
+//! 6. **Summaries.** A [Summary]'s digest is the hash of its encoding, and the certificate covers
+//!    the encoding in [Namespace::summary]. A running hash extends the parent summary's over each
+//!    request the close processes from that queue, in queue order. The ledger takes the running
+//!    hashes as certified and does not recompute them. The genesis summary has epoch 0, a parent of
+//!    all zeros, the empty matrix root, the empty balances root, the empty log's size and root, and
+//!    counts of zero with hashes of all zeros.
+//!
+//!    ```text
+//!    Summary
+//!    +-------+--------+--------+----------+-------------+--------------+--------------------+
+//!    | epoch | parent | matrix | balances |   payouts   |   deposits   | forced withdrawals |
+//!    |       |        |        |          | size | root | count | hash |  count   |  hash   |
+//!    |   8   |   D    |   D    |    D     |  8   |  D   |   8   |  D   |    8     |    D    |
+//!    +-------+--------+--------+----------+------+------+-------+------+----------+---------+
+//!
+//!    running hash after request i of a queue, from hash(0) in the parent summary
+//!    +---------------+-------------+------------+
+//!    | hash(i-1) (D) | account (P) | amount (A) |  -> hash(i)
+//!    +---------------+-------------+------------+
+//!    ```
+//!
+//! 7. **Counts.** A summary's count for each queue lies between that queue's required count and its
 //!    length.
 //!
-//! 9. **The empty roots.** A deployment reads the empty balances root from an empty [Balances]
+//! 8. **The empty roots.** A deployment reads the empty balances root from an empty [Balances]
 //!    database. It depends on the hasher, account type, and amount type, because the database pads
 //!    its fixed-size operations to the key and value widths. An empty [Payouts] log holds one
 //!    commit with no metadata and an inactivity floor of zero, so its size is 1. [Summary::genesis]
 //!    records its size and root.
 //!
-//! 10. **Balance proofs.** [BalanceProof::verify] is the key-value proof of QMDB's current
-//!     database, an operation proof under the canonical root together with its bitmap chunk of 32
-//!     bytes. It is the largest part of an implementation.
+//! 9. **Balance proofs.** [BalanceProof::verify] is the key-value proof of QMDB's current database,
+//!    an operation proof under the canonical root together with its bitmap chunk of 32 bytes. It is
+//!    the largest part of an implementation.
 //!
-//! 11. **Payout proofs.** [PayoutProof::verify] is the range proof of QMDB's keyless database for
-//!     one operation, over the Merkle Mountain Range of [commonware_storage::merkle::mmr]. A leaf
-//!     is `H(position || operation)`, with the operation's node position in the range as a
-//!     big-endian `u64`. That position differs from the operation's index. The proof carries the
-//!     log's size and rebuilds the root from that leaf and that size. The floor stays zero, so the
-//!     root has no inactive peaks.
+//! 10. **Payout proofs.** [PayoutProof::verify] is the range proof of QMDB's keyless database for
+//!     one operation, over the Merkle Mountain Range of [commonware_storage::merkle::mmr]. A leaf's
+//!     node position in the range differs from the operation's index. The proof carries the log's
+//!     size and rebuilds the root from that leaf and that size. The floor stays zero, so the root
+//!     has no inactive peaks. An implementation reproduces the storage crate's node and root
+//!     hashing for that family.
 //!
-//!     Every operation encodes to the payout's width plus 10 bytes. An appended payout encodes as
-//!     tag 1, its account, its amount, and zeros to that size. A commit encodes as tag 0, a zero
-//!     byte for its absent metadata, zeros of the payout's width, and its inactivity floor as a
-//!     big-endian `u64`. An implementation reproduces the storage crate's node and root hashing
-//!     for that family.
+//!     ```text
+//!     appended payout
+//!     +---------+-------------+------------+-----------+
+//!     | tag (1) | account (P) | amount (A) | zeros (9) |
+//!     |    1    |             |            |           |
+//!     +---------+-------------+------------+-----------+
+//!
+//!     commit
+//!     +---------+--------------+---------------+-----------+
+//!     | tag (1) | metadata (1) | zeros (P + A) | floor (8) |
+//!     |    0    |      0       |               |     0     |
+//!     +---------+--------------+---------------+-----------+
+//!
+//!     leaf
+//!     +-------------------+------------------------+
+//!     | node position (8) | operation (P + A + 10) |
+//!     +-------------------+------------------------+
+//!     ```
 
 mod amounts;
 mod close;
