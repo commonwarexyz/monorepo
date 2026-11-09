@@ -151,8 +151,10 @@ where
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut *self {
-            Self::Receiver(receiver) => Pin::new(receiver)
-                .poll(cx)
+            // Joining is not a budgeted operation: the receiver only carries
+            // the result of work that ran elsewhere.
+            Self::Receiver(receiver) => receiver
+                .poll_unbudgeted(cx)
                 .map(|result| result.unwrap_or(Err(Error::Closed))),
             Self::Future(future) => future.get_mut().as_mut().poll(cx),
         }
@@ -484,8 +486,9 @@ where
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut self.state {
-            HandleState::Task { receiver, .. } => Pin::new(receiver)
-                .poll(cx)
+            // Joining is not a budgeted operation (see Completion).
+            HandleState::Task { receiver, .. } => receiver
+                .poll_unbudgeted(cx)
                 .map(|result| result.unwrap_or_else(|_| Err(Error::Closed))),
             HandleState::Completion { future, .. } => Pin::new(future)
                 .poll(cx)
@@ -648,7 +651,7 @@ mod tests {
         telemetry::metrics::raw::Gauge,
         utils::{abort::AbortHandle, extract_panic_message, reschedule, supervision::Tree},
     };
-    use commonware_utils::{channel::oneshot, sync::Mutex};
+    use commonware_utils::{channel::oneshot, coop, sync::Mutex};
     use futures::{FutureExt as _, future, poll};
     use rstest::rstest;
     use std::{
@@ -781,6 +784,40 @@ mod tests {
     fn select_empty_returns_closed() {
         deterministic::Runner::default().start(|_| async move {
             assert!(matches!(Handle::<()>::select([]).await, Err(Error::Closed)));
+        });
+    }
+
+    /// Joining only carries a result, so it completes under a spent budget
+    /// and spends nothing.
+    #[test]
+    fn test_joins_spend_no_budget() {
+        deterministic::Runner::default().start(|context| async move {
+            // A finished task, a ready handle and a closed one.
+            let (done, finished) = oneshot::channel();
+            let mut task = context.child("task").spawn(|_| async move {
+                let _ = done.send(());
+                7
+            });
+            finished.await.unwrap();
+            let mut ready = Handle::ready(Ok(8));
+            let (sender, receiver) = oneshot::channel();
+            drop(sender);
+            let mut closed = Handle::<u32>::from_receiver(receiver);
+
+            // Poll each under a spent budget.
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            let _scope = coop::Scope::enter();
+            for _ in 0..coop::BUDGET {
+                coop::charge();
+            }
+            let task = task.poll_unpin(&mut cx);
+            let ready = ready.poll_unpin(&mut cx);
+            let closed = closed.poll_unpin(&mut cx);
+
+            // Each completed at once.
+            assert!(matches!(task, std::task::Poll::Ready(Ok(7))));
+            assert!(matches!(ready, std::task::Poll::Ready(Ok(8))));
+            assert!(matches!(closed, std::task::Poll::Ready(Err(Error::Closed))));
         });
     }
 
@@ -959,7 +996,7 @@ mod tests {
     #[test]
     fn abort_on_drop_join_all_drains_pending_task() {
         deterministic::Runner::default().start(|context| async move {
-            let (held, released) = oneshot::channel::<()>();
+            let (held, mut released) = oneshot::channel::<()>();
             let pending = context
                 .child("pending")
                 .spawn(move |_| async move {
@@ -970,11 +1007,10 @@ mod tests {
             let failed = Handle::ready(Ok(Err(Error::Closed))).abort_on_drop();
             let result = AbortOnDrop::join_all::<Error>(vec![failed, pending]).await;
             assert!(matches!(result, Err(Error::Closed)));
-            assert!(
-                released
-                    .now_or_never()
-                    .expect("task still owns sender")
-                    .is_err()
+            assert_eq!(
+                released.try_recv(),
+                Err(oneshot::error::TryRecvError::Closed),
+                "the aborted task should drop its sender"
             );
         });
     }

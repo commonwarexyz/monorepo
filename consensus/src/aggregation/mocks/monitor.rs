@@ -57,6 +57,7 @@ impl M for Monitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_utils::channel::ring::TryRecvError;
     use futures::FutureExt;
 
     #[test]
@@ -68,10 +69,7 @@ mod tests {
         // Two updates before the subscriber reads: only the newest is delivered.
         monitor.update(Epoch::new(2));
         monitor.update(Epoch::new(3));
-        assert_eq!(
-            subscription.recv().now_or_never(),
-            Some(Some(Epoch::new(3)))
-        );
-        assert!(subscription.recv().now_or_never().is_none());
+        assert_eq!(subscription.try_recv(), Ok(Epoch::new(3)));
+        assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
     }
 }

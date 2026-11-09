@@ -106,7 +106,6 @@ mod tests {
         non_empty, probability,
         sync::Mutex,
     };
-    use futures::FutureExt;
     use rand_core::CryptoRng;
     use std::{
         collections::BTreeMap,
@@ -2049,7 +2048,7 @@ mod tests {
             // Ensure no finalize vote is broadcast (don't vote on conflict)
             context.sleep(Duration::from_millis(100)).await;
             loop {
-                let Some(Some(message)) = batcher_receiver.recv().now_or_never() else {
+                let Ok(message) = batcher_receiver.try_recv() else {
                     break;
                 };
                 match message {
@@ -3943,7 +3942,7 @@ mod tests {
 
             // Nothing constructed for view 1 may reach the batcher while its
             // sync is blocked.
-            while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
+            while let Ok(msg) = batcher_receiver.try_recv() {
                 assert!(
                     !matches!(
                         msg,
@@ -4839,13 +4838,13 @@ mod tests {
         batcher: &mut mailbox::Receiver<batcher::Message<ed25519::Scheme, Sha256Digest>>,
         stale: &[Sha256Digest],
     ) {
-        while let Some((relayed_digest, _)) = relayed.recv().now_or_never().flatten() {
+        while let Ok((relayed_digest, _)) = relayed.try_recv() {
             assert!(
                 !stale.contains(&relayed_digest),
                 "stale handoff must not relay"
             );
         }
-        while let Some(message) = batcher.recv().now_or_never().flatten() {
+        while let Ok(message) = batcher.try_recv() {
             assert_no_stale_vote(&message, stale);
         }
     }
@@ -5073,10 +5072,10 @@ mod tests {
             context.sleep(SETTLE).await;
             assert_eq!(fixture.requests_for(View::new(3)), 2);
             assert!(
-                relayed.recv().now_or_never().is_none(),
+                matches!(relayed.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
                 "ordinary build must not relay before sync"
             );
-            while let Some(message) = fixture.batcher.recv().now_or_never().flatten() {
+            while let Ok(message) = fixture.batcher.try_recv() {
                 assert!(
                     !matches!(message, batcher::Message::Constructed(Vote::Notarize(ref vote))
                     if vote.view() == View::new(3)),
@@ -7057,7 +7056,7 @@ mod tests {
                     _ => continue,
                 }
             }
-            while resolver_receiver.recv().now_or_never().flatten().is_some() {}
+            while resolver_receiver.try_recv().is_ok() {}
 
             // Deliver notarization(3) without notarization(2). The voter saw
             // the certificate for view 3 but missed the one for view 2.
@@ -7097,7 +7096,7 @@ mod tests {
 
             // Deliver the fetched parent. The voter must certify the parent
             // before the child and then resume finalize voting.
-            while batcher_receiver.recv().now_or_never().flatten().is_some() {}
+            while batcher_receiver.try_recv().is_ok() {}
             mailbox.recovered(Certificate::Notarization(notarization_2));
             let mut certified = Vec::new();
             let mut finalized = Vec::new();
@@ -13202,7 +13201,7 @@ mod tests {
             blocked.await.expect("gated section sync was dropped");
 
             let mut certified_before_sync = false;
-            while let Some(msg) = resolver_receiver.recv().now_or_never().flatten() {
+            while let Ok(msg) = resolver_receiver.try_recv() {
                 if let MailboxMessage::Certified {
                     notarization,
                     success,
@@ -13223,7 +13222,7 @@ mod tests {
             );
 
             let mut finalize_constructed = false;
-            while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
+            while let Ok(msg) = batcher_receiver.try_recv() {
                 if matches!(
                     msg,
                     batcher::Message::Constructed(Vote::Finalize(ref finalize))
@@ -13622,7 +13621,7 @@ mod tests {
 
             // Let the journal sync.
             context.sleep(Duration::from_millis(50)).await;
-            while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
+            while let Ok(msg) = batcher_receiver.try_recv() {
                 if let batcher::Message::Update { .. } = msg {}
             }
 
@@ -13861,7 +13860,7 @@ mod tests {
                 .await
                 .expect("gated nullify section sync was dropped");
 
-            while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
+            while let Ok(msg) = batcher_receiver.try_recv() {
                 assert!(
                     !matches!(
                         msg,
@@ -13915,7 +13914,7 @@ mod tests {
 
             // Let journal sync.
             context.sleep(Duration::from_millis(50)).await;
-            while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
+            while let Ok(msg) = batcher_receiver.try_recv() {
                 if let batcher::Message::Update { .. } = msg {}
             }
 

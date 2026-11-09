@@ -39,12 +39,24 @@
 //!
 //! Enqueue calls from the same sender will be delivered in order. Concurrent enqueue calls,
 //! however, are not globally ordered and may be observed in any interleaving.
+//!
+//! # Cooperative budget
+//!
+//! Each ready result of a receiver's `recv`, a message or the end of the
+//! mailbox, spends one unit of the cooperative budget that bounds the current
+//! task poll (see [`commonware_utils::coop`]): the commonware budget on the
+//! io_uring and deterministic runtimes, tokio's own budget on tokio. Once the
+//! budget is spent, `recv` returns pending without removing a message and the
+//! task is woken again, so a fed receive loop yields to the executor once per
+//! budget. Polls that find the mailbox empty cost nothing, and `try_recv` is
+//! never budgeted, so it is the way to probe a mailbox without waiting.
 
 use crate::{Feedback, Unreliable};
 use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
+use commonware_utils::coop;
 use std::{
     collections::VecDeque,
     fmt,
@@ -312,6 +324,7 @@ impl<T: Policy> Receiver<T> {
     ///
     /// Returns `None` after all senders are dropped and all buffered messages
     /// have been drained.
+    #[inline]
     pub async fn recv(&mut self) -> Option<T> {
         recv_from(&self.state).await
     }
@@ -330,6 +343,7 @@ impl<T: UnreliablePolicy> UnreliableReceiver<T> {
     ///
     /// Returns `None` after all senders are dropped and all buffered messages
     /// have been drained.
+    #[inline]
     pub async fn recv(&mut self) -> Option<T> {
         recv_from(&self.state).await
     }
@@ -697,7 +711,27 @@ impl<T, M: Mode<T>> State<T, M> {
         feedback
     }
 
+    /// Polls for the next message, spending one unit of the cooperative
+    /// budget that bounds the current task poll for each ready result, a
+    /// message or the end of the mailbox.
+    ///
+    /// The budget is checked before any message is removed, so a spent budget
+    /// leaves ready and overflow untouched. The receiver then returns pending
+    /// without registering the waker, and the budget wakes the task. This is
+    /// safe because the task is already scheduled to poll again, and a sender
+    /// wake that finds an older registration only causes a spurious poll.
+    /// Empty polls cost nothing.
+    #[inline(always)]
     fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        coop::poll_budgeted(cx, |cx| self.poll_recv_inner(cx))
+    }
+
+    /// Polls for the next message without consulting the cooperative budget.
+    ///
+    /// Returns `None` once the mailbox is disconnected and drained. Otherwise
+    /// registers the waker of `cx` when no message is available.
+    #[inline(always)]
+    fn poll_recv_inner(&self, cx: &mut Context<'_>) -> Poll<Option<T>> {
         // Fast path avoids waker churn when a message is already ready.
         if let Some(message) = self.pop() {
             return Poll::Ready(Some(message));
@@ -722,6 +756,9 @@ impl<T, M: Mode<T>> State<T, M> {
         }
     }
 
+    /// Removes the next message, moving the oldest overflow messages into
+    /// ready as slots free up.
+    #[inline(always)]
     fn pop(&self) -> Option<T> {
         if let Some(message) = self.ready.pop() {
             // A freed ready slot may let the oldest overflow message advance.
@@ -782,6 +819,9 @@ fn fmt_sender_state<T, M: Mode<T>>(
         .finish()
 }
 
+/// Waits for the next message of `state`, or `None` once it is disconnected
+/// and drained.
+#[inline]
 async fn recv_from<T, M: Mode<T>>(state: &State<T, M>) -> Option<T> {
     poll_fn(|cx| state.poll_recv(cx)).await
 }
@@ -1466,6 +1506,561 @@ mod tests {
         assert_eq!(wakes.count(), 1);
         assert_eq!(receiver.try_recv(), Ok(SpillMessage::FillReady));
         assert_eq!(receiver.try_recv(), Ok(SpillMessage::Spill));
+    }
+}
+
+#[cfg(all(test, not(feature = "loom")))]
+mod coop_tests {
+    use super::{mocks, *};
+    use commonware_utils::{
+        NZUsize,
+        channel::{mpsc, oneshot, ring},
+    };
+    use futures::task::{ArcWake, waker_ref};
+    use std::{
+        future::Future,
+        pin::pin,
+        sync::{Arc, atomic::AtomicUsize},
+    };
+
+    /// Messages for the unreliable mailbox tests.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Message {
+        /// A message the test expects to fit in a free ready slot.
+        Fill(u64),
+        /// A message the test expects to be kept, possibly in overflow.
+        Keep(u64),
+    }
+
+    impl UnreliablePolicy for Message {
+        type Overflow = VecDeque<Self>;
+
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+            overflow.push_back(message);
+            true
+        }
+    }
+
+    /// A reliable message whose drop is visible to a oneshot receiver.
+    struct Ack {
+        /// Dropped with the message, which closes the paired receiver.
+        _sender: oneshot::Sender<()>,
+    }
+
+    impl Policy for Ack {
+        type Overflow = VecDeque<Self>;
+
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+            overflow.push_back(message);
+        }
+    }
+
+    /// A waker that counts how often it is woken.
+    #[derive(Default)]
+    struct Wakes(
+        /// Number of wakes so far.
+        AtomicUsize,
+    );
+
+    impl Wakes {
+        /// Returns the number of wakes so far.
+        fn count(&self) -> usize {
+            self.0.load(Ordering::Acquire)
+        }
+    }
+
+    impl ArcWake for Wakes {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Creates an unreliable mailbox with `capacity` ready slots.
+    fn new(capacity: usize) -> (UnreliableSender<Message>, UnreliableReceiver<Message>) {
+        super::new_unreliable(mocks::Metrics, NonZeroUsize::new(capacity).unwrap())
+    }
+
+    /// Polls `receiver` once with a waker that counts into `wakes`.
+    fn poll(receiver: &UnreliableReceiver<Message>, wakes: &Arc<Wakes>) -> Poll<Option<Message>> {
+        let waker = waker_ref(wakes);
+        let mut cx = Context::from_waker(&waker);
+        receiver.state.poll_recv(&mut cx)
+    }
+
+    /// Spend the whole budget of the current scope.
+    fn exhaust() {
+        for _ in 0..coop::BUDGET {
+            coop::charge();
+        }
+        assert!(coop::exhausted());
+    }
+
+    /// Returns the number of messages held in overflow.
+    fn overflow_len(receiver: &UnreliableReceiver<Message>) -> usize {
+        lock(&receiver.state.overflow.queue).len()
+    }
+
+    #[test]
+    fn test_exhaustion_preserves_ready_and_overflow() {
+        // Fill the single ready slot and push two messages into overflow.
+        let (sender, mut receiver) = new(1);
+        assert_eq!(
+            sender.enqueue(Message::Fill(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        for value in 2..=3 {
+            assert_eq!(
+                sender.enqueue(Message::Keep(value)),
+                Unreliable::new(Feedback::Backoff)
+            );
+        }
+        assert_eq!(overflow_len(&receiver), 2);
+        let wakes = Arc::new(Wakes::default());
+
+        {
+            let _scope = coop::Scope::enter();
+            exhaust();
+
+            // A spent budget pops nothing and refills nothing.
+            for _ in 0..3 {
+                assert_eq!(poll(&receiver, &wakes), Poll::Pending);
+            }
+            assert_eq!(overflow_len(&receiver), 2);
+
+            // The non-polling path is not bounded by the budget.
+            assert_eq!(receiver.try_recv(), Ok(Message::Fill(1)));
+        }
+
+        // A fresh budget delivers the overflow, in order.
+        let _scope = coop::Scope::enter();
+        assert_eq!(poll(&receiver, &wakes), Poll::Ready(Some(Message::Keep(2))));
+        assert_eq!(poll(&receiver, &wakes), Poll::Ready(Some(Message::Keep(3))));
+    }
+
+    #[test]
+    fn test_exhaustion_wakes_the_polling_task_without_registering_it() {
+        // Queue a message and spend the budget.
+        let (sender, receiver) = new(2);
+        assert_eq!(
+            sender.enqueue(Message::Fill(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        let wakes = Arc::new(Wakes::default());
+        let _scope = coop::Scope::enter();
+        exhaust();
+
+        // Every exhausted poll wakes the task once.
+        assert_eq!(poll(&receiver, &wakes), Poll::Pending);
+        assert_eq!(wakes.count(), 1);
+        assert_eq!(poll(&receiver, &wakes), Poll::Pending);
+        assert_eq!(wakes.count(), 2);
+
+        // Nothing was parked: an enqueue finds no waker to call.
+        assert_eq!(
+            sender.enqueue(Message::Fill(2)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(wakes.count(), 2);
+    }
+
+    #[test]
+    fn test_exhausted_poll_keeps_a_parked_waker_working() {
+        let (sender, receiver) = new(2);
+        let wakes = Arc::new(Wakes::default());
+
+        // Park on an empty mailbox, then run out of budget in a later poll.
+        {
+            let _scope = coop::Scope::enter();
+            assert_eq!(poll(&receiver, &wakes), Poll::Pending);
+            assert_eq!(wakes.count(), 0);
+        }
+
+        {
+            let _scope = coop::Scope::enter();
+            exhaust();
+            assert_eq!(poll(&receiver, &wakes), Poll::Pending);
+            assert_eq!(wakes.count(), 1);
+        }
+
+        // The earlier registration still delivers the sender's wake.
+        assert_eq!(
+            sender.enqueue(Message::Fill(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(wakes.count(), 2);
+
+        // The next poll receives the message.
+        let _scope = coop::Scope::enter();
+        assert_eq!(poll(&receiver, &wakes), Poll::Ready(Some(Message::Fill(1))));
+    }
+
+    #[test]
+    fn test_refill_makes_progress_through_overflow_without_loss() {
+        // Queue more than three budgets, most of them in overflow, and close the mailbox.
+        let budget = u64::from(coop::BUDGET);
+        let total = 3 * budget + 5;
+        let (sender, receiver) = new(4);
+        for value in 0..total {
+            assert!(sender.enqueue(Message::Keep(value)).accepted());
+        }
+        assert!(overflow_len(&receiver) > 0);
+        drop(sender);
+        let wakes = Arc::new(Wakes::default());
+
+        // Poll until the stream ends, one scope per task poll.
+        let mut next = 0;
+        let mut polls = 0;
+        loop {
+            let _scope = coop::Scope::enter();
+            polls += 1;
+            let mut delivered = 0;
+            let done = loop {
+                match poll(&receiver, &wakes) {
+                    Poll::Ready(Some(message)) => {
+                        assert_eq!(message, Message::Keep(next));
+                        next += 1;
+                        delivered += 1;
+                    }
+                    Poll::Ready(None) => break true,
+                    Poll::Pending => break false,
+                }
+            };
+            assert!(delivered <= budget);
+            if done {
+                break;
+            }
+        }
+
+        // Every message arrived in order, with one self-wake per full budget.
+        assert_eq!(next, total);
+        assert_eq!(polls, 4);
+        assert_eq!(wakes.count(), 3);
+    }
+
+    #[test]
+    fn test_empty_mailbox_does_not_charge() {
+        let budget = u64::from(coop::BUDGET);
+        let (sender, receiver) = new(budget as usize);
+        let wakes = Arc::new(Wakes::default());
+        let _scope = coop::Scope::enter();
+
+        // Poll the empty mailbox well past one budget.
+        for _ in 0..10 * budget {
+            assert_eq!(poll(&receiver, &wakes), Poll::Pending);
+        }
+
+        // Parking spent no budget and caused no self-wake.
+        assert!(!coop::exhausted());
+        assert_eq!(wakes.count(), 0);
+
+        // The whole budget is still there for the mailbox that has work.
+        for value in 0..budget {
+            assert_eq!(
+                sender.enqueue(Message::Fill(value)),
+                Unreliable::new(Feedback::Ok)
+            );
+        }
+        assert_eq!(wakes.count(), 1);
+
+        // Exactly one budget of messages is delivered.
+        for value in 0..budget {
+            assert_eq!(
+                poll(&receiver, &wakes),
+                Poll::Ready(Some(Message::Fill(value)))
+            );
+        }
+        assert!(coop::exhausted());
+    }
+
+    #[test]
+    fn test_exhaustion_keeps_buffered_messages_after_senders_drop() {
+        // Queue one ready and one overflow message, then drop the sender.
+        let (sender, receiver) = new(1);
+        assert_eq!(
+            sender.enqueue(Message::Fill(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Keep(2)),
+            Unreliable::new(Feedback::Backoff)
+        );
+        drop(sender);
+        let wakes = Arc::new(Wakes::default());
+
+        {
+            let _scope = coop::Scope::enter();
+            exhaust();
+
+            // Neither a message nor the end of the stream is delivered.
+            assert_eq!(poll(&receiver, &wakes), Poll::Pending);
+            assert_eq!(wakes.count(), 1);
+        }
+
+        // A fresh budget delivers both messages, then the end of the stream.
+        let _scope = coop::Scope::enter();
+        assert_eq!(poll(&receiver, &wakes), Poll::Ready(Some(Message::Fill(1))));
+        assert_eq!(poll(&receiver, &wakes), Poll::Ready(Some(Message::Keep(2))));
+        assert_eq!(poll(&receiver, &wakes), Poll::Ready(None));
+    }
+
+    #[test]
+    fn test_receiver_drop_drains_while_the_budget_is_spent() {
+        // Queue one ready and one overflow message, each holding a oneshot sender.
+        let (sender, receiver) = super::new(mocks::Metrics, NZUsize!(1));
+        let (ready_tx, mut ready_rx) = oneshot::channel();
+        let (overflow_tx, mut overflow_rx) = oneshot::channel();
+        assert_eq!(sender.enqueue(Ack { _sender: ready_tx }), Feedback::Ok);
+        assert_eq!(
+            sender.enqueue(Ack {
+                _sender: overflow_tx
+            }),
+            Feedback::Backoff
+        );
+
+        // Drop the receiver with the budget spent.
+        let _scope = coop::Scope::enter();
+        exhaust();
+        drop(receiver);
+
+        // Both messages were dropped and the mailbox is closed. The responders
+        // are checked with try_recv, which the spent budget does not defer.
+        assert!(sender.state.ready.pop().is_none());
+        assert!(matches!(
+            ready_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(matches!(
+            overflow_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+        let (late_tx, _late_rx) = oneshot::channel();
+        assert_eq!(sender.enqueue(Ack { _sender: late_tx }), Feedback::Closed);
+    }
+
+    #[test]
+    fn test_recv_loop_yields_once_per_budget() {
+        // Queue three budgets of messages and close the mailbox.
+        let budget = u64::from(coop::BUDGET);
+        let total = 3 * budget;
+        let (sender, mut receiver) = new(4);
+        for value in 0..total {
+            assert!(sender.enqueue(Message::Keep(value)).accepted());
+        }
+        drop(sender);
+
+        // Drive an ordinary receive loop to completion.
+        let mut future = pin!(async move {
+            let mut received = 0;
+            while let Some(message) = receiver.recv().await {
+                assert_eq!(message, Message::Keep(received));
+                received += 1;
+            }
+            received
+        });
+        let wakes = Arc::new(Wakes::default());
+        let waker = waker_ref(&wakes);
+        let mut cx = Context::from_waker(&waker);
+        let mut suspensions = 0;
+        let received = loop {
+            // An executor enters one scope per task poll.
+            let _scope = coop::Scope::enter();
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(received) => break received,
+                Poll::Pending => suspensions += 1,
+            }
+        };
+
+        // The loop yielded once per budget, each time with a self-wake.
+        assert_eq!(received, total);
+        assert_eq!(suspensions, 3);
+        assert_eq!(wakes.count(), 3);
+    }
+
+    /// On the tokio runtime, which installs no commonware budget, mailbox
+    /// receives spend tokio's own budget, so a fed receive loop still yields.
+    #[test]
+    fn test_tokio_budget_bounds_receives_on_the_tokio_runtime() {
+        use commonware_runtime::{Runner as _, Spawner as _};
+
+        let cfg = commonware_runtime::tokio::Config::new().with_worker_threads(1);
+        let storage = cfg.storage_directory().clone();
+        let per_poll = commonware_runtime::tokio::Runner::new(cfg).start(|context| async move {
+            // Queue more messages than tokio lets one poll take, and close the
+            // mailbox.
+            let total = 1024u64;
+            let (sender, receiver) = new(4);
+            for value in 0..total {
+                assert!(sender.enqueue(Message::Keep(value)).accepted());
+            }
+            drop(sender);
+
+            // Drain them from a task, counting the messages each poll receives.
+            context
+                .spawn(move |_| async move {
+                    let mut per_poll = Vec::new();
+                    futures::future::poll_fn(|cx| {
+                        per_poll.push(0u64);
+                        loop {
+                            match receiver.state.poll_recv(cx) {
+                                Poll::Ready(Some(_)) => *per_poll.last_mut().unwrap() += 1,
+                                Poll::Ready(None) => return Poll::Ready(()),
+                                Poll::Pending => return Poll::Pending,
+                            }
+                        }
+                    })
+                    .await;
+                    per_poll
+                })
+                .await
+                .unwrap()
+        });
+        let _ = std::fs::remove_dir_all(storage);
+
+        // Every message arrived, over several polls that each stayed within
+        // tokio's budget of 128.
+        assert_eq!(per_poll.iter().sum::<u64>(), 1024);
+        assert!(per_poll.len() > 1, "{per_poll:?}");
+        assert!(per_poll.iter().all(|&count| count <= 128), "{per_poll:?}");
+    }
+
+    /// Messages a mixed test keeps in mailbox overflow.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Mixed(u32);
+
+    impl Policy for Mixed {
+        type Overflow = VecDeque<Self>;
+
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+            overflow.push_back(message);
+        }
+    }
+
+    /// A resource other than a receive that takes part in the budget: it asks
+    /// before a send and charges the send it completes.
+    fn poll_charged_send(
+        sender: &mpsc::Sender<u32>,
+        value: u32,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), mpsc::error::TrySendError<u32>>> {
+        if coop::exhausted() {
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        let sent = sender.try_send(value);
+        if sent.is_ok() {
+            coop::charge();
+        }
+        Poll::Ready(sent)
+    }
+
+    /// The wrapped mpsc, ring and mailbox receivers and a charged send spend
+    /// one shared budget per poll, including messages retained in mailbox
+    /// overflow. Exhaustion preserves every next value.
+    #[test]
+    fn test_mixed_resources_share_one_budget() {
+        // Queue rounds plus two values on every resource. The mailbox keeps
+        // all but the first in overflow.
+        let rounds = coop::BUDGET / 4;
+        let capacity = usize::try_from(rounds + 2).unwrap();
+        let (sender, mut receiver) = mpsc::channel::<u32>(capacity);
+        let (ring_sender, mut ring_receiver) = ring::channel::<u32>(NZUsize!(capacity));
+        let (mailbox_sender, mut mailbox_receiver) = super::new(mocks::Metrics, NZUsize!(1));
+        let (charged_sender, mut charged_receiver) = mpsc::channel::<u32>(capacity);
+        let (full_sender, _full_receiver) = mpsc::channel::<u32>(1);
+        full_sender.try_send(7).unwrap();
+        for value in 0..rounds + 2 {
+            sender.try_send(value).unwrap();
+            assert!(ring_sender.send_lossy(value));
+            assert_eq!(
+                mailbox_sender.enqueue(Mixed(value)),
+                if value == 0 {
+                    Feedback::Ok
+                } else {
+                    Feedback::Backoff
+                }
+            );
+        }
+
+        // Run everything inside one task poll.
+        let wakes = Arc::new(Wakes::default());
+        let waker = waker_ref(&wakes);
+        let mut cx = Context::from_waker(&waker);
+        let _scope = coop::Scope::enter();
+        // A send that fails charges nothing.
+        assert!(matches!(
+            poll_charged_send(&full_sender, 9, &mut cx),
+            Poll::Ready(Err(mpsc::error::TrySendError::Full(9)))
+        ));
+
+        // Four units per round spend the whole budget without a wake.
+        for value in 0..rounds {
+            assert_eq!(
+                pin!(receiver.recv()).poll(&mut cx),
+                Poll::Ready(Some(value))
+            );
+            assert_eq!(
+                pin!(ring_receiver.recv()).poll(&mut cx),
+                Poll::Ready(Some(value))
+            );
+            assert_eq!(
+                pin!(mailbox_receiver.recv()).poll(&mut cx),
+                Poll::Ready(Some(Mixed(value)))
+            );
+            assert!(matches!(
+                poll_charged_send(&charged_sender, value, &mut cx),
+                Poll::Ready(Ok(()))
+            ));
+        }
+        assert!(coop::exhausted());
+        assert_eq!(wakes.count(), 0);
+        assert_eq!(receiver.len(), 2);
+
+        // Every resource now wakes the task and takes nothing.
+        let capacity_left = charged_sender.capacity();
+        for _ in 0..2 {
+            assert!(pin!(receiver.recv()).poll(&mut cx).is_pending());
+            assert!(pin!(ring_receiver.recv()).poll(&mut cx).is_pending());
+            assert!(pin!(mailbox_receiver.recv()).poll(&mut cx).is_pending());
+            assert!(poll_charged_send(&charged_sender, rounds, &mut cx).is_pending());
+        }
+        assert_eq!(wakes.count(), 8);
+        assert_eq!(receiver.len(), 2);
+        assert_eq!(charged_sender.capacity(), capacity_left);
+
+        // A refill lets every resource deliver its remaining values.
+        coop::refill();
+        for value in rounds..rounds + 2 {
+            assert_eq!(
+                pin!(receiver.recv()).poll(&mut cx),
+                Poll::Ready(Some(value))
+            );
+            assert_eq!(
+                pin!(ring_receiver.recv()).poll(&mut cx),
+                Poll::Ready(Some(value))
+            );
+            assert_eq!(
+                pin!(mailbox_receiver.recv()).poll(&mut cx),
+                Poll::Ready(Some(Mixed(value)))
+            );
+        }
+        assert!(matches!(
+            poll_charged_send(&charged_sender, rounds, &mut cx),
+            Poll::Ready(Ok(()))
+        ));
+
+        // The charged sends arrived in order.
+        for value in 0..=rounds {
+            assert_eq!(charged_receiver.try_recv(), Ok(value));
+        }
+        assert!(charged_receiver.try_recv().is_err());
+
+        // Six receives and one send spent seven fresh units.
+        for _ in 7..coop::BUDGET {
+            assert!(!coop::exhausted());
+            coop::charge();
+        }
+        assert!(coop::exhausted());
+        assert_eq!(wakes.count(), 8);
     }
 }
 

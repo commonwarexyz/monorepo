@@ -17,6 +17,7 @@ workspace = true
 cfg-if.workspace = true
 commonware-macros.workspace = true
 commonware-runtime.workspace = true
+commonware-utils = { workspace = true, features = ["std"] }
 crossbeam-queue.workspace = true
 futures-util.workspace = true
 loom = { workspace = true, features = ["futures"], optional = true }
@@ -24,7 +25,6 @@ parking_lot.workspace = true
 
 [dev-dependencies]
 commonware-allocator = { workspace = true, features = ["mimalloc"] }
-commonware-utils = { workspace = true, features = ["std"] }
 criterion.workspace = true
 futures.workspace = true
 

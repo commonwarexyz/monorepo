@@ -1,0 +1,92 @@
+error: `tokio::select!` bypasses the cooperative budget guard, so under a spent budget a branch that is ready without the budget can overtake a budgeted receive
+  --> $DIR/main.rs:48:5
+   |
+LL | /     tokio::select! {
+LL | |         biased;
+LL | |         _ = ready(1) => (),
+LL | |         _ = ready(2) => (),
+LL | |     }
+   | |_____^
+   |
+   = help: use `commonware_macros::select!` or `select_loop!`
+   = note: `#[deny(direct_tokio_select)]` on by default
+
+error: `tokio::select!` bypasses the cooperative budget guard, so under a spent budget a branch that is ready without the budget can overtake a budgeted receive
+  --> $DIR/main.rs:55:5
+   |
+LL | /     commonware_macros::__reexport::tokio::select! {
+LL | |         _ = ready(1) => (),
+LL | |     }
+   | |_____^
+   |
+   = help: use `commonware_macros::select!` or `select_loop!`
+
+error: `tokio::select!` bypasses the cooperative budget guard, so under a spent budget a branch that is ready without the budget can overtake a budgeted receive
+  --> $DIR/main.rs:58:5
+   |
+LL | /     reexport::select! {
+LL | |         _ = ready(1) => (),
+LL | |     }
+   | |_____^
+   |
+   = help: use `commonware_macros::select!` or `select_loop!`
+
+error: `tokio::select!` bypasses the cooperative budget guard, so under a spent budget a branch that is ready without the budget can overtake a budgeted receive
+  --> $DIR/main.rs:63:9
+   |
+LL | /         race! {
+LL | |             _ = ready(1) => (),
+LL | |         }
+   | |_________^
+   |
+   = help: use `commonware_macros::select!` or `select_loop!`
+
+error: `tokio::select!` bypasses the cooperative budget guard, so under a spent budget a branch that is ready without the budget can overtake a budgeted receive
+  --> $DIR/main.rs:24:9
+   |
+LL | /         tokio::select! {
+LL | |             _ = $future => (),
+LL | |         }
+   | |_________^
+...
+LL |       local_select!(ready(1));
+   |       ----------------------- in this macro invocation
+   |
+   = help: use `commonware_macros::select!` or `select_loop!`
+   = note: this error originates in the macro `local_select` (in Nightly b$DIRlds, run with -Z macro-backtrace for more info)
+
+error: `tokio::select!` bypasses the cooperative budget guard, so under a spent budget a branch that is ready without the budget can overtake a budgeted receive
+  --> $DIR/main.rs:24:9
+   |
+LL | /         tokio::select! {
+LL | |             _ = $future => (),
+LL | |         }
+   | |_________^
+...
+LL |       local_select!(ready(2));
+   |       ----------------------- in this macro invocation
+   |
+   = help: use `commonware_macros::select!` or `select_loop!`
+   = note: this error originates in the macro `local_select` (in Nightly b$DIRlds, run with -Z macro-backtrace for more info)
+
+error: `tokio::select!` bypasses the cooperative budget guard, so under a spent budget a branch that is ready without the budget can overtake a budgeted receive
+  --> $DIR/main.rs:73:5
+   |
+LL |     external::race!(ready(1));
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use `commonware_macros::select!` or `select_loop!`
+
+error: `tokio::select!` bypasses the cooperative budget guard, so under a spent budget a branch that is ready without the budget can overtake a budgeted receive
+  --> $DIR/main.rs:77:25
+   |
+LL |           _ = ready(1) => tokio::select! {
+   |  _________________________^
+LL | |             _ = ready(2) => (),
+LL | |         },
+   | |_________^
+   |
+   = help: use `commonware_macros::select!` or `select_loop!`
+
+error: aborting due to 8 previous errors
+

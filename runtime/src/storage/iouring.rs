@@ -86,7 +86,7 @@ use once_cell::sync::OnceCell;
 use std::{
     alloc,
     fs::{self, File},
-    future::Future,
+    future::{Future, poll_fn},
     io::{Error as IoError, ErrorKind},
     ops::{Deref, RangeInclusive},
     os::fd::{AsRawFd as _, RawFd},
@@ -887,9 +887,11 @@ impl crate::Blob for Blob {
             Err(error) => return Handle::ready(Err(error)),
         };
         let (partition, name) = self.shared.key.clone();
-        let receiver = operation::start_sync(request);
+        let mut receiver = operation::start_sync(request);
         Handle::from_future(async move {
-            match receiver.await {
+            // Like a join, waiting for the sync spends no budget: it only
+            // carries the result of work the worker runs.
+            match poll_fn(|cx| receiver.poll_unbudgeted(cx)).await {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(Error::Io(e))) => Err(Error::BlobSyncFailed(partition, hex(&name), e)),
                 Ok(Err(err)) => Err(err),
@@ -2644,6 +2646,40 @@ mod tests {
             assert!(!storage.pending.owes("partition", b"dirty"));
             assert_eq!(storage.pending.completions(), 0);
 
+            drop(storage);
+            let _ = std::fs::remove_dir_all(&storage_directory);
+        });
+    }
+
+    /// Waiting for a started sync only carries the worker's result, so the
+    /// handle completes under a spent budget.
+    #[test]
+    fn test_start_sync_handle_spends_no_budget() {
+        iouring::Runner::default().start(|context| async move {
+            let (storage, storage_directory) = create_test_storage();
+            let (blob, _) = storage.open("partition", b"budget").await.unwrap();
+            blob.resize(16).await.unwrap();
+            let mut handle = pin!(blob.start_sync().await);
+
+            // Poll the handle under a spent budget until the sync completes.
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            let mut polled = Poll::Pending;
+            for _ in 0..1000 {
+                let scope = commonware_utils::coop::Scope::enter();
+                for _ in 0..commonware_utils::coop::BUDGET {
+                    commonware_utils::coop::charge();
+                }
+                polled = handle.as_mut().poll(&mut cx);
+                drop(scope);
+                if polled.is_ready() {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            // It completed.
+            assert!(matches!(polled, Poll::Ready(Ok(()))));
+            drop(blob);
             drop(storage);
             let _ = std::fs::remove_dir_all(&storage_directory);
         });

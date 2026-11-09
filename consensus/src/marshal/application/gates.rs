@@ -668,7 +668,7 @@ mod tests {
             // The second stage registers while the claimed proposal is persisted and then
             // stays pending, so only the first stage can resolve a gate.
             let mut restage = Box::pin(gates.stage(round(1), digest, 7, |_| {}, "test"));
-            let gate = gates
+            let mut gate = gates
                 .claim(round(1), digest, |block, ack| {
                     assert_eq!(block, 7);
                     assert!((&mut restage).now_or_never().is_none());
@@ -680,9 +680,8 @@ mod tests {
             // already hold its outcome.
             stage.await.expect("first stage completes");
             assert_eq!(
-                gate.now_or_never()
-                    .map(|outcome| outcome.expect("gate resolved")),
-                Some(GateOutcome::Ready(true)),
+                gate.try_recv(),
+                Ok(GateOutcome::Ready(true)),
                 "the claimed gate must belong to the persisted proposal",
             );
         });

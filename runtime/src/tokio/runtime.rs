@@ -23,7 +23,7 @@ use crate::{
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::{Rayon, rayon::ThreadPoolBuilder};
-use commonware_utils::{sync::Mutex, sys_rng};
+use commonware_utils::{coop, sync::Mutex, sys_rng};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 use std::{
@@ -394,6 +394,12 @@ impl crate::Runner for Runner {
         F: FnOnce(Self::Context) -> Fut,
         Fut: Future,
     {
+        // The root runs on this thread, which may be inside another executor's poll. Hold the
+        // thread's cooperative budget for the whole run, cleanup and unwinding included, so the
+        // root's receives never find a budget that nothing here refills, and the caller gets its
+        // own back afterwards.
+        let _coop = coop::Ownership::take();
+
         // Create a new registry
         let mut registry = Registry::new();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
@@ -824,7 +830,10 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_parallel::Strategy as _;
-    use commonware_utils::{NZUsize, channel::oneshot};
+    use commonware_utils::{
+        NZUsize,
+        channel::{mpsc, oneshot},
+    };
     use rstest::rstest;
     use std::{
         self,
@@ -1021,6 +1030,57 @@ mod tests {
             ready_branch_ran,
             "the sibling branch must run while the job is in flight"
         );
+    }
+
+    /// A runner started from inside a poll that has spent its cooperative budget runs its root
+    /// without that budget, and the caller finds its spent budget again afterwards.
+    #[test]
+    fn test_runner_does_not_inherit_the_callers_budget() {
+        // A caller poll that has spent its budget.
+        let outer = coop::Scope::enter();
+        for _ in 0..coop::BUDGET {
+            coop::charge();
+        }
+        assert!(coop::exhausted());
+
+        // The root drains more values than one budget allows. A root that inherited the spent
+        // budget would make no progress, so give up after a bounded number of polls.
+        let total = 3 * coop::BUDGET as usize;
+        let cfg = Config::new().with_worker_threads(1);
+        let storage_directory = cfg.storage_directory().clone();
+        let (received, active) = Runner::new(cfg).start(|_| async move {
+            let active = coop::active();
+            let (sender, mut receiver) = mpsc::unbounded_channel();
+            for value in 0..total {
+                sender.send(value).unwrap();
+            }
+            drop(sender);
+            let mut received = 0;
+            let mut polls = 0;
+            poll_fn(|cx| {
+                polls += 1;
+                while let Poll::Ready(Some(_)) = receiver.poll_recv(cx) {
+                    received += 1;
+                }
+                if received == total || polls == 16 {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+            (received, active)
+        });
+        let _ = std::fs::remove_dir_all(storage_directory);
+
+        // The root ran unconstrained and received everything.
+        assert!(!active, "the root must not run under the caller's budget");
+        assert_eq!(received, total);
+
+        // The caller's spent budget is back, and leaving its scope clears it.
+        assert!(coop::exhausted());
+        drop(outer);
+        assert!(!coop::active());
     }
 
     #[test]

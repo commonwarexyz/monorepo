@@ -882,6 +882,10 @@ mod tests {
                 }
             }
 
+            // Let the muxer route every queued frame before either subchannel is read. It may
+            // take several polls, one per cooperative budget of frames.
+            context.sleep(Duration::from_millis(10)).await;
+
             // Each subchannel retains exactly its capacity.
             for rx in [&mut rx1, &mut rx2] {
                 expect_n_messages(rx, CAPACITY).await;

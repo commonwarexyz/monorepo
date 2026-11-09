@@ -79,8 +79,9 @@ mod tests {
         Clock, Error, IoBuf, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
         telemetry::metrics::count_running_tasks,
     };
-    use commonware_utils::{NZU32, NZUsize, Probability, probability};
-    use futures::FutureExt as _;
+    use commonware_utils::{
+        NZU32, NZUsize, Probability, channel::mpsc::error::TryRecvError, probability,
+    };
     use std::{
         collections::{BTreeMap, VecDeque},
         sync::{
@@ -1147,7 +1148,7 @@ mod tests {
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
             for receiver in [&mut first_receiver, &mut second_receiver] {
                 assert!(
-                    receiver.recv().now_or_never().is_none(),
+                    matches!(receiver.try_recv(), Err(TryRecvError::Empty)),
                     "recipient must receive the broadcast once"
                 );
             }
