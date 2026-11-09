@@ -98,6 +98,51 @@ where
     }
 }
 
+/// A sender's signatures over the two states of a [Request], each over its state's encoding in
+/// [Namespace::state].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Signatures<P: PublicKey> {
+    /// Over the state of the request's epoch.
+    pub current: P::Signature,
+    /// Over the state of the next epoch.
+    pub next: P::Signature,
+}
+
+impl<P: PublicKey> Write for Signatures<P> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.current.write(buf);
+        self.next.write(buf);
+    }
+}
+
+impl<P: PublicKey> FixedSize for Signatures<P> {
+    const SIZE: usize = 2 * P::Signature::SIZE;
+}
+
+impl<P: PublicKey> Read for Signatures<P> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(Self {
+            current: P::Signature::read(buf)?,
+            next: P::Signature::read(buf)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<P: PublicKey> arbitrary::Arbitrary<'_> for Signatures<P>
+where
+    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            current: u.arbitrary()?,
+            next: u.arbitrary()?,
+        })
+    }
+}
+
 /// A sender's request to pay a batch of receivers in its epoch, or in the next if its epoch closes
 /// first.
 ///
@@ -107,10 +152,10 @@ where
 /// sender's row in the close of the request's epoch decides which of the two can settle.
 ///
 /// ```text
-///                     close(epoch - 1)     close(epoch)     close(epoch + 1)  signed by
+///                     close(epoch - 1)     close(epoch)     close(epoch + 1)  signatures
 ///
-///   state(epoch)          previous <-------- payments                         signature
-///   state(epoch + 1)                           base <--------- root(batch)    next
+///   state(epoch)          previous <-------- payments                         current
+///   state(epoch + 1)                         latest <--------- root(batch)    next
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request<P: PublicKey, D: Digest, A: Amount> {
@@ -120,17 +165,15 @@ pub struct Request<P: PublicKey, D: Digest, A: Amount> {
     pub account: P,
     /// Amount paid to each receiver.
     pub batch: Amounts<P, A>,
-    /// Root of the sender's payment map in `epoch` with the batch added.
-    pub payments: D,
     /// Root of the sender's payment map in the epoch before `epoch`.
     pub previous: D,
-    /// Sender's signature over its state in `epoch`.
-    pub signature: P::Signature,
-    /// Root of the sender's payment map in `epoch` without the batch.
-    pub base: D,
-    /// Sender's signature over its state in the next epoch. That state pays only the batch on top
-    /// of `base`.
-    pub next: P::Signature,
+    /// Root of the sender's latest countersigned payment map in `epoch`.
+    pub latest: D,
+    /// Root of the sender's payment map in `epoch` with the batch added.
+    pub payments: D,
+    /// Sender's signatures over its states. The state in `epoch` pays `payments` on top of
+    /// `previous`, and the state in the next epoch pays only the batch on top of `latest`.
+    pub signatures: Signatures<P>,
 }
 
 impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
@@ -159,7 +202,7 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
         let extended = payments.combine(&batch)?;
         Ok(States {
             batch,
-            state: State {
+            current: State {
                 epoch,
                 account,
                 payments: extended.root::<H>(),
@@ -181,9 +224,9 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
         epoch: Epoch,
     ) -> Result<Verified<'_, P, D, A>, Error> {
         let (payments, previous, signature) = if epoch == self.epoch {
-            (self.payments, self.previous, &self.signature)
+            (self.payments, self.previous, &self.signatures.current)
         } else if self.epoch.checked_add(1) == Some(epoch) {
-            (self.batch.root::<H>(), self.base, &self.next)
+            (self.batch.root::<H>(), self.latest, &self.signatures.next)
         } else {
             return Err(Error::WrongEpoch {
                 expected: epoch,
@@ -215,17 +258,16 @@ impl<P: PublicKey, D: Digest, A: Amount> Write for Request<P, D, A> {
         self.epoch.write(buf);
         self.account.write(buf);
         self.batch.write(buf);
-        self.payments.write(buf);
         self.previous.write(buf);
-        self.signature.write(buf);
-        self.base.write(buf);
-        self.next.write(buf);
+        self.latest.write(buf);
+        self.payments.write(buf);
+        self.signatures.write(buf);
     }
 }
 
 impl<P: PublicKey, D: Digest, A: Amount> EncodeSize for Request<P, D, A> {
     fn encode_size(&self) -> usize {
-        Epoch::SIZE + P::SIZE + self.batch.encode_size() + 3 * D::SIZE + 2 * P::Signature::SIZE
+        Epoch::SIZE + P::SIZE + self.batch.encode_size() + 3 * D::SIZE + Signatures::<P>::SIZE
     }
 }
 
@@ -238,11 +280,10 @@ impl<P: PublicKey, D: Digest, A: Amount> Read for Request<P, D, A> {
             epoch: Epoch::read(buf)?,
             account: P::read(buf)?,
             batch: Amounts::read_cfg(buf, &RangeCfg::new(1..=*receivers))?,
-            payments: D::read(buf)?,
             previous: D::read(buf)?,
-            signature: P::Signature::read(buf)?,
-            base: D::read(buf)?,
-            next: P::Signature::read(buf)?,
+            latest: D::read(buf)?,
+            payments: D::read(buf)?,
+            signatures: Signatures::read(buf)?,
         })
     }
 }
@@ -261,11 +302,10 @@ where
             epoch: u.arbitrary()?,
             account: u.arbitrary()?,
             batch,
-            payments: u.arbitrary()?,
             previous: u.arbitrary()?,
-            signature: u.arbitrary()?,
-            base: u.arbitrary()?,
-            next: u.arbitrary()?,
+            latest: u.arbitrary()?,
+            payments: u.arbitrary()?,
+            signatures: u.arbitrary()?,
         })
     }
 }
@@ -277,27 +317,25 @@ pub struct States<P: PublicKey, D: Digest, A: Amount> {
     /// The batch the request pays.
     pub batch: Amounts<P, A>,
     /// The state for the request's epoch.
-    pub state: State<P, D>,
-    /// The payment map `state` commits to, the sender's map with the batch added.
+    pub current: State<P, D>,
+    /// The payment map `current` commits to, the sender's map with the batch added.
     pub payments: Amounts<P, A>,
     /// The state for the next epoch. It commits to `batch` alone.
     pub next: State<P, D>,
 }
 
 impl<P: PublicKey, D: Digest, A: Amount> States<P, D, A> {
-    /// Returns the request carrying these states and their claimed roots, with `signature` over
-    /// `self.state` and `next` over `self.next`. Each signature covers its state's encoding in
-    /// [Namespace::state].
-    pub fn request(&self, signature: P::Signature, next: P::Signature) -> Request<P, D, A> {
+    /// Returns the request carrying these states, their claimed roots, and `signatures` over
+    /// them. Each signature covers its state's encoding in [Namespace::state].
+    pub fn request(&self, signatures: Signatures<P>) -> Request<P, D, A> {
         Request {
-            epoch: self.state.epoch,
-            account: self.state.account.clone(),
+            epoch: self.current.epoch,
+            account: self.current.account.clone(),
             batch: self.batch.clone(),
-            payments: self.state.payments,
-            previous: self.state.previous,
-            signature,
-            base: self.next.previous,
-            next,
+            previous: self.current.previous,
+            latest: self.next.previous,
+            payments: self.current.payments,
+            signatures,
         }
     }
 
@@ -307,10 +345,10 @@ impl<P: PublicKey, D: Digest, A: Amount> States<P, D, A> {
     where
         S: Signer<PublicKey = P, Signature = P::Signature>,
     {
-        self.request(
-            self.state.sign(signer, namespace),
-            self.next.sign(signer, namespace),
-        )
+        self.request(Signatures {
+            current: self.current.sign(signer, namespace),
+            next: self.next.sign(signer, namespace),
+        })
     }
 }
 
@@ -633,9 +671,9 @@ mod tests {
         let namespace = namespace();
         let states = states(&[(2, 4), (3, 5)], &Amounts::empty(), empty_root());
         Receipt::<_, PublicKey, _, _>::issue::<Sha256>(
-            &states.state,
-            &states.state.sign(&user(0), &namespace),
-            &states.state.acknowledge(&operator_key(), &namespace),
+            &states.current,
+            &states.current.sign(&user(0), &namespace),
+            &states.current.acknowledge(&operator_key(), &namespace),
             &states.payments,
             [account(3)],
         )
@@ -654,7 +692,7 @@ mod tests {
             let states = states(&[(1, 5), (3, 6)], &payments, previous);
             let signed = states.sign(&user(0), &namespace);
             assert_eq!(states.payments, payments.combine(&states.batch).unwrap());
-            assert_eq!(states.state.payments, states.payments.root::<Sha256>());
+            assert_eq!(states.current.payments, states.payments.root::<Sha256>());
             assert_eq!(states.next.payments, states.batch.root::<Sha256>());
             assert_eq!(states.next.previous, payments.root::<Sha256>());
 
@@ -664,7 +702,7 @@ mod tests {
             let request = TestRequest::decode_cfg(encoded.clone(), &2).unwrap();
             assert_eq!(request, signed);
             assert_ne!(request.payments, request.previous);
-            assert_ne!(request.payments, request.base);
+            assert_ne!(request.payments, request.latest);
             assert!(TestRequest::decode_cfg(encoded.clone(), &1).is_err());
             assert!(TestRequest::decode_cfg(encoded.slice(..encoded.len() - 1), &2).is_err());
 
@@ -686,9 +724,9 @@ mod tests {
             assert_eq!(
                 admission,
                 Admission::New {
-                    state: states.state.clone(),
+                    state: states.current.clone(),
                     payments: states.payments.clone(),
-                    signature: request.signature.clone(),
+                    signature: request.signatures.current.clone(),
                 }
             );
 
@@ -698,9 +736,9 @@ mod tests {
             let admission = retried
                 .verify::<Sha256>(&namespace, 2)
                 .unwrap()
-                .admit::<Sha256>(Some((&states.state, &states.payments)), &previous)
+                .admit::<Sha256>(Some((&states.current, &states.payments)), &previous)
                 .unwrap();
-            assert_eq!(admission, Admission::Retry(states.state.clone()));
+            assert_eq!(admission, Admission::Retry(states.current.clone()));
 
             // In the next epoch, the request pays only its batch on top of the map the close of
             // its epoch settles. The admission carries the signature over the next state.
@@ -709,13 +747,13 @@ mod tests {
                 .unwrap()
                 .admit::<Sha256>(None, &payments.root::<Sha256>())
                 .unwrap();
-            assert_ne!(request.next, request.signature);
+            assert_ne!(request.signatures.next, request.signatures.current);
             assert_eq!(
                 admission,
                 Admission::New {
                     state: states.next.clone(),
                     payments: states.batch.clone(),
-                    signature: request.next.clone(),
+                    signature: request.signatures.next.clone(),
                 }
             );
 
@@ -725,7 +763,7 @@ mod tests {
                 request
                     .verify::<Sha256>(&namespace, 3)
                     .unwrap()
-                    .admit::<Sha256>(None, &states.state.payments),
+                    .admit::<Sha256>(None, &states.current.payments),
                 Err(Error::InvalidSignature)
             ));
         }
@@ -738,10 +776,10 @@ mod tests {
         let namespace = namespace();
         let signer = user(0);
         let states = states(&[(1, 5)], &amounts(&[(2, 1)]), empty_root());
-        let signature = signer.sign(&namespace.state, &states.state.encode());
+        let current = signer.sign(&namespace.state, &states.current.encode());
         let next = signer.sign(&namespace.state, &states.next.encode());
         assert_eq!(
-            states.request(signature, next),
+            states.request(Signatures { current, next }),
             states.sign(&signer, &namespace)
         );
     }
@@ -840,7 +878,7 @@ mod tests {
             (
                 3,
                 TestRequest {
-                    base: other,
+                    latest: other,
                     ..request.clone()
                 },
             ),
@@ -927,11 +965,11 @@ mod tests {
     fn test_issue_refuses_maps_that_do_not_commit_to_the_state() {
         let namespace = namespace();
         let states = states(&[(2, 4), (3, 5)], &Amounts::empty(), empty_root());
-        let signature = states.state.sign(&user(0), &namespace);
-        let acknowledgement = states.state.acknowledge(&operator_key(), &namespace);
+        let signature = states.current.sign(&user(0), &namespace);
+        let acknowledgement = states.current.acknowledge(&operator_key(), &namespace);
         let issue = |payments: &Amounts<PublicKey, u64>, receiver| {
             Receipt::<_, PublicKey, _, _>::issue::<Sha256>(
-                &states.state,
+                &states.current,
                 &signature,
                 &acknowledgement,
                 payments,
@@ -1104,6 +1142,7 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<State<PublicKey, Digest>>,
+            CodecConformance<Signatures<PublicKey>>,
             CodecConformance<Request<PublicKey, Digest, u64>>,
             CodecConformance<Receipt<PublicKey, PublicKey, Digest, u64>>,
             CodecConformance<Challenge<PublicKey, PublicKey, Digest, u64>>,

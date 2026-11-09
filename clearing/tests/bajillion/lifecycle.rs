@@ -216,7 +216,7 @@ fn test_late_challenge_halts_after_later_closes() {
         let carol_row = Row {
             account: account(3),
             payments: paid.batch.clone(),
-            signature: paid.signature.clone(),
+            signature: paid.signatures.current.clone(),
         };
         let queue = deployment.ledger.queue();
         let omitting = forge(&operator_key(), &queue, vec![carol_row], Vec::new(), 0, 0);
@@ -292,7 +292,7 @@ fn test_partial_credit_halts_ledger() {
         let earlier = Row {
             account: account(0),
             payments: amounts(&[(1, 5)]),
-            signature: first.signature,
+            signature: first.signatures.current,
         };
         let queue = deployment.ledger.queue();
         let underpaying = forge(&operator_key(), &queue, vec![earlier], Vec::new(), 0, 0);

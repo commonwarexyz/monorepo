@@ -598,7 +598,7 @@ impl Workload {
                 epoch,
                 "a state after the request's epoch must be the next one"
             );
-            (request.batch.root::<Sha256>(), request.base)
+            (request.batch.root::<Sha256>(), request.latest)
         }
     }
 
@@ -638,7 +638,7 @@ impl Workload {
         let (payments, previous) = if request.epoch == epoch {
             (request.payments, request.previous)
         } else if request.epoch + 1 == epoch {
-            (request.batch.root::<Sha256>(), request.base)
+            (request.batch.root::<Sha256>(), request.latest)
         } else {
             return Verdict::WrongEpoch;
         };
@@ -1114,7 +1114,7 @@ impl Model for Workload {
                     || request.batch != batch
                     || request.payments != Amounts::combine(&map, &batch).unwrap().root::<Sha256>()
                     || request.previous != own
-                    || request.base != map.root::<Sha256>()
+                    || request.latest != map.root::<Sha256>()
                 {
                     world.fail(format!(
                         "send: the request of user {user} is not the one asked for"

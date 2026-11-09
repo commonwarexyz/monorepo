@@ -83,7 +83,7 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Hash for Persisted<P, O, 
         if let Some((request, states)) = pending {
             let States {
                 batch,
-                state: proposed,
+                current: proposed,
                 payments,
                 next,
             } = states;
@@ -208,8 +208,12 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
                 }
             };
         vec![
-            countersigned(&states.state, &request.signature, &states.payments),
-            countersigned(&states.next, &request.next, &states.batch),
+            countersigned(
+                &states.current,
+                &request.signatures.current,
+                &states.payments,
+            ),
+            countersigned(&states.next, &request.signatures.next, &states.batch),
         ]
     }
 

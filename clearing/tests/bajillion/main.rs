@@ -19,8 +19,8 @@ mod payments;
 mod validator;
 
 use commonware_clearing::bajillion::{
-    Amount, Amounts, Close, Deposit, Epoch, Limits, Namespace, Proposal, Queue, Row, State,
-    Summary, Withdrawal,
+    Amount, Amounts, Close, Deposit, Epoch, Limits, Namespace, Proposal, Queue, Row, Signatures,
+    State, Summary, Withdrawal,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{

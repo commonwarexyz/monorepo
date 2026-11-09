@@ -375,9 +375,9 @@ fn test_port_vector() {
         )
         .unwrap();
         let receipt = Receipt::<_, PublicKey, _, _>::issue::<Sha256>(
-            &states.state,
-            &states.state.sign(&user(0), &namespace),
-            &states.state.acknowledge(&operator_key(), &namespace),
+            &states.current,
+            &states.current.sign(&user(0), &namespace),
+            &states.current.acknowledge(&operator_key(), &namespace),
             &states.payments,
             [account(1)],
         )

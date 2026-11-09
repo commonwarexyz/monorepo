@@ -40,7 +40,11 @@ hash = "c2527b5097ee91124f705f4f799e37d27d5a6933f96df3a139f76ed59333ff00"
 
 ["commonware_clearing::bajillion::payment::tests::conformance::CodecConformance<Request<PublicKey,Digest,u64>>"]
 n_cases = 65536
-hash = "b536c3f9dd0c9c63728ebb865ce478ac0adfc082e25ce7056a478b2246e5b984"
+hash = "10c105b5ebad316ae5614256dc40863daa0c92a8e0d3f3c8dc378944ba584eb2"
+
+["commonware_clearing::bajillion::payment::tests::conformance::CodecConformance<Signatures<PublicKey>>"]
+n_cases = 65536
+hash = "e5523727f2589ebdf34d8c2e48c2c42ecf9b2456170ce887592bd3f5b3c9fda2"
 
 ["commonware_clearing::bajillion::payment::tests::conformance::CodecConformance<State<PublicKey,Digest>>"]
 n_cases = 65536

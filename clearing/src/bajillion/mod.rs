@@ -717,7 +717,7 @@ pub use error::Error;
 pub use lookup::Lookup;
 pub use matrix::{Matrix, Opening};
 pub use namespace::Namespace;
-pub use payment::{Admission, Challenge, Receipt, Request, State, States, Verified};
+pub use payment::{Admission, Challenge, Receipt, Request, Signatures, State, States, Verified};
 pub use settlement::Flow;
 pub use summary::{Payouts, Processed, Summary};
 pub use validator::{

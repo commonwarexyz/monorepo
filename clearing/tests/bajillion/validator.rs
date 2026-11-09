@@ -71,7 +71,7 @@ fn test_request_settles_at_most_once() {
         let next = Row {
             account: account(0),
             payments: amounts(&[(1, 10)]),
-            signature: request.next.clone(),
+            signature: request.signatures.next.clone(),
         };
         let queue = deployment.ledger.queue();
         let close = forge(

@@ -177,14 +177,16 @@ fn test_operator_refuses_requests_that_pay_no_receiver() {
         ..state.clone()
     };
     let request = Request {
-        account: account(1),
         epoch: 2,
+        account: account(1),
         batch: empty,
-        payments: state.payments,
         previous: state.previous,
-        signature: user(1).sign(&namespace().state, &state.encode()),
-        base: next.previous,
-        next: user(1).sign(&namespace().state, &next.encode()),
+        latest: next.previous,
+        payments: state.payments,
+        signatures: Signatures {
+            current: user(1).sign(&namespace().state, &state.encode()),
+            next: user(1).sign(&namespace().state, &next.encode()),
+        },
     };
     assert!(matches!(
         operator.accept(&request),
