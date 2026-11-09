@@ -1241,36 +1241,36 @@ pub(crate) mod tests {
         outputs
     }
 
-    /// Runs [`evaluate`] in every representation, returning the positional ones' outputs.
-    struct Evaluate<'a>(&'a [Inputs]);
-
-    impl<S: Simd> Operation<S> for Evaluate<'_> {
-        type Output = [Vec<[[u8; BYTES]; OUTPUTS]>; 2];
-
-        fn portable(self, simd: S) -> Self::Output {
-            simd.execute(|simd: S| {
-                [
-                    evaluate::<S, Unsat49<S>>(simd, self.0),
-                    evaluate::<S, Unsat28<S>>(simd, self.0),
-                ]
-            })
-        }
-
-        // Residues require x86v4c and must match the other representations.
-        fn x86_v4c(self, simd: S) -> Self::Output
-        where
-            S: X86V4C,
-        {
-            let inputs = self.0;
-            let outputs = self.portable(simd);
-            let residues = simd.execute(|simd: S| evaluate::<S, Rns<S>>(simd, inputs));
-            assert!(residues == outputs[0], "residues differ");
-            outputs
-        }
-    }
-
     #[test]
     fn operations_match_blst() {
+        /// Runs [`evaluate`] in every representation, returning the positional ones' outputs.
+        struct Evaluate<'a>(&'a [Inputs]);
+
+        impl<S: Simd> Operation<S> for Evaluate<'_> {
+            type Output = [Vec<[[u8; BYTES]; OUTPUTS]>; 2];
+
+            fn portable(self, simd: S) -> Self::Output {
+                simd.execute(|simd: S| {
+                    [
+                        evaluate::<S, Unsat49<S>>(simd, self.0),
+                        evaluate::<S, Unsat28<S>>(simd, self.0),
+                    ]
+                })
+            }
+
+            // Residues require x86v4c and must match the other representations.
+            fn x86_v4c(self, simd: S) -> Self::Output
+            where
+                S: X86V4C,
+            {
+                let inputs = self.0;
+                let outputs = self.portable(simd);
+                let residues = simd.execute(|simd: S| evaluate::<S, Rns<S>>(simd, inputs));
+                assert!(residues == outputs[0], "residues differ");
+                outputs
+            }
+        }
+
         let mut inputs = Vec::new();
         for lane in 0..MAX_LANES {
             let seed = [(lane as u8).wrapping_mul(37).wrapping_add(11); 4096];
