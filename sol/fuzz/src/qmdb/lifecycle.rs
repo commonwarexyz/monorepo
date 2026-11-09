@@ -148,7 +148,7 @@ async fn exclusion<F: Graftable, H: Hasher>(
     let (proof, operation) = match proof {
         ExclusionProof::KeyValue(proof, update) => (proof, Operation::Update(update)),
         ExclusionProof::Commit(proof, metadata) => {
-            let operation = Operation::CommitFloor(metadata, proof.loc);
+            let operation = Operation::Commit(metadata, proof.loc);
             (proof, operation)
         }
     };

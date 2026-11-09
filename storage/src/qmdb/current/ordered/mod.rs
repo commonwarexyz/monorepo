@@ -416,8 +416,8 @@ pub mod tests {
                 let op = db.any.log.read(*Location::<F>::new(i)).await.unwrap();
                 let (key, value) = match op {
                     Operation::Update(key_data) => (key_data.key, key_data.value),
-                    Operation::CommitFloor(_, _) => continue,
-                    _ => unreachable!("expected update or commit floor operation"),
+                    Operation::Commit(_, _) => continue,
+                    _ => unreachable!("expected update or commit operation"),
                 };
                 let (proof, proved_value) = db.key_value_proof(&key).await.unwrap();
                 assert_eq!(proved_value, value);

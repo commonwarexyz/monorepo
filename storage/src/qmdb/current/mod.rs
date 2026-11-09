@@ -41,7 +41,7 @@
 //!   8` bits each). `N` must be a power of two.
 //!
 //!   One exception by convention: the *current* last commit carries bit = 1 even though a
-//!   CommitFloor is not an active update. Earlier (intermediate) CommitFloors carry bit = 0.
+//!   Commit is not an active update. Earlier (intermediate) Commits carry bit = 0.
 //!   Maintaining this makes the chunk containing the latest commit deterministic across init and
 //!   `apply_batch`.
 //!
@@ -3990,7 +3990,7 @@ pub mod tests {
         let partition = "speculative-root".to_string();
 
         // Write enough operations to cross a chunk boundary. With N=32 (CHUNK_SIZE_BITS=256),
-        // 260 writes + 1 CommitFloor = 261 operations, completing one chunk with 5 ops in the
+        // 260 writes + 1 Commit = 261 operations, completing one chunk with 5 ops in the
         // next partial chunk. This ensures the grafted root computation must handle the
         // newly completed chunk.
         let db: C = Box::pin(open_db_clone(context.child("init"), partition.clone())).await;
@@ -5020,7 +5020,7 @@ pub mod tests {
         const N: usize = 32;
         const CHUNK_SIZE_BITS: u64 = commonware_utils::bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
         // Seed enough keys to cross at least one chunk boundary. Each batch also produces a
-        // CommitFloor op, so the bitmap grows past the user-visible key count.
+        // Commit op, so the bitmap grows past the user-visible key count.
         const SEED_KEYS: u64 = CHUNK_SIZE_BITS + 50;
 
         let executor = deterministic::Runner::default();

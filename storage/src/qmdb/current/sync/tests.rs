@@ -178,7 +178,7 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
             batch.with_metadata(metadata).merkleize(&db).await.unwrap()
@@ -204,7 +204,7 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
             batch.with_metadata(metadata).merkleize(&db).await.unwrap()
@@ -230,7 +230,7 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
             batch.with_metadata(metadata).merkleize(&db).await.unwrap()
@@ -256,7 +256,7 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
             batch.with_metadata(metadata).merkleize(&db).await.unwrap()

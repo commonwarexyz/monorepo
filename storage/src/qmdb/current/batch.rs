@@ -773,9 +773,9 @@ where
 /// ancestor diffs. Avoids iterating raw operations.
 ///
 /// Pushes: one bit per operation in the batch. All false except active diff entries (whose `loc`
-/// falls in the batch) and the CommitFloor (last op).
+/// falls in the batch) and the Commit (last op).
 ///
-/// Clears: previous CommitFloor, plus the most recent superseded location for each mutated key. We
+/// Clears: previous Commit, plus the most recent superseded location for each mutated key. We
 /// search back through ancestors to find the most recent active location, and if none exists, we
 /// clear the key's database location (`base_old_loc`).
 #[allow(clippy::type_complexity)]
@@ -793,11 +793,11 @@ where
     let appended_chunks = (batch_len as u64).div_ceil(ChunkOverlay::<N>::CHUNK_BITS) as usize;
     let mut overlay = ChunkOverlay::new(base, total_bits, diff.len() + appended_chunks + 1);
 
-    // 1. CommitFloor (last op) is always active.
+    // 1. Commit (last op) is always active.
     let commit_loc = batch_base + batch_len as u64 - 1;
     overlay.set_bit(base, commit_loc);
 
-    // 2. Inactivate previous CommitFloor.
+    // 2. Inactivate previous Commit.
     overlay.clear_bit(base, batch_base - 1);
 
     // 3. Set active bits + clear superseded locations from the diff. The diff is key-sorted,
@@ -1575,12 +1575,12 @@ mod tests {
         let overlay = build_chunk_overlay::<mmr::Family, U, _, N>(&base, 4, 4, &diff, &[]);
 
         // Chunk 0 should have: bits 0-3 from base (all set), bit 4 set (key1), bits 5-6 false
-        // (inactive), bit 7 set (CommitFloor at loc 7). Also bit 3 cleared (previous commit).
+        // (inactive), bit 7 set (Commit at loc 7). Also bit 3 cleared (previous commit).
         let c0 = overlay.get(0).expect("chunk 0 should be dirty");
         assert_ne!(c0[0] & (1 << 4), 0); // key1 active
         assert_eq!(c0[0] & (1 << 5), 0); // inactive
         assert_eq!(c0[0] & (1 << 6), 0); // inactive
-        assert_ne!(c0[0] & (1 << 7), 0); // CommitFloor
+        assert_ne!(c0[0] & (1 << 7), 0); // Commit
         assert_eq!(c0[0] & (1 << 3), 0); // previous commit cleared
     }
 
@@ -1655,7 +1655,7 @@ mod tests {
 
         // Segment of 20 ops starting at loc 20. This pushes total to 40 bits, completing chunk 0
         // (32 bits) and starting chunk 1. Diff: only one active key at loc 35 (in chunk 1), plus
-        // CommitFloor at loc 39. No active bits land in chunk 0's new region (bits 20-31).
+        // Commit at loc 39. No active bits land in chunk 0's new region (bits 20-31).
         let key1 = FixedBytes::from([1, 0, 0, 0]);
         let mut diff = vec![(
             key1,

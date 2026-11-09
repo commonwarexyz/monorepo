@@ -160,7 +160,7 @@ pub mod unordered;
 /// Compute the authenticated root of a newly initialized database without opening storage.
 ///
 /// The initial commit never carries metadata, so this root always represents
-/// `CommitFloor(None, 0)`.
+/// `Commit(None, 0)`.
 pub fn initial_root<F, U, H>() -> H::Digest
 where
     F: Family,
@@ -168,7 +168,7 @@ where
     U: Update,
     Operation<F, U>: Codec,
 {
-    single_operation_root::<F, H>(&Operation::<F, U>::CommitFloor(None, Location::new(0)))
+    single_operation_root::<F, H>(&Operation::<F, U>::Commit(None, Location::new(0)))
 }
 
 pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
@@ -309,8 +309,8 @@ where
 
     if log.size() == 0 {
         warn!("Authenticated log is empty, initializing new db");
-        let commit_floor = Operation::CommitFloor(None, Location::new(0));
-        (log, _) = log.append(&commit_floor).await?;
+        let commit = Operation::Commit(None, Location::new(0));
+        (log, _) = log.append(&commit).await?;
         log = log.sync().await?;
     }
 
@@ -1282,7 +1282,7 @@ pub(crate) mod test {
             boundaries.push(db.bounds().end);
         }
 
-        // Singleton historical state: only the initial CommitFloor is visible.
+        // Singleton historical state: only the initial Commit is visible.
         let singleton_size = boundaries[0];
         let (single_proof, single_ops) = db
             .historical_proof(singleton_size, Location::new(0), NZU64!(1))
@@ -1513,7 +1513,7 @@ pub(crate) mod test {
                 Operation::Delete(key) => {
                     live.remove(key);
                 }
-                Operation::CommitFloor(..) => {}
+                Operation::Commit(..) => {}
             }
         }
     }
@@ -2640,7 +2640,7 @@ pub(crate) mod test {
             .map(|op| match op {
                 Operation::Update(update) => usize::from(before.contains_key(update.key())),
                 Operation::Delete(_) => 2,
-                Operation::CommitFloor(..) => panic!("the writes append a commit"),
+                Operation::Commit(..) => panic!("the writes append a commit"),
             })
             .sum();
         Written {
@@ -2673,7 +2673,7 @@ pub(crate) mod test {
             .map(|op| match op {
                 Operation::Update(update) => (*update.key(), Some(*update.value())),
                 Operation::Delete(key) => (*key, None),
-                Operation::CommitFloor(..) => panic!("a commit precedes the last operation"),
+                Operation::Commit(..) => panic!("a commit precedes the last operation"),
             })
             .collect()
     }
@@ -2851,7 +2851,7 @@ pub(crate) mod test {
             .map(|op| match op {
                 Operation::Update(update) => (*update.key(), Some(*update.value())),
                 Operation::Delete(key) => (*key, None),
-                Operation::CommitFloor(..) => unreachable!(),
+                Operation::Commit(..) => unreachable!(),
             })
             .collect();
         assert_eq!(
@@ -6102,7 +6102,7 @@ pub(crate) mod test {
             let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
 
-            // A CommitFloor op was appended, so root must change.
+            // A Commit op was appended, so root must change.
             assert_ne!(db.root(), root_before);
 
             // DB should still be functional.
@@ -6380,7 +6380,7 @@ pub(crate) mod test {
                 let before = db.bounds().end;
                 let writes = (first_key..first_key + 5).map(|i| (key(i), Some(val(i))));
                 db = commit_writes(db, writes, None).await;
-                // Five writes, a CommitFloor, and any floor-walk operations.
+                // Five writes, a Commit, and any floor-walk operations.
                 assert!(db.bounds().end.saturating_sub(*before) >= 6);
             }
 
@@ -7404,17 +7404,17 @@ mod bitmap_tests {
         AnyTest::init(context, cfg, None).await.unwrap()
     }
 
-    /// CommitFloor convention: only the *current* last commit carries bit=1; every earlier
+    /// Commit convention: only the *current* last commit carries bit=1. Every earlier
     /// (now intermediate) commit boundary carries bit=0.
     ///
-    /// Maintained by `apply_batch`'s explicit demote-then-promote pair on CommitFloor bits. If
+    /// Maintained by `apply_batch`'s explicit demote-then-promote pair on Commit bits. If
     /// the demote step were missed, intermediate commits would persist at bit=1.
     #[test_traced]
-    fn current_commit_floor_bit_is_one_others_zero() {
+    fn current_commit_bit_is_one_others_zero() {
         deterministic::Runner::default().start(|context| async move {
             let mut db = open_db(context.child("db")).await;
 
-            // Apply three single-write batches; each produces one CommitFloor op.
+            // Apply three single-write batches. Each produces one Commit op.
             let keys: Vec<_> = (0..3u64)
                 .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
                 .collect();
@@ -7443,11 +7443,7 @@ mod bitmap_tests {
             // Most recent commit is current -> bit=1.
             assert!(db.bitmap.get_bit(*commit_locs[2]));
 
-            let reopen = open_db(
-                context
-                    .child("reopen")
-                    .with_attribute("case", "commit_floor"),
-            );
+            let reopen = open_db(context.child("reopen").with_attribute("case", "commit"));
             let db = assert_rebuild_matches(db, reopen, &keys).await;
             db.destroy().await.unwrap();
         });

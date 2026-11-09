@@ -1274,7 +1274,7 @@ where
         let mut walk = Walk::new(self.base_inactivity_floor_loc, tip, entries, skips);
         let strategy = db.strategy();
         if !evicts {
-            // The walk appends at most one moved op per entry or active key, plus the CommitFloor.
+            // The walk appends at most one moved op per entry or active key, plus the Commit.
             let moves = entries.min(active_keys);
             walked.ops.reserve(moves + 1);
             walked.floor_diff.reserve(moves);
@@ -1335,7 +1335,7 @@ where
             }
 
             // Classify each candidate, as a [`Move`], against the state after the writes. A
-            // CommitFloor has no key and is inactive.
+            // Commit has no key and is inactive.
             let diff = &walked.diff;
             let moves: Vec<Option<Move<F>>> = strategy.map_collect_vec(
                 zip_eq(
@@ -1442,7 +1442,7 @@ where
     }
 
     /// Shared final phases of merkleization: the empty-state floor, the merge of the walk's new
-    /// diff entries, the CommitFloor, the journal merkleize, and the `MerkleizedBatch`. `floor`
+    /// diff entries, the Commit, the journal merkleize, and the `MerkleizedBatch`. `floor`
     /// is the floor the walk reached.
     async fn finish<E, C, I, const N: usize>(
         self,
@@ -1489,8 +1489,8 @@ where
             diff = Vec::new();
         }
 
-        // CommitFloor operation.
-        ops.push(Operation::CommitFloor(metadata, floor));
+        // Commit operation.
+        ops.push(Operation::Commit(metadata, floor));
 
         // Merkleize the journal batch.
         // The journal batch was created eagerly at batch construction time and its
@@ -2518,8 +2518,8 @@ where
             walked.push_create(update::Unordered(key, value), base_old_loc);
         }
 
-        // Remaining phases: floor walk, its decisions, CommitFloor, journal, diff merge. Each
-        // decision appends one operation, and the CommitFloor follows.
+        // Remaining phases: floor walk, its decisions, Commit, journal, diff merge. Each
+        // decision appends one operation, and the Commit follows.
         let (floor, decided) = m
             .walk(&mut walked, superseded_locs, policy, prefetched, source, db)
             .await?;
@@ -2860,7 +2860,7 @@ where
             .filter_map(|(_, entry)| entry.base_old_loc())
             .collect();
 
-        // Remaining phases: floor walk, its decisions and link repairs, CommitFloor, journal, diff
+        // Remaining phases: floor walk, its decisions and link repairs, Commit, journal, diff
         // merge.
         let (floor, decided) = m
             .walk(&mut walked, superseded_locs, policy, prefetched, source, db)
