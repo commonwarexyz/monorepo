@@ -15,7 +15,7 @@ use core::{
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Uint<const BITS: usize, const LIMBS: usize>(ruint::Uint<BITS, LIMBS>);
 
-/// An unsigned 256-bit integer, the width of EVM token balances.
+/// An unsigned 256-bit integer.
 pub type U256 = Uint<256, 4>;
 
 impl<const BITS: usize, const LIMBS: usize> Uint<BITS, LIMBS> {

@@ -1,13 +1,13 @@
-//! Unsigned integers with a fixed-width encoding.
+//! Amounts of funds, unsigned integers with a fixed-width encoding.
 
 use commonware_codec::{CodecFixedShared, Uint};
 use core::{fmt::Debug, hash::Hash};
 
-/// An unsigned integer with a fixed-width encoding.
+/// An amount of funds, an unsigned integer with a fixed-width encoding.
 ///
 /// An implementation orders values numerically and encodes each value in exactly one way, so a
 /// commitment over encoded values commits to the values themselves.
-pub trait Unsigned: Copy + Ord + Hash + Debug + CodecFixedShared + 'static {
+pub trait Amount: Copy + Ord + Hash + Debug + CodecFixedShared + 'static {
     /// The value zero.
     const ZERO: Self;
 
@@ -34,10 +34,10 @@ pub trait Unsigned: Copy + Ord + Hash + Debug + CodecFixedShared + 'static {
     }
 }
 
-macro_rules! impl_unsigned {
+macro_rules! impl_amount {
     ($($type:ty),*) => {
         $(
-            impl Unsigned for $type {
+            impl Amount for $type {
                 const ZERO: Self = 0;
 
                 fn overflowing_add(self, other: Self) -> (Self, bool) {
@@ -52,9 +52,9 @@ macro_rules! impl_unsigned {
     };
 }
 
-impl_unsigned!(u8, u16, u32, u64, u128);
+impl_amount!(u8, u16, u32, u64, u128);
 
-impl<const BITS: usize, const LIMBS: usize> Unsigned for Uint<BITS, LIMBS> {
+impl<const BITS: usize, const LIMBS: usize> Amount for Uint<BITS, LIMBS> {
     const ZERO: Self = Self::ZERO;
 
     fn overflowing_add(self, other: Self) -> (Self, bool) {
@@ -73,19 +73,19 @@ mod tests {
 
     #[test]
     fn test_checked_arithmetic_follows_overflow() {
-        assert_eq!(Unsigned::checked_add(250u8, 5), Some(255));
-        assert_eq!(Unsigned::checked_add(250u8, 6), None);
-        assert_eq!(Unsigned::checked_sub(5u64, 5), Some(0));
-        assert_eq!(Unsigned::checked_sub(5u64, 6), None);
-        assert_eq!(<u128 as Unsigned>::ZERO, 0);
+        assert_eq!(Amount::checked_add(250u8, 5), Some(255));
+        assert_eq!(Amount::checked_add(250u8, 6), None);
+        assert_eq!(Amount::checked_sub(5u64, 5), Some(0));
+        assert_eq!(Amount::checked_sub(5u64, 6), None);
+        assert_eq!(<u128 as Amount>::ZERO, 0);
     }
 
     #[test]
     fn test_uint_arithmetic_follows_overflow() {
         let (five, six) = (U256::from(5), U256::from(6));
-        assert_eq!(Unsigned::checked_add(U256::MAX, U256::ONE), None);
-        assert_eq!(Unsigned::checked_sub(five, six), None);
-        assert_eq!(Unsigned::checked_add(five, six), Some(U256::from(11)));
-        assert_eq!(<U256 as Unsigned>::ZERO, U256::ZERO);
+        assert_eq!(Amount::checked_add(U256::MAX, U256::ONE), None);
+        assert_eq!(Amount::checked_sub(five, six), None);
+        assert_eq!(Amount::checked_add(five, six), Some(U256::from(11)));
+        assert_eq!(<U256 as Amount>::ZERO, U256::ZERO);
     }
 }

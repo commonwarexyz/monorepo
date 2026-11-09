@@ -636,8 +636,7 @@
 //! An implementation must compute the same digests, roots, and verification results as the crate
 //! for every post, challenge, and claim. The rules below fix those computations, and a test vector
 //! in the crate pins their results for one deployment, so an implementation checks itself against
-//! the crate before it holds funds. The diagrams give widths in bytes, with `P`, `A`, and `D` the
-//! widths of a public key, an amount, and a digest.
+//! the crate before it holds funds.
 //!
 //! 1. **Integers.** Fixed-width integers (every epoch, count, and built-in amount) encode
 //!    big-endian. Lengths encode as the varints of [commonware_codec::varint], the canonical
@@ -785,7 +784,7 @@ mod tests;
 
 pub use amounts::{Amounts, AmountsError};
 pub use close::{AssemblyError, Close, Deposit, ForcedWithdrawal, Limits, Queue, Row, Withdrawal};
-pub use commonware_utils::Unsigned as Amount;
+pub use commonware_utils::Amount;
 pub use lookup::{InvalidOpening, Lookup};
 pub use matrix::{Matrix, Opening};
 pub use namespace::Namespace;
