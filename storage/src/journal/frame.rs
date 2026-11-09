@@ -6,7 +6,7 @@
 use super::Error;
 use bytes::{BufMut, Bytes, TryGetError, buf::Take};
 use commonware_codec::{
-    Buf, Decode, Encode, EncodeSize, OwnedBytes, ReadExt as _, Write,
+    Buf, Copying, Decode, Encode, EncodeSize, OwnedBytes, ReadExt as _, Write,
     varint::{MAX_U32_VARINT_SIZE, UInt},
 };
 use commonware_runtime::{Blob, Buf as _, IoBufMut, IoBufs, buffer::paged::Writer};
@@ -22,7 +22,8 @@ commonware_utils::thread_local_cache!(static DECOMPRESSOR: Decompressor<'static>
 
 /// Read access needed to decode a frame at a known offset.
 pub(super) trait FrameReader {
-    /// Read up to `len` bytes at `offset`.
+    /// Read up to `len` bytes at `offset`, returning the buffer truncated to the bytes read and
+    /// their count.
     fn read_up_to(
         &self,
         offset: u64,
@@ -236,20 +237,17 @@ pub(super) async fn read_frame_at<V: Decode>(
             IoBufMut::with_capacity(MAX_U32_VARINT_SIZE),
         )
         .await?;
-    let buf = buf.freeze();
-    let mut cursor = buf.slice(..available);
-    let (next_offset, item_info) = find_frame(&mut cursor, offset)?;
+    let mut buf = buf.freeze();
+    let (next_offset, item_info) = find_frame(&mut Copying(&buf.as_ref()[..available]), offset)?;
 
     let (item_size, decoded) = match item_info {
         FrameInfo::Complete {
             varint_len,
             data_len,
         } => {
-            let decoded = decode_item::<V>(
-                buf.slice(varint_len..varint_len + data_len),
-                cfg,
-                compressed,
-            )?;
+            // A header read of a tiny frame can run into the next frame.
+            buf.advance(varint_len);
+            let decoded = decode_item::<V>(Limited::new(&mut buf, data_len), cfg, compressed)?;
             (data_len as u32, decoded)
         }
         FrameInfo::Incomplete {
@@ -270,13 +268,14 @@ pub(super) async fn read_frame_at<V: Decode>(
             prefix_len,
             total_len,
         } => {
-            let prefix = buf.slice(varint_len..varint_len + prefix_len);
+            // Past the varint, the buffer holds the first `prefix_len` payload bytes.
+            buf.advance(varint_len);
             let read_offset = offset
                 .checked_add(varint_len as u64)
                 .and_then(|offset| offset.checked_add(prefix_len as u64))
                 .ok_or(Error::OffsetOverflow)?;
             let remainder = reader.read_at(read_offset, total_len - prefix_len).await?;
-            let decoded = decode_item::<V>(prefix.chain(remainder), cfg, compressed)?;
+            let decoded = decode_item::<V>(buf.chain(remainder), cfg, compressed)?;
             (total_len as u32, decoded)
         }
     };

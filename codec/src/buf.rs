@@ -649,7 +649,7 @@ mod tests {
         );
     }
 
-    /// Oversized advances are rejected before adding to the cursor position.
+    /// Oversized advances are rejected.
     #[test]
     #[should_panic(expected = "advance must not exceed the remaining bytes")]
     fn test_viewing_advance_past_end() {
