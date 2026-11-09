@@ -515,6 +515,9 @@ pub(crate) struct Log<E: Context, I: Record, V: CodecShared> {
     opening: BTreeSet<u64>,
     /// Live rows per segment.
     live: BTreeMap<u64, u64>,
+    /// Named segments with no live row: the only reclamation candidates, kept as rows are
+    /// released and appended so reclamation never scans every segment.
+    dead: BTreeSet<u64>,
     /// Next position.
     next: u64,
     /// Positions below this are covered by a started cut, so readable.
@@ -583,6 +586,7 @@ where
             snapshots: BTreeMap::new(),
             opening: BTreeSet::new(),
             live: BTreeMap::new(),
+            dead: BTreeSet::new(),
             next: 0,
             captured: 0,
             durable: 0,
@@ -616,6 +620,12 @@ where
             }
             journal.close().await?;
         }
+        log.dead = log
+            .segments
+            .iter()
+            .copied()
+            .filter(|segment| !log.live.contains_key(segment))
+            .collect();
         log.captured = log.next;
         log.durable = log.next;
         Ok((log, rows))
@@ -672,6 +682,7 @@ where
                 let opener = self.opener(segment);
                 if self.segments.insert(segment) {
                     self.manifest_dirty = true;
+                    self.dead.insert(segment);
                 }
                 Target::Closed(opener)
             }
@@ -709,6 +720,7 @@ where
         } = appended;
         self.busy = false;
         *self.live.entry(segment).or_default() += rows.len() as u64;
+        self.dead.remove(&segment);
         if self.segment(self.next) == segment {
             self.current = Some(journal);
             self.current_dirty = true;
@@ -805,6 +817,7 @@ where
             *live -= 1;
             if *live == 0 {
                 self.live.remove(&segment);
+                self.dead.insert(segment);
             }
         }
     }
@@ -819,12 +832,11 @@ where
         assert!(!self.busy, "one job at a time");
         let current = self.segment(self.next);
         let segments = self
-            .segments
+            .dead
             .iter()
             .copied()
             .filter(|segment| {
                 *segment != current
-                    && !self.live.contains_key(segment)
                     && !self.sealed.contains_key(segment)
                     && !self.opening.contains(segment)
                     && self
@@ -838,6 +850,7 @@ where
         }
         for segment in &segments {
             self.segments.remove(segment);
+            self.dead.remove(segment);
             self.snapshots.remove(segment);
         }
         let Some(manifest) = self.manifest.take() else {
@@ -1211,6 +1224,55 @@ mod tests {
             drop(log);
             let (_, rows) = open(&context, 2).await;
             assert_eq!(keys(&rows), vec![(4, 4), (5, 5)]);
+        });
+    }
+
+    /// Asserts that the reclamation candidates are exactly the named segments without live rows.
+    fn assert_candidates(log: &TestLog) {
+        let expected = log
+            .segments
+            .iter()
+            .copied()
+            .filter(|segment| !log.live.contains_key(segment))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(log.dead, expected);
+    }
+
+    #[test]
+    fn reclamation_candidates_follow_releases_and_appends() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut log, _) = open(&context, 2).await;
+            assert_candidates(&log);
+            append(&mut log, 0..5).await;
+            cut(&mut log).await;
+            assert_candidates(&log);
+
+            // Releasing every row of the current segment makes it a candidate, which it stops
+            // being once an append lands in it again; only the full segment is reclaimed.
+            for position in [0, 1, 4] {
+                log.release(position);
+                assert_candidates(&log);
+            }
+            append(&mut log, 5..6).await;
+            cut(&mut log).await;
+            assert_candidates(&log);
+            let job = log.start_reclaim().unwrap();
+            assert_eq!(log.finish_reclaim(job.run().await.unwrap()), vec![0]);
+            assert_candidates(&log);
+            assert!(log.start_reclaim().is_none());
+            drop(log);
+
+            // Reopening recovers the candidates from the named segments and their rows.
+            let (mut log, rows) = open(&context, 2).await;
+            assert_eq!(keys(&rows), (2..6).map(|key| (key, key)).collect::<Vec<_>>());
+            assert_candidates(&log);
+            log.release(2);
+            log.release(3);
+            assert_candidates(&log);
+            log.release_snapshots();
+            let job = log.start_reclaim().unwrap();
+            assert_eq!(log.finish_reclaim(job.run().await.unwrap()), vec![1]);
+            assert_candidates(&log);
         });
     }
 

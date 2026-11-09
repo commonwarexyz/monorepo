@@ -23,8 +23,8 @@ use std::{num::NonZeroUsize, sync::Arc};
 
 /// The handle to a running marshal: requests, and the reporter consensus feeds.
 ///
-/// Requests other than [`Mailbox::subscribe_block`] fail with [`Error::Busy`] when marshal's
-/// queue is full; a subscription waits for room instead.
+/// Staging ([`Mailbox::stage_block`]) and subscriptions ([`Mailbox::subscribe_block`]) wait for
+/// room when marshal's queue is full; other requests fail with [`Error::Busy`] instead.
 pub struct Mailbox<H: Hasher, S: Scheme, B: Body<H>> {
     sender: mpsc::Sender<Message<H, S, B>>,
     lane: Arc<Lane<S, H::Digest>>,
@@ -63,7 +63,25 @@ impl<H: Hasher, S: Scheme, B: Body<H>> Mailbox<H, S, B> {
         self.max_pending_acks
     }
 
-    /// Sends a request built around its reply channel and waits for the reply.
+    /// Sends a request built around its reply channel, waiting for room in marshal's queue, and
+    /// waits for the reply.
+    ///
+    /// Room freed in a full queue goes to waiting senders first, so a request that only tries
+    /// fails for as long as any other waits.
+    async fn request_waiting<T>(
+        &self,
+        build: impl FnOnce(Reply<T>) -> Message<H, S, B>,
+    ) -> Result<T, Error> {
+        let (reply, receiver) = oneshot::channel();
+        self.sender
+            .send(build(reply))
+            .await
+            .map_err(|_| Error::Closed)?;
+        receiver.await.unwrap_or(Err(Error::Closed))
+    }
+
+    /// Sends a request built around its reply channel and waits for the reply, failing with
+    /// [`Error::Busy`] when marshal's queue is full.
     async fn request<T>(
         &self,
         build: impl FnOnce(Reply<T>) -> Message<H, S, B>,
@@ -82,11 +100,15 @@ impl<H: Hasher, S: Scheme, B: Body<H>> Mailbox<H, S, B> {
     /// Returns once marshal accepted the block; the returned [`Custody`] resolves when the block
     /// is crash-recoverable. With a [`Relay`](super::Relay), the block is also kept for
     /// broadcast.
+    ///
+    /// Waits for room while marshal's queue is full, so subscriptions waiting there cannot starve
+    /// a producer's own blocks. Fails with [`Error::Busy`] only while the blocks waiting to be
+    /// appended to custody exceed the staging budget.
     pub async fn stage_block(&self, block: impl Into<Block<H, B>>) -> Result<Custody, Error> {
         let block = block.into();
         let staged = self.staged.as_ref().map(|_| Arc::clone(&block));
         let custody = self
-            .request(|reply| Message::Stage { block, reply })
+            .request_waiting(|reply| Message::Stage { block, reply })
             .await?;
         if let (Some(set), Some(block)) = (&self.staged, staged) {
             set.lock().insert(block);
@@ -155,15 +177,12 @@ impl<H: Hasher, S: Scheme, B: Body<H>> Mailbox<H, S, B> {
         &self,
         reference: BlockRef<H::Digest>,
     ) -> Result<Block<H, B>, Error> {
-        let (reply, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Subscribe {
+        let block = self
+            .request_waiting(|reply| Message::Subscribe {
                 block: reference,
                 reply,
             })
-            .await
-            .map_err(|_| Error::Closed)?;
-        let block = receiver.await.unwrap_or(Err(Error::Closed))?;
+            .await?;
         if let Some(staged) = &self.staged {
             staged.lock().remember(Arc::clone(&block));
         }

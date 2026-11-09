@@ -39,6 +39,10 @@ pub(crate) struct Metrics {
     pub(crate) floors: Counter,
     /// Prunes applied.
     pub(crate) prunes: Counter,
+    /// Turns of the owner: each takes a batch of ready inputs and drives the machines once.
+    pub(crate) turns: Counter,
+    /// Inputs the owner took.
+    pub(crate) inputs: Counter,
 }
 
 impl Metrics {
@@ -72,6 +76,8 @@ impl Metrics {
             custody_cuts: context.counter("custody_cuts", "Durability cuts of the custody stream"),
             floors: context.counter("floors", "Floors installed"),
             prunes: context.counter("prunes", "Prunes applied"),
+            turns: context.counter("turns", "Turns of the owner, each driving the machines once"),
+            inputs: context.counter("inputs", "Inputs the owner took"),
         }
     }
 }
