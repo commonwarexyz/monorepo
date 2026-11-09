@@ -19,7 +19,7 @@ fn epoch(
         Sha256::hash(&[b"committee"]),
     )
     .unwrap()
-    .bind::<Sha256, _, _>(
+    .bind::<Sha256, _, _, _>(
         state,
         deposits,
         withdrawals,
@@ -78,7 +78,7 @@ async fn verify(
             .payer()
             .cmp(b.authorization.body().payer())
     });
-    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
         state,
         context,
         &SigningKey::from_seed(OPERATOR_SEED),
@@ -90,7 +90,7 @@ async fn verify(
     .await
     .unwrap();
     let dealing = posted::decode(prepared.encoded().clone(), context).unwrap();
-    let verified = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+    let verified = validate_close_with_strategy::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
         state,
         context,
         deposits,
@@ -138,7 +138,9 @@ fn absent_credit_and_multilateral_payments_create_virtual_balances() {
         );
         assert!(prepared.close().withdrawal_outputs().is_empty());
         let range = prepared.close().roots.activity_range(&context).unwrap();
-        let (state, close) = Box::pin(prepared.apply::<_, Sha256>(state)).await.unwrap();
+        let (state, close) = Box::pin(prepared.apply::<_, Sha256, _>(state))
+            .await
+            .unwrap();
         for (key, balance) in [(&a, 70), (&b, 47), (&c, 15), (&d, 8)] {
             assert_eq!(
                 state
@@ -173,7 +175,7 @@ fn absent_recipient_cannot_originate_until_successor_epoch() {
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
         let context = epoch(&state, EPOCH, 0..0, 100, &deposits, &withdrawals);
-        let rejected = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let rejected = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &state,
             &context,
             &SigningKey::from_seed(OPERATOR_SEED),
@@ -195,7 +197,7 @@ fn absent_recipient_cannot_originate_until_successor_epoch() {
             vec![terminal(&context, empty_root(), &a, &[(&b, 20)])],
         )
         .await;
-        let (state, first) = Box::pin(first.apply::<_, Sha256>(state)).await.unwrap();
+        let (state, first) = Box::pin(first.apply::<_, Sha256, _>(state)).await.unwrap();
         assert_eq!(
             state
                 .state()
@@ -226,7 +228,7 @@ fn absent_recipient_cannot_originate_until_successor_epoch() {
             )],
         )
         .await;
-        let (state, _) = Box::pin(second.apply::<_, Sha256>(state)).await.unwrap();
+        let (state, _) = Box::pin(second.apply::<_, Sha256, _>(state)).await.unwrap();
         assert_eq!(
             state
                 .state()
@@ -263,7 +265,7 @@ fn eligible_recipient_reuses_incoming_credit() {
             ],
         )
         .await;
-        let (state, _) = Box::pin(close.apply::<_, Sha256>(state)).await.unwrap();
+        let (state, _) = Box::pin(close.apply::<_, Sha256, _>(state)).await.unwrap();
         assert!(
             state
                 .state()
@@ -314,7 +316,7 @@ fn close_deletes_balance_and_recredit_recreates_same_owner() {
         .await;
         let payout_head = first.close().roots.withdrawal_outputs;
         let payout_position = context.predecessor_logs().payouts.operations;
-        let (state, first) = Box::pin(first.apply::<_, Sha256>(state)).await.unwrap();
+        let (state, first) = Box::pin(first.apply::<_, Sha256, _>(state)).await.unwrap();
         let output = state.logs().payout_at(payout_position).await.unwrap();
         let (opening, _) = state
             .logs()
@@ -360,7 +362,7 @@ fn close_deletes_balance_and_recredit_recreates_same_owner() {
                 .iter()
                 .all(|row| row.output == SettlementOutput::None)
         );
-        let (state, _) = Box::pin(second.apply::<_, Sha256>(state)).await.unwrap();
+        let (state, _) = Box::pin(second.apply::<_, Sha256, _>(state)).await.unwrap();
         assert_eq!(
             state
                 .state()
@@ -397,7 +399,7 @@ fn new_balance_recovery_replays_only_missing_suffix_and_retains_historical_proof
             )
             .await;
             let first_record = Accepted::prepared(&first);
-            let (state, first) = Box::pin(first.apply::<_, Sha256>(state)).await.unwrap();
+            let (state, first) = Box::pin(first.apply::<_, Sha256, _>(state)).await.unwrap();
             let state = Box::pin(state.sync()).await.unwrap();
             let next = epoch(
                 &state,
@@ -484,7 +486,7 @@ fn receiving_balance_creation_respects_live_account_limit() {
             Sha256::hash(&[b"committee"]),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(
+        .bind::<Sha256, _, _, _>(
             &state,
             &deposits,
             &withdrawals,
@@ -499,7 +501,7 @@ fn receiving_balance_creation_respects_live_account_limit() {
         )
         .unwrap();
         let before = *state.state().head();
-        let rejected = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let rejected = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &state,
             &context,
             &SigningKey::from_seed(OPERATOR_SEED),
@@ -519,7 +521,9 @@ fn receiving_balance_creation_respects_live_account_limit() {
             vec![terminal(&context, empty_root(), &a, &[(&b, 100)])],
         )
         .await;
-        let (state, _) = Box::pin(prepared.apply::<_, Sha256>(state)).await.unwrap();
+        let (state, _) = Box::pin(prepared.apply::<_, Sha256, _>(state))
+            .await
+            .unwrap();
         assert_eq!(state.state().live_accounts(), 1);
         assert!(
             state

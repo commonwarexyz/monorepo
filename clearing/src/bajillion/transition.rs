@@ -27,6 +27,7 @@ use commonware_runtime::Spawner;
 use commonware_storage::{
     Context,
     merkle::{self, Family as _, Location, mmr},
+    translator::Translator,
 };
 use core::{cmp::Ordering, num::NonZeroU64, ops::Range};
 use rand_core::CryptoRng;
@@ -556,9 +557,9 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
     /// the values settlement bound when this epoch became the admission frontier. The state root
     /// and log heads are checked against the replica, and the rows only against the log heads.
     #[allow(clippy::too_many_arguments)]
-    pub fn bind<H, E, S>(
+    pub fn bind<H, E, S, T>(
         self,
-        replica: &Replica<E, H, P, S>,
+        replica: &Replica<E, H, P, S, T>,
         deposits: &DepositBatch<P>,
         withdrawals: &WithdrawalBatch<P, D>,
         predecessor_rows: Range<u64>,
@@ -571,6 +572,7 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
         H: Hasher<Digest = D>,
         E: Context + Spawner,
         S: Strategy,
+        T: Translator,
     {
         let context = CloseContext {
             epoch: self,
@@ -582,7 +584,7 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
             challenge_deadline,
             floors,
         };
-        validate_predecessor::<H, P, D, E, S>(replica, &context, deposits, withdrawals)?;
+        validate_predecessor::<H, P, D, E, S, T>(replica, &context, deposits, withdrawals)?;
         Ok(context)
     }
 
@@ -1139,13 +1141,14 @@ impl<P: PublicKey, D: Digest, S: Strategy> PreparedClose<P, D, S> {
         (self.close, self.replica)
     }
     /// Applies all three candidates and returns the derived close.
-    pub async fn apply<E, H>(
+    pub async fn apply<E, H, T>(
         self,
-        replica: Replica<E, H, P, S>,
-    ) -> Result<(Replica<E, H, P, S>, Close<P, D>), TransitionError>
+        replica: Replica<E, H, P, S, T>,
+    ) -> Result<(Replica<E, H, P, S, T>, Close<P, D>), TransitionError>
     where
         E: Context + Spawner,
         H: Hasher<Digest = D>,
+        T: Translator,
     {
         Ok((replica.apply(self.replica).await?, self.close))
     }
@@ -1158,8 +1161,8 @@ impl<P: PublicKey, D: Digest, S: Strategy> PreparedClose<P, D, S> {
 /// reads each predecessor from the retained rows; validators check signatures against those roots.
 /// Validators authenticate an untrusted dealing with [`validate_close_with_strategy`].
 /// This constructor is useful when the caller already owns the accepted endpoints.
-pub async fn prepare_close_with_strategy<H, P, D, E, S>(
-    replica: &Replica<E, H, P, S>,
+pub async fn prepare_close_with_strategy<H, P, D, E, S, T>(
+    replica: &Replica<E, H, P, S, T>,
     context: &CloseContext<P, D>,
     operator: &impl Signer<PublicKey = P, Signature = P::Signature>,
     deposits: &DepositBatch<P>,
@@ -1173,6 +1176,7 @@ where
     D: Digest,
     E: Context + Spawner,
     S: Strategy,
+    T: Translator,
 {
     let dealing = prepare_dealing::<H, P, D>(
         context.epoch_context(),
@@ -1181,7 +1185,7 @@ where
         withdrawals,
         terminals,
     )?;
-    derive::<H, P, D, E, S>(replica, context, deposits, withdrawals, dealing, strategy).await
+    derive::<H, P, D, E, S, T>(replica, context, deposits, withdrawals, dealing, strategy).await
 }
 
 /// Encodes accepted activity for every validator without reading account state.
@@ -1308,8 +1312,8 @@ pub fn prepare_dealing<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
 /// The caller must authenticate the context against settlement registration; native account
 /// storage authenticates predecessor balances and roots, while settlement owns total liability.
 #[allow(clippy::too_many_arguments)]
-pub async fn validate_close_with_strategy<H, P, D, E, S, B, R>(
-    replica: &Replica<E, H, P, S>,
+pub async fn validate_close_with_strategy<H, P, D, E, S, T, B, R>(
+    replica: &Replica<E, H, P, S, T>,
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
@@ -1323,12 +1327,14 @@ where
     D: Digest,
     E: Context + Spawner,
     S: Strategy,
+    T: Translator,
     B: BatchVerifier<PublicKey = P>,
     R: CryptoRng,
 {
     let signature = dealing.signature.clone();
     let prepared =
-        derive::<H, P, D, E, S>(replica, context, deposits, withdrawals, dealing, strategy).await?;
+        derive::<H, P, D, E, S, T>(replica, context, deposits, withdrawals, dealing, strategy)
+            .await?;
     if !verify_ack_signatures::<P, D, B, R, _>(
         prepared
             .close
@@ -1365,8 +1371,8 @@ fn activity_entries<P: PublicKey>(vectors: &[OutVector<P>]) -> Vec<OutEntry<P>> 
         .collect()
 }
 
-async fn derive<H, P, D, E, S>(
-    replica: &Replica<E, H, P, S>,
+async fn derive<H, P, D, E, S, T>(
+    replica: &Replica<E, H, P, S, T>,
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
@@ -1379,8 +1385,9 @@ where
     D: Digest,
     E: Context + Spawner,
     S: Strategy,
+    T: Translator,
 {
-    validate_predecessor::<H, P, D, E, S>(replica, context, deposits, withdrawals)?;
+    validate_predecessor::<H, P, D, E, S, T>(replica, context, deposits, withdrawals)?;
     let state = replica.state();
     let Dealing {
         rows: input,
@@ -1694,8 +1701,8 @@ where
     }
 }
 
-fn validate_predecessor<H, P, D, E, S>(
-    replica: &Replica<E, H, P, S>,
+fn validate_predecessor<H, P, D, E, S, T>(
+    replica: &Replica<E, H, P, S, T>,
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
@@ -1706,6 +1713,7 @@ where
     D: Digest,
     E: Context + Spawner,
     S: Strategy,
+    T: Translator,
 {
     let state = replica.state();
     let rows = &context.predecessor_rows;

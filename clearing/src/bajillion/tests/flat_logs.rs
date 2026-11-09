@@ -15,7 +15,7 @@ fn empty_activity_range_excludes_previous_epoch_and_commit_positions() {
         assert_eq!(first_range.end - first_range.start, 1);
         let successor_liability =
             fixture.context.predecessor_liability() - fixture.prepared.close().withdrawal_total;
-        let (replica, _) = Box::pin(fixture.prepared.apply::<_, Sha256>(fixture.state))
+        let (replica, _) = Box::pin(fixture.prepared.apply::<_, Sha256, _>(fixture.state))
             .await
             .unwrap();
         let first_epoch = Epoch::at(replica.logs(), EPOCH, first_range).await.unwrap();
@@ -40,7 +40,7 @@ fn empty_activity_range_excludes_previous_epoch_and_commit_positions() {
             *fixture.context.committee(),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(
+        .bind::<Sha256, _, _, _>(
             &replica,
             &fixture.deposits,
             &fixture.withdrawals,
@@ -54,7 +54,7 @@ fn empty_activity_range_excludes_previous_epoch_and_commit_positions() {
             },
         )
         .unwrap();
-        let empty = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let empty = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &replica,
             &context,
             &fixture.operator,
@@ -69,7 +69,9 @@ fn empty_activity_range_excludes_previous_epoch_and_commit_positions() {
         assert_eq!(range.start, first_range.head.operations);
         assert_eq!(range.start, range.end);
         assert_eq!(range.head.operations, first_range.head.operations + 1);
-        let (replica, _) = Box::pin(empty.apply::<_, Sha256>(replica)).await.unwrap();
+        let (replica, _) = Box::pin(empty.apply::<_, Sha256, _>(replica))
+            .await
+            .unwrap();
         let epoch = Epoch::at(replica.logs(), EPOCH + 1, range).await.unwrap();
         let absent = epoch
             .account_lookup(replica.logs(), &account)
@@ -113,7 +115,7 @@ fn proposal_identity_distinguishes_equal_balance_results_before_tree_derivation(
         );
         terminals[0].authorization =
             SendAuthorization::sign(changed, empty_root(), &fixture.accounts[0].1);
-        let alternative = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let alternative = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &fixture.state,
             &fixture.context,
             &fixture.operator,
@@ -158,7 +160,7 @@ fn accepted_replay_rejects_changed_original_records() {
         let first_rows = rows(&fixture.context, fixture.prepared.close());
         let successor_liability =
             fixture.context.predecessor_liability() - fixture.prepared.close().withdrawal_total;
-        let (state, _) = Box::pin(fixture.prepared.apply::<_, Sha256>(fixture.state))
+        let (state, _) = Box::pin(fixture.prepared.apply::<_, Sha256, _>(fixture.state))
             .await
             .unwrap();
         let context = EpochContext::new::<Sha256>(
@@ -171,7 +173,7 @@ fn accepted_replay_rejects_changed_original_records() {
             *fixture.context.committee(),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(
+        .bind::<Sha256, _, _, _>(
             &state,
             &fixture.deposits,
             &fixture.withdrawals,
@@ -185,7 +187,7 @@ fn accepted_replay_rejects_changed_original_records() {
             },
         )
         .unwrap();
-        let second = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let second = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &state,
             &context,
             &fixture.operator,

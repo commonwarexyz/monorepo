@@ -30,7 +30,7 @@ fn native_reopen_rebuilds_compact_account_and_outgoing_proofs() {
                 .iter()
                 .any(|row| row.has_outgoing() && row.terminal_seq() == 0)
         );
-        let (replica, close) = Box::pin(fixture.prepared.apply::<_, Sha256>(fixture.state))
+        let (replica, close) = Box::pin(fixture.prepared.apply::<_, Sha256, _>(fixture.state))
             .await
             .unwrap();
         let (state, logs) = replica.into_parts();
@@ -182,7 +182,7 @@ fn native_activity_accepts_recipient_local_decreasing_totals() {
         );
         terminal.authorization =
             SendAuthorization::sign(body, empty_root(), &fixture.accounts[0].1);
-        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &fixture.state,
             &fixture.context,
             &fixture.operator,
@@ -252,7 +252,7 @@ fn current_payout_proof_survives_old_activity_retirement() {
             *fixture.context.committee(),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(
+        .bind::<Sha256, _, _, _>(
             &state,
             &fixture.deposits,
             &withdrawals,
@@ -266,7 +266,7 @@ fn current_payout_proof_survives_old_activity_retirement() {
             },
         )
         .unwrap();
-        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &state,
             &context,
             &fixture.operator,
@@ -279,7 +279,9 @@ fn current_payout_proof_survives_old_activity_retirement() {
         .unwrap();
         let old_range = prepared.close().roots.activity_range(&context).unwrap();
         let position = context.predecessor_logs().payouts.operations;
-        let (mut state, close) = Box::pin(prepared.apply::<_, Sha256>(state)).await.unwrap();
+        let (mut state, close) = Box::pin(prepared.apply::<_, Sha256, _>(state))
+            .await
+            .unwrap();
         let liability = context.predecessor_liability() - close.withdrawal_total;
         let mut previous = old_range.start..old_range.end;
 
@@ -296,7 +298,7 @@ fn current_payout_proof_survives_old_activity_retirement() {
                 *context.committee(),
             )
             .unwrap()
-            .bind::<Sha256, _, _>(
+            .bind::<Sha256, _, _, _>(
                 &state,
                 &fixture.deposits,
                 &empty,
@@ -310,7 +312,7 @@ fn current_payout_proof_survives_old_activity_retirement() {
                 },
             )
             .unwrap();
-            let batch = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+            let batch = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
                 &state,
                 &next,
                 &fixture.operator,
@@ -322,7 +324,10 @@ fn current_payout_proof_survives_old_activity_retirement() {
             .await
             .unwrap();
             previous = rows(&next, batch.close());
-            state = Box::pin(batch.apply::<_, Sha256>(state)).await.unwrap().0;
+            state = Box::pin(batch.apply::<_, Sha256, _>(state))
+                .await
+                .unwrap()
+                .0;
         }
         let checkpoint = state.head();
         let current = checkpoint.logs.payouts;

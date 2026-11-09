@@ -387,7 +387,7 @@ async fn fixture(
         Sha256::hash(&[b"close-test-committee"]),
     )
     .unwrap()
-    .bind::<Sha256, _, _>(
+    .bind::<Sha256, _, _, _>(
         &state,
         &deposits,
         &withdrawals,
@@ -432,7 +432,7 @@ async fn fixture(
         });
         acks.push(ack);
     }
-    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
         &state,
         &context,
         &operator,
@@ -462,7 +462,7 @@ async fn validate(
     wire: Bytes,
 ) -> Result<PreparedClose<VerifyingKey, ShaDigest>, CloseError> {
     let dealing = posted::decode::<VerifyingKey, ShaDigest>(wire, &fixture.context)?;
-    validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+    validate_close_with_strategy::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
         &fixture.state,
         &fixture.context,
         &fixture.deposits,
@@ -492,7 +492,7 @@ fn full_dealing_derives_balances_and_preserves_idle_accounts() {
                 expected[(sender + offset) % 8] += 1;
             }
         }
-        let (state, close) = Box::pin(prepared.apply::<_, Sha256>(fixture.state))
+        let (state, close) = Box::pin(prepared.apply::<_, Sha256, _>(fixture.state))
             .await
             .unwrap();
         assert_eq!(state.state().root(), close.roots.successor);
@@ -523,7 +523,7 @@ fn zero_net_activity_and_empty_epochs_append_canonical_batches() {
         let prepared = validate(&fixture, fixture.prepared.encoded().clone())
             .await
             .unwrap();
-        let (state, close) = Box::pin(prepared.apply::<_, Sha256>(fixture.state))
+        let (state, close) = Box::pin(prepared.apply::<_, Sha256, _>(fixture.state))
             .await
             .unwrap();
         assert_ne!(state.state().root(), before);
@@ -569,7 +569,7 @@ fn zero_net_activity_and_empty_epochs_append_canonical_batches() {
             *fixture.context.committee(),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(
+        .bind::<Sha256, _, _, _>(
             &state,
             &fixture.deposits,
             &fixture.withdrawals,
@@ -583,7 +583,7 @@ fn zero_net_activity_and_empty_epochs_append_canonical_batches() {
             },
         )
         .unwrap();
-        let empty = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let empty = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &state,
             &context,
             &fixture.operator,
@@ -597,7 +597,7 @@ fn zero_net_activity_and_empty_epochs_append_canonical_batches() {
         assert!(empty.close().rows.is_empty());
         assert!(empty.state().mutations().is_empty());
         let previous = state.state().root();
-        let (state, _) = Box::pin(empty.apply::<_, Sha256>(state)).await.unwrap();
+        let (state, _) = Box::pin(empty.apply::<_, Sha256, _>(state)).await.unwrap();
         assert_ne!(state.state().root(), previous);
         assert!(state.state().head().operations() > after_operations);
     });
@@ -654,7 +654,7 @@ fn forged_payer_and_operator_acceptance_are_rejected() {
             } else {
                 &wrong
             };
-            let forged = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+            let forged = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
                 &fixture.state,
                 &fixture.context,
                 operator,
@@ -687,7 +687,7 @@ fn stale_and_divergent_predecessors_cannot_validate_the_same_dealing() {
         .await;
         assert_eq!(same.state().root(), fixture.state.state().root());
         let dealing = posted::decode(fixture.prepared.encoded().clone(), &fixture.context).unwrap();
-        let valid = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+        let valid = validate_close_with_strategy::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
             &same,
             &fixture.context,
             &fixture.deposits,
@@ -699,7 +699,7 @@ fn stale_and_divergent_predecessors_cannot_validate_the_same_dealing() {
         .await
         .unwrap();
         assert_eq!(valid.close().roots, fixture.prepared.close().roots);
-        let (advanced, _) = Box::pin(valid.apply::<_, Sha256>(same)).await.unwrap();
+        let (advanced, _) = Box::pin(valid.apply::<_, Sha256, _>(same)).await.unwrap();
         let divergent = new_state(
             runtime,
             "divergent",
@@ -715,7 +715,7 @@ fn stale_and_divergent_predecessors_cannot_validate_the_same_dealing() {
             let dealing =
                 posted::decode(fixture.prepared.encoded().clone(), &fixture.context).unwrap();
             assert!(
-                validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+                validate_close_with_strategy::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
                     state,
                     &fixture.context,
                     &fixture.deposits,

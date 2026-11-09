@@ -149,6 +149,7 @@ async fn semantic_header(
         _,
         _,
         _,
+        _,
     >(
         &state,
         &context,

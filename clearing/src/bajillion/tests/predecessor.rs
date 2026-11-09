@@ -51,7 +51,7 @@ fn context(
         Sha256::hash(&[b"predecessor-committee"]),
     )
     .unwrap()
-    .bind::<Sha256, _, _>(
+    .bind::<Sha256, _, _, _>(
         state,
         &deposits,
         &withdrawals,
@@ -131,7 +131,7 @@ async fn prepare(
             .payer()
             .cmp(b.authorization.body().payer())
     });
-    prepare_close_with_strategy::<Sha256, _, _, _, _>(
+    prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
         state,
         context,
         &operator(),
@@ -151,7 +151,7 @@ async fn validate(
     prepared: &PreparedClose<VerifyingKey, ShaDigest>,
 ) -> Result<PreparedClose<VerifyingKey, ShaDigest>, CloseError> {
     let dealing = posted::decode(prepared.encoded().clone(), context)?;
-    validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+    validate_close_with_strategy::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
         state,
         context,
         &DepositBatch::empty(),
@@ -167,7 +167,9 @@ async fn apply(
     state: TestState,
     prepared: PreparedClose<VerifyingKey, ShaDigest>,
 ) -> (TestState, Close<VerifyingKey, ShaDigest>) {
-    Box::pin(prepared.apply::<_, Sha256>(state)).await.unwrap()
+    Box::pin(prepared.apply::<_, Sha256, _>(state))
+        .await
+        .unwrap()
 }
 
 const fn is_invalid_payer(
@@ -467,16 +469,17 @@ fn batch_signature_covers_context_body_and_predecessor() {
             let mut tampered = wire[..signature_start].to_vec();
             tampered.extend_from_slice(&signature.encode());
             let dealing = posted::decode(tampered.into(), &next).unwrap();
-            let result = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
-                &state,
-                &next,
-                &DepositBatch::empty(),
-                &WithdrawalBatch::empty(),
-                dealing,
-                &mut TestRng::new(11),
-                &Sequential,
-            )
-            .await;
+            let result =
+                validate_close_with_strategy::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
+                    &state,
+                    &next,
+                    &DepositBatch::empty(),
+                    &WithdrawalBatch::empty(),
+                    dealing,
+                    &mut TestRng::new(11),
+                    &Sequential,
+                )
+                .await;
             if valid {
                 let validated = result.unwrap();
                 assert_eq!(validated.close().header, prepared.close().header);

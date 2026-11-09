@@ -59,7 +59,7 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             Sha256::hash(&[b"committee"]),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(
+        .bind::<Sha256, _, _, _>(
             &state,
             &deposits,
             &withdrawals,
@@ -104,7 +104,7 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
             authorization,
             vector,
         };
-        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &state,
             &context,
             &operator,
@@ -116,7 +116,7 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
         .await
         .unwrap();
         let dealing = posted::decode(prepared.encoded().clone(), &context).unwrap();
-        let verified = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+        let verified = validate_close_with_strategy::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
             &state,
             &context,
             &deposits,
@@ -148,7 +148,9 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
         );
         let range = verified.close().roots.activity_range(&context).unwrap();
         let payout_start = context.predecessor_logs().payouts.operations;
-        let (state, close) = Box::pin(verified.apply::<_, Sha256>(state)).await.unwrap();
+        let (state, close) = Box::pin(verified.apply::<_, Sha256, _>(state))
+            .await
+            .unwrap();
         let epoch = Epoch::at(state.logs(), EPOCH, range).await.unwrap();
         for (account, balance) in [
             (payer, Some(75)),
@@ -321,7 +323,7 @@ fn withdrawals_use_epoch_tail_and_batch_balance_reads() {
             .unwrap();
             let before = counts();
             let context = epoch
-                .bind::<Sha256, _, _>(
+                .bind::<Sha256, _, _, _>(
                     &state,
                     &deposits,
                     &withdrawals,
@@ -341,7 +343,7 @@ fn withdrawals_use_epoch_tail_and_batch_balance_reads() {
                 "{label}: binding only checks state identity"
             );
             let before = counts();
-            let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+            let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
                 &state,
                 &context,
                 &operator,
@@ -355,17 +357,18 @@ fn withdrawals_use_epoch_tail_and_batch_balance_reads() {
             reads.push(("prepare", before, counts()));
             let dealing = posted::decode(prepared.encoded().clone(), &context).unwrap();
             let before = counts();
-            let verified = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
-                &state,
-                &context,
-                &deposits,
-                &withdrawals,
-                dealing,
-                &mut TestRng::new(71),
-                &Sequential,
-            )
-            .await
-            .unwrap();
+            let verified =
+                validate_close_with_strategy::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
+                    &state,
+                    &context,
+                    &deposits,
+                    &withdrawals,
+                    dealing,
+                    &mut TestRng::new(71),
+                    &Sequential,
+                )
+                .await
+                .unwrap();
             reads.push(("validate", before, counts()));
             assert_eq!(verified.close().header, prepared.close().header);
             assert_eq!(

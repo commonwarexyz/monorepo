@@ -206,7 +206,7 @@ fn ack_debit_arms_decline_earlier_retries() {
         let ack = acknowledge(&fixture, private, &terminal.vector, 1, 2);
         terminal.authorization =
             SendAuthorization::sign(ack.body().clone(), ack.predecessor(), private);
-        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &fixture.state,
             &fixture.context,
             &fixture.operator,
@@ -374,7 +374,7 @@ fn entry_amount_and_count_contradictions_are_independent() {
         let ack = acknowledge(&fixture, private, &terminals[2].vector, 0, 2);
         terminals[2].authorization =
             SendAuthorization::sign(ack.body().clone(), ack.predecessor(), private);
-        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &fixture.state,
             &fixture.context,
             &fixture.operator,
@@ -698,7 +698,7 @@ fn foreign_context_acks_are_rejected() {
             let mut terminals = fixture.terminals.clone();
             terminals[2].authorization = SendAuthorization::sign(foreign, empty_root(), private);
             assert!(matches!(
-                prepare_close_with_strategy::<Sha256, _, _, _, _>(
+                prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
                     &fixture.state,
                     &fixture.context,
                     &fixture.operator,

@@ -10,7 +10,10 @@ use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt as _, 
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::Spawner;
-use commonware_storage::Context;
+use commonware_storage::{
+    Context,
+    translator::{EightCap, Translator},
+};
 use thiserror::Error;
 
 /// Physical configuration for all three native stores.
@@ -18,9 +21,9 @@ use thiserror::Error;
 /// Every explicit partition and native-derived partition name must be unique across the state and
 /// both logs.
 #[derive(Clone)]
-pub struct Config<S: Strategy = Sequential> {
+pub struct Config<S: Strategy = Sequential, T: Translator = EightCap> {
     /// Current Ordered balance state.
-    pub state: qmdb::Config<S>,
+    pub state: qmdb::Config<S, T>,
     /// Activity and payout logs.
     pub logs: logs::Config<S>,
 }
@@ -61,26 +64,28 @@ impl<D: Digest> Read for ReplicaHead<D> {
 }
 
 /// The three native stores governed by one application checkpoint.
-pub struct Replica<E, H, P, S = Sequential>
+pub struct Replica<E, H, P, S = Sequential, T = EightCap>
 where
     E: Context + Spawner,
     H: Hasher,
     P: PublicKey,
     S: Strategy,
+    T: Translator,
 {
-    state: State<E, H, S>,
+    state: State<E, H, S, T>,
     logs: Logs<E, H, P, S>,
 }
 
 /// Independently owned state and log handles.
-pub type Parts<E, H, P, S> = (State<E, H, S>, Logs<E, H, P, S>);
+pub type Parts<E, H, P, S, T = EightCap> = (State<E, H, S, T>, Logs<E, H, P, S>);
 
-impl<E, H, P, S> Replica<E, H, P, S>
+impl<E, H, P, S, T> Replica<E, H, P, S, T>
 where
     E: Context + Spawner,
     H: Hasher,
     P: PublicKey,
     S: Strategy,
+    T: Translator,
 {
     /// Open all native stores and report their independently recovered heads.
     ///
@@ -90,7 +95,7 @@ where
     /// reported.
     pub async fn open(
         context: E,
-        config: Config<S>,
+        config: Config<S, T>,
         target: Option<ReplicaHead<H::Digest>>,
     ) -> Result<Self, Error> {
         let mut partitions = qmdb::physical_partitions(&config.state);
@@ -115,12 +120,12 @@ where
     }
 
     /// Assemble already-open stores without introducing another storage representation.
-    pub const fn from_parts(state: State<E, H, S>, logs: Logs<E, H, P, S>) -> Self {
+    pub const fn from_parts(state: State<E, H, S, T>, logs: Logs<E, H, P, S>) -> Self {
         Self { state, logs }
     }
 
     /// Return the Current Ordered state.
-    pub const fn state(&self) -> &State<E, H, S> {
+    pub const fn state(&self) -> &State<E, H, S, T> {
         &self.state
     }
 
@@ -138,7 +143,7 @@ where
     }
 
     /// Return the independently native store owners.
-    pub fn into_parts(self) -> Parts<E, H, P, S> {
+    pub fn into_parts(self) -> Parts<E, H, P, S, T> {
         (self.state, self.logs)
     }
 

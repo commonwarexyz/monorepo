@@ -15,7 +15,7 @@ pub use certificate::{
 use commonware_cryptography::{BatchVerifier, Digest, Hasher, PublicKey};
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
-use commonware_storage::Context;
+use commonware_storage::{Context, translator::Translator};
 use rand_core::CryptoRng;
 
 /// One validator attestation over a full-close header.
@@ -32,9 +32,9 @@ pub type Vote = bls12381::Vote;
 /// checkpoint and signing decision before releasing the vote. Signing alone does not install
 /// the candidate or admit it to settlement.
 #[allow(clippy::too_many_arguments)]
-pub async fn seal<H, P, D, E, S, B, R>(
+pub async fn seal<H, P, D, E, S, T, B, R>(
     scheme: &bls12381::Scheme,
-    replica: &Replica<E, H, P, S>,
+    replica: &Replica<E, H, P, S, T>,
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
@@ -48,6 +48,7 @@ where
     D: Digest,
     E: Context + Spawner,
     S: Strategy,
+    T: Translator,
     B: BatchVerifier<PublicKey = P>,
     R: CryptoRng,
 {
@@ -59,7 +60,7 @@ where
     }
     let dealing = posted::decode_with_strategy(encoded, context, strategy)
         .map_err(|_| AdmissionError::InvalidDealing)?;
-    let prepared = transition::validate_close_with_strategy::<H, P, D, E, S, B, R>(
+    let prepared = transition::validate_close_with_strategy::<H, P, D, E, S, T, B, R>(
         replica,
         context,
         deposits,

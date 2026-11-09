@@ -4607,7 +4607,7 @@ mod tests {
         let withdrawals = withdrawals.clone();
         let (prepared, successor) = deterministic::Runner::default().start(|runtime| async move {
             let state = snapshot.reopen(runtime, "close").await;
-            let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+            let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
                 &state,
                 &context,
                 operator,
@@ -4625,7 +4625,9 @@ mod tests {
             )
             .unwrap();
             let accepted = Accepted::prepared(&prepared);
-            let (_, close) = Box::pin(prepared.apply::<_, Sha256>(state)).await.unwrap();
+            let (_, close) = Box::pin(prepared.apply::<_, Sha256, _>(state))
+                .await
+                .unwrap();
             (close, snapshot.extended(accepted, successor_liability))
         });
         (
@@ -4676,7 +4678,7 @@ mod tests {
                 crate::bajillion::posted::decode::<VerifyingKey, ShaDigest>(bytes, &context)
                     .unwrap();
             let validated =
-                validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
+                validate_close_with_strategy::<Sha256, _, _, _, _, _, PaymentBatchVerifier, _>(
                     &state,
                     &context,
                     &deposits,

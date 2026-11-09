@@ -75,7 +75,7 @@ fn bench_receive_apply(c: &mut Criterion) {
                             let (advanced, close) = {
                                 let start = Instant::now();
                                 let (vote, validated) =
-                                    seal::<Sha256, _, _, _, _, BatchVerifier, _>(
+                                    seal::<Sha256, _, _, _, _, _, BatchVerifier, _>(
                                         &signer,
                                         &state,
                                         &context,

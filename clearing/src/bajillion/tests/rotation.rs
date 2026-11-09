@@ -72,7 +72,7 @@ async fn prepare_epoch(
         committee.commitment::<Sha256>(),
     )
     .unwrap()
-    .bind::<Sha256, _, _>(
+    .bind::<Sha256, _, _, _>(
         state,
         &deposits,
         &withdrawals,
@@ -126,7 +126,7 @@ async fn prepare_epoch(
             }
         })
         .collect();
-    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
         state,
         &context,
         &fixture.operator,
@@ -176,7 +176,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
         )
         .await
         .unwrap();
-        let (vote, prepared) = seal::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+        let (vote, prepared) = seal::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
             scheme,
             &replica,
             &first.context,
@@ -193,7 +193,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
             prepared.state().mutations(),
             first.prepared.state().mutations()
         );
-        let (replica, _) = Box::pin(prepared.apply::<_, Sha256>(replica))
+        let (replica, _) = Box::pin(prepared.apply::<_, Sha256, _>(replica))
             .await
             .unwrap();
         outgoing_replicas.push(Box::pin(replica.sync()).await.unwrap());
@@ -288,7 +288,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
         let replica = replica.unwrap();
         assert_ne!(replica.state().root(), accepted_root);
         assert!(
-            seal::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+            seal::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
                 &schemes_in[0],
                 &replica,
                 &second.context,
@@ -393,7 +393,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
                 Bytes::from(changed_body),
             ] {
                 assert!(
-                    seal::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+                    seal::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
                         scheme,
                         &replica,
                         &second.context,
@@ -409,7 +409,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
                 assert_eq!(replica.state().root(), accepted_root);
             }
             assert!(
-                seal::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+                seal::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
                     &schemes_out[0],
                     &replica,
                     &second.context,
@@ -423,7 +423,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
                 .is_err()
             );
         }
-        match seal::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+        match seal::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
             scheme,
             &replica,
             &second.context,
@@ -442,7 +442,7 @@ async fn rotate(context: deterministic::Context, outgoing: &[u64], incoming: &[u
                     prepared.state().mutations(),
                     second.prepared.state().mutations()
                 );
-                let (replica, _) = Box::pin(prepared.apply::<_, Sha256>(replica))
+                let (replica, _) = Box::pin(prepared.apply::<_, Sha256, _>(replica))
                     .await
                     .unwrap();
                 let replica = Box::pin(replica.sync()).await.unwrap();
