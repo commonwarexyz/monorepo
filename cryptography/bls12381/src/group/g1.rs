@@ -3,7 +3,7 @@
 use super::{
     Hex, MSM_BATCH, Scalar,
     kernel::{
-        Add, Double, Group, MAX_COMPONENTS, MAX_LANES, Msm, Multiply, MultiplyEach, Sum, dispatch,
+        Add, Double, Group, Kernel, MAX_COMPONENTS, MAX_LANES, Msm, Multiply, MultiplyEach, Sum,
     },
 };
 use crate::core::{
@@ -93,7 +93,7 @@ impl fmt::Debug for G1 {
 
 impl PartialEq for G1 {
     fn eq(&self, other: &Self) -> bool {
-        dispatch(Add(*self, other.negate())).is_identity()
+        Add(*self, other.negate()).dispatch().is_identity()
     }
 }
 
@@ -103,7 +103,7 @@ impl Object for G1 {}
 
 impl<'a> AddAssign<&'a Self> for G1 {
     fn add_assign(&mut self, rhs: &'a Self) {
-        *self = dispatch(Add(*self, *rhs));
+        *self = Add(*self, *rhs).dispatch();
     }
 }
 
@@ -145,24 +145,26 @@ impl Additive for G1 {
     }
 
     fn double(&mut self) {
-        *self = dispatch(Double(*self));
+        *self = Double(*self).dispatch();
     }
 
     /// Multiplies by an integer of any length without branching on its value.
     fn scale(&self, bits_le: &[u64]) -> Self {
-        dispatch(Multiply {
+        Multiply {
             element: *self,
             scalar: Scalar::from_words_wide(bits_le),
-        })
+        }
+        .dispatch()
     }
 }
 
 impl<'a> MulAssign<&'a Scalar> for G1 {
     fn mul_assign(&mut self, rhs: &'a Scalar) {
-        *self = dispatch(Multiply {
+        *self = Multiply {
             element: *self,
             scalar: *rhs,
-        });
+        }
+        .dispatch();
     }
 }
 
@@ -189,11 +191,12 @@ impl Space<Scalar> for G1 {
                 .map_collect_vec(
                     |ranges| ranges,
                     |range| {
-                        dispatch(Msm {
+                        Msm {
                             elements: &points[range.clone()],
                             scalars: &scalars[range],
                             plan: None,
-                        })
+                        }
+                        .dispatch()
                     },
                 )
                 .iter()
@@ -215,7 +218,7 @@ impl G1 {
     ///
     /// Adds one element per lane, so it costs far less than adding them one at a time.
     pub fn sum(elements: &[Self]) -> Self {
-        dispatch(Sum(elements))
+        Sum(elements).dispatch()
     }
 
     /// Multiplies each element by the scalar at the same index, in place, without branching on
@@ -224,7 +227,7 @@ impl G1 {
     /// Multiplies one element per lane. Elements beyond the scalars are unchanged, and scalars
     /// beyond the elements are ignored.
     pub fn mul_each(elements: &mut [Self], scalars: &[Scalar]) {
-        dispatch(MultiplyEach { elements, scalars });
+        MultiplyEach { elements, scalars }.dispatch();
     }
 }
 
