@@ -77,9 +77,9 @@ pub mod tests {
     pub async fn test_build_small_close_reopen<F, C, Fn, Fut>(context: Context, mut open_db: Fn)
     where
         F: Graftable,
-        C: DbAny<F> + BitmapPrunedBits,
+        C: DbAny<Family = F> + BitmapPrunedBits,
         C::Key: TestKey,
-        <C as DbAny<F>>::Value: TestValue,
+        C::Value: TestValue,
         Fn: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
@@ -95,7 +95,7 @@ pub mod tests {
 
         // Add one key.
         let k1: C::Key = TestKey::from_seed(0);
-        let v1: <C as DbAny<F>>::Value = TestValue::from_seed(10);
+        let v1: C::Value = TestValue::from_seed(10);
         assert!(db.get(&k1).await.unwrap().is_none());
         let merkleized = db
             .new_batch()
@@ -119,7 +119,7 @@ pub mod tests {
 
         // Delete that one key.
         assert!(db.get(&k1).await.unwrap().is_some());
-        let metadata: <C as DbAny<F>>::Value = TestValue::from_seed(1);
+        let metadata: C::Value = TestValue::from_seed(1);
         let merkleized = db
             .new_batch()
             .write(k1, None)
@@ -178,7 +178,7 @@ pub mod tests {
         C: Mutable<Item = Operation<F, Digest, V>>,
         V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
-        TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        TestDb<F, C, V>: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
@@ -297,7 +297,7 @@ pub mod tests {
         C: Mutable<Item = Operation<F, Digest, V>>,
         V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
-        TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        TestDb<F, C, V>: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
@@ -384,7 +384,7 @@ pub mod tests {
         C: Mutable<Item = Operation<F, Digest, V>>,
         V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
-        TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        TestDb<F, C, V>: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
@@ -448,7 +448,7 @@ pub mod tests {
         C: Mutable<Item = Operation<F, Digest, V>>,
         V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
-        TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        TestDb<F, C, V>: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
