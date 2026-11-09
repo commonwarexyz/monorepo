@@ -993,31 +993,31 @@ mod tests {
         check_chain::<S, F>(simd, inputs);
     }
 
-    struct Evaluate([[u8; BYTES]; 4]);
-
-    impl<S: Simd> Operation<S> for Evaluate {
-        type Output = ();
-
-        fn portable(self, simd: S) {
-            simd.execute(|simd: S| {
-                check::<S, Unsat49<S>>(simd, &self.0);
-                check::<S, Unsat28<S>>(simd, &self.0);
-            });
-        }
-
-        // Residues require x86v4c.
-        fn x86_v4c(self, simd: S)
-        where
-            S: X86V4C,
-        {
-            let inputs = self.0;
-            self.portable(simd);
-            simd.execute(|simd: S| check::<S, Rns<S>>(simd, &inputs));
-        }
-    }
-
     #[test]
     fn representations_match_reference() {
+        struct Evaluate([[u8; BYTES]; 4]);
+
+        impl<S: Simd> Operation<S> for Evaluate {
+            type Output = ();
+
+            fn portable(self, simd: S) {
+                simd.execute(|simd: S| {
+                    check::<S, Unsat49<S>>(simd, &self.0);
+                    check::<S, Unsat28<S>>(simd, &self.0);
+                });
+            }
+
+            // Residues require x86v4c.
+            fn x86_v4c(self, simd: S)
+            where
+                S: X86V4C,
+            {
+                let inputs = self.0;
+                self.portable(simd);
+                simd.execute(|simd: S| check::<S, Rns<S>>(simd, &inputs));
+            }
+        }
+
         let one = reference::ONE;
         let minus_one = reference::neg(one);
         for value in [

@@ -752,42 +752,42 @@ mod tests {
         output
     }
 
-    /// Runs [`sum_and_double`] in every representation, returning the positional ones' outputs.
-    struct Evaluate<'a>(&'a [Coordinates]);
-
-    impl<S: Simd> Operation<S> for Evaluate<'_> {
-        type Output = [Vec<Coordinates>; 2];
-
-        fn portable(self, simd: S) -> [Vec<Coordinates>; 2] {
-            simd.execute(
-                #[inline(always)]
-                |simd: S| {
-                    [
-                        sum_and_double::<S, Unsat49<S>>(simd, self.0),
-                        sum_and_double::<S, Unsat28<S>>(simd, self.0),
-                    ]
-                },
-            )
-        }
-
-        // Residues require x86v4c and must match the other representations.
-        fn x86_v4c(self, simd: S) -> [Vec<Coordinates>; 2]
-        where
-            S: X86V4C,
-        {
-            let points = self.0;
-            let outputs = self.portable(simd);
-            let residues = simd.execute(
-                #[inline(always)]
-                |simd: S| sum_and_double::<S, Rns<S>>(simd, points),
-            );
-            assert!(residues == outputs[0], "residues differ");
-            outputs
-        }
-    }
-
     #[test]
     fn sums_and_doublings_match_reference() {
+        /// Runs [`sum_and_double`] in every representation, returning the positional ones' outputs.
+        struct Evaluate<'a>(&'a [Coordinates]);
+
+        impl<S: Simd> Operation<S> for Evaluate<'_> {
+            type Output = [Vec<Coordinates>; 2];
+
+            fn portable(self, simd: S) -> [Vec<Coordinates>; 2] {
+                simd.execute(
+                    #[inline(always)]
+                    |simd: S| {
+                        [
+                            sum_and_double::<S, Unsat49<S>>(simd, self.0),
+                            sum_and_double::<S, Unsat28<S>>(simd, self.0),
+                        ]
+                    },
+                )
+            }
+
+            // Residues require x86v4c and must match the other representations.
+            fn x86_v4c(self, simd: S) -> [Vec<Coordinates>; 2]
+            where
+                S: X86V4C,
+            {
+                let points = self.0;
+                let outputs = self.portable(simd);
+                let residues = simd.execute(
+                    #[inline(always)]
+                    |simd: S| sum_and_double::<S, Rns<S>>(simd, points),
+                );
+                assert!(residues == outputs[0], "residues differ");
+                outputs
+            }
+        }
+
         let (x, y) = generator();
         let b = mul(small(4), (reference::ONE, reference::ONE));
         assert_eq!(

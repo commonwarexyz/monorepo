@@ -865,31 +865,31 @@ mod tests {
         assert!(F::LANES > 0);
     }
 
-    struct Evaluate([[u8; BYTES]; 4]);
-
-    impl<S: Simd> Operation<S> for Evaluate {
-        type Output = ();
-
-        fn portable(self, simd: S) {
-            simd.execute(|simd: S| {
-                check::<S, Unsat49<S>>(simd, &self.0);
-                check::<S, Unsat28<S>>(simd, &self.0);
-            });
-        }
-
-        // Residues require x86v4c.
-        fn x86_v4c(self, simd: S)
-        where
-            S: X86V4C,
-        {
-            let inputs = self.0;
-            self.portable(simd);
-            simd.execute(|simd: S| check::<S, Rns<S>>(simd, &inputs));
-        }
-    }
-
     #[test]
     fn representations_match_reference() {
+        struct Evaluate([[u8; BYTES]; 4]);
+
+        impl<S: Simd> Operation<S> for Evaluate {
+            type Output = ();
+
+            fn portable(self, simd: S) {
+                simd.execute(|simd: S| {
+                    check::<S, Unsat49<S>>(simd, &self.0);
+                    check::<S, Unsat28<S>>(simd, &self.0);
+                });
+            }
+
+            // Residues require x86v4c.
+            fn x86_v4c(self, simd: S)
+            where
+                S: X86V4C,
+            {
+                let inputs = self.0;
+                self.portable(simd);
+                simd.execute(|simd: S| check::<S, Rns<S>>(simd, &inputs));
+            }
+        }
+
         for value in [
             reference::ZERO,
             reference::ONE,
@@ -931,31 +931,31 @@ mod tests {
         assert_eq!(output[1], reference::to_bytes(one));
     }
 
-    struct Invert([u8; BYTES]);
-
-    impl<S: Simd> Operation<S> for Invert {
-        type Output = ();
-
-        fn portable(self, simd: S) {
-            simd.execute(|simd: S| {
-                check_inverse::<S, Unsat49<S>>(simd, &self.0);
-                check_inverse::<S, Unsat28<S>>(simd, &self.0);
-            });
-        }
-
-        // Residues require x86v4c.
-        fn x86_v4c(self, simd: S)
-        where
-            S: X86V4C,
-        {
-            let input = self.0;
-            self.portable(simd);
-            simd.execute(|simd: S| check_inverse::<S, Rns<S>>(simd, &input));
-        }
-    }
-
     #[test]
     fn inverses_match_reference() {
+        struct Invert([u8; BYTES]);
+
+        impl<S: Simd> Operation<S> for Invert {
+            type Output = ();
+
+            fn portable(self, simd: S) {
+                simd.execute(|simd: S| {
+                    check_inverse::<S, Unsat49<S>>(simd, &self.0);
+                    check_inverse::<S, Unsat28<S>>(simd, &self.0);
+                });
+            }
+
+            // Residues require x86v4c.
+            fn x86_v4c(self, simd: S)
+            where
+                S: X86V4C,
+            {
+                let input = self.0;
+                self.portable(simd);
+                simd.execute(|simd: S| check_inverse::<S, Rns<S>>(simd, &input));
+            }
+        }
+
         let mut u = arbitrary::Unstructured::new(&[0xa5; 64]);
         for value in [
             reference::ZERO,

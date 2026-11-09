@@ -94,28 +94,28 @@ pub trait Kernel: Sized {
     }
 }
 
-/// Runs a kernel in the representation chosen for the backend.
-pub struct Run<K>(pub K);
-
-impl<S: Simd, K: Kernel> Operation<S> for Run<K> {
-    type Output = K::Output;
-
-    #[inline(always)]
-    fn portable(self, simd: S) -> K::Output {
-        self.0.run::<S, Unsat28<S>>(simd)
-    }
-
-    #[inline(always)]
-    fn x86_v4c(self, simd: S) -> K::Output
-    where
-        S: X86V4C,
-    {
-        self.0.x86_v4c(simd)
-    }
-}
-
 /// Runs a kernel on the best available backend.
 pub fn dispatch<K: Kernel>(kernel: K) -> K::Output {
+    /// Runs a kernel in the representation chosen for the backend.
+    struct Run<K>(K);
+
+    impl<S: Simd, K: Kernel> Operation<S> for Run<K> {
+        type Output = K::Output;
+
+        #[inline(always)]
+        fn portable(self, simd: S) -> K::Output {
+            self.0.run::<S, Unsat28<S>>(simd)
+        }
+
+        #[inline(always)]
+        fn x86_v4c(self, simd: S) -> K::Output
+        where
+            S: X86V4C,
+        {
+            self.0.x86_v4c(simd)
+        }
+    }
+
     commonware_simd::dispatch(Run(kernel))
 }
 
