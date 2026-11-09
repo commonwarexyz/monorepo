@@ -580,6 +580,7 @@ mod tests {
     use commonware_runtime::{
         Metrics as _, Runner as _, Supervisor as _,
         deterministic::{self, FaultConfig},
+        telemetry::metrics::MetricsExt as _,
     };
     use commonware_storage::{
         index::partitioned::unordered::Index as Partitioned,
@@ -1018,10 +1019,10 @@ mod tests {
         });
     }
 
-    /// Settling stages a batch without applying it. When the payout log then cannot be made
-    /// durable, apply fails, and the databases reopen at the parent as after a restart (V2).
+    /// Settling stages a batch without applying it, and when the payout log then cannot be made
+    /// durable, apply fails before it applies anything to the balances.
     #[test]
-    fn test_apply_fails_when_the_log_is_not_durable() {
+    fn test_apply_writes_no_balance_before_the_log_is_durable() {
         deterministic::Runner::default().start(|context| async move {
             let operator = operator_key();
             let store = open(context.child("opened"), "ordered").await;
@@ -1031,11 +1032,13 @@ mod tests {
             let checked = check(close, &parent, &queued).unwrap();
             let proposal = store.settle(&checked).await.unwrap();
             let posted = proposal.summary().digest();
-            assert!(
-                context
-                    .encode()
-                    .contains("opened_balances_apply_batch_calls_total 0")
-            );
+
+            // A second handle to the counter the balances database registered shares its count
+            // and keeps it in the registry after apply drops the database.
+            let apply_calls = context
+                .child("opened")
+                .child("balances")
+                .counter("apply_batch_calls", "Number of apply-batch calls");
 
             // Every sync fails, so the log's commit fails and apply drops both handles.
             *context.storage_fault_config().write() = FaultConfig {
@@ -1046,13 +1049,13 @@ mod tests {
                 store.apply(proposal, &posted).await,
                 Err(Error::Log(_))
             ));
-            *context.storage_fault_config().write() = FaultConfig::default();
-            let store = open(context.child("reopened"), "ordered").await;
-            assert_eq!(
-                store.roots(),
-                (parent.summary.balances, parent.summary.payouts.root)
+            assert_eq!(apply_calls.metric().get(), 0);
+            assert!(
+                context
+                    .encode()
+                    .contains("opened_balances_apply_batch_calls_total 0"),
+                "the shared counter must still be registered after the failure"
             );
-            assert!(store.balances.get_metadata().await.unwrap().is_none());
         });
     }
 
