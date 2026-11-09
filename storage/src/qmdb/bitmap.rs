@@ -1,4 +1,4 @@
-//! Activity-status bitmap. Owned by [`any::Db`](super::any::db::Db) and shared with
+//! Activity-status bitmap. Owned by [`any::Db`](super::any::Db) and shared with
 //! [`MerkleizedBatch`](super::current::batch::MerkleizedBatch)es via `Arc<Shared<N>>`.
 //!
 //! `any::Db` mutates the inner [`bitmap::Prunable`] under a [`RwLock`] during `apply_batch` /

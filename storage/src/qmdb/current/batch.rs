@@ -1234,7 +1234,7 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
 
     /// Return the batch's safe sync boundary.
     ///
-    /// This equals the boundary [`super::db::Db::sync_boundary`] reports once this batch is applied.
+    /// This equals the boundary [`super::Db::sync_boundary`] reports once this batch is applied.
     pub fn sync_boundary(&self) -> Location<F> {
         // Derive from the commit's chunk-aligned inactivity floor, the same quantity the DB uses
         // after apply. Deliberately not the physical bitmap pruning boundary, which can lag the

@@ -5,7 +5,7 @@ use commonware_cryptography::blake3::Digest;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    qmdb::store::db::{Config, Db},
+    qmdb::store::{Config, Db},
     translator::TwoCap,
 };
 use commonware_storage_fuzz::floor::{Plan, Recorder};
