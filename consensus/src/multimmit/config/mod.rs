@@ -13,6 +13,8 @@
 pub(super) mod profile;
 mod protocol;
 
+#[cfg(any(test, feature = "mocks"))]
+use crate::multimmit::types::ChainId;
 use crate::{
     multimmit::types::CodecConfigError,
     types::{Epoch, Participant},
@@ -39,6 +41,39 @@ pub enum ProposalPolicy {
     Endorsed,
     /// Propose only the highest held DA certificate, or the parent tip if none is newer.
     Certified,
+    /// Censor the [`Victims`]: propose every victim chain at the parent tip, ignoring newer
+    /// certificates and listing no blocks, and every other chain as [`Self::Endorsed`] does.
+    ///
+    /// For censorship experiments. The proposal is valid, so a censoring leader's view still
+    /// finalizes; votes may still extend a victim chain by up to its extension bound.
+    #[cfg(any(test, feature = "mocks"))]
+    Censor(Victims),
+}
+
+/// The chains a [`ProposalPolicy::Censor`] leader censors: a set of chain indices below 128.
+#[cfg(any(test, feature = "mocks"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Victims(u128);
+
+#[cfg(any(test, feature = "mocks"))]
+impl Victims {
+    /// The number of chains a set can name: every chain index is below it.
+    pub const CAPACITY: usize = 128;
+
+    /// Returns the set of `chains`, or `None` when a chain index is [`Self::CAPACITY`] or more.
+    pub fn new(chains: impl IntoIterator<Item = ChainId>) -> Option<Self> {
+        chains.into_iter().try_fold(Self(0), |set, chain| {
+            let bit = 1u128.checked_shl(chain.get())?;
+            Some(Self(set.0 | bit))
+        })
+    }
+
+    /// Returns whether `chain` is censored.
+    pub fn contains(self, chain: ChainId) -> bool {
+        1u128
+            .checked_shl(chain.get())
+            .is_some_and(|bit| self.0 & bit != 0)
+    }
 }
 
 /// An invalid protocol, tuning, or engine configuration.

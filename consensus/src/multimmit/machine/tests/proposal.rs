@@ -465,6 +465,71 @@ fn proposal_includes_the_da_voted_frontier_by_default() {
 }
 
 #[test]
+fn a_censoring_leader_proposes_only_its_victims_at_the_parent_tip() {
+    use crate::multimmit::config::{ProposalPolicy, Victims};
+
+    let mut machine = Machine::new(Harness::validator(0).participants(6).profile());
+    let start = machine.step(Input::Start).unwrap();
+    machine.persist(&start.persist_job(), Until::CursorAdvance);
+    let chain = ChainId::new(1);
+    let genesis = machine.profile().protocol().genesis().tips()[1];
+    let first = TransactionBlockHeader::new(
+        machine.profile().protocol().epoch(),
+        chain,
+        Height::new(1),
+        genesis.digest(),
+        digest(b"censored first"),
+    )
+    .unwrap();
+    let second = TransactionBlockHeader::new(
+        machine.profile().protocol().epoch(),
+        chain,
+        Height::new(2),
+        first.block_ref::<Sha256>().digest(),
+        digest(b"censored second"),
+    )
+    .unwrap();
+    let first_choice = validate_block(&mut machine, first.clone(), 1);
+    machine.persist(&first_choice.persist_job(), Until::CursorAdvance);
+    let certificate = symbolic_da_certificate(first, 0);
+    let verification = observe(&mut machine, Artifact::DaCertificate(certificate.clone()));
+    let advanced = machine.verify(&verification, true, Until::CursorAdvance);
+    machine.persist(&advanced.persist_job(), Until::CursorAdvance);
+    let second_choice = validate_block(&mut machine, second.clone(), 1);
+    machine.persist(&second_choice.persist_job(), Until::CursorAdvance);
+
+    // A victim chain is proposed at the parent tip, without the held certificate or the DA-voted
+    // block above it.
+    machine.chain.proposal_policy = ProposalPolicy::Censor(Victims::new([chain]).unwrap());
+    let censored = machine.chain.propose_chain(genesis).unwrap();
+    assert_eq!(censored.anchor(), &Anchor::Tip(genesis));
+    assert!(censored.payloads().is_empty());
+
+    // Every other chain is proposed as the endorsed policy proposes it.
+    machine.chain.proposal_policy =
+        ProposalPolicy::Censor(Victims::new([ChainId::new(0), ChainId::new(2)]).unwrap());
+    let spared = machine.chain.propose_chain(genesis).unwrap();
+    assert_eq!(spared.anchor(), &Anchor::Certificate(certificate));
+    assert_eq!(spared.payloads(), &[second.body_digest()]);
+}
+
+#[test]
+fn victims_hold_chain_indices_below_128() {
+    use crate::multimmit::config::Victims;
+
+    let victims = Victims::new([0, 5, 127].map(ChainId::new)).unwrap();
+    for index in 0..200 {
+        assert_eq!(
+            victims.contains(ChainId::new(index)),
+            [0, 5, 127].contains(&index),
+            "chain {index}"
+        );
+    }
+    assert_eq!(Victims::new([ChainId::new(128)]), None);
+    assert!(!Victims::default().contains(ChainId::new(0)));
+}
+
+#[test]
 fn leader_proposal_choice_is_durable() {
     let mut machine = Machine::new(Harness::validator(0).profile());
     let start = machine.step(Input::Start).unwrap();

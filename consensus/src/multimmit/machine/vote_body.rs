@@ -125,6 +125,14 @@ impl<S: Scheme, D: Digest> ChainState<S, D> {
     ) -> Result<ChainProposal<S, D>, ChainError> {
         let chain = tip.chain().index();
         let state = self.da.chains.get(chain).ok_or(ChainError::Context)?;
+        let depth = self.chain_limits(tip.chain())?.pipeline_depth() as usize;
+        #[cfg(any(test, feature = "mocks"))]
+        if let ProposalPolicy::Censor(victims) = self.proposal_policy
+            && victims.contains(tip.chain())
+        {
+            return ChainProposal::new(tip.chain(), Anchor::Tip(tip), Vec::new(), depth)
+                .map_err(|_| ChainError::Context);
+        }
         let certified = state
             .certified
             .range(..)
@@ -140,10 +148,11 @@ impl<S: Scheme, D: Digest> ChainState<S, D> {
             Some((certificate, block)) => (Anchor::Certificate(certificate), block),
             None => (Anchor::Tip(tip), tip),
         };
-        let depth = self.chain_limits(tip.chain())?.pipeline_depth() as usize;
         let budget = match self.proposal_policy {
             ProposalPolicy::Endorsed => depth,
             ProposalPolicy::Certified => 0,
+            #[cfg(any(test, feature = "mocks"))]
+            ProposalPolicy::Censor(_) => depth,
         };
         let mut payloads = Vec::new();
         while payloads.len() < budget {
