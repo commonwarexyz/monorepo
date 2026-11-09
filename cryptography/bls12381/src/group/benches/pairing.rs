@@ -4,7 +4,7 @@
 //! filling every lane, as when verifying many signatures separately.
 
 use super::utils::{blst_multi_pairing, pairs};
-use commonware_cryptography_bls12381::group::{GT, pairing, pairings};
+use commonware_cryptography_bls12381::{GT, pairing, pairings};
 use criterion::{Criterion, Throughput, criterion_group};
 use std::{hint::black_box, slice};
 

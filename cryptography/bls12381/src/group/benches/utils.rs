@@ -1,7 +1,7 @@
 //! Inputs shared by the group benchmarks, as elements of the public API and as their blst
 //! counterparts.
 
-use commonware_cryptography_bls12381::group::{G1, G2, Scalar};
+use commonware_cryptography_bls12381::{G1, G2, Scalar};
 use commonware_math::algebra::CryptoGroup;
 use std::ptr;
 

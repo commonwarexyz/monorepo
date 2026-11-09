@@ -1,7 +1,7 @@
 //! Multi-scalar multiplication on one thread, compared with blst's Pippenger method.
 
 use super::utils::{Curve, le_bytes, scalars};
-use commonware_cryptography_bls12381::group::{G1, G2};
+use commonware_cryptography_bls12381::{G1, G2};
 use commonware_parallel::Sequential;
 use criterion::{Criterion, Throughput, criterion_group};
 use std::hint::black_box;
