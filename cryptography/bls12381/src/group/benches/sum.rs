@@ -3,7 +3,7 @@
 //! The sum holds one element per lane, so every size fills the lanes.
 
 use super::utils::Curve;
-use commonware_cryptography_bls12381::group::{G1, G2};
+use commonware_cryptography_bls12381::{G1, G2};
 use criterion::{Criterion, Throughput, criterion_group};
 use std::hint::black_box;
 

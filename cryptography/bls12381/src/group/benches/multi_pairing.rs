@@ -5,7 +5,7 @@
 //! distinct messages.
 
 use super::utils::{blst_multi_pairing, pairs};
-use commonware_cryptography_bls12381::group::multi_pairing;
+use commonware_cryptography_bls12381::multi_pairing;
 use criterion::{Criterion, Throughput, criterion_group};
 use std::hint::black_box;
 
