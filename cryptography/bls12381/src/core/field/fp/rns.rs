@@ -1720,50 +1720,6 @@ mod tests {
     /// Number of element pairs in each evaluation.
     const COUNT: usize = 4;
 
-    /// Evaluates a formula on every pair of elements.
-    struct Evaluate<'a> {
-        formula: Formula,
-        mode: u8,
-        a: &'a [Element; COUNT],
-        b: &'a [Element; COUNT],
-    }
-
-    /// Backends without x86v4c have no residues and return the reference.
-    impl<S: Simd> Operation<S> for Evaluate<'_> {
-        type Output = [[u8; BYTES]; COUNT];
-
-        fn portable(self, _simd: S) -> [[u8; BYTES]; COUNT] {
-            let (a, b) = (self.a, self.b);
-            core::array::from_fn(|i| reference::to_bytes(self.formula.scalar(a[i], b[i])))
-        }
-
-        fn x86_v4c(self, simd: S) -> [[u8; BYTES]; COUNT]
-        where
-            S: X86V4C,
-        {
-            let mut output = [[0; BYTES]; COUNT];
-            let (a_bound, b_bound) = self.formula.bounds();
-            simd.execute(
-                #[inline(always)]
-                |simd: S| {
-                    for (i, output) in output.iter_mut().enumerate() {
-                        let a = match self.formula {
-                            Formula::Load => {
-                                Rns::load(simd, &[reference::to_bytes(self.a[i])], &[0; BYTES])
-                            }
-                            _ => loose(simd, self.a[i], a_bound, self.mode),
-                        };
-                        let b = loose(simd, self.b[i], b_bound, self.mode.rotate_left(2));
-                        let value = self.formula.evaluate(simd, a, b);
-                        assert_residues(simd, value);
-                        *output = stored(simd, value);
-                    }
-                },
-            );
-            output
-        }
-    }
-
     fn element(u: &mut Unstructured<'_>, largest: Element) -> arbitrary::Result<Element> {
         Ok(match u.int_in_range(0..=9)? {
             0 => reference::ZERO,
@@ -1788,6 +1744,50 @@ mod tests {
 
     #[test]
     fn matches_reference() {
+        /// Evaluates a formula on every pair of elements.
+        struct Evaluate<'a> {
+            formula: Formula,
+            mode: u8,
+            a: &'a [Element; COUNT],
+            b: &'a [Element; COUNT],
+        }
+
+        /// Backends without x86v4c have no residues and return the reference.
+        impl<S: Simd> Operation<S> for Evaluate<'_> {
+            type Output = [[u8; BYTES]; COUNT];
+
+            fn portable(self, _simd: S) -> [[u8; BYTES]; COUNT] {
+                let (a, b) = (self.a, self.b);
+                core::array::from_fn(|i| reference::to_bytes(self.formula.scalar(a[i], b[i])))
+            }
+
+            fn x86_v4c(self, simd: S) -> [[u8; BYTES]; COUNT]
+            where
+                S: X86V4C,
+            {
+                let mut output = [[0; BYTES]; COUNT];
+                let (a_bound, b_bound) = self.formula.bounds();
+                simd.execute(
+                    #[inline(always)]
+                    |simd: S| {
+                        for (i, output) in output.iter_mut().enumerate() {
+                            let a = match self.formula {
+                                Formula::Load => {
+                                    Rns::load(simd, &[reference::to_bytes(self.a[i])], &[0; BYTES])
+                                }
+                                _ => loose(simd, self.a[i], a_bound, self.mode),
+                            };
+                            let b = loose(simd, self.b[i], b_bound, self.mode.rotate_left(2));
+                            let value = self.formula.evaluate(simd, a, b);
+                            assert_residues(simd, value);
+                            *output = stored(simd, value);
+                        }
+                    },
+                );
+                output
+            }
+        }
+
         let largest = largest();
         minifuzz::test(|u| {
             let mut a = [reference::ZERO; COUNT];
@@ -1912,34 +1912,34 @@ mod tests {
         integer_domain(EmulatedX86V4C);
     }
 
-    /// Loads and stores every element.
-    struct RoundTrip<'a>(&'a [[u8; BYTES]; COUNT]);
-
-    /// Backends without x86v4c have no residues and return the reference.
-    impl<S: Simd> Operation<S> for RoundTrip<'_> {
-        type Output = [[u8; BYTES]; COUNT];
-
-        fn portable(self, _simd: S) -> [[u8; BYTES]; COUNT] {
-            self.0
-                .map(|bytes| reference::to_bytes(reference::reduce(&bytes)))
-        }
-
-        fn x86_v4c(self, simd: S) -> [[u8; BYTES]; COUNT]
-        where
-            S: X86V4C,
-        {
-            let mut output = [[0; BYTES]; COUNT];
-            for (bytes, output) in self.0.iter().zip(&mut output) {
-                let value = Rns::<S>::load(simd, &[*bytes], &[0; BYTES]);
-                assert_residues(simd, value);
-                *output = stored(simd, value);
-            }
-            output
-        }
-    }
-
     #[test]
     fn round_trip_reduces_bytes() {
+        /// Loads and stores every element.
+        struct RoundTrip<'a>(&'a [[u8; BYTES]; COUNT]);
+
+        /// Backends without x86v4c have no residues and return the reference.
+        impl<S: Simd> Operation<S> for RoundTrip<'_> {
+            type Output = [[u8; BYTES]; COUNT];
+
+            fn portable(self, _simd: S) -> [[u8; BYTES]; COUNT] {
+                self.0
+                    .map(|bytes| reference::to_bytes(reference::reduce(&bytes)))
+            }
+
+            fn x86_v4c(self, simd: S) -> [[u8; BYTES]; COUNT]
+            where
+                S: X86V4C,
+            {
+                let mut output = [[0; BYTES]; COUNT];
+                for (bytes, output) in self.0.iter().zip(&mut output) {
+                    let value = Rns::<S>::load(simd, &[*bytes], &[0; BYTES]);
+                    assert_residues(simd, value);
+                    *output = stored(simd, value);
+                }
+                output
+            }
+        }
+
         let largest = largest();
         let extremes = [
             [0; BYTES],

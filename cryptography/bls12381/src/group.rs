@@ -339,7 +339,7 @@ mod tests {
         for scalar in scalars {
             let element = generator * &scalar;
             assert_eq!(dispatch(Endomorphism(element)), element * &eigenvalue);
-            check_consistent(|| Representations(Endomorphism(element)));
+            check_kernel_representations(Endomorphism(element));
 
             let components = G::components(&scalar);
             let mut sum = Scalar::ZERO;
@@ -529,35 +529,87 @@ mod tests {
     ///
     /// Representations with different lane counts may sum in different orders, which changes the
     /// projective coordinates but not the element.
-    struct Representations<K>(K);
+    fn check_kernel_representations<G: Group + PartialEq + Debug, K: Kernel<Output = G> + Copy>(
+        kernel: K,
+    ) {
+        struct Representations<K>(K);
 
-    impl<S: Simd, G: Group + PartialEq + Debug, K: Kernel<Output = G> + Copy> Operation<S>
-        for Representations<K>
-    {
-        type Output = G;
-
-        fn portable(self, simd: S) -> G {
-            simd.execute(|simd: S| {
-                let expected = self.0.run::<S, Unsat49<S>>(simd);
-                assert_eq!(self.0.run::<S, Unsat28<S>>(simd), expected);
-                expected
-            })
-        }
-
-        // Residues require x86v4c.
-        fn x86_v4c(self, simd: S) -> G
-        where
-            S: X86V4C,
+        impl<S: Simd, G: Group + PartialEq + Debug, K: Kernel<Output = G> + Copy> Operation<S>
+            for Representations<K>
         {
-            let kernel = self.0;
-            let expected = self.portable(simd);
-            simd.execute(|simd: S| assert_eq!(kernel.run::<S, Rns<S>>(simd), expected));
-            expected
+            type Output = G;
+
+            fn portable(self, simd: S) -> G {
+                simd.execute(|simd: S| {
+                    let expected = self.0.run::<S, Unsat49<S>>(simd);
+                    assert_eq!(self.0.run::<S, Unsat28<S>>(simd), expected);
+                    expected
+                })
+            }
+
+            // Residues require x86v4c.
+            fn x86_v4c(self, simd: S) -> G
+            where
+                S: X86V4C,
+            {
+                let kernel = self.0;
+                let expected = self.portable(simd);
+                simd.execute(|simd: S| assert_eq!(kernel.run::<S, Rns<S>>(simd), expected));
+                expected
+            }
         }
+
+        check_consistent(|| Representations(kernel));
     }
 
     /// Checks that every representation and backend computes the same coordinates.
     pub fn check_representations<G: CryptoGroup<Scalar = Scalar> + Group>() {
+        /// Runs [`MultiplyEach`] in every representation, checking that they compute the same
+        /// elements.
+        struct EachRepresentations<'a, G>(&'a [G], &'a [Scalar]);
+
+        impl<S: Simd, G: Group + PartialEq + Debug> Operation<S> for EachRepresentations<'_, G> {
+            type Output = Vec<G>;
+
+            fn portable(self, simd: S) -> Vec<G> {
+                simd.execute(|simd: S| {
+                    let mut expected = self.0.to_vec();
+                    MultiplyEach {
+                        elements: &mut expected,
+                        scalars: self.1,
+                    }
+                    .run::<S, Unsat49<S>>(simd);
+                    let mut unsat28 = self.0.to_vec();
+                    MultiplyEach {
+                        elements: &mut unsat28,
+                        scalars: self.1,
+                    }
+                    .run::<S, Unsat28<S>>(simd);
+                    assert_eq!(unsat28, expected);
+                    expected
+                })
+            }
+
+            // Residues require x86v4c.
+            fn x86_v4c(self, simd: S) -> Vec<G>
+            where
+                S: X86V4C,
+            {
+                let (elements, scalars) = (self.0, self.1);
+                let expected = self.portable(simd);
+                simd.execute(|simd: S| {
+                    let mut rns = elements.to_vec();
+                    MultiplyEach {
+                        elements: &mut rns,
+                        scalars,
+                    }
+                    .run::<S, Rns<S>>(simd);
+                    assert_eq!(rns, expected);
+                });
+                expected
+            }
+        }
+
         let generator = G::generator();
         let scalars = scalars();
         let elements: Vec<G> = scalars.iter().map(|scalar| generator * scalar).collect();
@@ -573,67 +625,17 @@ mod tests {
             Plan::Pippenger(3),
         ];
         for plan in plans {
-            check_consistent(|| {
-                Representations(Msm {
-                    elements: &elements,
-                    scalars: &scalars,
-                    plan: Some(plan),
-                })
+            check_kernel_representations(Msm {
+                elements: &elements,
+                scalars: &scalars,
+                plan: Some(plan),
             });
         }
-        check_consistent(|| Representations(Sum(&elements)));
-        check_consistent(|| {
-            Representations(Multiply {
-                element: elements[6],
-                scalar: scalars[5],
-            })
+        check_kernel_representations(Sum(&elements));
+        check_kernel_representations(Multiply {
+            element: elements[6],
+            scalar: scalars[5],
         });
         check_consistent(|| EachRepresentations(&elements, &scalars));
-    }
-
-    /// Runs [`MultiplyEach`] in every representation, checking that they compute the same
-    /// elements.
-    struct EachRepresentations<'a, G>(&'a [G], &'a [Scalar]);
-
-    impl<S: Simd, G: Group + PartialEq + Debug> Operation<S> for EachRepresentations<'_, G> {
-        type Output = Vec<G>;
-
-        fn portable(self, simd: S) -> Vec<G> {
-            simd.execute(|simd: S| {
-                let mut expected = self.0.to_vec();
-                MultiplyEach {
-                    elements: &mut expected,
-                    scalars: self.1,
-                }
-                .run::<S, Unsat49<S>>(simd);
-                let mut unsat28 = self.0.to_vec();
-                MultiplyEach {
-                    elements: &mut unsat28,
-                    scalars: self.1,
-                }
-                .run::<S, Unsat28<S>>(simd);
-                assert_eq!(unsat28, expected);
-                expected
-            })
-        }
-
-        // Residues require x86v4c.
-        fn x86_v4c(self, simd: S) -> Vec<G>
-        where
-            S: X86V4C,
-        {
-            let (elements, scalars) = (self.0, self.1);
-            let expected = self.portable(simd);
-            simd.execute(|simd: S| {
-                let mut rns = elements.to_vec();
-                MultiplyEach {
-                    elements: &mut rns,
-                    scalars,
-                }
-                .run::<S, Rns<S>>(simd);
-                assert_eq!(rns, expected);
-            });
-            expected
-        }
     }
 }

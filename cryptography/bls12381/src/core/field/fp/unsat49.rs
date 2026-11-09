@@ -721,39 +721,6 @@ mod tests {
         from_lanes_form(limbs)
     }
 
-    /// Evaluates a formula on every pair of elements, a lane-sized chunk at a time.
-    struct Evaluate<'a> {
-        formula: Formula,
-        a: &'a [Element; MAX_LANES],
-        b: &'a [Element; MAX_LANES],
-    }
-
-    impl<S: Simd> Operation<S> for Evaluate<'_> {
-        type Output = [[u8; BYTES]; MAX_LANES];
-
-        fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
-            let mut output = [[0; BYTES]; MAX_LANES];
-            let (a_bound, b_bound) = self.formula.bounds();
-            let bytes = self.a.map(reference::to_bytes);
-            simd.execute(
-                #[inline(always)]
-                |simd: S| {
-                    for start in (0..MAX_LANES).step_by(S::U64_LANES) {
-                        let a = match self.formula {
-                            Formula::Load => Unsat49::load(simd, &bytes[start..], &[0; BYTES]),
-                            _ => loose(simd, &self.a[start..], a_bound),
-                        };
-                        let b = loose(simd, &self.b[start..], b_bound);
-                        self.formula
-                            .lanes(simd, a, b)
-                            .store(simd, &mut output[start..]);
-                    }
-                },
-            );
-            output
-        }
-    }
-
     fn elements(
         u: &mut Unstructured<'_>,
         largest: Element,
@@ -782,6 +749,39 @@ mod tests {
 
     #[test]
     fn matches_reference() {
+        /// Evaluates a formula on every pair of elements, a lane-sized chunk at a time.
+        struct Evaluate<'a> {
+            formula: Formula,
+            a: &'a [Element; MAX_LANES],
+            b: &'a [Element; MAX_LANES],
+        }
+
+        impl<S: Simd> Operation<S> for Evaluate<'_> {
+            type Output = [[u8; BYTES]; MAX_LANES];
+
+            fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
+                let mut output = [[0; BYTES]; MAX_LANES];
+                let (a_bound, b_bound) = self.formula.bounds();
+                let bytes = self.a.map(reference::to_bytes);
+                simd.execute(
+                    #[inline(always)]
+                    |simd: S| {
+                        for start in (0..MAX_LANES).step_by(S::U64_LANES) {
+                            let a = match self.formula {
+                                Formula::Load => Unsat49::load(simd, &bytes[start..], &[0; BYTES]),
+                                _ => loose(simd, &self.a[start..], a_bound),
+                            };
+                            let b = loose(simd, &self.b[start..], b_bound);
+                            self.formula
+                                .lanes(simd, a, b)
+                                .store(simd, &mut output[start..]);
+                        }
+                    },
+                );
+                output
+            }
+        }
+
         let largest = largest();
         minifuzz::test(|u| {
             let a = elements(u, largest)?;
@@ -805,24 +805,24 @@ mod tests {
         });
     }
 
-    /// Loads and stores every lane.
-    struct RoundTrip<'a>(&'a [[u8; BYTES]; MAX_LANES]);
-
-    impl<S: Simd> Operation<S> for RoundTrip<'_> {
-        type Output = [[u8; BYTES]; MAX_LANES];
-
-        fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
-            let mut output = [[0; BYTES]; MAX_LANES];
-            for start in (0..MAX_LANES).step_by(S::U64_LANES) {
-                Unsat49::<S>::load(simd, &self.0[start..], &[0; BYTES])
-                    .store(simd, &mut output[start..]);
-            }
-            output
-        }
-    }
-
     #[test]
     fn round_trip_reduces_bytes() {
+        /// Loads and stores every lane.
+        struct RoundTrip<'a>(&'a [[u8; BYTES]; MAX_LANES]);
+
+        impl<S: Simd> Operation<S> for RoundTrip<'_> {
+            type Output = [[u8; BYTES]; MAX_LANES];
+
+            fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
+                let mut output = [[0; BYTES]; MAX_LANES];
+                for start in (0..MAX_LANES).step_by(S::U64_LANES) {
+                    Unsat49::<S>::load(simd, &self.0[start..], &[0; BYTES])
+                        .store(simd, &mut output[start..]);
+                }
+                output
+            }
+        }
+
         let largest = largest();
         minifuzz::test(|u| {
             let a = elements(u, largest)?.map(reference::to_bytes);
@@ -836,23 +836,23 @@ mod tests {
         });
     }
 
-    /// Splats an element into every lane.
-    struct Splat([u8; BYTES]);
-
-    impl<S: Simd> Operation<S> for Splat {
-        type Output = [[u8; BYTES]; MAX_LANES];
-
-        fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
-            let mut output = [[0; BYTES]; MAX_LANES];
-            for start in (0..MAX_LANES).step_by(S::U64_LANES) {
-                Unsat49::<S>::splat(simd, &self.0).store(simd, &mut output[start..]);
-            }
-            output
-        }
-    }
-
     #[test]
     fn splat_fills_every_lane() {
+        /// Splats an element into every lane.
+        struct Splat([u8; BYTES]);
+
+        impl<S: Simd> Operation<S> for Splat {
+            type Output = [[u8; BYTES]; MAX_LANES];
+
+            fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
+                let mut output = [[0; BYTES]; MAX_LANES];
+                for start in (0..MAX_LANES).step_by(S::U64_LANES) {
+                    Unsat49::<S>::splat(simd, &self.0).store(simd, &mut output[start..]);
+                }
+                output
+            }
+        }
+
         minifuzz::test(|u| {
             let element = reference::to_bytes(reference::canonical(u)?);
             assert_eq!(test_dispatch(Splat(element)), [element; MAX_LANES]);

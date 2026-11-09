@@ -419,36 +419,71 @@ mod tests {
         assert_ne!(multi_pairing(&[(p, q), (r, s)]), GT::ONE);
     }
 
-    /// Runs the pairing kernel in every representation, checking that they agree.
-    struct Representations<'a>(Pairings<'a>);
-
-    impl<S: Simd> commonware_simd::Operation<S> for Representations<'_> {
-        type Output = GT;
-
-        fn portable(self, simd: S) -> GT {
-            use crate::core::field::fp::{unsat28::Unsat28, unsat49::Unsat49};
-            simd.execute(|simd: S| {
-                let expected = self.0.run::<S, Unsat49<S>>(simd);
-                assert_eq!(self.0.run::<S, Unsat28<S>>(simd), expected);
-                expected
-            })
-        }
-
-        // Residues require x86v4c.
-        fn x86_v4c(self, simd: S) -> GT
-        where
-            S: commonware_simd::X86V4C,
-        {
-            use crate::core::field::fp::rns::Rns;
-            let kernel = self.0;
-            let expected = self.portable(simd);
-            simd.execute(|simd: S| assert_eq!(kernel.run::<S, Rns<S>>(simd), expected));
-            expected
-        }
-    }
-
     #[test]
     fn representations_agree() {
+        /// Runs the kernel of [`pairings`] in every representation, checking that they agree.
+        struct EachRepresentations<'a>(&'a [(G1, G2)]);
+
+        impl<S: Simd> commonware_simd::Operation<S> for EachRepresentations<'_> {
+            type Output = Vec<GT>;
+
+            fn portable(self, simd: S) -> Vec<GT> {
+                use crate::core::field::fp::{unsat28::Unsat28, unsat49::Unsat49};
+                simd.execute(|simd: S| {
+                    let mut expected = vec![GT::ONE; self.0.len()];
+                    Each(self.0, &mut expected).run::<S, Unsat49<S>>(simd);
+                    let mut outputs = vec![GT::ONE; self.0.len()];
+                    Each(self.0, &mut outputs).run::<S, Unsat28<S>>(simd);
+                    assert_eq!(outputs, expected);
+                    expected
+                })
+            }
+
+            // Residues require x86v4c.
+            fn x86_v4c(self, simd: S) -> Vec<GT>
+            where
+                S: commonware_simd::X86V4C,
+            {
+                use crate::core::field::fp::rns::Rns;
+                let pairs = self.0;
+                let expected = self.portable(simd);
+                simd.execute(|simd: S| {
+                    let mut outputs = vec![GT::ONE; pairs.len()];
+                    Each(pairs, &mut outputs).run::<S, Rns<S>>(simd);
+                    assert_eq!(outputs, expected);
+                });
+                expected
+            }
+        }
+
+        /// Runs the pairing kernel in every representation, checking that they agree.
+        struct Representations<'a>(Pairings<'a>);
+
+        impl<S: Simd> commonware_simd::Operation<S> for Representations<'_> {
+            type Output = GT;
+
+            fn portable(self, simd: S) -> GT {
+                use crate::core::field::fp::{unsat28::Unsat28, unsat49::Unsat49};
+                simd.execute(|simd: S| {
+                    let expected = self.0.run::<S, Unsat49<S>>(simd);
+                    assert_eq!(self.0.run::<S, Unsat28<S>>(simd), expected);
+                    expected
+                })
+            }
+
+            // Residues require x86v4c.
+            fn x86_v4c(self, simd: S) -> GT
+            where
+                S: commonware_simd::X86V4C,
+            {
+                use crate::core::field::fp::rns::Rns;
+                let kernel = self.0;
+                let expected = self.portable(simd);
+                simd.execute(|simd: S| assert_eq!(kernel.run::<S, Rns<S>>(simd), expected));
+                expected
+            }
+        }
+
         let pairs = [
             (multiple::<G1>(3), multiple::<G2>(4)),
             (multiple::<G1>(5), G2::zero()),
@@ -456,40 +491,5 @@ mod tests {
         ];
         commonware_simd::check_consistent(|| Representations(Pairings(&pairs)));
         commonware_simd::check_consistent(|| EachRepresentations(&pairs));
-    }
-
-    /// Runs the kernel of [`pairings`] in every representation, checking that they agree.
-    struct EachRepresentations<'a>(&'a [(G1, G2)]);
-
-    impl<S: Simd> commonware_simd::Operation<S> for EachRepresentations<'_> {
-        type Output = Vec<GT>;
-
-        fn portable(self, simd: S) -> Vec<GT> {
-            use crate::core::field::fp::{unsat28::Unsat28, unsat49::Unsat49};
-            simd.execute(|simd: S| {
-                let mut expected = vec![GT::ONE; self.0.len()];
-                Each(self.0, &mut expected).run::<S, Unsat49<S>>(simd);
-                let mut outputs = vec![GT::ONE; self.0.len()];
-                Each(self.0, &mut outputs).run::<S, Unsat28<S>>(simd);
-                assert_eq!(outputs, expected);
-                expected
-            })
-        }
-
-        // Residues require x86v4c.
-        fn x86_v4c(self, simd: S) -> Vec<GT>
-        where
-            S: commonware_simd::X86V4C,
-        {
-            use crate::core::field::fp::rns::Rns;
-            let pairs = self.0;
-            let expected = self.portable(simd);
-            simd.execute(|simd: S| {
-                let mut outputs = vec![GT::ONE; pairs.len()];
-                Each(pairs, &mut outputs).run::<S, Rns<S>>(simd);
-                assert_eq!(outputs, expected);
-            });
-            expected
-        }
     }
 }

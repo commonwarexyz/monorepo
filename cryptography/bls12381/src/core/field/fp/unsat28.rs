@@ -378,6 +378,26 @@ impl<S: Simd> Unsat28<S> {
     /// Runs as its own kernel, so formulas call one copy rather than inlining it at every use.
     #[inline(always)]
     pub fn mul(self, simd: S, rhs: Self) -> Self {
+        /// The product as an operation, so that NEON multiplies by the limbs of `p` by vector lane.
+        struct Multiply<S: Simd>(Unsat28<S>, Unsat28<S>);
+
+        impl<S: Simd> Operation<S> for Multiply<S> {
+            type Output = Unsat28<S>;
+
+            #[inline(always)]
+            fn portable(self, simd: S) -> Unsat28<S> {
+                self.0.multiply(simd, self.1, Splat)
+            }
+
+            #[inline(always)]
+            fn neon(self, simd: S) -> Unsat28<S>
+            where
+                S: Neon,
+            {
+                self.0.multiply(simd, self.1, Lanes::new(simd))
+            }
+        }
+
         simd.execute(Multiply(self, rhs))
     }
 
@@ -569,26 +589,6 @@ impl<S: Simd> Unsat28<S> {
             bound: DebugCounter::new(1),
             limb_bound: self.limb_bound,
         }
-    }
-}
-
-/// [`Unsat28::mul`] as an operation, so that NEON multiplies by the limbs of `p` by vector lane.
-struct Multiply<S: Simd>(Unsat28<S>, Unsat28<S>);
-
-impl<S: Simd> Operation<S> for Multiply<S> {
-    type Output = Unsat28<S>;
-
-    #[inline(always)]
-    fn portable(self, simd: S) -> Unsat28<S> {
-        self.0.multiply(simd, self.1, Splat)
-    }
-
-    #[inline(always)]
-    fn neon(self, simd: S) -> Unsat28<S>
-    where
-        S: Neon,
-    {
-        self.0.multiply(simd, self.1, Lanes::new(simd))
     }
 }
 
@@ -956,39 +956,6 @@ mod tests {
         from_lanes_form(limbs)
     }
 
-    /// Evaluates a formula on every pair of elements, a lane-sized chunk at a time.
-    struct Evaluate<'a> {
-        formula: Formula,
-        a: &'a [Element; MAX_LANES],
-        b: &'a [Element; MAX_LANES],
-    }
-
-    impl<S: Simd> Operation<S> for Evaluate<'_> {
-        type Output = [[u8; BYTES]; MAX_LANES];
-
-        fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
-            let mut output = [[0; BYTES]; MAX_LANES];
-            let (a_bound, b_bound) = self.formula.bounds();
-            let bytes = self.a.map(reference::to_bytes);
-            simd.execute(
-                #[inline(always)]
-                |simd: S| {
-                    for start in (0..MAX_LANES).step_by(S::U32_LANES) {
-                        let a = match self.formula {
-                            Formula::Load => Unsat28::load(simd, &bytes[start..], &[0; BYTES]),
-                            _ => loose(simd, &self.a[start..], a_bound),
-                        };
-                        let b = loose(simd, &self.b[start..], b_bound);
-                        self.formula
-                            .lanes(simd, a, b)
-                            .store(simd, &mut output[start..]);
-                    }
-                },
-            );
-            output
-        }
-    }
-
     fn elements(
         u: &mut Unstructured<'_>,
         largest: Element,
@@ -1017,6 +984,39 @@ mod tests {
 
     #[test]
     fn matches_reference() {
+        /// Evaluates a formula on every pair of elements, a lane-sized chunk at a time.
+        struct Evaluate<'a> {
+            formula: Formula,
+            a: &'a [Element; MAX_LANES],
+            b: &'a [Element; MAX_LANES],
+        }
+
+        impl<S: Simd> Operation<S> for Evaluate<'_> {
+            type Output = [[u8; BYTES]; MAX_LANES];
+
+            fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
+                let mut output = [[0; BYTES]; MAX_LANES];
+                let (a_bound, b_bound) = self.formula.bounds();
+                let bytes = self.a.map(reference::to_bytes);
+                simd.execute(
+                    #[inline(always)]
+                    |simd: S| {
+                        for start in (0..MAX_LANES).step_by(S::U32_LANES) {
+                            let a = match self.formula {
+                                Formula::Load => Unsat28::load(simd, &bytes[start..], &[0; BYTES]),
+                                _ => loose(simd, &self.a[start..], a_bound),
+                            };
+                            let b = loose(simd, &self.b[start..], b_bound);
+                            self.formula
+                                .lanes(simd, a, b)
+                                .store(simd, &mut output[start..]);
+                        }
+                    },
+                );
+                output
+            }
+        }
+
         let largest = largest();
         minifuzz::test(|u| {
             let a = elements(u, largest)?;
@@ -1040,24 +1040,24 @@ mod tests {
         });
     }
 
-    /// Loads and stores every lane.
-    struct RoundTrip<'a>(&'a [[u8; BYTES]; MAX_LANES]);
-
-    impl<S: Simd> Operation<S> for RoundTrip<'_> {
-        type Output = [[u8; BYTES]; MAX_LANES];
-
-        fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
-            let mut output = [[0; BYTES]; MAX_LANES];
-            for start in (0..MAX_LANES).step_by(S::U32_LANES) {
-                Unsat28::<S>::load(simd, &self.0[start..], &[0; BYTES])
-                    .store(simd, &mut output[start..]);
-            }
-            output
-        }
-    }
-
     #[test]
     fn round_trip_reduces_bytes() {
+        /// Loads and stores every lane.
+        struct RoundTrip<'a>(&'a [[u8; BYTES]; MAX_LANES]);
+
+        impl<S: Simd> Operation<S> for RoundTrip<'_> {
+            type Output = [[u8; BYTES]; MAX_LANES];
+
+            fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
+                let mut output = [[0; BYTES]; MAX_LANES];
+                for start in (0..MAX_LANES).step_by(S::U32_LANES) {
+                    Unsat28::<S>::load(simd, &self.0[start..], &[0; BYTES])
+                        .store(simd, &mut output[start..]);
+                }
+                output
+            }
+        }
+
         let largest = largest();
         minifuzz::test(|u| {
             let a = elements(u, largest)?.map(reference::to_bytes);
@@ -1071,23 +1071,23 @@ mod tests {
         });
     }
 
-    /// Splats an element into every lane.
-    struct Splat([u8; BYTES]);
-
-    impl<S: Simd> Operation<S> for Splat {
-        type Output = [[u8; BYTES]; MAX_LANES];
-
-        fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
-            let mut output = [[0; BYTES]; MAX_LANES];
-            for start in (0..MAX_LANES).step_by(S::U32_LANES) {
-                Unsat28::<S>::splat(simd, &self.0).store(simd, &mut output[start..]);
-            }
-            output
-        }
-    }
-
     #[test]
     fn splat_fills_every_lane() {
+        /// Splats an element into every lane.
+        struct Splat([u8; BYTES]);
+
+        impl<S: Simd> Operation<S> for Splat {
+            type Output = [[u8; BYTES]; MAX_LANES];
+
+            fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
+                let mut output = [[0; BYTES]; MAX_LANES];
+                for start in (0..MAX_LANES).step_by(S::U32_LANES) {
+                    Unsat28::<S>::splat(simd, &self.0).store(simd, &mut output[start..]);
+                }
+                output
+            }
+        }
+
         minifuzz::test(|u| {
             let element = reference::to_bytes(reference::canonical(u)?);
             assert_eq!(test_dispatch(Splat(element)), [element; MAX_LANES]);
@@ -1137,28 +1137,29 @@ mod tests {
         (limbs, element)
     }
 
-    /// Multiplies sums of `SLACK` values with the widest carried limbs, so that product columns
-    /// reach their largest sums.
-    struct Widest;
-
-    impl<S: Simd> Operation<S> for Widest {
-        type Output = [u8; BYTES];
-
-        fn portable(self, simd: S) -> [u8; BYTES] {
-            let sum = |bound| {
-                let value = Unsat28::<S>::from_limbs(simd, &[widest(bound).0; MAX_LANES], bound);
-                (1..SLACK).fold(value, |sum, _| sum.add(simd, value))
-            };
-            let mut output = [[0; BYTES]; MAX_LANES];
-            sum(LIMIT / SLACK)
-                .mul(simd, sum((LIMIT - 1) / SLACK))
-                .store(simd, &mut output);
-            output[0]
-        }
-    }
-
     #[test]
     fn widest_columns_fit_the_lanes() {
+        /// Multiplies sums of `SLACK` values with the widest carried limbs, so that product columns
+        /// reach their largest sums.
+        struct Widest;
+
+        impl<S: Simd> Operation<S> for Widest {
+            type Output = [u8; BYTES];
+
+            fn portable(self, simd: S) -> [u8; BYTES] {
+                let sum = |bound| {
+                    let value =
+                        Unsat28::<S>::from_limbs(simd, &[widest(bound).0; MAX_LANES], bound);
+                    (1..SLACK).fold(value, |sum, _| sum.add(simd, value))
+                };
+                let mut output = [[0; BYTES]; MAX_LANES];
+                sum(LIMIT / SLACK)
+                    .mul(simd, sum((LIMIT - 1) / SLACK))
+                    .store(simd, &mut output);
+                output[0]
+            }
+        }
+
         let times = |element| reference::mul(element, [SLACK, 0, 0, 0, 0, 0]);
         let a = times(widest(LIMIT / SLACK).1);
         let b = times(widest((LIMIT - 1) / SLACK).1);
@@ -1186,46 +1187,46 @@ mod tests {
         multiple(LIMIT - 1)[LIMBS - 1] - 1
     }
 
-    /// Tightly reduces values at the integer limit, carried with the widest low limbs or summed
-    /// up to the limb limit, and a value just below a multiple of `p` with zero low limbs.
-    /// Checks that every result is carried and below `2p`.
-    struct Fold;
-
-    impl<S: Simd> Operation<S> for Fold {
-        type Output = Vec<[u8; BYTES]>;
-
-        fn portable(self, simd: S) -> Vec<[u8; BYTES]> {
-            let twice = words_from_limbs(multiple(2));
-            let mut outputs = Vec::new();
-            let mut fold = |value: Unsat28<S>| {
-                let folded = <Unsat28<S> as Field<S>>::reduce_tight(simd, value);
-                let rows = folded.to_rows(simd);
-                let lanes = (0..S::U32_LANES).map(|lane| rows.map(|row| row[lane]));
-                for limbs in lanes {
-                    assert!(limbs.iter().all(|limb| *limb <= MASK));
-                    let words = words_from_limbs(limbs);
-                    assert!(words.iter().rev().lt(twice.iter().rev()));
-                }
-                let mut output = [[0; BYTES]];
-                folded.store(simd, &mut output);
-                outputs.push(output[0]);
-            };
-            fold(Unsat28::from_limbs(
-                simd,
-                &[widest(LIMIT).0; MAX_LANES],
-                LIMIT,
-            ));
-            let bound = LIMIT / LIMB_LIMIT;
-            let value = Unsat28::from_limbs(simd, &[widest(bound).0; MAX_LANES], bound);
-            fold((1..LIMB_LIMIT).fold(value, |sum, _| sum.add(simd, value)));
-            let limbs = top_only(largest_top()).0;
-            fold(Unsat28::from_limbs(simd, &[limbs; MAX_LANES], LIMIT - 1));
-            outputs
-        }
-    }
-
     #[test]
     fn tight_reductions_fold_below_twice_the_modulus() {
+        /// Tightly reduces values at the integer limit, carried with the widest low limbs or summed
+        /// up to the limb limit, and a value just below a multiple of `p` with zero low limbs.
+        /// Checks that every result is carried and below `2p`.
+        struct Fold;
+
+        impl<S: Simd> Operation<S> for Fold {
+            type Output = Vec<[u8; BYTES]>;
+
+            fn portable(self, simd: S) -> Vec<[u8; BYTES]> {
+                let twice = words_from_limbs(multiple(2));
+                let mut outputs = Vec::new();
+                let mut fold = |value: Unsat28<S>| {
+                    let folded = <Unsat28<S> as Field<S>>::reduce_tight(simd, value);
+                    let rows = folded.to_rows(simd);
+                    let lanes = (0..S::U32_LANES).map(|lane| rows.map(|row| row[lane]));
+                    for limbs in lanes {
+                        assert!(limbs.iter().all(|limb| *limb <= MASK));
+                        let words = words_from_limbs(limbs);
+                        assert!(words.iter().rev().lt(twice.iter().rev()));
+                    }
+                    let mut output = [[0; BYTES]];
+                    folded.store(simd, &mut output);
+                    outputs.push(output[0]);
+                };
+                fold(Unsat28::from_limbs(
+                    simd,
+                    &[widest(LIMIT).0; MAX_LANES],
+                    LIMIT,
+                ));
+                let bound = LIMIT / LIMB_LIMIT;
+                let value = Unsat28::from_limbs(simd, &[widest(bound).0; MAX_LANES], bound);
+                fold((1..LIMB_LIMIT).fold(value, |sum, _| sum.add(simd, value)));
+                let limbs = top_only(largest_top()).0;
+                fold(Unsat28::from_limbs(simd, &[limbs; MAX_LANES], LIMIT - 1));
+                outputs
+            }
+        }
+
         let sum = reference::mul(widest(LIMIT / LIMB_LIMIT).1, [LIMB_LIMIT, 0, 0, 0, 0, 0]);
         let expected = [widest(LIMIT).1, sum, top_only(largest_top()).1].map(reference::to_bytes);
         assert_eq!(test_dispatch(Fold), expected);
