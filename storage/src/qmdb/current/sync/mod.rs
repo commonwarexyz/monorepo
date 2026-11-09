@@ -227,6 +227,11 @@ where
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, qmdb::Error<F>> {
+        db::drop_grafted_anchors::<F, _>(
+            context.child("drop_grafted_anchors"),
+            &config.grafted_metadata_partition,
+        )
+        .await?;
         let strategy = config.merkle.strategy.clone();
         build_db::<F, _, U, _, H, _, N, _>(
             context,

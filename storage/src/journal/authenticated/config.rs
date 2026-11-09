@@ -36,8 +36,9 @@ pub struct Config<S: Strategy> {
     pub cache: CacheConfig,
     /// Read buffer size for replaying operations.
     pub replay_buffer: NonZeroUsize,
-    /// Chunks of operations a startup replay reads and hashes at once, each on a task of its own.
-    /// Set it to the cores startup may use.
+    /// Chunks of operations a startup replay reads and hashes at once, each on a task of its own,
+    /// including when a snapshot build's decode tasks hash them. Set it to the cores startup may
+    /// use.
     pub replay_concurrency: NonZeroUsize,
     /// Strategy used for Merkle hashing.
     pub strategy: S,

@@ -624,6 +624,11 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         Ok(self)
     }
 
+    /// Chunks a startup replay reads and hashes at once.
+    pub(crate) const fn replay_concurrency(&self) -> NonZeroUsize {
+        self.replay_concurrency
+    }
+
     /// How a replay from the current size to `end` splits into chunks, with whole subtrees of
     /// `2^height` leaves.
     pub(crate) fn chunk_plan(&self, end: Location<F>, height: u32) -> ChunkPlan {

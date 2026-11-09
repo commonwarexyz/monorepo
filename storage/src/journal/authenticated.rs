@@ -645,9 +645,10 @@ where
     }
 
     /// Build a journal from synced operations starting at `start`, whose pinned digests are `pins`,
-    /// using the frontier opened under `context`. Nothing is written until
-    /// [Self::persist_boundary], so the frontier and the operations before `start` stay as they
-    /// were until the caller has verified the root. The operations must be durable.
+    /// using the frontier opened under `context`. It durably drops the frontier's anchors, which
+    /// may not describe the synced operations. Nothing else is written until
+    /// [Self::persist_boundary], so the frontier's boundary and the operations before `start` stay
+    /// as they were until the caller has verified the root. The operations must be durable.
     ///
     /// Returns [Error::Merkle] with [`merkle::Error::RangeOutOfBounds`] if `start` lies outside
     /// the retained operation range. Its end is a valid start for a fully pruned journal.
@@ -666,8 +667,10 @@ where
         if *start < bounds.start || *start > bounds.end {
             return Err(merkle::Error::RangeOutOfBounds(start).into());
         }
-        let frontier =
-            Frontier::open(context.child("frontier"), config.metadata_partition.clone()).await?;
+        let frontier = Frontier::open(context.child("frontier"), config.metadata_partition.clone())
+            .await?
+            .drop_anchors()
+            .await?;
         let merkle = Self::align(merkle, &journal, &hasher, apply_batch_size).await?;
         Ok(Self {
             merkle,
@@ -815,6 +818,17 @@ where
         Ok((journal, boundary))
     }
 
+    /// The boundary a prune to `min_position` records. The Merkle structure holds no digests
+    /// before its start, so a target there keeps the boundary where it is.
+    fn prune_boundary(&self, min_position: u64) -> Location<F> {
+        let target = Location::new(self.journal.prune_target(min_position));
+        if target >= self.merkle.bounds().start {
+            target.max(self.boundary)
+        } else {
+            self.boundary
+        }
+    }
+
     async fn prune_inner(
         mut self,
         prune_loc: Location<F>,
@@ -825,10 +839,8 @@ where
             return Ok((self, start, false));
         }
         let old = self.boundary;
-        let boundary = Location::new(self.prune_target(*prune_loc));
-        // The Merkle structure holds no digests before its start, so a boundary there keeps the
-        // frontier where it is.
-        if boundary > old && boundary >= self.merkle.bounds().start {
+        let boundary = self.prune_boundary(*prune_loc);
+        if boundary > old {
             let pins = self.pinned_nodes_at(boundary).await?;
             // The frontier must never get ahead of durable operations, and the new boundary may be
             // justified by a buffered append (e.g. a commit operation), so commit first.
@@ -1024,6 +1036,7 @@ where
         let sink = LeafSink {
             plan: self.merkle.chunk_plan(end, SUBTREE_HEIGHT),
             hasher: self.hasher.clone(),
+            concurrency: self.merkle.replay_concurrency(),
             tx,
         };
 
@@ -1122,6 +1135,7 @@ const BUFFERED_CHUNKS: usize = 8;
 pub struct LeafSink<F: Family, H: merkle::hasher::Hasher<F>> {
     plan: ChunkPlan,
     hasher: H,
+    concurrency: NonZeroUsize,
     tx: mpsc::Sender<Chunk<F, H::Digest>>,
 }
 
@@ -1137,6 +1151,11 @@ impl<F: Family, H: merkle::hasher::Hasher<F>> LeafSink<F, H> {
     /// from [Self::start] to the journal's end.
     pub(crate) fn chunks(&self) -> impl Iterator<Item = Range<u64>> + Send + 'static {
         self.plan.chunks()
+    }
+
+    /// Chunks to scan and hash at once, the journal's [Config::replay_concurrency].
+    pub(crate) const fn concurrency(&self) -> usize {
+        self.concurrency.get()
     }
 
     /// A hasher for `chunk`, one of [Self::chunks].
@@ -1379,7 +1398,12 @@ where
     }
 
     fn prune_target(&self, min_position: u64) -> u64 {
-        self.journal.prune_target(min_position).max(*self.boundary)
+        // A journal whose synced boundary is not recorded yet prunes nothing.
+        if !self.boundary_recorded {
+            return self.bounds().start;
+        }
+        self.journal
+            .prune_target(*self.prune_boundary(min_position))
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), JournalError> {
@@ -3198,12 +3222,14 @@ mod tests {
         ));
 
         // A prune before the anchor deletes nothing and keeps the frontier.
+        assert_eq!(journal.prune_target(50), 0);
         let (journal, start) = journal.prune(Location::new(50)).await.unwrap();
         assert_eq!(start, Location::new(0));
         assert_eq!(journal.journal.bounds().start, 0);
         assert_eq!(journal.frontier.boundary().0, Location::new(0));
 
         // A prune past it moves the boundary and drops the anchors at or before it.
+        assert_eq!(journal.prune_target(85), 84);
         let (journal, start) = journal.prune(Location::new(85)).await.unwrap();
         assert_eq!(start, Location::new(84));
         assert_eq!(journal.frontier.boundary().0, Location::new(84));
@@ -3293,8 +3319,8 @@ mod tests {
         deterministic::Runner::default().start(bounded_reopen_drops_later_anchors::<mmb::Family>);
     }
 
-    /// An import records no anchor before its boundary is persisted, and persisting it drops the
-    /// anchors the frontier held.
+    /// An import drops the anchors the frontier held and records none before its boundary is
+    /// persisted.
     async fn import_resets_anchors<F: Family + PartialEq>(context: Context) {
         let suffix = "import-anchors";
         let journal = create_journal_with_ops::<F>(context.child("source"), suffix, 50).await;
@@ -3321,8 +3347,9 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(anchor_locations(&journal).is_empty());
         let journal = journal.anchor(Location::new(45)).await.unwrap();
-        assert_eq!(anchor_locations(&journal), [28]);
+        assert!(anchor_locations(&journal).is_empty());
         let journal = journal.persist_boundary().await.unwrap();
         assert!(anchor_locations(&journal).is_empty());
         let journal = journal.anchor(Location::new(45)).await.unwrap();

@@ -6180,6 +6180,60 @@ pub(crate) mod test {
         });
     }
 
+    /// A snapshot build that hashes the journal's operations runs the journal's replay concurrency
+    /// of decode tasks when that exceeds its share of `init_concurrency`.
+    #[test_traced("INFO")]
+    fn test_hashing_build_decoders_follow_replay_concurrency() {
+        /// The runtime's running-task gauge for snapshot decoders.
+        fn running_decoders(metrics: &str) -> u64 {
+            metrics
+                .lines()
+                .filter(|line| {
+                    line.starts_with("runtime_tasks_running{") && line.contains("snapshot_decoder")
+                })
+                .filter_map(|line| line.rsplit_once(' ')?.1.trim().parse::<u64>().ok())
+                .sum()
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+
+            // A budget of four gives the index two decoders.
+            let cfg = || {
+                let mut cfg =
+                    fixed_db_config_full::<OneCap, _, _>("decoders", Sequential, NZUsize!(4));
+                cfg.merkle.replay_concurrency = NZUsize!(6);
+                cfg
+            };
+            let db: UnorderedFixedP1 = UnorderedFixedP1::init(ctx.child("storage"), cfg(), None)
+                .await
+                .unwrap();
+            let mut batch = db.new_batch();
+            for i in 0..2_000u64 {
+                batch = batch.write(key(i), Some(key(i)));
+            }
+            let merkleized = batch.merkleize(&db).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            let init = UnorderedFixedP1::init(ctx.child("storage"), cfg(), None);
+            pin_mut!(init);
+            let mut most = 0;
+            let db = loop {
+                if let std::task::Poll::Ready(db) = poll!(&mut init) {
+                    break db.unwrap();
+                }
+                most = most.max(running_decoders(&context.encode()));
+                context.sleep(Duration::from_millis(1)).await;
+            };
+            assert_eq!(most, 6);
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// An empty batch (no mutations) still produces a valid commit.
     #[test_traced("INFO")]
     fn test_any_batch_empty() {

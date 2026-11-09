@@ -335,8 +335,8 @@ impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> ChunkVisitor<F, Item
 trait Scan<F: Family, Item>: Send + Sync {
     type Visitor: ChunkVisitor<F, Item>;
 
-    /// Decode tasks the build needs at least.
-    const MIN_DECODERS: usize;
+    /// Decode tasks the build runs at least.
+    fn decoders(&self) -> usize;
 
     /// The chunks to decode, in position order, for a build from `floor` to `end`.
     fn chunks(&self, floor: u64, end: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static;
@@ -356,7 +356,9 @@ struct IndexOnly;
 impl<F: Family, Item> Scan<F, Item> for IndexOnly {
     type Visitor = ();
 
-    const MIN_DECODERS: usize = 0;
+    fn decoders(&self) -> usize {
+        0
+    }
 
     fn chunks(&self, floor: u64, end: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static {
         (floor..end)
@@ -375,8 +377,11 @@ impl<F: Family, Item> Scan<F, Item> for IndexOnly {
 impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> Scan<F, Item> for LeafSink<F, H> {
     type Visitor = ChunkHasher<F, H>;
 
-    // Hashing needs chunk boundaries, which only decode tasks keep.
-    const MIN_DECODERS: usize = 1;
+    // Hashing needs chunk boundaries, which only decode tasks keep, so the journal's replay
+    // concurrency sizes them.
+    fn decoders(&self) -> usize {
+        self.concurrency()
+    }
 
     // The Merkle structure's chunks, from its start, which callers keep at or before the floor.
     fn chunks(&self, _: u64, _: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static {
@@ -687,7 +692,7 @@ where
 {
     let floor = *inactivity_floor_loc;
     let end = log.bounds().end;
-    let decoders = plan.decoders.max(S::MIN_DECODERS);
+    let decoders = plan.decoders.max(scan.decoders());
 
     // All workers share one atomic bitmap to track the activity bits.
     let active = Arc::new(Atomic::zeroes(end - floor));
