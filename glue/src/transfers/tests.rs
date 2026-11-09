@@ -3,6 +3,7 @@ use crate::stateful::db::{DatabaseSet, Merkleized as StatefulMerkleized, Shared}
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
 use commonware_cryptography::{Sha256, sha256::Digest};
+use commonware_macros::boxed;
 use commonware_parallel::{Sequential, mocks::explore};
 use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
@@ -2112,6 +2113,7 @@ impl_stateful_db!(AnyUnordered: Balance, NoncedCurrent: Nonced);
 ///
 /// The candidates arrive in four rounds: `first`, a replay of `first` that touches only known
 /// keys, an empty round, and `last`.
+#[boxed]
 async fn stateful_select_matches_execute<D, S, T>(
     dbs: [D; 3],
     setup: &[S],

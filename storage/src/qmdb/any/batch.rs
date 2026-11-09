@@ -1602,9 +1602,11 @@ where
             .checked_add(keys.len())
             .expect("staged slot count must fit in usize");
         let db = self.batch.compatible(db)?;
-        let (values, mut resolutions) = self.batch.stage_reads(keys, db).await?;
+
+        // Retain the keys first and resolve the reads against them, so each key is borrowed once.
         self.keys
             .extend(keys.iter().map(|key| key.borrow().clone()));
+        let (values, mut resolutions) = self.batch.stage_reads(&self.keys[start..], db).await?;
         self.resolutions.append(&mut resolutions);
         Ok((self, start..end, values))
     }
@@ -2248,11 +2250,16 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let (results, resolutions) = self.stage_reads(keys, self.compatible(db)?).await?;
+        let db = self.compatible(db)?;
+
+        // Clone the keys first and resolve the reads against the clones the staged batch keeps, so
+        // each key is borrowed once.
+        let keys: Vec<U::Key> = keys.iter().map(|key| key.borrow().clone()).collect();
+        let (results, resolutions) = self.stage_reads(&keys, db).await?;
         Ok((
             Staged {
                 batch: self,
-                keys: keys.iter().map(|key| key.borrow().clone()).collect(),
+                keys,
                 resolutions,
             },
             results,
@@ -2264,7 +2271,7 @@ where
     /// they resolved to.
     async fn stage_reads<E, C, I, const N: usize>(
         &self,
-        keys: &[impl Borrow<U::Key> + Sync],
+        keys: &[U::Key],
         db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
     ) -> Result<(Vec<Option<U::Value>>, Vec<StagedResolution<F, U>>), crate::qmdb::Error<F>>
     where
