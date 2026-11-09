@@ -213,6 +213,7 @@ mod tests {
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
     use rstest::rstest;
+    use std::ops::Range;
 
     type FixedJournal = fixed::Journal<deterministic::Context, Digest>;
     type VariableJournal = variable::Journal<deterministic::Context, u64>;
@@ -559,68 +560,104 @@ mod tests {
 
     /// Operations ending exactly at the sync start are kept, both when the sync opens the journal
     /// and when the start moves to its end, since synced operations append right after them.
+    /// Pruning to the start removes only whole blobs below it, so a blob-aligned start keeps none.
+    #[rstest]
+    #[case::mid_blob(27, 29, 25..27, 25..29)]
+    #[case::blob_aligned(25, 30, 25..25, 30..30)]
     #[test_traced]
-    fn test_fixed_sync_journal_keeps_operations_ending_at_start() {
+    fn test_fixed_sync_journal_keeps_operations_ending_at_start(
+        #[case] start: u64,
+        #[case] new_start: u64,
+        #[case] opened: Range<u64>,
+        #[case] resized: Range<u64>,
+    ) {
         deterministic::Runner::default().start(|context| async move {
+            // Each item's value is its position.
+            let item = |pos: u64| Digest([pos as u8; 32]);
             let cfg = test_cfg();
             let mut journal = FixedJournal::init(context.child("setup"), cfg.clone())
                 .await
                 .unwrap();
-            for value in 0..27u8 {
-                (journal, _) = journal.append(&Digest([value; 32])).await.unwrap();
+            for pos in 0..start {
+                (journal, _) = journal.append(&item(pos)).await.unwrap();
             }
             let journal = journal.sync().await.unwrap();
             drop(journal);
 
-            // Pruning to the start removes only whole blobs below it, so blob 5 stays.
-            let range = non_empty_range!(Location::<F>::new(27), Location::<F>::new(40));
+            let range = non_empty_range!(Location::<F>::new(start), Location::<F>::new(40));
             let journal = <FixedJournal as Journal<F>>::new(context.child("sync"), cfg, range)
                 .await
                 .unwrap();
-            assert_eq!(journal.bounds(), 25..27);
-            assert_eq!(journal.read(26).await.unwrap(), Digest([26; 32]));
+            assert_eq!(journal.bounds(), opened);
+            for pos in opened {
+                assert_eq!(journal.read(pos).await.unwrap(), item(pos));
+            }
 
-            let journal = <FixedJournal as Journal<F>>::append(journal, vec![Digest([27; 32]); 2])
+            let ops = (start..new_start).map(item).collect();
+            let journal = <FixedJournal as Journal<F>>::append(journal, ops)
                 .await
                 .unwrap();
-            let journal = <FixedJournal as Journal<F>>::resize(journal, Location::new(29))
+            let journal = <FixedJournal as Journal<F>>::resize(journal, Location::new(new_start))
                 .await
                 .unwrap();
-            assert_eq!(journal.bounds(), 25..29);
-            assert_eq!(journal.read(26).await.unwrap(), Digest([26; 32]));
+            assert_eq!(journal.bounds(), resized);
+            let journal = <FixedJournal as Journal<F>>::append(journal, vec![item(new_start)])
+                .await
+                .unwrap();
+            for pos in resized.start..=new_start {
+                assert_eq!(journal.read(pos).await.unwrap(), item(pos));
+            }
             journal.destroy().await.unwrap();
         });
     }
 
     /// Like [test_fixed_sync_journal_keeps_operations_ending_at_start], for a variable journal.
+    #[rstest]
+    #[case::mid_blob(27, 29, 25..27, 25..29)]
+    #[case::blob_aligned(25, 30, 25..25, 30..30)]
     #[test_traced]
-    fn test_variable_sync_journal_keeps_operations_ending_at_start() {
+    fn test_variable_sync_journal_keeps_operations_ending_at_start(
+        #[case] start: u64,
+        #[case] new_start: u64,
+        #[case] opened: Range<u64>,
+        #[case] resized: Range<u64>,
+    ) {
         deterministic::Runner::default().start(|context| async move {
+            // Each item's value is its position.
             let cfg = variable_test_cfg();
             let mut journal = VariableJournal::init(context.child("setup"), cfg.clone())
                 .await
                 .unwrap();
-            for value in 0..27u64 {
-                (journal, _) = journal.append(&value).await.unwrap();
+            for pos in 0..start {
+                (journal, _) = journal.append(&pos).await.unwrap();
             }
             let journal = journal.sync().await.unwrap();
             drop(journal);
 
-            let range = non_empty_range!(Location::<F>::new(27), Location::<F>::new(40));
+            let range = non_empty_range!(Location::<F>::new(start), Location::<F>::new(40));
             let journal = <VariableJournal as Journal<F>>::new(context.child("sync"), cfg, range)
                 .await
                 .unwrap();
-            assert_eq!(journal.bounds(), 25..27);
-            assert_eq!(journal.read(26).await.unwrap(), 26);
+            assert_eq!(journal.bounds(), opened);
+            for pos in opened {
+                assert_eq!(journal.read(pos).await.unwrap(), pos);
+            }
 
-            let journal = <VariableJournal as Journal<F>>::append(journal, vec![27, 28])
+            let ops = (start..new_start).collect();
+            let journal = <VariableJournal as Journal<F>>::append(journal, ops)
                 .await
                 .unwrap();
-            let journal = <VariableJournal as Journal<F>>::resize(journal, Location::new(29))
+            let journal =
+                <VariableJournal as Journal<F>>::resize(journal, Location::new(new_start))
+                    .await
+                    .unwrap();
+            assert_eq!(journal.bounds(), resized);
+            let journal = <VariableJournal as Journal<F>>::append(journal, vec![new_start])
                 .await
                 .unwrap();
-            assert_eq!(journal.bounds(), 25..29);
-            assert_eq!(journal.read(26).await.unwrap(), 26);
+            for pos in resized.start..=new_start {
+                assert_eq!(journal.read(pos).await.unwrap(), pos);
+            }
             journal.destroy().await.unwrap();
         });
     }
@@ -1011,6 +1048,7 @@ mod tests {
 
     #[rstest]
     #[case::stale_below_start_leaves_blobs_unopened(30, 50, 70, false)]
+    #[case::start_at_newest_blob_capacity_leaves_blobs_unopened(27, 30, 50, false)]
     #[case::start_inside_newest_blob_opens_it(27, 28, 40, true)]
     #[test_traced]
     fn test_fixed_sync_journal_committed_tail_below_start(
@@ -1022,9 +1060,9 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             // Thirty items fill blobs 0 through 5, so the start 50 lies past every blob's
             // capacity. Twenty-seven items leave 25 and 26 in blob 5, whose capacity 25..30
-            // covers the start 28. In both cases every stored item lies below the range start.
-            // Each case runs over a clean store and a torn one, comparing the syncs each open
-            // issues.
+            // ends at the start 30 and covers the start 28. In every case each stored item lies
+            // below the range start. Each case runs over a clean store and a torn one, comparing
+            // the syncs each open issues.
             let mut calls = Vec::new();
             for torn in [false, true] {
                 let context = context.child(if torn { "torn" } else { "clean" });
@@ -1104,8 +1142,14 @@ mod tests {
         });
     }
 
+    #[rstest]
+    #[case::start_past_every_blob(30, 50)]
+    #[case::start_at_newest_blob_capacity(27, 30)]
     #[test_traced]
-    fn test_variable_sync_journal_stale_below_start_leaves_blobs_unopened() {
+    fn test_variable_sync_journal_stale_below_start_leaves_blobs_unopened(
+        #[case] initial_end: u64,
+        #[case] range_start: u64,
+    ) {
         deterministic::Runner::default().start(|context| async move {
             // Run the same open over a clean store and a torn one, each in its own partition,
             // and compare the syncs each open issues.
@@ -1116,11 +1160,12 @@ mod tests {
                 cfg.partition = format!("variable-sync-journal-{torn}");
                 let data = format!("{}_data", cfg.partition);
 
-                // Thirty items fill data blobs 0 through 5.
+                // Thirty items fill data blobs 0 through 5. Twenty-seven leave 25 and 26 in
+                // data blob 5.
                 let mut journal = VariableJournal::init(context.child("setup"), cfg.clone())
                     .await
                     .unwrap();
-                for value in 0..30u64 {
+                for value in 0..initial_end {
                     (journal, _) = journal.append(&value).await.unwrap();
                 }
 
@@ -1128,7 +1173,7 @@ mod tests {
                 let journal = journal.commit().await.unwrap();
                 drop(journal);
 
-                // Tear data blob 5, which holds 25..29 and is the newest data blob with items.
+                // Tear data blob 5, the newest data blob with items in either case.
                 if torn {
                     tear(&context, &data, 5).await;
                 }
@@ -1147,10 +1192,14 @@ mod tests {
                     pending: pending.clone(),
                 };
 
-                // The range start 50 lies past every data blob's capacity. The span, read from
-                // blob names and the offsets checkpoint alone, cannot cover it, so the open resets
-                // to an empty journal at 50 without opening any stored blob.
-                let range = non_empty_range!(Location::<F>::new(50), Location::<F>::new(70));
+                // The range start lies at or past the end of data blob 5's capacity 25..30. The
+                // span, read from blob names and the offsets checkpoint alone, cannot cover it,
+                // so the open resets to an empty journal at the start without opening any stored
+                // blob.
+                let range = non_empty_range!(
+                    Location::<F>::new(range_start),
+                    Location::<F>::new(range_start + 20)
+                );
                 let journal = drive_pending_syncs(
                     &pending,
                     Box::pin(<variable::Journal<_, u64> as Journal<F>>::new(
@@ -1161,7 +1210,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                assert_eq!(journal.bounds(), 50..50);
+                assert_eq!(journal.bounds(), range_start..range_start);
                 calls.push(pending.calls());
                 drop(journal);
 
@@ -1170,15 +1219,15 @@ mod tests {
                 let mut journal = VariableJournal::init(reopen.child("append"), cfg.clone())
                     .await
                     .unwrap();
-                assert_eq!(journal.bounds(), 50..50);
-                for value in 50..53u64 {
+                assert_eq!(journal.bounds(), range_start..range_start);
+                for value in range_start..range_start + 3 {
                     (journal, _) = journal.append(&value).await.unwrap();
                 }
                 let journal = journal.sync().await.unwrap();
                 drop(journal);
                 let journal = VariableJournal::init(reopen, cfg).await.unwrap();
-                assert_eq!(journal.bounds(), 50..53);
-                for value in 50..53u64 {
+                assert_eq!(journal.bounds(), range_start..range_start + 3);
+                for value in range_start..range_start + 3 {
                     assert_eq!(journal.read(value).await.unwrap(), value);
                 }
                 journal.destroy().await.unwrap();
