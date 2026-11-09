@@ -5,7 +5,7 @@ use super::{
     kernel::{Group, Kernel, MAX_LANES},
 };
 use crate::core::{
-    curve::{g1, g2},
+    curve::{Points, g1, g2},
     field::{
         arithmetic::{Field, TIGHT},
         fp::BYTES as FP_BYTES,

@@ -18,7 +18,7 @@
 
 use super::Scalar;
 use crate::core::{
-    curve::{g1, g2},
+    curve::Points,
     field::{
         arithmetic::Field,
         fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
@@ -113,110 +113,6 @@ pub trait Kernel: Sized {
         commonware_simd::dispatch(Run(self))
     }
 }
-
-/// Projective points of one group, one per lane of a base field representation.
-pub trait Points<S: Simd>: Copy {
-    /// Canonical projective coordinates of one point.
-    type Coordinates: Copy;
-
-    /// Loads up to one point per lane, filling the remaining lanes with `fill`.
-    fn load(simd: S, points: &[Self::Coordinates], fill: &Self::Coordinates) -> Self;
-
-    /// Stores each lane's canonical coordinates, dropping lanes beyond `points`.
-    fn store(self, simd: S, points: &mut [Self::Coordinates]);
-
-    /// Returns `self + rhs`.
-    fn add(self, simd: S, rhs: Self) -> Self;
-
-    /// Returns `2 * self`.
-    fn double(self, simd: S) -> Self;
-
-    /// Returns `rhs` in every lane whose bit is set in `lanes`, and `self` in the others.
-    fn select(self, simd: S, rhs: Self, lanes: u64) -> Self;
-
-    /// Returns `-self`.
-    fn negate(self, simd: S) -> Self;
-
-    /// Returns `-self` in every lane whose bit is set in `lanes`, and `self` in the others.
-    fn negate_lanes(self, simd: S, lanes: u64) -> Self;
-
-    /// Returns the image of every lane under the group's endomorphism, which multiplies elements
-    /// by the eigenvalue that [`Group::components`] splits scalars by.
-    fn endomorphism(self, simd: S) -> Self;
-
-    /// One lane of a point in the representation's own form.
-    type Raw: Copy + Default;
-
-    /// Stores each lane in the representation's own form, dropping lanes beyond `points`, without
-    /// any conversion.
-    fn store_raw(self, simd: S, points: &mut [Self::Raw]);
-
-    /// Loads lane `i` from `points[i]`, as [`Self::store_raw`] stored it, for at least one entry
-    /// per lane, without any conversion.
-    fn load_raw(simd: S, points: &[&Self::Raw]) -> Self;
-}
-
-macro_rules! points {
-    ($module:ident, $raw:ty) => {
-        impl<S: Simd, F: Field<S>> Points<S> for $module::Point<F> {
-            type Coordinates = $module::Coordinates;
-            type Raw = $raw;
-
-            #[inline(always)]
-            fn load(simd: S, points: &[Self::Coordinates], fill: &Self::Coordinates) -> Self {
-                Self::load(simd, points, fill)
-            }
-
-            #[inline(always)]
-            fn store(self, simd: S, points: &mut [Self::Coordinates]) {
-                self.store(simd, points);
-            }
-
-            #[inline(always)]
-            fn add(self, simd: S, rhs: Self) -> Self {
-                self.add(simd, rhs)
-            }
-
-            #[inline(always)]
-            fn double(self, simd: S) -> Self {
-                self.double(simd)
-            }
-
-            #[inline(always)]
-            fn select(self, simd: S, rhs: Self, lanes: u64) -> Self {
-                self.select(simd, rhs, lanes)
-            }
-
-            #[inline(always)]
-            fn negate(self, simd: S) -> Self {
-                self.neg(simd)
-            }
-
-            #[inline(always)]
-            fn negate_lanes(self, simd: S, lanes: u64) -> Self {
-                self.negate_lanes(simd, lanes)
-            }
-
-            #[inline(always)]
-            fn endomorphism(self, simd: S) -> Self {
-                self.endomorphism(simd)
-            }
-
-            #[inline(always)]
-            fn store_raw(self, simd: S, points: &mut [Self::Raw]) {
-                self.store_raw(simd, points);
-            }
-
-            #[inline(always)]
-            fn load_raw(simd: S, points: &[&Self::Raw]) -> Self {
-                Self::load_raw(simd, points)
-            }
-        }
-    };
-}
-
-points!(g1, [F::Raw; 3]);
-points!(g2, [[F::Raw; 2]; 3]);
 
 /// A group whose elements cross kernel boundaries as canonical projective coordinates.
 pub trait Group: Copy + Send + Sync {
