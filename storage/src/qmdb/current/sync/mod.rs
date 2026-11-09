@@ -247,9 +247,22 @@ where
     async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
         // Write the grafted metadata first, as `Db::prune` does, so a catch-up sync interrupted
         // before the boundary is recorded still opens.
-        self = self.sync_metadata().await?;
+        self = self.reset_metadata().await?;
         self.any.log = self.any.log.persist_boundary().await?;
         Ok(self)
+    }
+
+    async fn drop_anchors(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> Result<(), qmdb::Error<F>> {
+        authenticated::drop_anchors::<F, _, H::Digest, S>(context.child("log"), &config.merkle)
+            .await?;
+        db::drop_grafted_anchors::<F, _>(
+            context.child("grafted"),
+            &config.grafted_metadata_partition,
+        )
+        .await
     }
 
     async fn local_pinned_nodes(

@@ -48,7 +48,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, ReadOptions, Spawner};
-use commonware_utils::NZU64;
+use commonware_utils::{NZU64, channel::mpsc};
 use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -64,9 +64,10 @@ mod tree;
 #[cfg(test)]
 pub(crate) use config::tests::low_resident_height;
 pub use config::{CacheConfig, Config};
-pub(crate) use frontier::Frontier;
+pub(crate) use frontier::{Frontier, MAX_ANCHORS};
 use metrics::Metrics;
-use tree::Tree;
+pub(crate) use tree::{Chunk, ChunkHasher};
+use tree::{ChunkPlan, Tree};
 
 /// Errors that can occur when interacting with an authenticated journal.
 #[derive(Error, Debug)]
@@ -276,8 +277,13 @@ where
     /// Durable pruning boundary and the digests pinned there.
     pub(crate) frontier: Frontier<F, E, H::Digest>,
 
-    /// Whether the frontier records the Merkle structure's start. It does not from
-    /// [Self::from_components] until [Self::persist_boundary], and nothing is pruned meanwhile.
+    /// First readable item: the pruning boundary the frontier records, or the start of the synced
+    /// operations until [Self::persist_boundary] records it. The Merkle structure starts at or
+    /// after it.
+    pub(crate) boundary: Location<F>,
+
+    /// Whether the frontier records `boundary`. It does not from [Self::from_components] until
+    /// [Self::persist_boundary], and meanwhile nothing is pruned and no anchor is recorded.
     pub(crate) boundary_recorded: bool,
 
     /// Journal of items.
@@ -477,7 +483,8 @@ where
     ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
         let bounds = self.bounds();
 
-        if *start_loc < bounds.start {
+        // Items before the Merkle structure's start stay readable but cannot be proven.
+        if *start_loc < bounds.start || start_loc < self.merkle.bounds().start {
             return Err(JournalError::ItemPruned(*start_loc).into());
         }
 
@@ -665,21 +672,59 @@ where
         Ok(Self {
             merkle,
             frontier,
+            boundary: start,
             boundary_recorded: false,
             journal,
             hasher,
         })
     }
 
-    /// Record the boundary of a journal built by [Self::from_components] in its frontier, then
-    /// prune the operations before it.
+    /// Record the boundary of a journal built by [Self::from_components] in its frontier, dropping
+    /// the anchors the frontier held, then prune the operations before it.
     pub async fn persist_boundary(mut self) -> Result<Self, Error<F>> {
-        let boundary = self.merkle.bounds().start;
+        let boundary = self.boundary;
         let pins = self.pinned_nodes_at(boundary).await?;
-        self.frontier = self.frontier.set(boundary, pins).await?;
+        self.frontier = self.frontier.set_without_anchors(boundary, pins).await?;
         self.boundary_recorded = true;
         (self.journal, _) = self.journal.prune(*boundary).await?;
         Ok(self)
+    }
+
+    /// Begin durably recording an anchor at `location`, rounded down to where a prune there would
+    /// stop. Initialization replays the Merkle structure from the newest anchor at or before a
+    /// limit its caller sets, instead of from the pruning boundary. The rounding lets a prune at or
+    /// after `location` move the pruning boundary even right after such a replay.
+    ///
+    /// The operations before `location` must be durable or about to be, and must never change
+    /// unless a later initialization discards them. Records nothing if the rounded location is
+    /// past [Self::size] or not past the pruning boundary, the Merkle structure's start and the
+    /// newest anchor, or between [Self::from_components] and [Self::persist_boundary]. The returned
+    /// handle completes once the record is durable.
+    pub async fn start_anchor(
+        mut self,
+        location: Location<F>,
+    ) -> Result<(Self, Handle<()>), Error<F>> {
+        let location = Location::new(self.journal.prune_target(*location));
+        let newest = self
+            .frontier
+            .anchors()
+            .last()
+            .map_or(self.boundary, |(anchor, _)| *anchor);
+        let floor = newest.max(self.boundary).max(self.merkle.bounds().start);
+        if !self.boundary_recorded || location <= floor || location > self.size() {
+            return Ok((self, Handle::ready(Ok(()))));
+        }
+        let pins = self.pinned_nodes_at(location).await?;
+        let handle;
+        (self.frontier, handle) = self.frontier.start_anchor(location, pins).await?;
+        Ok((self, handle))
+    }
+
+    /// Like [Self::start_anchor], but returns once the record is durable.
+    pub async fn anchor(self, location: Location<F>) -> Result<Self, Error<F>> {
+        let (journal, handle) = self.start_anchor(location).await?;
+        handle.await.map_err(JournalError::from)?;
+        Ok(journal)
     }
 
     /// Align the Merkle structure with the journal.
@@ -779,21 +824,25 @@ where
             let start = Location::new(self.bounds().start);
             return Ok((self, start, false));
         }
-        let old = self.merkle.bounds().start;
+        let old = self.boundary;
         let boundary = Location::new(self.prune_target(*prune_loc));
-        if boundary > old {
+        // The Merkle structure holds no digests before its start, so a boundary there keeps the
+        // frontier where it is.
+        if boundary > old && boundary >= self.merkle.bounds().start {
             let pins = self.pinned_nodes_at(boundary).await?;
             // The frontier must never get ahead of durable operations, and the new boundary may be
             // justified by a buffered append (e.g. a commit operation), so commit first.
             self.journal = self.journal.commit().await?;
             self.frontier = self.frontier.set(boundary, pins.clone()).await?;
             self.merkle.prune(boundary, pins);
+            self.boundary = boundary;
             debug!(size = ?self.journal.bounds().end, ?prune_loc, ?boundary, "pruned inactive ops");
         }
         let pruned;
-        (self.journal, pruned) = self.journal.prune(*boundary).await?;
+        (self.journal, pruned) = self.journal.prune(*self.boundary).await?;
         let start = Location::new(self.bounds().start);
-        Ok((self, start, pruned || boundary > old))
+        let moved = self.boundary > old;
+        Ok((self, start, pruned || moved))
     }
 
     /// Destroy the authenticated journal, removing all data from disk.
@@ -834,6 +883,8 @@ where
     journal: C::Recovery,
     /// Durable frontier.
     frontier: Frontier<F, E, H::Digest>,
+    /// The frontier's pruning boundary.
+    boundary: Location<F>,
     /// Digests at the pruning boundary, before the selected operations are replayed.
     merkle: Tree<F, H::Digest, S>,
     /// Hasher and peak-bagging mode retained for Merkle alignment and the published journal.
@@ -854,7 +905,24 @@ where
 {
     /// Range selected for publication.
     pub(crate) fn bounds(&self) -> Range<u64> {
-        *self.merkle.bounds().start..self.selected_end
+        *self.boundary..self.selected_end
+    }
+
+    /// Replay the Merkle structure from the newest anchor after the pruning boundary and at or
+    /// before both `limit` and the selected end, if there is one. Proofs of the operations before
+    /// it are then unavailable until the pruning boundary passes it.
+    pub(crate) fn replay_from_anchor(&mut self, limit: Location<F>) -> Result<(), Error<F>> {
+        let limit = limit.min(Location::new(self.selected_end));
+        let anchor = self
+            .frontier
+            .anchors()
+            .into_iter()
+            .rev()
+            .find(|(anchor, _)| *anchor > self.boundary && *anchor <= limit);
+        if let Some((anchor, pins)) = anchor {
+            self.merkle.rebase(anchor, pins)?;
+        }
+        Ok(())
     }
 
     /// Whether storage was empty before commit selection.
@@ -876,7 +944,7 @@ where
         let merkle =
             Journal::<F, E, C, H, S>::align(self.merkle, &journal, &self.hasher, APPLY_BATCH_SIZE)
                 .await?;
-        Self::assemble(journal, merkle, self.frontier, self.hasher).await
+        Self::assemble(journal, merkle, self.frontier, self.boundary, self.hasher).await
     }
 
     /// Like [Self::finish], but runs `read` over the selected operations while their Merkle
@@ -894,19 +962,19 @@ where
     {
         let journal = Arc::new(Self::persist(self.journal, self.selected_end).await?);
 
-        // A reader sharing this task would starve the replay until it finished.
+        // A reader sharing this task would starve the replay until it finished. The replay's
+        // subtree tasks each hold a clone of `released` until they drop the journal, so
+        // `released_rx` closing means none of them holds it.
+        let (released, mut released_rx) = mpsc::channel::<()>(1);
         let replay = {
             let (journal, merkle, hasher) = (journal.clone(), self.merkle, self.hasher.clone());
             self.context
                 .dedicated()
-                .spawn(move |_| async move {
-                    let merkle = Journal::<F, E, C, H, S>::align(
-                        merkle,
-                        &journal,
-                        &hasher,
-                        APPLY_BATCH_SIZE,
-                    )
-                    .await;
+                .spawn(move |context| async move {
+                    let end = Location::new(journal.bounds().end);
+                    let merkle = merkle
+                        .replay_subtrees(context, &journal, &hasher, end, SUBTREE_HEIGHT, released)
+                        .await;
                     drop(journal);
                     merkle
                 })
@@ -915,16 +983,82 @@ where
         let value = match read(journal.clone()).await {
             Ok(value) => value,
             Err(error) => {
-                // Release the replay's clone of the journal before returning.
+                // Release every replay clone of the journal, its subtree tasks' included, before
+                // returning.
                 replay.abort().await;
+                while released_rx.recv().await.is_some() {}
                 return Err(error);
             }
         };
         let merkle = replay.join().await.map_err(JournalError::from);
+        let merkle = match merkle.map_err(Error::from).and_then(|merkle| merkle) {
+            Ok(merkle) => merkle,
+            Err(error) => {
+                while released_rx.recv().await.is_some() {}
+                return Err(error.into());
+            }
+        };
+        let journal = Arc::into_inner(journal).expect("read must drop every journal clone");
+        Ok((
+            Self::assemble(journal, merkle, self.frontier, self.boundary, self.hasher).await?,
+            value,
+        ))
+    }
+
+    /// Like [Self::finish_with], but `read` scans the selected operations for the journal. It must
+    /// hash every chunk of the [LeafSink] it receives and send them in order. A task of its own
+    /// appends them to the Merkle structure, so the operations are read and decoded once.
+    pub(crate) async fn finish_hashing<T, X, Fut>(
+        self,
+        read: impl FnOnce(Arc<C>, LeafSink<F, StandardHasher<H>>) -> Fut,
+    ) -> Result<(Journal<F, E, C, H, S>, T), X>
+    where
+        E: Spawner,
+        C: 'static,
+        Fut: Future<Output = Result<T, X>>,
+        X: From<Error<F>>,
+    {
+        let journal = Arc::new(Self::persist(self.journal, self.selected_end).await?);
+        let end = Location::new(journal.bounds().end);
+        let (tx, mut rx) = mpsc::channel(BUFFERED_CHUNKS);
+        let sink = LeafSink {
+            plan: self.merkle.chunk_plan(end, SUBTREE_HEIGHT),
+            hasher: self.hasher.clone(),
+            tx,
+        };
+
+        // Append each chunk in order as the reader sends it.
+        let append = {
+            let (merkle, hasher) = (self.merkle, self.hasher.clone());
+            self.context
+                .dedicated()
+                .spawn(move |_| async move {
+                    let mut merkle = merkle;
+                    while let Some(chunk) = rx.recv().await {
+                        merkle = merkle.apply_chunk(&hasher, chunk).await?;
+                    }
+                    if merkle.leaves() != end {
+                        return Err(merkle::Error::DataCorrupted(
+                            "chunks ended before the journal",
+                        )
+                        .into());
+                    }
+                    Ok::<_, Error<F>>(merkle)
+                })
+                .abort_on_drop()
+        };
+        let value = match read(journal.clone(), sink).await {
+            Ok(value) => value,
+            Err(error) => {
+                append.abort().await;
+                return Err(error);
+            }
+        };
+        let merkle = append.join().await.map_err(JournalError::from);
         let merkle = merkle.map_err(Error::from)??;
         let journal = Arc::into_inner(journal).expect("read must drop every journal clone");
         Ok((
-            Self::assemble(journal, merkle, self.frontier, self.hasher).await?,
+            Self::assemble(journal, merkle, self.frontier, self.boundary, self.hasher).await?,
             value,
         ))
     }
@@ -949,13 +1083,19 @@ where
         journal: C,
         merkle: Tree<F, H::Digest, S>,
         frontier: Frontier<F, E, H::Digest>,
+        boundary: Location<F>,
         hasher: StandardHasher<H>,
     ) -> Result<Journal<F, E, C, H, S>, Error<F>> {
-        let (journal, _) = journal.prune(*merkle.bounds().start).await?;
+        let (journal, _) = journal.prune(*boundary).await?;
+        // Anchors past the selected end describe operations that later appends may replace.
+        let frontier = frontier
+            .drop_anchors_after(Location::new(journal.bounds().end))
+            .await?;
         Ok(Journal {
             journal,
             merkle,
             frontier,
+            boundary,
             boundary_recorded: true,
             hasher,
         })
@@ -964,6 +1104,51 @@ where
 
 /// The number of items to apply to the Merkle structure in a single batch.
 const APPLY_BATCH_SIZE: NonZeroU64 = NZU64!(1 << 16);
+
+/// The height of the aligned subtrees a replay at initialization hashes whole, apart from the
+/// tree it appends them to. Small in tests, so ordinary logs span many subtrees.
+#[cfg(not(test))]
+const SUBTREE_HEIGHT: u32 = 17;
+#[cfg(test)]
+const SUBTREE_HEIGHT: u32 = 4;
+
+/// Chunks a [LeafSink] buffers ahead of the Merkle structure appending them.
+const BUFFERED_CHUNKS: usize = 8;
+
+/// Where a reader that scans a recovering journal's operations sends them hashed, chunk by chunk,
+/// so the journal rebuilds its Merkle structure without reading them again. Only this crate
+/// creates and uses one.
+#[commonware_macros::stability(ALPHA)]
+pub struct LeafSink<F: Family, H: merkle::hasher::Hasher<F>> {
+    plan: ChunkPlan,
+    hasher: H,
+    tx: mpsc::Sender<Chunk<F, H::Digest>>,
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<F: Family, H: merkle::hasher::Hasher<F>> LeafSink<F, H> {
+    /// The first operation to scan: the Merkle structure's start, which is the pruning boundary
+    /// or an anchor after it.
+    pub(crate) const fn start(&self) -> u64 {
+        self.plan.start()
+    }
+
+    /// The chunks to scan, hash and send, in position order. Together they cover every operation
+    /// from [Self::start] to the journal's end.
+    pub(crate) fn chunks(&self) -> impl Iterator<Item = Range<u64>> + Send + 'static {
+        self.plan.chunks()
+    }
+
+    /// A hasher for `chunk`, one of [Self::chunks].
+    pub(crate) fn chunk_hasher(&self, chunk: Range<u64>) -> ChunkHasher<F, H> {
+        self.plan.hasher(chunk, self.hasher.clone())
+    }
+
+    /// Send the next chunk's digests. Returns false if the journal no longer wants them.
+    pub(crate) async fn send(&self, chunk: Chunk<F, H::Digest>) -> bool {
+        self.tx.send(chunk).await.is_ok()
+    }
+}
 
 impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
@@ -984,10 +1169,10 @@ where
         predicate: fn(&C::Item) -> bool,
         bagging: merkle::Bagging,
     ) -> Result<Self, Error<F>> {
-        Self::prepare(context, merkle_cfg, journal_cfg, None, predicate, bagging)
-            .await?
-            .finish()
-            .await
+        let mut recovery =
+            Self::prepare(context, merkle_cfg, journal_cfg, None, predicate, bagging).await?;
+        recovery.replay_from_anchor(Location::new(recovery.selected_end))?;
+        recovery.finish().await
     }
 
     /// Recover a journal whose last matching item ends at or below `max_size`.
@@ -1003,7 +1188,7 @@ where
         predicate: fn(&C::Item) -> bool,
         bagging: merkle::Bagging,
     ) -> Result<Self, Error<F>> {
-        Self::prepare(
+        let mut recovery = Self::prepare(
             context,
             merkle_cfg,
             journal_cfg,
@@ -1011,9 +1196,9 @@ where
             predicate,
             bagging,
         )
-        .await?
-        .finish()
-        .await
+        .await?;
+        recovery.replay_from_anchor(Location::new(recovery.selected_end))?;
+        recovery.finish().await
     }
 
     /// Select and validate component availability before deliberately discarding history.
@@ -1059,6 +1244,7 @@ where
         Ok(Recovery {
             journal,
             frontier,
+            boundary: Location::new(boundary),
             merkle,
             hasher: StandardHasher::<H>::new(bagging),
             selected_end,
@@ -1079,7 +1265,7 @@ where
 
     fn bounds(&self) -> Range<u64> {
         let mut bounds = self.journal.bounds();
-        bounds.start = bounds.start.max(*self.merkle.bounds().start);
+        bounds.start = bounds.start.max(*self.boundary);
         bounds
     }
 
@@ -1193,9 +1379,7 @@ where
     }
 
     fn prune_target(&self, min_position: u64) -> u64 {
-        self.journal
-            .prune_target(min_position)
-            .max(*self.merkle.bounds().start)
+        self.journal.prune_target(min_position).max(*self.boundary)
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), JournalError> {
@@ -1404,6 +1588,18 @@ where
         return Ok(None);
     }
     Ok(Some(tree.pinned_nodes_at(journal, hasher, location).await?))
+}
+
+/// Durably drop every anchor of the authenticated journal whose frontier `config` names. A state
+/// sync does this before it opens the journal, since it may then truncate the local operations and
+/// append others, which anchors recorded over the local operations would no longer describe.
+pub(crate) async fn drop_anchors<F: Family, E: Context, D: Digest, S: Strategy>(
+    context: E,
+    config: &Config<S>,
+) -> Result<(), Error<F>> {
+    let frontier = Frontier::<F, E, D>::open(context, config.metadata_partition.clone()).await?;
+    frontier.drop_anchors().await?;
+    Ok(())
 }
 
 /// Recover the portion useful for state sync, or reset an unusable local range.
@@ -2926,6 +3122,269 @@ mod tests {
     fn test_from_components_records_boundary_mmb() {
         // Imported boundaries and roots must survive recovery across the valid range.
         deterministic::Runner::default().start(from_components_records_boundary::<mmb::Family>);
+    }
+
+    /// The locations of a journal's anchors, oldest first.
+    fn anchor_locations<F: Family + PartialEq>(journal: &TestJournal<F>) -> Vec<u64> {
+        journal
+            .frontier
+            .anchors()
+            .into_iter()
+            .map(|(location, _)| *location)
+            .collect()
+    }
+
+    /// A reopen replays from the newest anchor. Before it, every retained operation is provable.
+    /// After it, operations before the anchor stay readable but cannot be proven, a prune before
+    /// the anchor keeps the pruning boundary, and a prune past it moves the boundary with pins
+    /// that a replay from there agrees with.
+    async fn anchors_reopen<F: Family + PartialEq>(context: Context) {
+        let suffix = "anchors-reopen";
+        let mut journal = create_journal_with_ops::<F>(context.child("build"), suffix, 100).await;
+        (journal, _) = journal
+            .append(&TestOp::<F>::CommitFloor(None, Location::new(0)))
+            .await
+            .unwrap();
+        journal = journal.sync().await.unwrap();
+        let root = journal.root(0).unwrap();
+        let size = journal.size();
+
+        // Anchors round down to where a prune would stop (7 items per blob), and must pass the
+        // newest one.
+        journal = journal.anchor(Location::new(40)).await.unwrap();
+        journal = journal.anchor(Location::new(41)).await.unwrap();
+        assert_eq!(anchor_locations(&journal), [35]);
+        journal = journal.anchor(Location::new(80)).await.unwrap();
+        assert_eq!(anchor_locations(&journal), [35, 77]);
+
+        // Recording an anchor keeps every digest, so earlier operations stay provable.
+        let hasher = journal.hasher.clone();
+        let (proof, ops) = journal
+            .historical_proof(size, Location::new(10), NZU64!(5), 0)
+            .await
+            .unwrap();
+        assert!(verify_proof(
+            &proof,
+            &hasher,
+            Location::new(10),
+            &ops,
+            &root
+        ));
+        drop(journal);
+
+        // The reopen replays from the newest anchor.
+        let journal = create_empty_journal::<F>(context.child("reopen"), suffix).await;
+        assert_eq!(journal.root(0).unwrap(), root);
+        assert_eq!(journal.merkle.bounds().start, Location::new(77));
+        assert_eq!(journal.bounds().start, 0);
+        assert_eq!(journal.read(10).await.unwrap(), create_operation::<F>(10));
+        assert!(matches!(
+            journal
+                .historical_proof(size, Location::new(10), NZU64!(5), 0)
+                .await,
+            Err(Error::Journal(JournalError::ItemPruned(10)))
+        ));
+        let (proof, ops) = journal
+            .historical_proof(size, Location::new(77), NZU64!(5), 0)
+            .await
+            .unwrap();
+        assert!(verify_proof(
+            &proof,
+            &hasher,
+            Location::new(77),
+            &ops,
+            &root
+        ));
+
+        // A prune before the anchor deletes nothing and keeps the frontier.
+        let (journal, start) = journal.prune(Location::new(50)).await.unwrap();
+        assert_eq!(start, Location::new(0));
+        assert_eq!(journal.journal.bounds().start, 0);
+        assert_eq!(journal.frontier.boundary().0, Location::new(0));
+
+        // A prune past it moves the boundary and drops the anchors at or before it.
+        let (journal, start) = journal.prune(Location::new(85)).await.unwrap();
+        assert_eq!(start, Location::new(84));
+        assert_eq!(journal.frontier.boundary().0, Location::new(84));
+        assert!(anchor_locations(&journal).is_empty());
+        drop(journal);
+
+        // A replay from the new boundary rebuilds the same root.
+        let journal = create_empty_journal::<F>(context.child("pruned"), suffix).await;
+        assert_eq!(journal.merkle.bounds().start, Location::new(84));
+        assert_eq!(journal.root(0).unwrap(), root);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_anchors_reopen_mmr() {
+        deterministic::Runner::default().start(anchors_reopen::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_anchors_reopen_mmb() {
+        deterministic::Runner::default().start(anchors_reopen::<mmb::Family>);
+    }
+
+    /// A reopen bounded below an anchor replays from the pruning boundary and drops the anchor, so
+    /// different operations appended after the bound replay correctly later.
+    async fn bounded_reopen_drops_later_anchors<F: Family + PartialEq>(context: Context) {
+        let suffix = "bounded-anchors";
+        let mut journal = create_journal_with_ops::<F>(context.child("build"), suffix, 50).await;
+        (journal, _) = journal
+            .append(&TestOp::<F>::CommitFloor(None, Location::new(0)))
+            .await
+            .unwrap();
+        for i in 51..100u8 {
+            (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+        }
+        (journal, _) = journal
+            .append(&TestOp::<F>::CommitFloor(None, Location::new(0)))
+            .await
+            .unwrap();
+        journal = journal.sync().await.unwrap();
+        journal = journal.anchor(Location::new(90)).await.unwrap();
+        assert_eq!(anchor_locations(&journal), [84]);
+        drop(journal);
+
+        let mut journal = TestJournal::<F>::init_at_most(
+            context.child("bounded"),
+            merkle_config(suffix),
+            journal_config(suffix),
+            51,
+            |op: &TestOp<F>| op.is_commit(),
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        assert_eq!(journal.size(), Location::new(51));
+        assert_eq!(journal.merkle.bounds().start, Location::new(0));
+        assert!(anchor_locations(&journal).is_empty());
+
+        // Append different operations after the bound, then reopen.
+        for i in 0..49u8 {
+            (journal, _) = journal
+                .append(&create_operation::<F>(i.wrapping_add(200)))
+                .await
+                .unwrap();
+        }
+        (journal, _) = journal
+            .append(&TestOp::<F>::CommitFloor(None, Location::new(0)))
+            .await
+            .unwrap();
+        journal = journal.sync().await.unwrap();
+        let root = journal.root(0).unwrap();
+        drop(journal);
+
+        let journal = create_empty_journal::<F>(context.child("reopen"), suffix).await;
+        assert_eq!(journal.merkle.bounds().start, Location::new(0));
+        assert_eq!(journal.root(0).unwrap(), root);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_bounded_reopen_drops_later_anchors_mmr() {
+        deterministic::Runner::default().start(bounded_reopen_drops_later_anchors::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_bounded_reopen_drops_later_anchors_mmb() {
+        deterministic::Runner::default().start(bounded_reopen_drops_later_anchors::<mmb::Family>);
+    }
+
+    /// An import records no anchor before its boundary is persisted, and persisting it drops the
+    /// anchors the frontier held.
+    async fn import_resets_anchors<F: Family + PartialEq>(context: Context) {
+        let suffix = "import-anchors";
+        let journal = create_journal_with_ops::<F>(context.child("source"), suffix, 50).await;
+        let journal = journal.anchor(Location::new(30)).await.unwrap();
+        assert_eq!(anchor_locations(&journal), [28]);
+        let start = Location::new(20);
+        let pins = journal.pinned_nodes_at(start).await.unwrap();
+        let Journal {
+            journal: ops,
+            frontier,
+            hasher,
+            ..
+        } = journal;
+        drop(frontier);
+
+        let journal = TestJournal::<F>::from_components(
+            context.child("import"),
+            &merkle_config(suffix),
+            ops,
+            hasher,
+            start,
+            pins,
+            NZU64!(7),
+        )
+        .await
+        .unwrap();
+        let journal = journal.anchor(Location::new(45)).await.unwrap();
+        assert_eq!(anchor_locations(&journal), [28]);
+        let journal = journal.persist_boundary().await.unwrap();
+        assert!(anchor_locations(&journal).is_empty());
+        let journal = journal.anchor(Location::new(45)).await.unwrap();
+        assert_eq!(anchor_locations(&journal), [42]);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test]
+    fn test_import_resets_anchors_mmr() {
+        deterministic::Runner::default().start(import_resets_anchors::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_import_resets_anchors_mmb() {
+        deterministic::Runner::default().start(import_resets_anchors::<mmb::Family>);
+    }
+
+    /// An anchor recorded over operations a crash loses lies past the recovered end, so the reopen
+    /// replays from the pruning boundary and drops it.
+    #[test_traced("INFO")]
+    fn test_anchor_past_lost_operations_is_dropped() {
+        type F = mmr::Family;
+        let suffix = "anchor-lost-ops";
+        let (root, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let mut journal =
+                    create_journal_with_ops::<F>(context.child("build"), suffix, 50).await;
+                (journal, _) = journal
+                    .append(&TestOp::<F>::CommitFloor(None, Location::new(0)))
+                    .await
+                    .unwrap();
+                journal = journal.sync().await.unwrap();
+                let root = journal.root(0).unwrap();
+                for i in 51..100u8 {
+                    (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+                }
+                (journal, _) = journal
+                    .append(&TestOp::<F>::CommitFloor(None, Location::new(0)))
+                    .await
+                    .unwrap();
+
+                // Record an anchor over the unsynced operations, then crash, losing them.
+                journal = journal.anchor(Location::new(90)).await.unwrap();
+                assert_eq!(anchor_locations(&journal), [84]);
+                *context.storage_fault_config().write() = deterministic::FaultConfig {
+                    write_rate: Some(deterministic::WriteConfig {
+                        failure_rate: probability!(0.0),
+                        retention_rate: probability!(0.0),
+                        mode: deterministic::PartialWriteMode::Prefix,
+                    }),
+                    ..Default::default()
+                };
+                drop(journal);
+                root
+            });
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let journal = create_empty_journal::<F>(context.child("reopen"), suffix).await;
+            assert_eq!(journal.size(), Location::new(51));
+            assert_eq!(journal.merkle.bounds().start, Location::new(0));
+            assert_eq!(journal.root(0).unwrap(), root);
+            assert!(anchor_locations(&journal).is_empty());
+            journal.destroy().await.unwrap();
+        });
     }
 
     /// A journal built from synced operations prunes nothing until its boundary is persisted, so a
