@@ -1187,9 +1187,9 @@ pub trait Backing<E: Context>: Mutable {
     ) -> impl Future<Output = Result<Range<u64>, JournalError>> + Send;
 }
 
-/// Whether `span` contains `position` or is empty exactly at it.
-fn covers(span: &Range<u64>, position: u64) -> bool {
-    position == span.start || span.contains(&position)
+/// Whether `position` lies in `span` or at its end, where the next item would be appended.
+const fn covers(span: &Range<u64>, position: u64) -> bool {
+    span.start <= position && position <= span.end
 }
 
 /// A [Backing] journal's storage, as [Stored::open] leaves it.
@@ -1202,8 +1202,8 @@ pub(crate) enum Stored<E: Context, J: Backing<E>> {
 }
 
 impl<E: Context, J: Backing<E>> Stored<E, J> {
-    /// Open recovery bounded at `max_size` when [Backing::span] contains `position` or is empty
-    /// exactly at it. Otherwise return the storage unopened.
+    /// Open recovery bounded at `max_size` when [Backing::span] contains `position` or ends at it.
+    /// Otherwise return the storage unopened.
     pub(crate) async fn open(
         context: E,
         cfg: J::Config,
@@ -1228,7 +1228,8 @@ pub(crate) async fn init_sync<E: Context, J: Backing<E>>(
 
     // Storage whose span cannot hold the sync start is cleared without reading stored items.
     // The span end reflects blob capacity, which can overstate the recovered end when the tail
-    // is short or has a gap, so an opened prefix that does not cover the sync start is reset.
+    // is short or has a gap, so an opened prefix that does not reach the sync start is reset. A
+    // prefix ending at the sync start is kept, since the synced operations append right after it.
     let pending = match Stored::<E, J>::open(context, cfg, range.start, range.end).await? {
         Stored::Opened(pending) if covers(&pending.bounds(), range.start) => pending,
         Stored::Opened(pending) => pending.reset(range.start).await?,

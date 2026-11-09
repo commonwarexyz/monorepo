@@ -34,7 +34,7 @@ pub trait Journal<F: Family>: Sized + Send {
 
     /// Discard all operations before the given location.
     ///
-    /// If current `size() <= start`, initialize as empty at the given location.
+    /// If current `size() < start`, initialize as empty at the given location.
     /// Otherwise prune data before the given location.
     fn resize(self, start: Location<F>) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
@@ -69,7 +69,7 @@ where
     }
 
     async fn resize(self, start: Location<F>) -> Result<Self, Self::Error> {
-        if Contiguous::bounds(&self).end <= *start {
+        if Contiguous::bounds(&self).end < *start {
             self.clear_to_size(*start).await
         } else {
             let (journal, _) = self.prune(*start).await?;
@@ -112,7 +112,7 @@ where
     }
 
     async fn resize(self, start: Location<F>) -> Result<Self, Self::Error> {
-        if Contiguous::bounds(&self).end <= *start {
+        if Contiguous::bounds(&self).end < *start {
             self.clear_to_size(*start).await
         } else {
             let (journal, _) = self.prune(*start).await?;
@@ -553,6 +553,74 @@ mod tests {
                     .unwrap();
 
             assert_eq!(journal.bounds(), 7..7);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Operations ending exactly at the sync start are kept, both when the sync opens the journal
+    /// and when the start moves to its end, since synced operations append right after them.
+    #[test_traced]
+    fn test_fixed_sync_journal_keeps_operations_ending_at_start() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg();
+            let mut journal = FixedJournal::init(context.child("setup"), cfg.clone())
+                .await
+                .unwrap();
+            for value in 0..27u8 {
+                (journal, _) = journal.append(&Digest([value; 32])).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // Pruning to the start removes only whole blobs below it, so blob 5 stays.
+            let range = non_empty_range!(Location::<F>::new(27), Location::<F>::new(40));
+            let journal = <FixedJournal as Journal<F>>::new(context.child("sync"), cfg, range)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 25..27);
+            assert_eq!(journal.read(26).await.unwrap(), Digest([26; 32]));
+
+            let journal = <FixedJournal as Journal<F>>::append(journal, vec![Digest([27; 32]); 2])
+                .await
+                .unwrap();
+            let journal = <FixedJournal as Journal<F>>::resize(journal, Location::new(29))
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 25..29);
+            assert_eq!(journal.read(26).await.unwrap(), Digest([26; 32]));
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Like [test_fixed_sync_journal_keeps_operations_ending_at_start], for a variable journal.
+    #[test_traced]
+    fn test_variable_sync_journal_keeps_operations_ending_at_start() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = variable_test_cfg();
+            let mut journal = VariableJournal::init(context.child("setup"), cfg.clone())
+                .await
+                .unwrap();
+            for value in 0..27u64 {
+                (journal, _) = journal.append(&value).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            let range = non_empty_range!(Location::<F>::new(27), Location::<F>::new(40));
+            let journal = <VariableJournal as Journal<F>>::new(context.child("sync"), cfg, range)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 25..27);
+            assert_eq!(journal.read(26).await.unwrap(), 26);
+
+            let journal = <VariableJournal as Journal<F>>::append(journal, vec![27, 28])
+                .await
+                .unwrap();
+            let journal = <VariableJournal as Journal<F>>::resize(journal, Location::new(29))
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 25..29);
+            assert_eq!(journal.read(26).await.unwrap(), 26);
             journal.destroy().await.unwrap();
         });
     }
