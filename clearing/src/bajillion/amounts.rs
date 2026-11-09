@@ -223,9 +223,8 @@ where
 mod tests {
     use super::*;
     use crate::bajillion::tests::accounts;
-    use commonware_codec::{Decode as _, Encode as _};
+    use commonware_codec::{Decode as _, Encode as _, U256};
     use commonware_cryptography::{Sha256, ed25519::PublicKey};
-    use commonware_utils::U256;
 
     type TestAmounts = Amounts<PublicKey, u64>;
 

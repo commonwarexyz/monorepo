@@ -1819,6 +1819,7 @@ dependencies = [
  "rand 0.10.2",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
+ "ruint",
  "thiserror 2.0.18",
 ]
 
@@ -2644,7 +2645,6 @@ dependencies = [
  "rand 0.10.2",
  "roaring",
  "rstest",
- "ruint",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

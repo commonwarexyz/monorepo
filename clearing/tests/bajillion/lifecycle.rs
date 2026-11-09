@@ -399,12 +399,11 @@ mod schemes {
 
     use super::*;
     use commonware_clearing::bajillion::BalanceProof;
-    use commonware_codec::DecodeExt as _;
+    use commonware_codec::{DecodeExt as _, U256};
     use commonware_cryptography::{
         bls12381,
         secp256r1::{self, standard},
     };
-    use commonware_utils::U256;
 
     /// secp256r1 certificates over summaries from at least `2f + 1` of `3f + 1` validators.
     // The macro gates its fixture on a `mocks` feature that this crate does not define.

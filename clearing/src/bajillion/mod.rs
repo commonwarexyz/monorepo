@@ -87,8 +87,8 @@
 //! what each role stores and where, and how it caches, batches, schedules, persists, and recovers.
 //!
 //! Each deployment also chooses the unsigned integer type of its amounts ([Amount]). The primitive
-//! unsigned integers implement it, and so does [commonware_utils::Uint], so a deployment that
-//! settles EVM tokens uses [commonware_utils::U256].
+//! unsigned integers implement it, and so does [commonware_codec::Uint], so a deployment that
+//! settles EVM tokens uses [commonware_codec::U256].
 //!
 //! ```text
 //!   role        keeps                 calls

@@ -265,7 +265,7 @@ commonware_macros::stability_scope!(BETA {
 });
 commonware_macros::stability_scope!(ALPHA {
     pub mod unsigned;
-    pub use unsigned::{U256, Uint, Unsigned};
+    pub use unsigned::Unsigned;
 });
 commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     pub mod rng;
