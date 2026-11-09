@@ -1,8 +1,10 @@
 //! The group G1.
 
 use super::{
-    Scalar,
-    kernel::{Group, MAX_COMPONENTS, MAX_LANES},
+    Hex, MSM_BATCH, Scalar,
+    kernel::{
+        Add, Double, Group, MAX_COMPONENTS, MAX_LANES, Msm, Multiply, MultiplyEach, Sum, dispatch,
+    },
 };
 use crate::core::{
     curve::g1::{Coordinates, IDENTITY, Point},
@@ -11,7 +13,13 @@ use crate::core::{
         fp::{self, BYTES},
     },
 };
+use commonware_math::algebra::{Additive, CryptoGroup, Object, Space};
+use commonware_parallel::Strategy;
 use commonware_simd::Simd;
+use core::{
+    fmt,
+    ops::{self, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
+};
 
 /// The generator in projective coordinates, with `Z = 1`.
 const GENERATOR: Coordinates = [
@@ -72,7 +80,153 @@ impl Group for G1 {
     }
 }
 
-super::group_traits!(G1);
+impl fmt::Debug for G1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let [x, y, z] = &self.0;
+        f.debug_struct("G1")
+            .field("x", &Hex(x))
+            .field("y", &Hex(y))
+            .field("z", &Hex(z))
+            .finish()
+    }
+}
+
+impl PartialEq for G1 {
+    fn eq(&self, other: &Self) -> bool {
+        dispatch(Add(*self, other.negate())).is_identity()
+    }
+}
+
+impl Eq for G1 {}
+
+impl Object for G1 {}
+
+impl<'a> AddAssign<&'a Self> for G1 {
+    fn add_assign(&mut self, rhs: &'a Self) {
+        *self = dispatch(Add(*self, *rhs));
+    }
+}
+
+impl<'a> ops::Add<&'a Self> for G1 {
+    type Output = Self;
+
+    fn add(mut self, rhs: &'a Self) -> Self {
+        self += rhs;
+        self
+    }
+}
+
+impl<'a> SubAssign<&'a Self> for G1 {
+    fn sub_assign(&mut self, rhs: &'a Self) {
+        *self += &rhs.negate();
+    }
+}
+
+impl<'a> Sub<&'a Self> for G1 {
+    type Output = Self;
+
+    fn sub(mut self, rhs: &'a Self) -> Self {
+        self -= rhs;
+        self
+    }
+}
+
+impl Neg for G1 {
+    type Output = Self;
+
+    fn neg(self) -> Self {
+        self.negate()
+    }
+}
+
+impl Additive for G1 {
+    fn zero() -> Self {
+        Self(IDENTITY)
+    }
+
+    fn double(&mut self) {
+        *self = dispatch(Double(*self));
+    }
+
+    /// Multiplies by an integer of any length without branching on its value.
+    fn scale(&self, bits_le: &[u64]) -> Self {
+        dispatch(Multiply {
+            element: *self,
+            scalar: Scalar::from_words_wide(bits_le),
+        })
+    }
+}
+
+impl<'a> MulAssign<&'a Scalar> for G1 {
+    fn mul_assign(&mut self, rhs: &'a Scalar) {
+        *self = dispatch(Multiply {
+            element: *self,
+            scalar: *rhs,
+        });
+    }
+}
+
+impl<'a> Mul<&'a Scalar> for G1 {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a Scalar) -> Self {
+        self *= rhs;
+        self
+    }
+}
+
+impl Space<Scalar> for G1 {
+    /// Returns the sum of the points times their scalars, in variable time.
+    ///
+    /// The scalars must be public, as Lagrange coefficients and batch-verification weights are:
+    /// the running time and memory accesses depend on them. A sequential strategy runs one kernel
+    /// over all points, and a parallel one splits them into batches of at least 256 points.
+    fn msm(points: &[Self], scalars: &[Scalar], strategy: &impl Strategy) -> Self {
+        let count = points.len().min(scalars.len());
+        let (points, scalars) = (&points[..count], &scalars[..count]);
+        strategy.run_batches(count, MSM_BATCH, 1, |batches| {
+            batches
+                .map_collect_vec(
+                    |ranges| ranges,
+                    |range| {
+                        dispatch(Msm {
+                            elements: &points[range.clone()],
+                            scalars: &scalars[range],
+                            plan: None,
+                        })
+                    },
+                )
+                .iter()
+                .fold(Self::zero(), |sum, batch| sum + batch)
+        })
+    }
+}
+
+impl CryptoGroup for G1 {
+    type Scalar = Scalar;
+
+    fn generator() -> Self {
+        Self(GENERATOR)
+    }
+}
+
+impl G1 {
+    /// Returns the sum of the elements, as when aggregating keys or signatures.
+    ///
+    /// Adds one element per lane, so it costs far less than adding them one at a time.
+    pub fn sum(elements: &[Self]) -> Self {
+        dispatch(Sum(elements))
+    }
+
+    /// Multiplies each element by the scalar at the same index, in place, without branching on
+    /// the scalars.
+    ///
+    /// Multiplies one element per lane. Elements beyond the scalars are unchanged, and scalars
+    /// beyond the elements are ignored.
+    pub fn mul_each(elements: &mut [Self], scalars: &[Scalar]) {
+        dispatch(MultiplyEach { elements, scalars });
+    }
+}
 
 #[cfg(test)]
 mod tests {
