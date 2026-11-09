@@ -6,9 +6,7 @@ use crate::roles::{
     receiver::Refusal as Receiving,
     sender::{Outcome, Refusal as Sending},
 };
-use commonware_clearing::bajillion::{
-    InvalidOpening, InvalidReceipt, Matrix, Opening, Request, RequestError,
-};
+use commonware_clearing::bajillion::{Matrix, Opening, Request, RequestError};
 use commonware_codec::Decode as _;
 
 /// Returns the close's matrix root and an opening of `sender`'s row in it.
@@ -392,7 +390,7 @@ fn test_posted_close_resolves_pending_requests() {
     let (other, _) = open_row(&fund(&mut operator, &[(7, 1)]), 0);
     assert!(matches!(
         alice.posted(6, &other, &opening),
-        Err(Sending::Opening(InvalidOpening))
+        Err(Sending::InvalidOpening)
     ));
     assert_eq!(
         alice.posted(6, &root, &opening).unwrap(),
@@ -730,7 +728,7 @@ fn test_receiver_rejects_receipts_it_cannot_rely_on() {
     tampered.amount += 1;
     assert!(matches!(
         bob.receive(tampered),
-        Err(Receiving::Receipt(InvalidReceipt))
+        Err(Receiving::InvalidReceipt)
     ));
     let mut misled = TestReceiver::new(
         account(1),
@@ -740,7 +738,7 @@ fn test_receiver_rejects_receipts_it_cannot_rely_on() {
     );
     assert!(matches!(
         misled.receive(for_bob.clone()),
-        Err(Receiving::Receipt(InvalidReceipt))
+        Err(Receiving::InvalidReceipt)
     ));
     assert_eq!(bob.receive(for_bob.clone()).unwrap(), 10);
     assert!(matches!(
@@ -756,7 +754,7 @@ fn test_receiver_rejects_receipts_it_cannot_rely_on() {
     forged.acknowledgement = user(9).sign(b"forged", b"receipt");
     assert!(matches!(
         bob.receive(forged),
-        Err(Receiving::Receipt(InvalidReceipt))
+        Err(Receiving::InvalidReceipt)
     ));
     assert!(matches!(
         bob.receive(for_carol),
@@ -862,7 +860,7 @@ fn test_posted_close_needs_a_valid_opening() {
     let opening = populated.open(&account(0), &account(1));
     assert!(matches!(
         alice.posted(1, &empty.root(), &opening),
-        Err(Sending::Opening(InvalidOpening))
+        Err(Sending::InvalidOpening)
     ));
     assert!(alice.pending().is_some());
 }

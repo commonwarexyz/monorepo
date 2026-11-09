@@ -6,8 +6,7 @@ use crate::roles::{
     operator::Refusal as Admitting,
 };
 use commonware_clearing::bajillion::{
-    AssemblyError, Challenge, ChallengeError, InvalidCount, InvalidOpening, InvalidReceipt, Matrix,
-    PayoutProof, Processed, SummaryError,
+    AssemblyError, Challenge, ChallengeError, Matrix, PayoutProof, Processed, SummaryError,
 };
 use commonware_cryptography::Digest as _;
 use commonware_runtime::Runner as _;
@@ -94,9 +93,7 @@ fn test_close_processes_requests_queued_before_its_epoch() {
                 deployment
                     .operator
                     .close(&queue, deposits, forced_withdrawals),
-                Err(Admitting::Assembly(AssemblyError::InvalidCount(
-                    InvalidCount
-                )))
+                Err(Admitting::Assembly(AssemblyError::InvalidCount))
             ));
         }
         assert_eq!(deployment.operator.epoch(), 2);
@@ -150,7 +147,7 @@ fn test_ledger_rejects_closes_deferring_required_requests() {
                 deployment
                     .ledger
                     .post(&mut context, &deferring, &certificate),
-                Err(Refusal::Summary(SummaryError::InvalidCount(InvalidCount)))
+                Err(Refusal::Summary(SummaryError::InvalidCount))
             ));
         }
     });
@@ -213,7 +210,7 @@ fn test_ledger_posts_only_certified_successors() {
         ] {
             assert!(matches!(
                 ledger.post(&mut context, &wrong, &certify(schemes, &wrong)),
-                Err(Refusal::Summary(SummaryError::InvalidCount(InvalidCount)))
+                Err(Refusal::Summary(SummaryError::InvalidCount))
             ));
         }
 
@@ -308,17 +305,13 @@ fn test_challenges_need_a_contradicted_receipt() {
         forged.receipt.amount = 11;
         assert!(matches!(
             deployment.ledger.challenge(&forged),
-            Err(Refusal::Challenge(ChallengeError::InvalidReceipt(
-                InvalidReceipt
-            )))
+            Err(Refusal::Challenge(ChallengeError::InvalidReceipt))
         ));
         let mut misopened = challenge.clone();
         misopened.opening = matrix.open(&account(0), &account(2));
         assert!(matches!(
             deployment.ledger.challenge(&misopened),
-            Err(Refusal::Challenge(ChallengeError::InvalidOpening(
-                InvalidOpening
-            )))
+            Err(Refusal::Challenge(ChallengeError::InvalidOpening))
         ));
         assert_eq!(deployment.ledger.halted(), None);
     });

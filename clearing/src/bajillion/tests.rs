@@ -1,8 +1,8 @@
-//! Helpers shared by the unit tests, and the conformance vector for ports of the ledger.
+//! Helpers shared by the unit tests, and the test vector for implementations of the ledger.
 
 use super::{
     Amounts, ApplyError, Balances, CheckError, Checked, Checkpoint, Close, Deposit, Epoch,
-    ForcedWithdrawal, Matrix, Namespace, Payout, PayoutLog, PayoutProof, Proposal, Queue, Receipt,
+    ForcedWithdrawal, Matrix, Namespace, Payout, PayoutProof, Payouts, Proposal, Queue, Receipt,
     Request, Row, SettleError, State, Summary, Withdrawal,
 };
 use commonware_codec::Encode;
@@ -52,7 +52,7 @@ pub(crate) type TestDb<I> = Balances<deterministic::Context, PublicKey, Sha256, 
 pub(crate) type TestBalances<T = EightCap> = TestDb<Index<T, Location<mmb::Family>>>;
 
 /// A payout log.
-pub(crate) type TestLog = PayoutLog<deterministic::Context, PublicKey, Sha256, Sequential, u64>;
+pub(crate) type TestLog = Payouts<deterministic::Context, PublicKey, Sha256, Sequential, u64>;
 
 /// A validator's balances database over the unordered index `I`, with its payout log.
 pub(crate) struct Store<
@@ -328,12 +328,13 @@ pub(crate) fn chain<R: Encode>(hash: Digest, requests: &[R]) -> Digest {
     })
 }
 
-/// Pins what a port of the ledger must reproduce bit for bit, for SHA-256, Ed25519 keys, and `u64`
-/// amounts. It also pins a deposit running hash that a port of the validators must reproduce. Alice
-/// pays bob 5 and carol 7 in epoch 1, and the close of epoch 1 settles her map and processes bob's
-/// deposit of 5. A close then appends payouts of 3 to bob and 4 to carol to the empty payout log.
+/// Pins the digests, roots, and encodings an implementation of the ledger must compute, for
+/// SHA-256, Ed25519 keys, and `u64` amounts, and a deposit running hash that validators compute.
+/// Alice pays bob 5 and carol 7 in epoch 1, and the close of epoch 1 settles her map and processes
+/// bob's deposit of 5. A close then appends payouts of 3 to bob and 4 to carol to the empty payout
+/// log.
 #[test]
-fn test_port_vector() {
+fn test_ledger_vector() {
     deterministic::Runner::default().start(|context| async move {
         // The empty balances database and payout log, and the summary before the first close.
         let store = open(context, "vector").await;
@@ -384,9 +385,7 @@ fn test_port_vector() {
         .unwrap()
         .pop()
         .unwrap();
-        receipt
-            .verify::<Sha256>(&namespace, &operator_key().public_key())
-            .unwrap();
+        assert!(receipt.verify::<Sha256>(&namespace, &operator_key().public_key()));
         assert_eq!(
             hex(receipt.encode().as_ref()),
             concat!(

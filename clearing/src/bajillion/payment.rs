@@ -32,11 +32,6 @@ pub enum RequestError {
     Overflow,
 }
 
-/// A receipt does not verify, or cannot be issued from the state and map given.
-#[derive(Debug, Error)]
-#[error("invalid receipt")]
-pub struct InvalidReceipt;
-
 /// Why a challenge is refused.
 #[derive(Debug, Error)]
 pub enum ChallengeError {
@@ -49,14 +44,20 @@ pub enum ChallengeError {
         found: Epoch,
     },
     /// The opening does not verify.
-    #[error(transparent)]
-    InvalidOpening(#[from] InvalidOpening),
+    #[error("invalid opening")]
+    InvalidOpening,
     /// The close credits at least what the receipt promises.
     #[error("challenge does not contradict the close")]
     NoContradiction,
     /// The receipt does not verify.
-    #[error(transparent)]
-    InvalidReceipt(#[from] InvalidReceipt),
+    #[error("invalid receipt")]
+    InvalidReceipt,
+}
+
+impl From<InvalidOpening> for ChallengeError {
+    fn from(InvalidOpening: InvalidOpening) -> Self {
+        Self::InvalidOpening
+    }
 }
 
 /// A sender's commitment to its payment map in one epoch.
@@ -484,27 +485,25 @@ pub struct Receipt<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
 
 impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Receipt<P, O, D, A> {
     /// Returns a receipt for each of `receivers` from `state`, the sender's `signature` over it,
-    /// the operator's `acknowledgement` countersigning it, and `payments`, the map it commits to.
-    /// The receipts verify exactly when both signatures do.
-    ///
-    /// Returns [InvalidReceipt] if `payments` does not commit to `state` or holds no amount for a
-    /// receiver.
+    /// the operator's `acknowledgement` countersigning it, and `payments`, the map it commits to,
+    /// or `None` if `payments` does not commit to `state` or holds no amount for a receiver. The
+    /// receipts verify exactly when both signatures do.
     pub fn issue<H: Hasher<Digest = D>>(
         state: &State<P, D>,
         signature: &P::Signature,
         acknowledgement: &O::Signature,
         payments: &Amounts<P, A>,
         receivers: impl IntoIterator<Item = P>,
-    ) -> Result<Vec<Self>, InvalidReceipt> {
+    ) -> Option<Vec<Self>> {
         let tree = payments.tree::<H>();
         if tree.root() != state.payments {
-            return Err(InvalidReceipt);
+            return None;
         }
         receivers
             .into_iter()
             .map(|receiver| {
-                let position = payments.position(&receiver).ok_or(InvalidReceipt)? as u32;
-                Ok(Self {
+                let position = payments.position(&receiver)? as u32;
+                Some(Self {
                     state: state.clone(),
                     signature: signature.clone(),
                     acknowledgement: acknowledgement.clone(),
@@ -519,27 +518,21 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Receipt<P, O, D, A> {
             .collect()
     }
 
-    /// Verifies that both signatures cover the state and that its payment map holds the receipt's
-    /// entry. Returns [InvalidReceipt] otherwise.
-    pub fn verify<H: Hasher<Digest = D>>(
-        &self,
-        namespace: &Namespace,
-        operator: &O,
-    ) -> Result<(), InvalidReceipt> {
-        if !self.state.verify(namespace, &self.signature)
-            || !self
+    /// Returns whether both signatures cover the state and its payment map holds the receipt's
+    /// entry.
+    pub fn verify<H: Hasher<Digest = D>>(&self, namespace: &Namespace, operator: &O) -> bool {
+        self.state.verify(namespace, &self.signature)
+            && self
                 .state
                 .verify_acknowledgement(namespace, operator, &self.acknowledgement)
-        {
-            return Err(InvalidReceipt);
-        }
-        self.proof
-            .verify_element_inclusion::<H>(
-                self.position,
-                &leaf::<H, P, A>(&self.receiver, self.amount),
-                &self.state.payments,
-            )
-            .map_err(|_| InvalidReceipt)
+            && self
+                .proof
+                .verify_element_inclusion::<H>(
+                    self.position,
+                    &leaf::<H, P, A>(&self.receiver, self.amount),
+                    &self.state.payments,
+                )
+                .is_ok()
     }
 }
 
@@ -639,7 +632,9 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Challenge<P, O, D, A> {
         if credited >= receipt.amount {
             return Err(ChallengeError::NoContradiction);
         }
-        receipt.verify::<H>(namespace, operator)?;
+        if !receipt.verify::<H>(namespace, operator) {
+            return Err(ChallengeError::InvalidReceipt);
+        }
         Ok(())
     }
 }
@@ -997,7 +992,7 @@ mod tests {
         let namespace = namespace();
         let receipt = receipt();
         let operator = operator_key().public_key();
-        receipt.verify::<Sha256>(&namespace, &operator).unwrap();
+        assert!(receipt.verify::<Sha256>(&namespace, &operator));
         assert_eq!(receipt.amount, 5);
         assert_eq!(
             Receipt::<PublicKey, PublicKey, Digest, u64>::decode(receipt.encode()).unwrap(),
@@ -1020,8 +1015,8 @@ mod tests {
                 [account(receiver)],
             )
         };
-        assert!(matches!(issue(&amounts(&[(2, 4)]), 2), Err(InvalidReceipt)));
-        assert!(matches!(issue(&states.payments, 1), Err(InvalidReceipt)));
+        assert!(issue(&amounts(&[(2, 4)]), 2).is_none());
+        assert!(issue(&states.payments, 1).is_none());
         assert_eq!(issue(&states.payments, 2).unwrap()[0].amount, 4);
     }
 
@@ -1060,19 +1055,10 @@ mod tests {
             },
         ];
         for tampered in tampered {
-            assert!(matches!(
-                tampered.verify::<Sha256>(&namespace, &operator),
-                Err(InvalidReceipt)
-            ));
+            assert!(!tampered.verify::<Sha256>(&namespace, &operator));
         }
-        assert!(matches!(
-            receipt.verify::<Sha256>(&namespace, &other),
-            Err(InvalidReceipt)
-        ));
-        assert!(matches!(
-            receipt.verify::<Sha256>(&Namespace::new(b"other"), &operator),
-            Err(InvalidReceipt)
-        ));
+        assert!(!receipt.verify::<Sha256>(&namespace, &other));
+        assert!(!receipt.verify::<Sha256>(&Namespace::new(b"other"), &operator));
     }
 
     #[test]
@@ -1087,10 +1073,7 @@ mod tests {
             &operator,
             &receipt.acknowledgement
         ));
-        assert!(matches!(
-            receipt.verify::<Sha256>(&namespace, &operator),
-            Err(InvalidReceipt)
-        ));
+        assert!(!receipt.verify::<Sha256>(&namespace, &operator));
     }
 
     #[test]
@@ -1147,7 +1130,7 @@ mod tests {
         misopened.opening = underpaying.open(&sender, &account(2));
         assert!(matches!(
             misopened.verify::<Sha256>(&namespace, &operator, 2, &underpaying.root()),
-            Err(ChallengeError::InvalidOpening(InvalidOpening))
+            Err(ChallengeError::InvalidOpening)
         ));
         assert!(matches!(
             challenge(&forged, &underpaying).verify::<Sha256>(
@@ -1156,7 +1139,7 @@ mod tests {
                 2,
                 &paying.root()
             ),
-            Err(ChallengeError::InvalidOpening(InvalidOpening))
+            Err(ChallengeError::InvalidOpening)
         ));
         assert!(matches!(
             challenge(&forged, &paying).verify::<Sha256>(&namespace, &operator, 2, &paying.root()),
@@ -1169,7 +1152,7 @@ mod tests {
                 2,
                 &underpaying.root()
             ),
-            Err(ChallengeError::InvalidReceipt(InvalidReceipt))
+            Err(ChallengeError::InvalidReceipt)
         ));
     }
 

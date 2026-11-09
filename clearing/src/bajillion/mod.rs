@@ -81,10 +81,10 @@
 //!
 //! The exceptions are the validators' two [QMDB](commonware_storage::qmdb) databases. The root of
 //! the [Balances] database commits to every write ever made to it, not only to the balances it
-//! holds, so applying a posted close to it is prescribed as well. The root of the [PayoutLog]
-//! commits to every payout and commit in the order appended, so each posted close appends exactly
-//! the batch [Payout::stage] builds. Everything else belongs to the deployment. That covers what
-//! each role stores and where, and how it caches, batches, schedules, persists, and recovers.
+//! holds, so applying a posted close to it is prescribed as well. The root of the [Payouts]
+//! database commits to every payout and commit in the order appended, so each posted close appends
+//! exactly the batch [Payout::stage] builds. Everything else belongs to the deployment. That covers
+//! what each role stores and where, and how it caches, batches, schedules, persists, and recovers.
 //!
 //! Each deployment also chooses the unsigned integer type of its amounts ([Amount]). The primitive
 //! unsigned integers implement it, and so does [commonware_utils::Uint], so a deployment that
@@ -99,13 +99,10 @@
 //!   operator    any store             Request::verify, Verified::admit, State::acknowledge,
 //!                                     Withdrawal::verify, Close::assemble, Flow::settle
 //!   receiver    any store             Receipt::verify, Opening::verify, Challenge::verify
-//!   validators  Balances, PayoutLog,  Close::check, Checked::settle, Proposal::apply,
+//!   validators  Balances, Payouts,    Close::check, Checked::settle, Proposal::apply,
 //!               any store             Proposal::payouts, Matrix::open, Queue::prefix
 //!   ledger      any store             Summary::verify, Challenge::verify, PayoutProof::verify,
 //!                                     BalanceProof::verify
-//!   ---------------------------------------------------------------------------------------------
-//!   prescribed  wire formats, namespaces, commitments, close rules, the balances and payout log
-//!               steps
 //! ```
 //!
 //! Each role's section below names its helpers and states its obligations. An obligation is a
@@ -380,10 +377,10 @@
 //! requests the close processes and the queue's running hash after them. The post carries the
 //! proposal's summary and its certificate.
 //!
-//! Every payout joins one [PayoutLog] and keeps its index there for good. [Checked::settle] stages
-//! the close's batch with [Payout::stage], and the summary records the log's size and root after
-//! the batch. With p the parent's payouts size and s the close's, the close's payouts take the
-//! indices [p, s - 1) in account order and its commit takes s - 1 ([Proposal::payouts]). A
+//! Every payout joins the [Payouts] log and keeps its index there for good. [Checked::settle]
+//! stages the close's batch with [Payout::stage], and the summary records the log's size and root
+//! after the batch. With p the parent's payouts size and s the close's, the close's payouts take
+//! the indices [p, s - 1) in account order and its commit takes s - 1 ([Proposal::payouts]). A
 //! validator can find an account's payout of a close by binary search over [p, s - 1) and prove it
 //! with the log's proof of that one operation ([PayoutProof]).
 //!
@@ -401,7 +398,7 @@
 //!                        |         |        |       |      and hash in Summary(e-1) extended by
 //!                        |         |        |       |      H(hash || request) for each of them,
 //!                        |         |        |       |      in queue order
-//!                        |         |        '-------+--> size and root of PayoutLog after the
+//!                        |         |        '-------+--> size and root of Payouts after the
 //!                        |         |                     close's payouts and commit
 //!                        |         '--> root of Balances, keyed by account
 //!                        v
@@ -435,7 +432,7 @@
 //!                       apply after              apply after            apply after
 //!                     post(e-1) final           post(e) final         post(e+1) final
 //!                            v                        v                      v
-//!   PayoutLog L(e-2) -- batch(e-1) --> L(e-1) --- batch(e) ---> L(e) -- batch(e+1) --> L(e+1)
+//!   Payouts L(e-2) -- batch(e-1) --> L(e-1) --- batch(e) ---> L(e) -- batch(e+1) --> L(e+1)
 //!                            |                        |                      |
 //!                       once durable             once durable           once durable
 //!                            v                        v                      v
@@ -492,11 +489,12 @@
 //!
 //! # Ledger
 //!
-//! The production ledger is a contract on the chain that holds the funds, with its own storage. The
-//! crate supplies the checks that protect funds and specifies the rest. [Summary::verify] checks
-//! posts, [Challenge::verify] checks challenges, [PayoutProof::verify] checks payout withdrawals
-//! and claims, and [BalanceProof::verify] checks balance claims. The ledger keeps three stores, and
-//! the requests and payouts below move through them.
+//! The production ledger is a contract on the chain that holds the funds, with its own storage. It
+//! is written in the chain's language, so it implements the checks below itself. The crate
+//! supplies the checks for an implementation to test against, and specifies the rest.
+//! [Summary::verify] checks posts, [Challenge::verify] checks challenges, [PayoutProof::verify]
+//! checks payout withdrawals and claims, and [BalanceProof::verify] checks balance claims. The
+//! ledger keeps three stores, and the requests and payouts below move through them.
 //!
 //! ```text
 //!                           +------------------------------+
@@ -614,8 +612,8 @@
 //! Ranges never overlap or touch. Every commit is covered, so once every payout is paid the ranges
 //! collapse to the one range [0, s) for the last posted payouts size s. Each gap between two ranges
 //! holds at least one unpaid payout, so with U payouts unpaid at most U + 1 ranges remain in any
-//! order of payment. A port may keep the paid indices in any form that answers whether an index is
-//! covered, such as a flag per index or ranges found through a caller-supplied hint.
+//! order of payment. An implementation may keep the paid indices in any form that answers whether
+//! an index is covered, such as a flag per index or ranges found through a caller-supplied hint.
 //!
 //! ```text
 //!   log index     0   1   2   3   4   5   6
@@ -633,10 +631,12 @@
 //! replayed proof is refused even though it still verifies. A proof verifies only under the root it
 //! was built for, so after a later post the account fetches a fresh proof of the same index.
 //!
-//! ## What a port reproduces
+//! ## Implementing a ledger
 //!
-//! A ledger port reproduces these rules bit for bit. Each is what the crate computes for a post, a
-//! challenge, or a claim, so a port checks its results against the crate's before it holds funds.
+//! An implementation must compute the same digests, roots, and verification results as the crate
+//! for every post, challenge, and claim. The rules below fix those computations, and a test vector
+//! in the crate pins their results for one deployment, so an implementation checks itself against
+//! the crate before it holds funds.
 //!
 //! 1. **Integers.** Fixed-width integers (every epoch, count, and built-in amount) encode
 //!    big-endian, and lengths encode as varints. Public keys and digests encode as their raw bytes.
@@ -679,13 +679,13 @@
 //!
 //! 9. **The empty roots.** A deployment reads the empty balances root from an empty [Balances]
 //!    database. It depends on the hasher, account type, and amount type, because the database pads
-//!    its fixed-size operations to the key and value widths. An empty [PayoutLog] holds one commit
-//!    with no metadata and an inactivity floor of zero, so its size is 1. [Summary::genesis]
+//!    its fixed-size operations to the key and value widths. An empty [Payouts] log holds one
+//!    commit with no metadata and an inactivity floor of zero, so its size is 1. [Summary::genesis]
 //!    records its size and root.
 //!
 //! 10. **Balance proofs.** [BalanceProof::verify] is the key-value proof of QMDB's current
 //!     database, an operation proof under the canonical root together with its bitmap chunk of 32
-//!     bytes. It is the largest part of a port.
+//!     bytes. It is the largest part of an implementation.
 //!
 //! 11. **Payout proofs.** [PayoutProof::verify] is the range proof of QMDB's keyless database for
 //!     one operation, over the Merkle Mountain Range of [commonware_storage::merkle::mmr]. A leaf
@@ -697,8 +697,8 @@
 //!     Every operation encodes to the payout's width plus 10 bytes. An appended payout encodes as
 //!     tag 1, its account, its amount, and zeros to that size. A commit encodes as tag 0, a zero
 //!     byte for its absent metadata, zeros of the payout's width, and its inactivity floor as a
-//!     big-endian `u64`. A port reproduces the storage crate's node and root hashing for that
-//!     family.
+//!     big-endian `u64`. An implementation reproduces the storage crate's node and root hashing
+//!     for that family.
 
 mod amounts;
 mod close;
@@ -714,22 +714,20 @@ mod validator;
 mod tests;
 
 pub use amounts::{Amounts, AmountsError};
-pub use close::{
-    AssemblyError, Close, Deposit, ForcedWithdrawal, InvalidCount, Limits, Queue, Row, Withdrawal,
-};
+pub use close::{AssemblyError, Close, Deposit, ForcedWithdrawal, Limits, Queue, Row, Withdrawal};
 pub use commonware_utils::Unsigned as Amount;
 pub use lookup::{InvalidOpening, Lookup};
 pub use matrix::{Matrix, Opening};
 pub use namespace::Namespace;
 pub use payment::{
-    Admission, Challenge, ChallengeError, InvalidReceipt, Receipt, Request, RequestError,
-    Signatures, State, States, Verified,
+    Admission, Challenge, ChallengeError, Receipt, Request, RequestError, Signatures, State,
+    States, Verified,
 };
 pub use settlement::{Flow, FlowError};
-pub use summary::{Payouts, Processed, Summary, SummaryError};
+pub use summary::{Log, Processed, Summary, SummaryError};
 pub use validator::{
     ApplyError, BalanceProof, Balances, CheckError, Checked, Checkpoint, Payout, PayoutBatch,
-    PayoutLog, PayoutProof, Proposal, SettleError,
+    PayoutProof, Payouts, Proposal, SettleError,
 };
 
 /// An epoch number. Epochs start at one, and epoch zero names the state before the first close.

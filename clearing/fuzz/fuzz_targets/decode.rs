@@ -2,9 +2,8 @@
 
 use arbitrary::Arbitrary;
 use commonware_clearing::bajillion::{
-    Amounts, BalanceProof, Challenge, Close, Deposit, Flow, ForcedWithdrawal, Limits, Lookup,
-    Opening, Payout, PayoutProof, Payouts, Processed, Receipt, Request, Row, State, Summary,
-    Withdrawal,
+    Amounts, BalanceProof, Challenge, Close, Deposit, Flow, ForcedWithdrawal, Limits, Log, Lookup,
+    Opening, Payout, PayoutProof, Processed, Receipt, Request, Row, State, Summary, Withdrawal,
 };
 use commonware_codec::{Codec, Copying, RangeCfg};
 use commonware_cryptography::{Sha256, ed25519::PublicKey, sha256::Digest};
@@ -39,7 +38,7 @@ enum FuzzInput {
     Opening(Opening<PublicKey, Digest, u64>),
     Flow(Flow<u64>),
     Processed(Processed<Digest>),
-    Payouts(Payouts<Digest>),
+    Log(Log<Digest>),
     Summary(Summary<Sha256>),
     Payout(Payout<PublicKey, u64>),
     PayoutProof(PayoutProof<PublicKey, Digest, u64>),
@@ -91,7 +90,7 @@ fuzz_target!(|input: FuzzInput| {
         FuzzInput::Opening(value) => roundtrip(&value, &()),
         FuzzInput::Flow(value) => roundtrip(&value, &()),
         FuzzInput::Processed(value) => roundtrip(&value, &()),
-        FuzzInput::Payouts(value) => roundtrip(&value, &()),
+        FuzzInput::Log(value) => roundtrip(&value, &()),
         FuzzInput::Summary(value) => roundtrip(&value, &()),
         FuzzInput::Payout(value) => roundtrip(&value, &()),
         FuzzInput::PayoutProof(value) => roundtrip(&value, &()),
@@ -111,7 +110,7 @@ fuzz_target!(|input: FuzzInput| {
             decode::<Opening<PublicKey, Digest, u64>>(&bytes, &());
             decode::<Flow<u64>>(&bytes, &());
             decode::<Processed<Digest>>(&bytes, &());
-            decode::<Payouts<Digest>>(&bytes, &());
+            decode::<Log<Digest>>(&bytes, &());
             decode::<Summary<Sha256>>(&bytes, &());
             decode::<Payout<PublicKey, u64>>(&bytes, &());
             decode::<PayoutProof<PublicKey, Digest, u64>>(&bytes, &());

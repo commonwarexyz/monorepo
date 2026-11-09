@@ -2,8 +2,8 @@
 //! closes.
 
 use super::{
-    Amount, Amounts, Close, Epoch, FlowError, InvalidCount, Matrix, Namespace, Payouts, Processed,
-    Queue, State, Summary, settlement::Flows,
+    Amount, Amounts, Close, Epoch, FlowError, Log, Matrix, Namespace, Processed, Queue, State,
+    Summary, settlement::Flows,
 };
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
@@ -49,8 +49,8 @@ pub enum CheckError {
         found: Epoch,
     },
     /// A count is outside the queue's bounds.
-    #[error(transparent)]
-    InvalidCount(#[from] InvalidCount),
+    #[error("invalid number of queued requests")]
+    InvalidCount,
     /// The operator's signature does not verify.
     #[error("invalid operator signature")]
     InvalidOperatorSignature,
@@ -118,7 +118,7 @@ type Batch<P, D, S, A> = MerkleizedBatch<mmb::Family, D, Update<P, FixedEncoding
 /// Each posted close appends its payouts in account order and then a commit ([Payout::stage]).
 /// Its size and root after each posted close are the payouts size and root that close's summary
 /// certifies, and each payout keeps its index for good.
-pub type PayoutLog<E, P, H, S, A> = keyless::fixed::Db<mmr::Family, E, Payout<P, A>, H, S>;
+pub type Payouts<E, P, H, S, A> = keyless::fixed::Db<mmr::Family, E, Payout<P, A>, H, S>;
 
 /// A batch of payouts and a commit staged on the payout log.
 pub type PayoutBatch<P, D, S, A> =
@@ -140,7 +140,7 @@ impl<P: PublicKey, A: Amount> Payout<P, A> {
     ///
     /// Fails if the log fails, for example because it already raised its floor.
     pub async fn stage<E, H, S>(
-        log: &PayoutLog<E, P, H, S, A>,
+        log: &Payouts<E, P, H, S, A>,
         payouts: &Amounts<P, A>,
     ) -> Result<Arc<PayoutBatch<P, H::Digest, S, A>>, qmdb::Error<mmr::Family>>
     where
@@ -396,8 +396,9 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
                 found,
             });
         }
-        let (queued_deposits, queued_forced_withdrawals) =
-            queue.prefix(deposits, forced_withdrawals)?;
+        let (queued_deposits, queued_forced_withdrawals) = queue
+            .prefix(deposits, forced_withdrawals)
+            .ok_or(CheckError::InvalidCount)?;
 
         // Check the operator's signature over the matrix root before any user signature, so a
         // close the operator did not sign costs only hashing.
@@ -490,7 +491,7 @@ impl<P: PublicKey, H: Hasher, A: Amount> Checked<P, H, A> {
     pub async fn settle<E, I, S>(
         &self,
         balances: &Balances<E, P, H, I, S, A>,
-        log: &PayoutLog<E, P, H, S, A>,
+        log: &Payouts<E, P, H, S, A>,
     ) -> Result<Proposal<P, H, S, A>, SettleError>
     where
         E: Context,
@@ -518,7 +519,7 @@ impl<P: PublicKey, H: Hasher, A: Amount> Checked<P, H, A> {
             parent: self.parent.digest(),
             matrix: self.matrix.root(),
             balances: batch.root(),
-            payouts: Payouts {
+            payouts: Log {
                 size: *appends.bounds().tip.size,
                 root: appends.root(),
             },
@@ -583,12 +584,12 @@ impl<P: PublicKey, H: Hasher, S: Strategy, A: Amount> Proposal<P, H, S, A> {
     pub async fn apply<E, I>(
         self,
         balances: Balances<E, P, H, I, S, A>,
-        log: PayoutLog<E, P, H, S, A>,
+        log: Payouts<E, P, H, S, A>,
         posted: &H::Digest,
     ) -> Result<
         (
             Balances<E, P, H, I, S, A>,
-            PayoutLog<E, P, H, S, A>,
+            Payouts<E, P, H, S, A>,
             Checkpoint<P, H, A>,
         ),
         ApplyError,
@@ -734,7 +735,7 @@ mod tests {
                 let close = sign_close(&operator, 2, Vec::new(), Vec::new(), deposits, forced);
                 assert!(matches!(
                     check(close, &parent, &queued),
-                    Err(CheckError::InvalidCount(InvalidCount))
+                    Err(CheckError::InvalidCount)
                 ));
             }
 

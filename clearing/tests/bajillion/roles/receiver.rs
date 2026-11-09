@@ -1,7 +1,7 @@
 //! A reference receiver that holds the operator to its preconfirmations.
 
 use commonware_clearing::bajillion::{
-    Amount, Challenge, Epoch, InvalidOpening, InvalidReceipt, Namespace, Opening, Receipt,
+    Amount, Challenge, Epoch, InvalidOpening, Namespace, Opening, Receipt,
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Digest, Hasher, PublicKey};
@@ -27,11 +27,17 @@ pub enum Refusal {
     #[error("the close of the audited epoch has not posted")]
     NotClosed,
     /// The receipt does not verify.
-    #[error(transparent)]
-    Receipt(#[from] InvalidReceipt),
+    #[error("invalid receipt")]
+    InvalidReceipt,
     /// The opening does not verify.
-    #[error(transparent)]
-    Opening(#[from] InvalidOpening),
+    #[error("invalid opening")]
+    InvalidOpening,
+}
+
+impl From<InvalidOpening> for Refusal {
+    fn from(InvalidOpening: InvalidOpening) -> Self {
+        Self::InvalidOpening
+    }
 }
 
 /// The largest receipt held per epoch and sender.
@@ -168,7 +174,10 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
         if receipt.receiver != self.account {
             return Err(Refusal::WrongReceiver);
         }
-        Ok(receipt.verify::<H>(&self.namespace, &self.operator)?)
+        if !receipt.verify::<H>(&self.namespace, &self.operator) {
+            return Err(Refusal::InvalidReceipt);
+        }
+        Ok(())
     }
 
     /// Holds `receipt` in place of any earlier one from its sender in its epoch.

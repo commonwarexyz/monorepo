@@ -4,7 +4,7 @@
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     Amount, ApplyError, BalanceProof, Balances, CheckError, Checkpoint, Close, Deposit, Epoch,
-    ForcedWithdrawal, Limits, Matrix, Namespace, Opening, PayoutLog, PayoutProof, Proposal, Queue,
+    ForcedWithdrawal, Limits, Matrix, Namespace, Opening, PayoutProof, Payouts, Proposal, Queue,
     SettleError, Summary,
 };
 use commonware_codec::{Decode as _, DecodeExt as _, Encode as _, RangeCfg};
@@ -108,7 +108,7 @@ where
     /// Balances database, absent once a failed apply left it unusable until a restart.
     balances: Option<Database<E, P, H, T, S, A>>,
     /// Payout log, absent once a failed apply left it unusable until a restart.
-    log: Option<PayoutLog<E, P, H, S, A>>,
+    log: Option<Payouts<E, P, H, S, A>>,
 
     /// Closes the validator attested (V4).
     persisted: Persisted<H::Digest>,
@@ -135,9 +135,9 @@ where
         context: &E,
         config: &Config<O, T, S>,
         summary: &Summary<H>,
-    ) -> Result<PayoutLog<E, P, H, S, A>, Refusal> {
+    ) -> Result<Payouts<E, P, H, S, A>, Refusal> {
         let size = Some(Location::new(summary.payouts.size));
-        let log = PayoutLog::init(context.child("payouts"), config.payouts.clone(), size).await?;
+        let log = Payouts::init(context.child("payouts"), config.payouts.clone(), size).await?;
         if log.root() != summary.payouts.root {
             return Err(Refusal::InvalidCheckpoint);
         }
@@ -214,7 +214,7 @@ where
     }
 
     /// Returns the payout log.
-    const fn payout_log(&self) -> &PayoutLog<E, P, H, S, A> {
+    const fn payout_log(&self) -> &Payouts<E, P, H, S, A> {
         self.log
             .as_ref()
             .expect("a validator must restart after a failed apply")

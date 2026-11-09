@@ -2,8 +2,8 @@
 //! closes.
 
 use commonware_clearing::bajillion::{
-    Amount, Amounts, Epoch, InvalidOpening, InvalidReceipt, Namespace, Opening, Receipt, Request,
-    RequestError, State, States,
+    Amount, Amounts, Epoch, InvalidOpening, Namespace, Opening, Receipt, Request, RequestError,
+    State, States,
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
@@ -31,12 +31,18 @@ pub enum Refusal {
     /// The request's states do not derive.
     #[error(transparent)]
     Request(#[from] RequestError),
-    /// The receipts do not issue.
-    #[error(transparent)]
-    Receipt(#[from] InvalidReceipt),
+    /// The recorded state and map issue no receipt for a receiver.
+    #[error("invalid receipt")]
+    InvalidReceipt,
     /// The opening does not verify.
-    #[error(transparent)]
-    Opening(#[from] InvalidOpening),
+    #[error("invalid opening")]
+    InvalidOpening,
+}
+
+impl From<InvalidOpening> for Refusal {
+    fn from(InvalidOpening: InvalidOpening) -> Self {
+        Self::InvalidOpening
+    }
 }
 
 /// What a posted close did with the pending request.
@@ -320,13 +326,14 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
             .acknowledgement
             .as_ref()
             .ok_or(Refusal::NotAcknowledged)?;
-        Ok(Receipt::issue::<H>(
+        Receipt::issue::<H>(
             &countersigned.state,
             &countersigned.signature,
             acknowledgement,
             &countersigned.payments,
             receivers,
-        )?)
+        )
+        .ok_or(Refusal::InvalidReceipt)
     }
 
     /// Drops the pending request after a refusal of its only delivery (S4).

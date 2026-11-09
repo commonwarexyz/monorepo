@@ -8,17 +8,12 @@ use commonware_codec::{
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
 use thiserror::Error;
 
-/// A close processes fewer queued requests than required or more than are queued.
-#[derive(Debug, Error)]
-#[error("invalid number of queued requests")]
-pub struct InvalidCount;
-
 /// Why rows and withdrawals do not assemble into a close.
 #[derive(Debug, Error)]
 pub enum AssemblyError {
     /// A count is outside the queue's bounds.
-    #[error(transparent)]
-    InvalidCount(#[from] InvalidCount),
+    #[error("invalid number of queued requests")]
+    InvalidCount,
     /// A row pays no receiver.
     #[error("no receiver paid")]
     NoReceivers,
@@ -247,12 +242,12 @@ where
     }
 }
 
-/// Returns `count` as a number of queued requests between `required` and `queued`.
-fn bounded(required: usize, queued: usize, count: u64) -> Result<usize, InvalidCount> {
+/// Returns `count` as a number of queued requests, or `None` if it is not between `required` and
+/// `queued`.
+fn bounded(required: usize, queued: usize, count: u64) -> Option<usize> {
     usize::try_from(count)
         .ok()
         .filter(|count| (required..=queued).contains(count))
-        .ok_or(InvalidCount)
 }
 
 /// The requests queued on the ledger that the next close may process.
@@ -282,20 +277,21 @@ pub struct Queue<P: PublicKey, A: Amount> {
 }
 
 impl<P: PublicKey, A: Amount> Queue<P, A> {
-    /// Returns the oldest `deposits` deposits and `forced_withdrawals` forced withdrawals.
+    /// Returns the oldest `deposits` deposits and `forced_withdrawals` forced withdrawals, or
+    /// `None` if a count is not between its queue's required count and length.
     #[allow(clippy::type_complexity)]
     pub fn prefix(
         &self,
         deposits: u64,
         forced_withdrawals: u64,
-    ) -> Result<(&[Deposit<P, A>], &[ForcedWithdrawal<P, A>]), InvalidCount> {
+    ) -> Option<(&[Deposit<P, A>], &[ForcedWithdrawal<P, A>])> {
         let deposits = bounded(self.required_deposits, self.deposits.len(), deposits)?;
         let forced_withdrawals = bounded(
             self.required_forced_withdrawals,
             self.forced_withdrawals.len(),
             forced_withdrawals,
         )?;
-        Ok((
+        Some((
             &self.deposits[..deposits],
             &self.forced_withdrawals[..forced_withdrawals],
         ))
@@ -434,8 +430,9 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
         S: Signer<PublicKey = O, Signature = O::Signature>,
     {
         let epoch = queue.epoch;
-        let (queued_deposits, queued_forced_withdrawals) =
-            queue.prefix(deposits, forced_withdrawals)?;
+        let (queued_deposits, queued_forced_withdrawals) = queue
+            .prefix(deposits, forced_withdrawals)
+            .ok_or(AssemblyError::InvalidCount)?;
         let mut rows: Vec<_> = rows.into_iter().collect();
         let mut withdrawals: Vec<_> = withdrawals.into_iter().collect();
         if rows.iter().any(|row| row.payments.is_empty()) {
@@ -795,7 +792,7 @@ mod tests {
         let (deposits, forced) = queue.prefix(2, 1).unwrap();
         assert_eq!((deposits.len(), forced.len()), (2, 1));
         for (deposits, forced) in [(0, 0), (3, 0), (1, 2)] {
-            assert!(matches!(queue.prefix(deposits, forced), Err(InvalidCount)));
+            assert!(queue.prefix(deposits, forced).is_none());
         }
     }
 
@@ -933,7 +930,7 @@ mod tests {
         for deposits in [0, 2] {
             assert!(matches!(
                 assemble(deposits, Vec::new(), Vec::new()),
-                Err(AssemblyError::InvalidCount(InvalidCount))
+                Err(AssemblyError::InvalidCount)
             ));
         }
         assemble(1, Vec::new(), vec![withdrawal]).unwrap();

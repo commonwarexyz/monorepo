@@ -1,6 +1,6 @@
 //! Summaries of closes, certified by validators and posted to the ledger.
 
-use super::{Amount, Epoch, InvalidCount, Namespace, Payout, matrix};
+use super::{Amount, Epoch, Namespace, Payout, matrix};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, Encode, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{
@@ -85,30 +85,30 @@ where
 
 /// The payout log after one close, as its size and root.
 ///
-/// Each posted close appends its payouts to the [PayoutLog](super::PayoutLog) in account order,
-/// then a commit. `size` is the number of operations in the log after the close. It counts the
-/// initial commit and the payouts and commit of every close since genesis, so the close's commit
-/// sits at `size - 1`. `root` is the log's root after the close.
+/// Each posted close appends its payouts to the [Payouts](super::Payouts) database in account
+/// order, then a commit. `size` is the number of operations in the log after the close. It counts
+/// the initial commit and the payouts and commit of every close since genesis, so the close's
+/// commit sits at `size - 1`. `root` is the log's root after the close.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Payouts<D: Digest> {
+pub struct Log<D: Digest> {
     /// Number of operations in the payout log after the close, its initial commit included.
     pub size: u64,
     /// Root of the payout log after the close.
     pub root: D,
 }
 
-impl<D: Digest> Write for Payouts<D> {
+impl<D: Digest> Write for Log<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.size.write(buf);
         self.root.write(buf);
     }
 }
 
-impl<D: Digest> FixedSize for Payouts<D> {
+impl<D: Digest> FixedSize for Log<D> {
     const SIZE: usize = u64::SIZE + D::SIZE;
 }
 
-impl<D: Digest> Read for Payouts<D> {
+impl<D: Digest> Read for Log<D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -120,7 +120,7 @@ impl<D: Digest> Read for Payouts<D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for Payouts<D>
+impl<D: Digest> arbitrary::Arbitrary<'_> for Log<D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
@@ -146,9 +146,9 @@ pub enum SummaryError {
     /// The summary does not follow the last posted one.
     #[error("summary does not follow the last posted one")]
     WrongParent,
-    /// A count is outside the queue's bounds.
-    #[error(transparent)]
-    InvalidCount(#[from] InvalidCount),
+    /// A count is outside the range given.
+    #[error("invalid number of queued requests")]
+    InvalidCount,
     /// The certificate does not verify.
     #[error("invalid certificate")]
     InvalidCertificate,
@@ -181,7 +181,7 @@ pub struct Summary<H: Hasher> {
     /// Root of the balances after the close.
     pub balances: H::Digest,
     /// The payout log after the close, as its size and root.
-    pub payouts: Payouts<H::Digest>,
+    pub payouts: Log<H::Digest>,
     /// The deposits the close processes, as their count and the queue's running hash.
     pub deposits: Processed<H::Digest>,
     /// The forced withdrawals the close processes, as their count and the queue's running hash.
@@ -202,7 +202,7 @@ impl<H: Hasher> Summary<H> {
             parent: H::Digest::EMPTY,
             matrix: matrix::root::<H, P>(core::iter::empty()),
             balances,
-            payouts: Payouts {
+            payouts: Log {
                 size: 1,
                 root: keyless::initial_root::<mmr::Family, FixedEncoding<Payout<P, A>>, H>(),
             },
@@ -244,7 +244,7 @@ impl<H: Hasher> Summary<H> {
         if !deposits.contains(&self.deposits.count)
             || !forced_withdrawals.contains(&self.forced_withdrawals.count)
         {
-            return Err(SummaryError::InvalidCount(InvalidCount));
+            return Err(SummaryError::InvalidCount);
         }
         if !verifier.verify_certificate::<_, H::Digest>(rng, self, certificate, &Sequential) {
             return Err(SummaryError::InvalidCertificate);
@@ -313,7 +313,7 @@ impl<H: Hasher> Write for Summary<H> {
 impl<H: Hasher> FixedSize for Summary<H> {
     const SIZE: usize = Epoch::SIZE
         + 3 * H::Digest::SIZE
-        + Payouts::<H::Digest>::SIZE
+        + Log::<H::Digest>::SIZE
         + 2 * Processed::<H::Digest>::SIZE;
 }
 
@@ -326,7 +326,7 @@ impl<H: Hasher> Read for Summary<H> {
             parent: H::Digest::read(buf)?,
             matrix: H::Digest::read(buf)?,
             balances: H::Digest::read(buf)?,
-            payouts: Payouts::read(buf)?,
+            payouts: Log::read(buf)?,
             deposits: Processed::read(buf)?,
             forced_withdrawals: Processed::read(buf)?,
         })
@@ -397,7 +397,7 @@ mod tests {
         );
         let log =
             keyless::initial_root::<mmr::Family, FixedEncoding<Payout<PublicKey, u64>>, Sha256>();
-        let expected = Payouts { size: 1, root: log };
+        let expected = Log { size: 1, root: log };
         assert_eq!(genesis.payouts, expected);
         assert_eq!(Summary::decode(genesis.encode()).unwrap(), genesis);
 
@@ -422,14 +422,14 @@ mod tests {
                 ..genesis
             },
             Summary {
-                payouts: Payouts {
+                payouts: Log {
                     size: 2,
                     ..genesis.payouts
                 },
                 ..genesis
             },
             Summary {
-                payouts: Payouts {
+                payouts: Log {
                     root: other,
                     ..genesis.payouts
                 },
@@ -543,7 +543,7 @@ mod tests {
             parent,
             matrix: Sha256::hash(&[b"matrix"]),
             balances: Sha256::hash(&[b"after"]),
-            payouts: Payouts {
+            payouts: Log {
                 size: 3,
                 root: Sha256::hash(&[b"payouts"]),
             },
@@ -606,18 +606,18 @@ mod tests {
             for (deposits, forced_withdrawals) in [(3..=4, 0..=1), (0..=1, 0..=1), (0..=2, 2..=2)] {
                 assert!(matches!(
                     verify(&summary, certificate, &parent, deposits, forced_withdrawals),
-                    Err(SummaryError::InvalidCount(InvalidCount))
+                    Err(SummaryError::InvalidCount)
                 ));
             }
         }
 
         // A summary that differs in its payouts size or root is not certified.
         let changed = [
-            Payouts {
+            Log {
                 size: 4,
                 ..summary.payouts
             },
-            Payouts {
+            Log {
                 root: Sha256::hash(&[b"other"]),
                 ..summary.payouts
             },
@@ -642,7 +642,7 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Processed<Digest>>,
-            CodecConformance<Payouts<Digest>>,
+            CodecConformance<Log<Digest>>,
             CodecConformance<Summary<Sha256>>,
         }
     }

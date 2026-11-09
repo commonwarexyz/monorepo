@@ -3,7 +3,7 @@
 use super::*;
 use crate::roles::validator::Refusal;
 use commonware_clearing::bajillion::{
-    CheckError, FlowError, ForcedWithdrawal, Payout, PayoutLog, SettleError,
+    CheckError, FlowError, ForcedWithdrawal, Payout, Payouts, SettleError,
 };
 use commonware_runtime::{Runner as _, deterministic::FaultConfig};
 use commonware_storage::merkle::Location;
@@ -561,7 +561,7 @@ fn test_validator_refuses_a_log_behind_its_balances() {
 
         // The log loses the close of epoch 2, while the balances keep it.
         let kept = config("behind-0");
-        let truncated = PayoutLog::<_, PublicKey, Sha256, Sequential, u64>::init(
+        let truncated = Payouts::<_, PublicKey, Sha256, Sequential, u64>::init(
             context.child("truncated"),
             kept.payouts.clone(),
             Some(Location::new(first.payouts.size)),
@@ -592,7 +592,7 @@ fn test_validator_realigns_its_payout_log_after_a_crash() {
         // The crash leaves the log at the close of epoch 2 and the balances at the close of
         // epoch 1.
         let config = config("realign-0");
-        let log = PayoutLog::<_, PublicKey, Sha256, Sequential, u64>::init(
+        let log = Payouts::<_, PublicKey, Sha256, Sequential, u64>::init(
             context.child("crashed"),
             config.payouts.clone(),
             None,
