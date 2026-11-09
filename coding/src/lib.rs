@@ -17,6 +17,11 @@ commonware_macros::stability_scope!(ALPHA {
 
     mod reed_solomon;
     pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
+    mod segmented;
+    pub use segmented::{
+        CheckedSegmentChunk, EncodedSegment, Error as SegmentedError, SegmentChunk, SegmentEncoder,
+        Segmentable, Segmented, SegmentedShard,
+    };
 
     /// Configuration common to all encoding schemes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -271,9 +276,12 @@ mod test {
 
     mod scheme {
         use super::*;
-        use crate::{Scheme, reed_solomon::ReedSolomon};
+        use crate::{Scheme, Segmented, reed_solomon::ReedSolomon};
         use commonware_codec::Encode;
         use commonware_parallel::Sequential;
+
+        /// Small segments, so the generic cases cover data spanning many segments.
+        type Seg = Segmented<Sha256, 64>;
 
         fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
             let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();
@@ -330,23 +338,40 @@ mod test {
             );
         }
 
+        /// Decoding rejects shards checked against different commitments and empty shard sets.
         #[test]
         fn decode_rejects_mixed_commitment_shards() {
+            // Any two of three shards decode.
             let config = Config {
                 minimum_shards: NZU16!(2),
                 extra_shards: NZU16!(1),
             };
 
+            // Reed-Solomon rejects both on unrelated payloads.
             decode_rejects_mixed_commitments::<ReedSolomon<Sha256>>(
                 &config,
                 b"alpha payload",
                 b"bravo payload",
             );
             decode_rejects_empty_checked_shards::<ReedSolomon<Sha256>>(&config, b"alpha payload");
+
+            // So does the segmented scheme, on single-segment payloads with different roots.
+            decode_rejects_mixed_commitments::<Seg>(&config, b"alpha payload", b"bravo payload");
+            decode_rejects_empty_checked_shards::<Seg>(&config, b"alpha payload");
+
+            // Payloads that differ only in their last segment share every other segment root, so
+            // decoding must catch the mismatch in the last segment alone.
+            let alpha = [0x11; 200];
+            let mut bravo = alpha;
+            bravo[199] = 0x22;
+            decode_rejects_mixed_commitments::<Seg>(&config, &alpha, &bravo);
+            decode_rejects_empty_checked_shards::<Seg>(&config, &alpha);
         }
 
+        /// Empty data roundtrips through each scheme.
         #[test]
         fn roundtrip_empty_data() {
+            // Decode empty data from the first 30 of 100 shards under each scheme.
             let config = Config {
                 minimum_shards: NZU16!(30),
                 extra_shards: NZU16!(70),
@@ -354,10 +379,13 @@ mod test {
             let selected: Vec<u16> = (0..30).collect();
 
             roundtrip::<ReedSolomon<Sha256>>(&config, b"", &selected);
+            roundtrip::<Seg>(&config, b"", &selected);
         }
 
+        /// A 64 KiB payload roundtrips through each scheme across 25 shards.
         #[test]
         fn roundtrip_2_pow_16_25_total_shards() {
+            // Decode the payload from the first 8 of 25 shards under each scheme.
             let config = Config {
                 minimum_shards: NZU16!(8),
                 extra_shards: NZU16!(17),
@@ -366,6 +394,7 @@ mod test {
             let selected: Vec<u16> = (0..8).collect();
 
             roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+            roundtrip::<Seg>(&config, &data, &selected);
         }
 
         #[test]
@@ -373,6 +402,17 @@ mod test {
             minifuzz::test(|u| {
                 let (config, data, selected) = generate_case(u)?;
                 roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+                Ok(())
+            });
+        }
+
+        /// Random segmented encodings roundtrip from random shard subsets.
+        #[test]
+        fn minifuzz_roundtrip_segmented() {
+            minifuzz::test(|u| {
+                // Each case draws a config, a payload, and the shards to decode from.
+                let (config, data, selected) = generate_case(u)?;
+                roundtrip::<Seg>(&config, &data, &selected);
                 Ok(())
             });
         }

@@ -2,6 +2,14 @@
 n_cases = 65536
 hash = "45545e4d4aeb18b8bdb019e630fb9a1fa6dda9ed32b2d529a9213ec07ccab07c"
 
+["commonware_coding::segmented::tests::conformance::CodecConformance<SegmentChunk<Digest,L>>"]
+n_cases = 65536
+hash = "45545e4d4aeb18b8bdb019e630fb9a1fa6dda9ed32b2d529a9213ec07ccab07c"
+
+["commonware_coding::segmented::tests::conformance::CodecConformance<SegmentedShard<Digest,L>>"]
+n_cases = 65536
+hash = "b65f940acea63c11adc0c310a3bfcecfc63ade8d55c0a1f6da34dc58c7f8473e"
+
 ["commonware_coding::test::conformance::CodecConformance<Config>"]
 n_cases = 65536
 hash = "3ad3a60285f4df6dc4bde8c54d9d85ec37b7aa6af21479ec5b7fbff69dfce94e"
