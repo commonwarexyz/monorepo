@@ -825,10 +825,10 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        // Create an empty database (initialized with a single CommitFloor operation)
+        // Create an empty database (initialized with a single Commit operation)
         let source_db = H::init_db(context.child("source")).await;
 
-        // An empty database has exactly 1 operation (the initial CommitFloor)
+        // An empty database has exactly 1 operation (the initial Commit)
         assert_eq!(H::bounds(&source_db).end, Location::new(1));
 
         let target_hash = H::canonical_root(&source_db);
@@ -1587,7 +1587,7 @@ macro_rules! db_any_harness_methods {
                     Operation::Delete(key) => {
                         expected.insert(*key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
             for (key, value) in expected {
@@ -1779,7 +1779,7 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
             let merkleized = batch.merkleize(&db).await.unwrap();
@@ -1860,7 +1860,7 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
             let merkleized = batch.merkleize(&db).await.unwrap();
@@ -1938,7 +1938,7 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
             let merkleized = batch.merkleize(&db).await.unwrap();
@@ -2018,7 +2018,7 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
             let merkleized = batch.merkleize(&db).await.unwrap();

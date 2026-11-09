@@ -390,7 +390,10 @@ fn cur_var_cfg_with_cache(
 /// This leaves inactive update operations above the inactivity floor, matching
 /// the workload optimized by bitmap-backed floor raising.
 #[boxed]
-async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
+async fn run_churned_bench<
+    F: merkle::Family,
+    C: DbAny<Family = F, Key = Digest, Value = Digest>,
+>(
     db: C,
     num_keys: u64,
     churn_batches: u64,
@@ -443,7 +446,7 @@ impl BenchOptions {
 pub(crate) struct MerkleizeWorkload<F, C>
 where
     F: merkle::Family,
-    C: DbAny<F, Key = Digest, Value = Digest>,
+    C: DbAny<Family = F, Key = Digest, Value = Digest>,
 {
     context: Context,
     db: Option<C>,
@@ -459,7 +462,7 @@ where
 impl<F, C> MerkleizeWorkload<F, C>
 where
     F: merkle::Family,
-    C: DbAny<F, Key = Digest, Value = Digest>,
+    C: DbAny<Family = F, Key = Digest, Value = Digest>,
 {
     pub(crate) fn new(
         context: Context,
@@ -485,7 +488,7 @@ where
 impl<F, C> Workload for MerkleizeWorkload<F, C>
 where
     F: merkle::Family,
-    C: DbAny<F, Key = Digest, Value = Digest>,
+    C: DbAny<Family = F, Key = Digest, Value = Digest>,
     C::Merkleized: MerkleizedBatch<Digest = Digest>,
 {
     type Output = Digest;

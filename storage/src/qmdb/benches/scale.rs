@@ -282,7 +282,7 @@ fn generate(
     /// Time the build itself (updates + prune + sync). Opening the empty db is done by the
     /// caller and is cheap.
     #[commonware_macros::boxed]
-    async fn populate<M: DbAny<Mmr, Key = Digest, Value = Digest>>(
+    async fn populate<M: DbAny<Family = Mmr, Key = Digest, Value = Digest>>(
         db: M,
         keyspace: u64,
         num_updates: u64,
@@ -434,7 +434,7 @@ fn get_bench(
 }
 
 /// Run the cold/warm read passes for each reader count against an opened database.
-async fn run_reads<D: DbAny<Mmr, Key = Digest> + 'static>(
+async fn run_reads<D: DbAny<Family = Mmr, Key = Digest> + 'static>(
     ctx: &Context,
     db: Arc<D>,
     opened: Duration,
@@ -473,7 +473,7 @@ async fn run_reads<D: DbAny<Mmr, Key = Digest> + 'static>(
 /// deterministic key stream (so a repeat pass replays the same keys). With a `batch` size, each
 /// reader issues its gets in `batch`-key `get_many` calls instead of point gets. Returns the
 /// elapsed time, the number of gets issued, and how many found a value.
-async fn run_gets<D: DbAny<Mmr, Key = Digest> + 'static>(
+async fn run_gets<D: DbAny<Family = Mmr, Key = Digest> + 'static>(
     ctx: &Context,
     db: Arc<D>,
     keyspace: u64,
@@ -566,7 +566,7 @@ fn time_init(
     index: IndexKind,
 ) -> (Duration, u64) {
     /// The elapsed time since `start` and the db's replay-region size.
-    fn measure<M: DbAny<Mmr, Key = Digest, Value = Digest>>(
+    fn measure<M: DbAny<Family = Mmr, Key = Digest, Value = Digest>>(
         db: &M,
         start: Instant,
     ) -> (Duration, u64) {

@@ -49,7 +49,7 @@ cfg_if::cfg_if! {
 
 /// Populate, optionally prune, and sync a database (used in setup phase).
 #[boxed]
-async fn populate_and_sync<F: Family, C: DbAny<F, Key = Digest>>(
+async fn populate_and_sync<F: Family, C: DbAny<Family = F, Key = Digest>>(
     db: C,
     elements: u64,
     operations: u64,
