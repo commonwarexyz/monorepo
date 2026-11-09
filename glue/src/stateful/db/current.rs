@@ -514,10 +514,10 @@ where
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        CurrentSyncTarget::new(
-            initial_root::<F, unordered::Update<K, FixedEncoding<V>>, H>(),
-            non_empty_range!(Location::new(0), Location::new(1)),
-        )
+        CurrentSyncTarget {
+            root: initial_root::<F, unordered::Update<K, FixedEncoding<V>>, H>(),
+            range: non_empty_range!(Location::new(0), Location::new(1)),
+        }
     }
 
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
@@ -548,10 +548,10 @@ where
 
     fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
-        CurrentSyncTarget::new(
-            self.ops_root(),
-            non_empty_range!(self.sync_boundary(), bounds.end),
-        )
+        CurrentSyncTarget {
+            root: self.ops_root(),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
+        }
     }
 }
 
@@ -615,10 +615,10 @@ where
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        CurrentSyncTarget::new(
-            initial_root::<F, ordered::Update<K, FixedEncoding<V>>, H>(),
-            non_empty_range!(Location::new(0), Location::new(1)),
-        )
+        CurrentSyncTarget {
+            root: initial_root::<F, ordered::Update<K, FixedEncoding<V>>, H>(),
+            range: non_empty_range!(Location::new(0), Location::new(1)),
+        }
     }
 
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
@@ -649,10 +649,10 @@ where
 
     fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
-        CurrentSyncTarget::new(
-            self.ops_root(),
-            non_empty_range!(self.sync_boundary(), bounds.end),
-        )
+        CurrentSyncTarget {
+            root: self.ops_root(),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
+        }
     }
 }
 
@@ -782,10 +782,10 @@ where
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        CurrentSyncTarget::new(
-            initial_root::<F, unordered::Update<K, VariableEncoding<V>>, H>(),
-            non_empty_range!(Location::new(0), Location::new(1)),
-        )
+        CurrentSyncTarget {
+            root: initial_root::<F, unordered::Update<K, VariableEncoding<V>>, H>(),
+            range: non_empty_range!(Location::new(0), Location::new(1)),
+        }
     }
 
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
@@ -816,10 +816,10 @@ where
 
     fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
-        CurrentSyncTarget::new(
-            self.ops_root(),
-            non_empty_range!(self.sync_boundary(), bounds.end),
-        )
+        CurrentSyncTarget {
+            root: self.ops_root(),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
+        }
     }
 }
 
@@ -887,10 +887,10 @@ where
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        CurrentSyncTarget::new(
-            initial_root::<F, ordered::Update<K, VariableEncoding<V>>, H>(),
-            non_empty_range!(Location::new(0), Location::new(1)),
-        )
+        CurrentSyncTarget {
+            root: initial_root::<F, ordered::Update<K, VariableEncoding<V>>, H>(),
+            range: non_empty_range!(Location::new(0), Location::new(1)),
+        }
     }
 
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
@@ -921,10 +921,10 @@ where
 
     fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
-        CurrentSyncTarget::new(
-            self.ops_root(),
-            non_empty_range!(self.sync_boundary(), bounds.end),
-        )
+        CurrentSyncTarget {
+            root: self.ops_root(),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
+        }
     }
 }
 

@@ -23,11 +23,6 @@ pub struct Target<F: Family, D: Digest> {
 }
 
 impl<F: Family, D: Digest> Target<F, D> {
-    /// Create a sync target.
-    pub const fn new(root: D, range: NonEmptyRange<Location<F>>) -> Self {
-        Self { root, range }
-    }
-
     /// Whether this target advances relative to `from`.
     ///
     /// Both targets are assumed to describe valid states of the same append-only QMDB. Because
@@ -110,13 +105,6 @@ pub struct CompactTarget<F: Family, D: Digest> {
     pub root: D,
     /// Target database size.
     pub size: Location<F>,
-}
-
-impl<F: Family, D: Digest> CompactTarget<F, D> {
-    /// Create a compact-storage sync target.
-    pub const fn new(root: D, size: Location<F>) -> Self {
-        Self { root, size }
-    }
 }
 
 impl<F: Family, D: Digest> TryFrom<&CompactTarget<F, D>> for Target<F, D> {
@@ -209,10 +197,10 @@ mod tests {
     use commonware_utils::non_empty_range;
 
     fn target(root: sha256::Digest, start: u64, end: u64) -> Target<MmrFamily, sha256::Digest> {
-        Target::new(
+        Target {
             root,
-            non_empty_range!(Location::new(start), Location::new(end)),
-        )
+            range: non_empty_range!(Location::new(start), Location::new(end)),
+        }
     }
 
     #[test]
@@ -300,10 +288,10 @@ mod tests {
 
     #[test]
     fn test_compact_target_serialization() {
-        let target = CompactTarget::<MmrFamily, sha256::Digest>::new(
-            sha256::Digest::from([42; 32]),
-            Location::new(100),
-        );
+        let target = CompactTarget::<MmrFamily, sha256::Digest> {
+            root: sha256::Digest::from([42; 32]),
+            size: Location::new(100),
+        };
 
         let mut buffer = Vec::new();
         target.write(&mut buffer);
