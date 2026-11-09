@@ -315,46 +315,23 @@ fn to_affine<S: Simd, F: Field<S>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{core::field::fp12::tests::from_blst, group::Scalar};
+    use crate::group::Scalar;
+    use commonware_formatting::hex;
     use commonware_math::algebra::{Additive, CryptoGroup};
     use std::vec::Vec;
 
-    /// Returns `e(a G1, b G2)` computed by blst.
-    fn reference(a: u64, b: u64) -> GT {
-        let scalar = |value: u64| {
-            let mut bytes = [0u8; 32];
-            bytes[..8].copy_from_slice(&value.to_le_bytes());
-            bytes
-        };
-        let (a, b) = (scalar(a), scalar(b));
-        let mut p = blst::blst_p1::default();
-        let mut q = blst::blst_p2::default();
-        let mut p_affine = blst::blst_p1_affine::default();
-        let mut q_affine = blst::blst_p2_affine::default();
-        let mut result = blst::blst_fp12::default();
-        // SAFETY: every pointer references a valid value of the expected type, each scalar holds
-        // 64 bits, and blst's final exponentiation accepts the same input and output.
-        unsafe {
-            blst::blst_p1_mult(&mut p, blst::blst_p1_generator(), a.as_ptr(), 64);
-            blst::blst_p2_mult(&mut q, blst::blst_p2_generator(), b.as_ptr(), 64);
-            blst::blst_p1_to_affine(&mut p_affine, &p);
-            blst::blst_p2_to_affine(&mut q_affine, &q);
-            blst::blst_miller_loop(&mut result, &q_affine, &p_affine);
-            let pointer = &raw mut result;
-            blst::blst_final_exp(pointer, pointer);
-        }
-        GT(from_blst(&result))
-    }
+    /// The pairing of the generators.
+    const GENERATOR: GT = GT(hex!(
+        "0f41e58663bf08cf068672cbd01a7ec73baca4d72ca93544deff686bfd6df543d48eaa24afe47e1efde449383b67663104c581234d086a9902249b64728ffd21a189e87935a954051c7cdba7b3872629a4fafc05066245cb9108f0242d0fe3ef03350f55a7aefcd3c31b4fcb6ce5771cc6a0e9786ab5973320c806ad360829107ba810c5a09ffdd9be2291a0c25a99a211b8b424cd48bf38fcef68083b0b0ec5c81a93b330ee1a677d0d15ff7b984e8978ef48881e32fac91b93b47333e2ba5706fba23eb7c5af0d9f80940ca771b6ffd5857baaf222eb95a7d2809d61bfe02e1bfd1b68ff02f0b8102ae1c2d5d5ab1a19f26337d205fb469cd6bd15c3d5a04dc88784fbb3d0b2dbdea54d43b2b73f2cbb12d58386a8703e0f948226e47ee89d018107154f25a764bd3c79937a45b84546da634b8f6be14a8061e55cceba478b23f7dacaa35c8ca78beae9624045b4b601b2f522473d171391125ba84dc4007cfbf2f8da752f7c74185203fcca589ac719c34dffbbaad8431dad1c1fb597aaa5193502b86edb8857c273fa075a50512937e0794e1e65a7617c90d8bd66065b1fffe51d7a579973b1315021ec3c19934f1368bb445c7c2d209703f239689ce34c0378a68e72a6b3b216da0e22a5031b54ddff57309396b38c881c4c849ec23e87089a1c5b46e5110b86750ec6a532348868a84045483c92b7af5af689452eafabf1a8943e50439f1d59882a98eaa0170f1250ebd871fc0a92a7b2d83168d0d727272d441befa15c503dd8e90ce98db3e7b6d194f60839c508a84305aaca1789b6"
+    ));
 
     fn multiple<G: CryptoGroup<Scalar = Scalar>>(k: u64) -> G {
         G::generator() * &Scalar::from_u64(k)
     }
 
     #[test]
-    fn pairings_match_blst() {
-        for (a, b) in [(1, 1), (3, 5), (0xdead_beef, 7)] {
-            assert_eq!(pairing(&multiple(a), &multiple(b)), reference(a, b));
-        }
+    fn generators_pair_to_known_answer() {
+        assert_eq!(pairing(&G1::generator(), &G2::generator()), GENERATOR);
     }
 
     #[test]

@@ -59,6 +59,8 @@
 //! conversion, reusable MSM tables, and Lagrange coefficients.
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
+// TEMPORARY(fuzz-plan integration): removed once the crate-level plan references every local plan.
+#![cfg_attr(any(test, feature = "fuzz"), allow(dead_code))]
 
 commonware_macros::stability_scope!(ALPHA {
     extern crate alloc;

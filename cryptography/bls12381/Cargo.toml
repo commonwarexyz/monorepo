@@ -14,6 +14,7 @@ documentation = "https://docs.rs/commonware-cryptography-bls12381"
 workspace = true
 
 [dependencies]
+arbitrary = { workspace = true, optional = true }
 commonware-formatting.workspace = true
 commonware-macros.workspace = true
 commonware-math.workspace = true
@@ -23,7 +24,7 @@ rand_core.workspace = true
 subtle.workspace = true
 
 [dev-dependencies]
-arbitrary.workspace = true
+arbitrary = { workspace = true, features = [ "derive" ] }
 blst.workspace = true
 commonware-allocator = { workspace = true, features = [ "mimalloc" ] }
 commonware-invariants.workspace = true
@@ -42,6 +43,8 @@ path = "src/group/benches/bench.rs"
 
 [features]
 default = [ "std" ]
+arbitrary = [ "commonware-math/arbitrary", "dep:arbitrary", "std" ]
+fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
 std = [
 	"commonware-formatting/std",
 	"commonware-macros/std",

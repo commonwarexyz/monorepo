@@ -775,7 +775,7 @@ impl<S: Simd> Field<S> for Unsat28<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::tests as reference, *};
+    use super::{super::reference, *};
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz;
     use commonware_simd::{Operation, check_consistent, emulated::EmulatedScalar, test_dispatch};

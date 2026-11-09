@@ -685,7 +685,7 @@ const INVERSE_EXPONENT: [u64; WORDS] = {
 mod tests {
     use super::*;
     use crate::core::field::fp::{
-        rns::Rns, tests as reference, unsat28::Unsat28, unsat49::Unsat49,
+        rns::Rns, reference, unsat28::Unsat28, unsat49::Unsat49,
     };
     use commonware_invariants::minifuzz;
     use commonware_simd::{

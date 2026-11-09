@@ -166,8 +166,8 @@ const fn bias<const N: usize, const BITS: u32>(k: u64) -> [u64; N] {
 }
 
 /// Reference arithmetic on canonical integers, for testing representations.
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) mod reference {
     use super::*;
     use arbitrary::Unstructured;
 
@@ -244,6 +244,7 @@ pub(crate) mod tests {
         })
     }
 
+    #[cfg(test)]
     #[test]
     fn reference_arithmetic_is_consistent() {
         let two = add(ONE, ONE);

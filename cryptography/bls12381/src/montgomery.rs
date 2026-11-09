@@ -385,7 +385,7 @@ pub(crate) const fn invert<const N: usize, const L: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::field::fp::{MODULUS, WORDS, tests as reference};
+    use crate::core::field::fp::{MODULUS, WORDS, reference};
     use commonware_invariants::minifuzz;
 
     /// Limbs that hold the modulus of the base field with two spare bits.
