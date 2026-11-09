@@ -290,8 +290,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         if !blob.try_read_sync_into(&mut header[..header_len], offset) {
             return None;
         }
-        let mut cursor = Copying(&header[..header_len]);
-        let (_, frame_info) = find_frame(&mut cursor, offset).ok()?;
+        let (_, frame_info) = find_frame(&header[..header_len], offset).ok()?;
         let (varint_len, data_len) = match frame_info {
             FrameInfo::Complete {
                 varint_len,

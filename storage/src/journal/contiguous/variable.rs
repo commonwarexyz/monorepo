@@ -526,8 +526,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         if !blob.try_read_sync_into(&mut header[..header_len], offset) {
             return None;
         }
-        let mut cursor = Copying(&header[..header_len]);
-        let (_, item_info) = find_frame(&mut cursor, offset).ok()?;
+        let (_, item_info) = find_frame(&header[..header_len], offset).ok()?;
 
         let (varint_len, data_len) = match item_info {
             FrameInfo::Complete {
