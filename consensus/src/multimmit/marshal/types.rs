@@ -121,7 +121,9 @@ pub struct Update<B: Block> {
 /// A public marshal request failed.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum Error {
-    /// The marshal service has reached its configured ingress capacity.
+    /// The marshal service has reached its configured ingress capacity: its queue is full (for
+    /// requests that do not wait for room), or staged blocks not yet appended exceed the staging
+    /// budget.
     #[error("marshal service is busy")]
     Busy,
     /// The marshal service is no longer accepting work.

@@ -2,10 +2,15 @@
 //!
 //! One task owns every store and machine, and every transition is synchronous: storage, reads,
 //! certificate verification and serving run as jobs on other tasks and come back as [`Event`]s.
-//! The owner polls, in priority order: job completions, acknowledgements, the public mailbox,
-//! the consensus feed, peer responses, peer requests, and a periodic tick. Peer responses and
-//! requests also take a bounded turn every iteration, so inputs that are always ready under load
-//! never starve them.
+//!
+//! The owner works in turns. Each turn starts with a bounded batch of peer responses and peer
+//! requests, so peers waiting on blocks are served ahead of local work, and drives its machines.
+//! It then waits for any input (job completions, acknowledgements, the public mailbox, the
+//! consensus feed, peer responses, peer requests, or a periodic tick) and takes every other input
+//! that is ready, kind by kind, at most [`TURN`] of each. Driving costs the same however many
+//! inputs a turn took, so batching keeps the cost of an input flat as load grows instead of paying
+//! a full drive for each one, and the bound on each kind keeps inputs that are always ready under
+//! load from starving the others.
 //!
 //! - [`order`]: the proven positions and the exact block of each.
 //! - [`feed`]: proofs from consensus and peers, the order's target, and record walks.
@@ -72,7 +77,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-/// Peer responses and peer requests the owner takes each turn, ahead of its biased select.
+/// Most inputs of each kind the owner takes in one turn before driving its machines.
+const TURN: usize = 256;
+
+/// Peer responses and peer requests each turn takes ahead of driving the machines.
 const PEER_TURN: usize = 8;
 
 /// How often the owner wakes without other input, to retry fetches and walks.
@@ -396,21 +404,7 @@ where
     /// Runs until the public mailbox closes or a failure stops marshal.
     pub(crate) async fn run(mut self) -> Result<(), Error> {
         loop {
-            // The select below is biased, and local inputs (jobs, the mailbox, the feed) can be
-            // ready continuously under load: peer traffic takes a bounded turn every iteration so
-            // it is never starved, which would leave peers unserved and responses unread.
-            for _ in 0..PEER_TURN {
-                let Ok(delivered) = self.deliveries.try_recv() else {
-                    break;
-                };
-                self.on_delivered(delivered)?;
-            }
-            for _ in 0..PEER_TURN {
-                let Ok(request) = self.requests.try_recv() else {
-                    break;
-                };
-                self.on_request(request);
-            }
+            let peers = self.take_peers(PEER_TURN)?;
             self.drive()?;
             let input = {
                 let acks = &mut self.acks;
@@ -430,6 +424,7 @@ where
                     _ = self.context.sleep(TICK) => Input::Tick,
                 }
             };
+            let mut taken = 1;
             match input {
                 Input::Event(event) => self.on_event(event)?,
                 Input::Ack(slot, result) => self.on_ack(*slot, result)?,
@@ -438,9 +433,70 @@ where
                 Input::Feed => self.on_feed()?,
                 Input::Delivered(Some(delivered)) => self.on_delivered(delivered)?,
                 Input::Request(Some(request)) => self.on_request(request),
-                Input::Delivered(None) | Input::Request(None) | Input::Tick => {}
+                Input::Delivered(None) | Input::Request(None) | Input::Tick => taken = 0,
             }
+            let Some(ready) = self.take_ready()? else {
+                return Ok(());
+            };
+            self.metrics.turns.inc();
+            self.metrics.inputs.inc_by((peers + taken + ready) as u64);
         }
+    }
+
+    /// Takes the inputs that are ready without waiting, kind by kind and at most [`TURN`] of
+    /// each, and returns how many it took, or `None` once the public mailbox has closed.
+    fn take_ready(&mut self) -> Result<Option<usize>, Error> {
+        let mut taken = 0;
+        for _ in 0..TURN {
+            let Some(event) = self.jobs.next_completed().now_or_never() else {
+                break;
+            };
+            self.on_event(event)?;
+            taken += 1;
+        }
+        for _ in 0..TURN {
+            let Some(Some((slot, result))) = self.acks.next().now_or_never() else {
+                break;
+            };
+            self.on_ack(*slot, result)?;
+            taken += 1;
+        }
+        for _ in 0..TURN {
+            match self.mailbox.try_recv() {
+                Ok(message) => self.on_message(message)?,
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => return Ok(None),
+            }
+            taken += 1;
+        }
+        // The feed coalesces its signals: one look takes every report made so far.
+        if self.signal.try_recv().is_ok() {
+            self.on_feed()?;
+            taken += 1;
+        }
+        taken += self.take_peers(TURN)?;
+        Ok(Some(taken))
+    }
+
+    /// Takes the ready peer responses, then the ready peer requests, at most `limit` of each,
+    /// and returns how many it took.
+    fn take_peers(&mut self, limit: usize) -> Result<usize, Error> {
+        let mut taken = 0;
+        for _ in 0..limit {
+            let Ok(delivered) = self.deliveries.try_recv() else {
+                break;
+            };
+            self.on_delivered(delivered)?;
+            taken += 1;
+        }
+        for _ in 0..limit {
+            let Ok(request) = self.requests.try_recv() else {
+                break;
+            };
+            self.on_request(request);
+            taken += 1;
+        }
+        Ok(taken)
     }
 
     /// Advances every machine as far as its inputs allow.
