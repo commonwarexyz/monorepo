@@ -51,12 +51,13 @@
 //!               WithdrawPayout, and Claim use.
 //! ```
 //!
-//! The invariants are the properties below. Custody backs the balances, the unprocessed
-//! deposits, and the unpaid payouts. Every step had the outcome the model predicted. The operator
-//! holds the committee's balances after the last close it released. The committee's balances and
-//! payouts are what the released closes settle. Every receipt of a posted epoch is honored unless
-//! its admission was forgotten. A request is admitted in at most one epoch unless its admission
-//! was forgotten. Claimed ranges never overlap or touch.
+//! The invariants are the properties below. Custody backs the balances, the unprocessed deposits,
+//! and the unpaid payouts. Every step had the outcome the model predicted. The operator holds the
+//! committee's balances after the last close it released. The committee's balances and payouts
+//! are what the released closes settle. Every receipt of a posted epoch is honored unless its
+//! admission was forgotten. A request is admitted in at most one epoch unless its admission was
+//! forgotten. Claimed ranges never overlap or touch. A halt leaves nothing in custody once every
+//! claim and payout is paid.
 //!
 //! The witnesses each workload requires are listed with it. They cover admission and withdrawals
 //! while a close awaits its post, a pipelined state admitted next epoch and its copy refused
@@ -300,6 +301,8 @@ struct World {
     claimed_deposits: BTreeSet<usize>,
     /// Payouts paid, by epoch and user.
     withdrawn: BTreeSet<(Epoch, usize)>,
+    /// Users whose withdrawal request, forced or soft, the halt dropped unprocessed.
+    dropped: BTreeSet<usize>,
     /// The first step whose outcome was not the predicted one, if any.
     violation: Option<String>,
     /// What the workload may still do.
@@ -757,6 +760,48 @@ impl Workload {
         unprocessed
     }
 
+    /// Records the halt and what the ledger and the operator held back at that moment, where
+    /// `forced` are the users with a forced withdrawal queued, and tells every receiver.
+    fn halt(&self, world: &mut World, forced: Vec<usize>) {
+        world.halted = true;
+        for receiver in &mut world.receivers {
+            receiver.halt();
+        }
+        if world.candidate.is_some() {
+            self.witness("the ledger halts while a close awaits its post");
+        }
+        if self.unprocessed(world).iter().any(|amount| *amount > 0) {
+            self.witness("the ledger halts with deposits queued");
+        }
+        if !forced.is_empty() {
+            self.witness("the ledger halts with a forced withdrawal queued");
+        }
+        let soft: Vec<_> = world
+            .operator
+            .withdrawals()
+            .map(|withdrawal| self.user_of(&withdrawal.account))
+            .collect();
+        if !soft.is_empty() {
+            self.witness("the ledger halts with a soft withdrawal collected");
+        }
+        if world.pending.iter().any(Option::is_some) {
+            self.witness("the ledger halts with a request pending");
+        }
+        world.dropped.extend(forced);
+        world.dropped.extend(soft);
+    }
+
+    /// Returns the users with a forced withdrawal queued at the ledger.
+    fn forced_queued(&self, world: &World) -> Vec<usize> {
+        world
+            .ledger
+            .queue()
+            .forced_withdrawals
+            .iter()
+            .map(|forced| self.user_of(&forced.account))
+            .collect()
+    }
+
     /// Signs a soft withdrawal of `user` for the close of `epoch` and gives it to the operator,
     /// which collects it exactly if `epoch` is the one it admits in.
     fn soft_withdraw(&self, world: &mut World, user: usize, epoch: Epoch) {
@@ -888,6 +933,7 @@ impl Model for Workload {
             claimed: BTreeSet::new(),
             claimed_deposits: BTreeSet::new(),
             withdrawn: BTreeSet::new(),
+            dropped: BTreeSet::new(),
             violation: None,
             budget: self.budget.clone(),
         }]
@@ -1393,16 +1439,14 @@ impl Model for Workload {
             }
             Action::Challenge { index } => {
                 let challenge = world.challenges.remove(index);
+                let forced = self.forced_queued(&world);
                 match world.ledger.challenge(&challenge.0) {
                     Ok(()) if !world.halted => {
                         if !matches!(world.ledger.halted(), Some(Halt::Challenge { .. })) {
                             world.fail("challenge: the ledger did not record the halt".into());
                         }
-                        world.halted = true;
                         self.witness("an omitted payment halts the ledger");
-                        for receiver in &mut world.receivers {
-                            receiver.halt();
-                        }
+                        self.halt(&mut world, forced);
                     }
                     Err(Posting::Halted) if world.halted => {}
                     outcome => world.fail(format!("challenge: {outcome:?}")),
@@ -1430,11 +1474,9 @@ impl Model for Workload {
             }
             Action::Halt => {
                 world.budget.halts -= 1;
+                let forced = self.forced_queued(&world);
                 world.ledger.halt();
-                world.halted = true;
-                for receiver in &mut world.receivers {
-                    receiver.halt();
-                }
+                self.halt(&mut world, forced);
             }
             Action::Claim { user } => {
                 // A claim pays the balance of the last post once and the unprocessed deposits
@@ -1456,6 +1498,14 @@ impl Model for Workload {
                     Ok(paid) if expected > 0 && paid == expected => {
                         if balance > 0 {
                             world.claimed.insert(user);
+                            if world.dropped.contains(&user) {
+                                self.witness("a withdrawal the halt dropped is claimed as balance");
+                            }
+                            if world.withdrawn.iter().any(|(_, paid)| *paid == user) {
+                                self.witness(
+                                    "a user claims its balance after withdrawing a payout",
+                                );
+                            }
                         }
                         world.claimed_deposits.insert(user);
                         if world.ledger.custody() == 0 {
@@ -1579,6 +1629,23 @@ impl Model for Workload {
                         .ranges()
                         .windows(2)
                         .all(|pair| pair[0].1 < pair[1].0)
+                },
+            ),
+            Property::always(
+                "a halt leaves nothing in custody once every claim and payout is paid",
+                |model: &Self, world: &World| {
+                    if !world.halted {
+                        return true;
+                    }
+                    let (balances, payouts) = model.settled(world, false);
+                    let unprocessed = model.unprocessed(world);
+                    let owed = (0..model.accounts.len()).any(|user| {
+                        (balances[user] > 0 && !world.claimed.contains(&user))
+                            || (unprocessed[user] > 0 && !world.claimed_deposits.contains(&user))
+                    }) || payouts
+                        .keys()
+                        .any(|payout| !world.withdrawn.contains(payout));
+                    owed || world.ledger.custody() == 0
                 },
             ),
         ]
@@ -1743,6 +1810,8 @@ fn test_model_halts_and_claims() {
         &[
             "every epoch posts",
             "an omitted payment halts the ledger",
+            "the ledger halts with a request pending",
+            "the ledger halts with a forced withdrawal queued",
             "claims and withdrawals drain the custody after a halt",
             "a claim with nothing left to claim is refused",
             "a payout proven again is refused",
@@ -1769,6 +1838,40 @@ fn test_model_rebuilds_on_the_posted_row() {
             "every epoch posts",
             "an omitted payment halts the ledger",
             "a payment builds on a row the close omitted",
+        ],
+    );
+}
+
+/// A payment attempt, a deposit, a soft withdrawal, and a forced withdrawal over two epochs while
+/// the deployment may halt at any point. Whatever the queues and the operator hold at the halt,
+/// claims and payout withdrawals recover every unit the ledger holds.
+#[test_group("slow")]
+#[test]
+fn test_model_recovers_funds_after_a_halt() {
+    check(
+        workload(
+            2,
+            false,
+            Budget {
+                sends: 1,
+                deposits: 1,
+                soft: 1,
+                forced: 1,
+                halts: 1,
+                ..NOTHING
+            },
+        ),
+        &[
+            "the ledger halts while a close awaits its post",
+            "the ledger halts with deposits queued",
+            "the ledger halts with a forced withdrawal queued",
+            "the ledger halts with a soft withdrawal collected",
+            "the ledger halts with a request pending",
+            "a withdrawal the halt dropped is claimed as balance",
+            "a user claims its balance after withdrawing a payout",
+            "claims and withdrawals drain the custody after a halt",
+            "a claim with nothing left to claim is refused",
+            "a payout proven again is refused",
         ],
     );
 }

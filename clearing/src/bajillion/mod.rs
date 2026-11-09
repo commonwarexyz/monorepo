@@ -1,4 +1,4 @@
-//! Clear payments between accounts through an operator, and settle each epoch's net effect at once.
+//! Settle payments too cheap to track. Pay someone a bajillion times for the cost of paying once.
 //!
 //! Bajillion runs between users, an operator, a committee of validators, and a ledger that holds
 //! deposited funds. Users pay each other through the operator, and the operator preconfirms each
@@ -49,8 +49,10 @@
 //!
 //! Each arrow carries a protocol message, except queue(e) and posted(e), the final ledger state the
 //! roles read. Each label in a lane is a step that role takes. Validators serve openings of the
-//! posted matrix. A receiver whose receipt promises more than the post credits challenges the post,
-//! and the ledger halts. Every account then claims what the last post left it.
+//! posted matrix. A post transfers nothing. Each payout it posts stays owed until its account
+//! withdraws it with a proof from a validator, before or after a halt. A receiver whose receipt
+//! promises more than the post credits challenges the post, and the ledger halts. After a halt,
+//! every account also claims what the last post left it.
 //!
 //! # Trust model
 //!
@@ -190,7 +192,7 @@
 //!   none of its states is for a later epoch. Otherwise the sender drops a request a close settled,
 //!   or builds on the wrong root.
 //!
-//! # The operator
+//! # Operator
 //!
 //! The operator admits payments and soft withdrawals, closes each epoch, and tracks what each
 //! account can spend. [Request::verify] reads no storage and checks the sender's signature over the
@@ -484,7 +486,7 @@
 //! - **V7.** Decode closes with the deployment's [Limits]. Otherwise the validator rejects valid
 //!   closes or attests closes beyond the agreed limits.
 //!
-//! # The ledger
+//! # Ledger
 //!
 //! The production ledger is a contract on the chain that holds the funds, with its own storage. The
 //! crate supplies the checks that protect funds and specifies the rest. [Summary::verify] checks
