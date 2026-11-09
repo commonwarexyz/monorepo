@@ -371,9 +371,11 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 ### E3. Data-structure targets
 - **Goal:** Self-contained single-process targets:
   - `attributable_map.rs`: `AttributableMap` inserts checked against a model.
+  - `automaton_defaults.rs`: the handoff and certification an automaton or application gets from the trait defaults.
   - `simplex_elector.rs`: elector selection.
   - `simplex_reporter_filtering.rs`: reporter filtering of invalid and wrong-namespace activity, across real schemes.
-- **Path:** `consensus/fuzz/structures/fuzz_targets/` (`attributable_map.rs`, `simplex_elector.rs`, `simplex_reporter_filtering.rs`)
+  - `simplex_threshold_vrf.rs`: the BLS12-381 threshold VRF scheme in every role, with faulty votes and certificates checked against a model, and its seeds and timelock encryption.
+- **Path:** `consensus/fuzz/structures/fuzz_targets/` (`attributable_map.rs`, `automaton_defaults.rs`, `simplex_elector.rs`, `simplex_reporter_filtering.rs`, `simplex_threshold_vrf.rs`)
 - **When to use:** A pure data structure or a synchronous component that needs no runtime. The package depends only on published crates.
 - **Example:** `consensus/fuzz/structures/fuzz_targets/attributable_map.rs` (`fuzz`)
 
