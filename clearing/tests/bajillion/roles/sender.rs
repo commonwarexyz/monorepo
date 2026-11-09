@@ -185,10 +185,13 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
         self.persisted.pending.as_ref().map(|(request, _)| request)
     }
 
-    /// Returns the root a request in `epoch` builds on (S1). That is the posted row root of the
-    /// epoch before if the sender recorded that post, else the root of the countersigned map of
-    /// that epoch, else the empty map's root.
+    /// Returns the root a request in `epoch` builds on (S1). An existing countersigned map keeps
+    /// its predecessor. A new map uses the posted row root of the epoch before if recorded, else
+    /// its countersigned map's root, else the empty map's root.
     fn previous(&self, epoch: Epoch) -> H::Digest {
+        if let Some(countersigned) = self.persisted.countersigned.get(&epoch) {
+            return countersigned.state.previous;
+        }
         let before = epoch.checked_sub(1);
         before
             .and_then(|before| self.persisted.posted.get(&before).copied())

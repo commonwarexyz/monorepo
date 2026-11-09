@@ -230,7 +230,8 @@ pub struct Request<P: PublicKey, D: Digest, A: Amount> {
 impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
     /// Derives the states of `account`'s request to pay `batch` in `epoch`, where `latest` is its
     /// latest countersigned map of `epoch`. The state of `epoch` adds `batch` to `latest` on top of
-    /// `previous`, and the state of the next epoch pays only `batch` on top of `latest`.
+    /// `previous`, and the state of the next epoch pays only `batch` on top of `latest`. When
+    /// extending a countersigned map, `previous` must remain the root its state builds on.
     pub fn states<H: Hasher<Digest = D>>(
         epoch: Epoch,
         account: P,

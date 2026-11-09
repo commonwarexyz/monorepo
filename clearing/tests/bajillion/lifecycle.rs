@@ -1,8 +1,11 @@
 //! Deployments running over several epochs.
 
 use super::*;
-use crate::roles::ledger::{Halt, Refusal};
-use commonware_clearing::bajillion::{Challenge, ChallengeError};
+use crate::roles::{
+    ledger::{Halt, Refusal},
+    validator::Refusal as Verifying,
+};
+use commonware_clearing::bajillion::{Challenge, ChallengeError, CheckError};
 use commonware_runtime::Runner as _;
 
 /// Over several epochs of payments, soft and forced withdrawals, and deposits, every balance and
@@ -319,6 +322,74 @@ fn test_partial_credit_halts_ledger() {
             deployment.ledger.halted(),
             Some(Halt::Challenge { epoch: 2 })
         );
+    });
+}
+
+/// A countersigned map keeps its predecessor when an earlier post contradicts the operator's
+/// acknowledgement. Extending that map cannot authorize its payments under the posted root.
+#[test]
+fn test_sender_keeps_its_epoch_anchor_after_a_conflicting_post() {
+    deterministic::Runner::default().start(|mut context| async move {
+        let mut deployment = TestDeployment::new(&context, "conflicting_post", 4).await;
+        deployment.ledger.deposit(account(0), 100).unwrap();
+        deployment.close(&mut context).await;
+        let mut alice = sender(0);
+        let batch = amounts(&[(1, 10)]);
+        let request = alice.send(2, batch.clone()).unwrap();
+
+        // The operator preconfirms the next state while retaining the signed current state.
+        let next = State {
+            epoch: 3,
+            account: account(0),
+            payments: batch.root::<Sha256>(),
+            previous: request.latest,
+        };
+        alice
+            .acknowledged(&next.acknowledge(&operator_key(), &namespace()))
+            .unwrap();
+
+        // The current state pays bob in epoch 2, making the next state's predecessor invalid.
+        let queue = deployment.ledger.queue();
+        let current = forge(
+            &operator_key(),
+            &queue,
+            vec![Row {
+                account: account(0),
+                payments: batch,
+                signature: request.signatures.current,
+            }],
+            Vec::new(),
+            0,
+            0,
+        );
+        let proposals = deployment.verify(&current).await;
+        let summary = deployment.post(&mut context, proposals).await;
+        let opening = current.matrix::<Sha256>().open(&account(0), &account(0));
+        assert_eq!(alice.posted(2, &summary.matrix, &opening).unwrap(), None);
+
+        // A new payment to carol must not make bob's payment settle again in epoch 3.
+        let successor = alice.send(3, amounts(&[(2, 1)])).unwrap();
+        let queue = deployment.ledger.queue();
+        let repeated = forge(
+            &operator_key(),
+            &queue,
+            vec![Row {
+                account: account(0),
+                payments: amounts(&[(1, 10), (2, 1)]),
+                signature: successor.signatures.current,
+            }],
+            Vec::new(),
+            0,
+            0,
+        );
+        for validator in &mut deployment.validators {
+            assert_eq!(validator.balance(&account(0)).await.unwrap(), 90);
+            assert_eq!(validator.balance(&account(1)).await.unwrap(), 10);
+            assert!(matches!(
+                validator.verify(repeated.clone(), &queue).await,
+                Err(Verifying::Check(CheckError::InvalidSignature))
+            ));
+        }
     });
 }
 
