@@ -159,9 +159,9 @@ fn shared_miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<
 /// Doubles `t` in place and returns the line tangent at it, evaluated at the pair's G1 point.
 ///
 /// With the curve equation, `3 x^3 - 2 y^2 z` becomes `z (y^2 - 3b z^2)`, and scaling the tangent by
-/// `-2 y z^2 / z` leaves `[3b z^2 - y^2, 3 x^2 xp, -2 y z yp]`. The point is [`Point::double`]'s,
-/// whose stages the line's values join: `x^2` reduces with the first stage and the last two
-/// coefficients with the coordinates.
+/// `-2 y z^2 / z` leaves `[3b z^2 - y^2, 3 x^2 xp, -2 y z yp]`. The point is
+/// [`Points::double`](crate::core::curve::Points::double)'s, whose stages the line's values join:
+/// `x^2` reduces with the first stage and the last two coefficients with the coordinates.
 /// Runs as its own kernel, so callers share one copy, and replaces the point in place, so that
 /// the loop copies nothing.
 #[cfg_attr(not(debug_assertions), inline(always))]
@@ -207,8 +207,9 @@ fn double_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) 
 /// Adds the pair's G2 point to `t` in place and returns the line through them, evaluated at the
 /// pair's G1 point.
 ///
-/// The line is `[qx y - qy x, (qy z - y) xp, -(qx z - x) yp]` and the point is [`Point::add`]'s,
-/// whose second stage the line's first products join.
+/// The line is `[qx y - qy x, (qy z - y) xp, -(qx z - x) yp]` and the point is
+/// [`Points::add`](crate::core::curve::Points::add)'s, whose second stage the line's first products
+/// join.
 /// Runs as its own kernel, so callers share one copy, and replaces the point in place.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn add_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> [Fp2<F>; 3] {

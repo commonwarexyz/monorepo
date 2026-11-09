@@ -56,11 +56,14 @@ impl ::core::fmt::Debug for Hex<'_> {
 mod tests {
     use super::{
         MSM_BATCH, Scalar,
-        kernel::{Group, Kernel, MAX_LANES, Msm, Multiply, MultiplyEach, Plan, Points, Sum},
+        kernel::{Group, Kernel, MAX_LANES, Msm, Multiply, MultiplyEach, Plan, Sum},
     };
-    use crate::core::field::{
-        arithmetic::Field,
-        fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
+    use crate::core::{
+        curve::Points,
+        field::{
+            arithmetic::Field,
+            fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
+        },
     };
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::{

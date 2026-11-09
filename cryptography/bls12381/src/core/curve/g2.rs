@@ -25,10 +25,13 @@
 //! representation. Inside a formula, values reach integer bounds of at most `384` and positional
 //! limb bounds of at most `12`, and wide sums of products reach at most `334848`.
 
-use crate::core::field::{
-    arithmetic::{Field, Signed},
-    fp::{self, MINUS_ONE, ONE},
-    fp2::{BYTES, Fp2, Product, encode},
+use crate::core::{
+    curve::Points,
+    field::{
+        arithmetic::{Field, Signed},
+        fp::{self, MINUS_ONE, ONE},
+        fp2::{BYTES, Fp2, Product, encode},
+    },
 };
 use commonware_simd::Simd;
 
@@ -95,85 +98,37 @@ pub struct Point<F> {
     pub z: Fp2<F>,
 }
 
-impl<F> Point<F> {
+impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
+    type Coordinates = Coordinates;
+    type Raw = [[F::Raw; 2]; 3];
+
     /// Loads up to one projective point per lane, filling the remaining lanes with `fill`.
     ///
     /// Runs as its own kernel, so callers share one copy of the conversions.
     #[inline(always)]
-    pub fn load<S: Simd>(simd: S, points: &[Coordinates], fill: &Coordinates) -> Self
-    where
-        F: Field<S>,
-    {
+    fn load(simd: S, points: &[Coordinates], fill: &Coordinates) -> Self {
         simd.execute(
             #[inline(always)]
             move |simd: S| Self::read(simd, points, fill),
         )
     }
 
-    /// Body of [`Self::load`].
-    #[inline(always)]
-    fn read<S: Simd>(simd: S, points: &[Coordinates], fill: &Coordinates) -> Self
-    where
-        F: Field<S>,
-    {
-        const { assert!(F::LANES <= MAX_LANES) };
-        let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
-        let lanes = points.len().min(F::LANES);
-        for (i, coordinate) in coordinates.iter_mut().enumerate() {
-            for (lane, point) in coordinate.iter_mut().zip(&points[..lanes]) {
-                *lane = point[i];
-            }
-        }
-        Self {
-            x: Fp2::load(simd, &coordinates[0][..lanes], &fill[0]),
-            y: Fp2::load(simd, &coordinates[1][..lanes], &fill[1]),
-            z: Fp2::load(simd, &coordinates[2][..lanes], &fill[2]),
-        }
-    }
-
     /// Stores each lane's canonical projective coordinates, dropping lanes beyond `points`.
     ///
     /// Runs as its own kernel, so callers share one copy of the conversions.
     #[inline(always)]
-    pub fn store<S: Simd>(self, simd: S, points: &mut [Coordinates])
-    where
-        F: Field<S>,
-    {
+    fn store(self, simd: S, points: &mut [Coordinates]) {
         simd.execute(
             #[inline(always)]
             move |simd: S| self.write(simd, points),
         )
     }
 
-    /// Body of [`Self::store`].
-    #[inline(always)]
-    fn write<S: Simd>(self, simd: S, points: &mut [Coordinates])
-    where
-        F: Field<S>,
-    {
-        const { assert!(F::LANES <= MAX_LANES) };
-        let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
-        let lanes = points.len().min(F::LANES);
-        self.x.store(simd, &mut coordinates[0][..lanes]);
-        self.y.store(simd, &mut coordinates[1][..lanes]);
-        self.z.store(simd, &mut coordinates[2][..lanes]);
-        for (lane, point) in points[..lanes].iter_mut().enumerate() {
-            *point = [
-                coordinates[0][lane],
-                coordinates[1][lane],
-                coordinates[2][lane],
-            ];
-        }
-    }
-
     /// Returns `rhs` in every lane whose bit is set in `lanes`, and `self` in the others.
     ///
     /// Bit `i` of `lanes` selects lane `i`, without branching on `lanes`.
     #[inline(always)]
-    pub fn select<S: Simd>(self, simd: S, rhs: Self, lanes: u64) -> Self
-    where
-        F: Field<S>,
-    {
+    fn select(self, simd: S, rhs: Self, lanes: u64) -> Self {
         Self {
             x: self.x.select(simd, rhs.x, lanes),
             y: self.y.select(simd, rhs.y, lanes),
@@ -183,10 +138,7 @@ impl<F> Point<F> {
 
     /// Stores each lane's raw coordinates, dropping lanes beyond `points`.
     #[inline(always)]
-    pub fn store_raw<S: Simd>(self, simd: S, points: &mut [[[F::Raw; 2]; 3]])
-    where
-        F: Field<S>,
-    {
+    fn store_raw(self, simd: S, points: &mut [[[F::Raw; 2]; 3]]) {
         const { assert!(F::LANES <= MAX_LANES) };
         let mut coordinates = [[[F::Raw::default(); 2]; MAX_LANES]; 3];
         let lanes = points.len().min(F::LANES);
@@ -207,10 +159,7 @@ impl<F> Point<F> {
 
     /// Loads lane `i` from the raw coordinates `points[i]`, for at least `F::LANES` entries.
     #[inline(always)]
-    pub fn load_raw<S: Simd>(simd: S, points: &[&[[F::Raw; 2]; 3]]) -> Self
-    where
-        F: Field<S>,
-    {
+    fn load_raw(simd: S, points: &[&[[F::Raw; 2]; 3]]) -> Self {
         const { assert!(F::LANES <= MAX_LANES) };
         let coordinate = |i: usize| {
             let mut lanes = [&points[0][i]; MAX_LANES];
@@ -230,10 +179,7 @@ impl<F> Point<F> {
     ///
     /// Multiplies `Y` by `-1` rather than subtracting it, so the coordinates keep their bounds.
     #[inline(always)]
-    pub fn neg<S: Simd>(self, simd: S) -> Self
-    where
-        F: Field<S>,
-    {
+    fn negate(self, simd: S) -> Self {
         let minus_one = F::load(simd, &[], &MINUS_ONE);
         Self {
             y: self.y.ready::<1, S>(simd).mul_base(simd, minus_one),
@@ -245,10 +191,7 @@ impl<F> Point<F> {
     ///
     /// Multiplies `Y` by `1` or `-1`, selected without branching on `lanes`.
     #[inline(always)]
-    pub fn negate_lanes<S: Simd>(self, simd: S, lanes: u64) -> Self
-    where
-        F: Field<S>,
-    {
+    fn negate_lanes(self, simd: S, lanes: u64) -> Self {
         let sign = F::load(simd, &[], &ONE).select(simd, F::load(simd, &[], &MINUS_ONE), lanes);
         Self {
             y: self.y.ready::<1, S>(simd).mul_base(simd, sign),
@@ -263,15 +206,12 @@ impl<F> Point<F> {
     /// Conjugates each coordinate and multiplies `X` by [`PSI_X`]` i` and `Y` by [`PSI_Y`],
     /// forming `conj(y) PSI_Y` from its four base field products so that no conjugate needs a
     /// bias; `Z`'s conjugate multiplies its imaginary component by `-1` instead, as
-    /// [`Self::neg`] does, so the coordinates keep their bounds. Seven base field products and
+    /// [`Self::negate`] does, so the coordinates keep their bounds. Seven base field products and
     /// five reductions in all.
     ///
     /// Runs as its own kernel, so callers share one copy.
     #[inline(always)]
-    pub fn endomorphism<S: Simd>(self, simd: S) -> Self
-    where
-        F: Field<S>,
-    {
+    fn endomorphism(self, simd: S) -> Self {
         simd.execute(
             #[inline(always)]
             move |simd: S| {
@@ -322,10 +262,7 @@ impl<F> Point<F> {
     ///
     /// Runs as its own kernel, so callers share one copy of the formula.
     #[inline(always)]
-    pub fn add<S: Simd>(self, simd: S, rhs: Self) -> Self
-    where
-        F: Field<S>,
-    {
+    fn add(self, simd: S, rhs: Self) -> Self {
         simd.execute(
             #[inline(always)]
             move |simd: S| {
@@ -353,10 +290,7 @@ impl<F> Point<F> {
     ///
     /// Runs as its own kernel, so callers share one copy of the formula.
     #[inline(always)]
-    pub fn double<S: Simd>(self, simd: S) -> Self
-    where
-        F: Field<S>,
-    {
+    fn double(self, simd: S) -> Self {
         simd.execute(
             #[inline(always)]
             move |simd: S| {
@@ -373,6 +307,50 @@ impl<F> Point<F> {
                 Self { x, y, z }
             },
         )
+    }
+}
+
+impl<F> Point<F> {
+    /// Body of [`Self::load`].
+    #[inline(always)]
+    fn read<S: Simd>(simd: S, points: &[Coordinates], fill: &Coordinates) -> Self
+    where
+        F: Field<S>,
+    {
+        const { assert!(F::LANES <= MAX_LANES) };
+        let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
+        let lanes = points.len().min(F::LANES);
+        for (i, coordinate) in coordinates.iter_mut().enumerate() {
+            for (lane, point) in coordinate.iter_mut().zip(&points[..lanes]) {
+                *lane = point[i];
+            }
+        }
+        Self {
+            x: Fp2::load(simd, &coordinates[0][..lanes], &fill[0]),
+            y: Fp2::load(simd, &coordinates[1][..lanes], &fill[1]),
+            z: Fp2::load(simd, &coordinates[2][..lanes], &fill[2]),
+        }
+    }
+
+    /// Body of [`Self::store`].
+    #[inline(always)]
+    fn write<S: Simd>(self, simd: S, points: &mut [Coordinates])
+    where
+        F: Field<S>,
+    {
+        const { assert!(F::LANES <= MAX_LANES) };
+        let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
+        let lanes = points.len().min(F::LANES);
+        self.x.store(simd, &mut coordinates[0][..lanes]);
+        self.y.store(simd, &mut coordinates[1][..lanes]);
+        self.z.store(simd, &mut coordinates[2][..lanes]);
+        for (lane, point) in points[..lanes].iter_mut().enumerate() {
+            *point = [
+                coordinates[0][lane],
+                coordinates[1][lane],
+                coordinates[2][lane],
+            ];
+        }
     }
 
     /// Returns the `k`th of the four values of the first stage of a doubling, as a sum of
@@ -737,7 +715,7 @@ mod tests {
                     }
                     // Negate through -s + 2s, and round-trip through raw coordinates.
                     _ => {
-                        let negated = check_bound(simd, sum.neg(simd));
+                        let negated = check_bound(simd, sum.negate(simd));
                         sum = check_bound(simd, negated.add(simd, sum.double(simd)));
                         let mut raw = [[[F::Raw::default(); 2]; 3]; MAX_LANES];
                         sum.store_raw(simd, &mut raw);

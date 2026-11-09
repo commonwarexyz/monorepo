@@ -22,9 +22,12 @@
 //! formula, the positional representations reach integer bounds of at most `912` and limb bounds
 //! of at most `12`; residues reach integer bounds of at most `629`.
 
-use crate::core::field::{
-    arithmetic::Field,
-    fp::{BYTES, MINUS_ONE, ONE, encode},
+use crate::core::{
+    curve::Points,
+    field::{
+        arithmetic::Field,
+        fp::{BYTES, MINUS_ONE, ONE, encode},
+    },
 };
 use commonware_simd::Simd;
 
@@ -81,13 +84,13 @@ pub struct Point<F> {
     pub z: F,
 }
 
-impl<F> Point<F> {
+impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
+    type Coordinates = Coordinates;
+    type Raw = [F::Raw; 3];
+
     /// Loads up to one projective point per lane, filling the remaining lanes with `fill`.
     #[inline(always)]
-    pub fn load<S: Simd>(simd: S, points: &[Coordinates], fill: &Coordinates) -> Self
-    where
-        F: Field<S>,
-    {
+    fn load(simd: S, points: &[Coordinates], fill: &Coordinates) -> Self {
         const { assert!(F::LANES <= MAX_LANES) };
         let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
         let lanes = points.len().min(F::LANES);
@@ -105,10 +108,7 @@ impl<F> Point<F> {
 
     /// Stores each lane's canonical projective coordinates, dropping lanes beyond `points`.
     #[inline(always)]
-    pub fn store<S: Simd>(self, simd: S, points: &mut [Coordinates])
-    where
-        F: Field<S>,
-    {
+    fn store(self, simd: S, points: &mut [Coordinates]) {
         const { assert!(F::LANES <= MAX_LANES) };
         let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
         let lanes = points.len().min(F::LANES);
@@ -128,10 +128,7 @@ impl<F> Point<F> {
     ///
     /// Bit `i` of `lanes` selects lane `i`, without branching on `lanes`.
     #[inline(always)]
-    pub fn select<S: Simd>(self, simd: S, rhs: Self, lanes: u64) -> Self
-    where
-        F: Field<S>,
-    {
+    fn select(self, simd: S, rhs: Self, lanes: u64) -> Self {
         Self {
             x: self.x.select(simd, rhs.x, lanes),
             y: self.y.select(simd, rhs.y, lanes),
@@ -141,10 +138,7 @@ impl<F> Point<F> {
 
     /// Stores each lane's raw coordinates, dropping lanes beyond `points`.
     #[inline(always)]
-    pub fn store_raw<S: Simd>(self, simd: S, points: &mut [[F::Raw; 3]])
-    where
-        F: Field<S>,
-    {
+    fn store_raw(self, simd: S, points: &mut [[F::Raw; 3]]) {
         const { assert!(F::LANES <= MAX_LANES) };
         let mut coordinates = [[F::Raw::default(); MAX_LANES]; 3];
         let lanes = points.len().min(F::LANES);
@@ -165,10 +159,7 @@ impl<F> Point<F> {
 
     /// Loads lane `i` from the raw coordinates `points[i]`, for at least `F::LANES` entries.
     #[inline(always)]
-    pub fn load_raw<S: Simd>(simd: S, points: &[&[F::Raw; 3]]) -> Self
-    where
-        F: Field<S>,
-    {
+    fn load_raw(simd: S, points: &[&[F::Raw; 3]]) -> Self {
         const { assert!(F::LANES <= MAX_LANES) };
         let coordinate = |i: usize| {
             let mut lanes = [&points[0][i]; MAX_LANES];
@@ -188,10 +179,7 @@ impl<F> Point<F> {
     ///
     /// Multiplies `Y` by `-1` rather than subtracting it, so the coordinates keep their bounds.
     #[inline(always)]
-    pub fn neg<S: Simd>(self, simd: S) -> Self
-    where
-        F: Field<S>,
-    {
+    fn negate(self, simd: S) -> Self {
         let minus_one = F::load(simd, &[], &MINUS_ONE);
         Self {
             y: self.y.ready::<1>(simd).mul(simd, minus_one),
@@ -203,10 +191,7 @@ impl<F> Point<F> {
     ///
     /// Multiplies `Y` by `1` or `-1`, selected without branching on `lanes`.
     #[inline(always)]
-    pub fn negate_lanes<S: Simd>(self, simd: S, lanes: u64) -> Self
-    where
-        F: Field<S>,
-    {
+    fn negate_lanes(self, simd: S, lanes: u64) -> Self {
         let sign = F::load(simd, &[], &ONE).select(simd, F::load(simd, &[], &MINUS_ONE), lanes);
         Self {
             y: self.y.ready::<1>(simd).mul(simd, sign),
@@ -217,10 +202,7 @@ impl<F> Point<F> {
     /// Returns the image of every lane under the endomorphism `(x, y) -> (beta x, y)`, which
     /// multiplies points of the prime-order subgroup by `-x^2` for the curve parameter `x`.
     #[inline(always)]
-    pub fn endomorphism<S: Simd>(self, simd: S) -> Self
-    where
-        F: Field<S>,
-    {
+    fn endomorphism(self, simd: S) -> Self {
         let beta = F::load(simd, &[], &BETA);
         Self {
             x: self.x.ready::<1>(simd).mul(simd, beta),
@@ -238,10 +220,7 @@ impl<F> Point<F> {
     ///
     /// Debug builds keep this a call so that chained formulas fit in a stack frame.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn add<S: Simd>(self, simd: S, rhs: Self) -> Self
-    where
-        F: Field<S>,
-    {
+    fn add(self, simd: S, rhs: Self) -> Self {
         let (x1, y1, z1) = (
             self.x.ready::<1>(simd),
             self.y.ready::<1>(simd),
@@ -285,10 +264,7 @@ impl<F> Point<F> {
     ///
     /// Debug builds keep this a call so that chained formulas fit in a stack frame.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn double<S: Simd>(self, simd: S) -> Self
-    where
-        F: Field<S>,
-    {
+    fn double(self, simd: S) -> Self {
         let (x, y, z) = (
             self.x.ready::<1>(simd),
             self.y.ready::<1>(simd),
@@ -418,7 +394,7 @@ mod tests {
                     }
                     // Negate through -s + 2s, and round-trip through raw coordinates.
                     _ => {
-                        sum = sum.neg(simd).add(simd, sum.double(simd));
+                        sum = sum.negate(simd).add(simd, sum.double(simd));
                         let mut raw = [[F::Raw::default(); 3]; MAX_LANES];
                         sum.store_raw(simd, &mut raw);
                         let lanes: Vec<_> = raw.iter().collect();
