@@ -1,11 +1,39 @@
 //! Closes, soft withdrawals, and the requests queued on the ledger.
 
-use super::{Amount, Amounts, Epoch, Error, Flow, Matrix, Namespace, matrix, settlement::Flows};
+use super::{Amount, Amounts, Epoch, Flow, Matrix, Namespace, matrix, settlement::Flows};
 use bytes::BufMut;
 use commonware_codec::{
     Buf, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
+use thiserror::Error;
+
+/// A close processes fewer queued requests than required or more than are queued.
+#[derive(Debug, Error)]
+#[error("invalid number of queued requests")]
+pub struct InvalidCount;
+
+/// Why rows and withdrawals do not assemble into a close.
+#[derive(Debug, Error)]
+pub enum AssemblyError {
+    /// A count is outside the queue's bounds.
+    #[error(transparent)]
+    InvalidCount(#[from] InvalidCount),
+    /// A row pays no receiver.
+    #[error("no receiver paid")]
+    NoReceivers,
+    /// A soft withdrawal is for another epoch.
+    #[error("wrong epoch: expected {expected}, found {found}")]
+    WrongEpoch {
+        /// The epoch of the close.
+        expected: Epoch,
+        /// The epoch of the withdrawal.
+        found: Epoch,
+    },
+    /// An account has two rows, or a withdrawal request repeats.
+    #[error("account or withdrawal request appears more than once")]
+    Duplicate,
+}
 
 /// An account's signed request to withdraw up to `amount` through the operator in the close of
 /// `epoch`.
@@ -219,14 +247,12 @@ where
     }
 }
 
-/// Returns `count` as a number of queued requests.
-///
-/// Returns [Error::InvalidCount] unless `required <= count <= queued`.
-fn bounded(required: usize, queued: usize, count: u64) -> Result<usize, Error> {
+/// Returns `count` as a number of queued requests between `required` and `queued`.
+fn bounded(required: usize, queued: usize, count: u64) -> Result<usize, InvalidCount> {
     usize::try_from(count)
         .ok()
         .filter(|count| (required..=queued).contains(count))
-        .ok_or(Error::InvalidCount)
+        .ok_or(InvalidCount)
 }
 
 /// The requests queued on the ledger that the next close may process.
@@ -257,15 +283,12 @@ pub struct Queue<P: PublicKey, A: Amount> {
 
 impl<P: PublicKey, A: Amount> Queue<P, A> {
     /// Returns the oldest `deposits` deposits and `forced_withdrawals` forced withdrawals.
-    ///
-    /// Returns [Error::InvalidCount] unless each count lies between its queue's required count and
-    /// length.
     #[allow(clippy::type_complexity)]
     pub fn prefix(
         &self,
         deposits: u64,
         forced_withdrawals: u64,
-    ) -> Result<(&[Deposit<P, A>], &[ForcedWithdrawal<P, A>]), Error> {
+    ) -> Result<(&[Deposit<P, A>], &[ForcedWithdrawal<P, A>]), InvalidCount> {
         let deposits = bounded(self.required_deposits, self.deposits.len(), deposits)?;
         let forced_withdrawals = bounded(
             self.required_forced_withdrawals,
@@ -362,33 +385,6 @@ pub struct Close<P: PublicKey, O: PublicKey, A: Amount> {
 }
 
 impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
-    /// Returns a close of rows and withdrawals already in their canonical order.
-    ///
-    /// # Panics
-    ///
-    /// Panics unless the rows and withdrawals are strictly increasing.
-    pub(crate) fn new(
-        epoch: Epoch,
-        rows: Vec<Row<P, A>>,
-        withdrawals: Vec<Withdrawal<P, A>>,
-        deposits: u64,
-        forced_withdrawals: u64,
-        signature: O::Signature,
-    ) -> Self {
-        assert!(
-            Self::is_canonical(&rows, &withdrawals),
-            "rows and withdrawals must be in canonical order"
-        );
-        Self {
-            epoch,
-            rows,
-            withdrawals,
-            deposits,
-            forced_withdrawals,
-            signature,
-        }
-    }
-
     /// Returns whether rows and withdrawals are strictly increasing.
     fn is_canonical(rows: &[Row<P, A>], withdrawals: &[Withdrawal<P, A>]) -> bool {
         rows.windows(2)
@@ -422,10 +418,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
     /// withdrawals, in any order, processing the oldest `deposits` deposits and
     /// `forced_withdrawals` forced withdrawals. Returns it with each touched account's flow.
     ///
-    /// Assembly recomputes every root and checks neither signatures nor [Limits]. Returns
-    /// [Error::InvalidCount] if a count is out of bounds, [Error::NoReceivers] if a row pays no
-    /// receiver, [Error::WrongEpoch] if a soft withdrawal is for another epoch, and
-    /// [Error::Duplicate] if an account has two rows or a withdrawal request repeats.
+    /// Assembly recomputes every root and checks neither signatures nor [Limits].
     #[allow(clippy::type_complexity)]
     pub fn assemble<H, S>(
         signer: &S,
@@ -435,7 +428,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
         withdrawals: impl IntoIterator<Item = Withdrawal<P, A>>,
         deposits: u64,
         forced_withdrawals: u64,
-    ) -> Result<(Self, Vec<(P, Flow<A>)>), Error>
+    ) -> Result<(Self, Vec<(P, Flow<A>)>), AssemblyError>
     where
         H: Hasher,
         S: Signer<PublicKey = O, Signature = O::Signature>,
@@ -446,13 +439,13 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
         let mut rows: Vec<_> = rows.into_iter().collect();
         let mut withdrawals: Vec<_> = withdrawals.into_iter().collect();
         if rows.iter().any(|row| row.payments.is_empty()) {
-            return Err(Error::NoReceivers);
+            return Err(AssemblyError::NoReceivers);
         }
         if let Some(withdrawal) = withdrawals
             .iter()
             .find(|withdrawal| withdrawal.epoch != epoch)
         {
-            return Err(Error::WrongEpoch {
+            return Err(AssemblyError::WrongEpoch {
                 expected: epoch,
                 found: withdrawal.epoch,
             });
@@ -460,7 +453,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
         rows.sort_unstable_by(|a, b| a.account.cmp(&b.account));
         withdrawals.sort_unstable_by(|a, b| a.request().cmp(&b.request()));
         if !Self::is_canonical(&rows, &withdrawals) {
-            return Err(Error::Duplicate);
+            return Err(AssemblyError::Duplicate);
         }
         let flows = Flows::new(
             epoch,
@@ -468,7 +461,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
             &withdrawals,
             queued_deposits,
             queued_forced_withdrawals,
-        )?;
+        );
         let close = Self::sign::<H, S>(
             signer,
             namespace,
@@ -499,20 +492,24 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
         H: Hasher,
         S: Signer<PublicKey = O, Signature = O::Signature>,
     {
+        assert!(
+            Self::is_canonical(&rows, &withdrawals),
+            "rows and withdrawals must be in canonical order"
+        );
         let roots: Vec<_> = rows.iter().map(|row| row.payments.root::<H>()).collect();
         let root = matrix::root::<H, P>(rows.iter().map(|row| &row.account).zip(&roots));
         let signature = signer.sign(
             &namespace.close,
             &Self::message(epoch, &root, &withdrawals, deposits, forced_withdrawals),
         );
-        Self::new(
+        Self {
             epoch,
             rows,
             withdrawals,
             deposits,
             forced_withdrawals,
             signature,
-        )
+        }
     }
 
     /// Returns the epoch closed.
@@ -798,10 +795,7 @@ mod tests {
         let (deposits, forced) = queue.prefix(2, 1).unwrap();
         assert_eq!((deposits.len(), forced.len()), (2, 1));
         for (deposits, forced) in [(0, 0), (3, 0), (1, 2)] {
-            assert!(matches!(
-                queue.prefix(deposits, forced),
-                Err(Error::InvalidCount)
-            ));
+            assert!(matches!(queue.prefix(deposits, forced), Err(InvalidCount)));
         }
     }
 
@@ -923,7 +917,7 @@ mod tests {
         let rows = vec![row(&signers[0], &signers[2]), repeated];
         assert!(matches!(
             assemble(1, rows, Vec::new()),
-            Err(Error::Duplicate)
+            Err(AssemblyError::Duplicate)
         ));
         let withdrawal = Withdrawal::sign(&signers[0], &namespace, 1, 5, 0);
         let resigned = Withdrawal {
@@ -932,14 +926,14 @@ mod tests {
         };
         assert!(matches!(
             assemble(1, Vec::new(), vec![withdrawal.clone(), resigned]),
-            Err(Error::Duplicate)
+            Err(AssemblyError::Duplicate)
         ));
 
         // The close processes at least the required requests and at most those queued.
         for deposits in [0, 2] {
             assert!(matches!(
                 assemble(deposits, Vec::new(), Vec::new()),
-                Err(Error::InvalidCount)
+                Err(AssemblyError::InvalidCount(InvalidCount))
             ));
         }
         assemble(1, Vec::new(), vec![withdrawal]).unwrap();
@@ -962,12 +956,12 @@ mod tests {
         };
         assert!(matches!(
             assemble(vec![empty], Vec::new()),
-            Err(Error::NoReceivers)
+            Err(AssemblyError::NoReceivers)
         ));
         let late = Withdrawal::sign(&signers[1], &namespace, 2, 5, 0);
         assert!(matches!(
             assemble(Vec::new(), vec![late]),
-            Err(Error::WrongEpoch {
+            Err(AssemblyError::WrongEpoch {
                 expected: 1,
                 found: 2
             })

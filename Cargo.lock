@@ -2631,6 +2631,7 @@ dependencies = [
  "commonware-formatting",
  "commonware-invariants",
  "commonware-macros",
+ "commonware-utils",
  "criterion",
  "futures",
  "getrandom 0.2.17",

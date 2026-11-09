@@ -1,10 +1,15 @@
 //! Openings of one key in a sorted list committed with a binary Merkle tree.
 
-use super::Error;
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::bmt::{Proof, Tree};
+use thiserror::Error;
+
+/// An opening does not verify.
+#[derive(Debug, Error)]
+#[error("invalid opening")]
+pub struct InvalidOpening;
 
 /// Tag of [Lookup::Member] in the encoding.
 const MEMBER: u8 = 0;
@@ -83,7 +88,7 @@ impl<K: Ord + Clone, V: Clone, D: Digest> Lookup<K, V, D> {
         root: &D,
         key: &K,
         leaf: impl Fn(&K, &V) -> D,
-    ) -> Result<Option<&V>, Error> {
+    ) -> Result<Option<&V>, InvalidOpening> {
         match self {
             Self::Member {
                 position,
@@ -92,7 +97,7 @@ impl<K: Ord + Clone, V: Clone, D: Digest> Lookup<K, V, D> {
             } => {
                 proof
                     .verify_element_inclusion::<H>(*position, &leaf(key, value), root)
-                    .map_err(|_| Error::InvalidOpening)?;
+                    .map_err(|_| InvalidOpening)?;
                 Ok(Some(value))
             }
             Self::NonMember {
@@ -110,7 +115,7 @@ impl<K: Ord + Clone, V: Clone, D: Digest> Lookup<K, V, D> {
                     || lower.as_ref().is_some_and(|(lower, _)| lower >= key)
                     || upper.as_ref().is_some_and(|(upper, _)| upper <= key)
                 {
-                    return Err(Error::InvalidOpening);
+                    return Err(InvalidOpening);
                 }
                 let mut elements = Vec::with_capacity(2);
                 if let Some((lower, value)) = lower {
@@ -121,7 +126,7 @@ impl<K: Ord + Clone, V: Clone, D: Digest> Lookup<K, V, D> {
                 }
                 proof
                     .verify_multi_inclusion::<H>(&elements, root)
-                    .map_err(|_| Error::InvalidOpening)?;
+                    .map_err(|_| InvalidOpening)?;
                 Ok(None)
             }
         }
@@ -269,7 +274,7 @@ mod tests {
         (entries, builder.build())
     }
 
-    fn verify(lookup: &TestLookup, key: u64, root: &Digest) -> Result<Option<u64>, Error> {
+    fn verify(lookup: &TestLookup, key: u64, root: &Digest) -> Result<Option<u64>, InvalidOpening> {
         lookup
             .verify::<Sha256>(root, &key, leaf)
             .map(|value| value.copied())
@@ -318,18 +323,12 @@ mod tests {
                 proof,
             },
         ] {
-            assert!(matches!(
-                verify(&tampered, 20, &root),
-                Err(Error::InvalidOpening)
-            ));
+            assert!(matches!(verify(&tampered, 20, &root), Err(InvalidOpening)));
         }
-        assert!(matches!(
-            verify(&lookup, 30, &root),
-            Err(Error::InvalidOpening)
-        ));
+        assert!(matches!(verify(&lookup, 30, &root), Err(InvalidOpening)));
         assert!(matches!(
             verify(&lookup, 20, &list(5).1.root()),
-            Err(Error::InvalidOpening)
+            Err(InvalidOpening)
         ));
     }
 
@@ -341,10 +340,7 @@ mod tests {
         // An opening between two neighbors only proves keys strictly between them absent.
         let lookup = TestLookup::new(&entries, &tree, &25);
         for key in [20, 30, 15, 35] {
-            assert!(matches!(
-                verify(&lookup, key, &root),
-                Err(Error::InvalidOpening)
-            ));
+            assert!(matches!(verify(&lookup, key, &root), Err(InvalidOpening)));
         }
         let Lookup::NonMember {
             position,
@@ -379,10 +375,7 @@ mod tests {
                 },
             ),
         ] {
-            assert!(matches!(
-                verify(&tampered, key, &root),
-                Err(Error::InvalidOpening)
-            ));
+            assert!(matches!(verify(&tampered, key, &root), Err(InvalidOpening)));
         }
 
         // Neighbors must sit at the claimed position, and a list with entries does not open as
@@ -407,23 +400,14 @@ mod tests {
                 proof: Proof::default(),
             },
         ] {
-            assert!(matches!(
-                verify(&tampered, 25, &root),
-                Err(Error::InvalidOpening)
-            ));
+            assert!(matches!(verify(&tampered, 25, &root), Err(InvalidOpening)));
         }
 
         // A present key cannot be proven absent with the neighbors of a nearby absent key.
         let lookup = TestLookup::new(&entries, &tree, &5);
-        assert!(matches!(
-            verify(&lookup, 10, &root),
-            Err(Error::InvalidOpening)
-        ));
+        assert!(matches!(verify(&lookup, 10, &root), Err(InvalidOpening)));
         let lookup = TestLookup::new(&entries, &tree, &45);
-        assert!(matches!(
-            verify(&lookup, 40, &root),
-            Err(Error::InvalidOpening)
-        ));
+        assert!(matches!(verify(&lookup, 40, &root), Err(InvalidOpening)));
     }
 
     #[test]
@@ -433,7 +417,7 @@ mod tests {
         assert_eq!(verify(&lookup, 5, &tree.root()).unwrap(), None);
         assert!(matches!(
             verify(&lookup, 5, &list(1).1.root()),
-            Err(Error::InvalidOpening)
+            Err(InvalidOpening)
         ));
     }
 

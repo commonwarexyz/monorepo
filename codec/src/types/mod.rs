@@ -14,8 +14,9 @@ pub mod lazy;
 #[cfg(feature = "std")]
 pub mod net;
 pub mod primitives;
-#[cfg(feature = "ruint")]
-pub mod ruint;
+commonware_macros::stability_scope!(ALPHA, cfg(feature = "ruint") {
+    pub mod ruint;
+});
 pub mod tuple;
 pub mod vec;
 

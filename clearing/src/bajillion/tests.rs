@@ -1,9 +1,9 @@
 //! Helpers shared by the unit tests, and the conformance vector for ports of the ledger.
 
 use super::{
-    Amounts, Balances, Checked, Checkpoint, Close, Deposit, Epoch, Error, ForcedWithdrawal, Matrix,
-    Namespace, Payout, PayoutLog, PayoutProof, Proposal, Queue, Receipt, Request, Row, State,
-    Summary, Withdrawal,
+    Amounts, ApplyError, Balances, CheckError, Checked, Checkpoint, Close, Deposit, Epoch,
+    ForcedWithdrawal, Matrix, Namespace, Payout, PayoutLog, PayoutProof, Proposal, Queue, Receipt,
+    Request, Row, SettleError, State, Summary, Withdrawal,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
@@ -64,7 +64,7 @@ pub(crate) struct Store<
 
 impl<I: Unordered<Value = Location<mmb::Family>> + 'static> Store<I> {
     /// Settles `checked` on both databases.
-    pub(crate) async fn settle(&self, checked: &TestChecked) -> Result<TestProposal, Error> {
+    pub(crate) async fn settle(&self, checked: &TestChecked) -> Result<TestProposal, SettleError> {
         checked.settle(&self.balances, &self.log).await
     }
 
@@ -73,7 +73,7 @@ impl<I: Unordered<Value = Location<mmb::Family>> + 'static> Store<I> {
         self,
         proposal: TestProposal,
         posted: &Digest,
-    ) -> Result<(Self, TestCheckpoint), Error> {
+    ) -> Result<(Self, TestCheckpoint), ApplyError> {
         let (balances, log, checkpoint) = proposal.apply(self.balances, self.log, posted).await?;
         Ok((Self { balances, log }, checkpoint))
     }
@@ -286,7 +286,7 @@ pub(crate) fn check(
     close: TestClose,
     parent: &TestCheckpoint,
     queue: &TestQueue,
-) -> Result<TestChecked, Error> {
+) -> Result<TestChecked, CheckError> {
     close.check::<Sha256, _>(
         &namespace(),
         &operator_key().public_key(),

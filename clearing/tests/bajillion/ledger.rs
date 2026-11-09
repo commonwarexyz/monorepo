@@ -1,8 +1,14 @@
 //! Posting closes, challenging them, withdrawing payouts, and claiming funds after a halt.
 
 use super::*;
-use crate::roles::ledger::{Halt, Refusal};
-use commonware_clearing::bajillion::{Challenge, Error, Matrix, PayoutProof, Processed};
+use crate::roles::{
+    ledger::{Halt, Refusal},
+    operator::Refusal as Admitting,
+};
+use commonware_clearing::bajillion::{
+    AssemblyError, Challenge, ChallengeError, InvalidCount, InvalidOpening, InvalidReceipt, Matrix,
+    PayoutProof, Processed, SummaryError,
+};
 use commonware_cryptography::Digest as _;
 use commonware_runtime::Runner as _;
 
@@ -16,11 +22,11 @@ fn test_ledger_queues_requests() {
         // Zero amounts are refused.
         assert!(matches!(
             ledger.deposit(account(0), 0),
-            Err(Refusal::Error(Error::ZeroAmount))
+            Err(Refusal::ZeroAmount)
         ));
         assert!(matches!(
             ledger.withdraw(account(0), 0),
-            Err(Refusal::Error(Error::ZeroAmount))
+            Err(Refusal::ZeroAmount)
         ));
 
         // The ledger never holds more than `u64::MAX`, so no balance can overflow.
@@ -88,7 +94,9 @@ fn test_close_processes_requests_queued_before_its_epoch() {
                 deployment
                     .operator
                     .close(&queue, deposits, forced_withdrawals),
-                Err(Error::InvalidCount)
+                Err(Admitting::Assembly(AssemblyError::InvalidCount(
+                    InvalidCount
+                )))
             ));
         }
         assert_eq!(deployment.operator.epoch(), 2);
@@ -142,7 +150,7 @@ fn test_ledger_rejects_closes_deferring_required_requests() {
                 deployment
                     .ledger
                     .post(&mut context, &deferring, &certificate),
-                Err(Refusal::Error(Error::InvalidCount))
+                Err(Refusal::Summary(SummaryError::InvalidCount(InvalidCount)))
             ));
         }
     });
@@ -172,7 +180,7 @@ fn test_ledger_posts_only_certified_successors() {
         };
         assert!(matches!(
             ledger.post(&mut context, &wrong, &certify(schemes, &wrong)),
-            Err(Refusal::Error(Error::WrongEpoch {
+            Err(Refusal::Summary(SummaryError::WrongEpoch {
                 expected: 1,
                 found: 2
             }))
@@ -183,7 +191,7 @@ fn test_ledger_posts_only_certified_successors() {
         };
         assert!(matches!(
             ledger.post(&mut context, &wrong, &certify(schemes, &wrong)),
-            Err(Refusal::Error(Error::WrongParent))
+            Err(Refusal::Summary(SummaryError::WrongParent))
         ));
 
         // It must process the queue within its bounds.
@@ -205,7 +213,7 @@ fn test_ledger_posts_only_certified_successors() {
         ] {
             assert!(matches!(
                 ledger.post(&mut context, &wrong, &certify(schemes, &wrong)),
-                Err(Refusal::Error(Error::InvalidCount))
+                Err(Refusal::Summary(SummaryError::InvalidCount(InvalidCount)))
             ));
         }
 
@@ -216,7 +224,7 @@ fn test_ledger_posts_only_certified_successors() {
         };
         assert!(matches!(
             ledger.post(&mut context, &summary, &certify(schemes, &other)),
-            Err(Refusal::Error(Error::InvalidCertificate))
+            Err(Refusal::Summary(SummaryError::InvalidCertificate))
         ));
 
         // The certified summary posts once, and its commit joins the claimed ranges.
@@ -227,7 +235,7 @@ fn test_ledger_posts_only_certified_successors() {
         assert_eq!(ledger.ranges(), vec![(0, summary.payouts.size)]);
         assert!(matches!(
             ledger.post(&mut context, &summary, &certificate),
-            Err(Refusal::Error(Error::WrongEpoch {
+            Err(Refusal::Summary(SummaryError::WrongEpoch {
                 expected: 2,
                 found: 1
             }))
@@ -292,7 +300,7 @@ fn test_challenges_need_a_contradicted_receipt() {
         deployment.post(&mut context, proposals).await;
         assert!(matches!(
             deployment.ledger.challenge(&challenge),
-            Err(Refusal::Error(Error::NoContradiction))
+            Err(Refusal::Challenge(ChallengeError::NoContradiction))
         ));
 
         // A receipt raised to 11 fails its proof, and an opening of another pair proves nothing.
@@ -300,13 +308,17 @@ fn test_challenges_need_a_contradicted_receipt() {
         forged.receipt.amount = 11;
         assert!(matches!(
             deployment.ledger.challenge(&forged),
-            Err(Refusal::Error(Error::InvalidReceipt))
+            Err(Refusal::Challenge(ChallengeError::InvalidReceipt(
+                InvalidReceipt
+            )))
         ));
         let mut misopened = challenge.clone();
         misopened.opening = matrix.open(&account(0), &account(2));
         assert!(matches!(
             deployment.ledger.challenge(&misopened),
-            Err(Refusal::Error(Error::InvalidOpening))
+            Err(Refusal::Challenge(ChallengeError::InvalidOpening(
+                InvalidOpening
+            )))
         ));
         assert_eq!(deployment.ledger.halted(), None);
     });

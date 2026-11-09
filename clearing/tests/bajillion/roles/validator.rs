@@ -3,8 +3,9 @@
 
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
-    Amount, BalanceProof, Balances, Checkpoint, Close, Deposit, Epoch, Error, ForcedWithdrawal,
-    Limits, Matrix, Namespace, Opening, PayoutLog, PayoutProof, Proposal, Queue, Summary,
+    Amount, ApplyError, BalanceProof, Balances, CheckError, Checkpoint, Close, Deposit, Epoch,
+    ForcedWithdrawal, Limits, Matrix, Namespace, Opening, PayoutLog, PayoutProof, Proposal, Queue,
+    SettleError, Summary,
 };
 use commonware_codec::{Decode as _, DecodeExt as _, Encode as _, RangeCfg};
 use commonware_cryptography::{Digest, Digestible, Hasher, PublicKey};
@@ -13,12 +14,35 @@ use commonware_runtime::Spawner;
 use commonware_storage::{
     Context,
     index::unordered::Index,
-    merkle::{Location, mmb},
+    merkle::{Location, mmb, mmr},
     qmdb::{self, current::unordered::fixed, keyless},
     translator::Translator,
 };
 use commonware_utils::NZU64;
 use std::{cmp::Ordering, collections::HashMap};
+
+/// Why the validator refused a close, a restart, or a proof.
+#[derive(Debug, thiserror::Error)]
+pub enum Refusal {
+    /// The databases and the persisted records do not agree on a posted close.
+    #[error("the databases and the records do not agree on a posted close")]
+    InvalidCheckpoint,
+    /// The close fails its check.
+    #[error(transparent)]
+    Check(#[from] CheckError),
+    /// The close does not settle.
+    #[error(transparent)]
+    Settle(#[from] SettleError),
+    /// The proposal does not apply.
+    #[error(transparent)]
+    Apply(#[from] ApplyError),
+    /// The balances database failed.
+    #[error("balances: {0}")]
+    Balances(#[from] qmdb::Error<mmb::Family>),
+    /// The payout log failed.
+    #[error("payout log: {0}")]
+    Log(#[from] qmdb::Error<mmr::Family>),
+}
 
 /// The balances database over the plain unordered index.
 type Database<E, P, H, T, S, A> = Balances<E, P, H, Index<T, Location<mmb::Family>>, S, A>;
@@ -40,7 +64,7 @@ pub struct Config<O: PublicKey, T: Translator, S: Strategy> {
 
 /// A close the validator attested, with the deposits and forced withdrawals it processes and its
 /// summary, each in its encoding.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Record {
     close: Bytes,
     deposits: Bytes,
@@ -53,7 +77,7 @@ struct Record {
 ///
 /// With the ledger's last posted digest, it suffices to recover after a restart and to serve
 /// earlier posted closes (V6).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Persisted<D: Digest> {
     attested: HashMap<D, Record>,
 }
@@ -78,16 +102,12 @@ where
     S: Strategy,
     A: Amount,
 {
-    /// Runtime context the databases open under.
-    context: E,
     /// Configuration the validator opened with.
     config: Config<O, T, S>,
-    /// Number of reopens after a refusal. It labels the context of each database handle.
-    opened: u64,
 
-    /// Balances database, absent once a storage failure left it unusable until a restart.
+    /// Balances database, absent once a failed apply left it unusable until a restart.
     balances: Option<Database<E, P, H, T, S, A>>,
-    /// Payout log, absent once a storage failure left it unusable until a restart.
+    /// Payout log, absent once a failed apply left it unusable until a restart.
     log: Option<PayoutLog<E, P, H, S, A>>,
 
     /// Closes the validator attested (V4).
@@ -106,32 +126,20 @@ where
     S: Strategy,
     A: Amount,
 {
-    /// Opens the balances database under a context labeled with the reopen count `opened`.
-    async fn database(
-        context: &E,
-        config: &Config<O, T, S>,
-        opened: u64,
-    ) -> Result<Database<E, P, H, T, S, A>, Error> {
-        let context = context.child("balances").with_attribute("opened", opened);
-        Ok(Database::init(context, config.balances.clone(), None).await?)
-    }
-
     /// Opens the payout log at `summary`'s payouts size (V2). The log is durable before the
     /// balances change, so it is at or past the close the balances hold, and the bounded reopen
     /// discards any later close.
     ///
-    /// Returns [Error::InvalidCheckpoint] unless the log then has `summary`'s payouts root.
+    /// Returns [Refusal::InvalidCheckpoint] unless the log then has `summary`'s payouts root.
     async fn log(
         context: &E,
         config: &Config<O, T, S>,
-        opened: u64,
         summary: &Summary<H>,
-    ) -> Result<PayoutLog<E, P, H, S, A>, Error> {
-        let context = context.child("payouts").with_attribute("opened", opened);
+    ) -> Result<PayoutLog<E, P, H, S, A>, Refusal> {
         let size = Some(Location::new(summary.payouts.size));
-        let log = PayoutLog::init(context, config.payouts.clone(), size).await?;
+        let log = PayoutLog::init(context.child("payouts"), config.payouts.clone(), size).await?;
         if log.root() != summary.payouts.root {
-            return Err(Error::InvalidCheckpoint);
+            return Err(Refusal::InvalidCheckpoint);
         }
         Ok(log)
     }
@@ -147,8 +155,9 @@ where
         config: Config<O, T, S>,
         persisted: Persisted<H::Digest>,
         posted: Option<&H::Digest>,
-    ) -> Result<Self, Error> {
-        let balances = Self::database(&context, &config, 0).await?;
+    ) -> Result<Self, Refusal> {
+        let balances: Database<E, P, H, T, S, A> =
+            Database::init(context.child("balances"), config.balances.clone(), None).await?;
         let applied = balances.get_metadata().await?.is_some();
         let root = balances.root();
 
@@ -175,12 +184,10 @@ where
                     matrix: Matrix::empty(),
                 })
             })
-            .ok_or(Error::InvalidCheckpoint)?;
-        let log = Self::log(&context, &config, 0, &parent.summary).await?;
+            .ok_or(Refusal::InvalidCheckpoint)?;
+        let log = Self::log(&context, &config, &parent.summary).await?;
         Ok(Self {
-            context,
             config,
-            opened: 0,
             balances: Some(balances),
             log: Some(log),
             persisted,
@@ -203,14 +210,14 @@ where
     const fn balances(&self) -> &Database<E, P, H, T, S, A> {
         self.balances
             .as_ref()
-            .expect("a validator whose storage failed must restart")
+            .expect("a validator must restart after a failed apply")
     }
 
     /// Returns the payout log.
     const fn payout_log(&self) -> &PayoutLog<E, P, H, S, A> {
         self.log
             .as_ref()
-            .expect("a validator whose storage failed must restart")
+            .expect("a validator must restart after a failed apply")
     }
 
     /// Returns what the validator persisted besides its databases.
@@ -229,13 +236,13 @@ where
     }
 
     /// Returns the balance of `account` as of the last close applied.
-    pub async fn balance(&self, account: &P) -> Result<A, Error> {
+    pub async fn balance(&self, account: &P) -> Result<A, Refusal> {
         Ok(self.balances().get(account).await?.unwrap_or(A::ZERO))
     }
 
     /// Proves the balance of `account` as of the last close applied, or returns `None` if it is
     /// zero.
-    pub async fn prove(&self, account: &P) -> Result<Option<BalanceProof<H::Digest, A>>, Error> {
+    pub async fn prove(&self, account: &P) -> Result<Option<BalanceProof<H::Digest, A>>, Refusal> {
         match self.balances().key_value_proof(account).await {
             Ok((proof, balance)) => Ok(Some(BalanceProof { balance, proof })),
             Err(qmdb::Error::KeyNotFound) => Ok(None),
@@ -274,7 +281,7 @@ where
         &self,
         epoch: Epoch,
         account: &P,
-    ) -> Result<Option<PayoutProof<P, H::Digest, A>>, Error> {
+    ) -> Result<Option<PayoutProof<P, H::Digest, A>>, Refusal> {
         let Some(record) = self.record(epoch) else {
             return Ok(None);
         };
@@ -285,7 +292,7 @@ where
         let start = match self.persisted.attested.get(&summary.parent) {
             Some(parent) => Self::summary_of(parent).payouts.size,
             None if epoch == 1 => Summary::<H>::genesis::<P, A>(H::Digest::EMPTY).payouts.size,
-            None => return Err(Error::InvalidCheckpoint),
+            None => return Err(Refusal::InvalidCheckpoint),
         };
         let log = self.payout_log();
         let (mut low, mut high) = (start, summary.payouts.size - 1);
@@ -314,11 +321,13 @@ where
     /// Checks the close of the epoch after the last close applied while the ledger's queues are
     /// `queue` (V3), and settles it on the balances. Before returning the proposal whose summary
     /// it attests (V1), it persists the close, the requests it processes, and the summary (V4).
+    /// Checking and settling depend only on the close, the checkpoint, and the queues, so asking
+    /// again for a close already persisted yields the same proposal and writes nothing.
     pub async fn verify(
         &mut self,
         close: Close<P, O, A>,
         queue: &Queue<P, A>,
-    ) -> Result<Proposal<P, H, S, A>, Error> {
+    ) -> Result<Proposal<P, H, S, A>, Refusal> {
         let encoded = close.encode();
         let (deposited, forced) = (close.deposits(), close.forced_withdrawals());
         let checked = close.check::<H, S>(
@@ -332,7 +341,9 @@ where
 
         // The close, the requests it processes, and its summary are persisted before the
         // attestation is released (V4).
-        let (deposits, forced_withdrawals) = queue.prefix(deposited, forced)?;
+        let (deposits, forced_withdrawals) = queue
+            .prefix(deposited, forced)
+            .expect("a checked close must process a prefix of its queue");
         let record = Record {
             close: encoded,
             deposits: deposits.encode(),
@@ -341,38 +352,24 @@ where
         };
         self.persisted
             .attested
-            .insert(proposal.summary().digest(), record);
+            .entry(proposal.summary().digest())
+            .or_insert(record);
         Ok(proposal)
     }
 
     /// Applies the proposal of the posted close whose summary has digest `posted` to both
     /// databases, and makes it durable (V5).
     ///
-    /// A refusal leaves both databases at the last close, reopened. A storage failure while
-    /// applying the close or making it durable leaves the validator unusable until it restarts.
+    /// Any error leaves the validator unusable until it restarts (V2).
     pub async fn apply(
         &mut self,
         proposal: Proposal<P, H, S, A>,
         posted: &H::Digest,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Refusal> {
         let (Some(balances), Some(log)) = (self.balances.take(), self.log.take()) else {
-            panic!("a validator whose storage failed must restart");
+            panic!("a validator must restart after a failed apply");
         };
-        let (balances, log, checkpoint) = match proposal.apply(balances, log, posted).await {
-            Ok(applied) => applied,
-            Err(error) => {
-                // A refusal touches neither database. After a storage failure the balances may
-                // hold either close, so only a restart realigns the log with them (V2).
-                if matches!(error, Error::InvalidCheckpoint) {
-                    self.opened += 1;
-                    let (context, config) = (&self.context, &self.config);
-                    self.balances = Some(Self::database(context, config, self.opened).await?);
-                    let log = Self::log(context, config, self.opened, &self.parent.summary).await?;
-                    self.log = Some(log);
-                }
-                return Err(error);
-            }
-        };
+        let (balances, log, checkpoint) = proposal.apply(balances, log, posted).await?;
 
         // The log is durable once the close applies, so committing the balances makes the close
         // durable. The balances then prune their history up to the sync boundary.
@@ -388,8 +385,8 @@ where
     /// `posted`, from the persisted closes and the requests they process alone (V4, V5). Returns
     /// how many it applied.
     ///
-    /// Returns [Error::InvalidCheckpoint] if a posted close in between was not persisted.
-    pub async fn catch_up(&mut self, posted: &H::Digest) -> Result<usize, Error> {
+    /// Returns [Refusal::InvalidCheckpoint] if a posted close in between was not persisted.
+    pub async fn catch_up(&mut self, posted: &H::Digest) -> Result<usize, Refusal> {
         // Collect the persisted closes from the ledger's last post back to the last close applied.
         let applied = self.parent.summary.digest();
         let mut missing = Vec::new();
@@ -399,10 +396,10 @@ where
                 .persisted
                 .attested
                 .get(&digest)
-                .ok_or(Error::InvalidCheckpoint)?;
+                .ok_or(Refusal::InvalidCheckpoint)?;
             let summary = Self::summary_of(record);
             if summary.epoch <= self.parent.summary.epoch {
-                return Err(Error::InvalidCheckpoint);
+                return Err(Refusal::InvalidCheckpoint);
             }
             missing.push((digest, record.clone()));
             digest = summary.parent;
@@ -431,7 +428,7 @@ where
             let close = Self::close_of(&self.config, &record);
             let proposal = self.verify(close, &queue).await?;
             if proposal.summary() != &summary {
-                return Err(Error::InvalidCheckpoint);
+                return Err(Refusal::InvalidCheckpoint);
             }
             self.apply(proposal, &digest).await?;
         }

@@ -2,8 +2,8 @@
 //! payouts, and pays claims after a halt.
 
 use commonware_clearing::bajillion::{
-    Amount, BalanceProof, Challenge, Deposit, Epoch, Error, ForcedWithdrawal, Namespace,
-    PayoutProof, Queue, Summary,
+    Amount, BalanceProof, Challenge, ChallengeError, Deposit, Epoch, ForcedWithdrawal, Namespace,
+    PayoutProof, Queue, Summary, SummaryError,
 };
 use commonware_cryptography::{Digest, Digestible, Hasher, PublicKey, certificate::Verifier};
 use core::hash::Hash;
@@ -44,13 +44,19 @@ pub enum Refusal {
     /// The balance or payout proof does not verify under the last posted root.
     #[error("the balance or payout proof does not verify under the last posted root")]
     InvalidProof,
-    /// A helper refused it.
+    /// A deposit or withdrawal of nothing.
+    #[error("amount is zero")]
+    ZeroAmount,
+    /// The post does not verify.
     #[error(transparent)]
-    Error(#[from] Error),
+    Summary(#[from] SummaryError),
+    /// The challenge does not verify.
+    #[error(transparent)]
+    Challenge(#[from] ChallengeError),
 }
 
 /// What the ledger persists, as its queues, its posts, its payout ranges, and the funds it
-/// holds. A restart resumes from it alone.
+/// holds.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Persisted<P: PublicKey, D: Digest, A: Amount> {
     /// Digest of the last posted summary.
@@ -58,7 +64,7 @@ pub struct Persisted<P: PublicKey, D: Digest, A: Amount> {
     /// Balances root of the last posted summary.
     pub balances: D,
     /// Payouts root of the last posted summary.
-    pub log: D,
+    pub payouts: D,
     /// Matrix root of each posted close, in epoch order.
     pub matrices: Vec<D>,
     /// Funds the ledger holds. A deposit adds to them and every transfer takes from them.
@@ -143,7 +149,7 @@ where
         let persisted = Persisted {
             parent: genesis.digest(),
             balances,
-            log: genesis.payouts.root,
+            payouts: genesis.payouts.root,
             matrices: Vec::new(),
             held: A::ZERO,
             deposits: VecDeque::new(),
@@ -225,7 +231,7 @@ where
             return Err(Refusal::Halted);
         }
         if amount == A::ZERO {
-            return Err(Error::ZeroAmount.into());
+            return Err(Refusal::ZeroAmount);
         }
         persisted.held = persisted.held.checked_add(amount).ok_or(Refusal::Custody)?;
         persisted.deposits.push_back(Deposit { account, amount });
@@ -238,7 +244,7 @@ where
             return Err(Refusal::Halted);
         }
         if amount == A::ZERO {
-            return Err(Error::ZeroAmount.into());
+            return Err(Refusal::ZeroAmount);
         }
         self.persisted
             .forced_withdrawals
@@ -286,7 +292,7 @@ where
         persisted.forced_withdrawals.drain(..forced_withdrawals);
         persisted.required_deposits = persisted.deposits.len();
         persisted.required_forced_withdrawals = persisted.forced_withdrawals.len();
-        persisted.log = summary.payouts.root;
+        persisted.payouts = summary.payouts.root;
         persisted.matrices.push(summary.matrix);
         persisted.balances = summary.balances;
         persisted.parent = summary.digest();
@@ -299,7 +305,7 @@ where
         &mut self,
         proof: &PayoutProof<P, H::Digest, A>,
     ) -> Result<(P, A), Refusal> {
-        if !proof.verify::<H>(&self.persisted.log) {
+        if !proof.verify::<H>(&self.persisted.payouts) {
             return Err(Refusal::InvalidProof);
         }
         if self.covers(proof.index) {

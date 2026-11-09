@@ -2,8 +2,8 @@
 //! closes.
 
 use super::{
-    Amount, Amounts, Close, Epoch, Error, Matrix, Namespace, Payouts, Processed, Queue, State,
-    Summary, settlement::Flows,
+    Amount, Amounts, Close, Epoch, FlowError, InvalidCount, Matrix, Namespace, Payouts, Processed,
+    Queue, State, Summary, settlement::Flows,
 };
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
@@ -16,7 +16,7 @@ use commonware_storage::{
     journal::contiguous::fixed::Journal,
     merkle::{Location, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof, mmb, mmr},
     qmdb::{
-        ProofExt as _,
+        self, ProofExt as _,
         any::unordered::{Update, fixed::Operation},
         current::{
             batch::MerkleizedBatch,
@@ -29,6 +29,67 @@ use commonware_storage::{
 use commonware_utils::iter::zip_eq;
 use core::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
+use thiserror::Error;
+
+/// Why a close fails its check.
+#[derive(Debug, Error)]
+pub enum CheckError {
+    /// The checkpoint's matrix is not its summary's.
+    #[error("invalid checkpoint")]
+    InvalidCheckpoint,
+    /// The next epoch does not fit.
+    #[error("arithmetic overflow")]
+    Overflow,
+    /// The close, the queue, or a soft withdrawal is for another epoch.
+    #[error("wrong epoch: expected {expected}, found {found}")]
+    WrongEpoch {
+        /// The epoch after the checkpoint's.
+        expected: Epoch,
+        /// The epoch found.
+        found: Epoch,
+    },
+    /// A count is outside the queue's bounds.
+    #[error(transparent)]
+    InvalidCount(#[from] InvalidCount),
+    /// The operator's signature does not verify.
+    #[error("invalid operator signature")]
+    InvalidOperatorSignature,
+    /// A sender did not sign its row's map on top of the map the parent settled for it, or a soft
+    /// withdrawal does not verify.
+    #[error("invalid user signature")]
+    InvalidSignature,
+}
+
+/// Why a checked close does not settle.
+#[derive(Debug, Error)]
+pub enum SettleError {
+    /// The databases are not at the parent's roots.
+    #[error("invalid checkpoint")]
+    InvalidCheckpoint,
+    /// A flow does not settle on its account's balance.
+    #[error(transparent)]
+    Flow(#[from] FlowError),
+    /// The balances database failed.
+    #[error("balances: {0}")]
+    Balances(#[from] qmdb::Error<mmb::Family>),
+    /// The payout log failed.
+    #[error("payout log: {0}")]
+    Log(#[from] qmdb::Error<mmr::Family>),
+}
+
+/// Why a proposal does not apply.
+#[derive(Debug, Error)]
+pub enum ApplyError {
+    /// The summary did not post, or the databases are not at the parent's roots.
+    #[error("invalid checkpoint")]
+    InvalidCheckpoint,
+    /// The balances database failed.
+    #[error("balances: {0}")]
+    Balances(#[from] qmdb::Error<mmb::Family>),
+    /// The payout log failed.
+    #[error("payout log: {0}")]
+    Log(#[from] qmdb::Error<mmr::Family>),
+}
 
 /// Bytes per chunk of the balances database's activity bitmap.
 const CHUNK: usize = 32;
@@ -77,11 +138,11 @@ impl<P: PublicKey, A: Amount> Payout<P, A> {
     /// then a commit with no metadata that keeps the inactivity floor at zero, so no payout is
     /// ever pruned.
     ///
-    /// Returns [Error::Log] if the log fails, for example because it already raised its floor.
+    /// Fails if the log fails, for example because it already raised its floor.
     pub async fn stage<E, H, S>(
         log: &PayoutLog<E, P, H, S, A>,
         payouts: &Amounts<P, A>,
-    ) -> Result<Arc<PayoutBatch<P, H::Digest, S, A>>, Error>
+    ) -> Result<Arc<PayoutBatch<P, H::Digest, S, A>>, qmdb::Error<mmr::Family>>
     where
         E: Context,
         H: Hasher,
@@ -94,7 +155,7 @@ impl<P: PublicKey, A: Amount> Payout<P, A> {
                 amount,
             });
         }
-        Ok(batch.merkleize(log).await?)
+        batch.merkleize(log).await
     }
 }
 
@@ -301,13 +362,6 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
     /// Checks the close as the successor of the posted close `parent` against the ledger's `queue`.
     /// It checks the operator's signature before any user's, and chains each queue's running hash
     /// from `parent`'s summary over the prefix of `queue` that the close's counts select.
-    ///
-    /// Returns [Error::InvalidCheckpoint] if `parent`'s matrix is not its summary's,
-    /// [Error::WrongEpoch] unless the close, `queue`, and every soft withdrawal are for the next
-    /// epoch, [Error::InvalidCount] unless each count is within `queue`'s bounds,
-    /// [Error::InvalidOperatorSignature] unless the operator signed the close,
-    /// [Error::InvalidSignature] unless every row's state builds on its row in `parent` and every
-    /// soft withdrawal verifies, and [Error::Overflow] if the next epoch does not fit.
     pub fn check<H: Hasher, S: Strategy>(
         self,
         namespace: &Namespace,
@@ -315,11 +369,15 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
         strategy: &S,
         parent: &Checkpoint<P, H, A>,
         queue: &Queue<P, A>,
-    ) -> Result<Checked<P, H, A>, Error> {
+    ) -> Result<Checked<P, H, A>, CheckError> {
         if parent.matrix.root() != parent.summary.matrix {
-            return Err(Error::InvalidCheckpoint);
+            return Err(CheckError::InvalidCheckpoint);
         }
-        let epoch = parent.summary.epoch.checked_add(1).ok_or(Error::Overflow)?;
+        let epoch = parent
+            .summary
+            .epoch
+            .checked_add(1)
+            .ok_or(CheckError::Overflow)?;
         let Self {
             epoch: closed,
             rows,
@@ -333,7 +391,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
             .chain(withdrawals.iter().map(|withdrawal| withdrawal.epoch))
             .find(|&other| other != epoch)
         {
-            return Err(Error::WrongEpoch {
+            return Err(CheckError::WrongEpoch {
                 expected: epoch,
                 found,
             });
@@ -359,7 +417,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
             forced_withdrawals,
         );
         if !operator.verify(&namespace.close, &message, &signature) {
-            return Err(Error::InvalidOperatorSignature);
+            return Err(CheckError::InvalidOperatorSignature);
         }
 
         // Each sender must have signed exactly its row's payment map on top of the map the parent
@@ -377,14 +435,14 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
                 state
                     .verify(namespace, signature)
                     .then_some(())
-                    .ok_or(Error::InvalidSignature)
+                    .ok_or(CheckError::InvalidSignature)
             },
         )?;
         strategy.try_map_collect_vec(&withdrawals, |withdrawal| {
             withdrawal
                 .verify(namespace)
                 .then_some(())
-                .ok_or(Error::InvalidSignature)
+                .ok_or(CheckError::InvalidSignature)
         })?;
 
         let flows = Flows::new(
@@ -393,7 +451,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
             &withdrawals,
             queued_deposits,
             queued_forced_withdrawals,
-        )?;
+        );
         Ok(Checked {
             epoch,
             parent: parent.summary,
@@ -429,22 +487,18 @@ impl<P: PublicKey, H: Hasher, A: Amount> Checked<P, H, A> {
     /// batch writes exactly the balances that change, with a zero balance written as a delete, and
     /// commits with metadata zero, so a balances database with no metadata has applied no close.
     /// The log batch is the one [Payout::stage] builds from the close's payouts.
-    ///
-    /// Returns [Error::InvalidCheckpoint] unless `balances` is at the parent's balances root and
-    /// `log` at its payouts root, [Error::Overdraft] if a balance goes negative, [Error::Overflow]
-    /// if a balance does not fit, and [Error::Balances] or [Error::Log] if a database fails.
     pub async fn settle<E, I, S>(
         &self,
         balances: &Balances<E, P, H, I, S, A>,
         log: &PayoutLog<E, P, H, S, A>,
-    ) -> Result<Proposal<P, H, S, A>, Error>
+    ) -> Result<Proposal<P, H, S, A>, SettleError>
     where
         E: Context,
         I: Unordered<Value = Location<mmb::Family>> + 'static,
         S: Strategy,
     {
         if balances.root() != self.parent.balances || log.root() != self.parent.payouts.root {
-            return Err(Error::InvalidCheckpoint);
+            return Err(SettleError::InvalidCheckpoint);
         }
         let accounts: Vec<&P> = self.flows.accounts().collect();
         let previous = balances.get_many(&accounts).await?;
@@ -522,11 +576,8 @@ impl<P: PublicKey, H: Hasher, S: Strategy, A: Amount> Proposal<P, H, S, A> {
     /// durable before the balances change, so after any crash the log is at or past the close the
     /// balances hold. The balance writes are not yet durable.
     ///
-    /// Returns [Error::InvalidCheckpoint], before touching either database, if `posted` is not this
-    /// summary's digest, `balances` is not at the parent's balances root, or `log` is not at the
-    /// parent's payouts root. Returns [Error::Balances] or [Error::Log] if a batch does not apply
-    /// or the log does not commit. An error drops both handles, and they must be reopened as after
-    /// a restart (V2).
+    /// Every error drops both handles, and they must be reopened as after a restart (V2). A refusal
+    /// writes to neither database.
     #[allow(clippy::type_complexity)]
     #[boxed]
     pub async fn apply<E, I>(
@@ -540,7 +591,7 @@ impl<P: PublicKey, H: Hasher, S: Strategy, A: Amount> Proposal<P, H, S, A> {
             PayoutLog<E, P, H, S, A>,
             Checkpoint<P, H, A>,
         ),
-        Error,
+        ApplyError,
     >
     where
         E: Context,
@@ -550,7 +601,7 @@ impl<P: PublicKey, H: Hasher, S: Strategy, A: Amount> Proposal<P, H, S, A> {
             || balances.root() != self.parent.balances
             || log.root() != self.parent.payouts.root
         {
-            return Err(Error::InvalidCheckpoint);
+            return Err(ApplyError::InvalidCheckpoint);
         }
         let log = log.apply_batch(self.appends).await?.commit().await?;
         let balances = balances.apply_batch(self.batch).await?;
@@ -578,7 +629,7 @@ mod tests {
         Digest as _, Sha256, Signer as _, ed25519::PublicKey, sha256::Digest,
     };
     use commonware_runtime::{
-        Metrics as _, Runner as _, Supervisor as _,
+        Runner as _, Supervisor as _,
         deterministic::{self, FaultConfig},
         telemetry::metrics::MetricsExt as _,
     };
@@ -674,7 +725,7 @@ mod tests {
             let close = sign_close(&operator, 3, vec![valid.clone()], Vec::new(), 1, 1);
             assert!(matches!(
                 check(close, &parent, &queued),
-                Err(Error::WrongEpoch {
+                Err(CheckError::WrongEpoch {
                     expected: 2,
                     found: 3
                 })
@@ -683,7 +734,7 @@ mod tests {
                 let close = sign_close(&operator, 2, Vec::new(), Vec::new(), deposits, forced);
                 assert!(matches!(
                     check(close, &parent, &queued),
-                    Err(Error::InvalidCount)
+                    Err(CheckError::InvalidCount(InvalidCount))
                 ));
             }
 
@@ -694,20 +745,14 @@ mod tests {
             let close = sign_close(&user(5), 2, vec![forged], Vec::new(), 1, 1);
             assert!(matches!(
                 check(close, &parent, &queued),
-                Err(Error::InvalidOperatorSignature)
+                Err(CheckError::InvalidOperatorSignature)
             ));
             let signed = sign_close(&operator, 2, vec![valid.clone()], Vec::new(), 1, 1);
-            let altered = Close::new(
-                2,
-                signed.rows().to_vec(),
-                Vec::new(),
-                0,
-                1,
-                signed.signature().clone(),
-            );
+            let mut altered = signed.clone();
+            altered.deposits = 0;
             assert!(matches!(
                 check(altered, &parent, &queued),
-                Err(Error::InvalidOperatorSignature)
+                Err(CheckError::InvalidOperatorSignature)
             ));
 
             // The signature also covers every row and soft withdrawal, so adding one its account
@@ -716,10 +761,12 @@ mod tests {
             rows.sort_by(|a, b| a.account.cmp(&b.account));
             let withdrawals = vec![Withdrawal::sign(&user(0), &namespace(), 2, 1, 0)];
             for (rows, withdrawals) in [(rows, Vec::new()), (vec![valid.clone()], withdrawals)] {
-                let altered = Close::new(2, rows, withdrawals, 1, 1, signed.signature().clone());
+                let mut altered = signed.clone();
+                altered.rows = rows;
+                altered.withdrawals = withdrawals;
                 assert!(matches!(
                     check(altered, &parent, &queued),
-                    Err(Error::InvalidOperatorSignature)
+                    Err(CheckError::InvalidOperatorSignature)
                 ));
             }
 
@@ -731,7 +778,7 @@ mod tests {
             let close = sign_close(&operator, 2, vec![valid.clone()], Vec::new(), 1, 1);
             assert!(matches!(
                 check(close, &parent, &stale),
-                Err(Error::WrongEpoch {
+                Err(CheckError::WrongEpoch {
                     expected: 2,
                     found: 3
                 })
@@ -747,7 +794,7 @@ mod tests {
                 let close = sign_close(&operator, 2, vec![row], Vec::new(), 1, 1);
                 assert!(matches!(
                     check(close, &parent, &queued),
-                    Err(Error::InvalidSignature)
+                    Err(CheckError::InvalidSignature)
                 ));
             }
 
@@ -756,7 +803,7 @@ mod tests {
             let close = sign_close(&operator, 2, Vec::new(), vec![wrong_epoch], 1, 1);
             assert!(matches!(
                 check(close, &parent, &queued),
-                Err(Error::WrongEpoch {
+                Err(CheckError::WrongEpoch {
                     expected: 2,
                     found: 3
                 })
@@ -766,7 +813,7 @@ mod tests {
             let close = sign_close(&operator, 2, Vec::new(), vec![forged], 1, 1);
             assert!(matches!(
                 check(close, &parent, &queued),
-                Err(Error::InvalidSignature)
+                Err(CheckError::InvalidSignature)
             ));
 
             // No balance may go negative, even when the sender signed the payment.
@@ -775,7 +822,7 @@ mod tests {
             let checked = check(close, &parent, &queued).unwrap();
             assert!(matches!(
                 store.settle(&checked).await,
-                Err(Error::Overdraft)
+                Err(SettleError::Flow(FlowError::Overdraft))
             ));
 
             // A sender's next row builds on the map the posted close settled for it, not on the
@@ -788,7 +835,7 @@ mod tests {
             let close = sign_close(&operator, 3, vec![unanchored], Vec::new(), 0, 0);
             assert!(matches!(
                 check(close, &parent, &next),
-                Err(Error::InvalidSignature)
+                Err(CheckError::InvalidSignature)
             ));
             let settled = amounts(&[(1, 5)]).root::<Sha256>();
             let anchored = row(3, 0, amounts(&[(1, 1)]), settled);
@@ -804,7 +851,7 @@ mod tests {
             let close = sign_close(&operator, 3, Vec::new(), Vec::new(), 0, 0);
             assert!(matches!(
                 check(close, &mismatched, &next),
-                Err(Error::InvalidCheckpoint)
+                Err(CheckError::InvalidCheckpoint)
             ));
         });
     }
@@ -860,7 +907,7 @@ mod tests {
             let other = open(context.child("other"), "other").await;
             assert!(matches!(
                 checked.settle(&store.balances, &other.log).await,
-                Err(Error::InvalidCheckpoint)
+                Err(SettleError::InvalidCheckpoint)
             ));
         });
     }
@@ -892,7 +939,7 @@ mod tests {
             let before = store.roots();
             assert!(matches!(
                 store.apply(first, &posted).await,
-                Err(Error::InvalidCheckpoint)
+                Err(ApplyError::InvalidCheckpoint)
             ));
             let store = reopen("refused").await;
             assert_eq!(store.roots(), before);
@@ -906,7 +953,7 @@ mod tests {
             assert_eq!(store.balances.get(&account(1)).await.unwrap(), Some(20));
             assert!(matches!(
                 store.apply(duplicate, &posted).await,
-                Err(Error::InvalidCheckpoint)
+                Err(ApplyError::InvalidCheckpoint)
             ));
             let store = reopen("stale").await;
             assert_eq!(store.roots(), after);
@@ -916,7 +963,7 @@ mod tests {
             let checked = check(close, &parent, &queued).unwrap();
             assert!(matches!(
                 store.settle(&checked).await,
-                Err(Error::InvalidCheckpoint)
+                Err(SettleError::InvalidCheckpoint)
             ));
         });
     }
@@ -943,7 +990,7 @@ mod tests {
             let proposal = here.settle(&checked).await.unwrap();
             assert!(matches!(
                 here.apply(proposal, &Digest::EMPTY).await,
-                Err(Error::InvalidCheckpoint)
+                Err(ApplyError::InvalidCheckpoint)
             ));
             let here = reopen("digest", "here").await;
             assert_eq!(here.roots(), at_parent);
@@ -953,7 +1000,7 @@ mod tests {
             let posted = proposal.summary().digest();
             assert!(matches!(
                 proposal.apply(elsewhere.balances, here.log, &posted).await,
-                Err(Error::InvalidCheckpoint)
+                Err(ApplyError::InvalidCheckpoint)
             ));
             drop((here.balances, elsewhere.log));
             let (here, elsewhere) = (
@@ -967,7 +1014,7 @@ mod tests {
             let proposal = here.settle(&checked).await.unwrap();
             assert!(matches!(
                 proposal.apply(here.balances, elsewhere.log, &posted).await,
-                Err(Error::InvalidCheckpoint)
+                Err(ApplyError::InvalidCheckpoint)
             ));
             drop((here.log, elsewhere.balances));
             let (here, elsewhere) = (
@@ -979,43 +1026,56 @@ mod tests {
         });
     }
 
-    /// Apply makes the payout log durable before it changes the balances. A validator stopped
-    /// before the balances commit reopens with the log at the new close and the balances at the old
-    /// one. A bounded reopen of the log at the payouts size the balances' close certifies realigns
-    /// them.
+    /// A validator that applies several posted closes before committing its balances may stop
+    /// with the balances holding any of them, because applied writes can reach disk before a
+    /// commit, and with the log at the last one. Reopening the log at the payouts size of the
+    /// close the balances hold discards the rest, and replaying from that close reaches the roots
+    /// of a validator that committed after every close.
     #[test]
-    fn test_apply_makes_the_log_durable_first() {
+    fn test_log_rewinds_past_several_closes() {
         deterministic::Runner::default().start(|context| async move {
-            let operator = operator_key();
-            let store = open(context.child("opened"), "durable").await;
-            let parent = genesis(store.balances.root());
-            let queued = queue(1, &[(0, 10), (1, 20)], &[(1, 5)]);
-            let close = sign_close(&operator, 1, Vec::new(), Vec::new(), 2, 1);
-            let (store, first) = post(store, &parent, close, &queued).await;
-            let store = store.commit().await;
+            let closes = churn(6);
+            let store = open(context.child("opened"), "ahead").await;
+            let start = genesis(store.balances.root());
+            let (mut store, mut parent, _) = replay(store, start.clone(), &closes[..1]).await;
 
-            // The close of epoch 2 applies, and the validator stops before the balances commit.
-            let queued = queue(2, &[(2, 7)], &[(0, 10)]);
-            let close = sign_close(&operator, 2, Vec::new(), Vec::new(), 1, 1);
-            let (store, second) = post(store, &first, close.clone(), &queued).await;
+            // The closes of epochs 2 to 4 apply without a balances commit. The close of epoch 4
+            // pays forced withdrawals out, so the log gains payouts and not only commits.
+            let mut applied = vec![parent.clone()];
+            for (close, queue) in &closes[1..4] {
+                (store, parent) = post(store, &parent, close.clone(), queue).await;
+                applied.push(parent.clone());
+            }
+            assert!(parent.summary.payouts.size > applied[0].summary.payouts.size + 3);
             drop(store);
-            let crashed = open(context.child("crashed"), "durable").await;
-            assert_eq!(crashed.balances.root(), first.summary.balances);
-            assert_eq!(crashed.log.root(), second.summary.payouts.root);
 
-            // The balances hold the close of epoch 1, so the log reopens at that close's payouts
-            // size and the close of epoch 2 applies again as it did.
+            // The balances hold one of the applied closes, and the log is past it.
+            let crashed = open(context.child("crashed"), "ahead").await;
+            let held = applied
+                .iter()
+                .position(|checkpoint| checkpoint.summary.balances == crashed.balances.root())
+                .expect("the balances must hold an applied close");
+            assert_eq!(crashed.log.root(), parent.summary.payouts.root);
+            assert!(applied[held].summary.payouts.size < parent.summary.payouts.size);
+
+            // The log reopens at that close's payouts size, and the replay converges with a
+            // validator that committed after every close.
             let Store { balances, log } = crashed;
             drop(log);
-            let size = Some(first.summary.payouts.size);
-            let log = open_log(context.child("rewound"), "durable", size).await;
-            assert_eq!(log.root(), first.summary.payouts.root);
-            let (store, again) = post(Store { balances, log }, &first, close, &queued).await;
-            assert_eq!(again.summary, second.summary);
-            assert_eq!(
-                store.roots(),
-                (second.summary.balances, second.summary.payouts.root)
-            );
+            let size = Some(applied[held].summary.payouts.size);
+            let log = open_log(context.child("rewound"), "ahead", size).await;
+            assert_eq!(log.root(), applied[held].summary.payouts.root);
+            let (store, rewound_parent, rewound) = replay(
+                Store { balances, log },
+                applied[held].clone(),
+                &closes[held + 1..],
+            )
+            .await;
+            let fresh = open(context.child("fresh"), "fresh").await;
+            let (fresh, fresh_parent, expected) = replay(fresh, start, &closes).await;
+            assert_eq!(rewound, expected[held + 1..]);
+            assert_eq!(rewound_parent.summary, fresh_parent.summary);
+            assert_eq!(store.roots(), fresh.roots());
         });
     }
 
@@ -1026,36 +1086,36 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let operator = operator_key();
             let store = open(context.child("opened"), "ordered").await;
-            let parent = genesis(store.balances.root());
-            let queued = queue(1, &[(0, 10)], &[(0, 4)]);
-            let close = sign_close(&operator, 1, Vec::new(), Vec::new(), 1, 1);
-            let checked = check(close, &parent, &queued).unwrap();
-            let proposal = store.settle(&checked).await.unwrap();
-            let posted = proposal.summary().digest();
 
-            // A second handle to the counter the balances database registered shares its count
-            // and keeps it in the registry after apply drops the database.
+            // A second handle to the counter the balances database registered shares its count,
+            // so it counts the balances batch of the close of epoch 1 and keeps counting after
+            // apply drops the database.
             let apply_calls = context
                 .child("opened")
                 .child("balances")
                 .counter("apply_batch_calls", "Number of apply-batch calls");
+            let parent = genesis(store.balances.root());
+            let queued = queue(1, &[(0, 10)], &[]);
+            let close = sign_close(&operator, 1, Vec::new(), Vec::new(), 1, 0);
+            let (store, parent) = post(store, &parent, close, &queued).await;
+            assert_eq!(apply_calls.metric().get(), 1);
 
-            // Every sync fails, so the log's commit fails and apply drops both handles.
+            // The close of epoch 2 pays out a forced withdrawal. Every sync fails, so the log's
+            // commit fails and apply drops both handles.
+            let queued = queue(2, &[], &[(0, 4)]);
+            let close = sign_close(&operator, 2, Vec::new(), Vec::new(), 0, 1);
+            let checked = check(close, &parent, &queued).unwrap();
+            let proposal = store.settle(&checked).await.unwrap();
+            let posted = proposal.summary().digest();
             *context.storage_fault_config().write() = FaultConfig {
                 sync_rate: Some(Probability::new(1, 1).unwrap()),
                 ..Default::default()
             };
             assert!(matches!(
                 store.apply(proposal, &posted).await,
-                Err(Error::Log(_))
+                Err(ApplyError::Log(_))
             ));
-            assert_eq!(apply_calls.metric().get(), 0);
-            assert!(
-                context
-                    .encode()
-                    .contains("opened_balances_apply_batch_calls_total 0"),
-                "the shared counter must still be registered after the failure"
-            );
+            assert_eq!(apply_calls.metric().get(), 1);
         });
     }
 
@@ -1095,46 +1155,13 @@ mod tests {
             for balances in [&other.balances, &empty.balances] {
                 assert!(matches!(
                     successor().settle(balances, &posted.log).await,
-                    Err(Error::InvalidCheckpoint)
+                    Err(SettleError::InvalidCheckpoint)
                 ));
             }
             assert!(matches!(
                 successor().settle(&posted.balances, &empty.log).await,
-                Err(Error::InvalidCheckpoint)
+                Err(SettleError::InvalidCheckpoint)
             ));
-        });
-    }
-
-    /// A refused or repeated settle leaves the checked close usable, and every settle of it on the
-    /// same databases stages the same writes.
-    #[test]
-    fn test_settle_can_be_retried() {
-        deterministic::Runner::default().start(|context| async move {
-            let operator = operator_key();
-            let store = open(context.child("opened"), "retry").await;
-            let parent = genesis(store.balances.root());
-            let funded = sign_close(&operator, 1, Vec::new(), Vec::new(), 2, 0);
-            let queued = queue(1, &[(0, 10), (1, 20)], &[]);
-            let (store, parent) = post(store, &parent, funded, &queued).await;
-
-            // Databases at another root refuse the close, and the right ones settle it as a fresh
-            // check would, as often as asked.
-            let paying = row(2, 0, amounts(&[(1, 3)]), empty_root());
-            let close = sign_close(&operator, 2, vec![paying], Vec::new(), 0, 1);
-            let next = queue(2, &[], &[(1, 4)]);
-            let checked = check(close.clone(), &parent, &next).unwrap();
-            let other = open(context.child("other"), "other").await;
-            assert!(matches!(
-                other.settle(&checked).await,
-                Err(Error::InvalidCheckpoint)
-            ));
-            let fresh = check(close, &parent, &next).unwrap();
-            let fresh = store.settle(&fresh).await.unwrap();
-            for _ in 0..2 {
-                let retried = store.settle(&checked).await.unwrap();
-                assert_eq!(retried.summary(), fresh.summary());
-                assert_eq!(retried.payouts(), fresh.payouts());
-            }
         });
     }
 

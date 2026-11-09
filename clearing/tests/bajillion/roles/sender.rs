@@ -2,7 +2,8 @@
 //! closes.
 
 use commonware_clearing::bajillion::{
-    Amount, Amounts, Epoch, Error, Namespace, Opening, Receipt, Request, State, States,
+    Amount, Amounts, Epoch, InvalidOpening, InvalidReceipt, Namespace, Opening, Receipt, Request,
+    RequestError, State, States,
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
@@ -27,9 +28,15 @@ pub enum Refusal {
     /// The sender holds no acknowledged state of the epoch.
     #[error("the sender holds no acknowledged state of the epoch")]
     NotAcknowledged,
-    /// A helper refused it.
+    /// The request's states do not derive.
     #[error(transparent)]
-    Error(#[from] Error),
+    Request(#[from] RequestError),
+    /// The receipts do not issue.
+    #[error(transparent)]
+    Receipt(#[from] InvalidReceipt),
+    /// The opening does not verify.
+    #[error(transparent)]
+    Opening(#[from] InvalidOpening),
 }
 
 /// What a posted close did with the pending request.
@@ -83,13 +90,13 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Hash for Persisted<P, O, 
         if let Some((request, states)) = pending {
             let States {
                 batch,
-                current: proposed,
+                current,
                 payments,
                 next,
             } = states;
             request.encode().hash(state);
             batch.hash(state);
-            proposed.hash(state);
+            current.hash(state);
             payments.hash(state);
             next.hash(state);
         }

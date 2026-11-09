@@ -1,8 +1,8 @@
 //! A reference operator that admits payments and soft withdrawals and closes each epoch.
 
 use commonware_clearing::bajillion::{
-    Admission, Amount, Amounts, Close, Epoch, Error, Flow, Limits, Namespace, Queue, Request, Row,
-    State, Withdrawal,
+    Admission, Amount, Amounts, AssemblyError, Close, Epoch, Flow, FlowError, Limits, Namespace,
+    Queue, Request, RequestError, Row, State, Withdrawal,
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
@@ -12,7 +12,7 @@ use core::{
 };
 use std::collections::BTreeMap;
 
-/// Why the operator refused a request or a soft withdrawal.
+/// Why the operator refused a request, a soft withdrawal, or a close.
 #[derive(Debug, thiserror::Error)]
 pub enum Refusal {
     /// Admitting it would take the close past the operator's limits.
@@ -21,9 +21,29 @@ pub enum Refusal {
     /// The batch exceeds what the sender can still spend in the epoch.
     #[error("the batch exceeds what the sender can still spend in the epoch")]
     InsufficientBalance,
-    /// A helper refused it.
+    /// The soft withdrawal or the queue is for another epoch.
+    #[error("wrong epoch: expected {expected}, found {found}")]
+    WrongEpoch {
+        /// The epoch the operator admits in.
+        expected: Epoch,
+        /// The epoch found.
+        found: Epoch,
+    },
+    /// The soft withdrawal's signature does not verify.
+    #[error("invalid withdrawal signature")]
+    InvalidWithdrawal,
+    /// The next epoch does not fit.
+    #[error("epoch overflow")]
+    Overflow,
+    /// The request does not verify or extend the sender's record.
     #[error(transparent)]
-    Error(#[from] Error),
+    Request(#[from] RequestError),
+    /// The rows and withdrawals do not assemble into a close.
+    #[error(transparent)]
+    Assembly(#[from] AssemblyError),
+    /// A flow of the close does not settle.
+    #[error(transparent)]
+    Flow(#[from] FlowError),
 }
 
 /// Per-account records that count their lookups. The count is not part of the records' identity,
@@ -326,14 +346,13 @@ impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Operator<P, K, H, A> {
     pub fn withdraw(&mut self, withdrawal: Withdrawal<P, A>) -> Result<(), Refusal> {
         let epoch = self.persisted.epoch;
         if withdrawal.epoch != epoch {
-            return Err(Error::WrongEpoch {
+            return Err(Refusal::WrongEpoch {
                 expected: epoch,
                 found: withdrawal.epoch,
-            }
-            .into());
+            });
         }
         if !withdrawal.verify(&self.namespace) {
-            return Err(Error::InvalidSignature.into());
+            return Err(Refusal::InvalidWithdrawal);
         }
 
         // A request already collected stays as it is, and a new one must fit the limits (O5).
@@ -360,15 +379,15 @@ impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Operator<P, K, H, A> {
         queue: &Queue<P, A>,
         deposits: u64,
         forced_withdrawals: u64,
-    ) -> Result<(Close<P, K::PublicKey, A>, Vec<(P, Flow<A>)>), Error> {
+    ) -> Result<(Close<P, K::PublicKey, A>, Vec<(P, Flow<A>)>), Refusal> {
         let epoch = self.persisted.epoch;
         if queue.epoch != epoch {
-            return Err(Error::WrongEpoch {
+            return Err(Refusal::WrongEpoch {
                 expected: epoch,
                 found: queue.epoch,
             });
         }
-        let next = epoch.checked_add(1).ok_or(Error::Overflow)?;
+        let next = epoch.checked_add(1).ok_or(Refusal::Overflow)?;
         let (close, flows) = Close::assemble::<H, K>(
             &self.signer,
             &self.namespace,
@@ -386,7 +405,7 @@ impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Operator<P, K, H, A> {
                 let (balance, _) = flow.settle(self.balance(account))?;
                 Ok((account.clone(), balance))
             })
-            .collect::<Result<Vec<_>, Error>>()?;
+            .collect::<Result<Vec<_>, FlowError>>()?;
 
         // Every flow of the close applies at once, with the close's row roots, before anything of
         // the next epoch is admitted.

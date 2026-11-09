@@ -1,6 +1,6 @@
 //! Summaries of closes, certified by validators and posted to the ledger.
 
-use super::{Amount, Epoch, Error, Namespace, Payout, matrix};
+use super::{Amount, Epoch, InvalidCount, Namespace, Payout, matrix};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, Encode, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{
@@ -17,6 +17,7 @@ use core::{
     ops::RangeInclusive,
 };
 use rand_core::CryptoRng;
+use thiserror::Error;
 
 /// A ledger queue's requests that one close processes, as their count and the queue's running hash.
 ///
@@ -131,6 +132,28 @@ where
     }
 }
 
+/// Why the ledger refuses a post.
+#[derive(Debug, Error)]
+pub enum SummaryError {
+    /// The summary is for another epoch.
+    #[error("wrong epoch: expected {expected}, found {found}")]
+    WrongEpoch {
+        /// The epoch whose close the ledger expects.
+        expected: Epoch,
+        /// The epoch of the summary.
+        found: Epoch,
+    },
+    /// The summary does not follow the last posted one.
+    #[error("summary does not follow the last posted one")]
+    WrongParent,
+    /// A count is outside the queue's bounds.
+    #[error(transparent)]
+    InvalidCount(#[from] InvalidCount),
+    /// The certificate does not verify.
+    #[error("invalid certificate")]
+    InvalidCertificate,
+}
+
 /// The effects of one close, as certified by validators and posted to the ledger.
 ///
 /// A summary's digest ([Digestible]) is what the next summary names as its parent, so the hasher
@@ -192,11 +215,8 @@ impl<H: Hasher> Summary<H> {
     /// post this summary under `certificate`. `deposits` and `forced_withdrawals` each range from
     /// the queue's required count to its length.
     ///
-    /// Returns [Error::WrongEpoch] unless the summary is for `epoch`, [Error::WrongParent] unless
-    /// it names `parent`, [Error::InvalidCount] unless each count is in its range, and
-    /// [Error::InvalidCertificate] unless `certificate` verifies. The certificate is checked last,
-    /// and it alone vouches for the matrix and balances roots, the payouts size and root, and the
-    /// running hashes.
+    /// The certificate is checked last, and it alone vouches for the matrix and balances roots,
+    /// the payouts size and root, and the running hashes.
     #[allow(clippy::too_many_arguments)]
     pub fn verify<V, R>(
         &self,
@@ -207,27 +227,27 @@ impl<H: Hasher> Summary<H> {
         parent: &H::Digest,
         deposits: RangeInclusive<u64>,
         forced_withdrawals: RangeInclusive<u64>,
-    ) -> Result<(), Error>
+    ) -> Result<(), SummaryError>
     where
         V: for<'a> Verifier<Subject<'a, H::Digest> = &'a Self>,
         R: CryptoRng,
     {
         if self.epoch != epoch {
-            return Err(Error::WrongEpoch {
+            return Err(SummaryError::WrongEpoch {
                 expected: epoch,
                 found: self.epoch,
             });
         }
         if self.parent != *parent {
-            return Err(Error::WrongParent);
+            return Err(SummaryError::WrongParent);
         }
         if !deposits.contains(&self.deposits.count)
             || !forced_withdrawals.contains(&self.forced_withdrawals.count)
         {
-            return Err(Error::InvalidCount);
+            return Err(SummaryError::InvalidCount(InvalidCount));
         }
         if !verifier.verify_certificate::<_, H::Digest>(rng, self, certificate, &Sequential) {
-            return Err(Error::InvalidCertificate);
+            return Err(SummaryError::InvalidCertificate);
         }
         Ok(())
     }
@@ -574,19 +594,19 @@ mod tests {
             };
             assert!(matches!(
                 verify(&wrong, certificate, &parent, 0..=2, 0..=1),
-                Err(Error::WrongEpoch {
+                Err(SummaryError::WrongEpoch {
                     expected: 1,
                     found: 2
                 })
             ));
             assert!(matches!(
                 verify(&summary, certificate, &Digest::EMPTY, 0..=2, 0..=1),
-                Err(Error::WrongParent)
+                Err(SummaryError::WrongParent)
             ));
             for (deposits, forced_withdrawals) in [(3..=4, 0..=1), (0..=1, 0..=1), (0..=2, 2..=2)] {
                 assert!(matches!(
                     verify(&summary, certificate, &parent, deposits, forced_withdrawals),
-                    Err(Error::InvalidCount)
+                    Err(SummaryError::InvalidCount(InvalidCount))
                 ));
             }
         }
@@ -606,12 +626,12 @@ mod tests {
             let changed = Summary { payouts, ..summary };
             assert!(matches!(
                 verify(&changed, &certificate, &parent, 0..=2, 0..=1),
-                Err(Error::InvalidCertificate)
+                Err(SummaryError::InvalidCertificate)
             ));
         }
         assert!(matches!(
             verify(&summary, &other, &parent, 0..=2, 0..=1),
-            Err(Error::InvalidCertificate)
+            Err(SummaryError::InvalidCertificate)
         ));
     }
 

@@ -146,7 +146,9 @@
 //! A request also signs a state for the next epoch that pays only the batch, on top of the map
 //! without it. A payment refused because its epoch just closed then settles in the next epoch
 //! without a new request. Each state commits to the root it builds on, so the sender's row in the
-//! close of the request's epoch decides which of the two can settle.
+//! close of the request's epoch decides which of the two can settle. Sending a request therefore
+//! authorizes the batch in the next epoch as well, and the operator needs no copy of the request
+//! to settle that state.
 //!
 //! ```text
 //!              close(e-1)               close(e)                 close(e+1)
@@ -182,9 +184,9 @@
 //!
 //! - **S4.** Treat a refusal as final only for a request delivered once, with no copy in flight.
 //!   Otherwise an earlier copy may have been admitted, and the record diverges as in S1. A refused
-//!   request's state for the next epoch can still be admitted from a replayed copy until the post
-//!   of the request's epoch settles a map other than the one that state builds on, with the same
-//!   outcome.
+//!   request's state for the next epoch can still settle, with or without a replayed copy, until
+//!   the post of the request's epoch settles a map other than the one that state builds on, with
+//!   the same outcome.
 //!
 //! - **S5.** Resolve a pending request against each post from its epoch on, in epoch order, before
 //!   dropping it or building on a posted row root. The request settled in epoch `e` if it has a
@@ -419,8 +421,9 @@
 //! the balance writes durable, and committing and pruning the balances leave their root unchanged.
 //!
 //! Applied balance writes can survive a crash before the balances commit, so after a crash the
-//! balances may hold either close. Because the log is durable first, it is then at or past the
-//! close the balances hold. A restart rewinds it by reopening it at that close's payouts size (V2).
+//! balances may hold any close applied since their last commit. Because the log is durable first,
+//! it is then at or past the close the balances hold. A restart rewinds it by reopening it at that
+//! close's payouts size (V2).
 //!
 //! Because each root commits to every write, an empty batch changes it and the same balances
 //! reached through other batches give another root. Validators therefore apply one batch to each
@@ -461,8 +464,8 @@
 //!
 //! - **V3.** Pass [Close::check] the ledger's queues as final ledger state holds them while the
 //!   ledger expects the close. Queues grow only at their tail, so read them again at a later final
-//!   block before treating an [Error::InvalidCount] refusal as a rejection. Otherwise the validator
-//!   rejects a valid close or credits requests the ledger does not hold.
+//!   block before treating a [CheckError::InvalidCount] refusal as a rejection. Otherwise the
+//!   validator rejects a valid close or credits requests the ledger does not hold.
 //!
 //! - **V4.** Before releasing an attestation, persist the close, the requests it processes
 //!   ([Queue::prefix], in the [Deposit] and [ForcedWithdrawal] encodings), and the proposal's
@@ -472,9 +475,9 @@
 //!
 //! - **V5.** Apply exactly the posted closes, once each, in epoch order, each to databases at its
 //!   parent's roots, and no other batch. Otherwise a root diverges, and [Checked::settle] and
-//!   [Proposal::apply] refuse with [Error::InvalidCheckpoint] until it recovers by reopening at a
-//!   retained posted commit, by replaying persisted posted closes, or by state sync to a posted
-//!   root.
+//!   [Proposal::apply] refuse with [SettleError::InvalidCheckpoint] and
+//!   [ApplyError::InvalidCheckpoint] until it recovers by reopening at a retained posted commit, by
+//!   replaying persisted posted closes, or by state sync to a posted root.
 //!
 //! - **V6.** Keep each posted matrix while receivers may still audit it, and serve openings
 //!   ([Matrix::open]). Serve each close and the requests it processes to validators that did not
@@ -512,8 +515,8 @@
 //!                           +------------------------------+
 //! ```
 //!
-//! The funds the ledger holds back the balances as of the last post, the deposits still queued, and
-//! the posted payouts not yet paid. The ledger counts the funds held as one amount. The last posted
+//! The ledger's funds back the balances as of the last post, the deposits still queued, and the
+//! posted payouts not yet paid. The ledger counts the funds held as one amount. The last posted
 //! roots, the queued deposits, and the claimed ranges determine how much backs each part.
 //!
 //! ```text
@@ -548,8 +551,8 @@
 //!
 //! - **L3.** Refuse a deposit that would take the funds held past the largest amount. Otherwise a
 //!   close can credit a balance past the largest amount, and validators reject it with
-//!   [Error::Overflow]. When the excess comes from its rows or a required deposit, no acceptable
-//!   close exists, as in O3.
+//!   [FlowError::Overflow]. When the excess comes from its rows or a required deposit, no
+//!   acceptable close exists, as in O3.
 //!
 //! - **L4.** Queue a forced withdrawal only on a request its account authenticated. Otherwise
 //!   anyone can force an account's balance out and learn the amount.
@@ -698,7 +701,6 @@
 
 mod amounts;
 mod close;
-mod error;
 mod lookup;
 mod matrix;
 mod namespace;
@@ -710,19 +712,23 @@ mod validator;
 #[cfg(test)]
 mod tests;
 
-pub use amounts::Amounts;
-pub use close::{Close, Deposit, ForcedWithdrawal, Limits, Queue, Row, Withdrawal};
+pub use amounts::{Amounts, AmountsError};
+pub use close::{
+    AssemblyError, Close, Deposit, ForcedWithdrawal, InvalidCount, Limits, Queue, Row, Withdrawal,
+};
 pub use commonware_utils::Unsigned as Amount;
-pub use error::Error;
-pub use lookup::Lookup;
+pub use lookup::{InvalidOpening, Lookup};
 pub use matrix::{Matrix, Opening};
 pub use namespace::Namespace;
-pub use payment::{Admission, Challenge, Receipt, Request, Signatures, State, States, Verified};
-pub use settlement::Flow;
-pub use summary::{Payouts, Processed, Summary};
+pub use payment::{
+    Admission, Challenge, ChallengeError, InvalidReceipt, Receipt, Request, RequestError,
+    Signatures, State, States, Verified,
+};
+pub use settlement::{Flow, FlowError};
+pub use summary::{Payouts, Processed, Summary, SummaryError};
 pub use validator::{
-    BalanceProof, Balances, Checked, Checkpoint, Payout, PayoutBatch, PayoutLog, PayoutProof,
-    Proposal,
+    ApplyError, BalanceProof, Balances, CheckError, Checked, Checkpoint, Payout, PayoutBatch,
+    PayoutLog, PayoutProof, Proposal, SettleError,
 };
 
 /// An epoch number. Epochs start at one, and epoch zero names the state before the first close.

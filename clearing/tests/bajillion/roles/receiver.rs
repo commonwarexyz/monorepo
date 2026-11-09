@@ -1,7 +1,7 @@
 //! A reference receiver that holds the operator to its preconfirmations.
 
 use commonware_clearing::bajillion::{
-    Amount, Challenge, Epoch, Error, Namespace, Opening, Receipt,
+    Amount, Challenge, Epoch, InvalidOpening, InvalidReceipt, Namespace, Opening, Receipt,
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Digest, Hasher, PublicKey};
@@ -26,9 +26,12 @@ pub enum Refusal {
     /// The close of the audited epoch has not posted.
     #[error("the close of the audited epoch has not posted")]
     NotClosed,
-    /// A helper refused it.
+    /// The receipt does not verify.
     #[error(transparent)]
-    Error(#[from] Error),
+    Receipt(#[from] InvalidReceipt),
+    /// The opening does not verify.
+    #[error(transparent)]
+    Opening(#[from] InvalidOpening),
 }
 
 /// The largest receipt held per epoch and sender.

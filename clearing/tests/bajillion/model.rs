@@ -8,7 +8,7 @@
 //! The model keeps its own record of what it sent, what was acknowledged, what each receiver
 //! kept, what was deposited, and what was claimed. From that record it predicts the outcome of
 //! every step before running it, and it computes every balance and payout the posted closes
-//! should produce. A step whose outcome differs from the prediction is a violation. Before a
+//! should produce. A step whose outcome differs from the prediction is a violation. To predict a
 //! step, the model reads a role only for the epoch it is in and the queues the ledger holds, and
 //! its record determines both.
 //!
@@ -52,12 +52,12 @@
 //! ```
 //!
 //! The invariants are the properties below. Custody backs the balances, the unprocessed deposits,
-//! and the unpaid payouts. Every step had the outcome the model predicted. The operator holds the
-//! committee's balances after the last close it released. The committee's balances and payouts
-//! are what the released closes settle. Every receipt of a posted epoch is honored unless its
-//! admission was forgotten. A request is admitted in at most one epoch unless its admission was
-//! forgotten. Claimed ranges never overlap or touch. A halt leaves nothing in custody once every
-//! claim and payout is paid.
+//! and the unpaid payouts, so a halt leaves nothing in custody once every claim and payout is paid.
+//! Every step had the outcome the model predicted. The operator holds the committee's balances
+//! after the last close it released. The committee's balances and payouts are what the released
+//! closes settle. Every receipt of a posted epoch is honored unless its admission was forgotten. A
+//! request is admitted in at most one epoch unless its admission was forgotten. Claimed ranges
+//! never overlap or touch.
 //!
 //! The witnesses each workload requires are listed with it. They cover admission and withdrawals
 //! while a close awaits its post, a request admitted in the epoch after its own and its copy
@@ -97,7 +97,7 @@ use crate::roles::{
 };
 use bytes::BufMut;
 use commonware_clearing::bajillion::{
-    BalanceProof, Challenge, Error, ForcedWithdrawal, Opening, PayoutProof, Receipt, Request,
+    BalanceProof, Challenge, ForcedWithdrawal, Opening, PayoutProof, Receipt, Request, RequestError,
 };
 use commonware_codec::{EncodeSize, Write};
 use commonware_cryptography::{Digest as _, ed25519::Signature};
@@ -816,7 +816,7 @@ impl Workload {
                     self.witness("a soft withdrawal is collected while a close awaits its post");
                 }
             }
-            Err(Admitting::Error(Error::WrongEpoch { .. })) if !open => {
+            Err(Admitting::WrongEpoch { .. }) if !open => {
                 self.witness("a soft withdrawal for a closed epoch is refused");
             }
             outcome => world.fail(format!("soft withdrawal: {outcome:?}")),
@@ -1151,8 +1151,8 @@ impl Model for Workload {
                 let actual = match &outcome {
                     Ok(_) if world.operator.payments(&account).cloned() == before => Verdict::Retry,
                     Ok(_) => Verdict::Admit,
-                    Err(Admitting::Error(Error::WrongEpoch { .. })) => Verdict::WrongEpoch,
-                    Err(Admitting::Error(Error::InvalidSignature)) => Verdict::Stale,
+                    Err(Admitting::Request(RequestError::WrongEpoch { .. })) => Verdict::WrongEpoch,
+                    Err(Admitting::Request(RequestError::InvalidSignature)) => Verdict::Stale,
                     Err(Admitting::InsufficientBalance) => Verdict::Insufficient,
                     Err(refusal) => {
                         world.fail(format!("deliver: {refusal}"));
@@ -1180,7 +1180,11 @@ impl Model for Workload {
                         world.admitted.insert((request, epoch));
                     }
                     Verdict::Retry => self.witness("a retried request is acknowledged again"),
-                    Verdict::Stale if sent.copies > 1 && epoch > sent.request.0.epoch => {
+                    Verdict::Stale
+                        if sent.copies > 1
+                            && epoch > sent.request.0.epoch
+                            && world.admitted.contains(&(request, sent.request.0.epoch)) =>
+                    {
                         self.witness("a copy is refused after its own epoch settled it");
                     }
                     _ => {}
@@ -1618,23 +1622,6 @@ impl Model for Workload {
                         .all(|pair| pair[0].1 < pair[1].0)
                 },
             ),
-            Property::always(
-                "a halt leaves nothing in custody once every claim and payout is paid",
-                |model: &Self, world: &World| {
-                    if !world.halted {
-                        return true;
-                    }
-                    let (balances, payouts) = model.settled(world, false);
-                    let unprocessed = model.unprocessed(world);
-                    let owed = (0..model.accounts.len()).any(|user| {
-                        (balances[user] > 0 && !world.claimed.contains(&user))
-                            || (unprocessed[user] > 0 && !world.claimed_deposits.contains(&user))
-                    }) || payouts
-                        .keys()
-                        .any(|payout| !world.withdrawn.contains(payout));
-                    owed || world.ledger.custody() == 0
-                },
-            ),
         ]
     }
 }
@@ -1690,10 +1677,10 @@ const NOTHING: Budget = Budget {
     halts: 0,
 };
 
-/// One payment attempt around the funding cut settles in the epoch after its own, stays pending,
-/// or is refused, and the funding posts.
+/// One payment attempt around the funding cut is refused, or is admitted and stays pending, and
+/// the funding posts. A request the cut overtakes is admitted in the epoch after its own.
 #[test]
-fn test_model_settles_one_payment() {
+fn test_model_admits_one_payment() {
     check(
         workload(
             1,

@@ -1,12 +1,63 @@
 //! Payment states, requests, acknowledgements, receipts, and challenges.
 
-use super::{Amount, Amounts, Epoch, Error, Namespace, Opening, amounts::leaf};
+use super::{Amount, Amounts, Epoch, InvalidOpening, Namespace, Opening, amounts::leaf};
 use bytes::BufMut;
 use commonware_codec::{
     Buf, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
 use commonware_storage::bmt::Proof;
+use thiserror::Error;
+
+/// Why a request is refused.
+#[derive(Debug, Error)]
+pub enum RequestError {
+    /// The request has no state for the epoch.
+    #[error("wrong epoch: expected {expected}, found {found}")]
+    WrongEpoch {
+        /// The epoch the operator admits in.
+        expected: Epoch,
+        /// The epoch of the request.
+        found: Epoch,
+    },
+    /// The batch pays no receiver.
+    #[error("no receiver paid")]
+    NoReceivers,
+    /// The sender's signature does not verify, or covers a state the operator would not
+    /// countersign.
+    #[error("invalid signature")]
+    InvalidSignature,
+    /// The next epoch, an amount, or the payment map does not fit while deriving the states.
+    #[error("arithmetic overflow")]
+    Overflow,
+}
+
+/// A receipt does not verify, or cannot be issued from the state and map given.
+#[derive(Debug, Error)]
+#[error("invalid receipt")]
+pub struct InvalidReceipt;
+
+/// Why a challenge is refused.
+#[derive(Debug, Error)]
+pub enum ChallengeError {
+    /// The receipt is for another epoch.
+    #[error("wrong epoch: expected {expected}, found {found}")]
+    WrongEpoch {
+        /// The epoch of the posted close.
+        expected: Epoch,
+        /// The epoch of the receipt.
+        found: Epoch,
+    },
+    /// The opening does not verify.
+    #[error(transparent)]
+    InvalidOpening(#[from] InvalidOpening),
+    /// The close credits at least what the receipt promises.
+    #[error("challenge does not contradict the close")]
+    NoContradiction,
+    /// The receipt does not verify.
+    #[error(transparent)]
+    InvalidReceipt(#[from] InvalidReceipt),
+}
 
 /// A sender's commitment to its payment map in one epoch.
 ///
@@ -177,29 +228,26 @@ pub struct Request<P: PublicKey, D: Digest, A: Amount> {
 }
 
 impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
-    /// Derives the states of `account`'s request to pay `batch` in `epoch`, where `payments` is its
-    /// latest countersigned map of `epoch`. The state of `epoch` adds `batch` to `payments` on top
-    /// of `previous`, and the state of the next epoch pays only `batch` on top of `payments`.
-    ///
-    /// Returns [Error::NoReceivers] if `batch` is empty, and [Error::Overflow] if the next epoch or
-    /// an amount overflows.
+    /// Derives the states of `account`'s request to pay `batch` in `epoch`, where `latest` is its
+    /// latest countersigned map of `epoch`. The state of `epoch` adds `batch` to `latest` on top of
+    /// `previous`, and the state of the next epoch pays only `batch` on top of `latest`.
     pub fn states<H: Hasher<Digest = D>>(
         epoch: Epoch,
         account: P,
         batch: Amounts<P, A>,
-        payments: &Amounts<P, A>,
+        latest: &Amounts<P, A>,
         previous: &D,
-    ) -> Result<States<P, D, A>, Error> {
+    ) -> Result<States<P, D, A>, RequestError> {
         if batch.is_empty() {
-            return Err(Error::NoReceivers);
+            return Err(RequestError::NoReceivers);
         }
         let next = State {
-            epoch: epoch.checked_add(1).ok_or(Error::Overflow)?,
+            epoch: epoch.checked_add(1).ok_or(RequestError::Overflow)?,
             account: account.clone(),
             payments: batch.root::<H>(),
-            previous: payments.root::<H>(),
+            previous: latest.root::<H>(),
         };
-        let extended = payments.combine(&batch)?;
+        let extended = latest.combine(&batch).map_err(|_| RequestError::Overflow)?;
         Ok(States {
             batch,
             current: State {
@@ -215,26 +263,23 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
 
     /// Verifies the sender's signature over the request's state for `epoch`, either its state of
     /// its own epoch or its state of the next.
-    ///
-    /// Returns [Error::WrongEpoch] if the request has no state for `epoch`, [Error::NoReceivers] if
-    /// the batch is empty, and [Error::InvalidSignature] if the signature does not verify.
     pub fn verify<H: Hasher<Digest = D>>(
         &self,
         namespace: &Namespace,
         epoch: Epoch,
-    ) -> Result<Verified<'_, P, D, A>, Error> {
+    ) -> Result<Verified<'_, P, D, A>, RequestError> {
         let (payments, previous, signature) = if epoch == self.epoch {
             (self.payments, self.previous, &self.signatures.current)
         } else if self.epoch.checked_add(1) == Some(epoch) {
             (self.batch.root::<H>(), self.latest, &self.signatures.next)
         } else {
-            return Err(Error::WrongEpoch {
+            return Err(RequestError::WrongEpoch {
                 expected: epoch,
                 found: self.epoch,
             });
         };
         if self.batch.is_empty() {
-            return Err(Error::NoReceivers);
+            return Err(RequestError::NoReceivers);
         }
         let state = State {
             epoch,
@@ -243,7 +288,7 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
             previous,
         };
         if !state.verify(namespace, signature) {
-            return Err(Error::InvalidSignature);
+            return Err(RequestError::InvalidSignature);
         }
         Ok(Verified {
             request: self,
@@ -366,27 +411,27 @@ impl<P: PublicKey, D: Digest, A: Amount> Verified<'_, P, D, A> {
     /// the root of the sender's row in the close of the epoch before, or the empty map's root.
     ///
     /// Returns [Admission::Retry] if the state is `latest`'s, and [Admission::New] if it pays
-    /// `latest`'s map plus the batch on top of `previous`. Returns [Error::InvalidSignature]
-    /// otherwise, including for a batch that overflows the map.
+    /// `latest`'s map plus the batch on top of `previous`. Any other state is refused as one
+    /// the operator would not countersign, including one whose batch overflows the map.
     #[allow(clippy::type_complexity)]
     pub fn admit<H: Hasher<Digest = D>>(
         self,
         latest: Option<(&State<P, D>, &Amounts<P, A>)>,
         previous: &D,
-    ) -> Result<Admission<P, D, A>, Error> {
+    ) -> Result<Admission<P, D, A>, RequestError> {
         if latest.is_some_and(|(state, _)| *state == self.state) {
             return Ok(Admission::Retry(self.state));
         }
         if self.state.previous != *previous {
-            return Err(Error::InvalidSignature);
+            return Err(RequestError::InvalidSignature);
         }
         let empty = Amounts::empty();
         let payments = latest.map_or(&empty, |(_, payments)| payments);
         let extended = payments
             .combine(&self.request.batch)
-            .map_err(|_| Error::InvalidSignature)?;
+            .map_err(|_| RequestError::InvalidSignature)?;
         if extended.root::<H>() != self.state.payments {
-            return Err(Error::InvalidSignature);
+            return Err(RequestError::InvalidSignature);
         }
         Ok(Admission::New {
             state: self.state,
@@ -441,23 +486,23 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Receipt<P, O, D, A> {
     /// the operator's `acknowledgement` countersigning it, and `payments`, the map it commits to.
     /// The receipts verify exactly when both signatures do.
     ///
-    /// Returns [Error::InvalidReceipt] if `payments` does not commit to `state` or holds no amount
-    /// for a receiver.
+    /// Returns [InvalidReceipt] if `payments` does not commit to `state` or holds no amount for a
+    /// receiver.
     pub fn issue<H: Hasher<Digest = D>>(
         state: &State<P, D>,
         signature: &P::Signature,
         acknowledgement: &O::Signature,
         payments: &Amounts<P, A>,
         receivers: impl IntoIterator<Item = P>,
-    ) -> Result<Vec<Self>, Error> {
+    ) -> Result<Vec<Self>, InvalidReceipt> {
         let tree = payments.tree::<H>();
         if tree.root() != state.payments {
-            return Err(Error::InvalidReceipt);
+            return Err(InvalidReceipt);
         }
         receivers
             .into_iter()
             .map(|receiver| {
-                let position = payments.position(&receiver).ok_or(Error::InvalidReceipt)? as u32;
+                let position = payments.position(&receiver).ok_or(InvalidReceipt)? as u32;
                 Ok(Self {
                     state: state.clone(),
                     signature: signature.clone(),
@@ -474,18 +519,18 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Receipt<P, O, D, A> {
     }
 
     /// Verifies that both signatures cover the state and that its payment map holds the receipt's
-    /// entry. Returns [Error::InvalidReceipt] otherwise.
+    /// entry. Returns [InvalidReceipt] otherwise.
     pub fn verify<H: Hasher<Digest = D>>(
         &self,
         namespace: &Namespace,
         operator: &O,
-    ) -> Result<(), Error> {
+    ) -> Result<(), InvalidReceipt> {
         if !self.state.verify(namespace, &self.signature)
             || !self
                 .state
                 .verify_acknowledgement(namespace, operator, &self.acknowledgement)
         {
-            return Err(Error::InvalidReceipt);
+            return Err(InvalidReceipt);
         }
         self.proof
             .verify_element_inclusion::<H>(
@@ -493,7 +538,7 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Receipt<P, O, D, A> {
                 &leaf::<H, P, A>(&self.receiver, self.amount),
                 &self.state.payments,
             )
-            .map_err(|_| Error::InvalidReceipt)
+            .map_err(|_| InvalidReceipt)
     }
 }
 
@@ -571,11 +616,7 @@ pub struct Challenge<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
 
 impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Challenge<P, O, D, A> {
     /// Checks that the posted close of `epoch` with payment matrix root `matrix` credits the
-    /// receipt's receiver less from its sender than the receipt promises.
-    ///
-    /// Returns [Error::WrongEpoch] unless the receipt is for `epoch`, [Error::InvalidOpening]
-    /// unless the opening verifies, [Error::NoContradiction] unless the close credits less, and
-    /// [Error::InvalidReceipt] unless the receipt verifies. The receipt's signatures are checked
+    /// receipt's receiver less from its sender than the receipt promises. The receipt is checked
     /// last.
     pub fn verify<H: Hasher<Digest = D>>(
         &self,
@@ -583,10 +624,10 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Challenge<P, O, D, A> {
         operator: &O,
         epoch: Epoch,
         matrix: &D,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ChallengeError> {
         let receipt = &self.receipt;
         if receipt.state.epoch != epoch {
-            return Err(Error::WrongEpoch {
+            return Err(ChallengeError::WrongEpoch {
                 expected: epoch,
                 found: receipt.state.epoch,
             });
@@ -595,9 +636,10 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Challenge<P, O, D, A> {
             self.opening
                 .verify::<H>(matrix, &receipt.state.account, &receipt.receiver)?;
         if credited >= receipt.amount {
-            return Err(Error::NoContradiction);
+            return Err(ChallengeError::NoContradiction);
         }
-        receipt.verify::<H>(namespace, operator)
+        receipt.verify::<H>(namespace, operator)?;
+        Ok(())
     }
 }
 
@@ -764,7 +806,7 @@ mod tests {
                     .verify::<Sha256>(&namespace, 3)
                     .unwrap()
                     .admit::<Sha256>(None, &states.current.payments),
-                Err(Error::InvalidSignature)
+                Err(RequestError::InvalidSignature)
             ));
         }
     }
@@ -794,7 +836,7 @@ mod tests {
                 &Amounts::empty(),
                 &empty_root(),
             ),
-            Err(Error::NoReceivers)
+            Err(RequestError::NoReceivers)
         ));
         assert!(matches!(
             TestRequest::states::<Sha256>(
@@ -804,7 +846,7 @@ mod tests {
                 &Amounts::empty(),
                 &empty_root(),
             ),
-            Err(Error::Overflow)
+            Err(RequestError::Overflow)
         ));
         assert!(matches!(
             TestRequest::states::<Sha256>(
@@ -814,7 +856,7 @@ mod tests {
                 &amounts(&[(1, u64::MAX)]),
                 &empty_root(),
             ),
-            Err(Error::Overflow)
+            Err(RequestError::Overflow)
         ));
     }
 
@@ -829,18 +871,19 @@ mod tests {
         for epoch in [1, 4] {
             assert!(matches!(
                 request.verify::<Sha256>(&namespace, epoch),
-                Err(Error::WrongEpoch { expected, found: 2 }) if expected == epoch
+                Err(RequestError::WrongEpoch { expected, found: 2 }) if expected == epoch
             ));
         }
 
-        // A request paying no one is refused before its signature is checked.
+        // A request paying no one is refused, even though its state for its own epoch carries a
+        // valid signature.
         let empty = TestRequest {
             batch: Amounts::empty(),
             ..request.clone()
         };
         assert!(matches!(
             empty.verify::<Sha256>(&namespace, 2),
-            Err(Error::NoReceivers)
+            Err(RequestError::NoReceivers)
         ));
 
         // The signatures cover the account, the claimed roots, the next state's batch, and the
@@ -885,13 +928,13 @@ mod tests {
         ] {
             assert!(matches!(
                 request.verify::<Sha256>(&namespace, epoch),
-                Err(Error::InvalidSignature)
+                Err(RequestError::InvalidSignature)
             ));
         }
         for epoch in [2, 3] {
             assert!(matches!(
                 request.verify::<Sha256>(&Namespace::new(b"other"), epoch),
-                Err(Error::InvalidSignature)
+                Err(RequestError::InvalidSignature)
             ));
         }
     }
@@ -926,7 +969,7 @@ mod tests {
         ] {
             assert!(matches!(
                 admit(states, latest, empty_root()),
-                Err(Error::InvalidSignature)
+                Err(RequestError::InvalidSignature)
             ));
         }
         let full = amounts(&[(1, u64::MAX)]);
@@ -937,7 +980,7 @@ mod tests {
         };
         assert!(matches!(
             admit(&fresh, Some((&at_limit, &full)), empty_root()),
-            Err(Error::InvalidSignature)
+            Err(RequestError::InvalidSignature)
         ));
 
         // The state extending the latest map is admitted.
@@ -976,14 +1019,8 @@ mod tests {
                 [account(receiver)],
             )
         };
-        assert!(matches!(
-            issue(&amounts(&[(2, 4)]), 2),
-            Err(Error::InvalidReceipt)
-        ));
-        assert!(matches!(
-            issue(&states.payments, 1),
-            Err(Error::InvalidReceipt)
-        ));
+        assert!(matches!(issue(&amounts(&[(2, 4)]), 2), Err(InvalidReceipt)));
+        assert!(matches!(issue(&states.payments, 1), Err(InvalidReceipt)));
         assert_eq!(issue(&states.payments, 2).unwrap()[0].amount, 4);
     }
 
@@ -1024,16 +1061,16 @@ mod tests {
         for tampered in tampered {
             assert!(matches!(
                 tampered.verify::<Sha256>(&namespace, &operator),
-                Err(Error::InvalidReceipt)
+                Err(InvalidReceipt)
             ));
         }
         assert!(matches!(
             receipt.verify::<Sha256>(&namespace, &other),
-            Err(Error::InvalidReceipt)
+            Err(InvalidReceipt)
         ));
         assert!(matches!(
             receipt.verify::<Sha256>(&Namespace::new(b"other"), &operator),
-            Err(Error::InvalidReceipt)
+            Err(InvalidReceipt)
         ));
     }
 
@@ -1051,7 +1088,7 @@ mod tests {
         ));
         assert!(matches!(
             receipt.verify::<Sha256>(&namespace, &operator),
-            Err(Error::InvalidReceipt)
+            Err(InvalidReceipt)
         ));
     }
 
@@ -1095,7 +1132,7 @@ mod tests {
         // Another epoch's close is never the receipt's.
         assert!(matches!(
             valid.verify::<Sha256>(&namespace, &operator, 3, &underpaying.root()),
-            Err(Error::WrongEpoch {
+            Err(ChallengeError::WrongEpoch {
                 expected: 3,
                 found: 2
             })
@@ -1109,7 +1146,7 @@ mod tests {
         misopened.opening = underpaying.open(&sender, &account(2));
         assert!(matches!(
             misopened.verify::<Sha256>(&namespace, &operator, 2, &underpaying.root()),
-            Err(Error::InvalidOpening)
+            Err(ChallengeError::InvalidOpening(InvalidOpening))
         ));
         assert!(matches!(
             challenge(&forged, &underpaying).verify::<Sha256>(
@@ -1118,11 +1155,11 @@ mod tests {
                 2,
                 &paying.root()
             ),
-            Err(Error::InvalidOpening)
+            Err(ChallengeError::InvalidOpening(InvalidOpening))
         ));
         assert!(matches!(
             challenge(&forged, &paying).verify::<Sha256>(&namespace, &operator, 2, &paying.root()),
-            Err(Error::NoContradiction)
+            Err(ChallengeError::NoContradiction)
         ));
         assert!(matches!(
             challenge(&forged, &underpaying).verify::<Sha256>(
@@ -1131,7 +1168,7 @@ mod tests {
                 2,
                 &underpaying.root()
             ),
-            Err(Error::InvalidReceipt)
+            Err(ChallengeError::InvalidReceipt(InvalidReceipt))
         ));
     }
 

@@ -1,8 +1,12 @@
 //! Checking closes, applying posted closes, and resuming validators.
 
 use super::*;
-use commonware_clearing::bajillion::{Error, ForcedWithdrawal, Payout, PayoutLog};
+use crate::roles::validator::Refusal;
+use commonware_clearing::bajillion::{
+    CheckError, FlowError, ForcedWithdrawal, Payout, PayoutLog, SettleError,
+};
 use commonware_runtime::{Runner as _, deterministic::FaultConfig};
+use commonware_storage::merkle::Location;
 use commonware_utils::Probability;
 
 /// Validators agree on every close, and each holds the operator's balances and proves them.
@@ -84,7 +88,7 @@ fn test_request_settles_at_most_once() {
         );
         assert!(matches!(
             deployment.validators[0].verify(close, &queue).await,
-            Err(Error::InvalidSignature)
+            Err(Refusal::Check(CheckError::InvalidSignature))
         ));
 
         // Had the close of epoch 2 omitted the request, the operator would admit its state for
@@ -152,7 +156,7 @@ fn test_validator_resumes_from_its_records() {
         };
         assert!(matches!(
             open("missing", Persisted::default()).await,
-            Err(Error::InvalidCheckpoint)
+            Err(Refusal::InvalidCheckpoint)
         ));
 
         // With them, it resumes from the posted close of epoch 1 and replays the close of epoch 2.
@@ -176,6 +180,35 @@ fn test_validator_resumes_from_its_records() {
         .await
         .unwrap();
         assert_eq!(fresh.summary().epoch, 0);
+    });
+}
+
+/// A database that applied an empty close still needs that close's record to resume.
+#[test]
+fn test_validator_recovers_an_empty_close() {
+    deterministic::Runner::default().start(|mut context| async move {
+        let mut deployment = TestDeployment::new(&context, "empty_close", 1).await;
+        let (_, summary) = deployment.close(&mut context).await;
+        let persisted = deployment.validators[0].persisted().clone();
+        let posted = summary.digest();
+        drop(deployment);
+
+        let open = |label, persisted| {
+            TestValidator::init(
+                context.child(label),
+                config("empty_close-0"),
+                persisted,
+                Some(&posted),
+            )
+        };
+        assert!(matches!(
+            open("missing", Persisted::default()).await,
+            Err(Refusal::InvalidCheckpoint)
+        ));
+        let mut validator = open("recovered", persisted).await.unwrap();
+        assert_eq!(validator.summary(), &summary);
+        assert_eq!(validator.catch_up(&posted).await.unwrap(), 0);
+        assert_eq!(validator.balance(&account(0)).await.unwrap(), 0);
     });
 }
 
@@ -258,7 +291,7 @@ fn test_validators_refuse_a_close_that_overdrafts() {
         let validator = &mut deployment.validators[0];
         assert!(matches!(
             validator.verify(overdrafting, &queue).await,
-            Err(Error::Overdraft)
+            Err(Refusal::Settle(SettleError::Flow(FlowError::Overdraft)))
         ));
         assert_eq!(validator.summary().epoch, 2);
 
@@ -312,7 +345,7 @@ fn test_close_settles_gross_flows_beyond_the_largest_amount() {
         let close = forge(&operator_key(), &queue, Vec::new(), Vec::new(), 1, 0);
         assert!(matches!(
             validator.verify(close, &queue).await,
-            Err(Error::Overflow)
+            Err(Refusal::Settle(SettleError::Flow(FlowError::Overflow)))
         ));
     });
 }
@@ -458,6 +491,89 @@ fn test_applied_close_is_durable() {
         assert_eq!(validator.summary().digest(), posted);
         assert_eq!(validator.catch_up(&posted).await.unwrap(), 0);
         check_epoch_2(&validator).await;
+    });
+}
+
+/// A validator that persisted a close and stopped before its attestation was released derives the
+/// same proposal when asked for the close again after a restart, so the committee's certificate is
+/// the same, and its records are unchanged.
+#[test]
+fn test_validator_attests_the_same_close_again_after_a_restart() {
+    deterministic::Runner::default().start(|mut context| async move {
+        let mut deployment = TestDeployment::new(&context, "again", 1).await;
+        deployment.ledger.deposit(account(0), 10).unwrap();
+        deployment.close(&mut context).await;
+        let mut alice = sender(0);
+        let request = alice.send(2, amounts(&[(1, 4)])).unwrap();
+        deployment.operator.accept(&request).unwrap();
+        deployment.ledger.withdraw(account(0), 1).unwrap();
+        let queue = deployment.ledger.queue();
+        let close = close_epoch(&mut deployment.operator, &queue, 0, 1);
+
+        // The validator persists the close, and stops before the certificate is assembled.
+        let proposals = deployment.verify(&close).await;
+        let certificate = deployment.certify(&proposals);
+        let summary = *proposals[0].summary();
+        let persisted = deployment.validators[0].persisted().clone();
+        let posted = *deployment.ledger.parent();
+        drop(proposals);
+        drop(deployment.validators.pop());
+
+        // Asked again, the restarted validator proposes the same summary from a fresh check, so
+        // its attestation certifies the same summary, and its records are unchanged.
+        let mut restarted = TestValidator::init(
+            context.child("restarted"),
+            config("again-0"),
+            persisted.clone(),
+            Some(&posted),
+        )
+        .await
+        .unwrap();
+        let again = restarted.verify(close, &queue).await.unwrap();
+        assert_eq!(again.summary(), &summary);
+        assert_eq!(certify(&deployment.schemes, again.summary()), certificate);
+        assert_eq!(restarted.persisted(), &persisted);
+
+        // The post then applies at the restarted validator as it would have before the stop.
+        deployment
+            .ledger
+            .post(&mut context, &summary, &certificate)
+            .unwrap();
+        restarted.apply(again, &summary.digest()).await.unwrap();
+        assert_eq!(restarted.summary(), &summary);
+        assert_eq!(restarted.balance(&account(1)).await.unwrap(), 4);
+        assert_eq!(restarted.balance(&account(0)).await.unwrap(), 5);
+    });
+}
+
+/// Apply makes the payout log durable before the balances change, so a validator whose log is
+/// behind its balances at a restart has lost part of its storage, and it refuses to resume.
+#[test]
+fn test_validator_refuses_a_log_behind_its_balances() {
+    deterministic::Runner::default().start(|mut context| async move {
+        let (deployment, mut validator, proposal) = interrupted(&mut context, "behind").await;
+        let first = *validator.summary();
+        let posted = proposal.summary().digest();
+        validator.apply(proposal, &posted).await.unwrap();
+        let persisted = validator.persisted().clone();
+        drop(validator);
+        assert_eq!(*deployment.ledger.parent(), posted);
+
+        // The log loses the close of epoch 2, while the balances keep it.
+        let kept = config("behind-0");
+        let truncated = PayoutLog::<_, PublicKey, Sha256, Sequential, u64>::init(
+            context.child("truncated"),
+            kept.payouts.clone(),
+            Some(Location::new(first.payouts.size)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(truncated.root(), first.payouts.root);
+        drop(truncated);
+        assert!(matches!(
+            TestValidator::init(context.child("restarted"), kept, persisted, Some(&posted)).await,
+            Err(Refusal::InvalidCheckpoint)
+        ));
     });
 }
 

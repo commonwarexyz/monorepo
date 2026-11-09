@@ -73,10 +73,10 @@ mod tests {
 
     #[test]
     fn test_checked_arithmetic_follows_overflow() {
-        assert_eq!(250u8.checked_add(5), Some(255));
-        assert_eq!(250u8.checked_add(6), None);
-        assert_eq!(5u64.checked_sub(5), Some(0));
-        assert_eq!(5u64.checked_sub(6), None);
+        assert_eq!(Unsigned::checked_add(250u8, 5), Some(255));
+        assert_eq!(Unsigned::checked_add(250u8, 6), None);
+        assert_eq!(Unsigned::checked_sub(5u64, 5), Some(0));
+        assert_eq!(Unsigned::checked_sub(5u64, 6), None);
         assert_eq!(<u128 as Unsigned>::ZERO, 0);
     }
 

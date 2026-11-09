@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::roles::ledger::{Halt, Refusal};
-use commonware_clearing::bajillion::{Challenge, Error};
+use commonware_clearing::bajillion::{Challenge, ChallengeError};
 use commonware_runtime::Runner as _;
 
 /// Over several epochs of payments, soft and forced withdrawals, and deposits, every balance and
@@ -240,7 +240,7 @@ fn test_late_challenge_halts_after_later_closes() {
         };
         assert!(matches!(
             deployment.ledger.challenge(&settled),
-            Err(Refusal::Error(Error::NoContradiction))
+            Err(Refusal::Challenge(ChallengeError::NoContradiction))
         ));
 
         // The omitted payment still halts the ledger. Claims follow the balances of the latest

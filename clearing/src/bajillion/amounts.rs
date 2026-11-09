@@ -1,12 +1,29 @@
 //! Amounts of funds, and nonzero amounts per account committed with a binary Merkle tree.
 
-use super::{Error, Lookup};
+use super::{Amount, Lookup};
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_storage::bmt::{Builder, Tree};
-use commonware_utils::Unsigned as Amount;
 use core::cmp::Ordering;
+use thiserror::Error;
+
+/// Why entries do not form amounts, or two amounts do not add up.
+#[derive(Debug, Error)]
+pub enum AmountsError {
+    /// An amount is zero.
+    #[error("amount is zero")]
+    ZeroAmount,
+    /// An account appears more than once.
+    #[error("account appears more than once")]
+    Duplicate,
+    /// There are more entries than a tree can commit to.
+    #[error("too many entries")]
+    TooManyEntries,
+    /// A sum overflows.
+    #[error("arithmetic overflow")]
+    Overflow,
+}
 
 /// Computes the leaf committing to `amount` for `account`.
 pub(crate) fn leaf<H: Hasher, P: PublicKey, A: Amount>(account: &P, amount: A) -> H::Digest {
@@ -38,28 +55,22 @@ impl<P: PublicKey, A: Amount> Amounts<P, A> {
     }
 
     /// Collects `entries` in account order.
-    ///
-    /// Returns [Error::ZeroAmount] if an amount is zero, [Error::Duplicate] if an account appears
-    /// more than once, and [Error::TooManyEntries] if there are more than `u32::MAX` entries.
-    pub fn new(entries: impl IntoIterator<Item = (P, A)>) -> Result<Self, Error> {
+    pub fn new(entries: impl IntoIterator<Item = (P, A)>) -> Result<Self, AmountsError> {
         let mut entries: Vec<_> = entries.into_iter().collect();
         entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
         Self::from_sorted(entries)
     }
 
     /// Wraps `entries` already in account order.
-    ///
-    /// Returns [Error::ZeroAmount] if an amount is zero, [Error::Duplicate] if the accounts are not
-    /// strictly increasing, and [Error::TooManyEntries] if there are more than `u32::MAX` entries.
-    pub(crate) fn from_sorted(entries: Vec<(P, A)>) -> Result<Self, Error> {
+    pub(crate) fn from_sorted(entries: Vec<(P, A)>) -> Result<Self, AmountsError> {
         if entries.len() > u32::MAX as usize {
-            return Err(Error::TooManyEntries);
+            return Err(AmountsError::TooManyEntries);
         }
         if entries.iter().any(|(_, amount)| *amount == A::ZERO) {
-            return Err(Error::ZeroAmount);
+            return Err(AmountsError::ZeroAmount);
         }
         if entries.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
-            return Err(Error::Duplicate);
+            return Err(AmountsError::Duplicate);
         }
         Ok(Self { entries })
     }
@@ -95,9 +106,7 @@ impl<P: PublicKey, A: Amount> Amounts<P, A> {
     }
 
     /// Returns the amounts with `other` added entry by entry.
-    ///
-    /// Returns [Error::Overflow] if a sum overflows.
-    pub fn combine(&self, other: &Self) -> Result<Self, Error> {
+    pub fn combine(&self, other: &Self) -> Result<Self, AmountsError> {
         let mut entries = Vec::with_capacity(self.entries.len() + other.entries.len());
         let mut left = self.entries.iter().peekable();
         let mut right = other.entries.iter().peekable();
@@ -110,7 +119,7 @@ impl<P: PublicKey, A: Amount> Amounts<P, A> {
                     Ordering::Less => left.next().cloned(),
                     Ordering::Greater => right.next().cloned(),
                     Ordering::Equal => {
-                        let sum = x.checked_add(*y).ok_or(Error::Overflow)?;
+                        let sum = x.checked_add(*y).ok_or(AmountsError::Overflow)?;
                         let account = a.clone();
                         left.next();
                         right.next();
@@ -250,11 +259,11 @@ mod tests {
         let keys = accounts(2);
         assert!(matches!(
             TestAmounts::new([(keys[0].clone(), 0)]),
-            Err(Error::ZeroAmount)
+            Err(AmountsError::ZeroAmount)
         ));
         assert!(matches!(
             TestAmounts::new([(keys[0].clone(), 1), (keys[0].clone(), 2)]),
-            Err(Error::Duplicate)
+            Err(AmountsError::Duplicate)
         ));
         assert!(TestAmounts::new([]).unwrap().is_empty());
     }
@@ -279,7 +288,7 @@ mod tests {
 
         let full = TestAmounts::new([(keys[0].clone(), u64::MAX)]).unwrap();
         let one = TestAmounts::new([(keys[0].clone(), 1)]).unwrap();
-        assert!(matches!(full.combine(&one), Err(Error::Overflow)));
+        assert!(matches!(full.combine(&one), Err(AmountsError::Overflow)));
         let overflowing = TestAmounts::new([(keys[0].clone(), u64::MAX), (keys[1].clone(), 1)]);
         assert_eq!(overflowing.unwrap().total(), None);
     }

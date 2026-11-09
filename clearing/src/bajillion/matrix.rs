@@ -1,6 +1,6 @@
 //! The payment matrix a close settles.
 
-use super::{Amount, Amounts, Error, Lookup, amounts};
+use super::{Amount, Amounts, InvalidOpening, Lookup, amounts};
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
@@ -180,7 +180,7 @@ impl<P: PublicKey, D: Digest, A: Amount> Opening<P, D, A> {
         &self,
         root: &D,
         sender: &P,
-    ) -> Result<Option<D>, Error> {
+    ) -> Result<Option<D>, InvalidOpening> {
         let row = self
             .row
             .verify::<H>(root, sender, |sender, payments| {
@@ -188,7 +188,7 @@ impl<P: PublicKey, D: Digest, A: Amount> Opening<P, D, A> {
             })?
             .copied();
         if row.is_some() != self.entry.is_some() {
-            return Err(Error::InvalidOpening);
+            return Err(InvalidOpening);
         }
         Ok(row)
     }
@@ -201,7 +201,7 @@ impl<P: PublicKey, D: Digest, A: Amount> Opening<P, D, A> {
         root: &D,
         sender: &P,
         receiver: &P,
-    ) -> Result<A, Error> {
+    ) -> Result<A, InvalidOpening> {
         let (Some(payments), Some(entry)) = (self.verify_row::<H>(root, sender)?, &self.entry)
         else {
             return Ok(A::ZERO);
@@ -354,7 +354,7 @@ mod tests {
         ] {
             assert!(matches!(
                 opening.verify::<Sha256>(&root, sender, &keys[0]),
-                Err(Error::InvalidOpening)
+                Err(InvalidOpening)
             ));
         }
 
@@ -370,7 +370,7 @@ mod tests {
         };
         assert!(matches!(
             forged.verify::<Sha256>(&root, &keys[3], &keys[0]),
-            Err(Error::InvalidOpening)
+            Err(InvalidOpening)
         ));
 
         // The entry must open under the sender's own row.
@@ -381,7 +381,7 @@ mod tests {
         };
         assert!(matches!(
             swapped.verify::<Sha256>(&root, &keys[1], &keys[0]),
-            Err(Error::InvalidOpening)
+            Err(InvalidOpening)
         ));
 
         // Openings verify only under their own root and for their own pair.
