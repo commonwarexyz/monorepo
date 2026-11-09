@@ -18,39 +18,6 @@ pub use scalar::Scalar;
 /// cost about as much as adding a few hundred elements.
 const MSM_BATCH: NonZeroUsize = NonZeroUsize::new(256).unwrap();
 
-/// Decodes a hexadecimal string at compile time.
-const fn hex<const N: usize>(digits: &str) -> [u8; N] {
-    const fn nibble(digit: u8) -> u8 {
-        match digit {
-            b'0'..=b'9' => digit - b'0',
-            b'a'..=b'f' => digit - b'a' + 10,
-            _ => panic!("invalid hexadecimal digit"),
-        }
-    }
-    let digits = digits.as_bytes();
-    assert!(digits.len() == 2 * N);
-    let mut bytes = [0; N];
-    let mut i = 0;
-    while i < N {
-        bytes[i] = (nibble(digits[2 * i]) << 4) | nibble(digits[2 * i + 1]);
-        i += 1;
-    }
-    bytes
-}
-
-/// Formats bytes as hexadecimal.
-struct Hex<'a>(&'a [u8]);
-
-impl ::core::fmt::Debug for Hex<'_> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.write_str("0x")?;
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
-
 /// Checks shared by both groups.
 #[cfg(test)]
 mod tests {

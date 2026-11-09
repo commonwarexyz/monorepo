@@ -2030,6 +2030,7 @@ dependencies = [
  "arbitrary",
  "blst",
  "commonware-allocator",
+ "commonware-formatting",
  "commonware-invariants",
  "commonware-macros",
  "commonware-math",
