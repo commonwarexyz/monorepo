@@ -1,7 +1,7 @@
 //! The group G2.
 
 use super::{
-    Hex, MSM_BATCH, Scalar,
+    MSM_BATCH, Scalar,
     kernel::{Add, Double, Group, Kernel, MAX_COMPONENTS, Msm, Multiply, MultiplyEach, Sum},
 };
 use crate::core::{
@@ -12,6 +12,7 @@ use crate::core::{
         fp2::BYTES,
     },
 };
+use commonware_formatting::{Hex, hex};
 use commonware_math::algebra::{Additive, CryptoGroup, Object, Space};
 use commonware_parallel::Strategy;
 use commonware_simd::Simd;
@@ -23,14 +24,14 @@ use core::{
 /// The generator in projective coordinates, with `Z = 1`. Each coordinate is `c1` followed by
 /// `c0`.
 const GENERATOR: Coordinates = [
-    super::hex(concat!(
-        "13e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e",
-        "024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb8",
-    )),
-    super::hex(concat!(
-        "0606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be",
-        "0ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801",
-    )),
+    hex!(
+        "13e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e"
+        "024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb8"
+    ),
+    hex!(
+        "0606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be"
+        "0ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801"
+    ),
     {
         let mut one = [0; BYTES];
         one[BYTES - 1] = 1;

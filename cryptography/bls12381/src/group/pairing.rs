@@ -1,7 +1,7 @@
 //! The pairing of G1 and G2 into the target group.
 
 use super::{
-    G1, G2, Hex,
+    G1, G2,
     kernel::{Group, Kernel, MAX_LANES},
 };
 use crate::core::{
@@ -14,6 +14,7 @@ use crate::core::{
     },
     pairing::{G1Affine, G2Affine, Pair, SHARED, final_exponentiation, miller_loop},
 };
+use commonware_formatting::Hex;
 use commonware_math::algebra::{Multiplicative, Object};
 use alloc::{vec, vec::Vec};
 use commonware_simd::Simd;
