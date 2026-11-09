@@ -4,8 +4,12 @@ use commonware_clearing::bajillion::{
     Admission, Amount, Amounts, Close, Epoch, Error, Flow, Limits, Namespace, Queue, Request, Row,
     State, Withdrawal,
 };
+use commonware_codec::Encode as _;
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
-use core::cell::Cell;
+use core::{
+    hash::Hash,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use std::collections::BTreeMap;
 
 /// Why the operator refused a request or a soft withdrawal.
@@ -22,18 +26,28 @@ pub enum Refusal {
     Error(#[from] Error),
 }
 
-/// Per-account records that count their lookups.
-#[derive(Clone, Debug)]
+/// Per-account records that count their lookups. The count is not part of the records' identity,
+/// and it is atomic so the records can be read from several threads.
+#[derive(Debug)]
 pub struct Records<K: Ord, V> {
     entries: BTreeMap<K, V>,
-    reads: Cell<usize>,
+    reads: AtomicUsize,
 }
 
 impl<K: Ord, V> Default for Records<K, V> {
     fn default() -> Self {
         Self {
             entries: BTreeMap::new(),
-            reads: Cell::new(0),
+            reads: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl<K: Ord + Clone, V: Clone> Clone for Records<K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            reads: AtomicUsize::new(self.reads.load(Ordering::Relaxed)),
         }
     }
 }
@@ -44,17 +58,30 @@ impl<K: Ord, V: PartialEq> PartialEq for Records<K, V> {
     }
 }
 
+impl<K: Ord, V: Eq> Eq for Records<K, V> {}
+
+impl<K: Ord + Hash, V: Hash> Hash for Records<K, V> {
+    fn hash<S: core::hash::Hasher>(&self, state: &mut S) {
+        self.entries.hash(state);
+    }
+}
+
 impl<K: Ord, V> Records<K, V> {
     /// Returns the record of `key`, counting the lookup.
     fn get(&self, key: &K) -> Option<&V> {
-        self.reads.set(self.reads.get() + 1);
+        self.reads.fetch_add(1, Ordering::Relaxed);
         self.entries.get(key)
+    }
+
+    /// Returns how many lookups the records served.
+    fn reads(&self) -> usize {
+        self.reads.load(Ordering::Relaxed)
     }
 }
 
 /// A sender's latest countersigned state in the current epoch, with its payment map and the
 /// sender's signature over it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Admitted<P: PublicKey, D: Digest, A: Amount> {
     /// The countersigned state.
     pub state: State<P, D>,
@@ -65,7 +92,7 @@ pub struct Admitted<P: PublicKey, D: Digest, A: Amount> {
 }
 
 /// What the operator persists (O7). A restart resumes from it alone.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Persisted<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
     /// Epoch the operator admits in.
     pub epoch: Epoch,
@@ -82,14 +109,60 @@ pub struct Persisted<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
     pub released: Option<Close<P, O, A>>,
 }
 
+impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Hash for Persisted<P, O, D, A> {
+    fn hash<S: core::hash::Hasher>(&self, state: &mut S) {
+        let Self {
+            epoch,
+            balances,
+            previous,
+            admitted,
+            withdrawals,
+            released,
+        } = self;
+        epoch.hash(state);
+        balances.hash(state);
+        previous.hash(state);
+        admitted.hash(state);
+        withdrawals.hash(state);
+        released.as_ref().map(|close| close.encode()).hash(state);
+    }
+}
+
 /// An operator that serves every account and applies each close it assembles at once.
 ///
-/// Its balances follow the posted closes only if every close it assembles posts.
+/// Its balances follow the posted closes only if every close it assembles posts. Two operators
+/// are equal when they persisted the same records.
 pub struct Operator<P: PublicKey, K: Signer, H: Hasher, A: Amount> {
     signer: K,
     namespace: Namespace,
     limits: Limits,
     persisted: Persisted<P, K::PublicKey, H::Digest, A>,
+}
+
+// The hasher is a type parameter only, so the derived impl would bound it.
+impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Clone for Operator<P, K, H, A> {
+    fn clone(&self) -> Self {
+        Self {
+            signer: self.signer.clone(),
+            namespace: self.namespace.clone(),
+            limits: self.limits,
+            persisted: self.persisted.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> PartialEq for Operator<P, K, H, A> {
+    fn eq(&self, other: &Self) -> bool {
+        self.persisted == other.persisted
+    }
+}
+
+impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Eq for Operator<P, K, H, A> {}
+
+impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Hash for Operator<P, K, H, A> {
+    fn hash<S: core::hash::Hasher>(&self, state: &mut S) {
+        self.persisted.hash(state);
+    }
 }
 
 impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Operator<P, K, H, A> {
@@ -133,10 +206,10 @@ impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Operator<P, K, H, A> {
 
     /// Returns how many times the operator looked up an account's balance, previous row root, or
     /// admission.
-    pub const fn reads(&self) -> usize {
-        self.persisted.balances.reads.get()
-            + self.persisted.previous.reads.get()
-            + self.persisted.admitted.reads.get()
+    pub fn reads(&self) -> usize {
+        self.persisted.balances.reads()
+            + self.persisted.previous.reads()
+            + self.persisted.admitted.reads()
     }
 
     /// Returns the account's balance as of the last close.
@@ -241,6 +314,12 @@ impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Operator<P, K, H, A> {
             }
         };
         Ok(state.acknowledge(&self.signer, &self.namespace))
+    }
+
+    /// Drops `account`'s admission in the current epoch, as an operator that broke O7 would after a
+    /// crash. The close of the epoch then omits the countersigned state.
+    pub fn forget(&mut self, account: &P) {
+        self.persisted.admitted.entries.remove(account);
     }
 
     /// Collects a soft withdrawal for the current epoch. Collecting one again has no effect.

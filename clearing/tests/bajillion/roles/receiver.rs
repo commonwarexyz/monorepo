@@ -3,7 +3,9 @@
 use commonware_clearing::bajillion::{
     Amount, Challenge, Epoch, Error, Namespace, Opening, Receipt,
 };
-use commonware_cryptography::{Hasher, PublicKey};
+use commonware_codec::Encode as _;
+use commonware_cryptography::{Digest, Hasher, PublicKey};
+use core::hash::Hash;
 use std::collections::BTreeMap;
 
 /// Why the receiver refused a receipt or an audit.
@@ -30,17 +32,73 @@ pub enum Refusal {
 }
 
 /// The largest receipt held per epoch and sender.
-type Receipts<P, O, D, A> = BTreeMap<Epoch, BTreeMap<P, Receipt<P, O, D, A>>>;
+pub type Receipts<P, O, D, A> = BTreeMap<Epoch, BTreeMap<P, Receipt<P, O, D, A>>>;
+
+/// What the receiver persists (R2). A restart resumes from it alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Persisted<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
+    /// Epoch of the close the ledger expects, as far as the receiver knows.
+    pub next: Epoch,
+    /// Whether the ledger halted.
+    pub halted: bool,
+    /// The largest receipt held per epoch and sender.
+    pub receipts: Receipts<P, O, D, A>,
+}
+
+impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Hash for Persisted<P, O, D, A> {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        let Self {
+            next,
+            halted,
+            receipts,
+        } = self;
+        next.hash(state);
+        halted.hash(state);
+        receipts.len().hash(state);
+        for (epoch, receipts) in receipts {
+            epoch.hash(state);
+            receipts.len().hash(state);
+            for (sender, receipt) in receipts {
+                sender.hash(state);
+                receipt.encode().hash(state);
+            }
+        }
+    }
+}
 
 /// A receiver keeping the largest receipt per epoch and sender until it audits that epoch's
-/// posted close.
+/// posted close. Two receivers are equal when they persisted the same records.
 pub struct Receiver<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> {
     account: P,
     namespace: Namespace,
     operator: O,
-    next: Epoch,
-    halted: bool,
-    receipts: Receipts<P, O, H::Digest, A>,
+    persisted: Persisted<P, O, H::Digest, A>,
+}
+
+// The hasher is a type parameter only, so the derived impl would bound it.
+impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Clone for Receiver<P, O, H, A> {
+    fn clone(&self) -> Self {
+        Self {
+            account: self.account.clone(),
+            namespace: self.namespace.clone(),
+            operator: self.operator.clone(),
+            persisted: self.persisted.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> PartialEq for Receiver<P, O, H, A> {
+    fn eq(&self, other: &Self) -> bool {
+        self.persisted == other.persisted
+    }
+}
+
+impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Eq for Receiver<P, O, H, A> {}
+
+impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Hash for Receiver<P, O, H, A> {
+    fn hash<T: core::hash::Hasher>(&self, state: &mut T) {
+        self.persisted.hash(state);
+    }
 }
 
 impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
@@ -50,9 +108,11 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
             account,
             namespace,
             operator,
-            next,
-            halted: false,
-            receipts: BTreeMap::new(),
+            persisted: Persisted {
+                next,
+                halted: false,
+                receipts: BTreeMap::new(),
+            },
         }
     }
 
@@ -67,7 +127,7 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
         receipts: impl IntoIterator<Item = Receipt<P, O, H::Digest, A>>,
     ) -> Result<Self, Refusal> {
         let mut receiver = Self::new(account, namespace, operator, next);
-        receiver.halted = halted;
+        receiver.persisted.halted = halted;
         for receipt in receipts {
             receiver.verify(&receipt)?;
             if receipt.amount > receiver.amount(receipt.state.epoch, &receipt.state.account) {
@@ -84,7 +144,8 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
 
     /// Returns the largest amount a held receipt promises from `sender` in `epoch`.
     pub fn amount(&self, epoch: Epoch, sender: &P) -> A {
-        self.receipts
+        self.persisted
+            .receipts
             .get(&epoch)
             .and_then(|receipts| receipts.get(sender))
             .map_or(A::ZERO, |receipt| receipt.amount)
@@ -92,7 +153,8 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
 
     /// Returns the receipts held for `epoch`, one per sender.
     pub fn receipts(&self, epoch: Epoch) -> impl Iterator<Item = &Receipt<P, O, H::Digest, A>> {
-        self.receipts
+        self.persisted
+            .receipts
             .get(&epoch)
             .into_iter()
             .flat_map(BTreeMap::values)
@@ -108,7 +170,8 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
 
     /// Holds `receipt` in place of any earlier one from its sender in its epoch.
     fn insert(&mut self, receipt: Receipt<P, O, H::Digest, A>) {
-        self.receipts
+        self.persisted
+            .receipts
             .entry(receipt.state.epoch)
             .or_default()
             .insert(receipt.state.account.clone(), receipt);
@@ -116,10 +179,10 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
 
     /// Relies on a receipt (R1, R2), and returns the amount it promises.
     pub fn receive(&mut self, receipt: Receipt<P, O, H::Digest, A>) -> Result<A, Refusal> {
-        if self.halted {
+        if self.persisted.halted {
             return Err(Refusal::Halted);
         }
-        if receipt.state.epoch < self.next {
+        if receipt.state.epoch < self.persisted.next {
             return Err(Refusal::Closed);
         }
 
@@ -136,12 +199,12 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
 
     /// Records the final post of `epoch`, after which no receipt of it is accepted.
     pub fn posted(&mut self, epoch: Epoch) {
-        self.next = self.next.max(epoch.saturating_add(1));
+        self.persisted.next = self.persisted.next.max(epoch.saturating_add(1));
     }
 
     /// Records that the ledger halted, after which no receipt is accepted.
     pub const fn halt(&mut self) {
-        self.halted = true;
+        self.persisted.halted = true;
     }
 
     /// Compares the receipt held from `sender` in `epoch` with what the posted close credits under
@@ -154,10 +217,11 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
         sender: &P,
         opening: &Opening<P, H::Digest, A>,
     ) -> Result<Option<Challenge<P, O, H::Digest, A>>, Refusal> {
-        if epoch >= self.next {
+        if epoch >= self.persisted.next {
             return Err(Refusal::NotClosed);
         }
         let Some(receipt) = self
+            .persisted
             .receipts
             .get(&epoch)
             .and_then(|receipts| receipts.get(sender))
@@ -175,6 +239,6 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
 
     /// Forgets the receipts of epochs before `epoch`, once their closes are audited.
     pub fn prune(&mut self, epoch: Epoch) {
-        self.receipts = self.receipts.split_off(&epoch);
+        self.persisted.receipts = self.persisted.receipts.split_off(&epoch);
     }
 }

@@ -4,7 +4,9 @@
 use commonware_clearing::bajillion::{
     Amount, Amounts, Epoch, Error, Namespace, Opening, Receipt, Request, State, States,
 };
+use commonware_codec::Encode as _;
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
+use core::hash::Hash;
 use std::collections::BTreeMap;
 
 /// Why the sender refused to act.
@@ -31,7 +33,7 @@ pub enum Refusal {
 }
 
 /// What a posted close did with the pending request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Outcome {
     /// The close settled one of its states.
     Settled,
@@ -43,7 +45,7 @@ pub enum Outcome {
 
 /// A countersigned state with the sender's signature, the operator's acknowledgement if the
 /// sender received it, and the payment map the state commits to (S2, S3).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Countersigned<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
     /// The countersigned state.
     pub state: State<P, D>,
@@ -59,7 +61,7 @@ pub struct Countersigned<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
 pub type Pending<P, D, A> = (Request<P, D, A>, States<P, D, A>);
 
 /// What the sender persists. A restart resumes from it alone.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Persisted<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
     /// The latest countersigned state of each epoch the sender paid in.
     pub countersigned: BTreeMap<Epoch, Countersigned<P, O, D, A>>,
@@ -69,14 +71,66 @@ pub struct Persisted<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
     pub pending: Option<Pending<P, D, A>>,
 }
 
+impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Hash for Persisted<P, O, D, A> {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        let Self {
+            countersigned,
+            posted,
+            pending,
+        } = self;
+        countersigned.hash(state);
+        posted.hash(state);
+        if let Some((request, states)) = pending {
+            let States {
+                batch,
+                state: proposed,
+                payments,
+                pipelined,
+            } = states;
+            request.encode().hash(state);
+            batch.hash(state);
+            proposed.hash(state);
+            payments.hash(state);
+            pipelined.hash(state);
+        }
+    }
+}
+
 /// A sender keeping its countersigned states, the row roots of posted closes, and at most one
-/// pending request with its states.
+/// pending request with its states. Two senders are equal when they persisted the same records.
 pub struct Sender<S: Signer, O: PublicKey, H: Hasher, A: Amount> {
     signer: S,
     account: S::PublicKey,
     namespace: Namespace,
     operator: O,
     persisted: Persisted<S::PublicKey, O, H::Digest, A>,
+}
+
+// The hasher is a type parameter only, so the derived impl would bound it.
+impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Clone for Sender<S, O, H, A> {
+    fn clone(&self) -> Self {
+        Self {
+            signer: self.signer.clone(),
+            account: self.account.clone(),
+            namespace: self.namespace.clone(),
+            operator: self.operator.clone(),
+            persisted: self.persisted.clone(),
+        }
+    }
+}
+
+impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> PartialEq for Sender<S, O, H, A> {
+    fn eq(&self, other: &Self) -> bool {
+        self.persisted == other.persisted
+    }
+}
+
+impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Eq for Sender<S, O, H, A> {}
+
+impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Hash for Sender<S, O, H, A> {
+    fn hash<T: core::hash::Hasher>(&self, state: &mut T) {
+        self.persisted.hash(state);
+    }
 }
 
 impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
@@ -124,9 +178,9 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
         self.persisted.pending.as_ref().map(|(request, _)| request)
     }
 
-    /// Returns the root a request in `epoch` builds on (S1). That is the posted row root of
-    /// the epoch before if its close posted, else the root of the countersigned map of that
-    /// epoch, else the empty map's root.
+    /// Returns the root a request in `epoch` builds on (S1). That is the posted row root of the
+    /// epoch before if the sender recorded that post, else the root of the countersigned map of
+    /// that epoch, else the empty map's root.
     fn previous(&self, epoch: Epoch) -> H::Digest {
         let before = epoch.checked_sub(1);
         before

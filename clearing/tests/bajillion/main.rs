@@ -13,6 +13,7 @@ mod roles {
 
 mod ledger;
 mod lifecycle;
+mod model;
 mod operator;
 mod payments;
 mod validator;

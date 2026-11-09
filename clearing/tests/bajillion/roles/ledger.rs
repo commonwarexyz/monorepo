@@ -5,12 +5,13 @@ use commonware_clearing::bajillion::{
     Amount, BalanceProof, Challenge, Deposit, Epoch, Error, ForcedWithdrawal, Namespace,
     PayoutProof, Queue, Summary,
 };
-use commonware_cryptography::{Digestible, Hasher, PublicKey, certificate::Verifier};
+use commonware_cryptography::{Digest, Digestible, Hasher, PublicKey, certificate::Verifier};
+use core::hash::Hash;
 use rand_core::CryptoRng;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Why the ledger halted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Halt {
     /// A challenge showed that the posted close of `epoch` credits a receiver less than a receipt
     /// promised.
@@ -48,11 +49,45 @@ pub enum Refusal {
     Error(#[from] Error),
 }
 
+/// What the ledger persists, as its queues, its posts, its payout ranges, and the funds it
+/// holds. A restart resumes from it alone.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Persisted<P: PublicKey, D: Digest, A: Amount> {
+    /// Digest of the last posted summary.
+    pub parent: D,
+    /// Balances root of the last posted summary.
+    pub balances: D,
+    /// Payouts root of the last posted summary.
+    pub log: D,
+    /// Matrix root of each posted close, in epoch order.
+    pub matrices: Vec<D>,
+    /// Funds the ledger holds. A deposit adds to them and every transfer takes from them.
+    pub held: A,
+    /// Queued deposits, oldest first.
+    pub deposits: VecDeque<Deposit<P, A>>,
+    /// Number of queued deposits the next close must process.
+    pub required_deposits: usize,
+    /// Queued forced withdrawals, oldest first.
+    pub forced_withdrawals: VecDeque<ForcedWithdrawal<P, A>>,
+    /// Number of queued forced withdrawals the next close must process.
+    pub required_forced_withdrawals: usize,
+    /// Payout log indices that hold a commit or a paid payout, as ranges from start to exclusive
+    /// end. No two ranges overlap or touch.
+    pub ranges: BTreeMap<u64, u64>,
+    /// Why the ledger halted, if it has.
+    pub halt: Option<Halt>,
+    /// Accounts that claimed their balance after the halt.
+    pub claimed: BTreeSet<P>,
+    /// Deposits no close processed that each account can still claim after the halt.
+    pub claimable: BTreeMap<P, A>,
+}
+
 /// A ledger following L1-L11 that counts the funds it holds as one amount and tracks paid payouts
 /// by ranges of payout log indices.
 ///
 /// Every transfer goes to the account it pays (L10). The amount returned by a payout withdrawal
-/// or a claim stands for that transfer.
+/// or a claim stands for that transfer. Two ledgers are equal when they persisted the same
+/// state.
 pub struct Ledger<P: PublicKey, O: PublicKey, V: Verifier, H: Hasher, A: Amount> {
     /// Signature namespaces of the deployment.
     namespace: Namespace,
@@ -60,33 +95,37 @@ pub struct Ledger<P: PublicKey, O: PublicKey, V: Verifier, H: Hasher, A: Amount>
     operator: O,
     /// Verifier of the validators' certificates.
     verifier: V,
-    /// Digest of the last posted summary.
-    parent: H::Digest,
-    /// Balances root of the last posted summary.
-    balances: H::Digest,
-    /// Payouts root of the last posted summary.
-    log: H::Digest,
-    /// Matrix root of each posted close, in epoch order.
-    matrices: Vec<H::Digest>,
-    /// Funds the ledger holds. A deposit adds to them and every transfer takes from them.
-    held: A,
-    /// Queued deposits, oldest first.
-    deposits: VecDeque<Deposit<P, A>>,
-    /// Number of queued deposits the next close must process.
-    required_deposits: usize,
-    /// Queued forced withdrawals, oldest first.
-    forced_withdrawals: VecDeque<ForcedWithdrawal<P, A>>,
-    /// Number of queued forced withdrawals the next close must process.
-    required_forced_withdrawals: usize,
-    /// Payout log indices that hold a commit or a paid payout, as ranges from start to exclusive
-    /// end. No two ranges overlap or touch.
-    ranges: BTreeMap<u64, u64>,
-    /// Why the ledger halted, if it has.
-    halt: Option<Halt>,
-    /// Accounts that claimed their balance after the halt.
-    claimed: HashSet<P>,
-    /// Deposits no close processed that each account can still claim after the halt.
-    claimable: HashMap<P, A>,
+    persisted: Persisted<P, H::Digest, A>,
+}
+
+// The hasher is a type parameter only, so the derived impl would bound it.
+impl<P: PublicKey, O: PublicKey, V: Verifier, H: Hasher, A: Amount> Clone
+    for Ledger<P, O, V, H, A>
+{
+    fn clone(&self) -> Self {
+        Self {
+            namespace: self.namespace.clone(),
+            operator: self.operator.clone(),
+            verifier: self.verifier.clone(),
+            persisted: self.persisted.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, O: PublicKey, V: Verifier, H: Hasher, A: Amount> PartialEq
+    for Ledger<P, O, V, H, A>
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.persisted == other.persisted
+    }
+}
+
+impl<P: PublicKey, O: PublicKey, V: Verifier, H: Hasher, A: Amount> Eq for Ledger<P, O, V, H, A> {}
+
+impl<P: PublicKey, O: PublicKey, V: Verifier, H: Hasher, A: Amount> Hash for Ledger<P, O, V, H, A> {
+    fn hash<S: core::hash::Hasher>(&self, state: &mut S) {
+        self.persisted.hash(state);
+    }
 }
 
 impl<P, O, V, H, A> Ledger<P, O, V, H, A>
@@ -101,10 +140,7 @@ where
     /// `balances` (L1).
     pub fn new(namespace: Namespace, operator: O, verifier: V, balances: H::Digest) -> Self {
         let genesis = Summary::<H>::genesis::<P, A>(balances);
-        Self {
-            namespace,
-            operator,
-            verifier,
+        let persisted = Persisted {
             parent: genesis.digest(),
             balances,
             log: genesis.payouts.root,
@@ -116,36 +152,43 @@ where
             required_forced_withdrawals: 0,
             ranges: BTreeMap::from([(0, genesis.payouts.size)]),
             halt: None,
-            claimed: HashSet::new(),
-            claimable: HashMap::new(),
+            claimed: BTreeSet::new(),
+            claimable: BTreeMap::new(),
+        };
+        Self {
+            namespace,
+            operator,
+            verifier,
+            persisted,
         }
     }
 
     /// Returns the epoch of the close the ledger expects.
     pub const fn epoch(&self) -> Epoch {
-        self.matrices.len() as Epoch + 1
+        self.persisted.matrices.len() as Epoch + 1
     }
 
     /// Returns the digest of the last posted summary.
     pub const fn parent(&self) -> &H::Digest {
-        &self.parent
+        &self.persisted.parent
     }
 
     /// Returns the balances root of the last posted summary.
     pub const fn balances(&self) -> &H::Digest {
-        &self.balances
+        &self.persisted.balances
     }
 
     /// Returns the matrix root of the posted close of `epoch`.
     pub fn matrix(&self, epoch: Epoch) -> Option<&H::Digest> {
         let index = usize::try_from(epoch.checked_sub(1)?).ok()?;
-        self.matrices.get(index)
+        self.persisted.matrices.get(index)
     }
 
     /// Returns the ranges of payout log indices that hold a commit or a paid payout, in order, each
     /// from start to exclusive end.
     pub fn ranges(&self) -> Vec<(u64, u64)> {
-        self.ranges
+        self.persisted
+            .ranges
             .iter()
             .map(|(start, end)| (*start, *end))
             .collect()
@@ -154,48 +197,51 @@ where
     /// Returns the funds held. They back the unclaimed balances as of the last post, the unclaimed
     /// deposits no close processed, and the posted payouts not yet paid.
     pub const fn custody(&self) -> A {
-        self.held
+        self.persisted.held
     }
 
     /// Returns why the ledger halted, if it has.
     pub const fn halted(&self) -> Option<Halt> {
-        self.halt
+        self.persisted.halt
     }
 
     /// Returns the queues as the close the ledger expects must process them.
     pub fn queue(&self) -> Queue<P, A> {
+        let persisted = &self.persisted;
         Queue {
             epoch: self.epoch(),
-            deposits: self.deposits.iter().cloned().collect(),
-            required_deposits: self.required_deposits,
-            forced_withdrawals: self.forced_withdrawals.iter().cloned().collect(),
-            required_forced_withdrawals: self.required_forced_withdrawals,
+            deposits: persisted.deposits.iter().cloned().collect(),
+            required_deposits: persisted.required_deposits,
+            forced_withdrawals: persisted.forced_withdrawals.iter().cloned().collect(),
+            required_forced_withdrawals: persisted.required_forced_withdrawals,
         }
     }
 
     /// Takes custody of a deposit and queues it (L2). It refuses a deposit that would take the
     /// funds held past the largest amount (L3).
     pub fn deposit(&mut self, account: P, amount: A) -> Result<(), Refusal> {
-        if self.halt.is_some() {
+        let persisted = &mut self.persisted;
+        if persisted.halt.is_some() {
             return Err(Refusal::Halted);
         }
         if amount == A::ZERO {
             return Err(Error::ZeroAmount.into());
         }
-        self.held = self.held.checked_add(amount).ok_or(Refusal::Custody)?;
-        self.deposits.push_back(Deposit { account, amount });
+        persisted.held = persisted.held.checked_add(amount).ok_or(Refusal::Custody)?;
+        persisted.deposits.push_back(Deposit { account, amount });
         Ok(())
     }
 
     /// Queues a forced withdrawal `account` requested (L2, L4).
     pub fn withdraw(&mut self, account: P, amount: A) -> Result<(), Refusal> {
-        if self.halt.is_some() {
+        if self.persisted.halt.is_some() {
             return Err(Refusal::Halted);
         }
         if amount == A::ZERO {
             return Err(Error::ZeroAmount.into());
         }
-        self.forced_withdrawals
+        self.persisted
+            .forced_withdrawals
             .push_back(ForcedWithdrawal { account, amount });
         Ok(())
     }
@@ -208,17 +254,20 @@ where
         summary: &Summary<H>,
         certificate: &V::Certificate,
     ) -> Result<(), Refusal> {
-        if self.halt.is_some() {
+        if self.persisted.halt.is_some() {
             return Err(Refusal::Halted);
         }
+        let epoch = self.epoch();
+        let persisted = &self.persisted;
         summary.verify(
             rng,
             &self.verifier,
             certificate,
-            self.epoch(),
-            &self.parent,
-            self.required_deposits as u64..=self.deposits.len() as u64,
-            self.required_forced_withdrawals as u64..=self.forced_withdrawals.len() as u64,
+            epoch,
+            &persisted.parent,
+            persisted.required_deposits as u64..=persisted.deposits.len() as u64,
+            persisted.required_forced_withdrawals as u64
+                ..=persisted.forced_withdrawals.len() as u64,
         )?;
 
         // The counts lie within the queues, and the certificate vouches that the payouts size
@@ -229,17 +278,18 @@ where
             .expect("a count within the queue must fit");
         let commit = summary.payouts.size - 1;
 
-        // One state change drops the processed requests, requires the rest, claims the commit
-        // position, and records the summary (L5).
-        self.deposits.drain(..deposits);
-        self.forced_withdrawals.drain(..forced_withdrawals);
-        self.required_deposits = self.deposits.len();
-        self.required_forced_withdrawals = self.forced_withdrawals.len();
+        // One state change claims the commit position, drops the processed requests, requires
+        // the rest, and records the summary (L5).
         self.fold(commit);
-        self.log = summary.payouts.root;
-        self.matrices.push(summary.matrix);
-        self.balances = summary.balances;
-        self.parent = summary.digest();
+        let persisted = &mut self.persisted;
+        persisted.deposits.drain(..deposits);
+        persisted.forced_withdrawals.drain(..forced_withdrawals);
+        persisted.required_deposits = persisted.deposits.len();
+        persisted.required_forced_withdrawals = persisted.forced_withdrawals.len();
+        persisted.log = summary.payouts.root;
+        persisted.matrices.push(summary.matrix);
+        persisted.balances = summary.balances;
+        persisted.parent = summary.digest();
         Ok(())
     }
 
@@ -249,7 +299,7 @@ where
         &mut self,
         proof: &PayoutProof<P, H::Digest, A>,
     ) -> Result<(P, A), Refusal> {
-        if !proof.verify::<H>(&self.log) {
+        if !proof.verify::<H>(&self.persisted.log) {
             return Err(Refusal::InvalidProof);
         }
         if self.covers(proof.index) {
@@ -263,13 +313,15 @@ where
     /// Takes `amount` from the funds held for a transfer, or returns [Refusal::Custody] and changes
     /// nothing if the ledger holds less.
     fn transfer(&mut self, amount: A) -> Result<(), Refusal> {
-        self.held = self.held.checked_sub(amount).ok_or(Refusal::Custody)?;
+        let held = &mut self.persisted.held;
+        *held = held.checked_sub(amount).ok_or(Refusal::Custody)?;
         Ok(())
     }
 
     /// Returns whether a range covers `index`.
     fn covers(&self, index: u64) -> bool {
-        self.ranges
+        self.persisted
+            .ranges
             .range(..=index)
             .next_back()
             .is_some_and(|(_, end)| index < *end)
@@ -277,23 +329,24 @@ where
 
     /// Adds `index` to the ranges, merging it with each range it touches.
     fn fold(&mut self, index: u64) {
+        let ranges = &mut self.persisted.ranges;
         let (mut start, mut end) = (index, index + 1);
-        if let Some((&before, &until)) = self.ranges.range(..=index).next_back()
+        if let Some((&before, &until)) = ranges.range(..=index).next_back()
             && until >= index
         {
-            self.ranges.remove(&before);
+            ranges.remove(&before);
             start = before;
             end = end.max(until);
         }
-        if let Some(after) = self.ranges.remove(&end) {
+        if let Some(after) = ranges.remove(&end) {
             end = after;
         }
-        self.ranges.insert(start, end);
+        ranges.insert(start, end);
     }
 
     /// Halts on a challenge to a posted close (L7).
     pub fn challenge(&mut self, challenge: &Challenge<P, O, H::Digest, A>) -> Result<(), Refusal> {
-        if self.halt.is_some() {
+        if self.persisted.halt.is_some() {
             return Err(Refusal::Halted);
         }
         let epoch = challenge.receipt.state.epoch;
@@ -305,7 +358,7 @@ where
 
     /// Halts as the deployment's own policy requires. Halting again keeps the first reason.
     pub fn halt(&mut self) {
-        if self.halt.is_none() {
+        if self.persisted.halt.is_none() {
             self.stop(Halt::Fault);
         }
     }
@@ -313,16 +366,20 @@ where
     /// Records the halt, makes every queued deposit claimable, and drops the queued forced
     /// withdrawals and the required counts (L8).
     fn stop(&mut self, halt: Halt) {
-        self.halt = Some(halt);
-        for deposit in self.deposits.drain(..) {
-            let claimable = self.claimable.entry(deposit.account).or_insert(A::ZERO);
+        let persisted = &mut self.persisted;
+        persisted.halt = Some(halt);
+        for deposit in persisted.deposits.drain(..) {
+            let claimable = persisted
+                .claimable
+                .entry(deposit.account)
+                .or_insert(A::ZERO);
             *claimable = claimable
                 .checked_add(deposit.amount)
                 .expect("claimable deposits must not exceed the funds held");
         }
-        self.forced_withdrawals.clear();
-        self.required_deposits = 0;
-        self.required_forced_withdrawals = 0;
+        persisted.forced_withdrawals.clear();
+        persisted.required_deposits = 0;
+        persisted.required_forced_withdrawals = 0;
     }
 
     /// Pays `account` its balance as of the last post, proven by `balance`, and its claimable
@@ -332,27 +389,29 @@ where
         account: &P,
         balance: Option<&BalanceProof<H::Digest, A>>,
     ) -> Result<A, Refusal> {
-        if self.halt.is_none() {
+        let persisted = &self.persisted;
+        if persisted.halt.is_none() {
             return Err(Refusal::NotHalted);
         }
         let balance = match balance {
-            Some(proof) if !proof.verify::<H, P>(&self.balances, account) => {
+            Some(proof) if !proof.verify::<H, P>(&persisted.balances, account) => {
                 return Err(Refusal::InvalidProof);
             }
-            Some(proof) if !self.claimed.contains(account) => proof.balance,
+            Some(proof) if !persisted.claimed.contains(account) => proof.balance,
             _ => A::ZERO,
         };
-        let deposits = self.claimable.get(account).copied().unwrap_or(A::ZERO);
+        let deposits = persisted.claimable.get(account).copied().unwrap_or(A::ZERO);
         if balance == A::ZERO && deposits == A::ZERO {
             return Err(Refusal::NothingToClaim);
         }
         let paid = balance.checked_add(deposits).ok_or(Refusal::Custody)?;
 
         self.transfer(paid)?;
+        let persisted = &mut self.persisted;
         if balance != A::ZERO {
-            self.claimed.insert(account.clone());
+            persisted.claimed.insert(account.clone());
         }
-        self.claimable.remove(account);
+        persisted.claimable.remove(account);
         Ok(paid)
     }
 }

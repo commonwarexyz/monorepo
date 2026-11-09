@@ -162,11 +162,12 @@
 //! happened from the row root [Opening::verify_row] proves under each post's matrix root.
 //!
 //! - **S1.** Derive a request's states from the latest countersigned map of its epoch and from
-//!   `previous`. Until the close of the epoch before posts, `previous` is the root of the latest
-//!   countersigned map of that epoch. Once it posts, it is the posted row root. Either is the empty
-//!   map's root when there is none. Sign no request while another may still be countersigned, and
-//!   none for an epoch before one with a countersigned map. Otherwise [Verified::admit] refuses the
-//!   state, and the sender's requests fail until a post shows which map settled.
+//!   `previous`. Until the sender records the row root the post of the epoch before proves (S5),
+//!   `previous` is the root of the latest countersigned map of that epoch. Once it has, it is that
+//!   row root. Either is the empty map's root when there is none. Sign no request while another
+//!   may still be countersigned, and none for an epoch before one with a countersigned map.
+//!   Otherwise [Verified::admit] refuses the state, and the sender's requests fail until a post
+//!   shows which map settled.
 //!
 //! - **S2.** Record a map as countersigned only once [State::verify_acknowledgement] accepts the
 //!   operator's acknowledgement of its state. Otherwise the sender's record diverges as in S1, and
