@@ -143,10 +143,10 @@
 //! preconfirms the payment, because the close of its epoch must credit at least that amount or its
 //! receiver can halt the ledger.
 //!
-//! A pipelined request also signs a state for the next epoch that pays only the batch, on top of
-//! the map without it. A payment refused because its epoch just closed then settles in the next
-//! epoch without a new request. Each state commits to the root it builds on, so the sender's row in
-//! the close of the request's epoch decides which of the two can settle.
+//! A request also signs a state for the next epoch that pays only the batch, on top of the map
+//! without it. A payment refused because its epoch just closed then settles in the next epoch
+//! without a new request. Each state commits to the root it builds on, so the sender's row in the
+//! close of the request's epoch decides which of the two can settle.
 //!
 //! ```text
 //!              close(e-1)               close(e)                 close(e+1)
@@ -182,9 +182,9 @@
 //!
 //! - **S4.** Treat a refusal as final only for a request delivered once, with no copy in flight.
 //!   Otherwise an earlier copy may have been admitted, and the record diverges as in S1. A refused
-//!   pipelined request's state for the next epoch can still be admitted from a replayed copy until
-//!   the post of the request's epoch settles a map other than the one that state builds on, with
-//!   the same outcome.
+//!   request's state for the next epoch can still be admitted from a replayed copy until the post
+//!   of the request's epoch settles a map other than the one that state builds on, with the same
+//!   outcome.
 //!
 //! - **S5.** Resolve a pending request against each post from its epoch on, in epoch order, before
 //!   dropping it or building on a posted row root. The request settled in epoch `e` if it has a
@@ -309,8 +309,8 @@
 //!   forged or over the limit only needs assembling again without it.
 //!
 //! - **O6.** When a request arrives after its own epoch closed, verify it with [Request::verify]
-//!   for the next epoch, and admit its pipelined state if [Verified::admit] and the checks of O3
-//!   and O5 accept it. Otherwise a payment refused because its epoch just closed needs a new
+//!   for the next epoch, and admit its state of that epoch if [Verified::admit] and the checks of
+//!   O3 and O5 accept it. Otherwise a payment refused because its epoch just closed needs a new
 //!   request.
 //!
 //! - **O7.** Persist each [Admission::New] state with its map and the sender's signature before

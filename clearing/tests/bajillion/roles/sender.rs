@@ -85,13 +85,13 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Hash for Persisted<P, O, 
                 batch,
                 state: proposed,
                 payments,
-                pipelined,
+                next,
             } = states;
             request.encode().hash(state);
             batch.hash(state);
             proposed.hash(state);
             payments.hash(state);
-            pipelined.hash(state);
+            next.hash(state);
         }
     }
 }
@@ -193,7 +193,7 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
             .unwrap_or_else(|| Amounts::<S::PublicKey, A>::empty().root::<H>())
     }
 
-    /// Returns each state of the pending request as a [Countersigned] without an acknowledgement.
+    /// Returns both states of the pending request as a [Countersigned] without an acknowledgement.
     fn proposed(&self) -> Vec<Countersigned<S::PublicKey, O, H::Digest, A>> {
         let Some((request, states)) = &self.persisted.pending else {
             return Vec::new();
@@ -207,28 +207,18 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
                     payments: payments.clone(),
                 }
             };
-        let pipelined = states
-            .pipelined
-            .as_ref()
-            .zip(request.pipelined.as_ref())
-            .map(|(state, (_, signature))| countersigned(state, signature, &states.batch));
-        core::iter::once(countersigned(
-            &states.state,
-            &request.signature,
-            &states.payments,
-        ))
-        .chain(pipelined)
-        .collect()
+        vec![
+            countersigned(&states.state, &request.signature, &states.payments),
+            countersigned(&states.next, &request.next, &states.batch),
+        ]
     }
 
     /// Signs a request paying `batch` in `epoch` on top of the countersigned map of that epoch,
-    /// and, if `pipelined`, on top of it in the next. The request is persisted before it is
-    /// returned for sending.
+    /// or on top of it in the next. The request is persisted before it is returned for sending.
     pub fn send(
         &mut self,
         epoch: Epoch,
         batch: Amounts<S::PublicKey, A>,
-        pipelined: bool,
     ) -> Result<Request<S::PublicKey, H::Digest, A>, Refusal> {
         // One request at a time, and none for an epoch before one with a countersigned map (S1).
         if self.persisted.pending.is_some() {
@@ -254,7 +244,6 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
             batch,
             payments,
             &self.previous(epoch),
-            pipelined,
         )?;
         let request = states.sign(&self.signer, &self.namespace);
         self.persisted.pending = Some((request.clone(), states));

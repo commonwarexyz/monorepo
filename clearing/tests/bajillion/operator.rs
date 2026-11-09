@@ -34,7 +34,7 @@ fn test_assembly_matches_monolithic_close() {
         for offset in [1, 3] {
             let to = (from + offset) % USERS;
             let sender = senders.get_mut(from).unwrap();
-            let request = sender.send(2, amounts(&[(to, 10 + from)]), false).unwrap();
+            let request = sender.send(2, amounts(&[(to, 10 + from)])).unwrap();
             let shard = &mut shards[(from % SHARDS) as usize];
             let acknowledgement = shard.accept(&request).unwrap();
             replica.accept(&request).unwrap();
@@ -80,7 +80,7 @@ fn test_flows_apply_per_account_in_epoch_order() {
 
     // In epoch 2 alice pays bob 30 and bob forces out more than he holds. In epoch 3 he deposits
     // 40. After both closes the operator holds 70 for alice and 40 for bob.
-    let request = alice.send(2, amounts(&[(1, 30)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 30)])).unwrap();
     alice
         .acknowledged(&operator.accept(&request).unwrap())
         .unwrap();
@@ -143,16 +143,15 @@ fn test_restarted_operator_closes_like_the_original() {
     let mut operator = operator();
     fund(&mut operator, &[(0, 100)]);
     let mut alice = sender(0);
-    let request = alice.send(2, amounts(&[(1, 10)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 10)])).unwrap();
     alice
         .acknowledged(&operator.accept(&request).unwrap())
         .unwrap();
     close(&mut operator);
 
-    // In epoch 3, the operator admits the epoch 3 state of a pipelined request on top of the row
-    // the close of epoch 2 settled for alice, and a soft withdrawal, persisting each before it
-    // answers.
-    let request = alice.send(3, amounts(&[(1, 5)]), true).unwrap();
+    // In epoch 3, the operator admits a request on top of the row the close of epoch 2 settled for
+    // alice, and a soft withdrawal, persisting each before it answers.
+    let request = alice.send(3, amounts(&[(1, 5)])).unwrap();
     let acknowledgement = operator.accept(&request).unwrap();
     assert_eq!(alice.acknowledged(&acknowledgement).unwrap()[0].amount, 5);
     let withdrawal = Withdrawal::sign(&user(1), &namespace(), 3, 4, 0);

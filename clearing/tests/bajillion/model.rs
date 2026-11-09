@@ -60,8 +60,8 @@
 //! claim and payout is paid.
 //!
 //! The witnesses each workload requires are listed with it. They cover admission and withdrawals
-//! while a close awaits its post, a pipelined state admitted next epoch and its copy refused
-//! after its own epoch settled it, a retry acknowledged, a post settling an unacknowledged
+//! while a close awaits its post, a request admitted in the epoch after its own and its copy
+//! refused after its own epoch settled it, a retry acknowledged, a post settling an unacknowledged
 //! request, a payout capped by the balance, a repeated payout or claim refused, an omitted row
 //! challenged, and claims draining the custody.
 //!
@@ -151,8 +151,6 @@ struct Workload {
     payment: u64,
     /// Amount of every deposit made after genesis and of every withdrawal.
     amount: u64,
-    /// Whether senders may pipeline requests.
-    pipelining: bool,
     /// Closes the ledger may post. The epoch after the last one stays open.
     epochs: Epoch,
     /// What the workload may do.
@@ -357,7 +355,6 @@ enum Action {
         user: usize,
         receiver: usize,
         epoch: Epoch,
-        pipelined: bool,
     },
     /// A sender sends another copy of its pending request.
     Resend { user: usize },
@@ -596,11 +593,12 @@ impl Workload {
         if request.epoch == epoch {
             (request.payments, request.previous)
         } else {
-            let (previous, _) = request
-                .pipelined
-                .as_ref()
-                .expect("a state after the request's epoch must be the pipelined one");
-            (request.batch.root::<Sha256>(), *previous)
+            assert_eq!(
+                request.epoch + 1,
+                epoch,
+                "a state after the request's epoch must be the next one"
+            );
+            (request.batch.root::<Sha256>(), request.base)
         }
     }
 
@@ -639,10 +637,8 @@ impl Workload {
         let epoch = world.operator.epoch();
         let (payments, previous) = if request.epoch == epoch {
             (request.payments, request.previous)
-        } else if request.epoch + 1 == epoch
-            && let Some((previous, _)) = &request.pipelined
-        {
-            (request.batch.root::<Sha256>(), *previous)
+        } else if request.epoch + 1 == epoch {
+            (request.batch.root::<Sha256>(), request.base)
         } else {
             return Verdict::WrongEpoch;
         };
@@ -692,7 +688,7 @@ impl Workload {
     fn resolution(&self, world: &World, epoch: Epoch, user: usize) -> Resolution {
         let index = world.pending[user]?;
         let request = &world.sent[index].request.0;
-        let epochs = request.epoch..=request.epoch + u64::from(request.pipelined.is_some());
+        let epochs = request.epoch..=request.epoch + 1;
         if epochs.contains(&epoch)
             && self.state_of(world, index, epoch).0 == self.row_root_of(world, epoch, user)
         {
@@ -976,17 +972,11 @@ impl Model for Workload {
                     }
                     for receiver in (0..users).filter(|receiver| *receiver != user) {
                         for epoch in &epochs {
-                            for pipelined in [false, true] {
-                                if pipelined && !self.pipelining {
-                                    continue;
-                                }
-                                actions.push(Action::Send {
-                                    user,
-                                    receiver,
-                                    epoch: *epoch,
-                                    pipelined,
-                                });
-                            }
+                            actions.push(Action::Send {
+                                user,
+                                receiver,
+                                epoch: *epoch,
+                            });
                         }
                     }
                 }
@@ -1097,7 +1087,6 @@ impl Model for Workload {
                 user,
                 receiver,
                 epoch,
-                pipelined,
             } => {
                 world.budget.sends -= 1;
                 let batch = amounts(&[(receiver as u64, self.payment)]);
@@ -1107,7 +1096,7 @@ impl Model for Workload {
                     .countersigned
                     .iter()
                     .any(|(index, state)| world.sent[*index].user == user && *state > epoch);
-                let request = match world.senders[user].send(epoch, batch.clone(), pipelined) {
+                let request = match world.senders[user].send(epoch, batch.clone()) {
                     Err(Sending::LaterEpoch) if later => return None,
                     Ok(request) if !later => request,
                     outcome => {
@@ -1120,14 +1109,12 @@ impl Model for Workload {
                 // names.
                 let map = self.map_of(&world, &world.countersigned, epoch, user);
                 let own = self.expected_previous(&world, epoch, user);
-                let expected_pipelined = pipelined.then(|| map.root::<Sha256>());
                 if request.epoch != epoch
                     || request.account != self.accounts[user]
                     || request.batch != batch
                     || request.payments != Amounts::combine(&map, &batch).unwrap().root::<Sha256>()
                     || request.previous != own
-                    || request.pipelined.as_ref().map(|(previous, _)| *previous)
-                        != expected_pipelined
+                    || request.base != map.root::<Sha256>()
                 {
                     world.fail(format!(
                         "send: the request of user {user} is not the one asked for"
@@ -1180,7 +1167,7 @@ impl Model for Workload {
                 match actual {
                     Verdict::Admit => {
                         if epoch == sent.request.0.epoch + 1 {
-                            self.witness("a pipelined request is admitted in the next epoch");
+                            self.witness("a request is admitted in the epoch after its own");
                         }
                         if world.candidate.is_some() {
                             self.witness(
@@ -1194,7 +1181,7 @@ impl Model for Workload {
                     }
                     Verdict::Retry => self.witness("a retried request is acknowledged again"),
                     Verdict::Stale if sent.copies > 1 && epoch > sent.request.0.epoch => {
-                        self.witness("a pipelined copy is refused after its own epoch settled it");
+                        self.witness("a copy is refused after its own epoch settled it");
                     }
                     _ => {}
                 }
@@ -1426,7 +1413,7 @@ impl Model for Workload {
                             self.witness("a post drops a request");
                         }
                         Some(Outcome::Pending) => {
-                            self.witness("a post keeps a pipelined request pending");
+                            self.witness("a post keeps a request pending");
                         }
                         None => {}
                     },
@@ -1676,7 +1663,7 @@ fn check(workload: Workload, flows: &[&'static str]) {
 
 /// Returns a workload of two users funded with 3 and 2, paying 1 at a time, depositing and
 /// withdrawing 2 at a time, over `epochs` epochs, with `budget`.
-fn workload(epochs: Epoch, pipelining: bool, budget: Budget) -> Workload {
+fn workload(epochs: Epoch, budget: Budget) -> Workload {
     let (schemes, verifier) = committee(4);
     Workload {
         accounts: (0..2).map(account).collect(),
@@ -1685,7 +1672,6 @@ fn workload(epochs: Epoch, pipelining: bool, budget: Budget) -> Workload {
         funding: vec![3, 2],
         payment: 1,
         amount: 2,
-        pipelining,
         epochs,
         budget,
         witnessed: Arc::default(),
@@ -1704,13 +1690,13 @@ const NOTHING: Budget = Budget {
     halts: 0,
 };
 
-/// One payment attempt around the funding cut settles or is dropped, and the funding posts.
+/// One payment attempt around the funding cut settles in the epoch after its own, stays pending,
+/// or is refused, and the funding posts.
 #[test]
 fn test_model_settles_one_payment() {
     check(
         workload(
             1,
-            false,
             Budget {
                 sends: 1,
                 ..NOTHING
@@ -1718,22 +1704,21 @@ fn test_model_settles_one_payment() {
         ),
         &[
             "every epoch posts",
-            "a post drops a request",
+            "a request is admitted in the epoch after its own",
+            "a post keeps a request pending",
             "a refusal of a request sent once is final",
         ],
     );
 }
 
-/// Two payment attempts over two epochs with pipelining, a request sent again, and a reply lost
-/// settle each payment at most once in every order of sends, deliveries, cuts, posts, and
-/// resolutions.
+/// Two payment attempts over two epochs, a request sent again, and a reply lost settle each
+/// payment at most once in every order of sends, deliveries, cuts, posts, and resolutions.
 #[test_group("slow")]
 #[test]
-fn test_model_pipelines_and_retries_payments() {
+fn test_model_retries_payments() {
     check(
         workload(
             2,
-            true,
             Budget {
                 sends: 2,
                 duplicates: 1,
@@ -1744,9 +1729,9 @@ fn test_model_pipelines_and_retries_payments() {
         &[
             "every epoch posts",
             "a payment is admitted while the last close awaits its post",
-            "a pipelined request is admitted in the next epoch",
-            "a pipelined copy is refused after its own epoch settled it",
-            "a post keeps a pipelined request pending",
+            "a request is admitted in the epoch after its own",
+            "a copy is refused after its own epoch settled it",
+            "a post keeps a request pending",
             "a post settles a request before its acknowledgement arrives",
             "a post drops a request",
             "a retried request is acknowledged again",
@@ -1764,7 +1749,6 @@ fn test_model_races_withdrawals_around_a_cut() {
     check(
         workload(
             2,
-            true,
             Budget {
                 sends: 1,
                 deposits: 1,
@@ -1798,7 +1782,6 @@ fn test_model_halts_and_claims() {
     check(
         workload(
             2,
-            true,
             Budget {
                 sends: 1,
                 forced: 1,
@@ -1827,7 +1810,6 @@ fn test_model_rebuilds_on_the_posted_row() {
     check(
         workload(
             3,
-            false,
             Budget {
                 sends: 2,
                 omissions: 1,
@@ -1851,7 +1833,6 @@ fn test_model_recovers_funds_after_a_halt() {
     check(
         workload(
             2,
-            false,
             Budget {
                 sends: 1,
                 deposits: 1,

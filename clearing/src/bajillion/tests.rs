@@ -372,7 +372,6 @@ fn test_port_vector() {
             amounts(&[(1, 5), (2, 7)]),
             &Amounts::empty(),
             &empty_root(),
-            false,
         )
         .unwrap();
         let receipt = Receipt::<_, PublicKey, _, _>::issue::<Sha256>(

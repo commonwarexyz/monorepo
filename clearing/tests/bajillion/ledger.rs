@@ -267,7 +267,7 @@ fn test_challenges_need_a_contradicted_receipt() {
         deployment.ledger.deposit(account(0), 100).unwrap();
         deployment.close(&mut context).await;
         let mut alice = sender(0);
-        let request = alice.send(2, amounts(&[(1, 10)]), false).unwrap();
+        let request = alice.send(2, amounts(&[(1, 10)])).unwrap();
         let receipt = alice
             .acknowledged(&deployment.operator.accept(&request).unwrap())
             .unwrap()
@@ -325,7 +325,7 @@ fn test_halted_ledger_pays_balance_and_deposit_claims() {
         deployment.ledger.deposit(account(1), 20).unwrap();
         deployment.close(&mut context).await;
         let mut alice = sender(0);
-        let request = alice.send(2, amounts(&[(2, 3)]), false).unwrap();
+        let request = alice.send(2, amounts(&[(2, 3)])).unwrap();
         deployment.operator.accept(&request).unwrap();
         deployment.close(&mut context).await;
         deployment.ledger.deposit(account(0), 4).unwrap();
@@ -423,9 +423,7 @@ fn test_custody_backs_balances_deposits_and_payouts() {
             for from in 0..USERS {
                 let to = (from + 1) % USERS;
                 let sender = &mut senders[from as usize];
-                let request = sender
-                    .send(epoch, amounts(&[(to, 5 + epoch)]), false)
-                    .unwrap();
+                let request = sender.send(epoch, amounts(&[(to, 5 + epoch)])).unwrap();
                 let acknowledgement = deployment.operator.accept(&request).unwrap();
                 sender.acknowledged(&acknowledgement).unwrap();
             }

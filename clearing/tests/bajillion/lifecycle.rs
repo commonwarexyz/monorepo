@@ -46,7 +46,7 @@ fn test_epochs_settle_payments_and_withdrawals() {
                     expected[from as usize] -= amount;
                     expected[to as usize] += amount;
                     let sender = &mut senders[from as usize];
-                    let request = sender.send(epoch, amounts(&[(to, amount)]), false).unwrap();
+                    let request = sender.send(epoch, amounts(&[(to, amount)])).unwrap();
                     let acknowledgement = deployment.operator.accept(&request).unwrap();
                     for receipt in sender.acknowledged(&acknowledgement).unwrap() {
                         receivers[to as usize].receive(receipt).unwrap();
@@ -124,7 +124,7 @@ fn test_omitted_payment_halts_ledger() {
         // The operator preconfirms a payment to bob.
         let mut alice = sender(0);
         let mut bob = receiver(1, 2);
-        let request = alice.send(2, amounts(&[(1, 30)]), false).unwrap();
+        let request = alice.send(2, amounts(&[(1, 30)])).unwrap();
         let receipt = alice
             .acknowledged(&deployment.operator.accept(&request).unwrap())
             .unwrap()
@@ -197,14 +197,14 @@ fn test_late_challenge_halts_after_later_closes() {
         let mut alice = sender(0);
         let mut carol = sender(3);
         let mut bob = receiver(1, 2);
-        let request = alice.send(2, amounts(&[(1, 30)]), false).unwrap();
+        let request = alice.send(2, amounts(&[(1, 30)])).unwrap();
         let receipt = alice
             .acknowledged(&deployment.operator.accept(&request).unwrap())
             .unwrap()
             .pop()
             .unwrap();
         bob.receive(receipt).unwrap();
-        let paid = carol.send(2, amounts(&[(1, 10)]), false).unwrap();
+        let paid = carol.send(2, amounts(&[(1, 10)])).unwrap();
         let credited = carol
             .acknowledged(&deployment.operator.accept(&paid).unwrap())
             .unwrap()
@@ -276,11 +276,11 @@ fn test_partial_credit_halts_ledger() {
         // Alice pays bob 5 and then 5 more, and bob holds the receipt for the cumulative 10.
         let mut alice = sender(0);
         let mut bob = receiver(1, 2);
-        let first = alice.send(2, amounts(&[(1, 5)]), false).unwrap();
+        let first = alice.send(2, amounts(&[(1, 5)])).unwrap();
         alice
             .acknowledged(&deployment.operator.accept(&first).unwrap())
             .unwrap();
-        let second = alice.send(2, amounts(&[(1, 5)]), false).unwrap();
+        let second = alice.send(2, amounts(&[(1, 5)])).unwrap();
         let receipt = alice
             .acknowledged(&deployment.operator.accept(&second).unwrap())
             .unwrap()
@@ -396,7 +396,7 @@ mod schemes {
                 2,
             );
             let batch = Amounts::new([(users[1].public_key(), units(2) + U256::ONE)]).unwrap();
-            let request = alice.send(2, batch, false).unwrap();
+            let request = alice.send(2, batch).unwrap();
             let acknowledgement = deployment.operator.accept(&request).unwrap();
             for receipt in alice.acknowledged(&acknowledgement).unwrap() {
                 assert_eq!(bob.receive(receipt).unwrap(), units(2) + U256::ONE);

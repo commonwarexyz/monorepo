@@ -98,16 +98,19 @@ where
     }
 }
 
-/// A sender's request to pay a batch of receivers.
+/// A sender's request to pay a batch of receivers in its epoch, or in the next if its epoch closes
+/// first.
 ///
-/// It carries the roots its states claim, so the sender's signature verifies from the request
-/// alone. Each signature covers one state.
+/// It carries the roots its two states claim, so each signature verifies from the request alone.
+/// The state of the request's epoch pays the batch on top of the sender's latest countersigned map
+/// of that epoch, and the state of the next epoch pays only the batch on top of that map. The
+/// sender's row in the close of the request's epoch decides which of the two can settle.
 ///
 /// ```text
 ///                     close(epoch - 1)     close(epoch)     close(epoch + 1)  signed by
 ///
 ///   state(epoch)          previous <-------- payments                         signature
-///   state(epoch + 1)                        pipelined.0 <----- root(batch)    pipelined.1
+///   state(epoch + 1)                           base <--------- root(batch)    next
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request<P: PublicKey, D: Digest, A: Amount> {
@@ -123,17 +126,17 @@ pub struct Request<P: PublicKey, D: Digest, A: Amount> {
     pub previous: D,
     /// Sender's signature over its state in `epoch`.
     pub signature: P::Signature,
-    /// For a pipelined request, the root of the sender's payment map in `epoch` without the batch,
-    /// and the sender's signature over its state in the next epoch. That state pays only the batch
-    /// on top of that root.
-    pub pipelined: Option<(D, P::Signature)>,
+    /// Root of the sender's payment map in `epoch` without the batch.
+    pub base: D,
+    /// Sender's signature over its state in the next epoch. That state pays only the batch on top
+    /// of `base`.
+    pub next: P::Signature,
 }
 
 impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
     /// Derives the states of `account`'s request to pay `batch` in `epoch`, where `payments` is its
     /// latest countersigned map of `epoch`. The state of `epoch` adds `batch` to `payments` on top
-    /// of `previous`. If `pipelined`, the state of the next epoch pays only `batch` on top of
-    /// `payments`.
+    /// of `previous`, and the state of the next epoch pays only `batch` on top of `payments`.
     ///
     /// Returns [Error::NoReceivers] if `batch` is empty, and [Error::Overflow] if the next epoch or
     /// an amount overflows.
@@ -143,20 +146,15 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
         batch: Amounts<P, A>,
         payments: &Amounts<P, A>,
         previous: &D,
-        pipelined: bool,
     ) -> Result<States<P, D, A>, Error> {
         if batch.is_empty() {
             return Err(Error::NoReceivers);
         }
-        let pipelined = if pipelined {
-            Some(State {
-                epoch: epoch.checked_add(1).ok_or(Error::Overflow)?,
-                account: account.clone(),
-                payments: batch.root::<H>(),
-                previous: payments.root::<H>(),
-            })
-        } else {
-            None
+        let next = State {
+            epoch: epoch.checked_add(1).ok_or(Error::Overflow)?,
+            account: account.clone(),
+            payments: batch.root::<H>(),
+            previous: payments.root::<H>(),
         };
         let extended = payments.combine(&batch)?;
         Ok(States {
@@ -168,12 +166,12 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
                 previous: *previous,
             },
             payments: extended,
-            pipelined,
+            next,
         })
     }
 
     /// Verifies the sender's signature over the request's state for `epoch`, either its state of
-    /// its own epoch or its pipelined state of the next.
+    /// its own epoch or its state of the next.
     ///
     /// Returns [Error::WrongEpoch] if the request has no state for `epoch`, [Error::NoReceivers] if
     /// the batch is empty, and [Error::InvalidSignature] if the signature does not verify.
@@ -182,26 +180,19 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
         namespace: &Namespace,
         epoch: Epoch,
     ) -> Result<Verified<'_, P, D, A>, Error> {
-        let pipelined = if epoch == self.epoch {
-            None
+        let (payments, previous, signature) = if epoch == self.epoch {
+            (self.payments, self.previous, &self.signature)
+        } else if self.epoch.checked_add(1) == Some(epoch) {
+            (self.batch.root::<H>(), self.base, &self.next)
         } else {
-            match &self.pipelined {
-                Some(pipelined) if self.epoch.checked_add(1) == Some(epoch) => Some(pipelined),
-                _ => {
-                    return Err(Error::WrongEpoch {
-                        expected: epoch,
-                        found: self.epoch,
-                    });
-                }
-            }
+            return Err(Error::WrongEpoch {
+                expected: epoch,
+                found: self.epoch,
+            });
         };
         if self.batch.is_empty() {
             return Err(Error::NoReceivers);
         }
-        let (payments, previous, signature) = match pipelined {
-            None => (self.payments, self.previous, &self.signature),
-            Some((previous, signature)) => (self.batch.root::<H>(), *previous, signature),
-        };
         let state = State {
             epoch,
             account: self.account.clone(),
@@ -227,18 +218,14 @@ impl<P: PublicKey, D: Digest, A: Amount> Write for Request<P, D, A> {
         self.payments.write(buf);
         self.previous.write(buf);
         self.signature.write(buf);
-        self.pipelined.write(buf);
+        self.base.write(buf);
+        self.next.write(buf);
     }
 }
 
 impl<P: PublicKey, D: Digest, A: Amount> EncodeSize for Request<P, D, A> {
     fn encode_size(&self) -> usize {
-        Epoch::SIZE
-            + P::SIZE
-            + self.batch.encode_size()
-            + 2 * D::SIZE
-            + P::Signature::SIZE
-            + self.pipelined.encode_size()
+        Epoch::SIZE + P::SIZE + self.batch.encode_size() + 3 * D::SIZE + 2 * P::Signature::SIZE
     }
 }
 
@@ -254,7 +241,8 @@ impl<P: PublicKey, D: Digest, A: Amount> Read for Request<P, D, A> {
             payments: D::read(buf)?,
             previous: D::read(buf)?,
             signature: P::Signature::read(buf)?,
-            pipelined: Option::<(D, P::Signature)>::read_cfg(buf, &((), ()))?,
+            base: D::read(buf)?,
+            next: P::Signature::read(buf)?,
         })
     }
 }
@@ -276,7 +264,8 @@ where
             payments: u.arbitrary()?,
             previous: u.arbitrary()?,
             signature: u.arbitrary()?,
-            pipelined: u.arbitrary()?,
+            base: u.arbitrary()?,
+            next: u.arbitrary()?,
         })
     }
 }
@@ -291,28 +280,15 @@ pub struct States<P: PublicKey, D: Digest, A: Amount> {
     pub state: State<P, D>,
     /// The payment map `state` commits to, the sender's map with the batch added.
     pub payments: Amounts<P, A>,
-    /// For a pipelined request, the state for the next epoch. It commits to `batch` alone.
-    pub pipelined: Option<State<P, D>>,
+    /// The state for the next epoch. It commits to `batch` alone.
+    pub next: State<P, D>,
 }
 
 impl<P: PublicKey, D: Digest, A: Amount> States<P, D, A> {
     /// Returns the request carrying these states and their claimed roots, with `signature` over
-    /// `self.state` and `pipelined` over the pipelined state. Each signature covers its state's
-    /// encoding in [Namespace::state].
-    ///
-    /// # Panics
-    ///
-    /// Panics unless `pipelined` is present exactly when the states are pipelined.
-    pub fn request(
-        &self,
-        signature: P::Signature,
-        pipelined: Option<P::Signature>,
-    ) -> Request<P, D, A> {
-        assert_eq!(
-            self.pipelined.is_some(),
-            pipelined.is_some(),
-            "a pipelined signature must be given exactly when the states are pipelined"
-        );
+    /// `self.state` and `next` over `self.next`. Each signature covers its state's encoding in
+    /// [Namespace::state].
+    pub fn request(&self, signature: P::Signature, next: P::Signature) -> Request<P, D, A> {
         Request {
             epoch: self.state.epoch,
             account: self.state.account.clone(),
@@ -320,25 +296,21 @@ impl<P: PublicKey, D: Digest, A: Amount> States<P, D, A> {
             payments: self.state.payments,
             previous: self.state.previous,
             signature,
-            pipelined: self
-                .pipelined
-                .as_ref()
-                .zip(pipelined)
-                .map(|(state, signature)| (state.previous, signature)),
+            base: self.next.previous,
+            next,
         }
     }
 
-    /// Signs `self.state`, and the pipelined state if any, with `signer` in [Namespace::state], and
-    /// returns the request as [States::request] does.
+    /// Signs both states with `signer` in [Namespace::state], and returns the request as
+    /// [States::request] does.
     pub fn sign<S>(&self, signer: &S, namespace: &Namespace) -> Request<P, D, A>
     where
         S: Signer<PublicKey = P, Signature = P::Signature>,
     {
-        let pipelined = self
-            .pipelined
-            .as_ref()
-            .map(|state| state.sign(signer, namespace));
-        self.request(self.state.sign(signer, namespace), pipelined)
+        self.request(
+            self.state.sign(signer, namespace),
+            self.next.sign(signer, namespace),
+        )
     }
 }
 
@@ -652,23 +624,14 @@ mod tests {
         batch: &[(u64, u64)],
         payments: &Amounts<PublicKey, u64>,
         previous: Digest,
-        pipelined: bool,
     ) -> TestStates {
-        TestRequest::states::<Sha256>(
-            2,
-            account(0),
-            amounts(batch),
-            payments,
-            &previous,
-            pipelined,
-        )
-        .unwrap()
+        TestRequest::states::<Sha256>(2, account(0), amounts(batch), payments, &previous).unwrap()
     }
 
     /// Returns a receipt from a payment map paying two receivers.
     fn receipt() -> Receipt<PublicKey, PublicKey, Digest, u64> {
         let namespace = namespace();
-        let states = states(&[(2, 4), (3, 5)], &Amounts::empty(), empty_root(), false);
+        let states = states(&[(2, 4), (3, 5)], &Amounts::empty(), empty_root());
         Receipt::<_, PublicKey, _, _>::issue::<Sha256>(
             &states.state,
             &states.state.sign(&user(0), &namespace),
@@ -688,95 +651,83 @@ mod tests {
         let namespace = namespace();
         let previous = amounts(&[(4, 1)]).root::<Sha256>();
         for payments in [Amounts::empty(), amounts(&[(1, 3), (2, 4)])] {
-            for pipelined in [false, true] {
-                let states = states(&[(1, 5), (3, 6)], &payments, previous, pipelined);
-                let signed = states.sign(&user(0), &namespace);
-                assert_eq!(states.payments, payments.combine(&states.batch).unwrap());
-                assert_eq!(states.state.payments, states.payments.root::<Sha256>());
+            let states = states(&[(1, 5), (3, 6)], &payments, previous);
+            let signed = states.sign(&user(0), &namespace);
+            assert_eq!(states.payments, payments.combine(&states.batch).unwrap());
+            assert_eq!(states.state.payments, states.payments.root::<Sha256>());
+            assert_eq!(states.next.payments, states.batch.root::<Sha256>());
+            assert_eq!(states.next.previous, payments.root::<Sha256>());
 
-                // The request crosses the wire with its distinct claimed roots intact. Decoding
-                // refuses a batch beyond the receiver limit and a truncated encoding.
-                let encoded = signed.encode();
-                let request = TestRequest::decode_cfg(encoded.clone(), &2).unwrap();
-                assert_eq!(request, signed);
-                assert_ne!(request.payments, request.previous);
-                assert!(TestRequest::decode_cfg(encoded.clone(), &1).is_err());
-                assert!(TestRequest::decode_cfg(encoded.slice(..encoded.len() - 1), &2).is_err());
+            // The request crosses the wire with its distinct claimed roots intact. Decoding
+            // refuses a batch beyond the receiver limit and a truncated encoding.
+            let encoded = signed.encode();
+            let request = TestRequest::decode_cfg(encoded.clone(), &2).unwrap();
+            assert_eq!(request, signed);
+            assert_ne!(request.payments, request.previous);
+            assert_ne!(request.payments, request.base);
+            assert!(TestRequest::decode_cfg(encoded.clone(), &1).is_err());
+            assert!(TestRequest::decode_cfg(encoded.slice(..encoded.len() - 1), &2).is_err());
 
-                // In its own epoch, the request extends the sender's latest map.
-                let latest = (!payments.is_empty()).then(|| {
-                    let state = State {
-                        epoch: 2,
-                        account: account(0),
-                        payments: payments.root::<Sha256>(),
-                        previous,
-                    };
-                    (state, payments.clone())
-                });
-                let admission = request
-                    .verify::<Sha256>(&namespace, 2)
-                    .unwrap()
-                    .admit::<Sha256>(latest.as_ref().map(|(s, p)| (s, p)), &previous)
-                    .unwrap();
-                assert_eq!(
-                    admission,
-                    Admission::New {
-                        state: states.state.clone(),
-                        payments: states.payments.clone(),
-                        signature: request.signature.clone(),
-                    }
-                );
-
-                // A retry of the countersigned state is admitted as one, whatever its batch.
-                let mut retried = request.clone();
-                retried.batch = amounts(&[(7, 1)]);
-                let admission = retried
-                    .verify::<Sha256>(&namespace, 2)
-                    .unwrap()
-                    .admit::<Sha256>(Some((&states.state, &states.payments)), &previous)
-                    .unwrap();
-                assert_eq!(admission, Admission::Retry(states.state.clone()));
-
-                // In the next epoch, a pipelined request pays only its batch on top of the map
-                // the close of its epoch settles. The admission carries the signature over the
-                // pipelined state.
-                let next = request.verify::<Sha256>(&namespace, 3);
-                let Some(state) = &states.pipelined else {
-                    assert!(matches!(
-                        next,
-                        Err(Error::WrongEpoch {
-                            expected: 3,
-                            found: 2
-                        })
-                    ));
-                    continue;
+            // In its own epoch, the request extends the sender's latest map.
+            let latest = (!payments.is_empty()).then(|| {
+                let state = State {
+                    epoch: 2,
+                    account: account(0),
+                    payments: payments.root::<Sha256>(),
+                    previous,
                 };
-                assert_eq!(state.previous, payments.root::<Sha256>());
-                let admission = next
-                    .unwrap()
-                    .admit::<Sha256>(None, &payments.root::<Sha256>())
-                    .unwrap();
-                let (_, signature) = request.pipelined.clone().unwrap();
-                assert_ne!(signature, request.signature);
-                assert_eq!(
-                    admission,
-                    Admission::New {
-                        state: state.clone(),
-                        payments: states.batch.clone(),
-                        signature,
-                    }
-                );
+                (state, payments.clone())
+            });
+            let admission = request
+                .verify::<Sha256>(&namespace, 2)
+                .unwrap()
+                .admit::<Sha256>(latest.as_ref().map(|(s, p)| (s, p)), &previous)
+                .unwrap();
+            assert_eq!(
+                admission,
+                Admission::New {
+                    state: states.state.clone(),
+                    payments: states.payments.clone(),
+                    signature: request.signature.clone(),
+                }
+            );
 
-                // If the close of its epoch settles the map with the batch added, the pipelined
-                // state does not build on the sender's row, so it is never admitted.
-                assert!(matches!(
-                    request
-                        .verify::<Sha256>(&namespace, 3)
-                        .unwrap()
-                        .admit::<Sha256>(None, &states.state.payments),
-                    Err(Error::InvalidSignature)
-                ));
-            }
+            // A retry of the countersigned state is admitted as one, whatever its batch.
+            let mut retried = request.clone();
+            retried.batch = amounts(&[(7, 1)]);
+            let admission = retried
+                .verify::<Sha256>(&namespace, 2)
+                .unwrap()
+                .admit::<Sha256>(Some((&states.state, &states.payments)), &previous)
+                .unwrap();
+            assert_eq!(admission, Admission::Retry(states.state.clone()));
+
+            // In the next epoch, the request pays only its batch on top of the map the close of
+            // its epoch settles. The admission carries the signature over the next state.
+            let admission = request
+                .verify::<Sha256>(&namespace, 3)
+                .unwrap()
+                .admit::<Sha256>(None, &payments.root::<Sha256>())
+                .unwrap();
+            assert_ne!(request.next, request.signature);
+            assert_eq!(
+                admission,
+                Admission::New {
+                    state: states.next.clone(),
+                    payments: states.batch.clone(),
+                    signature: request.next.clone(),
+                }
+            );
+
+            // If the close of its epoch settles the map with the batch added, the next state does
+            // not build on the sender's row, so it is never admitted.
+            assert!(matches!(
+                request
+                    .verify::<Sha256>(&namespace, 3)
+                    .unwrap()
+                    .admit::<Sha256>(None, &states.state.payments),
+                Err(Error::InvalidSignature)
+            ));
         }
     }
 
@@ -786,26 +737,13 @@ mod tests {
     fn test_external_signatures_fill_the_same_request() {
         let namespace = namespace();
         let signer = user(0);
-        for pipelined in [false, true] {
-            let states = states(&[(1, 5)], &amounts(&[(2, 1)]), empty_root(), pipelined);
-            let signature = signer.sign(&namespace.state, &states.state.encode());
-            let next = states
-                .pipelined
-                .as_ref()
-                .map(|state| signer.sign(&namespace.state, &state.encode()));
-            assert_eq!(
-                states.request(signature, next),
-                states.sign(&signer, &namespace)
-            );
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "a pipelined signature must be given exactly when")]
-    fn test_request_needs_a_signature_per_state() {
-        let states = states(&[(1, 5)], &Amounts::empty(), empty_root(), true);
-        let signature = user(0).sign(&namespace().state, &states.state.encode());
-        states.request(signature, None);
+        let states = states(&[(1, 5)], &amounts(&[(2, 1)]), empty_root());
+        let signature = signer.sign(&namespace.state, &states.state.encode());
+        let next = signer.sign(&namespace.state, &states.next.encode());
+        assert_eq!(
+            states.request(signature, next),
+            states.sign(&signer, &namespace)
+        );
     }
 
     #[test]
@@ -817,7 +755,6 @@ mod tests {
                 Amounts::empty(),
                 &Amounts::empty(),
                 &empty_root(),
-                false
             ),
             Err(Error::NoReceivers)
         ));
@@ -828,7 +765,6 @@ mod tests {
                 amounts(&[(1, 1)]),
                 &Amounts::empty(),
                 &empty_root(),
-                true
             ),
             Err(Error::Overflow)
         ));
@@ -839,7 +775,6 @@ mod tests {
                 amounts(&[(1, 1)]),
                 &amounts(&[(1, u64::MAX)]),
                 &empty_root(),
-                false
             ),
             Err(Error::Overflow)
         ));
@@ -849,7 +784,7 @@ mod tests {
     #[test]
     fn test_verify_refuses_requests_the_sender_did_not_sign() {
         let namespace = namespace();
-        let states = states(&[(1, 5)], &Amounts::empty(), empty_root(), true);
+        let states = states(&[(1, 5)], &Amounts::empty(), empty_root());
         let request = states.sign(&user(0), &namespace);
 
         // The request has states for its epoch and the next only.
@@ -870,8 +805,8 @@ mod tests {
             Err(Error::NoReceivers)
         ));
 
-        // The signatures cover the account, the claimed roots, the pipelined state's batch, and
-        // the deployment.
+        // The signatures cover the account, the claimed roots, the next state's batch, and the
+        // deployment.
         let other = amounts(&[(9, 9)]).root::<Sha256>();
         for (epoch, request) in [
             (
@@ -905,7 +840,7 @@ mod tests {
             (
                 3,
                 TestRequest {
-                    pipelined: Some((other, request.pipelined.clone().unwrap().1)),
+                    base: other,
                     ..request.clone()
                 },
             ),
@@ -945,8 +880,8 @@ mod tests {
 
         // A state built on another previous map, a state that does not extend the latest map, and
         // a batch that would overflow the latest map are all refused.
-        let elsewhere = states(&[(1, 5)], &paid, amounts(&[(4, 1)]).root::<Sha256>(), false);
-        let stale = states(&[(1, 5)], &Amounts::empty(), empty_root(), false);
+        let elsewhere = states(&[(1, 5)], &paid, amounts(&[(4, 1)]).root::<Sha256>());
+        let stale = states(&[(1, 5)], &Amounts::empty(), empty_root());
         for (states, latest) in [
             (&elsewhere, Some((&latest, &paid))),
             (&stale, Some((&latest, &paid))),
@@ -957,7 +892,7 @@ mod tests {
             ));
         }
         let full = amounts(&[(1, u64::MAX)]);
-        let fresh = states(&[(1, 1)], &Amounts::empty(), empty_root(), false);
+        let fresh = states(&[(1, 1)], &Amounts::empty(), empty_root());
         let at_limit = State {
             payments: full.root::<Sha256>(),
             ..latest.clone()
@@ -968,7 +903,7 @@ mod tests {
         ));
 
         // The state extending the latest map is admitted.
-        let next = states(&[(1, 5)], &paid, empty_root(), false);
+        let next = states(&[(1, 5)], &paid, empty_root());
         assert!(matches!(
             admit(&next, Some((&latest, &paid)), empty_root()),
             Ok(Admission::New { .. })
@@ -991,7 +926,7 @@ mod tests {
     #[test]
     fn test_issue_refuses_maps_that_do_not_commit_to_the_state() {
         let namespace = namespace();
-        let states = states(&[(2, 4), (3, 5)], &Amounts::empty(), empty_root(), false);
+        let states = states(&[(2, 4), (3, 5)], &Amounts::empty(), empty_root());
         let signature = states.state.sign(&user(0), &namespace);
         let acknowledgement = states.state.acknowledge(&operator_key(), &namespace);
         let issue = |payments: &Amounts<PublicKey, u64>, receiver| {

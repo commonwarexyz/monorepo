@@ -21,7 +21,7 @@ fn test_validators_agree_on_closes() {
         // Alice pays bob 30 and carol 20, and the close of epoch 2 follows the first and commits
         // to its matrix.
         let mut alice = sender(0);
-        let request = alice.send(2, amounts(&[(1, 30), (2, 20)]), false).unwrap();
+        let request = alice.send(2, amounts(&[(1, 30), (2, 20)])).unwrap();
         alice
             .acknowledged(&deployment.operator.accept(&request).unwrap())
             .unwrap();
@@ -51,10 +51,10 @@ fn test_validators_agree_on_closes() {
     });
 }
 
-/// A pipelined request whose state for its own epoch settled cannot settle again in the next,
-/// and settles there if its own epoch's close omitted it.
+/// A request whose state for its own epoch settled cannot settle again in the next, and settles
+/// there if its own epoch's close omitted it.
 #[test]
-fn test_pipelined_request_settles_at_most_once() {
+fn test_request_settles_at_most_once() {
     deterministic::Runner::default().start(|mut context| async move {
         let mut deployment = TestDeployment::new(&context, "settled", 1).await;
         deployment.ledger.deposit(account(0), 100).unwrap();
@@ -62,22 +62,22 @@ fn test_pipelined_request_settles_at_most_once() {
 
         // The close of epoch 2 settles the request's state for epoch 2.
         let mut alice = sender(0);
-        let request = alice.send(2, amounts(&[(1, 10)]), true).unwrap();
+        let request = alice.send(2, amounts(&[(1, 10)])).unwrap();
         deployment.operator.accept(&request).unwrap();
         deployment.close(&mut context).await;
 
-        // A close of epoch 3 that also settles the pipelined state is invalid, because that state
-        // commits to a previous map the close of epoch 2 did not settle.
-        let pipelined = Row {
+        // A close of epoch 3 that also settles the state for epoch 3 is invalid, because that
+        // state commits to a previous map the close of epoch 2 did not settle.
+        let next = Row {
             account: account(0),
             payments: amounts(&[(1, 10)]),
-            signature: request.pipelined.clone().unwrap().1,
+            signature: request.next.clone(),
         };
         let queue = deployment.ledger.queue();
         let close = forge(
             &operator_key(),
             &queue,
-            vec![pipelined.clone()],
+            vec![next.clone()],
             Vec::new(),
             0,
             0,
@@ -88,8 +88,7 @@ fn test_pipelined_request_settles_at_most_once() {
         ));
 
         // Had the close of epoch 2 omitted the request, the operator would admit its state for
-        // epoch 3, and validators would certify the close carrying it with its pipelined
-        // signature.
+        // epoch 3, and validators would certify the close carrying it with that state's signature.
         let omitted = context.child("omitted");
         let mut deployment = TestDeployment::new(&omitted, "omitted", 1).await;
         deployment.ledger.deposit(account(0), 100).unwrap();
@@ -97,7 +96,7 @@ fn test_pipelined_request_settles_at_most_once() {
         deployment.close(&mut context).await;
         deployment.operator.accept(&request).unwrap();
         let (close, _) = deployment.close(&mut context).await;
-        assert_eq!(close.rows(), &[pipelined]);
+        assert_eq!(close.rows(), &[next]);
         deployment
             .check_balances(&[(account(0), 90), (account(1), 10)])
             .await;
@@ -126,7 +125,7 @@ fn test_validator_resumes_from_its_records() {
 
         // The close of epoch 2 posts, but the validator stops before applying it.
         let mut alice = sender(0);
-        let request = alice.send(2, amounts(&[(1, 4)]), false).unwrap();
+        let request = alice.send(2, amounts(&[(1, 4)])).unwrap();
         deployment.operator.accept(&request).unwrap();
         let queue = deployment.ledger.queue();
         let close = close_epoch(&mut deployment.operator, &queue, 0, 0);
@@ -202,7 +201,7 @@ fn test_withdrawals_pay_up_to_the_balance() {
 
         // Payments settle before withdrawals.
         let mut carol = sender(2);
-        let request = carol.send(2, amounts(&[(1, 5)]), false).unwrap();
+        let request = carol.send(2, amounts(&[(1, 5)])).unwrap();
         deployment.operator.accept(&request).unwrap();
 
         // The close processes both forced withdrawals and all three soft ones, and the payouts
@@ -330,7 +329,7 @@ async fn interrupted(
     deployment.ledger.deposit(account(0), 10).unwrap();
     deployment.close(context).await;
     let mut alice = sender(0);
-    let request = alice.send(2, amounts(&[(1, 4)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 4)])).unwrap();
     deployment.operator.accept(&request).unwrap();
     deployment.ledger.deposit(account(2), 5).unwrap();
     deployment.ledger.withdraw(account(0), 1).unwrap();

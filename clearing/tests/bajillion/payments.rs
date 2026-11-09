@@ -29,7 +29,7 @@ fn test_payments_preconfirm_receivers() {
     let mut carol = receiver(2, 2);
 
     // One request pays both receivers, each of which gets a receipt for its cumulative amount.
-    let request = alice.send(2, amounts(&[(1, 10), (2, 5)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 10), (2, 5)])).unwrap();
     let acknowledgement = operator.accept(&request).unwrap();
     let receipts = alice.acknowledged(&acknowledgement).unwrap();
     assert_eq!(receipts.len(), 2);
@@ -42,7 +42,7 @@ fn test_payments_preconfirm_receivers() {
     }
 
     // Later payments to the same receiver accumulate.
-    let request = alice.send(2, amounts(&[(1, 7)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 7)])).unwrap();
     let acknowledgement = operator.accept(&request).unwrap();
     let receipts = alice.acknowledged(&acknowledgement).unwrap();
     assert_eq!(receipts.len(), 1);
@@ -64,18 +64,18 @@ fn test_operator_refuses_overdrafts() {
 
     // Alice spends her 10 in two requests. A request beyond what remains is refused, and she
     // drops it.
-    let request = alice.send(2, amounts(&[(1, 8)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 8)])).unwrap();
     alice
         .acknowledged(&operator.accept(&request).unwrap())
         .unwrap();
-    let request = alice.send(2, amounts(&[(1, 3)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 3)])).unwrap();
     assert!(matches!(
         operator.accept(&request),
         Err(Admitting::InsufficientBalance)
     ));
     alice.refused().unwrap();
     assert!(alice.pending().is_none());
-    let request = alice.send(2, amounts(&[(1, 2)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 2)])).unwrap();
     alice
         .acknowledged(&operator.accept(&request).unwrap())
         .unwrap();
@@ -83,7 +83,7 @@ fn test_operator_refuses_overdrafts() {
 
     // Incoming payments are not spendable until a close processes them.
     let mut bob = sender(1);
-    let request = bob.send(2, amounts(&[(2, 1)]), false).unwrap();
+    let request = bob.send(2, amounts(&[(2, 1)])).unwrap();
     assert!(matches!(
         operator.accept(&request),
         Err(Admitting::InsufficientBalance)
@@ -91,7 +91,7 @@ fn test_operator_refuses_overdrafts() {
     bob.refused().unwrap();
     close(&mut operator);
     assert_eq!(operator.balance(&account(1)), 10);
-    let request = bob.send(3, amounts(&[(2, 10)]), false).unwrap();
+    let request = bob.send(3, amounts(&[(2, 10)])).unwrap();
     bob.acknowledged(&operator.accept(&request).unwrap())
         .unwrap();
 }
@@ -103,9 +103,9 @@ fn test_operator_refuses_states_the_sender_did_not_sign() {
     let mut operator = operator();
     fund(&mut operator, &[(0, 100), (1, 100)]);
 
-    // The request must be for the current epoch.
-    for epoch in [1, 3] {
-        let request = sender(0).send(epoch, amounts(&[(2, 1)]), false).unwrap();
+    // The request must have a state for the current epoch.
+    for epoch in [3, 4] {
+        let request = sender(0).send(epoch, amounts(&[(2, 1)])).unwrap();
         assert!(matches!(
             operator.accept(&request),
             Err(Admitting::Error(Error::WrongEpoch {
@@ -116,7 +116,7 @@ fn test_operator_refuses_states_the_sender_did_not_sign() {
     }
 
     // The signature must cover the batch, the account, and the deployment.
-    let request = sender(0).send(2, amounts(&[(2, 1)]), false).unwrap();
+    let request = sender(0).send(2, amounts(&[(2, 1)])).unwrap();
     let mut tampered = request.clone();
     tampered.batch = amounts(&[(2, 2)]);
     assert!(matches!(
@@ -134,7 +134,7 @@ fn test_operator_refuses_states_the_sender_did_not_sign() {
         Namespace::new(b"other"),
         operator_key().public_key(),
     );
-    let request = other.send(2, amounts(&[(2, 1)]), false).unwrap();
+    let request = other.send(2, amounts(&[(2, 1)])).unwrap();
     assert!(matches!(
         operator.accept(&request),
         Err(Admitting::Error(Error::InvalidSignature))
@@ -143,17 +143,17 @@ fn test_operator_refuses_states_the_sender_did_not_sign() {
     // The state must extend the map the last close settled for the sender. A sender that lost
     // track of its payments cannot pay on top of a different map.
     let mut alice = sender(0);
-    let request = alice.send(2, amounts(&[(2, 1)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(2, 1)])).unwrap();
     alice
         .acknowledged(&operator.accept(&request).unwrap())
         .unwrap();
     close(&mut operator);
-    let request = sender(0).send(3, amounts(&[(2, 1)]), false).unwrap();
+    let request = sender(0).send(3, amounts(&[(2, 1)])).unwrap();
     assert!(matches!(
         operator.accept(&request),
         Err(Admitting::Error(Error::InvalidSignature))
     ));
-    let request = alice.send(3, amounts(&[(2, 1)]), false).unwrap();
+    let request = alice.send(3, amounts(&[(2, 1)])).unwrap();
     alice
         .acknowledged(&operator.accept(&request).unwrap())
         .unwrap();
@@ -172,6 +172,10 @@ fn test_operator_refuses_requests_that_pay_no_receiver() {
         payments: empty.root::<Sha256>(),
         previous: empty.root::<Sha256>(),
     };
+    let next = State {
+        epoch: 3,
+        ..state.clone()
+    };
     let request = Request {
         account: account(1),
         epoch: 2,
@@ -179,7 +183,8 @@ fn test_operator_refuses_requests_that_pay_no_receiver() {
         payments: state.payments,
         previous: state.previous,
         signature: user(1).sign(&namespace().state, &state.encode()),
-        pipelined: None,
+        base: next.previous,
+        next: user(1).sign(&namespace().state, &next.encode()),
     };
     assert!(matches!(
         operator.accept(&request),
@@ -197,7 +202,7 @@ fn test_operator_acknowledges_retried_requests_once() {
     let mut alice = sender(0);
 
     // The first acknowledgement is lost, and the sender sends the same request again.
-    let first = alice.send(2, amounts(&[(1, 10)]), false).unwrap();
+    let first = alice.send(2, amounts(&[(1, 10)])).unwrap();
     operator.accept(&first).unwrap();
     let acknowledgement = operator.accept(alice.pending().unwrap()).unwrap();
     assert_eq!(alice.acknowledged(&acknowledgement).unwrap()[0].amount, 10);
@@ -205,7 +210,7 @@ fn test_operator_acknowledges_retried_requests_once() {
 
     // A retried request that spent the rest of the balance is acknowledged again, and its
     // receipt carries the cumulative amount.
-    let second = alice.send(2, amounts(&[(1, 90)]), false).unwrap();
+    let second = alice.send(2, amounts(&[(1, 90)])).unwrap();
     operator.accept(&second).unwrap();
     assert_eq!(operator.live(&account(0)), 0);
     let receipts = alice
@@ -230,16 +235,16 @@ fn test_sender_rules() {
     // An empty batch is refused, and no request is pending to drop.
     let mut alice = sender(0);
     assert!(matches!(
-        alice.send(1, Amounts::empty(), false),
+        alice.send(1, Amounts::empty()),
         Err(Sending::Error(Error::NoReceivers))
     ));
     assert!(matches!(alice.refused(), Err(Sending::NotPending)));
 
     // One request at a time.
-    let request = alice.send(1, amounts(&[(1, 1)]), false).unwrap();
+    let request = alice.send(1, amounts(&[(1, 1)])).unwrap();
     assert_eq!(alice.pending(), Some(&request));
     assert!(matches!(
-        alice.send(1, amounts(&[(1, 1)]), false),
+        alice.send(1, amounts(&[(1, 1)])),
         Err(Sending::Pending)
     ));
 
@@ -247,17 +252,15 @@ fn test_sender_rules() {
     let mut operator = operator();
     fund(&mut operator, &[(0, 10)]);
     let mut alice = sender(0);
-    let request = alice.send(2, amounts(&[(1, 1)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 1)])).unwrap();
     alice
         .acknowledged(&operator.accept(&request).unwrap())
         .unwrap();
-    for pipelined in [false, true] {
-        assert!(matches!(
-            alice.send(1, amounts(&[(1, 1)]), pipelined),
-            Err(Sending::LaterEpoch)
-        ));
-    }
-    alice.send(2, amounts(&[(1, 1)]), true).unwrap();
+    assert!(matches!(
+        alice.send(1, amounts(&[(1, 1)])),
+        Err(Sending::LaterEpoch)
+    ));
+    alice.send(2, amounts(&[(1, 1)])).unwrap();
 }
 
 /// A sender records a map only on an acknowledgement of its pending state by the deployment's
@@ -270,9 +273,9 @@ fn test_sender_rejects_foreign_acknowledgements() {
     let mut bob = sender(1);
 
     // An acknowledgement of bob's state does not count for alice's request.
-    let request = alice.send(2, amounts(&[(2, 1)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(2, 1)])).unwrap();
     let bobs = operator
-        .accept(&bob.send(2, amounts(&[(2, 1)]), false).unwrap())
+        .accept(&bob.send(2, amounts(&[(2, 1)])).unwrap())
         .unwrap();
     assert!(matches!(
         alice.acknowledged(&bobs),
@@ -297,17 +300,17 @@ fn test_sender_rejects_foreign_acknowledgements() {
     ));
 }
 
-/// A pipelined request that reaches the operator after its epoch closed settles in the next, but
-/// not once its own epoch settled it.
+/// A request that reaches the operator after its epoch closed settles in the next, but not once
+/// its own epoch settled it.
 #[test]
-fn test_pipelined_request_settles_in_the_next_epoch() {
+fn test_request_settles_in_the_next_epoch() {
     let mut operator = operator();
     fund(&mut operator, &[(0, 100)]);
     let mut alice = sender(0);
     let mut bob = receiver(1, 2);
 
     // The request is for epoch 2, but reaches the operator after it closed epoch 2.
-    let request = alice.send(2, amounts(&[(1, 10)]), true).unwrap();
+    let request = alice.send(2, amounts(&[(1, 10)])).unwrap();
     close(&mut operator);
     let acknowledgement = operator.accept(&request).unwrap();
     let receipts = alice.acknowledged(&acknowledgement).unwrap();
@@ -318,7 +321,7 @@ fn test_pipelined_request_settles_in_the_next_epoch() {
 
     // After a request settles in its own epoch, its state for the next epoch does not extend
     // the settled map, so the operator cannot settle it again.
-    let request = alice.send(3, amounts(&[(1, 5)]), true).unwrap();
+    let request = alice.send(3, amounts(&[(1, 5)])).unwrap();
     alice
         .acknowledged(&operator.accept(&request).unwrap())
         .unwrap();
@@ -339,7 +342,7 @@ fn test_posted_close_resolves_pending_requests() {
     // The operator admitted the request and the close settles it, but its acknowledgement was
     // lost.
     let mut alice = sender(0);
-    let request = alice.send(2, amounts(&[(1, 10)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 10)])).unwrap();
     operator.accept(&request).unwrap();
     let posted = close(&mut operator);
     let (root, opening) = open_row(&posted, 0);
@@ -350,8 +353,75 @@ fn test_posted_close_resolves_pending_requests() {
     assert!(alice.pending().is_none());
     assert_eq!(alice.payments(2), Some(&amounts(&[(1, 10)])));
 
-    // A request for one epoch is dropped if that epoch's close did not settle it.
-    alice.send(3, amounts(&[(1, 10)]), false).unwrap();
+    // A request the close of its epoch did not settle stays pending, because its state for the
+    // next epoch may still settle. It is dropped once that epoch's close did not settle it either.
+    let request = alice.send(3, amounts(&[(1, 10)])).unwrap();
+    let posted = close(&mut operator);
+    let (root, opening) = open_row(&posted, 0);
+    assert_eq!(
+        alice.posted(3, &root, &opening).unwrap(),
+        Some(Outcome::Pending)
+    );
+    assert_eq!(alice.pending(), Some(&request));
+    let posted = close(&mut operator);
+    let (root, opening) = open_row(&posted, 0);
+    assert_eq!(
+        alice.posted(4, &root, &opening).unwrap(),
+        Some(Outcome::Dropped)
+    );
+    assert!(alice.pending().is_none());
+    assert_eq!(alice.payments(3), None);
+    assert_eq!(alice.payments(4), None);
+
+    // The operator admits a request in the epoch after its own, and the sender takes the post
+    // only with an opening under the posted root.
+    let request = alice.send(5, amounts(&[(1, 10)])).unwrap();
+    let posted = close(&mut operator);
+    let (root, opening) = open_row(&posted, 0);
+    assert_eq!(
+        alice.posted(5, &root, &opening).unwrap(),
+        Some(Outcome::Pending)
+    );
+    operator.accept(&request).unwrap();
+    let posted = close(&mut operator);
+    let (root, opening) = open_row(&posted, 0);
+    let (other, _) = open_row(&fund(&mut operator, &[(7, 1)]), 0);
+    assert!(matches!(
+        alice.posted(6, &other, &opening),
+        Err(Sending::Error(Error::InvalidOpening))
+    ));
+    assert_eq!(
+        alice.posted(6, &root, &opening).unwrap(),
+        Some(Outcome::Settled)
+    );
+    assert_eq!(alice.payments(6), Some(&amounts(&[(1, 10)])));
+}
+
+/// A close settling an earlier countersigned map does not settle the request that would have
+/// extended it. The request stays pending, because its state for the next epoch builds on the
+/// settled map, and the next close drops it if the operator did not admit it.
+#[test]
+fn test_posted_earlier_map_does_not_settle_request() {
+    let mut operator = operator();
+    fund(&mut operator, &[(0, 100)]);
+    let mut alice = sender(0);
+    let request = alice.send(2, amounts(&[(1, 5)])).unwrap();
+    alice
+        .acknowledged(&operator.accept(&request).unwrap())
+        .unwrap();
+
+    // The close settles the sender's earlier map, not the one its pending request pays.
+    let request = alice.send(2, amounts(&[(1, 5)])).unwrap();
+    let posted = close(&mut operator);
+    let (root, opening) = open_row(&posted, 0);
+    assert_eq!(
+        alice.posted(2, &root, &opening).unwrap(),
+        Some(Outcome::Pending)
+    );
+    assert_eq!(alice.pending(), Some(&request));
+    assert_eq!(alice.payments(2), Some(&amounts(&[(1, 5)])));
+
+    // The next close has no row of the sender, so it drops the request.
     let posted = close(&mut operator);
     let (root, opening) = open_row(&posted, 0);
     assert_eq!(
@@ -360,73 +430,25 @@ fn test_posted_close_resolves_pending_requests() {
     );
     assert!(alice.pending().is_none());
     assert_eq!(alice.payments(3), None);
-
-    // A pipelined request the close did not settle may still settle in the next epoch.
-    let request = alice.send(4, amounts(&[(1, 10)]), true).unwrap();
-    let posted = close(&mut operator);
-    let (root, opening) = open_row(&posted, 0);
-    assert_eq!(
-        alice.posted(4, &root, &opening).unwrap(),
-        Some(Outcome::Pending)
-    );
-    assert_eq!(alice.pending(), Some(&request));
-
-    // The operator admits it in epoch 5, and the sender takes the post only with an opening under
-    // the posted root.
-    operator.accept(&request).unwrap();
-    let posted = close(&mut operator);
-    let (root, opening) = open_row(&posted, 0);
-    let (other, _) = open_row(&fund(&mut operator, &[(7, 1)]), 0);
-    assert!(matches!(
-        alice.posted(5, &other, &opening),
-        Err(Sending::Error(Error::InvalidOpening))
-    ));
-    assert_eq!(
-        alice.posted(5, &root, &opening).unwrap(),
-        Some(Outcome::Settled)
-    );
-    assert_eq!(alice.payments(5), Some(&amounts(&[(1, 10)])));
 }
 
-/// A close settling an earlier countersigned map drops the request that would have extended it.
+/// A refusal of a request in its own epoch does not retire its state for the next epoch (S4). Once
+/// the close settles the map that state builds on, a replayed copy is admitted if the sender can
+/// afford it. A request for another batch then fails, and a request for the same batch repeats the
+/// admitted state, so the batch pays once.
 #[test]
-fn test_posted_earlier_map_does_not_settle_request() {
-    let mut operator = operator();
-    fund(&mut operator, &[(0, 100)]);
-    let mut alice = sender(0);
-    let request = alice.send(2, amounts(&[(1, 5)]), false).unwrap();
-    alice
-        .acknowledged(&operator.accept(&request).unwrap())
-        .unwrap();
-
-    // The close settles the sender's earlier map, not the one its pending request pays.
-    alice.send(2, amounts(&[(1, 5)]), false).unwrap();
-    let posted = close(&mut operator);
-    let (root, opening) = open_row(&posted, 0);
-    assert_eq!(
-        alice.posted(2, &root, &opening).unwrap(),
-        Some(Outcome::Dropped)
-    );
-    assert_eq!(alice.payments(2), Some(&amounts(&[(1, 5)])));
-}
-
-/// A refusal of a pipelined request in its own epoch does not retire its state for the next
-/// epoch (S4). Once the close settles the map that state builds on, a replayed copy is admitted
-/// if the sender can afford it. A request for another batch then fails, and a request for the
-/// same batch repeats the admitted state, so the batch pays once.
-#[test]
-fn test_replayed_pipelined_request_settles_at_most_once() {
+fn test_replayed_request_settles_at_most_once() {
     let mut operator = operator();
     fund(&mut operator, &[(0, 10)]);
     let mut alice = sender(0);
 
-    // Alice pays bob her whole balance, then asks to pay carol 5, pipelined. The operator refuses
-    // the request, and alice drops it as if it had been delivered once.
-    let paid = alice.send(2, amounts(&[(1, 10)]), false).unwrap();
+    // Alice pays bob her whole balance, then asks to pay carol 5. The operator refuses the
+    // request, and alice drops it as if it had been delivered once.
+    let paid = alice.send(2, amounts(&[(1, 10)])).unwrap();
     alice
         .acknowledged(&operator.accept(&paid).unwrap())
         .unwrap();
-    let refused = alice.send(2, amounts(&[(2, 5)]), true).unwrap();
+    let refused = alice.send(2, amounts(&[(2, 5)])).unwrap();
     assert!(matches!(
         operator.accept(&refused),
         Err(Admitting::InsufficientBalance)
@@ -448,7 +470,7 @@ fn test_replayed_pipelined_request_settles_at_most_once() {
     ));
 
     // A request of hers for another batch does not extend the admitted state and is refused.
-    let other = alice.send(3, amounts(&[(3, 1)]), false).unwrap();
+    let other = alice.send(3, amounts(&[(3, 1)])).unwrap();
     assert!(matches!(
         operator.accept(&other),
         Err(Admitting::Error(Error::InvalidSignature))
@@ -458,7 +480,7 @@ fn test_replayed_pipelined_request_settles_at_most_once() {
     // A request for the same batch signs the admitted state, so the operator countersigns it
     // again. Alice's record then holds the map the close of epoch 3 settles, and carol is paid
     // once.
-    let again = alice.send(3, amounts(&[(2, 5)]), false).unwrap();
+    let again = alice.send(3, amounts(&[(2, 5)])).unwrap();
     let acknowledgement = operator.accept(&again).unwrap();
     assert_eq!(acknowledgement, replayed);
     alice.acknowledged(&acknowledgement).unwrap();
@@ -470,22 +492,22 @@ fn test_replayed_pipelined_request_settles_at_most_once() {
     assert_eq!(operator.balance(&account(2)), 5);
 }
 
-/// A posted row settles a pipelined request only if it matches the request's state for the row's
-/// epoch. The state for the next epoch pays only the batch, so a close of the request's own epoch
-/// that settles an earlier map equal to the batch leaves it pending, and the next close settles it.
+/// A posted row settles a request only if it matches the request's state for the row's epoch. The
+/// state for the next epoch pays only the batch, so a close of the request's own epoch that settles
+/// an earlier map equal to the batch leaves it pending, and the next close settles it.
 #[test]
-fn test_pipelined_state_settles_only_in_its_own_epoch() {
+fn test_state_settles_only_in_its_own_epoch() {
     let mut operator = operator();
     fund(&mut operator, &[(0, 100)]);
     let mut alice = sender(0);
-    let request = alice.send(2, amounts(&[(1, 10)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 10)])).unwrap();
     alice
         .acknowledged(&operator.accept(&request).unwrap())
         .unwrap();
 
-    // Her pipelined request paying bob 10 more reaches the operator after it closed epoch 2.
-    // That close settles her map paying bob 10, the same map her state for epoch 3 commits to.
-    let request = alice.send(2, amounts(&[(1, 10)]), true).unwrap();
+    // Her request paying bob 10 more reaches the operator after it closed epoch 2. That close
+    // settles her map paying bob 10, the same map her state for epoch 3 commits to.
+    let request = alice.send(2, amounts(&[(1, 10)])).unwrap();
     let posted = close(&mut operator);
     let (root, opening) = open_row(&posted, 0);
     assert_eq!(
@@ -520,19 +542,19 @@ fn test_operator_admits_within_its_limits() {
     let (mut alice, mut bob, mut carol) = (sender(0), sender(1), sender(2));
 
     // Alice pays two receivers and bob one, filling the senders and alice's map.
-    let request = alice.send(2, amounts(&[(1, 5), (2, 5)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 5), (2, 5)])).unwrap();
     alice
         .acknowledged(&operator.accept(&request).unwrap())
         .unwrap();
-    let retried = bob.send(2, amounts(&[(0, 5)]), false).unwrap();
+    let retried = bob.send(2, amounts(&[(0, 5)])).unwrap();
     bob.acknowledged(&operator.accept(&retried).unwrap())
         .unwrap();
 
     // A third sender, or a third receiver in alice's map, would not fit the close.
-    let request = carol.send(2, amounts(&[(0, 5)]), false).unwrap();
+    let request = carol.send(2, amounts(&[(0, 5)])).unwrap();
     assert!(matches!(operator.accept(&request), Err(Admitting::Full)));
     carol.refused().unwrap();
-    let request = alice.send(2, amounts(&[(3, 1)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(3, 1)])).unwrap();
     assert!(matches!(operator.accept(&request), Err(Admitting::Full)));
     alice.refused().unwrap();
 
@@ -540,7 +562,7 @@ fn test_operator_admits_within_its_limits() {
     // the refusal does not reveal which accounts pay or how many receivers they paid.
     let mut impostor = sender(9);
     for (owner, receiver) in [(2, 0), (0, 3)] {
-        let mut request = impostor.send(2, amounts(&[(receiver, 1)]), false).unwrap();
+        let mut request = impostor.send(2, amounts(&[(receiver, 1)])).unwrap();
         request.account = account(owner);
         assert!(matches!(
             operator.accept(&request),
@@ -550,7 +572,7 @@ fn test_operator_admits_within_its_limits() {
     }
 
     // Alice still pays a receiver she paid, and a retried request is acknowledged again.
-    let request = alice.send(2, amounts(&[(1, 1)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 1)])).unwrap();
     alice
         .acknowledged(&operator.accept(&request).unwrap())
         .unwrap();
@@ -597,8 +619,8 @@ fn test_operator_admits_within_its_limits() {
 }
 
 /// A request the account did not sign is refused for its signature alone, before the operator
-/// reads any record of the account, so the refusal is the same whatever the account holds or
-/// paid. That holds for amounts the account can and cannot pay, for a pipelined state, and for a
+/// reads any record of the account, so the refusal is the same whatever the account holds or paid.
+/// That holds for amounts the account can and cannot pay, for a state of the next epoch, and for a
 /// batch that would overflow its map.
 #[test]
 fn test_unsigned_requests_are_refused_before_any_read() {
@@ -614,13 +636,10 @@ fn test_unsigned_requests_are_refused_before_any_read() {
     fund(&mut operator, &[(0, 10)]);
 
     // An impostor signs requests for alice's account, for amounts she can and cannot pay, in the
-    // current epoch and as the pipelined state of a request for the epoch before.
+    // current epoch and as the next state of a request for the epoch before.
     let mut impostor = sender(9);
     for (epoch, amount) in [(2, 5), (2, 11), (1, 5)] {
-        let pipelined = epoch == 1;
-        let mut request = impostor
-            .send(epoch, amounts(&[(1, amount)]), pipelined)
-            .unwrap();
+        let mut request = impostor.send(epoch, amounts(&[(1, amount)])).unwrap();
         request.account = account(0);
         refused(&mut operator, request);
         impostor.refused().unwrap();
@@ -629,13 +648,13 @@ fn test_unsigned_requests_are_refused_before_any_read() {
     // Alice's own request reads her records. Once she has paid, a forged batch that would
     // overflow her map is refused alike.
     let mut alice = sender(0);
-    let request = alice.send(2, amounts(&[(1, 3)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 3)])).unwrap();
     let reads = operator.reads();
     alice
         .acknowledged(&operator.accept(&request).unwrap())
         .unwrap();
     assert!(operator.reads() > reads);
-    let mut request = impostor.send(2, amounts(&[(1, u64::MAX)]), false).unwrap();
+    let mut request = impostor.send(2, amounts(&[(1, u64::MAX)])).unwrap();
     request.account = account(0);
     refused(&mut operator, request);
     assert_eq!(operator.payments(&account(0)), Some(&amounts(&[(1, 3)])));
@@ -659,7 +678,7 @@ fn test_sender_restarts_from_its_records() {
     let mut alice = sender(0);
 
     // The request is persisted before it is sent.
-    let request = alice.send(2, amounts(&[(1, 10), (2, 5)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 10), (2, 5)])).unwrap();
     let mut restarted = restart(&alice);
     assert_eq!(restarted.pending(), Some(&request));
     let receipts = restarted
@@ -671,7 +690,7 @@ fn test_sender_restarts_from_its_records() {
     assert!(again.pending().is_none());
     let receivers = receipts.iter().map(|receipt| receipt.receiver.clone());
     assert_eq!(again.receipts(2, receivers).unwrap(), receipts);
-    let request = again.send(2, amounts(&[(1, 1)]), false).unwrap();
+    let request = again.send(2, amounts(&[(1, 1)])).unwrap();
     again
         .acknowledged(&operator.accept(&request).unwrap())
         .unwrap();
@@ -686,7 +705,7 @@ fn test_receiver_rejects_receipts_it_cannot_rely_on() {
     let mut operator = operator();
     fund(&mut operator, &[(0, 100)]);
     let mut alice = sender(0);
-    let request = alice.send(2, amounts(&[(1, 10), (2, 5)]), false).unwrap();
+    let request = alice.send(2, amounts(&[(1, 10), (2, 5)])).unwrap();
     let receipts = alice
         .acknowledged(&operator.accept(&request).unwrap())
         .unwrap();
@@ -769,13 +788,13 @@ fn test_resumed_receiver_keeps_its_strongest_receipts_and_halt() {
     let mut operator = operator();
     fund(&mut operator, &[(0, 100)]);
     let mut alice = sender(0);
-    let first = alice.send(2, amounts(&[(1, 10)]), false).unwrap();
+    let first = alice.send(2, amounts(&[(1, 10)])).unwrap();
     let lower = alice
         .acknowledged(&operator.accept(&first).unwrap())
         .unwrap()
         .pop()
         .unwrap();
-    let second = alice.send(2, amounts(&[(1, 5)]), false).unwrap();
+    let second = alice.send(2, amounts(&[(1, 5)])).unwrap();
     let upper = alice
         .acknowledged(&operator.accept(&second).unwrap())
         .unwrap()
@@ -824,7 +843,7 @@ fn test_resumed_receiver_keeps_its_strongest_receipts_and_halt() {
 #[test]
 fn test_posted_close_needs_a_valid_opening() {
     let mut alice = sender(0);
-    alice.send(2, amounts(&[(1, 5)]), false).unwrap();
+    alice.send(2, amounts(&[(1, 5)])).unwrap();
     let queue = deposits(1, &[]);
     let populated = forge(
         &operator_key(),
