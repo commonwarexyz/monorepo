@@ -767,7 +767,8 @@ impl CacheRef {
             }
         }
 
-        // Drop the fully read ranges, keeping the rest in order.
+        // Release the cache, then drop the fully read ranges, keeping the rest in order.
+        drop(page_cache);
         ranges.retain(|(buf, _)| !buf.is_empty());
     }
 
