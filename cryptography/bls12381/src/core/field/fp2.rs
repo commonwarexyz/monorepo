@@ -332,12 +332,16 @@ impl<F> Fp2<F> {
     /// Returns `sum + a * b`, as [`Field::accumulate_quadratic`] does: the product of
     /// [`Self::product`] accumulated into each component of `sum`.
     #[inline(always)]
-    pub fn accumulate_product<S: Simd>(simd: S, sum: Product<F, S>, a: Self, b: Self) -> Product<F, S>
+    pub fn accumulate_product<S: Simd>(
+        simd: S,
+        sum: Product<F, S>,
+        a: Self,
+        b: Self,
+    ) -> Product<F, S>
     where
         F: Field<S>,
     {
-        let [c0, c1] =
-            F::accumulate_quadratic(simd, [sum.c0, sum.c1], [a.c0, a.c1], [b.c0, b.c1]);
+        let [c0, c1] = F::accumulate_quadratic(simd, [sum.c0, sum.c1], [a.c0, a.c1], [b.c0, b.c1]);
         Fp2 { c0, c1 }
     }
 
@@ -348,8 +352,7 @@ impl<F> Fp2<F> {
     where
         F: Field<S>,
     {
-        let [c0, c1] =
-            F::subtract_quadratic(simd, [sum.c0, sum.c1], [a.c0, a.c1], [b.c0, b.c1]);
+        let [c0, c1] = F::subtract_quadratic(simd, [sum.c0, sum.c1], [a.c0, a.c1], [b.c0, b.c1]);
         Fp2 { c0, c1 }
     }
 
@@ -438,7 +441,7 @@ impl<F> Fp2<F> {
 
     /// Returns `self * self`, under the requirements of [`Self::square_product`].
     #[cfg_attr(
-        not(test),
+        not(any(test, feature = "fuzz")),
         expect(
             dead_code,
             reason = "Completes the documented arithmetic, which the tests check."
@@ -873,25 +876,17 @@ pub(crate) mod reference {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::field::fp::{
-        rns::Rns,
+/// Checks of [`Fp2`] arithmetic in every representation against the reference arithmetic.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
+    use super::{
         reference::{self, Element},
-        unsat28::Unsat28,
-        unsat49::Unsat49,
+        *,
     };
-    use commonware_invariants::minifuzz;
-    use commonware_simd::{
-        Operation, X86V4C, check_consistent,
-        emulated::{EmulatedNeon, EmulatedScalar, EmulatedX86V4C},
-        test_dispatch,
-    };
+    use crate::core::field::fp::testing::{self, Check};
+    use arbitrary::{Arbitrary, Unstructured};
+    use core::any::type_name;
     use std::vec;
-
-    /// A reference element `(c0, c1)` with canonical components.
-    type Reference = (Element, Element);
 
     /// Largest component integer bound that multiplications preserve, in units of `p`.
     const BOUND: u64 = 77;
@@ -899,132 +894,197 @@ mod tests {
     /// Positional bias of every reduction, which covers the negative sums of these checks.
     const BIAS: u64 = 64;
 
-    /// Multiplications in the chain of [`check`].
+    /// Multiplications in the chain of [`Plan::Chain`].
     const ROUNDS: usize = 8;
 
-    fn add((a0, a1): Reference, (b0, b1): Reference) -> Reference {
-        (reference::add(a0, b0), reference::add(a1, b1))
+    /// A check of [`Fp2`] operations over a base field representation and on an emulated backend
+    /// drawn from the input.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    pub enum Plan {
+        /// Checks loading, storing, and every value operation, including reduced products.
+        Values,
+        /// Checks sums and differences of products, which never stack subtraction biases.
+        Products,
+        /// Chains multiplications through the bound they preserve, mixing in the operations whose
+        /// outputs exceed it before squaring them back down.
+        Chain,
     }
 
-    fn sub((a0, a1): Reference, (b0, b1): Reference) -> Reference {
-        (reference::sub(a0, b0), reference::sub(a1, b1))
+    impl Plan {
+        /// Runs the operation using the remaining input.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            testing::check_any(u, self)
+        }
     }
 
-    fn mul((a0, a1): Reference, (b0, b1): Reference) -> Reference {
-        (
-            reference::sub(reference::mul(a0, b0), reference::mul(a1, b1)),
-            reference::add(reference::mul(a0, b1), reference::mul(a1, b0)),
-        )
-    }
-
-    fn decode(bytes: &[u8; BYTES]) -> Reference {
-        let (c1, c0) = split(bytes);
-        (reference::reduce(c0), reference::reduce(c1))
-    }
-
-    fn encode((c0, c1): Reference) -> [u8; BYTES] {
-        let mut bytes = [0; BYTES];
-        bytes[..FP_BYTES].copy_from_slice(&reference::to_bytes(c1));
-        bytes[FP_BYTES..].copy_from_slice(&reference::to_bytes(c0));
-        bytes
+    impl Check for Plan {
+        fn check<S: Simd, F: Field<S>>(
+            self,
+            simd: S,
+            u: &mut Unstructured<'_>,
+        ) -> arbitrary::Result<()> {
+            let mut inputs = [[0; BYTES]; 4];
+            for input in &mut inputs {
+                // Components biased toward zero, one, and -1, so edge elements such as 0, 1, i,
+                // and -1 - i appear.
+                input[..FP_BYTES].copy_from_slice(&testing::bytes(u)?);
+                input[FP_BYTES..].copy_from_slice(&testing::bytes(u)?);
+            }
+            match self {
+                Self::Values => check_values::<S, F>(simd, &inputs),
+                Self::Products => check_products::<S, F>(simd, &inputs),
+                Self::Chain => check_chain::<S, F>(simd, &inputs),
+            }
+            Ok(())
+        }
     }
 
     /// Asserts that the lane-0 value of `value` is `expected`.
-    fn assert_value<S: Simd, F: Field<S>>(simd: S, value: Fp2<F>, expected: Reference) {
+    fn assert_value<S: Simd, F: Field<S>>(simd: S, value: Fp2<F>, label: &str, expected: Element) {
         let mut output = [[0; BYTES]];
         value.store(simd, &mut output);
-        assert_eq!(output[0], encode(expected));
+        assert_eq!(
+            output[0],
+            reference::encode(expected),
+            "{label} on {}",
+            type_name::<F>()
+        );
     }
 
-    /// Checks loading, storing, and every value operation, including reduced products.
     fn check_values<S: Simd, F: Field<S>>(simd: S, inputs: &[[u8; BYTES]; 4]) {
         let mut lanes = vec![[0; BYTES]; F::LANES + 1];
         Fp2::<F>::load(simd, &inputs[..1], &inputs[1]).store(simd, &mut lanes);
-        assert_eq!(lanes[0], encode(decode(&inputs[0])));
+        let decoded = |input: &[u8; BYTES]| reference::encode(reference::decode(input));
+        assert_eq!(
+            lanes[0],
+            decoded(&inputs[0]),
+            "load on {}",
+            type_name::<F>()
+        );
         for lane in &lanes[1..F::LANES] {
-            assert_eq!(*lane, encode(decode(&inputs[1])));
+            assert_eq!(*lane, decoded(&inputs[1]), "fill on {}", type_name::<F>());
         }
-        assert_eq!(lanes[F::LANES], [0; BYTES]);
+        assert_eq!(
+            lanes[F::LANES],
+            [0; BYTES],
+            "store beyond lanes on {}",
+            type_name::<F>()
+        );
         let [a, b, ..] = inputs.map(|bytes| Fp2::<F>::load(simd, &[], &bytes));
-        let [ra, rb, ..] = inputs.map(|bytes| decode(&bytes));
-        let (zero, one) = (reference::ZERO, reference::ONE);
-        let i = (zero, one);
-        assert_value(simd, a.add(simd, b), add(ra, rb));
-        assert_value(simd, a.double(simd), add(ra, ra));
+        let [ra, rb, ..] = inputs.map(|bytes| reference::decode(&bytes));
+        let i = (fp::reference::ZERO, fp::reference::ONE);
+        assert_value(simd, a.add(simd, b), "a + b", reference::add(ra, rb));
+        assert_value(simd, a.double(simd), "2a", reference::add(ra, ra));
         assert_value(
             simd,
             a.mul_small::<5, S>(simd),
-            mul(ra, ([5, 0, 0, 0, 0, 0], zero)),
+            "5a",
+            reference::mul(ra, reference::small(5)),
         );
-        assert_value(simd, a.sub::<3, S>(simd, b), sub(ra, rb));
-        assert_value(simd, a.neg::<3, S>(simd), sub((zero, zero), ra));
+        assert_value(
+            simd,
+            a.sub::<3, S>(simd, b),
+            "a - b",
+            reference::sub(ra, rb),
+        );
+        assert_value(simd, a.neg::<3, S>(simd), "-a", reference::neg(ra));
         assert_value(
             simd,
             a.conjugate::<3, S>(simd),
-            (ra.0, reference::neg(ra.1)),
+            "conjugate",
+            reference::conjugate(ra),
         );
-        assert_value(simd, a.mul_by_nonresidue::<3, S>(simd), mul(ra, (one, one)));
-        assert_value(simd, a.mul::<BIAS, S>(simd, b), mul(ra, rb));
+        assert_value(
+            simd,
+            a.mul_by_nonresidue::<3, S>(simd),
+            "a (1 + i)",
+            reference::mul(ra, reference::NONRESIDUE),
+        );
+        assert_value(
+            simd,
+            a.mul::<BIAS, S>(simd, b),
+            "a * b",
+            reference::mul(ra, rb),
+        );
         assert_value(
             simd,
             Fp2::<F>::reduce::<BIAS, S>(simd, a.product_schoolbook(simd, b)),
-            mul(ra, rb),
+            "schoolbook a * b",
+            reference::mul(ra, rb),
         );
-        let unit = Fp2::<F>::load(simd, &[], &encode(i));
-        assert_value(simd, unit.mul::<BIAS, S>(simd, a), mul(i, ra));
-        assert_value(simd, a.square::<3, S>(simd), mul(ra, ra));
-        assert_value(simd, a.mul_base(simd, b.c0), mul(ra, (rb.0, zero)));
-        assert_value(simd, Fp2::<F>::reduce::<BIAS, S>(simd, a.lift(simd)), ra);
+        let unit = Fp2::<F>::load(simd, &[], &reference::encode(i));
+        assert_value(
+            simd,
+            unit.mul::<BIAS, S>(simd, a),
+            "i * a",
+            reference::mul(i, ra),
+        );
+        assert_value(simd, a.square::<3, S>(simd), "a^2", reference::mul(ra, ra));
+        assert_value(
+            simd,
+            a.mul_base(simd, b.c0),
+            "a * b.c0",
+            reference::mul(ra, (rb.0, fp::reference::ZERO)),
+        );
+        assert_value(
+            simd,
+            Fp2::<F>::reduce::<BIAS, S>(simd, a.lift(simd)),
+            "lift(a)",
+            ra,
+        );
     }
 
-    /// Checks sums and differences of products, which never stack subtraction biases.
     fn check_products<S: Simd, F: Field<S>>(simd: S, inputs: &[[u8; BYTES]; 4]) {
         let [a, b, c, d] = inputs.map(|bytes| Fp2::<F>::load(simd, &[], &bytes));
-        let [ra, rb, rc, rd] = inputs.map(|bytes| decode(&bytes));
-        let (zero, one) = (reference::ZERO, reference::ONE);
+        let [ra, rb, rc, rd] = inputs.map(|bytes| reference::decode(&bytes));
         let (ab, cd) = (a.product(simd, b), c.product(simd, d));
-        let (rab, rcd) = (mul(ra, rb), mul(rc, rd));
+        let (rab, rcd) = (reference::mul(ra, rb), reference::mul(rc, rd));
+        let reduce = |product| Fp2::<F>::reduce::<BIAS, S>(simd, product);
         assert_value(
             simd,
-            Fp2::<F>::reduce::<BIAS, S>(simd, Fp2::<F>::accumulate(simd, ab, cd)),
-            add(rab, rcd),
+            reduce(Fp2::<F>::accumulate(simd, ab, cd)),
+            "ab + cd",
+            reference::add(rab, rcd),
         );
         assert_value(
             simd,
-            Fp2::<F>::reduce::<BIAS, S>(simd, Fp2::<F>::product_sub(simd, ab, c.lift(simd))),
-            sub(rab, rc),
+            reduce(Fp2::<F>::product_sub(simd, ab, c.lift(simd))),
+            "ab - c",
+            reference::sub(rab, rc),
         );
         assert_value(
             simd,
-            Fp2::<F>::reduce::<BIAS, S>(
-                simd,
-                Fp2::<F>::product_sub(simd, ab, c.product_base(simd, d.c0)),
-            ),
-            sub(rab, mul(rc, (rd.0, zero))),
+            reduce(Fp2::<F>::product_sub(simd, ab, c.product_base(simd, d.c0))),
+            "ab - c * d.c0",
+            reference::sub(rab, reference::mul(rc, (rd.0, fp::reference::ZERO))),
         );
         assert_value(
             simd,
-            Fp2::<F>::reduce::<BIAS, S>(simd, Fp2::<F>::product_sub(simd, ab, cd)),
-            sub(rab, rcd),
+            reduce(Fp2::<F>::product_sub(simd, ab, cd)),
+            "ab - cd",
+            reference::sub(rab, rcd),
         );
         // Products accumulate into sums as they form, and subtract from them.
         assert_value(
             simd,
-            Fp2::<F>::reduce::<BIAS, S>(simd, Fp2::<F>::accumulate_product(simd, ab, c, d)),
-            add(rab, rcd),
+            reduce(Fp2::<F>::accumulate_product(simd, ab, c, d)),
+            "ab + c * d",
+            reference::add(rab, rcd),
         );
         assert_value(
             simd,
-            Fp2::<F>::reduce::<BIAS, S>(simd, Fp2::<F>::subtract_product(simd, ab, c, d)),
-            sub(rab, rcd),
+            reduce(Fp2::<F>::subtract_product(simd, ab, c, d)),
+            "ab - c * d",
+            reference::sub(rab, rcd),
         );
         let accumulated = Fp2::<F>::accumulate_product(simd, cd, a, b);
         let accumulated = Fp2::<F>::subtract_product(simd, accumulated, c, d);
         let accumulated = Fp2::<F>::accumulate_product(simd, accumulated, a, b);
         assert_value(
             simd,
-            Fp2::<F>::reduce::<BIAS, S>(simd, accumulated),
-            add(rab, rab),
+            reduce(accumulated),
+            "cd + ab - cd + ab",
+            reference::add(rab, rab),
         );
         // (ab - cd)(1 + i) - (ab + cd) - b^2, as formulas over extensions combine products.
         let difference = Fp2::<F>::product_sub(simd, ab, cd);
@@ -1032,94 +1092,55 @@ mod tests {
         let sum = Fp2::<F>::accumulate(simd, ab, cd);
         let combined = Fp2::<F>::product_sub(simd, rotated, sum);
         let combined = Fp2::<F>::product_sub(simd, combined, b.square_product::<3, S>(simd));
-        let expected = sub(
-            sub(mul(sub(rab, rcd), (one, one)), add(rab, rcd)),
-            mul(rb, rb),
+        let rotated = reference::mul(reference::sub(rab, rcd), reference::NONRESIDUE);
+        let expected = reference::sub(
+            reference::sub(rotated, reference::add(rab, rcd)),
+            reference::mul(rb, rb),
         );
-        assert_value(simd, Fp2::<F>::reduce::<BIAS, S>(simd, combined), expected);
+        assert_value(simd, reduce(combined), "combined products", expected);
     }
 
-    /// Chains multiplications through the bound they preserve, mixing in the operations whose
-    /// outputs exceed it before squaring them back down.
     fn check_chain<S: Simd, F: Field<S>>(simd: S, inputs: &[[u8; BYTES]; 4]) {
         let [a, b, ..] = inputs.map(|bytes| Fp2::<F>::load(simd, &[], &bytes));
-        let [ra, rb, ..] = inputs.map(|bytes| decode(&bytes));
-        let one = reference::ONE;
+        let [ra, rb, ..] = inputs.map(|bytes| reference::decode(&bytes));
         let mut value = a;
         let mut expected = ra;
         for _ in 0..ROUNDS {
             value = value.mul::<BIAS, S>(simd, b);
-            expected = mul(expected, rb);
+            expected = reference::mul(expected, rb);
             // Components below BOUND + 1 and 2 * BOUND, carried to limb bound 1.
             value = value
                 .mul_by_nonresidue::<{ BOUND + 1 }, S>(simd)
                 .carry(simd);
-            expected = mul(expected, (one, one));
+            expected = reference::mul(expected, reference::NONRESIDUE);
             value = value.square::<{ 2 * BOUND + 1 }, S>(simd);
-            expected = mul(expected, expected);
+            expected = reference::mul(expected, expected);
             value = value.conjugate::<{ BOUND + 1 }, S>(simd).carry(simd);
-            expected = (expected.0, reference::neg(expected.1));
+            expected = reference::conjugate(expected);
             value = value.mul::<BIAS, S>(simd, value);
-            expected = mul(expected, expected);
+            expected = reference::mul(expected, expected);
         }
-        assert_value(simd, value, expected);
+        assert_value(simd, value, "chain", expected);
     }
 
-    /// Runs every check in one representation.
-    fn check<S: Simd, F: Field<S>>(simd: S, inputs: &[[u8; BYTES]; 4]) {
-        check_values::<S, F>(simd, inputs);
-        check_products::<S, F>(simd, inputs);
-        check_chain::<S, F>(simd, inputs);
-    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use commonware_invariants::minifuzz;
 
-    #[test]
-    fn representations_match_reference() {
-        struct Evaluate([[u8; BYTES]; 4]);
-
-        impl<S: Simd> Operation<S> for Evaluate {
-            type Output = ();
-
-            fn portable(self, simd: S) {
-                simd.execute(|simd: S| {
-                    check::<S, Unsat49<S>>(simd, &self.0);
-                    check::<S, Unsat28<S>>(simd, &self.0);
-                });
-            }
-
-            // Residues require x86v4c.
-            fn x86_v4c(self, simd: S)
-            where
-                S: X86V4C,
-            {
-                let inputs = self.0;
-                self.portable(simd);
-                simd.execute(|simd: S| check::<S, Rns<S>>(simd, &inputs));
-            }
+        #[test]
+        fn minifuzz_values() {
+            minifuzz::test(|u| Plan::Values.run(u));
         }
 
-        let one = reference::ONE;
-        let minus_one = reference::neg(one);
-        for value in [
-            (reference::ZERO, reference::ZERO),
-            (one, reference::ZERO),
-            (reference::ZERO, one),
-            (minus_one, minus_one),
-        ] {
-            let inputs = [encode(value); 4];
-            check_consistent(|| Evaluate(inputs));
+        #[test]
+        fn minifuzz_products() {
+            minifuzz::test(|u| Plan::Products.run(u));
         }
-        minifuzz::test(|u| {
-            let mut inputs = [[0; BYTES]; 4];
-            for input in &mut inputs {
-                *input = u.arbitrary()?;
-            }
-            test_dispatch(Evaluate(inputs));
-            check_consistent(|| Evaluate(inputs));
-            // Run every representation and vector width even on hosts without native SIMD.
-            Evaluate(inputs).portable(EmulatedScalar);
-            Evaluate(inputs).portable(EmulatedNeon);
-            EmulatedX86V4C.execute(Evaluate(inputs));
-            Ok(())
-        });
+
+        #[test]
+        fn minifuzz_chain() {
+            minifuzz::test(|u| Plan::Chain.run(u));
+        }
     }
 }

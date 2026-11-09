@@ -357,17 +357,32 @@ impl<F> Fp12<F> {
                         let sum = acc(simd, a[0].square_product::<K, S>(simd), d[1], t[4]);
                         acc(simd, acc(simd, sum, d[2], t[3]), t[2], a[3])
                     }
-                    1 => acc(simd, acc(simd, d[0].product(simd, a[1]), d[2], t[4]), d[3], t[3]),
+                    1 => acc(
+                        simd,
+                        acc(simd, d[0].product(simd, a[1]), d[2], t[4]),
+                        d[3],
+                        t[3],
+                    ),
                     2 => {
                         let sum = acc(simd, a[1].square_product::<K, S>(simd), d[0], a[2]);
                         acc(simd, acc(simd, sum, d[3], t[4]), t[3], a[4])
                     }
-                    3 => acc(simd, acc(simd, d[0].product(simd, a[3]), d[1], a[2]), d[4], t[4]),
+                    3 => acc(
+                        simd,
+                        acc(simd, d[0].product(simd, a[3]), d[1], a[2]),
+                        d[4],
+                        t[4],
+                    ),
                     4 => {
                         let sum = acc(simd, a[2].square_product::<K, S>(simd), d[0], a[4]);
                         acc(simd, acc(simd, sum, d[1], a[3]), t[4], a[5])
                     }
-                    _ => acc(simd, acc(simd, d[0].product(simd, a[5]), d[1], a[4]), d[2], a[3]),
+                    _ => acc(
+                        simd,
+                        acc(simd, d[0].product(simd, a[5]), d[1], a[4]),
+                        d[2],
+                        a[3],
+                    ),
                 }
             },
         ))
@@ -841,166 +856,389 @@ fn split(element: &[u8; BYTES]) -> (&[u8; FP6_BYTES], &[u8; FP6_BYTES]) {
     (c1, c0.try_into().expect("two coefficients"))
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-    use crate::core::field::{
-        fp::{
-            rns::Rns,
-            reference::{self, Element},
-            unsat28::Unsat28,
-            unsat49::Unsat49,
-        },
-        fp6::BYTES as FP6_BYTES,
+/// Reference arithmetic on elements with canonical components, by definition, for testing.
+///
+/// An element is the polynomial `c_0 + c_1 w + ... + c_5 w^5` over `Fp2`, where `w^6 = 1 + i`: since
+/// `v = w^2`, the coefficient of `v^i w^j` in the tower is that of `w^(2i + j)`.
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) mod reference {
+    use super::{BYTES, FP2_BYTES};
+    use crate::core::field::{fp::MODULUS, fp2::reference as fp2};
+    use std::sync::OnceLock;
+
+    /// The coefficients of `1, w, ..., w^5`.
+    pub(crate) type Element = [fp2::Element; 6];
+
+    /// Zero.
+    pub(crate) const ZERO: Element = [fp2::ZERO; 6];
+
+    /// One.
+    pub(crate) const ONE: Element = {
+        let mut one = ZERO;
+        one[0] = fp2::ONE;
+        one
     };
-    use arbitrary::Unstructured;
-    use commonware_simd::{
-        Operation, X86V4C, check_consistent,
-        emulated::{EmulatedNeon, EmulatedScalar, EmulatedX86V4C},
-        test_dispatch,
-    };
-    use std::{vec, vec::Vec};
 
-    /// Chained rounds of every operation in [`evaluate`].
-    const ROUNDS: usize = 3;
+    /// Returns the degree in `w` of the extension coefficient at `index` of an encoding, which holds
+    /// `c1` then `c0`, each with the coefficients of `v^2, v, 1`.
+    const fn degree(index: usize) -> usize {
+        2 * (2 - index % 3) + (1 - index / 3)
+    }
 
-    /// Chained cyclotomic squarings in [`evaluate`].
-    const SQUARINGS: usize = 8;
-
-    /// Outputs per lane of [`evaluate`].
-    const OUTPUTS: usize = 14;
-
-    /// Returns the components of an encoding, in blst's order: `c0.c0.c0`, `c0.c0.c1`,
-    /// `c0.c1.c0`, and so on.
-    fn components(bytes: &[u8; BYTES]) -> [[u8; FP_BYTES]; 12] {
-        let (chunks, _) = bytes.as_chunks::<FP_BYTES>();
-        let mut components = [[0; FP_BYTES]; 12];
-        for (k, component) in components.iter_mut().enumerate() {
-            // Coefficient k / 2 of Fp6 coefficient k / 6, highest first in each encoding.
-            let (fp6, fp2, fp) = (k / 6, (k / 2) % 3, k % 2);
-            *component = chunks[(1 - fp6) * 6 + (2 - fp2) * 2 + (1 - fp)];
+    /// Returns the residues of an encoding's components.
+    pub(crate) fn decode(bytes: &[u8; BYTES]) -> Element {
+        let (chunks, _) = bytes.as_chunks::<FP2_BYTES>();
+        let mut a = ZERO;
+        for (index, chunk) in chunks.iter().enumerate() {
+            a[degree(index)] = fp2::decode(chunk);
         }
-        components
+        a
     }
 
-    /// Returns the encoding of components in blst's order.
-    fn from_components(components: &[[u8; FP_BYTES]; 12]) -> [u8; BYTES] {
-        let mut bytes = [0; BYTES];
-        let (chunks, _) = bytes.as_chunks_mut::<FP_BYTES>();
-        for (k, component) in components.iter().enumerate() {
-            let (fp6, fp2, fp) = (k / 6, (k / 2) % 3, k % 2);
-            chunks[(1 - fp6) * 6 + (2 - fp2) * 2 + (1 - fp)] = *component;
-        }
-        bytes
-    }
-
-    /// Converts an encoding to blst's representation.
-    pub(crate) fn to_blst(bytes: &[u8; BYTES]) -> blst::blst_fp12 {
-        let mut value = blst::blst_fp12::default();
-        for (k, component) in components(bytes).iter().enumerate() {
-            let fp = &mut value.fp6[k / 6].fp2[(k / 2) % 3].fp[k % 2];
-            // SAFETY: the pointers reference a valid field element and 48 readable bytes.
-            unsafe { blst::blst_fp_from_bendian(fp, component.as_ptr()) };
-        }
-        value
-    }
-
-    /// Converts blst's representation to an encoding.
-    pub(crate) fn from_blst(value: &blst::blst_fp12) -> [u8; BYTES] {
-        let mut components = [[0; FP_BYTES]; 12];
-        for (k, component) in components.iter_mut().enumerate() {
-            let fp = &value.fp6[k / 6].fp2[(k / 2) % 3].fp[k % 2];
-            // SAFETY: the pointers reference a valid field element and 48 writable bytes.
-            unsafe { blst::blst_bendian_from_fp(component.as_mut_ptr(), fp) };
-        }
-        from_components(&components)
-    }
-
-    /// Applies a blst operation to encodings.
-    fn blst_mul(a: &[u8; BYTES], b: &[u8; BYTES]) -> [u8; BYTES] {
-        let mut out = blst::blst_fp12::default();
-        // SAFETY: the pointers reference valid field elements.
-        unsafe { blst::blst_fp12_mul(&mut out, &to_blst(a), &to_blst(b)) };
-        from_blst(&out)
-    }
-
-    fn blst_square(a: &[u8; BYTES]) -> [u8; BYTES] {
-        let mut out = blst::blst_fp12::default();
-        // SAFETY: the pointers reference valid field elements.
-        unsafe { blst::blst_fp12_sqr(&mut out, &to_blst(a)) };
-        from_blst(&out)
-    }
-
-    fn blst_conjugate(a: &[u8; BYTES]) -> [u8; BYTES] {
-        let mut value = to_blst(a);
-        // SAFETY: the pointer references a valid field element.
-        unsafe { blst::blst_fp12_conjugate(&mut value) };
-        from_blst(&value)
-    }
-
-    fn blst_frobenius(a: &[u8; BYTES], n: usize) -> [u8; BYTES] {
-        let mut out = blst::blst_fp12::default();
-        // SAFETY: the pointers reference valid field elements.
-        unsafe { blst::blst_fp12_frobenius_map(&mut out, &to_blst(a), n) };
-        from_blst(&out)
-    }
-
-    pub(crate) fn blst_invert(a: &[u8; BYTES]) -> [u8; BYTES] {
-        let mut out = blst::blst_fp12::default();
-        // SAFETY: the pointers reference valid field elements.
-        unsafe { blst::blst_fp12_inverse(&mut out, &to_blst(a)) };
-        from_blst(&out)
-    }
-
-    fn blst_cyclotomic_square(a: &[u8; BYTES]) -> [u8; BYTES] {
-        let mut out = blst::blst_fp12::default();
-        // SAFETY: the pointers reference valid field elements.
-        unsafe { blst::blst_fp12_cyclotomic_sqr(&mut out, &to_blst(a)) };
-        from_blst(&out)
-    }
-
-    /// Returns the element of line coefficients `[l0, l2, l3]`: `(l0 + l2 v) + l3 v w`.
-    fn line_element(line: &[[u8; FP2_BYTES]; 3]) -> [u8; BYTES] {
+    /// Returns the encoding of an element.
+    pub(crate) fn encode(a: &Element) -> [u8; BYTES] {
         let mut bytes = [0; BYTES];
         let (chunks, _) = bytes.as_chunks_mut::<FP2_BYTES>();
-        // Coefficients c1.c2, c1.c1, c1.c0, c0.c2, c0.c1, c0.c0.
-        chunks[5] = line[0];
-        chunks[4] = line[1];
-        chunks[1] = line[2];
-        bytes
-    }
-
-    /// Returns `(t, 0)` for an `Fp6` encoding `t`.
-    fn embed(t: &[u8; FP6_BYTES]) -> [u8; BYTES] {
-        let mut bytes = [0; BYTES];
-        bytes[FP6_BYTES..].copy_from_slice(t);
-        bytes
-    }
-
-    /// Returns an element with canonical components.
-    pub(crate) fn element(u: &mut Unstructured<'_>) -> arbitrary::Result<[u8; BYTES]> {
-        let mut components = [[0; FP_BYTES]; 12];
-        for component in &mut components {
-            *component = reference::to_bytes(reference::canonical(u)?);
+        for (index, chunk) in chunks.iter_mut().enumerate() {
+            *chunk = fp2::encode(a[degree(index)]);
         }
-        Ok(from_components(&components))
+        bytes
     }
 
-    /// Maps a nonzero element into the cyclotomic subgroup: `a^((p^6 - 1)(p^2 + 1))`.
-    pub(crate) fn cyclotomic(a: &[u8; BYTES]) -> [u8; BYTES] {
-        let a = blst_mul(&blst_conjugate(a), &blst_invert(a));
-        blst_mul(&blst_frobenius(&a, 2), &a)
+    /// Returns `a * b`, the product of polynomials with `w^6` replaced by `1 + i`.
+    pub(crate) fn mul(a: &Element, b: &Element) -> Element {
+        let mut product = ZERO;
+        for (j, &x) in a.iter().enumerate() {
+            for (k, &y) in b.iter().enumerate() {
+                let mut term = fp2::mul(x, y);
+                if j + k >= 6 {
+                    term = fp2::mul(term, fp2::NONRESIDUE);
+                }
+                product[(j + k) % 6] = fp2::add(product[(j + k) % 6], term);
+            }
+        }
+        product
     }
 
-    /// The inputs of one lane.
+    /// Returns `base^exponent` for a little-endian exponent, given the product and its unit.
+    fn pow<T: Copy>(base: T, one: T, mul: impl Fn(T, T) -> T, exponent: &[u64]) -> T {
+        let mut result = one;
+        for word in exponent.iter().rev() {
+            for bit in (0..64).rev() {
+                result = mul(result, result);
+                if (word >> bit) & 1 == 1 {
+                    result = mul(result, base);
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns `a^exponent` for a little-endian exponent.
+    pub(crate) fn power(a: &Element, exponent: &[u64]) -> Element {
+        pow(*a, ONE, |x, y| mul(&x, &y), exponent)
+    }
+
+    /// Returns the conjugate `a(-w)`, which is `a^(p^6)`.
+    pub(crate) fn conjugate(a: &Element) -> Element {
+        let mut conjugate = *a;
+        for coefficient in conjugate.iter_mut().skip(1).step_by(2) {
+            *coefficient = fp2::neg(*coefficient);
+        }
+        conjugate
+    }
+
+    /// Returns `gamma^k` for `k` from `0` to `5`, where `gamma = (1 + i)^((p - 1) / 6)` is
+    /// `w^(p - 1)`.
+    pub(crate) fn frobenius_factors() -> &'static [fp2::Element; 6] {
+        static FACTORS: OnceLock<[fp2::Element; 6]> = OnceLock::new();
+        FACTORS.get_or_init(|| {
+            // (p - 1) / 6, little-endian.
+            let mut exponent = MODULUS;
+            exponent[0] -= 1;
+            let mut remainder = 0u128;
+            for word in exponent.iter_mut().rev() {
+                let value = (remainder << 64) | *word as u128;
+                *word = (value / 6) as u64;
+                remainder = value % 6;
+            }
+            assert_eq!(remainder, 0, "6 divides p - 1");
+            let gamma = pow(fp2::NONRESIDUE, fp2::ONE, fp2::mul, &exponent);
+            let mut factors = [fp2::ONE; 6];
+            for k in 1..6 {
+                factors[k] = fp2::mul(factors[k - 1], gamma);
+            }
+            factors
+        })
+    }
+
+    /// Returns `a^p`: each coefficient `c_k` of `w^k` maps to `conj(c_k) w^(k p)`, which is
+    /// `conj(c_k) gamma^k w^k`.
+    pub(crate) fn frobenius(a: &Element) -> Element {
+        let factors = frobenius_factors();
+        let mut image = ZERO;
+        for (k, coefficient) in image.iter_mut().enumerate() {
+            *coefficient = fp2::mul(fp2::conjugate(a[k]), factors[k]);
+        }
+        image
+    }
+
+    /// Returns the inverse of `a`, or zero for zero, through norms.
+    ///
+    /// `n = a conj(a)` lies in `Fp6`, whose norm `n n^(p^2) n^(p^4)` lies in `Fp2`, so
+    /// `a^(-1) = conj(a) n^(p^2) n^(p^4) / (n n^(p^2) n^(p^4))`.
+    pub(crate) fn invert(a: &Element) -> Element {
+        let conjugate = conjugate(a);
+        let n = mul(a, &conjugate);
+        let n2 = frobenius(&frobenius(&n));
+        let others = mul(&n2, &frobenius(&frobenius(&n2)));
+        let scale = fp2::invert(mul(&n, &others)[0]);
+        mul(&conjugate, &others).map(|coefficient| fp2::mul(coefficient, scale))
+    }
+}
+
+/// Fuzzing of [`Fp12`] and [`Fp6`] against the [reference arithmetic](mod@reference).
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
+    use super::{reference::Element, *};
+    use crate::core::field::{
+        fp::{rns::Rns, testing::Backend, unsat28::Unsat28, unsat49::Unsat49},
+        fp2::reference as fp2,
+    };
+    use arbitrary::{Arbitrary, Unstructured};
+    use commonware_simd::{Operation, X86V4C};
+    use std::{vec, vec::Vec};
+
+    /// Largest number of operations in a chain.
+    const STEPS: usize = 8;
+
+    /// A fuzzing operation on `Fp12` and its subfield `Fp6`.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    pub enum Plan {
+        /// Check that a chain of multiplications, squarings, line multiplications, conjugations,
+        /// Frobenius maps, and inversions of elements at their bounds matches the reference after
+        /// every step, with inverses checked by their defining property.
+        Chain,
+        /// Check that a chain of cyclotomic squarings and conjugations of elements of the
+        /// cyclotomic subgroup matches the reference after every step.
+        CyclotomicChain,
+        /// Check that the products, squares, sparse products, and inverses of `Fp6` match the
+        /// reference in the embedding of `Fp6` in `Fp12`.
+        Subfield,
+        /// Check that the product of lanes is the reference product of every lane's element.
+        ProductOfLanes,
+    }
+
+    impl Plan {
+        /// Runs the operation using the remaining input.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::Chain => chain(u, false),
+                Self::CyclotomicChain => chain(u, true),
+                Self::Subfield => subfield(u),
+                Self::ProductOfLanes => product_of_lanes(u),
+            }
+        }
+    }
+
+    /// A computation on the lanes of values, generic over the backend and representation.
+    pub(crate) trait Kernel {
+        /// The stored results.
+        type Output;
+
+        /// Runs the computation in representation `F`.
+        fn run<S: Simd, F: Field<S>>(&self, simd: S) -> Self::Output;
+    }
+
+    /// A base field representation.
+    #[derive(Clone, Copy, Debug)]
+    enum Representation {
+        Unsat49,
+        Unsat28,
+        Rns,
+    }
+
+    /// An emulated backend and a representation it supports: residues require x86v4c.
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct Target {
+        backend: Backend,
+        representation: Representation,
+    }
+
+    /// Runs a kernel in a representation, as an operation of any backend.
+    struct Execute<'a, K>(&'a K, Representation);
+
+    impl<S: Simd, K: Kernel> Operation<S> for Execute<'_, K> {
+        type Output = K::Output;
+
+        fn portable(self, simd: S) -> K::Output {
+            match self.1 {
+                Representation::Unsat49 => self.0.run::<S, Unsat49<S>>(simd),
+                Representation::Unsat28 => self.0.run::<S, Unsat28<S>>(simd),
+                Representation::Rns => unreachable!("residues require x86v4c"),
+            }
+        }
+
+        fn x86_v4c(self, simd: S) -> K::Output
+        where
+            S: X86V4C,
+        {
+            match self.1 {
+                Representation::Rns => self.0.run::<S, Rns<S>>(simd),
+                _ => self.portable(simd),
+            }
+        }
+    }
+
+    /// Returns the lane count of a representation.
+    struct Lanes;
+
+    impl Kernel for Lanes {
+        type Output = usize;
+
+        fn run<S: Simd, F: Field<S>>(&self, _: S) -> usize {
+            F::LANES
+        }
+    }
+
+    impl Target {
+        /// Draws any emulated backend and representation.
+        pub(crate) fn draw(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+            let backend = Backend::draw(u)?;
+            let representations = if matches!(backend, Backend::X86V4C) {
+                2
+            } else {
+                1
+            };
+            let representation = [
+                Representation::Unsat28,
+                Representation::Unsat49,
+                Representation::Rns,
+            ][u.int_in_range(0..=representations)?];
+            Ok(Self {
+                backend,
+                representation,
+            })
+        }
+
+        /// Runs a kernel on this target.
+        pub(crate) fn run<K: Kernel>(self, kernel: &K) -> K::Output {
+            self.backend.execute(Execute(kernel, self.representation))
+        }
+
+        /// Returns the number of elements a value holds on this target.
+        pub(crate) fn lanes(self) -> usize {
+            self.run(&Lanes)
+        }
+
+        /// Draws a lane count from one to [`Self::lanes`], every lane when the input is exhausted.
+        pub(crate) fn draw_lanes(self, u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
+            let lanes = self.lanes();
+            Ok(lanes - u.int_in_range(0..=lanes - 1)?)
+        }
+    }
+
+    /// Draws an extension element with canonical components, requiring the bytes it reads.
+    fn extension(u: &mut Unstructured<'_>) -> arbitrary::Result<fp2::Element> {
+        fp2::canonical(&mut Unstructured::new(u.bytes(2 * FP_BYTES)?))
+    }
+
+    /// Draws an element with canonical components: mostly any element, otherwise zero, one, or an
+    /// element of `Fp2` or `Fp6`.
+    pub(crate) fn element(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
+        let mut a = reference::ZERO;
+        match u.int_in_range(0..=7u8)? {
+            0..=3 => {
+                for coefficient in &mut a {
+                    *coefficient = extension(u)?;
+                }
+            }
+            4 => {}
+            5 => a = reference::ONE,
+            6 => a[0] = extension(u)?,
+            _ => {
+                for coefficient in a.iter_mut().step_by(2) {
+                    *coefficient = extension(u)?;
+                }
+            }
+        }
+        Ok(a)
+    }
+
+    /// Draws an element of the cyclotomic subgroup: `a^((p^6 - 1)(p^2 + 1))` for a drawn nonzero
+    /// `a`.
+    pub(crate) fn cyclotomic(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
+        let mut a = element(u)?;
+        if a == reference::ZERO {
+            a = reference::ONE;
+        }
+        let x = reference::mul(&reference::conjugate(&a), &reference::invert(&a));
+        let c = reference::mul(&reference::frobenius(&reference::frobenius(&x)), &x);
+        assert!(
+            reference::mul(&reference::conjugate(&c), &c) == reference::ONE,
+            "cyclotomic element"
+        );
+        Ok(c)
+    }
+
+    /// Returns `inverse` after checking that it is the inverse of `a`, or zero for zero.
+    fn checked_inverse(a: &Element, inverse: Element, label: &str) -> Element {
+        let expected = if *a == reference::ZERO {
+            reference::ZERO
+        } else {
+            reference::ONE
+        };
+        assert!(reference::mul(a, &inverse) == expected, "inverse, {label}");
+        inverse
+    }
+
+    /// The inputs of one lane, as encodings.
     #[derive(Clone, Copy)]
     struct Inputs {
         a: [u8; BYTES],
         b: [u8; BYTES],
-        /// An element of the cyclotomic subgroup.
-        c: [u8; BYTES],
         /// The coefficients of `1, w^2, w^3` of a line.
         line: [[u8; FP2_BYTES]; 3],
+    }
+
+    /// The inputs of one lane, as reference elements.
+    struct Values {
+        a: Element,
+        b: Element,
+        line: [fp2::Element; 3],
+    }
+
+    impl Values {
+        /// Draws inputs; `a` lies in the cyclotomic subgroup when `cyclotomic` is set.
+        fn draw(u: &mut Unstructured<'_>, cyclotomic: bool) -> arbitrary::Result<Self> {
+            let a = if cyclotomic {
+                self::cyclotomic(u)?
+            } else {
+                element(u)?
+            };
+            Ok(Self {
+                a,
+                b: element(u)?,
+                line: [extension(u)?, extension(u)?, extension(u)?],
+            })
+        }
+
+        /// Returns the encodings.
+        fn encode(&self) -> Inputs {
+            Inputs {
+                a: reference::encode(&self.a),
+                b: reference::encode(&self.b),
+                line: self.line.map(fp2::encode),
+            }
+        }
+
+        /// Returns the line `l0 + l2 w^2 + l3 w^3` as an element.
+        const fn line(&self) -> Element {
+            let [l0, l2, l3] = self.line;
+            let mut line = reference::ZERO;
+            (line[0], line[2], line[3]) = (l0, l2, l3);
+            line
+        }
     }
 
     /// Returns the same extension value with every component at integer bound `2 + K`, given
@@ -1011,8 +1249,12 @@ pub(crate) mod tests {
     }
 
     /// Loads elements and widens every component to integer bound [`BOUND`].
-    fn load_wide<S: Simd, F: Field<S>>(simd: S, elements: &[[u8; BYTES]]) -> Fp12<F> {
-        let value = Fp12::<F>::load(simd, elements, &ONE);
+    fn load_wide<S: Simd, F: Field<S>>(
+        simd: S,
+        elements: &[[u8; BYTES]],
+        fill: &[u8; BYTES],
+    ) -> Fp12<F> {
+        let value = Fp12::<F>::load(simd, elements, fill);
         let widen6 = |value: Fp6<F>| Fp6 {
             c0: widen::<{ BOUND - 2 }, S, F>(simd, value.c0),
             c1: widen::<{ BOUND - 2 }, S, F>(simd, value.c1),
@@ -1032,325 +1274,386 @@ pub(crate) mod tests {
         value
     }
 
-    /// The inputs of a chunk of lanes, loaded and widened.
+    /// Stores the first `lanes` elements of a value.
+    fn store<S: Simd, F: Field<S>>(simd: S, value: Fp12<F>, lanes: usize) -> Vec<[u8; BYTES]> {
+        let mut elements = vec![[0; BYTES]; lanes];
+        value.store(simd, &mut elements);
+        elements
+    }
+
+    /// The inputs of the lanes of a value, loaded with every component widened to its bound.
     struct Loaded<F> {
         a: Fp12<F>,
         b: Fp12<F>,
-        c: Fp12<F>,
         line: [Fp2<F>; 3],
     }
 
-    /// An operation on loaded inputs.
-    type Step<S, F> = fn(S, &Loaded<F>) -> Fp12<F>;
-
-    /// Loads the inputs of a chunk of lanes, widening every component to its bound.
+    /// Loads the inputs of up to one value's lanes, widening every component to its bound.
     #[inline(never)]
-    fn load_chunk<S: Simd, F: Field<S>>(simd: S, chunk: &[Inputs]) -> Loaded<F> {
-        let a: Vec<_> = chunk.iter().map(|inputs| inputs.a).collect();
-        let b: Vec<_> = chunk.iter().map(|inputs| inputs.b).collect();
-        let c: Vec<_> = chunk.iter().map(|inputs| inputs.c).collect();
+    fn load<S: Simd, F: Field<S>>(simd: S, inputs: &[Inputs]) -> Loaded<F> {
+        let a: Vec<_> = inputs.iter().map(|inputs| inputs.a).collect();
+        let b: Vec<_> = inputs.iter().map(|inputs| inputs.b).collect();
         let mut line = [Fp2::<F>::load(simd, &[], &[0; FP2_BYTES]); 3];
         for (k, coefficient) in line.iter_mut().enumerate() {
-            let lanes: Vec<_> = chunk.iter().map(|inputs| inputs.line[k]).collect();
+            let lanes: Vec<_> = inputs.iter().map(|inputs| inputs.line[k]).collect();
             let loaded = Fp2::<F>::load(simd, &lanes, &[0; FP2_BYTES]);
             *coefficient = widen::<{ LINE_BOUND - 2 }, S, F>(simd, loaded);
         }
         Loaded {
-            a: load_wide(simd, &a),
-            b: load_wide(simd, &b),
-            c: load_wide(simd, &c),
+            a: load_wide(simd, &a, &ONE),
+            b: load_wide(simd, &b, &ONE),
             line,
         }
     }
 
-    /// Returns `(t, 0)` for a value `t` of `Fp6`.
-    fn embed6<S: Simd, F: Field<S>>(simd: S, t: Fp6<F>) -> Fp12<F> {
-        Fp12 {
-            c0: t,
-            c1: Fp6::load(simd, &[], &[0; FP6_BYTES]),
-        }
+    /// An operation of a chain.
+    #[derive(Clone, Copy, Debug)]
+    enum Step {
+        /// Multiplies by `b`.
+        Mul,
+        Square,
+        /// Multiplies by the line.
+        MulByLine,
+        Conjugate,
+        Frobenius,
+        Invert,
+        CyclotomicSquare,
     }
 
-    fn mul<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        let mut y = x.a;
+    /// The operations of [`Plan::Chain`].
+    const STEPS_ANY: [Step; 6] = [
+        Step::Mul,
+        Step::Square,
+        Step::MulByLine,
+        Step::Conjugate,
+        Step::Frobenius,
+        Step::Invert,
+    ];
+
+    /// The operations of [`Plan::CyclotomicChain`].
+    const STEPS_CYCLOTOMIC: [Step; 2] = [Step::CyclotomicSquare, Step::Conjugate];
+
+    /// An operation on the current value of a chain.
+    type Apply<S, F> = fn(S, Fp12<F>, &Loaded<F>, &[Fp2<F>; 5]) -> Fp12<F>;
+
+    fn mul<S: Simd, F: Field<S>>(
+        simd: S,
+        mut y: Fp12<F>,
+        x: &Loaded<F>,
+        _: &[Fp2<F>; 5],
+    ) -> Fp12<F> {
         y.mul(simd, &x.b);
         y
     }
 
-    fn square<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        let mut y = x.a;
+    fn square<S: Simd, F: Field<S>>(
+        simd: S,
+        mut y: Fp12<F>,
+        _: &Loaded<F>,
+        _: &[Fp2<F>; 5],
+    ) -> Fp12<F> {
         y.square(simd);
         y
     }
 
-    fn mul_by_line<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        let mut y = x.a;
+    fn mul_by_line<S: Simd, F: Field<S>>(
+        simd: S,
+        mut y: Fp12<F>,
+        x: &Loaded<F>,
+        _: &[Fp2<F>; 5],
+    ) -> Fp12<F> {
         y.mul_by_line(simd, &x.line);
         y
     }
 
-    fn cyclotomic_square<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        let mut y = x.c;
+    fn conjugate<S: Simd, F: Field<S>>(
+        simd: S,
+        y: Fp12<F>,
+        _: &Loaded<F>,
+        _: &[Fp2<F>; 5],
+    ) -> Fp12<F> {
+        y.conjugate(simd)
+    }
+
+    fn frobenius<S: Simd, F: Field<S>>(
+        simd: S,
+        y: Fp12<F>,
+        _: &Loaded<F>,
+        coefficients: &[Fp2<F>; 5],
+    ) -> Fp12<F> {
+        y.frobenius(simd, coefficients)
+    }
+
+    fn invert<S: Simd, F: Field<S>>(
+        simd: S,
+        y: Fp12<F>,
+        _: &Loaded<F>,
+        _: &[Fp2<F>; 5],
+    ) -> Fp12<F> {
+        y.invert(simd)
+    }
+
+    fn cyclotomic_square<S: Simd, F: Field<S>>(
+        simd: S,
+        mut y: Fp12<F>,
+        _: &Loaded<F>,
+        _: &[Fp2<F>; 5],
+    ) -> Fp12<F> {
         y.cyclotomic_square(simd);
         y
     }
 
-    fn conjugate<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        x.a.conjugate(simd)
-    }
-
-    fn frobenius<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        let coefficients = Fp12::<F>::frobenius_coefficients(simd);
-        x.a.frobenius(simd, &coefficients)
-    }
-
-    fn invert<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        x.a.invert(simd)
-    }
-
-    /// Every operation on the outputs of others.
-    fn chain<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        let coefficients = Fp12::<F>::frobenius_coefficients(simd);
-        let mut y = x.a;
-        for _ in 0..ROUNDS {
-            y.mul(simd, &x.b);
-            y = check_bound(simd, y);
-            y.square(simd);
-            y = check_bound(simd, y);
-            y.mul_by_line(simd, &x.line);
-            y = check_bound(simd, y);
-            y = check_bound(simd, y.conjugate(simd));
-            y = check_bound(simd, y.frobenius(simd, &coefficients));
-            y = check_bound(simd, y.invert(simd));
-        }
-        y
-    }
-
-    fn cyclotomic_chain<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        let mut y = x.c;
-        for _ in 0..SQUARINGS {
-            y.cyclotomic_square(simd);
-            y = check_bound(simd, y.conjugate(simd));
-        }
-        y
-    }
-
-    fn product6<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        let product = x.a.c0.product(simd, &x.b.c0);
-        embed6(simd, Fp6::<F>::reduce_tight::<BIAS, S>(simd, product))
-    }
-
-    fn square6<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        let product = x.a.c0.square_product(simd);
-        embed6(simd, Fp6::<F>::reduce_tight::<BIAS, S>(simd, product))
-    }
-
-    fn product6_by_01<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        let product = x.a.c0.product_by_01(simd, x.line[0], x.line[1]);
-        embed6(simd, Fp6::<F>::reduce_tight::<BIAS, S>(simd, product))
-    }
-
-    fn product6_by_1<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        let product = x.a.c0.product_by_1(simd, x.line[2]);
-        embed6(simd, Fp6::<F>::reduce_tight::<BIAS, S>(simd, product))
-    }
-
-    fn invert6<S: Simd, F: Field<S>>(simd: S, x: &Loaded<F>) -> Fp12<F> {
-        embed6(simd, x.a.c0.invert(simd))
-    }
-
-    /// Evaluates every operation on one input per lane.
+    /// Applies operations to `a`, storing the value after each.
     ///
     /// Each operation runs in its own function, so debug builds keep every frame small.
-    fn evaluate<S: Simd, F: Field<S>>(simd: S, inputs: &[Inputs]) -> Vec<[[u8; BYTES]; OUTPUTS]> {
-        let operations: [Step<S, F>; OUTPUTS] = [
-            mul,
-            square,
-            mul_by_line,
-            cyclotomic_square,
-            conjugate,
-            frobenius,
-            invert,
-            chain,
-            cyclotomic_chain,
-            product6,
-            square6,
-            product6_by_01,
-            product6_by_1,
-            invert6,
-        ];
-        let mut outputs = vec![[[0; BYTES]; OUTPUTS]; inputs.len()];
-        for start in (0..inputs.len()).step_by(F::LANES) {
-            let chunk = &inputs[start..inputs.len().min(start + F::LANES)];
-            let loaded = load_chunk::<S, F>(simd, chunk);
-            for (k, operation) in operations.iter().enumerate() {
-                let mut lanes = [[0; BYTES]; MAX_LANES];
-                check_bound(simd, operation(simd, &loaded)).store(simd, &mut lanes[..chunk.len()]);
-                for (output, lane) in outputs[start..].iter_mut().zip(&lanes[..chunk.len()]) {
-                    output[k] = *lane;
-                }
-            }
-        }
-        outputs
+    struct Chain<'a> {
+        inputs: &'a [Inputs],
+        steps: &'a [Step],
     }
 
-    /// Returns the expected outputs of [`evaluate`] for one lane.
-    fn expected(inputs: &Inputs) -> [[u8; BYTES]; OUTPUTS] {
-        let Inputs {
-            a,
-            b,
-            c,
-            line: coefficients,
-        } = *inputs;
-        let line = line_element(&coefficients);
-        let mut outputs = [[0; BYTES]; OUTPUTS];
-        outputs[0] = blst_mul(&a, &b);
-        outputs[1] = blst_square(&a);
-        outputs[2] = blst_mul(&a, &line);
-        outputs[3] = blst_cyclotomic_square(&c);
-        outputs[4] = blst_conjugate(&a);
-        outputs[5] = blst_frobenius(&a, 1);
-        outputs[6] = blst_invert(&a);
-        let mut x = a;
-        for _ in 0..ROUNDS {
-            x = blst_mul(&x, &b);
-            x = blst_square(&x);
-            x = blst_mul(&x, &line);
-            x = blst_conjugate(&x);
-            x = blst_frobenius(&x, 1);
-            x = blst_invert(&x);
-        }
-        outputs[7] = x;
-        let mut y = c;
-        for _ in 0..SQUARINGS {
-            y = blst_conjugate(&blst_cyclotomic_square(&y));
-        }
-        outputs[8] = y;
-        let low = |x: &[u8; BYTES]| -> [u8; FP6_BYTES] { x[FP6_BYTES..].try_into().unwrap() };
-        let (a0, b0) = (embed(&low(&a)), embed(&low(&b)));
-        outputs[9] = blst_mul(&a0, &b0);
-        outputs[10] = blst_square(&a0);
-        // (l0 + l2 v, 0) and (l3 v, 0).
-        let mut l01 = line;
-        l01[..FP6_BYTES].fill(0);
-        outputs[11] = blst_mul(&a0, &l01);
-        let mut l1 = [0; BYTES];
-        l1[FP6_BYTES + FP2_BYTES..FP6_BYTES + 2 * FP2_BYTES].copy_from_slice(&coefficients[2]);
-        outputs[12] = blst_mul(&a0, &l1);
-        outputs[13] = blst_invert(&a0);
-        outputs
-    }
+    impl Kernel for Chain<'_> {
+        type Output = Vec<Vec<[u8; BYTES]>>;
 
-    #[test]
-    fn operations_match_blst() {
-        /// Runs [`evaluate`] in every representation, returning the positional ones' outputs.
-        struct Evaluate<'a>(&'a [Inputs]);
-
-        impl<S: Simd> Operation<S> for Evaluate<'_> {
-            type Output = [Vec<[[u8; BYTES]; OUTPUTS]>; 2];
-
-            fn portable(self, simd: S) -> Self::Output {
-                simd.execute(|simd: S| {
-                    [
-                        evaluate::<S, Unsat49<S>>(simd, self.0),
-                        evaluate::<S, Unsat28<S>>(simd, self.0),
-                    ]
+        fn run<S: Simd, F: Field<S>>(&self, simd: S) -> Self::Output {
+            let loaded = load::<S, F>(simd, self.inputs);
+            let coefficients = Fp12::<F>::frobenius_coefficients(simd);
+            let mut y = loaded.a;
+            self.steps
+                .iter()
+                .map(|step| {
+                    let apply: Apply<S, F> = match step {
+                        Step::Mul => mul,
+                        Step::Square => square,
+                        Step::MulByLine => mul_by_line,
+                        Step::Conjugate => conjugate,
+                        Step::Frobenius => frobenius,
+                        Step::Invert => invert,
+                        Step::CyclotomicSquare => cyclotomic_square,
+                    };
+                    y = check_bound(simd, apply(simd, y, &loaded, &coefficients));
+                    store(simd, y, self.inputs.len())
                 })
-            }
-
-            // Residues require x86v4c and must match the other representations.
-            fn x86_v4c(self, simd: S) -> Self::Output
-            where
-                S: X86V4C,
-            {
-                let inputs = self.0;
-                let outputs = self.portable(simd);
-                let residues = simd.execute(|simd: S| evaluate::<S, Rns<S>>(simd, inputs));
-                assert!(residues == outputs[0], "residues differ");
-                outputs
-            }
+                .collect()
         }
-
-        let mut inputs = Vec::new();
-        for lane in 0..MAX_LANES {
-            let seed = [(lane as u8).wrapping_mul(37).wrapping_add(11); 4096];
-            let mut u = Unstructured::new(&seed);
-            let mut lane_inputs = Inputs {
-                a: element(&mut u).unwrap(),
-                b: element(&mut u).unwrap(),
-                c: [0; BYTES],
-                line: [[0; FP2_BYTES]; 3],
-            };
-            lane_inputs.c = cyclotomic(&element(&mut u).unwrap());
-            for coefficient in &mut lane_inputs.line {
-                let (c0, c1) = (
-                    reference::canonical(&mut u).unwrap(),
-                    reference::canonical(&mut u).unwrap(),
-                );
-                coefficient[..FP_BYTES].copy_from_slice(&reference::to_bytes(c1));
-                coefficient[FP_BYTES..].copy_from_slice(&reference::to_bytes(c0));
-            }
-            inputs.push(lane_inputs);
-        }
-        // Edge cases in the first lanes: zero, one, and an element of Fp2.
-        inputs[0].a = [0; BYTES];
-        inputs[1].a = ONE;
-        inputs[2].b = ONE;
-        let expected: Vec<_> = inputs.iter().map(expected).collect();
-        let check = |outputs: [Vec<[[u8; BYTES]; OUTPUTS]>; 2]| {
-            for (representation, output) in outputs.iter().enumerate() {
-                for (lane, (output, expected)) in output.iter().zip(&expected).enumerate() {
-                    for k in 0..OUTPUTS {
-                        assert!(
-                            output[k] == expected[k],
-                            "output {k}, representation {representation}, lane {lane}"
-                        );
-                    }
-                }
-            }
-        };
-        check(test_dispatch(Evaluate(&inputs)));
-        // Run every representation and vector width even on hosts without native SIMD.
-        check(Evaluate(&inputs).portable(EmulatedScalar));
-        check(Evaluate(&inputs).portable(EmulatedNeon));
-        check(EmulatedX86V4C.execute(Evaluate(&inputs)));
-        check_consistent(|| Evaluate(&inputs[..4]));
     }
 
-    #[test]
-    fn frobenius_constants_are_powers_of_the_nonresidue() {
-        let mul = |(a0, a1): (Element, Element), (b0, b1): (Element, Element)| {
-            (
-                reference::sub(reference::mul(a0, b0), reference::mul(a1, b1)),
-                reference::add(reference::mul(a0, b1), reference::mul(a1, b0)),
-            )
+    /// Runs [`Plan::Chain`], or [`Plan::CyclotomicChain`] when `cyclotomic` is set.
+    fn chain(u: &mut Unstructured<'_>, cyclotomic: bool) -> arbitrary::Result<()> {
+        let target = Target::draw(u)?;
+        let lanes = target.draw_lanes(u)?;
+        let values = (0..lanes)
+            .map(|_| Values::draw(u, cyclotomic))
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        let choices: &[Step] = if cyclotomic {
+            &STEPS_CYCLOTOMIC
+        } else {
+            &STEPS_ANY
         };
-        // (p - 1) / 6, little-endian.
-        let mut exponent = crate::core::field::fp::MODULUS;
-        exponent[0] -= 1;
-        let mut remainder = 0u128;
-        for word in exponent.iter_mut().rev() {
-            let value = (remainder << 64) | *word as u128;
-            *word = (value / 6) as u64;
-            remainder = value % 6;
-        }
-        assert_eq!(remainder, 0);
-        let nonresidue = (reference::ONE, reference::ONE);
-        let mut gamma = (reference::ONE, reference::ZERO);
-        for word in exponent.iter().rev() {
-            for bit in (0..64).rev() {
-                gamma = mul(gamma, gamma);
-                if (word >> bit) & 1 == 1 {
-                    gamma = mul(gamma, nonresidue);
-                }
+        let steps = (0..STEPS - u.int_in_range(0..=STEPS - 1)?)
+            .map(|_| u.choose(choices).copied())
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        let inputs: Vec<_> = values.iter().map(Values::encode).collect();
+        let outputs = target.run(&Chain {
+            inputs: &inputs,
+            steps: &steps,
+        });
+        for (lane, values) in values.iter().enumerate() {
+            let line = values.line();
+            let mut y = values.a;
+            for (k, (step, output)) in steps.iter().zip(&outputs).enumerate() {
+                let label = std::format!("{target:?}, lane {lane}, step {k} ({step:?})");
+                y = match step {
+                    Step::Mul => reference::mul(&y, &values.b),
+                    Step::Square | Step::CyclotomicSquare => reference::mul(&y, &y),
+                    Step::MulByLine => reference::mul(&y, &line),
+                    Step::Conjugate => reference::conjugate(&y),
+                    Step::Frobenius => reference::frobenius(&y),
+                    Step::Invert => checked_inverse(&y, reference::decode(&output[lane]), &label),
+                };
+                assert!(output[lane] == reference::encode(&y), "{label}");
             }
         }
-        let mut power = gamma;
-        for constant in &FROBENIUS {
-            let (c0, c1) = power;
-            assert_eq!(constant[..FP_BYTES], reference::to_bytes(c1));
-            assert_eq!(constant[FP_BYTES..], reference::to_bytes(c0));
-            power = mul(power, gamma);
+        Ok(())
+    }
+
+    /// An operation of `Fp6`, on the coefficients `c0` of the inputs.
+    #[derive(Clone, Copy, Debug)]
+    enum Operation6 {
+        /// Multiplies `a` by `b`.
+        Product,
+        Square,
+        /// Multiplies `a` by `l0 + l2 v`.
+        ProductBy01,
+        /// Multiplies `a` by `l3 v`.
+        ProductBy1,
+        Invert,
+    }
+
+    /// Applies an operation of `Fp6` and stores its embedding `(t, 0)`.
+    struct Subfield<'a> {
+        inputs: &'a [Inputs],
+        operation: Operation6,
+    }
+
+    impl Kernel for Subfield<'_> {
+        type Output = Vec<[u8; BYTES]>;
+
+        fn run<S: Simd, F: Field<S>>(&self, simd: S) -> Self::Output {
+            let x = load::<S, F>(simd, self.inputs);
+            let a = x.a.c0;
+            let t = match self.operation {
+                Operation6::Product => {
+                    Fp6::<F>::reduce_tight::<BIAS, S>(simd, a.product(simd, &x.b.c0))
+                }
+                Operation6::Square => {
+                    Fp6::<F>::reduce_tight::<BIAS, S>(simd, a.square_product(simd))
+                }
+                Operation6::ProductBy01 => Fp6::<F>::reduce_tight::<BIAS, S>(
+                    simd,
+                    a.product_by_01(simd, x.line[0], x.line[1]),
+                ),
+                Operation6::ProductBy1 => {
+                    Fp6::<F>::reduce_tight::<BIAS, S>(simd, a.product_by_1(simd, x.line[2]))
+                }
+                Operation6::Invert => a.invert(simd),
+            };
+            let embedded = Fp12 {
+                c0: t,
+                c1: Fp6::load(simd, &[], &[0; FP6_BYTES]),
+            };
+            store(simd, check_bound(simd, embedded), self.inputs.len())
+        }
+    }
+
+    /// Returns the embedding of the coefficient `c0` of `a`: its coefficients of even degree.
+    fn even(a: &Element) -> Element {
+        let mut even = *a;
+        for coefficient in even.iter_mut().skip(1).step_by(2) {
+            *coefficient = fp2::ZERO;
+        }
+        even
+    }
+
+    /// Runs [`Plan::Subfield`].
+    fn subfield(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let target = Target::draw(u)?;
+        let lanes = target.draw_lanes(u)?;
+        let operation = *u.choose(&[
+            Operation6::Product,
+            Operation6::Square,
+            Operation6::ProductBy01,
+            Operation6::ProductBy1,
+            Operation6::Invert,
+        ])?;
+        let values = (0..lanes)
+            .map(|_| Values::draw(u, false))
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        let inputs: Vec<_> = values.iter().map(Values::encode).collect();
+        let outputs = target.run(&Subfield {
+            inputs: &inputs,
+            operation,
+        });
+        for (lane, (values, output)) in values.iter().zip(&outputs).enumerate() {
+            let label = std::format!("{target:?}, lane {lane}, {operation:?}");
+            let a = even(&values.a);
+            let [l0, l2, l3] = values.line;
+            let mut factor = reference::ZERO;
+            let expected = match operation {
+                Operation6::Product => reference::mul(&a, &even(&values.b)),
+                Operation6::Square => reference::mul(&a, &a),
+                Operation6::ProductBy01 => {
+                    (factor[0], factor[2]) = (l0, l2);
+                    reference::mul(&a, &factor)
+                }
+                Operation6::ProductBy1 => {
+                    factor[2] = l3;
+                    reference::mul(&a, &factor)
+                }
+                Operation6::Invert => checked_inverse(&a, reference::decode(output), &label),
+            };
+            assert!(*output == reference::encode(&expected), "{label}");
+        }
+        Ok(())
+    }
+
+    /// Multiplies the lanes of a value loaded with a fill, storing every lane.
+    struct LaneProduct<'a> {
+        elements: &'a [[u8; BYTES]],
+        fill: [u8; BYTES],
+    }
+
+    impl Kernel for LaneProduct<'_> {
+        type Output = Vec<[u8; BYTES]>;
+
+        fn run<S: Simd, F: Field<S>>(&self, simd: S) -> Self::Output {
+            let value = load_wide::<S, F>(simd, self.elements, &self.fill);
+            let product = check_bound(simd, value.product_of_lanes(simd));
+            store(simd, product, F::LANES)
+        }
+    }
+
+    /// Runs [`Plan::ProductOfLanes`].
+    fn product_of_lanes(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let target = Target::draw(u)?;
+        let lanes = target.lanes();
+        // Every lane holds an element when the input is exhausted.
+        let count = lanes - u.int_in_range(0..=lanes)?;
+        let elements = (0..count)
+            .map(|_| element(u))
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        let fill = element(u)?;
+        let mut expected = reference::ONE;
+        for element in elements
+            .iter()
+            .chain(core::iter::repeat_n(&fill, lanes - count))
+        {
+            expected = reference::mul(&expected, element);
+        }
+        let encoded: Vec<_> = elements.iter().map(reference::encode).collect();
+        let outputs = target.run(&LaneProduct {
+            elements: &encoded,
+            fill: reference::encode(&fill),
+        });
+        for (lane, output) in outputs.iter().enumerate() {
+            assert!(
+                *output == reference::encode(&expected),
+                "{target:?}, {count} elements, lane {lane}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use commonware_invariants::minifuzz;
+
+        #[test]
+        fn minifuzz_chain() {
+            minifuzz::test(|u| Plan::Chain.run(u));
+        }
+
+        #[test]
+        fn minifuzz_cyclotomic_chain() {
+            minifuzz::test(|u| Plan::CyclotomicChain.run(u));
+        }
+
+        #[test]
+        fn minifuzz_subfield() {
+            minifuzz::test(|u| Plan::Subfield.run(u));
+        }
+
+        #[test]
+        fn minifuzz_product_of_lanes() {
+            minifuzz::test(|u| Plan::ProductOfLanes.run(u));
+        }
+
+        #[test]
+        fn frobenius_constants_are_powers_of_the_nonresidue() {
+            let factors = reference::frobenius_factors();
+            for (k, constant) in FROBENIUS.iter().enumerate() {
+                assert_eq!(*constant, fp2::encode(factors[k + 1]), "gamma^{}", k + 1);
+            }
         }
     }
 }

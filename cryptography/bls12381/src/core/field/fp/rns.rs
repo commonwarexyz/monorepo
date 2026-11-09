@@ -643,13 +643,6 @@ fn scalars<S: X86V4C>(simd: S, residues: S::U64) -> [u64; MODULI] {
 }
 
 impl<S: X86V4C> Rns<S> {
-    /// Returns every lane set to `element`.
-    #[cfg(test)]
-    #[inline(always)]
-    pub fn splat(simd: S, element: &[u8; BYTES]) -> Self {
-        Self::load(simd, &[], element)
-    }
-
     /// Loads the first element, or `fill` when there is none.
     ///
     /// The integer's 50-bit digits convert into the second basis with floor fractions, which
@@ -693,7 +686,7 @@ impl<S: X86V4C> Rns<S> {
 
     /// Returns the residues in this module's representation, the first basis then the second,
     /// without any conversion, for a value bounded by `bound * p`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzz"))]
     #[inline(always)]
     pub fn to_residues(self, simd: S, bound: u64) -> [u64; RESIDUES] {
         self.bound.assert_le(bound);
@@ -748,7 +741,10 @@ impl<S: X86V4C> Rns<S> {
     #[inline(always)]
     fn expand(simd: S, n: S::U64) -> S::U64 {
         let k = estimate(simd, n);
-        let digits = (simd.u64_and(k, simd.u64_splat(MASK)), simd.u64_shr::<WORD>(k));
+        let digits = (
+            simd.u64_and(k, simd.u64_splat(MASK)),
+            simd.u64_shr::<WORD>(k),
+        );
         Self::convert(simd, &scalars(simd, n), digits, &EXPAND, &M)
     }
 
@@ -830,13 +826,6 @@ impl<S: X86V4C> Rns<S> {
         Self { m, n, bound }
     }
 
-    /// Returns `2 * self`.
-    #[cfg(test)]
-    #[inline(always)]
-    pub fn double(self, simd: S) -> Self {
-        self.add(simd, self)
-    }
-
     /// Returns `self * rhs`.
     ///
     /// The first basis reduces its products into the quotient, already in `[0, 2q]`. Its
@@ -903,7 +892,7 @@ impl<S: X86V4C> Rns<S> {
     }
 
     /// Returns `self * self`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzz"))]
     #[inline(always)]
     pub fn square(self, simd: S) -> Self {
         self.mul(simd, self)
@@ -1038,7 +1027,8 @@ impl<S: X86V4C> Rns<S> {
                 unroll::<SUMS>(
                     #[inline(always)]
                     |i| {
-                        let reduced = reduce(simd, add_wide(simd, even[i], odd[i]), modulus, inverse);
+                        let reduced =
+                            reduce(simd, add_wide(simd, even[i], odd[i]), modulus, inverse);
                         n[i] = fold(simd, reduced, complement);
                     },
                 );
@@ -1080,12 +1070,7 @@ impl<S: X86V4C> Rns<S> {
                     #[inline(always)]
                     |i| {
                         let chain = if split { &mut odd[i] } else { &mut even[i] };
-                        *chain = madd(
-                            simd,
-                            *chain,
-                            simd.u64_shr::<WORD>(estimates[i]),
-                            correction,
-                        );
+                        *chain = madd(simd, *chain, simd.u64_shr::<WORD>(estimates[i]), correction);
                     },
                 );
 
@@ -1495,14 +1480,49 @@ fn accumulate_into<S: X86V4C>(simd: S, sum: Option<Wide<S>>, a: Rns<S>, b: Rns<S
     <Rns<S> as Field<S>>::accumulate_product(simd, sum, a, b)
 }
 
-#[cfg(test)]
-mod tests {
+/// Fuzz plan checking the residue representation against the reference arithmetic.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
     use super::{super::reference, *};
-    use arbitrary::Unstructured;
-    use commonware_invariants::minifuzz;
-    use commonware_simd::{Operation, check_consistent, emulated::EmulatedX86V4C};
+    use arbitrary::{Arbitrary, Unstructured};
+    use commonware_simd::emulated::EmulatedX86V4C;
     use reference::Element;
-    use std::{panic::catch_unwind, vec::Vec};
+    use std::vec::Vec;
+
+    /// A residue representation check, run on [`EmulatedX86V4C`] so that it runs on any host.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    pub enum Plan {
+        /// Check a drawn formula on lifted inputs with redundant residues against the reference,
+        /// with every result's residues at most twice their moduli.
+        Formulas,
+        /// Check random sequences of operations within the documented bounds, tracking each
+        /// value's bound, against the reference.
+        BoundedSequences,
+        /// Check that a value lifted by a drawn multiple of `p` with redundant residues keeps its
+        /// residues, estimates its quotient exactly, and stores as its element.
+        Representatives,
+        /// Check that loading reduces any integer, leaving residues at most twice their moduli.
+        RoundTrip,
+        /// Check lazy sums and differences of products of reduced values against the reference.
+        LazyProducts,
+        /// Check that reducing sums together in passes of every size matches single reductions.
+        InterleavedReductions,
+    }
+
+    impl Plan {
+        /// Runs the operation using the remaining input.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            let simd = EmulatedX86V4C;
+            match self {
+                Self::Formulas => formulas(simd, u),
+                Self::BoundedSequences => bounded_sequences(simd, u),
+                Self::Representatives => representatives(simd, u),
+                Self::RoundTrip => round_trip(simd, u),
+                Self::LazyProducts => lazy_products(simd, u),
+                Self::InterleavedReductions => interleaved_reductions(simd, u),
+            }
+        }
+    }
 
     /// The moduli of both bases, in residue order.
     const MODULI_ALL: [u64; RESIDUES] = {
@@ -1604,15 +1624,44 @@ mod tests {
         output[0]
     }
 
+    /// Asserts that a reduced value is within the reduced bound, has residues at most twice their
+    /// moduli, and stores as `expected`.
+    fn assert_reduced<S: X86V4C>(simd: S, value: Rns<S>, expected: Element) {
+        value.bound.assert_le(REDUCED);
+        assert_residues(simd, value);
+        assert_eq!(stored(simd, value), reference::to_bytes(expected));
+    }
+
+    /// Draws an element, biased toward zero, one, minus one, and the largest representative.
+    ///
+    /// The random choice comes first and takes its bytes in one draw, so that short inputs ask
+    /// for more data rather than collapsing to zero.
+    fn element(u: &mut Unstructured<'_>, largest: Element) -> arbitrary::Result<Element> {
+        Ok(match u.int_in_range(0..=9)? {
+            6 => reference::ZERO,
+            7 => reference::ONE,
+            8 => reference::neg(reference::ONE),
+            9 => largest,
+            _ => reference::canonical(&mut Unstructured::new(u.bytes(BYTES)?))?,
+        })
+    }
+
+    /// Draws an integer bound in units of `p`, biased toward both ends of the domain.
+    fn bound(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
+        Ok(match u.int_in_range(0..=3)? {
+            2 => 1,
+            3 => LIMIT,
+            _ => u.int_in_range(1..=LIMIT)?,
+        })
+    }
+
     /// A formula evaluated on one pair of elements.
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Clone, Copy, Debug, Arbitrary)]
     enum Formula {
         Add,
         Sub,
         Neg,
-        Double,
         Mul,
-        Square,
         /// `(a + a + a) * (b - a) - b`: linear operations chained around a product.
         Chain,
         /// Addition up to the integer limit.
@@ -1625,39 +1674,17 @@ mod tests {
         LooseNeg,
         /// Multiplication of inputs at the integer limit.
         LooseMul,
-        /// Storing a value at the integer limit.
-        LooseStore,
-        /// Loading the elements as bytes, then multiplying.
-        Load,
     }
-
-    const FORMULAS: [Formula; 14] = [
-        Formula::Add,
-        Formula::Sub,
-        Formula::Neg,
-        Formula::Double,
-        Formula::Mul,
-        Formula::Square,
-        Formula::Chain,
-        Formula::LooseAdd,
-        Formula::LooseDoubling,
-        Formula::LooseSub,
-        Formula::LooseNeg,
-        Formula::LooseMul,
-        Formula::LooseStore,
-        Formula::Load,
-    ];
 
     /// Doublings of a loaded value that stay within the integer limit.
     const DOUBLINGS: u32 = LIMIT.ilog2() - 1;
 
     impl Formula {
         /// Returns the integer bounds of the inputs, in units of `p`.
-        fn bounds(self) -> (u64, u64) {
+        const fn bounds(self) -> (u64, u64) {
             match self {
                 Self::LooseAdd => (LIMIT / 2, LIMIT / 2),
                 Self::LooseMul => (LIMIT, LIMIT),
-                Self::LooseStore => (LIMIT, 1),
                 Self::LooseNeg => (LIMIT, 2),
                 _ => (2, 2),
             }
@@ -1668,9 +1695,7 @@ mod tests {
                 Self::Add | Self::LooseAdd => reference::add(a, b),
                 Self::Sub => reference::sub(a, b),
                 Self::Neg => reference::neg(a),
-                Self::Double => reference::add(a, a),
-                Self::Mul | Self::LooseMul | Self::Load => reference::mul(a, b),
-                Self::Square => reference::mul(a, a),
+                Self::Mul | Self::LooseMul => reference::mul(a, b),
                 Self::Chain => {
                     let three = reference::add(reference::add(a, a), a);
                     reference::sub(reference::mul(three, reference::sub(b, a)), b)
@@ -1684,7 +1709,6 @@ mod tests {
                     reference::mul(difference, difference)
                 }
                 Self::LooseNeg => reference::mul(reference::neg(a), b),
-                Self::LooseStore => a,
             }
         }
 
@@ -1694,9 +1718,7 @@ mod tests {
                 Self::Add | Self::LooseAdd => a.add(simd, b),
                 Self::Sub => a.sub::<2>(simd, b),
                 Self::Neg => a.neg::<2>(simd),
-                Self::Double => a.double(simd),
-                Self::Mul | Self::LooseMul | Self::Load => a.mul(simd, b),
-                Self::Square => a.square(simd),
+                Self::Mul | Self::LooseMul => a.mul(simd, b),
                 Self::Chain => {
                     let three = a.double(simd).add(simd, a);
                     three
@@ -1712,388 +1734,171 @@ mod tests {
                 }
                 Self::LooseSub => a.sub::<{ LIMIT - 2 }>(simd, b).square(simd),
                 Self::LooseNeg => a.neg::<LIMIT>(simd).mul(simd, b),
-                Self::LooseStore => a,
             }
         }
     }
 
-    /// Number of element pairs in each evaluation.
-    const COUNT: usize = 4;
-
-    fn element(u: &mut Unstructured<'_>, largest: Element) -> arbitrary::Result<Element> {
-        Ok(match u.int_in_range(0..=9)? {
-            0 => reference::ZERO,
-            1 => reference::ONE,
-            2 => reference::neg(reference::ONE),
-            3 => largest,
-            _ => reference::canonical(u)?,
-        })
-    }
-
-    #[test]
-    fn representatives_round_trip() {
-        let simd = EmulatedX86V4C;
+    /// Evaluates a drawn formula on one drawn pair of lifted elements.
+    fn formulas<S: X86V4C>(simd: S, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let formula: Formula = u.arbitrary()?;
+        let mode: u8 = u.arbitrary()?;
         let largest = largest();
-        for element in [reference::ZERO, reference::ONE, largest] {
-            for mode in 0..4 {
-                let value = loose(simd, element, 1, mode);
-                assert_eq!(stored(simd, value), reference::to_bytes(element));
-            }
-        }
-    }
-
-    #[test]
-    fn matches_reference() {
-        /// Evaluates a formula on every pair of elements.
-        struct Evaluate<'a> {
-            formula: Formula,
-            mode: u8,
-            a: &'a [Element; COUNT],
-            b: &'a [Element; COUNT],
-        }
-
-        /// Backends without x86v4c have no residues and return the reference.
-        impl<S: Simd> Operation<S> for Evaluate<'_> {
-            type Output = [[u8; BYTES]; COUNT];
-
-            fn portable(self, _simd: S) -> [[u8; BYTES]; COUNT] {
-                let (a, b) = (self.a, self.b);
-                core::array::from_fn(|i| reference::to_bytes(self.formula.scalar(a[i], b[i])))
-            }
-
-            fn x86_v4c(self, simd: S) -> [[u8; BYTES]; COUNT]
-            where
-                S: X86V4C,
-            {
-                let mut output = [[0; BYTES]; COUNT];
-                let (a_bound, b_bound) = self.formula.bounds();
-                simd.execute(
-                    #[inline(always)]
-                    |simd: S| {
-                        for (i, output) in output.iter_mut().enumerate() {
-                            let a = match self.formula {
-                                Formula::Load => {
-                                    Rns::load(simd, &[reference::to_bytes(self.a[i])], &[0; BYTES])
-                                }
-                                _ => loose(simd, self.a[i], a_bound, self.mode),
-                            };
-                            let b = loose(simd, self.b[i], b_bound, self.mode.rotate_left(2));
-                            let value = self.formula.evaluate(simd, a, b);
-                            assert_residues(simd, value);
-                            *output = stored(simd, value);
-                        }
-                    },
-                );
-                output
-            }
-        }
-
-        let largest = largest();
-        minifuzz::test(|u| {
-            let mut a = [reference::ZERO; COUNT];
-            let mut b = [reference::ZERO; COUNT];
-            for (a, b) in a.iter_mut().zip(&mut b) {
-                *a = element(u, largest)?;
-                *b = element(u, largest)?;
-            }
-            let mode = u.arbitrary()?;
-            for formula in FORMULAS {
-                let expected: Vec<[u8; BYTES]> = a
-                    .iter()
-                    .zip(&b)
-                    .map(|(a, b)| reference::to_bytes(formula.scalar(*a, *b)))
-                    .collect();
-                let evaluate = || Evaluate {
-                    formula,
-                    mode,
-                    a: &a,
-                    b: &b,
-                };
-                assert_eq!(
-                    EmulatedX86V4C.execute(evaluate()),
-                    expected[..],
-                    "{formula:?}"
-                );
-                check_consistent(evaluate);
-            }
-            Ok(())
-        });
+        let (a, b) = (element(u, largest)?, element(u, largest)?);
+        let (a_bound, b_bound) = formula.bounds();
+        let va = loose(simd, a, a_bound, mode);
+        let vb = loose(simd, b, b_bound, mode.rotate_left(2));
+        let value = formula.evaluate(simd, va, vb);
+        assert_residues(simd, value);
+        assert_eq!(
+            stored(simd, value),
+            reference::to_bytes(formula.scalar(a, b)),
+            "{formula:?} of {a:x?} and {b:x?} with mode {mode}"
+        );
+        Ok(())
     }
 
     /// Applies random operations within the documented bounds on one backend, tracking each
     /// value's bound, and compares every result with the reference.
-    fn bounded_sequences<S: X86V4C>(simd: S) {
+    fn bounded_sequences<S: X86V4C>(simd: S, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         let largest = largest();
-        minifuzz::test(|u| {
-            let mut expected = [reference::ZERO; 4];
-            for value in &mut expected {
-                *value = element(u, largest)?;
-            }
-            let load = |a: Element| Rns::load(simd, &[reference::to_bytes(a)], &[0; BYTES]);
-            let mut values = expected.map(load);
-            let mut bounds = [2u64; 4];
-            for _ in 0..u.int_in_range(1..=64)? {
-                let (i, j, k) = (
-                    u.int_in_range(0..=3)?,
-                    u.int_in_range(0..=3)?,
-                    u.int_in_range(0..=3)?,
-                );
-                const BIAS: u64 = 1 << 9;
-                let (value, scalar, bound) = match u.int_in_range(0..=4)? {
-                    0 if bounds[i] + bounds[j] <= LIMIT => (
-                        values[i].add(simd, values[j]),
-                        reference::add(expected[i], expected[j]),
-                        bounds[i] + bounds[j],
-                    ),
-                    1 if bounds[j] <= BIAS && bounds[i] + BIAS <= LIMIT => (
-                        values[i].sub::<BIAS>(simd, values[j]),
-                        reference::sub(expected[i], expected[j]),
-                        bounds[i] + BIAS,
-                    ),
-                    2 if bounds[i] <= BIAS => (
-                        values[i].neg::<BIAS>(simd),
-                        reference::neg(expected[i]),
-                        BIAS,
-                    ),
-                    3 => {
-                        let a = element(u, largest)?;
-                        (load(a), a, 2)
-                    }
-                    _ => (
-                        values[i].mul(simd, values[j]),
-                        reference::mul(expected[i], expected[j]),
-                        (bounds[i] * bounds[j]).div_ceil(M_OVER_P) + LIFT,
-                    ),
-                };
-                assert_residues(simd, value);
-                assert_eq!(stored(simd, value), reference::to_bytes(scalar));
-                values[k] = value;
-                expected[k] = scalar;
-                bounds[k] = bound;
-            }
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn bounded_sequences_match_reference() {
-        bounded_sequences(EmulatedX86V4C);
-    }
-
-    /// Checks every multiple of p below the limit and products at the top of the domain on one
-    /// backend.
-    fn integer_domain<S: X86V4C>(simd: S) {
-        // Every multiple of p below the limit represents zero.
-        for bound in 1..=LIMIT {
-            for mode in 0..4 {
-                let zero = loose(simd, reference::ZERO, bound, mode);
-                assert_eq!(stored(simd, zero), [0; BYTES], "{bound}p");
-            }
+        let mut expected = [reference::ZERO; 4];
+        for value in &mut expected {
+            *value = element(u, largest)?;
         }
-        let largest = largest();
-        for element in [reference::ONE, reference::neg(reference::ONE), largest] {
-            let square = reference::mul(element, element);
-            for mode in 0..4 {
-                // The top of the domain, LIMIT * p - 1 for the largest representative.
-                let top = loose(simd, element, LIMIT, mode);
-                assert_eq!(stored(simd, top), reference::to_bytes(element));
-                // Products of the largest values are exact and within the bounds.
-                let product = top.mul(simd, top);
-                assert_residues(simd, product);
-                assert_eq!(stored(simd, product), reference::to_bytes(square));
-                let fourth = reference::to_bytes(reference::mul(square, square));
-                assert_eq!(stored(simd, product.square(simd)), fourth);
-            }
-        }
-    }
-
-    #[test]
-    fn canonicalization_covers_the_integer_domain() {
-        integer_domain(EmulatedX86V4C);
-    }
-
-    #[test]
-    fn round_trip_reduces_bytes() {
-        /// Loads and stores every element.
-        struct RoundTrip<'a>(&'a [[u8; BYTES]; COUNT]);
-
-        /// Backends without x86v4c have no residues and return the reference.
-        impl<S: Simd> Operation<S> for RoundTrip<'_> {
-            type Output = [[u8; BYTES]; COUNT];
-
-            fn portable(self, _simd: S) -> [[u8; BYTES]; COUNT] {
-                self.0
-                    .map(|bytes| reference::to_bytes(reference::reduce(&bytes)))
-            }
-
-            fn x86_v4c(self, simd: S) -> [[u8; BYTES]; COUNT]
-            where
-                S: X86V4C,
-            {
-                let mut output = [[0; BYTES]; COUNT];
-                for (bytes, output) in self.0.iter().zip(&mut output) {
-                    let value = Rns::<S>::load(simd, &[*bytes], &[0; BYTES]);
-                    assert_residues(simd, value);
-                    *output = stored(simd, value);
+        let load = |a: Element| Rns::load(simd, &[reference::to_bytes(a)], &[0; BYTES]);
+        let mut values = expected.map(load);
+        let mut bounds = [2u64; 4];
+        for _ in 0..u.int_in_range(1..=64)? {
+            let (i, j, k) = (
+                u.int_in_range(0..=3)?,
+                u.int_in_range(0..=3)?,
+                u.int_in_range(0..=3)?,
+            );
+            const BIAS: u64 = 1 << 9;
+            let (value, scalar, bound) = match u.int_in_range(0..=4)? {
+                0 if bounds[i] + bounds[j] <= LIMIT => (
+                    values[i].add(simd, values[j]),
+                    reference::add(expected[i], expected[j]),
+                    bounds[i] + bounds[j],
+                ),
+                1 if bounds[j] <= BIAS && bounds[i] + BIAS <= LIMIT => (
+                    values[i].sub::<BIAS>(simd, values[j]),
+                    reference::sub(expected[i], expected[j]),
+                    bounds[i] + BIAS,
+                ),
+                2 if bounds[i] <= BIAS => (
+                    values[i].neg::<BIAS>(simd),
+                    reference::neg(expected[i]),
+                    BIAS,
+                ),
+                3 => {
+                    let a = element(u, largest)?;
+                    (load(a), a, 2)
                 }
-                output
-            }
+                _ => (
+                    values[i].mul(simd, values[j]),
+                    reference::mul(expected[i], expected[j]),
+                    (bounds[i] * bounds[j]).div_ceil(M_OVER_P) + LIFT,
+                ),
+            };
+            assert_residues(simd, value);
+            assert_eq!(stored(simd, value), reference::to_bytes(scalar));
+            values[k] = value;
+            expected[k] = scalar;
+            bounds[k] = bound;
         }
-
-        let largest = largest();
-        let extremes = [
-            [0; BYTES],
-            [0xff; BYTES],
-            reference::to_bytes(largest),
-            [0x5a; BYTES],
-        ];
-        let reduced = extremes.map(|bytes| reference::to_bytes(reference::reduce(&bytes)));
-        assert_eq!(EmulatedX86V4C.execute(RoundTrip(&extremes)), reduced);
-        check_consistent(|| RoundTrip(&extremes));
-        minifuzz::test(|u| {
-            let mut elements = [[0; BYTES]; COUNT];
-            for bytes in &mut elements {
-                *bytes = reference::to_bytes(element(u, largest)?);
-            }
-            assert_eq!(EmulatedX86V4C.execute(RoundTrip(&elements)), elements);
-            check_consistent(|| RoundTrip(&elements));
-            // Integers at or above p load as their residues.
-            let raw: [[u8; BYTES]; COUNT] = u.arbitrary()?;
-            let reduced = raw.map(|bytes| reference::to_bytes(reference::reduce(&bytes)));
-            assert_eq!(EmulatedX86V4C.execute(RoundTrip(&raw)), reduced);
-            check_consistent(|| RoundTrip(&raw));
-            Ok(())
-        });
+        Ok(())
     }
 
-    #[test]
-    fn splat_and_fill_load_the_element() {
-        let simd = EmulatedX86V4C;
-        minifuzz::test(|u| {
-            let element = reference::to_bytes(reference::canonical(u)?);
-            assert_eq!(stored(simd, Rns::splat(simd, &element)), element);
-            assert_eq!(stored(simd, Rns::load(simd, &[], &element)), element);
-            // Storing into nothing is a no-op.
-            Rns::splat(simd, &element).store(simd, &mut []);
-            Ok(())
-        });
+    /// Lifts a drawn element by a drawn bound with drawn redundant residues and checks its
+    /// residues, quotient estimate, and canonical form.
+    fn representatives<S: X86V4C>(simd: S, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let element = element(u, largest())?;
+        let bound = bound(u)?;
+        let mode: u8 = u.arbitrary()?;
+        let residues = lift(element, bound, redundancy(mode));
+        let value = Rns::from_residues(simd, &residues, bound);
+        let context = format!("{element:x?} at {bound}p with mode {mode}");
+        assert_eq!(value.to_residues(simd, bound), residues, "{context}");
+        let expected = quotient(&scalars(simd, value.n), &EXPAND.fraction);
+        assert_eq!(
+            scalars(simd, estimate(simd, value.n)),
+            [expected; MODULI],
+            "{context}"
+        );
+        assert_eq!(
+            stored(simd, value),
+            reference::to_bytes(element),
+            "{context}"
+        );
+        Ok(())
     }
 
-    #[test]
-    fn residues_round_trip() {
-        minifuzz::test(|u| {
-            let a = reference::canonical(u)?;
-            let residues = lift(a, 3, redundancy(u.arbitrary()?));
-            let simd = EmulatedX86V4C;
-            let value = Rns::from_residues(simd, &residues, 3);
-            assert_eq!(value.to_residues(simd, 3), residues);
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn estimates_match_quotients() {
-        let simd = EmulatedX86V4C;
-        let check = |element, bound, mode| {
-            let n = loose(simd, element, bound, mode).n;
-            let expected = quotient(&scalars(simd, n), &EXPAND.fraction);
-            assert_eq!(scalars(simd, estimate(simd, n)), [expected; MODULI]);
+    /// Loads drawn bytes, biased toward the largest integer and canonical edge elements, and
+    /// checks the residues and the canonical form.
+    fn round_trip<S: X86V4C>(simd: S, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let bytes = match u.int_in_range(0..=3)? {
+            0 => u.bytes(BYTES)?.try_into().expect("drew BYTES bytes"),
+            1 => [0xff; BYTES],
+            _ => reference::to_bytes(element(u, largest())?),
         };
-        for mode in 0..4 {
-            check(reference::ZERO, 1, mode);
-            check(largest(), LIMIT, mode);
-        }
-        minifuzz::test(|u| {
-            let element = reference::canonical(u)?;
-            let bound = 1 + u64::from(u.arbitrary::<u8>()?) % LIMIT;
-            check(element, bound, u.arbitrary()?);
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn rejects_values_beyond_the_limits() {
-        if !DebugCounter::live() {
-            return;
-        }
-        let simd = EmulatedX86V4C;
-        let largest = largest();
-        let at = |bound| loose(simd, largest, bound, 0);
-        assert!(catch_unwind(|| at(LIMIT - 1).add(simd, at(1))).is_ok());
-        assert!(catch_unwind(|| at(LIMIT).add(simd, at(1))).is_err());
-        assert!(catch_unwind(|| at(2).sub::<2>(simd, at(2))).is_ok());
-        assert!(catch_unwind(|| at(2).sub::<2>(simd, at(3))).is_err());
-        assert!(catch_unwind(|| at(LIMIT - 2).sub::<2>(simd, at(1))).is_ok());
-        assert!(catch_unwind(|| at(LIMIT - 1).sub::<2>(simd, at(1))).is_err());
-        assert!(catch_unwind(|| at(3).neg::<3>(simd)).is_ok());
-        assert!(catch_unwind(|| at(4).neg::<3>(simd)).is_err());
-        assert!(catch_unwind(|| at(LIMIT).mul(simd, at(LIMIT))).is_ok());
-        assert!(catch_unwind(|| at(LIMIT + 1).mul(simd, at(LIMIT))).is_err());
-        assert!(catch_unwind(|| at(LIMIT + 1).store(simd, &mut [[0; BYTES]])).is_err());
-    }
-
-    /// Asserts that a reduced value is within the reduced bound, has residues at most twice their
-    /// moduli, and stores as `expected`.
-    fn assert_reduced<S: X86V4C>(simd: S, value: Rns<S>, expected: Element) {
-        value.bound.assert_le(REDUCED);
+        let value = Rns::load(simd, &[bytes], &[0; BYTES]);
         assert_residues(simd, value);
-        assert_eq!(stored(simd, value), reference::to_bytes(expected));
+        assert_eq!(
+            stored(simd, value),
+            reference::to_bytes(reference::reduce(&bytes)),
+            "{bytes:x?}"
+        );
+        Ok(())
     }
 
     /// Evaluates lazy sums of products of reduced values on one backend.
-    fn lazy_products<S: X86V4C>(simd: S) {
+    fn lazy_products<S: X86V4C>(simd: S, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         let largest = largest();
-        minifuzz::test(|u| {
-            let mut elements = [reference::ZERO; 4];
-            for slot in &mut elements {
-                *slot = element(u, largest)?;
-            }
-            let mode: u8 = u.arbitrary()?;
-            let [a, b, c, d] = elements;
-            let va = loose(simd, a, REDUCED, mode);
-            let vb = loose(simd, b, REDUCED, mode.rotate_left(2));
-            let vc = loose(simd, c, REDUCED, mode.rotate_left(4));
-            let vd = loose(simd, d, REDUCED, mode.rotate_left(6));
-            let (ab, cd) = (va.product(simd, vb), vc.product(simd, vd));
-            let (rab, rcd) = (reference::mul(a, b), reference::mul(c, d));
+        let mut elements = [reference::ZERO; 4];
+        for slot in &mut elements {
+            *slot = element(u, largest)?;
+        }
+        let mode: u8 = u.arbitrary()?;
+        let [a, b, c, d] = elements;
+        let va = loose(simd, a, REDUCED, mode);
+        let vb = loose(simd, b, REDUCED, mode.rotate_left(2));
+        let vc = loose(simd, c, REDUCED, mode.rotate_left(4));
+        let vd = loose(simd, d, REDUCED, mode.rotate_left(6));
+        let (ab, cd) = (va.product(simd, vb), vc.product(simd, vd));
+        let (rab, rcd) = (reference::mul(a, b), reference::mul(c, d));
 
-            assert_reduced(simd, Rns::reduce(simd, ab), rab);
-            assert_reduced(simd, Field::mul(va, simd, vb), rab);
-            let sum = Rns::accumulate(simd, ab, cd);
-            assert_reduced(simd, Rns::reduce(simd, sum), reference::add(rab, rcd));
-            let difference = Rns::product_sub::<64>(simd, ab, cd);
-            assert_reduced(
-                simd,
-                Rns::reduce(simd, difference),
-                reference::sub(rab, rcd),
-            );
-            assert_reduced(simd, Rns::reduce(simd, va.lift(simd)), a);
-            let difference = Rns::product_sub::<64>(simd, va.lift(simd), cd);
-            assert_reduced(simd, Rns::reduce(simd, difference), reference::sub(a, rcd));
-            let sum = Rns::accumulate(simd, vb.lift(simd), Rns::product_sub::<64>(simd, cd, ab));
-            let expected = reference::add(b, reference::sub(rcd, rab));
-            assert_reduced(simd, Rns::reduce(simd, sum), expected);
+        assert_reduced(simd, Rns::reduce(simd, ab), rab);
+        assert_reduced(simd, Field::mul(va, simd, vb), rab);
+        let sum = Rns::accumulate(simd, ab, cd);
+        assert_reduced(simd, Rns::reduce(simd, sum), reference::add(rab, rcd));
+        let difference = Rns::product_sub::<64>(simd, ab, cd);
+        assert_reduced(
+            simd,
+            Rns::reduce(simd, difference),
+            reference::sub(rab, rcd),
+        );
+        assert_reduced(simd, Rns::reduce(simd, va.lift(simd)), a);
+        let difference = Rns::product_sub::<64>(simd, va.lift(simd), cd);
+        assert_reduced(simd, Rns::reduce(simd, difference), reference::sub(a, rcd));
+        let sum = Rns::accumulate(simd, vb.lift(simd), Rns::product_sub::<64>(simd, cd, ab));
+        let expected = reference::add(b, reference::sub(rcd, rab));
+        assert_reduced(simd, Rns::reduce(simd, sum), expected);
 
-            // The overridden schoolbook cross and Karatsuba through subtractions.
-            let (ac, bd) = (va.product(simd, vc), vb.product(simd, vd));
-            let expected = reference::add(reference::mul(a, d), reference::mul(b, c));
-            let cross = Rns::cross(simd, [va, vb], [vc, vd], ac, bd);
-            assert_reduced(simd, Rns::reduce_signed::<64>(simd, cross), expected);
-            let left = va.add(simd, vb).ready::<2>(simd);
-            let right = vc.add(simd, vd).ready::<2>(simd);
-            let karatsuba = Rns::product_sub::<64>(
-                simd,
-                Rns::product_sub::<64>(simd, left.product(simd, right), ac),
-                bd,
-            );
-            assert_reduced(simd, Rns::reduce(simd, karatsuba), expected);
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn lazy_products_match_reference() {
-        lazy_products(EmulatedX86V4C);
+        // The overridden schoolbook cross and Karatsuba through subtractions.
+        let (ac, bd) = (va.product(simd, vc), vb.product(simd, vd));
+        let expected = reference::add(reference::mul(a, d), reference::mul(b, c));
+        let cross = Rns::cross(simd, [va, vb], [vc, vd], ac, bd);
+        assert_reduced(simd, Rns::reduce_signed::<64>(simd, cross), expected);
+        let left = va.add(simd, vb).ready::<2>(simd);
+        let right = vc.add(simd, vd).ready::<2>(simd);
+        let karatsuba = Rns::product_sub::<64>(
+            simd,
+            Rns::product_sub::<64>(simd, left.product(simd, right), ac),
+            bd,
+        );
+        assert_reduced(simd, Rns::reduce(simd, karatsuba), expected);
+        Ok(())
     }
 
     /// Reduces the first `N` sums together, checking that each result has the residues of its
@@ -2110,7 +1915,8 @@ mod tests {
             value.bound.assert_le(REDUCED);
             assert_eq!(
                 value.to_residues(simd, LIMIT),
-                single.to_residues(simd, LIMIT)
+                single.to_residues(simd, LIMIT),
+                "signed pass of {N}"
             );
         }
         let tight = Rns::reduce_each_signed_tight::<N, 64>(simd, |i| sums[i]);
@@ -2119,159 +1925,235 @@ mod tests {
             let single = Rns::reduce_signed::<64>(simd, *sum);
             assert_eq!(
                 tight.to_residues(simd, LIMIT),
-                single.to_residues(simd, LIMIT)
+                single.to_residues(simd, LIMIT),
+                "tight pass of {N}"
             );
             let single = Rns::reduce(simd, sum.pos);
             assert_eq!(
                 positive.to_residues(simd, LIMIT),
-                single.to_residues(simd, LIMIT)
+                single.to_residues(simd, LIMIT),
+                "positive pass of {N}"
             );
         }
     }
 
     /// Reduces sums together in passes of every size on one backend.
-    fn interleaved_reductions<S: X86V4C>(simd: S) {
+    fn interleaved_reductions<S: X86V4C>(
+        simd: S,
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
         let largest = largest();
-        minifuzz::test(|u| {
-            let mode: u8 = u.arbitrary()?;
-            let mut sums = Vec::new();
-            for k in 0..BATCH as u32 {
-                let [a, b, c] = [
-                    element(u, largest)?,
-                    element(u, largest)?,
-                    element(u, largest)?,
-                ];
-                let va = loose(simd, a, REDUCED, mode.rotate_left(k));
-                let vb = loose(simd, b, REDUCED, mode.rotate_left(k + 2));
-                let vc = loose(simd, c, LIMIT, mode.rotate_left(k + 4));
-                // Alternate sums with and without a negative sum.
-                let neg = (k % 2 == 1).then(|| vc.lift(simd));
-                sums.push(Signed {
-                    pos: va.product(simd, vb),
-                    neg,
-                });
+        let mode: u8 = u.arbitrary()?;
+        let mut sums = Vec::new();
+        for k in 0..BATCH as u32 {
+            let [a, b, c] = [
+                element(u, largest)?,
+                element(u, largest)?,
+                element(u, largest)?,
+            ];
+            let va = loose(simd, a, REDUCED, mode.rotate_left(k));
+            let vb = loose(simd, b, REDUCED, mode.rotate_left(k + 2));
+            let vc = loose(simd, c, LIMIT, mode.rotate_left(k + 4));
+            // Alternate sums with and without a negative sum.
+            let neg = (k % 2 == 1).then(|| vc.lift(simd));
+            sums.push(Signed {
+                pos: va.product(simd, vb),
+                neg,
+            });
+        }
+        reduce_together::<1, S>(simd, &sums);
+        reduce_together::<2, S>(simd, &sums);
+        reduce_together::<3, S>(simd, &sums);
+        reduce_together::<4, S>(simd, &sums);
+        reduce_together::<5, S>(simd, &sums);
+        reduce_together::<6, S>(simd, &sums);
+        reduce_together::<7, S>(simd, &sums);
+        reduce_together::<12, S>(simd, &sums);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use commonware_invariants::minifuzz;
+        use std::panic::catch_unwind;
+
+        #[test]
+        fn minifuzz_formulas() {
+            minifuzz::test(|u| Plan::Formulas.run(u));
+        }
+
+        #[test]
+        fn minifuzz_bounded_sequences() {
+            minifuzz::test(|u| Plan::BoundedSequences.run(u));
+        }
+
+        #[test]
+        fn minifuzz_representatives() {
+            minifuzz::test(|u| Plan::Representatives.run(u));
+        }
+
+        #[test]
+        fn minifuzz_round_trip() {
+            minifuzz::test(|u| Plan::RoundTrip.run(u));
+        }
+
+        #[test]
+        fn minifuzz_lazy_products() {
+            minifuzz::test(|u| Plan::LazyProducts.run(u));
+        }
+
+        #[test]
+        fn minifuzz_interleaved_reductions() {
+            minifuzz::test(|u| Plan::InterleavedReductions.run(u));
+        }
+
+        /// Checks that every multiple of p below the limit represents zero on one backend.
+        fn integer_domain<S: X86V4C>(simd: S) {
+            for bound in 1..=LIMIT {
+                for mode in 0..4 {
+                    let zero = loose(simd, reference::ZERO, bound, mode);
+                    assert_eq!(stored(simd, zero), [0; BYTES], "{bound}p with mode {mode}");
+                }
             }
-            reduce_together::<1, S>(simd, &sums);
-            reduce_together::<2, S>(simd, &sums);
-            reduce_together::<3, S>(simd, &sums);
-            reduce_together::<4, S>(simd, &sums);
-            reduce_together::<5, S>(simd, &sums);
-            reduce_together::<6, S>(simd, &sums);
-            reduce_together::<7, S>(simd, &sums);
-            reduce_together::<12, S>(simd, &sums);
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn interleaved_reductions_match_single_reductions() {
-        interleaved_reductions(EmulatedX86V4C);
-    }
-
-    /// Fills the integer and term budgets with residues at their largest on one backend.
-    fn lazy_budgets<S: X86V4C>(simd: S) {
-        let largest = largest();
-        let square = reference::mul(largest, largest);
-        let multiple =
-            |count: u64| (0..count).fold(reference::ZERO, |sum, _| reference::add(sum, square));
-
-        // Every term at once: TERMS * 25^2 is within the budget.
-        let factor = loose(simd, largest, 25, 1);
-        let product = factor.product(simd, factor);
-        let mut sum = product;
-        for _ in 1..TERMS {
-            sum = Rns::accumulate(simd, sum, product);
         }
-        assert_reduced(simd, Rns::reduce(simd, sum), multiple(TERMS));
 
-        // A subtrahend with every term the bias covers.
-        let factor = loose(simd, largest, 1, 1);
-        let product = factor.product(simd, factor);
-        let mut subtrahend = product;
-        for _ in 1..SUB_TERMS {
-            subtrahend = Rns::accumulate(simd, subtrahend, product);
+        #[test]
+        fn canonicalization_covers_the_integer_domain() {
+            integer_domain(EmulatedX86V4C);
         }
-        let difference = Rns::product_sub::<64>(simd, product, subtrahend);
-        assert_reduced(
-            simd,
-            Rns::reduce(simd, difference),
-            reference::sub(square, multiple(SUB_TERMS)),
-        );
 
-        // A subtraction of the largest subtrahend, 544^2 = SUB_BIAS, filling the term budget.
-        const PRODUCTS: u64 = TERMS - SUB_TERMS - 1;
-        const { assert!(544 * 544 == SUB_BIAS) };
-        const { assert!(PRODUCTS + SUB_BIAS <= BUDGET) };
-        let small = loose(simd, largest, 1, 1);
-        let small = small.product(simd, small);
-        let mut sum = small;
-        for _ in 1..PRODUCTS {
-            sum = Rns::accumulate(simd, sum, small);
+        #[test]
+        fn rejects_values_beyond_the_limits() {
+            if !DebugCounter::live() {
+                return;
+            }
+            let simd = EmulatedX86V4C;
+            let largest = largest();
+            let at = |bound| loose(simd, largest, bound, 0);
+            assert!(catch_unwind(|| at(LIMIT - 1).add(simd, at(1))).is_ok());
+            assert!(catch_unwind(|| at(LIMIT).add(simd, at(1))).is_err());
+            assert!(catch_unwind(|| at(2).sub::<2>(simd, at(2))).is_ok());
+            assert!(catch_unwind(|| at(2).sub::<2>(simd, at(3))).is_err());
+            assert!(catch_unwind(|| at(LIMIT - 2).sub::<2>(simd, at(1))).is_ok());
+            assert!(catch_unwind(|| at(LIMIT - 1).sub::<2>(simd, at(1))).is_err());
+            assert!(catch_unwind(|| at(3).neg::<3>(simd)).is_ok());
+            assert!(catch_unwind(|| at(4).neg::<3>(simd)).is_err());
+            assert!(catch_unwind(|| at(LIMIT).mul(simd, at(LIMIT))).is_ok());
+            assert!(catch_unwind(|| at(LIMIT + 1).mul(simd, at(LIMIT))).is_err());
+            assert!(catch_unwind(|| at(LIMIT + 1).store(simd, &mut [[0; BYTES]])).is_err());
         }
-        let factor = loose(simd, largest, 544, 2);
-        let subtrahend = factor.product(simd, factor);
-        let sum = Rns::product_sub::<64>(simd, sum, subtrahend);
-        let expected = reference::sub(multiple(PRODUCTS), square);
-        assert_reduced(simd, Rns::reduce(simd, sum), expected);
 
-        // A zero integer less the largest subtrahend leaves a small nonnegative integer.
-        let zero = loose(simd, reference::ZERO, 1, 1);
-        let difference = Rns::product_sub::<64>(simd, zero.product(simd, zero), subtrahend);
-        assert_reduced(simd, Rns::reduce(simd, difference), reference::neg(square));
+        /// Fills the integer and term budgets with residues at their largest on one backend.
+        fn lazy_budgets<S: X86V4C>(simd: S) {
+            let largest = largest();
+            let square = reference::mul(largest, largest);
+            let multiple =
+                |count: u64| (0..count).fold(reference::ZERO, |sum, _| reference::add(sum, square));
 
-        // A single product at the integer budget, and a lift at the integer limit.
-        let factor = loose(simd, largest, 803, 1);
-        let product = Rns::reduce(simd, factor.product(simd, factor));
-        assert_reduced(simd, product, square);
-        let top = loose(simd, largest, LIMIT, 1);
-        assert_reduced(simd, Rns::reduce(simd, top.lift(simd)), largest);
-    }
+            // Every term at once: TERMS * 25^2 is within the budget.
+            let factor = loose(simd, largest, 25, 1);
+            let product = factor.product(simd, factor);
+            let mut sum = product;
+            for _ in 1..TERMS {
+                sum = Rns::accumulate(simd, sum, product);
+            }
+            assert_reduced(simd, Rns::reduce(simd, sum), multiple(TERMS));
 
-    #[test]
-    fn lazy_products_reach_the_budgets() {
-        lazy_budgets(EmulatedX86V4C);
-    }
+            // A subtrahend with every term the bias covers.
+            let factor = loose(simd, largest, 1, 1);
+            let product = factor.product(simd, factor);
+            let mut subtrahend = product;
+            for _ in 1..SUB_TERMS {
+                subtrahend = Rns::accumulate(simd, subtrahend, product);
+            }
+            let difference = Rns::product_sub::<64>(simd, product, subtrahend);
+            assert_reduced(
+                simd,
+                Rns::reduce(simd, difference),
+                reference::sub(square, multiple(SUB_TERMS)),
+            );
 
-    #[test]
-    fn lazy_products_reject_budget_violations() {
-        if !DebugCounter::live() {
-            return;
+            // A subtraction of the largest subtrahend, 544^2 = SUB_BIAS, filling the term budget.
+            const PRODUCTS: u64 = TERMS - SUB_TERMS - 1;
+            const { assert!(544 * 544 == SUB_BIAS) };
+            const { assert!(PRODUCTS + SUB_BIAS <= BUDGET) };
+            let small = loose(simd, largest, 1, 1);
+            let small = small.product(simd, small);
+            let mut sum = small;
+            for _ in 1..PRODUCTS {
+                sum = Rns::accumulate(simd, sum, small);
+            }
+            let factor = loose(simd, largest, 544, 2);
+            let subtrahend = factor.product(simd, factor);
+            let sum = Rns::product_sub::<64>(simd, sum, subtrahend);
+            let expected = reference::sub(multiple(PRODUCTS), square);
+            assert_reduced(simd, Rns::reduce(simd, sum), expected);
+
+            // A zero integer less the largest subtrahend leaves a small nonnegative integer.
+            let zero = loose(simd, reference::ZERO, 1, 1);
+            let difference = Rns::product_sub::<64>(simd, zero.product(simd, zero), subtrahend);
+            assert_reduced(simd, Rns::reduce(simd, difference), reference::neg(square));
+
+            // A single product at the integer budget, and a lift at the integer limit.
+            let factor = loose(simd, largest, 803, 1);
+            let product = Rns::reduce(simd, factor.product(simd, factor));
+            assert_reduced(simd, product, square);
+            let top = loose(simd, largest, LIMIT, 1);
+            assert_reduced(simd, Rns::reduce(simd, top.lift(simd)), largest);
         }
-        let simd = EmulatedX86V4C;
-        let largest = largest();
-        let at = |bound| loose(simd, largest, bound, 0);
-        let product = |a, b| at(a).product(simd, at(b));
-        assert!(catch_unwind(|| Rns::reduce(simd, product(803, 803))).is_ok());
-        assert!(catch_unwind(|| Rns::reduce(simd, product(804, 803))).is_err());
-        assert!(
-            catch_unwind(|| Rns::product_sub::<64>(simd, product(1, 1), product(544, 544))).is_ok()
-        );
-        assert!(
-            catch_unwind(|| Rns::product_sub::<64>(simd, product(1, 1), product(545, 544)))
-                .is_err()
-        );
-        let one = product(1, 1);
-        let sum = |count| (1..count).fold(one, |sum, _| Rns::accumulate(simd, sum, one));
-        assert!(catch_unwind(|| sum(TERMS)).is_ok());
-        assert!(catch_unwind(|| sum(TERMS + 1)).is_err());
-        assert!(catch_unwind(|| Rns::product_sub::<64>(simd, one, sum(SUB_TERMS))).is_ok());
-        assert!(catch_unwind(|| Rns::product_sub::<64>(simd, one, sum(SUB_TERMS + 1))).is_err());
-        assert!(
-            catch_unwind(|| Rns::product_sub::<64>(simd, sum(TERMS - SUB_TERMS - 1), one)).is_ok()
-        );
-        assert!(
-            catch_unwind(|| Rns::product_sub::<64>(simd, sum(TERMS - SUB_TERMS), one)).is_err()
-        );
-        assert!(catch_unwind(|| Field::mul(at(REDUCED), simd, at(REDUCED))).is_ok());
-        assert!(catch_unwind(|| Field::mul(at(803), simd, at(804))).is_err());
-    }
 
-    #[test]
-    fn one_is_the_loaded_one() {
-        let simd = EmulatedX86V4C;
-        let one = Rns::load(simd, &[reference::to_bytes(reference::ONE)], &[0; BYTES]);
-        for ((residue, expected), q) in one.to_residues(simd, 2).iter().zip(ONE).zip(MODULI_ALL) {
-            assert_eq!(residue % q, expected);
+        #[test]
+        fn lazy_products_reach_the_budgets() {
+            lazy_budgets(EmulatedX86V4C);
+        }
+
+        #[test]
+        fn lazy_products_reject_budget_violations() {
+            if !DebugCounter::live() {
+                return;
+            }
+            let simd = EmulatedX86V4C;
+            let largest = largest();
+            let at = |bound| loose(simd, largest, bound, 0);
+            let product = |a, b| at(a).product(simd, at(b));
+            assert!(catch_unwind(|| Rns::reduce(simd, product(803, 803))).is_ok());
+            assert!(catch_unwind(|| Rns::reduce(simd, product(804, 803))).is_err());
+            assert!(
+                catch_unwind(|| Rns::product_sub::<64>(simd, product(1, 1), product(544, 544)))
+                    .is_ok()
+            );
+            assert!(
+                catch_unwind(|| Rns::product_sub::<64>(simd, product(1, 1), product(545, 544)))
+                    .is_err()
+            );
+            let one = product(1, 1);
+            let sum = |count| (1..count).fold(one, |sum, _| Rns::accumulate(simd, sum, one));
+            assert!(catch_unwind(|| sum(TERMS)).is_ok());
+            assert!(catch_unwind(|| sum(TERMS + 1)).is_err());
+            assert!(catch_unwind(|| Rns::product_sub::<64>(simd, one, sum(SUB_TERMS))).is_ok());
+            assert!(
+                catch_unwind(|| Rns::product_sub::<64>(simd, one, sum(SUB_TERMS + 1))).is_err()
+            );
+            assert!(
+                catch_unwind(|| Rns::product_sub::<64>(simd, sum(TERMS - SUB_TERMS - 1), one))
+                    .is_ok()
+            );
+            assert!(
+                catch_unwind(|| Rns::product_sub::<64>(simd, sum(TERMS - SUB_TERMS), one)).is_err()
+            );
+            assert!(catch_unwind(|| Field::mul(at(REDUCED), simd, at(REDUCED))).is_ok());
+            assert!(catch_unwind(|| Field::mul(at(803), simd, at(804))).is_err());
+        }
+
+        #[test]
+        fn one_is_the_loaded_one() {
+            let simd = EmulatedX86V4C;
+            let one = Rns::load(simd, &[reference::to_bytes(reference::ONE)], &[0; BYTES]);
+            for ((residue, expected), q) in one.to_residues(simd, 2).iter().zip(ONE).zip(MODULI_ALL)
+            {
+                assert_eq!(residue % q, expected);
+            }
         }
     }
 }

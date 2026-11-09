@@ -254,7 +254,11 @@ fn add_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> 
                     Fp2::<F>::difference::<1, S>(simd, factor.product_base(simd, scale))
                 },
             );
-            *t = Point { x: sx, y: sy, z: sz };
+            *t = Point {
+                x: sx,
+                y: sy,
+                z: sz,
+            };
             [l0, l2, l3]
         },
     )
@@ -264,7 +268,7 @@ fn add_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> 
 /// or zero for zero.
 ///
 /// This is the second half of a pairing: the final exponentiation of [`miller_loop`] of one pair is
-/// its pairing. The result is the same as blst's.
+/// its pairing.
 pub fn final_exponentiation<S: Simd, F: Field<S>>(simd: S, f: Fp12<F>) -> Fp12<F> {
     let coefficients = Fp12::<F>::frobenius_coefficients(simd);
     // The easy part: f^((p^6 - 1) (p^2 + 1)) lies in the cyclotomic subgroup.
@@ -322,352 +326,163 @@ fn raise_to_z<S: Simd, F: Field<S>>(simd: S, a: Fp12<F>) -> Fp12<F> {
     result
 }
 
-#[cfg(test)]
-mod tests {
+/// Fuzzing of the final exponentiation, and the bounds of the Miller loop's steps.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
     use super::*;
-    use crate::core::field::{
-        fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
-        fp12::{
-            BYTES, LINE_BOUND, ONE,
-            tests::{element, from_blst, to_blst},
-        },
+    use crate::core::field::fp12::{
+        BYTES, ONE,
+        fuzz::{Kernel, Target, element},
+        reference::{self, Element},
     };
-    use arbitrary::Unstructured;
-    use commonware_simd::{
-        Operation, X86V4C,
-        emulated::{EmulatedNeon, EmulatedScalar, EmulatedX86V4C},
-        test_dispatch,
-    };
+    use arbitrary::{Arbitrary, Unstructured};
     use std::{vec, vec::Vec};
 
-    /// Pairs in each lane of the multi-pairing checks, more than share their squarings.
-    const PAIRS: usize = SHARED + 1;
-
-    /// Returns `[k] G1` for a nonzero scalar of 32 seeded bytes, in affine coordinates and in blst's.
-    fn g1(seed: u8) -> (G1Affine, blst::blst_p1_affine) {
-        let scalar = [seed.wrapping_mul(29).wrapping_add(3) | 1; 32];
-        let mut point = blst::blst_p1::default();
-        let mut affine = blst::blst_p1_affine::default();
-        let mut coordinates = [[0; FP_BYTES]; 2];
-        // SAFETY: every pointer references a valid value of the expected type, the scalar holds
-        // 256 bits, and each output buffer holds a base field element.
-        unsafe {
-            blst::blst_p1_mult(&mut point, blst::blst_p1_generator(), scalar.as_ptr(), 256);
-            blst::blst_p1_to_affine(&mut affine, &point);
-            blst::blst_bendian_from_fp(coordinates[0].as_mut_ptr(), &affine.x);
-            blst::blst_bendian_from_fp(coordinates[1].as_mut_ptr(), &affine.y);
-        }
-        (coordinates, affine)
+    /// A fuzzing operation on the pairing.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    pub enum Plan {
+        /// Check that the final exponentiation of any elements is multiplicative, maps zero to
+        /// zero and the subfield `Fp6` (so every line scaling factor) to one, and maps nonzero
+        /// elements into the cyclotomic subgroup, where the Frobenius map raises to the power
+        /// `z`, as it does on the target group since `p = z mod r`.
+        FinalExponentiation,
     }
 
-    /// Returns `[k] G2` for a nonzero scalar of 32 seeded bytes, or the generator for no seed, in
-    /// affine coordinates and in blst's.
-    fn g2(seed: Option<u8>) -> (G2Affine, blst::blst_p2_affine) {
-        let mut point = blst::blst_p2::default();
-        let mut affine = blst::blst_p2_affine::default();
-        let mut coordinates = [[0; FP2_BYTES]; 2];
-        // SAFETY: every pointer references a valid value of the expected type, the scalar holds
-        // 256 bits, and each output buffer holds a base field element.
-        unsafe {
-            match seed {
-                Some(seed) => {
-                    let scalar = [seed.wrapping_mul(53).wrapping_add(7) | 1; 32];
-                    blst::blst_p2_mult(&mut point, blst::blst_p2_generator(), scalar.as_ptr(), 256);
-                }
-                None => point = *blst::blst_p2_generator(),
-            }
-            blst::blst_p2_to_affine(&mut affine, &point);
-            // Extension elements encode the imaginary component first.
-            for (coordinate, value) in coordinates.iter_mut().zip([&affine.x, &affine.y]) {
-                blst::blst_bendian_from_fp(coordinate.as_mut_ptr(), &value.fp[1]);
-                blst::blst_bendian_from_fp(coordinate[FP_BYTES..].as_mut_ptr(), &value.fp[0]);
+    impl Plan {
+        /// Runs the operation using the remaining input.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::FinalExponentiation => final_exponentiations(u),
             }
         }
-        (coordinates, affine)
     }
 
-    /// Returns blst's pairing of affine points.
-    fn blst_pairing(p: &blst::blst_p1_affine, q: &blst::blst_p2_affine) -> blst::blst_fp12 {
-        let mut miller = blst::blst_fp12::default();
-        let mut out = blst::blst_fp12::default();
-        // SAFETY: all pointers reference valid, initialized structures.
-        unsafe {
-            blst::blst_miller_loop(&mut miller, q, p);
-            blst::blst_final_exp(&mut out, &miller);
+    /// Returns the final exponentiations of elements, one per lane of as few values as hold them.
+    struct Exponentiate<'a>(&'a [[u8; BYTES]]);
+
+    impl Kernel for Exponentiate<'_> {
+        type Output = Vec<[u8; BYTES]>;
+
+        fn run<S: Simd, F: Field<S>>(&self, simd: S) -> Self::Output {
+            let mut output = vec![[0; BYTES]; self.0.len()];
+            for (elements, output) in self.0.chunks(F::LANES).zip(output.chunks_mut(F::LANES)) {
+                let f = Fp12::<F>::load(simd, elements, &ONE);
+                final_exponentiation(simd, f).store(simd, output);
+            }
+            output
         }
-        out
     }
 
-    fn blst_mul(a: &blst::blst_fp12, b: &blst::blst_fp12) -> blst::blst_fp12 {
-        let mut out = blst::blst_fp12::default();
-        // SAFETY: the pointers reference valid field elements.
-        unsafe { blst::blst_fp12_mul(&mut out, a, b) };
-        out
+    /// Returns whether an element lies in `Fp6`: its coefficients of odd degree in `w` are zero.
+    fn in_subfield(a: &Element) -> bool {
+        a.iter()
+            .skip(1)
+            .step_by(2)
+            .all(|c| *c == reference::ZERO[0])
     }
 
-    /// The pairs of one lane, with blst's product of their pairings.
-    #[derive(Clone)]
-    struct Lane {
-        pairs: Vec<(G1Affine, G2Affine)>,
-        expected: [u8; BYTES],
-    }
-
-    /// Returns a lane of `count` pairs, the last of which is the neutral pair when `neutral` is set.
-    fn lane(seed: u8, count: usize, neutral: bool) -> Lane {
-        let mut pairs = Vec::new();
-        let mut expected = None;
-        for k in 0..count {
-            let seed = seed.wrapping_mul(17).wrapping_add(k as u8);
-            if neutral && k + 1 == count {
-                pairs.push(([[0; FP_BYTES]; 2], g2(None).0));
+    /// Runs [`Plan::FinalExponentiation`].
+    fn final_exponentiations(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let target = Target::draw(u)?;
+        // Elements and the products of neighbors fill the lanes of one value where it holds two
+        // or more.
+        let count = target.lanes().div_ceil(2);
+        let count = count - u.int_in_range(0..=count - 1)?;
+        let a = (0..count)
+            .map(|_| element(u))
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        let mut elements: Vec<_> = a.iter().map(reference::encode).collect();
+        for (k, x) in a.iter().enumerate() {
+            elements.push(reference::encode(&reference::mul(x, &a[(k + 1) % count])));
+        }
+        let outputs = target.run(&Exponentiate(&elements));
+        let (images, products) = outputs.split_at(count);
+        for lane in 0..count {
+            let label = std::format!("{target:?}, element {lane} of {count}");
+            let x = reference::decode(&images[lane]);
+            let y = reference::decode(&images[(lane + 1) % count]);
+            assert!(
+                products[lane] == reference::encode(&reference::mul(&x, &y)),
+                "multiplicative, {label}"
+            );
+            if a[lane] == reference::ZERO {
+                assert!(x == reference::ZERO, "zero, {label}");
                 continue;
             }
-            let ((p, p_blst), (q, q_blst)) = (g1(seed), g2(Some(seed)));
-            pairs.push((p, q));
-            let pairing = blst_pairing(&p_blst, &q_blst);
-            expected = Some(expected.map_or(pairing, |product| blst_mul(&product, &pairing)));
-        }
-        Lane {
-            pairs,
-            expected: from_blst(&expected.expect("a pair")),
-        }
-    }
-
-    /// Returns the pairing products of lanes, one pair slot per call of [`Pair::load`].
-    fn pairings<S: Simd, F: Field<S>>(simd: S, lanes: &[Lane]) -> Vec<[u8; BYTES]> {
-        let mut output = vec![[0; BYTES]; lanes.len()];
-        let fill = (g1(0).0, g2(None).0);
-        for start in (0..lanes.len()).step_by(F::LANES) {
-            let chunk = &lanes[start..lanes.len().min(start + F::LANES)];
-            let mut pairs = Vec::new();
-            for k in 0..chunk[0].pairs.len() {
-                let slot: Vec<_> = chunk.iter().map(|lane| lane.pairs[k]).collect();
-                pairs.push(Pair::<F>::load(simd, &slot, &fill));
+            if in_subfield(&a[lane]) {
+                assert!(x == reference::ONE, "subfield, {label}");
             }
-            let f = final_exponentiation(simd, miller_loop(simd, &pairs));
-            f.store(simd, &mut output[start..]);
-        }
-        output
-    }
-
-    /// Runs [`pairings`] in every representation, on fewer lanes for residues, which hold one.
-    fn pairing_representations<S: Simd>(
-        lanes: &[Lane],
-        n: usize,
-    ) -> impl Operation<S, Output = [Vec<[u8; BYTES]>; 2]> + '_ {
-        struct Pairings<'a>(&'a [Lane], usize);
-
-        impl<S: Simd> Operation<S> for Pairings<'_> {
-            type Output = [Vec<[u8; BYTES]>; 2];
-
-            fn portable(self, simd: S) -> Self::Output {
-                simd.execute(|simd: S| {
-                    [
-                        pairings::<S, Unsat49<S>>(simd, self.0),
-                        pairings::<S, Unsat28<S>>(simd, self.0),
-                    ]
-                })
-            }
-
-            // Residues require x86v4c and must match the other representations.
-            fn x86_v4c(self, simd: S) -> Self::Output
-            where
-                S: X86V4C,
-            {
-                let lanes = &self.0[..self.1];
-                let outputs = self.portable(simd);
-                let residues = simd.execute(|simd: S| pairings::<S, Rns<S>>(simd, lanes));
-                assert!(residues == outputs[0][..lanes.len()], "residues differ");
-                outputs
-            }
-        }
-
-        Pairings(lanes, n)
-    }
-
-    fn check(lanes: &[Lane], outputs: [Vec<[u8; BYTES]>; 2]) {
-        for (representation, output) in outputs.iter().enumerate() {
-            for (k, (output, lane)) in output.iter().zip(lanes).enumerate() {
-                assert!(
-                    *output == lane.expected,
-                    "representation {representation}, lane {k}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn pairings_match_blst() {
-        let lanes: Vec<_> = (0..MAX_LANES as u8)
-            .map(|seed| lane(seed, 1, false))
-            .collect();
-        check(&lanes, test_dispatch(pairing_representations(&lanes, 2)));
-        // Run every representation and vector width even on hosts without native SIMD.
-        check(
-            &lanes,
-            pairing_representations(&lanes, 1).portable(EmulatedNeon),
-        );
-        check(
-            &lanes,
-            EmulatedX86V4C.execute(pairing_representations(&lanes, 2)),
-        );
-    }
-
-    #[test]
-    fn multi_pairings_match_blst() {
-        // More pairs than share squarings, the last of them neutral.
-        let lanes: Vec<_> = (0..MAX_LANES as u8)
-            .map(|seed| lane(seed, PAIRS, true))
-            .collect();
-        check(&lanes, test_dispatch(pairing_representations(&lanes, 1)));
-        check(
-            &lanes,
-            EmulatedX86V4C.execute(pairing_representations(&lanes, 1)),
-        );
-    }
-
-    /// Checks that `e(a P, Q) e(-P, a Q)` is one across the lanes, and that a perturbed product is not.
-    fn check_lanes<S: Simd, F: Field<S>>(simd: S) {
-        let (p, q) = (g1(5), g2(Some(6)));
-        let mut pairs = Vec::new();
-        for lane in 0..F::LANES {
-            // Lanes alternate between e(2 P, Q) and e(-P, 2 Q), a neutral pair filling an odd count.
-            let mut point = blst::blst_p1::default();
-            let mut affine = blst::blst_p1_affine::default();
-            let mut q2 = blst::blst_p2::default();
-            let mut q2_affine = blst::blst_p2_affine::default();
-            // SAFETY: every pointer references a valid value of the expected type.
-            let pair = unsafe {
-                blst::blst_p1_from_affine(&mut point, &p.1);
-                blst::blst_p2_from_affine(&mut q2, &q.1);
-                if lane % 2 == 0 {
-                    blst::blst_p1_double(&mut point, &point);
-                    blst::blst_p1_to_affine(&mut affine, &point);
-                    q2_affine = q.1;
-                } else {
-                    blst::blst_p1_cneg(&mut point, true);
-                    blst::blst_p1_to_affine(&mut affine, &point);
-                    blst::blst_p2_double(&mut q2, &q2);
-                    blst::blst_p2_to_affine(&mut q2_affine, &q2);
-                }
-                (affine, q2_affine)
-            };
-            let mut coordinates = ([[0; FP_BYTES]; 2], [[0; FP2_BYTES]; 2]);
-            // SAFETY: each output buffer holds a base field element.
-            unsafe {
-                blst::blst_bendian_from_fp(coordinates.0[0].as_mut_ptr(), &pair.0.x);
-                blst::blst_bendian_from_fp(coordinates.0[1].as_mut_ptr(), &pair.0.y);
-                for (coordinate, value) in coordinates.1.iter_mut().zip([&pair.1.x, &pair.1.y]) {
-                    blst::blst_bendian_from_fp(coordinate.as_mut_ptr(), &value.fp[1]);
-                    blst::blst_bendian_from_fp(coordinate[FP_BYTES..].as_mut_ptr(), &value.fp[0]);
-                }
-            }
-            let last = lane + 1 == F::LANES && F::LANES % 2 == 1;
-            pairs.push(if last {
-                ([[0; FP_BYTES]; 2], g2(None).0)
-            } else {
-                coordinates
-            });
-        }
-        let pair = Pair::<F>::load(simd, &pairs, &pairs[0]);
-        let product = miller_loop(simd, &[pair]).product_of_lanes(simd);
-        let mut output = [[0; BYTES]; MAX_LANES];
-        final_exponentiation(simd, product).store(simd, &mut output);
-        for lane in &output[..F::LANES] {
-            assert!(*lane == ONE);
-        }
-        // Without the last lane's pair, an even count leaves one e(-P, 2 Q).
-        if F::LANES > 1 && F::LANES % 2 == 0 {
-            let pair = Pair::<F>::load(
-                simd,
-                &pairs[..F::LANES - 1],
-                &([[0; FP_BYTES]; 2], g2(None).0),
+            assert!(
+                reference::mul(&reference::conjugate(&x), &x) == reference::ONE,
+                "cyclotomic, {label}"
             );
-            let product = miller_loop(simd, &[pair]).product_of_lanes(simd);
-            final_exponentiation(simd, product).store(simd, &mut output);
-            assert!(output[0] != ONE);
+            // z is negative, and conjugation inverts in the cyclotomic subgroup.
+            assert!(
+                reference::frobenius(&x) == reference::conjugate(&reference::power(&x, &[Z])),
+                "frobenius is z, {label}"
+            );
         }
+        Ok(())
     }
 
-    #[test]
-    fn pairing_checks_multiply_lanes() {
-        EmulatedX86V4C.execute(|simd: EmulatedX86V4C| {
-            check_lanes::<_, Unsat49<_>>(simd);
-            check_lanes::<_, Unsat28<_>>(simd);
-            check_lanes::<_, Rns<_>>(simd);
-        });
-        EmulatedNeon.execute(|simd: EmulatedNeon| check_lanes::<_, Unsat28<_>>(simd));
-    }
-
-    /// Returns the final exponentiation of elements, one per lane.
-    fn exponentiate<S: Simd, F: Field<S>>(simd: S, elements: &[[u8; BYTES]]) -> Vec<[u8; BYTES]> {
-        let mut output = vec![[0; BYTES]; elements.len()];
-        for start in (0..elements.len()).step_by(F::LANES) {
-            let f = Fp12::<F>::load(simd, &elements[start..], &ONE);
-            final_exponentiation(simd, f).store(simd, &mut output[start..]);
-        }
-        output
-    }
-
-    #[test]
-    fn final_exponentiations_match_blst() {
-        let mut elements = vec![[0; BYTES]; 4];
-        for (k, value) in elements.iter_mut().enumerate().skip(1) {
-            let seed = [(k as u8).wrapping_mul(71).wrapping_add(5); 1024];
-            *value = element(&mut Unstructured::new(&seed)).unwrap();
-        }
-        let expected: Vec<_> = elements
-            .iter()
-            .map(|element| {
-                let mut out = blst::blst_fp12::default();
-                // SAFETY: the pointers reference valid field elements.
-                unsafe { blst::blst_final_exp(&mut out, &to_blst(element)) };
-                from_blst(&out)
-            })
-            .collect();
-        // Zero maps to zero.
-        assert_eq!(expected[0], [0; BYTES]);
-        EmulatedScalar.execute(|simd: EmulatedScalar| {
-            assert!(exponentiate::<_, Unsat49<_>>(simd, &elements) == expected);
-            assert!(exponentiate::<_, Unsat28<_>>(simd, &elements) == expected);
-        });
-        EmulatedX86V4C.execute(|simd: EmulatedX86V4C| {
-            assert!(exponentiate::<_, Rns<_>>(simd, &elements) == expected);
-        });
-    }
-
-    /// Checks, in debug builds, that steps from points at the coordinate bounds return points within
-    /// them and lines within the documented bounds.
-    fn check_steps<S: Simd, F: Field<S>>(simd: S) {
-        let zero = Fp2::<F>::load(simd, &[], &[0; FP2_BYTES]);
-        let widen = |value: Fp2<F>| value.sub::<{ g2::BOUND - 2 }, S>(simd, zero).carry(simd);
-        let pair = Pair::<F>::load(simd, &[], &(g1(1).0, g2(Some(2)).0));
-        let t = Point {
-            x: widen(pair.q.x),
-            y: widen(pair.q.y),
-            z: widen(pair.q.z),
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::core::{
+            curve::g1,
+            field::{
+                fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
+                fp12::LINE_BOUND,
+            },
         };
-        let (mut doubled, mut sum) = (t, t);
-        let steps = [
-            (double_step(simd, &mut doubled, &pair), doubled),
-            (add_step(simd, &mut sum, &pair), sum),
-        ];
-        for (line, point) in steps {
-            for coordinate in [point.x, point.y, point.z] {
-                coordinate.neg::<{ g2::BOUND + 1 }, S>(simd);
-            }
-            line[0].neg::<62, S>(simd);
-            line[1].neg::<{ LINE_BOUND + 1 }, S>(simd);
-            line[2].neg::<{ LINE_BOUND + 1 }, S>(simd);
-        }
-    }
+        use commonware_invariants::minifuzz;
+        use commonware_simd::emulated::{EmulatedScalar, EmulatedX86V4C};
 
-    #[test]
-    fn steps_satisfy_their_bounds() {
-        EmulatedScalar.execute(|simd: EmulatedScalar| {
-            check_steps::<_, Unsat49<_>>(simd);
-            check_steps::<_, Unsat28<_>>(simd);
-        });
-        EmulatedX86V4C.execute(|simd: EmulatedX86V4C| check_steps::<_, Rns<_>>(simd));
+        #[test]
+        fn minifuzz_final_exponentiation() {
+            minifuzz::Builder::default()
+                .with_min_iterations(MIN_ITERATIONS)
+                .test(|u| Plan::FinalExponentiation.run(u));
+        }
+
+        /// Cases of [`minifuzz_final_exponentiation`] that run however long they take.
+        const MIN_ITERATIONS: u64 = 10;
+
+        /// Checks, in debug builds, that steps from points at the coordinate bounds return points
+        /// within them and lines within the documented bounds.
+        fn check_steps<S: Simd, F: Field<S>>(simd: S) {
+            let zero = Fp2::<F>::load(simd, &[], &[0; FP2_BYTES]);
+            let widen = |value: Fp2<F>| value.sub::<{ g2::BOUND - 2 }, S>(simd, zero).carry(simd);
+            let p = [g1::GENERATOR[0], g1::GENERATOR[1]];
+            let q = [g2::GENERATOR[0], g2::GENERATOR[1]];
+            let pair = Pair::<F>::load(simd, &[], &(p, q));
+            let t = Point {
+                x: widen(pair.q.x),
+                y: widen(pair.q.y),
+                z: widen(pair.q.z),
+            };
+            let (mut doubled, mut sum) = (t, t);
+            let steps = [
+                (double_step(simd, &mut doubled, &pair), doubled),
+                (add_step(simd, &mut sum, &pair), sum),
+            ];
+            for (line, point) in steps {
+                for coordinate in [point.x, point.y, point.z] {
+                    coordinate.neg::<{ g2::BOUND + 1 }, S>(simd);
+                }
+                line[0].neg::<62, S>(simd);
+                line[1].neg::<{ LINE_BOUND + 1 }, S>(simd);
+                line[2].neg::<{ LINE_BOUND + 1 }, S>(simd);
+            }
+        }
+
+        #[test]
+        fn steps_satisfy_their_bounds() {
+            EmulatedScalar.execute(|simd: EmulatedScalar| {
+                check_steps::<_, Unsat49<_>>(simd);
+                check_steps::<_, Unsat28<_>>(simd);
+            });
+            EmulatedX86V4C.execute(|simd: EmulatedX86V4C| check_steps::<_, Rns<_>>(simd));
+        }
     }
 }
