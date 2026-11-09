@@ -4,7 +4,7 @@ use crate::{Buf, Error, FixedSize, Read, Write, util::at_least};
 use bytes::BufMut;
 use core::{
     fmt::{self, Debug, Display, Formatter},
-    ops::{Add, Mul, Sub},
+    ops::{Add, BitOrAssign, Mul, Shl, ShrAssign, Sub},
 };
 
 /// An unsigned integer of `BITS` bits held in `LIMBS` limbs of 64 bits, such as [U256].
@@ -46,6 +46,11 @@ impl<const BITS: usize, const LIMBS: usize> Uint<BITS, LIMBS> {
     /// Returns the 64-bit limbs of the value, least significant first.
     pub const fn as_limbs(&self) -> &[u64; LIMBS] {
         self.0.as_limbs()
+    }
+
+    /// Returns the number of leading zero bits within the width.
+    pub const fn leading_zeros(&self) -> usize {
+        self.0.leading_zeros()
     }
 
     /// Returns `self + other` wrapped to the width, and whether the sum overflowed.
@@ -103,6 +108,27 @@ impl<const BITS: usize, const LIMBS: usize> Mul for Uint<BITS, LIMBS> {
 
     fn mul(self, other: Self) -> Self {
         Self(self.0 * other.0)
+    }
+}
+
+impl<const BITS: usize, const LIMBS: usize> Shl<usize> for Uint<BITS, LIMBS> {
+    type Output = Self;
+
+    /// Shifts left, discarding the bits shifted beyond the width.
+    fn shl(self, bits: usize) -> Self {
+        Self(self.0 << bits)
+    }
+}
+
+impl<const BITS: usize, const LIMBS: usize> ShrAssign<usize> for Uint<BITS, LIMBS> {
+    fn shr_assign(&mut self, bits: usize) {
+        self.0 >>= bits;
+    }
+}
+
+impl<const BITS: usize, const LIMBS: usize> BitOrAssign for Uint<BITS, LIMBS> {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0 |= other.0;
     }
 }
 

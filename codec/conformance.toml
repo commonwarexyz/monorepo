@@ -182,6 +182,10 @@ hash = "24c94e3ee52cd4e9838b2e092fe328d94d6d5cee56690070f70c322849e1d2a6"
 n_cases = 65536
 hash = "2f24c93ed0351071f864d22d2f5782f7395569da09eabc42341807dbd5422d72"
 
+["commonware_codec::varint::tests::conformance::CodecConformance<UInt<U256>>"]
+n_cases = 65536
+hash = "937ac7b8358736dd5f52217de542619d6d70ccec8ec029e2572638bdde1071be"
+
 ["commonware_codec::varint::tests::conformance::CodecConformance<UInt<u128>>"]
 n_cases = 65536
 hash = "29b319cdfd0c760440086a14ebb5bec17e34de582d3d94f127ccb6e292b8b779"
