@@ -31,15 +31,14 @@ use std::{collections::VecDeque, sync::Arc};
 /// activity status of the operation, and the second argument is the location of the operation it
 /// inactivates (if any). Returns the number of active keys in the db.
 ///
-/// `init_buffer` sizes the replay read buffer (in bytes) and `read_options` sets how it reads.
-/// `cache_size` bounds a `(location -> key)` cache that lets collision resolution resolve
-/// candidates from memory instead of re-reading the log; `None` disables it.
+/// `init_buffer` sizes the replay read buffer (in bytes). `cache_size` bounds a
+/// `(location -> key)` cache that lets collision resolution resolve candidates from memory
+/// instead of re-reading the log; `None` disables it.
 pub(crate) async fn build_snapshot_from_log<F, C, I, Fn>(
     inactivity_floor_loc: crate::merkle::Location<F>,
     reader: &C,
     snapshot: &mut I,
     init_buffer: NonZeroUsize,
-    read_options: ReadOptions,
     cache_size: Option<NonZeroUsize>,
     mut callback: Fn,
 ) -> Result<usize, Error<F>>
@@ -50,8 +49,14 @@ where
     Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
 {
     let bounds = reader.bounds();
+    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
+    // the init cache, not the OS cache, decides which probes hit.
     let stream = reader
-        .replay(*inactivity_floor_loc..bounds.end, init_buffer, read_options)
+        .replay(
+            *inactivity_floor_loc..bounds.end,
+            init_buffer,
+            ReadOptions::DONT_CACHE,
+        )
         .await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
@@ -336,8 +341,6 @@ trait Scan<F: Family, Item>: Send + Sync {
     /// The chunks to decode, in position order, for a build from `floor` to `end`.
     fn chunks(&self, floor: u64, end: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static;
 
-    /// How the decode tasks read the log.
-    fn read_options(&self) -> ReadOptions;
 
     fn visitor(&self, chunk: Range<u64>) -> Self::Visitor;
 
@@ -362,11 +365,6 @@ impl<F: Family, Item> Scan<F, Item> for IndexOnly {
             .map(move |start| start..(start + SNAPSHOT_DECODE_CHUNK).min(end))
     }
 
-    fn read_options(&self) -> ReadOptions {
-        // The journal may replay these operations alongside, so they stay in the OS page cache.
-        ReadOptions::default()
-    }
-
     fn visitor(&self, _: Range<u64>) {}
 
     async fn send(&self, _: ()) -> bool {
@@ -384,11 +382,6 @@ impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> Scan<F, Item> for Le
     // The Merkle structure's chunks, from its start, which callers keep at or before the floor.
     fn chunks(&self, _: u64, _: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static {
         Self::chunks(self)
-    }
-
-    fn read_options(&self) -> ReadOptions {
-        // Init reads these operations only here, so nothing gains from keeping them cached.
-        ReadOptions::DONT_CACHE
     }
 
     fn visitor(&self, chunk: Range<u64>) -> ChunkHasher<F, H> {
@@ -410,7 +403,6 @@ async fn route_snapshot<F, C, T, Fut>(
     log: &C,
     range: Range<u64>,
     floor: u64,
-    read_options: ReadOptions,
     routing: SnapshotRouting,
     visitor: &mut T,
     mut send: impl FnMut(usize, RoutedBatch<<C::Item as Operation<F>>::Key>) -> Fut + Send,
@@ -421,7 +413,11 @@ where
     T: ChunkVisitor<F, C::Item>,
     Fut: Future<Output = bool> + Send,
 {
-    let stream = log.replay(range, routing.init_buffer, read_options).await?;
+    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
+    // the init cache, not the OS cache, decides which probes hit.
+    let stream = log
+        .replay(range, routing.init_buffer, ReadOptions::DONT_CACHE)
+        .await?;
     pin_mut!(stream);
     let mut batches: Vec<RoutedBatch<_>> = (0..routing.workers)
         .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
@@ -589,7 +585,6 @@ where
         reader,
         snapshot,
         init_buffer,
-        ReadOptions::default(),
         cache_size,
         |is_active, old_loc| {
             activity.push(is_active);
@@ -746,14 +741,12 @@ where
     let routing_result: Result<(), Error<F>> = async {
         // With no decode tasks, decode and route on this task over one continuous replay to avoid
         // per-chunk buffered-reader overhead (measured 265s vs 369s on a 1.66B-op log).
-        let read_options = scan.read_options();
         if decoders == 0 {
             let senders = &senders;
             return route_snapshot::<F, C, _, _>(
                 &**log,
                 floor..end,
                 floor,
-                read_options,
                 routing,
                 &mut (),
                 |w, batch| async move { senders[w].send(batch).await.is_ok() },
@@ -783,7 +776,6 @@ where
                         &*log,
                         chunk,
                         floor,
-                        read_options,
                         routing,
                         &mut visitor,
                         |w, batch| async move { tx.send((w, batch)).await.is_ok() },

@@ -102,7 +102,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
-use commonware_runtime::{Handle, ReadOptions};
+use commonware_runtime::Handle;
 use commonware_utils::{Widen, bitmap, iter::zip_eq};
 use core::{borrow::Borrow, num::NonZeroUsize};
 use std::collections::{BTreeMap, HashMap};
@@ -521,14 +521,12 @@ where
 
         // Replay the log from the floor, appending each operation's status and clearing the bit
         // of any location it supersedes. The state after the last operation is each location's
-        // final status. Each operation is read once, so its pages are not kept in the OS page
-        // cache.
+        // final status.
         let active_keys = build_snapshot_from_log(
             inactivity_floor_loc,
             &log,
             &mut snapshot,
             init_buffer,
-            ReadOptions::DONT_CACHE,
             cache_size,
             |is_active, old_loc| {
                 bitmap.push(is_active);
