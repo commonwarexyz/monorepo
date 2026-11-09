@@ -2,78 +2,15 @@
 
 use super::{Error, Lookup};
 use bytes::BufMut;
-use commonware_codec::{
-    Buf, CodecFixedShared, EncodeSize, Error as CodecError, RangeCfg, Read, Write,
-};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_storage::bmt::{Builder, Tree};
-use core::{cmp::Ordering, fmt::Debug, hash::Hash};
-
-/// An unsigned integer amount of funds.
-///
-/// An implementation must be an unsigned integer type whose order is numeric order. Its codec
-/// encoding must have a fixed width of at most 32 bytes and exactly one encoding per value.
-pub trait Amount: Copy + Ord + Hash + Debug + CodecFixedShared + 'static {
-    /// The amount zero.
-    const ZERO: Self;
-
-    /// Returns `self + other` wrapped to the type's width, and whether the sum overflowed.
-    fn overflowing_add(self, other: Self) -> (Self, bool);
-
-    /// Returns `self - other` wrapped to the type's width, and whether the difference is negative.
-    fn overflowing_sub(self, other: Self) -> (Self, bool);
-
-    /// Returns `self + other`, or `None` if the sum overflows.
-    fn checked_add(self, other: Self) -> Option<Self> {
-        match self.overflowing_add(other) {
-            (sum, false) => Some(sum),
-            (_, true) => None,
-        }
-    }
-
-    /// Returns `self - other`, or `None` if the difference is negative.
-    fn checked_sub(self, other: Self) -> Option<Self> {
-        match self.overflowing_sub(other) {
-            (difference, false) => Some(difference),
-            (_, true) => None,
-        }
-    }
-}
-
-macro_rules! impl_amount {
-    ($($type:ty),*) => {
-        $(
-            impl Amount for $type {
-                const ZERO: Self = 0;
-
-                fn overflowing_add(self, other: Self) -> (Self, bool) {
-                    <$type>::overflowing_add(self, other)
-                }
-
-                fn overflowing_sub(self, other: Self) -> (Self, bool) {
-                    <$type>::overflowing_sub(self, other)
-                }
-            }
-        )*
-    };
-}
-
-impl_amount!(u64, u128);
-
-/// The most bytes an [Amount] may encode to.
-const MAX_AMOUNT_SIZE: usize = 32;
+use commonware_utils::Unsigned as Amount;
+use core::cmp::Ordering;
 
 /// Computes the leaf committing to `amount` for `account`.
 pub(crate) fn leaf<H: Hasher, P: PublicKey, A: Amount>(account: &P, amount: A) -> H::Digest {
-    const {
-        assert!(
-            A::SIZE <= MAX_AMOUNT_SIZE,
-            "amounts must encode in at most 32 bytes"
-        )
-    };
-    let mut encoded = [0u8; MAX_AMOUNT_SIZE];
-    amount.write(&mut &mut encoded[..A::SIZE]);
-    H::hash(&[account.as_ref(), &encoded[..A::SIZE]])
+    H::hash(&[account.as_ref(), amount.encode().as_ref()])
 }
 
 /// Nonzero amounts per account, sorted by account.
@@ -277,6 +214,7 @@ mod tests {
     use crate::bajillion::tests::accounts;
     use commonware_codec::{Decode as _, Encode as _};
     use commonware_cryptography::{Sha256, ed25519::PublicKey};
+    use ruint::aliases::U256;
 
     type TestAmounts = Amounts<PublicKey, u64>;
 
@@ -356,6 +294,10 @@ mod tests {
         assert_eq!(
             leaf::<Sha256, _, u128>(key, 5),
             Sha256::hash(&[key.as_ref(), &5u128.to_be_bytes()])
+        );
+        assert_eq!(
+            leaf::<Sha256, _, U256>(key, U256::from(5u64)),
+            Sha256::hash(&[key.as_ref(), &U256::from(5u64).to_be_bytes::<32>()])
         );
     }
 

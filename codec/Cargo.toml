@@ -26,8 +26,10 @@ arbitrary = [
 	"dep:commonware-conformance",
 	"dep:rand_chacha",
 	"dep:rand_core",
+	"ruint?/arbitrary",
 	"std",
 ]
+ruint = [ "dep:ruint" ]
 
 [dependencies]
 arbitrary = { workspace = true, optional = true }
@@ -39,10 +41,12 @@ commonware-macros.workspace = true
 paste.workspace = true
 rand_chacha = { workspace = true, optional = true }
 rand_core = { workspace = true, optional = true }
+ruint = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]
 commonware-allocator = { workspace = true, features = ["mimalloc"] }
+commonware-codec = { path = ".", default-features = false, features = ["ruint"] }
 criterion.workspace = true
 proptest.workspace = true
 rand = { workspace = true, features = ["std", "std_rng"] }

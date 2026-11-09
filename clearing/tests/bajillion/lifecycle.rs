@@ -324,7 +324,7 @@ fn test_partial_credit_halts_ledger() {
 
 mod schemes {
     //! A deployment whose users, operator, and validators sign with three different schemes, and
-    //! whose amounts exceed `u64::MAX`.
+    //! whose amounts exceed `u128::MAX`.
 
     use super::*;
     use commonware_clearing::bajillion::BalanceProof;
@@ -333,6 +333,7 @@ mod schemes {
         bls12381,
         secp256r1::{self, standard},
     };
+    use ruint::aliases::U256;
 
     /// secp256r1 certificates over summaries from at least `2f + 1` of `3f + 1` validators.
     // The macro gates its fixture on a `mocks` feature that this crate does not define.
@@ -348,11 +349,16 @@ mod schemes {
     type User = standard::PublicKey;
     type Scheme = scheme::Scheme<PublicKey>;
 
-    /// One more than `u64::MAX`.
-    const UNIT: u128 = 1 << 64;
+    /// One more than `u128::MAX`.
+    const UNIT: U256 = U256::from_limbs([0, 0, 1, 0]);
+
+    /// Returns `units` times [UNIT].
+    fn units(units: u64) -> U256 {
+        UNIT * U256::from(units)
+    }
 
     /// The reference roles run with secp256r1 users, a BLS12-381 operator, secp256r1 validator
-    /// certificates, and `u128` amounts beyond `u64::MAX`.
+    /// certificates, and `U256` amounts beyond `u128::MAX`.
     #[test]
     fn test_schemes_and_amounts_are_independent() {
         deterministic::Runner::default().start(|mut context| async move {
@@ -365,7 +371,7 @@ mod schemes {
                 Scheme::signer,
                 Scheme::verifier,
             );
-            let mut deployment = Deployment::<User, _, _, u128>::start(
+            let mut deployment = Deployment::<User, _, _, U256>::start(
                 &context,
                 "schemes",
                 key.clone(),
@@ -375,29 +381,29 @@ mod schemes {
             .await;
             deployment
                 .ledger
-                .deposit(users[0].public_key(), 5 * UNIT)
+                .deposit(users[0].public_key(), units(5))
                 .unwrap();
             deployment.close(&mut context).await;
 
             // A user pays another and withdraws part of its balance through the operator, and the
             // receiver withdraws part of the payment through the ledger in the same epoch.
             let mut alice =
-                Sender::<_, _, Sha256, u128>::new(users[0].clone(), namespace(), key.public_key());
-            let mut bob = Receiver::<User, _, Sha256, u128>::new(
+                Sender::<_, _, Sha256, U256>::new(users[0].clone(), namespace(), key.public_key());
+            let mut bob = Receiver::<User, _, Sha256, U256>::new(
                 users[1].public_key(),
                 namespace(),
                 key.public_key(),
                 2,
             );
-            let batch = Amounts::new([(users[1].public_key(), 2 * UNIT + 1)]).unwrap();
+            let batch = Amounts::new([(users[1].public_key(), units(2) + U256::ONE)]).unwrap();
             let request = alice.send(2, batch, false).unwrap();
             let acknowledgement = deployment.operator.accept(&request).unwrap();
             for receipt in alice.acknowledged(&acknowledgement).unwrap() {
-                assert_eq!(bob.receive(receipt).unwrap(), 2 * UNIT + 1);
+                assert_eq!(bob.receive(receipt).unwrap(), units(2) + U256::ONE);
             }
             assert_eq!(
                 deployment.operator.live(&users[0].public_key()),
-                3 * UNIT - 1
+                units(3) - U256::ONE
             );
             deployment
                 .operator
@@ -420,11 +426,11 @@ mod schemes {
                     .is_none()
             );
             let balances = [
-                (users[0].public_key(), 2 * UNIT - 1),
-                (users[1].public_key(), UNIT + 1),
+                (users[0].public_key(), units(2) - U256::ONE),
+                (users[1].public_key(), UNIT + U256::ONE),
             ];
             deployment.check_balances(&balances).await;
-            assert_eq!(deployment.ledger.custody(), 3 * UNIT);
+            assert_eq!(deployment.ledger.custody(), units(3));
 
             // After a halt, each user claims its balance with a proof against the last close.
             deployment.ledger.halt();
@@ -440,7 +446,7 @@ mod schemes {
                     expected
                 );
             }
-            assert_eq!(deployment.ledger.custody(), 0);
+            assert_eq!(deployment.ledger.custody(), U256::ZERO);
         });
     }
 }

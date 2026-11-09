@@ -1787,6 +1787,7 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "rand_core 0.10.1",
+ "ruint",
  "stateright",
  "thiserror 2.0.18",
 ]
@@ -1810,6 +1811,7 @@ dependencies = [
  "bytes",
  "cfg-if",
  "commonware-allocator",
+ "commonware-codec",
  "commonware-codec-macros",
  "commonware-conformance",
  "commonware-macros",
@@ -1819,6 +1821,7 @@ dependencies = [
  "rand 0.10.2",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
+ "ruint",
  "thiserror 2.0.18",
 ]
 
@@ -2644,6 +2647,7 @@ dependencies = [
  "rand 0.10.2",
  "roaring",
  "rstest",
+ "ruint",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -6298,6 +6302,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5e99bff0393163bb25029a6af25d3d8d202ba5b5438a74d1bd8789f5c822970"
 dependencies = [
  "alloy-rlp",
+ "arbitrary",
  "ark-ff 0.3.0",
  "ark-ff 0.4.2",
  "ark-ff 0.5.0",

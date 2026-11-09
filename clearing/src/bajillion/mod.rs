@@ -86,9 +86,9 @@
 //! the batch [Payout::stage] builds. Everything else belongs to the deployment. That covers what
 //! each role stores and where, and how it caches, batches, schedules, persists, and recovers.
 //!
-//! Each deployment also chooses the unsigned integer type of its amounts ([Amount]). This crate
-//! implements it for `u64` and `u128`, and a deployment that settles EVM tokens can implement it
-//! for its own 256-bit integer type.
+//! Each deployment also chooses the unsigned integer type of its amounts ([Amount]). The primitive
+//! unsigned integers implement it, and so does [ruint::Uint](https://docs.rs/ruint) under the
+//! `ruint` feature of `commonware-utils`, so a deployment that settles EVM tokens can use `U256`.
 //!
 //! ```text
 //!   role        keeps                 calls
@@ -710,8 +710,9 @@ mod validator;
 #[cfg(test)]
 mod tests;
 
-pub use amounts::{Amount, Amounts};
+pub use amounts::Amounts;
 pub use close::{Close, Deposit, ForcedWithdrawal, Limits, Queue, Row, Withdrawal};
+pub use commonware_utils::Unsigned as Amount;
 pub use error::Error;
 pub use lookup::Lookup;
 pub use matrix::{Matrix, Opening};
