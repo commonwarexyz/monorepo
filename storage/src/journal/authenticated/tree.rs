@@ -531,11 +531,12 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         {
             return Err(merkle::Error::RangeOutOfBounds(end).into());
         }
+        // Each operation is read once, so its pages are not kept in the OS page cache.
         let stream = journal
             .replay(
                 *self.leaves()..*end,
                 self.replay_buffer,
-                ReadOptions::default(),
+                ReadOptions::DONT_CACHE,
             )
             .await?
             .fuse();
