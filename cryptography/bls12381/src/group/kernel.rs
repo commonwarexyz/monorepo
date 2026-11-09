@@ -1,10 +1,10 @@
 //! Kernels for the group operations, each written once over every base field representation.
 //!
-//! Each public operation runs as one kernel through [`dispatch`], which selects the backend at the
-//! boundary. The backend's profile then selects the base field representation: on x86v4c,
-//! residues, except for the sums and multiples of many elements of G1, whose base field products
-//! the 64-bit lanes finish sooner; 32-bit lanes elsewhere. Elements cross the boundary as
-//! canonical coordinates, so every kernel loads its inputs and stores its outputs, and loaded
+//! Each public operation runs as one kernel through [`Kernel::dispatch`], which selects the
+//! backend at the boundary. The backend's profile then selects the base field representation: on
+//! x86v4c, residues, except for the sums and multiples of many elements of G1, whose base field
+//! products the 64-bit lanes finish sooner; 32-bit lanes elsewhere. Elements cross the boundary
+//! as canonical coordinates, so every kernel loads its inputs and stores its outputs, and loaded
 //! coordinates satisfy the bounds of the curve formulas.
 //!
 //! Operations over slices of elements ([`Sum`], [`MultiplyEach`], and [`Msm`]) hold one element
@@ -81,42 +81,37 @@ pub trait Kernel: Sized {
     /// Runs the operation in the representation `F`.
     fn run<S: Simd, F: Field<S>>(self, simd: S) -> Self::Output;
 
-    /// Runs the operation on x86v4c: in 64-bit lanes for a batch of independent items and in
-    /// residues otherwise. An operation whose independent items end in a single one may override
-    /// this to switch representations in between through canonical encodings.
-    #[inline(always)]
-    fn x86_v4c<S: X86V4C>(self, simd: S) -> Self::Output {
-        if self.batch() {
-            self.run::<S, Unsat49<S>>(simd)
-        } else {
-            self.run::<S, Rns<S>>(simd)
+    /// Runs the operation on the best available backend.
+    fn dispatch(self) -> Self::Output {
+        /// Runs a kernel in the representation chosen for the backend.
+        struct Run<K>(K);
+
+        impl<S: Simd, K: Kernel> Operation<S> for Run<K> {
+            type Output = K::Output;
+
+            #[inline(always)]
+            fn portable(self, simd: S) -> K::Output {
+                self.0.run::<S, Unsat28<S>>(simd)
+            }
+
+            #[inline(always)]
+            fn x86_v4c(self, simd: S) -> K::Output
+            where
+                S: X86V4C,
+            {
+                {
+                    let this = self.0;
+                    if this.batch() {
+                        this.run::<S, Unsat49<S>>(simd)
+                    } else {
+                        this.run::<S, Rns<S>>(simd)
+                    }
+                }
+            }
         }
+
+        commonware_simd::dispatch(Run(self))
     }
-}
-
-/// Runs a kernel on the best available backend.
-pub fn dispatch<K: Kernel>(kernel: K) -> K::Output {
-    /// Runs a kernel in the representation chosen for the backend.
-    struct Run<K>(K);
-
-    impl<S: Simd, K: Kernel> Operation<S> for Run<K> {
-        type Output = K::Output;
-
-        #[inline(always)]
-        fn portable(self, simd: S) -> K::Output {
-            self.0.run::<S, Unsat28<S>>(simd)
-        }
-
-        #[inline(always)]
-        fn x86_v4c(self, simd: S) -> K::Output
-        where
-            S: X86V4C,
-        {
-            self.0.x86_v4c(simd)
-        }
-    }
-
-    commonware_simd::dispatch(Run(kernel))
 }
 
 /// Projective points of one group, one per lane of a base field representation.
@@ -605,9 +600,7 @@ impl Plan {
     /// Returns the plan of least estimated cost for `count` elements of `G` on `lanes` lanes.
     pub fn choose<G: Group>(count: usize, lanes: usize) -> Self {
         let plans = STRAUS_WIDTHS
-            .flat_map(|width| {
-                [false, true].map(|split| Self::Straus { width, split })
-            })
+            .flat_map(|width| [false, true].map(|split| Self::Straus { width, split }))
             .chain(PIPPENGER_WIDTHS.map(Self::Pippenger));
         let mut best = Self::Straus {
             width: *STRAUS_WIDTHS.start(),
@@ -828,7 +821,8 @@ fn straus<S: Simd, F: Field<S>, G: Group>(
                     let digit = digits[c * windows + window];
                     if digit != 0 {
                         let magnitude = digit.unsigned_abs() as usize;
-                        let entry = 2 * c * entries + magnitude - 1 + if digit < 0 { entries } else { 0 };
+                        let entry =
+                            2 * c * entries + magnitude - 1 + if digit < 0 { entries } else { 0 };
                         entries_used[lane] = &table[entry * F::LANES + lane];
                         any = true;
                     }
@@ -967,7 +961,10 @@ impl<G: Group> Kernel for Msm<'_, G> {
             return G::from_coordinates(G::IDENTITY);
         }
         let (elements, scalars) = (&self.elements[..count], &self.scalars[..count]);
-        match self.plan.unwrap_or_else(|| Plan::choose::<G>(count, F::LANES)) {
+        match self
+            .plan
+            .unwrap_or_else(|| Plan::choose::<G>(count, F::LANES))
+        {
             Plan::Straus { width, split } => {
                 straus::<S, F, G>(simd, elements, scalars, width, split)
             }

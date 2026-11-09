@@ -2,7 +2,7 @@
 
 use super::{
     G1, G2, Hex,
-    kernel::{self, Group, Kernel, MAX_LANES},
+    kernel::{Group, Kernel, MAX_LANES},
 };
 use crate::core::{
     curve::{g1, g2},
@@ -49,7 +49,7 @@ impl Object for GT {}
 
 impl<'a> MulAssign<&'a Self> for GT {
     fn mul_assign(&mut self, rhs: &'a Self) {
-        *self = kernel::dispatch(Product(*self, *rhs));
+        *self = Product(*self, *rhs).dispatch();
     }
 }
 
@@ -75,7 +75,7 @@ pub fn pairing(p: &G1, q: &G2) -> GT {
 /// Pairs one pair per lane. Outputs beyond the pairs are unchanged, and pairs beyond the outputs
 /// are ignored.
 pub fn pairings(pairs: &[(G1, G2)], outputs: &mut [GT]) {
-    kernel::dispatch(Each(pairs, outputs));
+    Each(pairs, outputs).dispatch();
 }
 
 /// Returns the product of the pairings of `pairs`, with one shared final exponentiation, or
@@ -84,7 +84,7 @@ pub fn pairings(pairs: &[(G1, G2)], outputs: &mut [GT]) {
 /// A product of pairings is cheaper than the pairings it multiplies, so checks such as
 /// `e(a, b) = e(c, d)` should compare `multi_pairing(&[(a, b), (-c, d)])` with [`GT::ONE`].
 pub fn multi_pairing(pairs: &[(G1, G2)]) -> GT {
-    kernel::dispatch(Pairings(pairs))
+    Pairings(pairs).dispatch()
 }
 
 /// Multiplies two elements of GT.
