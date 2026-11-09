@@ -134,7 +134,8 @@ impl Drop for PageFetchGuard<'_> {
 const MISSES_PER_LOCK: usize = 64;
 
 /// Ranges [CacheRef::read_cached_many] resolves before copying any of them. Their resolved pages
-/// are held on the stack, and each chunk's lookups can overlap their memory latency.
+/// are held on the stack, and each chunk's lookups can overlap their memory latency. Chunks of 16
+/// and 32 perform the same in a mainnet follower replay, and 64 is slower.
 const RESOLVE_CHUNK: usize = 32;
 
 /// The read of a [Batch]. It fails if the read fails or does not yield every page exactly once.
