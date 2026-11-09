@@ -88,6 +88,10 @@ loom = [ "dep:loom" ]
 # mimalloc is the global allocator.
 mimalloc = [ "dep:commonware-allocator" ]
 test-utils = []
+# UNSAFE, for benchmarks only: skips every storage durability barrier (blob and directory syncs,
+# per-write data syncs, and the startup filesystem sync) while still writing to the filesystem. A
+# crash or power loss can then lose or tear data the storage traits report as durable.
+unsafe-disable-sync = []
 tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [lib]

@@ -59,7 +59,7 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use super::{
-    Generation, Layout, Pending, Sender, Tracker, create_header,
+    Generation, Layout, Pending, SYNC_DISABLED, Sender, Tracker, create_header,
     hold::{Held, Hold},
     resolve_header, sync_dir,
 };
@@ -428,10 +428,12 @@ impl Shared {
         #[cfg(test)]
         self.pending.before_complete();
         let (partition, name) = &self.key;
-        let result = self
-            .file
-            .sync_data()
-            .map_err(|e| Error::BlobSyncFailed(partition.clone(), hex(name), e.into()));
+        let result = if SYNC_DISABLED {
+            Ok(())
+        } else {
+            self.file.sync_data()
+        }
+        .map_err(|e| Error::BlobSyncFailed(partition.clone(), hex(name), e.into()));
         #[cfg(test)]
         let result = self.pending.take_flush_failure().map_or(result, Err);
 
@@ -2170,6 +2172,8 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    // Without durability barriers, a sync never reaches the kernel and cannot fail.
+    #[cfg(not(feature = "unsafe-disable-sync"))]
     #[test]
     fn test_blob_sync_reports_kernel_error() {
         iouring::Runner::default().start(|_| async {

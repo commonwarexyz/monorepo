@@ -14,7 +14,10 @@ use super::{
     sockaddr::SockAddr,
     waiter::{WaiterId, WaiterState},
 };
-use crate::{BLOB_PAGE_SIZE, Error, IoBuf, IoBufMut, IoBufs, storage::iouring::Shared};
+use crate::{
+    BLOB_PAGE_SIZE, Error, IoBuf, IoBufMut, IoBufs,
+    storage::{SYNC_DISABLED, iouring::Shared},
+};
 use bytes::Buf as _;
 use commonware_utils::{NZUsize, sync::AsyncMutex};
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
@@ -839,8 +842,11 @@ pub enum WriteAtState {
     Syncing,
 }
 
-/// Build a data-only fsync SQE.
+/// Build a data-only fsync SQE, or a no-op when `unsafe-disable-sync` skips durability barriers.
 fn build_datasync_sqe(file: &File) -> SqueueEntry {
+    if SYNC_DISABLED {
+        return opcode::Nop::new().build();
+    }
     opcode::Fsync::new(Fd(file.as_raw_fd()))
         .flags(io_uring::types::FsyncFlags::DATASYNC)
         .build()
@@ -900,7 +906,7 @@ impl WriteAtRequest {
 
     /// Use `RWF_DSYNC` because the write contract does not require timestamp-only metadata.
     fn rw_flags(&mut self) -> i32 {
-        let sync = if self.state == WriteAtState::WritingSync {
+        let sync = if self.state == WriteAtState::WritingSync && !SYNC_DISABLED {
             libc::RWF_DSYNC
         } else {
             0
@@ -1090,6 +1096,16 @@ mod tests {
 
     /// Waiter state before any deadline or orphan cancellation.
     const ACTIVE: WaiterState = WaiterState::Active { target_tick: None };
+
+    /// Opcode of a data sync, which `unsafe-disable-sync` replaces with a no-op.
+    const DATASYNC_OPCODE: u8 = if SYNC_DISABLED {
+        opcode::Nop::CODE
+    } else {
+        opcode::Fsync::CODE
+    };
+
+    /// Write flag that makes a write durable, which `unsafe-disable-sync` drops.
+    const DSYNC: i32 = if SYNC_DISABLED { 0 } else { libc::RWF_DSYNC };
 
     /// Create a socket owner for SQE construction without submitting kernel I/O.
     fn make_socket_fd() -> Arc<OwnedFd> {
@@ -1484,7 +1500,7 @@ mod tests {
                 ),
                 (
                     Request::Sync(SyncRequest::new(make_file())),
-                    opcode::Fsync::CODE,
+                    DATASYNC_OPCODE,
                     None,
                     true,
                 ),
@@ -2155,7 +2171,7 @@ mod tests {
 
             if trailing_sync {
                 assert!(result.is_none());
-                assert_eq!(write.build_sqe().get_opcode(), opcode::Fsync::CODE as u32);
+                assert_eq!(write.build_sqe().get_opcode(), DATASYNC_OPCODE as u32);
                 result = write.on_cqe(ACTIVE, 0);
             }
 
@@ -2207,7 +2223,7 @@ mod tests {
         // A fused write retains the kernel errno through its durability failure.
         let mut write = make_write_request(make_file(), Cache::Enabled);
         write.state = WriteAtState::WritingSync;
-        assert_eq!(write.rw_flags(), libc::RWF_DSYNC);
+        assert_eq!(write.rw_flags(), DSYNC);
         let file = write.file.clone();
         assert!(matches!(
             complete(Request::WriteAt(write), ACTIVE, -libc::EINVAL),
@@ -2243,11 +2259,11 @@ mod tests {
             Cache::Disabled,
         );
 
-        assert_eq!(request.rw_flags(), libc::RWF_DSYNC | libc::RWF_DONTCACHE);
+        assert_eq!(request.rw_flags(), DSYNC | libc::RWF_DONTCACHE);
         assert!(request.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
         assert!(!request.file.dont_cache_supported.load(Ordering::Relaxed));
         request.cache = Cache::Disabled;
-        assert_eq!(request.rw_flags(), libc::RWF_DSYNC);
+        assert_eq!(request.rw_flags(), DSYNC);
         assert!(
             !request
                 .cache

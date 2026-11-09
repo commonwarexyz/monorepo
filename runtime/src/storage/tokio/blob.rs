@@ -1,7 +1,7 @@
 use crate::{
     Buf, Error, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     storage::{
-        Generation, Pending, Sender, Tracker,
+        Generation, Pending, SYNC_DISABLED, Sender, Tracker,
         hold::{Held, Hold},
     },
 };
@@ -169,9 +169,9 @@ impl Shared {
         // Other platforms retain `sync_all` for their platform-specific guarantees.
         cfg_if! {
             if #[cfg(target_os = "linux")] {
-                let result = self.file.sync_data();
+                let result = if SYNC_DISABLED { Ok(()) } else { self.file.sync_data() };
             } else {
-                let result = self.file.sync_all();
+                let result = if SYNC_DISABLED { Ok(()) } else { self.file.sync_all() };
             }
         }
         let (partition, name) = &self.key;
@@ -660,7 +660,7 @@ impl crate::Blob for Blob {
         cfg_if! {
             if #[cfg(target_os = "linux")] {
                 let flags = (sync && bufs.chunk_count() <= IOVEC_BATCH_SIZE)
-                    .then_some(libc::RWF_DSYNC);
+                    .then_some(if SYNC_DISABLED { 0 } else { libc::RWF_DSYNC });
             } else {
                 let flags = None;
             }

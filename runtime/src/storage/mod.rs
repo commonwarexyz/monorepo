@@ -16,6 +16,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     mod pending;
     pub(crate) use pending::{Generation, Pending, Sender};
+
+    /// Whether the `unsafe-disable-sync` feature skips every durability barrier.
+    ///
+    /// Writes still reach the filesystem, so a clean shutdown keeps them, but nothing a storage
+    /// trait reports as durable survives a crash or power loss.
+    pub(crate) const SYNC_DISABLED: bool = cfg!(feature = "unsafe-disable-sync");
     mod tracker;
     pub(crate) use tracker::Tracker;
 
@@ -59,6 +65,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             /// kernel >= 5.8.
             pub(crate) fn sync(dir: &Path) -> io::Result<()> {
                 let file = File::open(dir)?;
+                if SYNC_DISABLED {
+                    return Ok(());
+                }
                 // SAFETY: `file` owns a valid fd that lives across the call; `syncfs` takes only
                 // that fd, performs no memory access, and returns -1 on error.
                 if unsafe { libc::syncfs(file.as_raw_fd()) } == -1 {
@@ -70,7 +79,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             /// Make inherited partition entries durable before user code starts. Partition
             /// directories and existing blob contents are synchronized on their first access.
             pub(crate) fn sync(dir: &Path) -> io::Result<()> {
-                File::open(dir)?.sync_all()
+                let file = File::open(dir)?;
+                if SYNC_DISABLED {
+                    return Ok(());
+                }
+                file.sync_all()
             }
         }
     }
@@ -85,6 +98,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 e.into(),
             )
         })?;
+        if SYNC_DISABLED {
+            return Ok(());
+        }
         dir.sync_all().map_err(|e| {
             Error::BlobSyncFailed(
                 path.to_string_lossy().to_string(),
@@ -142,8 +158,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             return Err(Error::Closed);
         }
         file.write_all(&region).map_err(|_| Error::WriteFailed)?;
-        file.sync_all()
-            .map_err(|e| Error::BlobSyncFailed(partition.clone(), hex(name), e.into()))?;
+        if !SYNC_DISABLED {
+            file.sync_all()
+                .map_err(|e| Error::BlobSyncFailed(partition.clone(), hex(name), e.into()))?;
+        }
         Ok((0, blob_version, data_offset))
     }
 
