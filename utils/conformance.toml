@@ -89,3 +89,7 @@ hash = "b2714bf2d181f332a44e9701d501d0f2d1cadd38d3bd87634c175fcefd8640fc"
 ["commonware_utils::tests::conformance::CodecConformance<Participant>"]
 n_cases = 65536
 hash = "f0b66ee345e9e295c50b522d9cf3501d95cd70cecfe7bfd315c970ffa78ede40"
+
+["commonware_utils::unsigned::tests::conformance::CodecConformance<U256>"]
+n_cases = 65536
+hash = "c77358ae1ef0863e39da8eaa73de0a98c6c379c67151681ab87a9dc670e99aa3"

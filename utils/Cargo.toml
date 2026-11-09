@@ -30,7 +30,7 @@ num-traits.workspace = true
 parking_lot = { workspace = true, optional = true }
 pin-project.workspace = true
 rand.workspace = true
-ruint = { workspace = true, optional = true }
+ruint.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"], optional = true }
 tracing = { workspace = true, optional = true }
@@ -59,7 +59,6 @@ commonware-allocator = { workspace = true, features = ["mimalloc"] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 commonware-macros.workspace = true
-commonware-utils = { path = ".", default-features = false, features = ["ruint"] }
 criterion.workspace = true
 num-bigint = { workspace = true, default-features = false }
 proptest.workspace = true
@@ -89,7 +88,7 @@ std = [
 	"rand/std",
 	"rand/std_rng",
 	"rand/sys_rng",
-	"ruint?/std",
+	"ruint/std",
 	"thiserror/std",
 	"tokio",
 	"tracing",
@@ -99,10 +98,9 @@ arbitrary = [
 	"commonware-codec/arbitrary",
 	"dep:arbitrary",
 	"num-bigint?/arbitrary",
-	"ruint?/arbitrary",
+	"ruint/arbitrary",
 	"std",
 ]
-ruint = [ "commonware-codec/ruint", "dep:ruint" ]
 # Enables analytical helpers used by roaring analysis benchmarks.
 # Off by default; tests turn it on automatically via `cfg(test)`.
 analysis = []

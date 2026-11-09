@@ -130,10 +130,6 @@ hash = "60235eab7c1e2b919b14bd3b8cfd3f6ca311f2de976a061ef99a5be848cbb61e"
 n_cases = 65536
 hash = "3f11d4610d535212b93cf8b0d3601e2685a4aacc1129ad57622d857db94db68e"
 
-["commonware_codec::types::ruint::tests::conformance::CodecConformance<U256>"]
-n_cases = 65536
-hash = "c77358ae1ef0863e39da8eaa73de0a98c6c379c67151681ab87a9dc670e99aa3"
-
 ["commonware_codec::types::tuple::tests::conformance::CodecConformance<(u32,u32)>"]
 n_cases = 65536
 hash = "9f3fbde186c4164d91b0b3cabba62b5bdbcb6113a2c8dd836dccb730f116066e"

@@ -223,7 +223,7 @@ mod tests {
     use crate::bajillion::tests::accounts;
     use commonware_codec::{Decode as _, Encode as _};
     use commonware_cryptography::{Sha256, ed25519::PublicKey};
-    use ruint::aliases::U256;
+    use commonware_utils::U256;
 
     type TestAmounts = Amounts<PublicKey, u64>;
 
@@ -304,9 +304,11 @@ mod tests {
             leaf::<Sha256, _, u128>(key, 5),
             Sha256::hash(&[key.as_ref(), &5u128.to_be_bytes()])
         );
+        let mut five = [0u8; 32];
+        five[31] = 5;
         assert_eq!(
-            leaf::<Sha256, _, U256>(key, U256::from(5u64)),
-            Sha256::hash(&[key.as_ref(), &U256::from(5u64).to_be_bytes::<32>()])
+            leaf::<Sha256, _, U256>(key, U256::from(5)),
+            Sha256::hash(&[key.as_ref(), &five])
         );
     }
 
